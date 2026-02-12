@@ -1,3 +1,3 @@
-"""ExcelManus v2 — 基于大语言模型的 Excel 智能代理框架。"""
+"""ExcelManus v3 — Tools + Skillpacks 双层架构。"""
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

@@ -3,10 +3,11 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import fc from 'fast-check'
+import type { StreamEvent } from '../api'
 
 // Mock api 模块，阻止真实网络请求
 vi.mock('../api', () => ({
-  sendMessage: vi.fn(),
+  sendMessageStream: vi.fn(),
 }))
 
 // Mock useSession composable
@@ -18,8 +19,17 @@ vi.mock('./useSession', () => ({
   }),
 }))
 
-import { sendMessage as apiSendMessage } from '../api'
+import { sendMessageStream } from '../api'
 import { useChat } from './useChat'
+
+/** 模拟 SSE 流：依次触发事件回调 */
+function mockStreamSuccess(sessionId: string, reply: string) {
+  vi.mocked(sendMessageStream).mockImplementation(async (_req, onEvent) => {
+    onEvent({ type: 'session_init', session_id: sessionId } as StreamEvent)
+    onEvent({ type: 'reply', content: reply, skills_used: ['data_basic'], tool_scope: ['read_excel'], route_mode: 'hint_direct' } as StreamEvent)
+    onEvent({ type: 'done' } as StreamEvent)
+  })
+}
 
 describe('Property 2: 空白消息拒绝', () => {
   beforeEach(() => {
@@ -48,7 +58,7 @@ describe('Property 2: 空白消息拒绝', () => {
         expect(messages.value.length).toBe(0)
 
         // 不应触发 API 请求
-        expect(apiSendMessage).not.toHaveBeenCalled()
+        expect(sendMessageStream).not.toHaveBeenCalled()
       }),
       { numRuns: 100 },
     )
@@ -73,11 +83,8 @@ describe('Property 1: 对话完整性', () => {
       fc.asyncProperty(nonEmptyArb, nonEmptyArb, async (userMsg, replyContent) => {
         vi.clearAllMocks()
 
-        // Mock API 返回生成的回复内容和 session_id
-        vi.mocked(apiSendMessage).mockResolvedValue({
-          session_id: 'test-session',
-          reply: replyContent,
-        })
+        // Mock SSE 流返回生成的回复内容和 session_id
+        mockStreamSuccess('test-session', replyContent)
 
         const { messages, sendMessage } = useChat()
 
@@ -121,16 +128,16 @@ describe('Property 3: Loading 状态禁用发送', () => {
         vi.clearAllMocks()
 
         // 创建一个永不 resolve 的 promise，使 loading 保持为 true
-        vi.mocked(apiSendMessage).mockReturnValue(new Promise(() => {}))
+        vi.mocked(sendMessageStream).mockReturnValue(new Promise(() => {}))
 
         const { messages, loading, sendMessage } = useChat()
 
         // 发送第一条消息（不会 resolve，loading 将保持 true）
-        const pendingPromise = sendMessage(firstMsg)
+        void sendMessage(firstMsg)
 
-        // 此时 loading 应为 true，消息列表应有 1 条用户消息
+        // 此时 loading 应为 true，消息列表应有 2 条（user + streaming assistant）
         expect(loading.value).toBe(true)
-        expect(messages.value.length).toBe(1)
+        expect(messages.value.length).toBe(2)
 
         const countBeforeSecond = messages.value.length
 
@@ -141,7 +148,7 @@ describe('Property 3: Loading 状态禁用发送', () => {
         expect(messages.value.length).toBe(countBeforeSecond)
 
         // API 应只被调用一次（第一条消息）
-        expect(apiSendMessage).toHaveBeenCalledTimes(1)
+        expect(sendMessageStream).toHaveBeenCalledTimes(1)
       }),
       { numRuns: 100 },
     )

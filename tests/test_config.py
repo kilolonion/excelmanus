@@ -135,9 +135,11 @@ def test_property17_invalid_base_url_rejected(
     """
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")
+    old_model = os.environ.get("EXCELMANUS_MODEL")
     try:
         os.environ["EXCELMANUS_API_KEY"] = "test-key"
         os.environ["EXCELMANUS_BASE_URL"] = invalid_url
+        os.environ["EXCELMANUS_MODEL"] = "test-model"
         with pytest.raises(ConfigError):
             load_config()
     finally:
@@ -149,6 +151,10 @@ def test_property17_invalid_base_url_rejected(
             os.environ.pop("EXCELMANUS_BASE_URL", None)
         else:
             os.environ["EXCELMANUS_BASE_URL"] = old_url
+        if old_model is None:
+            os.environ.pop("EXCELMANUS_MODEL", None)
+        else:
+            os.environ["EXCELMANUS_MODEL"] = old_model
 
 
 @settings(max_examples=120)
@@ -162,9 +168,11 @@ def test_property17_valid_base_url_accepted(
     """
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")
+    old_model = os.environ.get("EXCELMANUS_MODEL")
     try:
         os.environ["EXCELMANUS_API_KEY"] = "test-key"
         os.environ["EXCELMANUS_BASE_URL"] = valid_url
+        os.environ["EXCELMANUS_MODEL"] = "test-model"
         cfg = load_config()
         assert cfg.base_url == valid_url
     finally:
@@ -176,6 +184,10 @@ def test_property17_valid_base_url_accepted(
             os.environ.pop("EXCELMANUS_BASE_URL", None)
         else:
             os.environ["EXCELMANUS_BASE_URL"] = old_url
+        if old_model is None:
+            os.environ.pop("EXCELMANUS_MODEL", None)
+        else:
+            os.environ["EXCELMANUS_MODEL"] = old_model
 
 
 # ══════════════════════════════════════════════════════════
@@ -204,54 +216,84 @@ class TestMissingConfig:
 class TestDefaultValues:
     """测试默认值是否正确。"""
 
-    def test_default_base_url(self, monkeypatch, tmp_path) -> None:
-        """默认 Base URL 为阿里云 DashScope。（需求 6.4）"""
-        # 切换到无 .env 的临时目录，避免 load_dotenv 覆盖默认值
+    def test_missing_base_url_raises_config_error(self, monkeypatch, tmp_path) -> None:
+        """缺少 BASE_URL 时必须抛出 ConfigError。"""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
-        cfg = load_config()
-        assert cfg.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        with pytest.raises(ConfigError, match="EXCELMANUS_BASE_URL"):
+            load_config()
 
-    def test_default_model(self, monkeypatch, tmp_path) -> None:
-        """默认模型为 qwen-max-latest。（需求 6.4）"""
+    def test_missing_model_raises_config_error(self, monkeypatch, tmp_path) -> None:
+        """缺少 MODEL 时必须抛出 ConfigError。"""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
-        cfg = load_config()
-        assert cfg.model == "qwen-max-latest"
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        with pytest.raises(ConfigError, match="EXCELMANUS_MODEL"):
+            load_config()
 
     def test_default_max_iterations(self, monkeypatch) -> None:
         """默认最大迭代次数为 20。（需求 6.6）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         assert cfg.max_iterations == 20
 
     def test_default_max_consecutive_failures(self, monkeypatch) -> None:
         """默认最大连续失败次数为 3。（需求 6.6）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         assert cfg.max_consecutive_failures == 3
 
     def test_default_session_ttl(self, monkeypatch) -> None:
         """默认会话 TTL 为 1800 秒。（需求 6.7）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         assert cfg.session_ttl_seconds == 1800
 
     def test_default_max_sessions(self, monkeypatch) -> None:
         """默认最大会话数为 1000。（需求 6.7）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         assert cfg.max_sessions == 1000
 
     def test_default_workspace_root(self, monkeypatch) -> None:
         """默认工作目录白名单根路径为当前目录。（需求 6.8）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         assert cfg.workspace_root == "."
+
+    def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
+        """默认开启对外安全模式。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        cfg = load_config()
+        assert cfg.external_safe_mode is True
+
+    def test_external_safe_mode_can_be_disabled(self, monkeypatch) -> None:
+        """允许通过环境变量关闭对外安全模式。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_EXTERNAL_SAFE_MODE", "false")
+        cfg = load_config()
+        assert cfg.external_safe_mode is False
 
     def test_config_is_frozen(self, monkeypatch) -> None:
         """配置对象不可变。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
         with pytest.raises(AttributeError):
             cfg.api_key = "new-key"  # type: ignore[misc]
@@ -263,7 +305,11 @@ class TestDotEnvPriority:
     def test_dotenv_provides_api_key(self, monkeypatch, tmp_path) -> None:
         """.env 文件中的 API Key 应被正确加载。"""
         env_file = tmp_path / ".env"
-        env_file.write_text("EXCELMANUS_API_KEY=from-dotenv\n")
+        env_file.write_text(
+            "EXCELMANUS_API_KEY=from-dotenv\n"
+            "EXCELMANUS_BASE_URL=https://example.com/v1\n"
+            "EXCELMANUS_MODEL=test-model\n"
+        )
         monkeypatch.chdir(tmp_path)
 
         cfg = load_config()
@@ -274,6 +320,7 @@ class TestDotEnvPriority:
         env_file = tmp_path / ".env"
         env_file.write_text(
             "EXCELMANUS_API_KEY=from-dotenv\n"
+            "EXCELMANUS_BASE_URL=https://example.com/v1\n"
             "EXCELMANUS_MODEL=dotenv-model\n"
         )
         monkeypatch.chdir(tmp_path)
@@ -290,6 +337,7 @@ class TestDotEnvPriority:
         env_file.write_text(
             "EXCELMANUS_API_KEY=test-key\n"
             "EXCELMANUS_BASE_URL=https://custom.api.com/v1\n"
+            "EXCELMANUS_MODEL=test-model\n"
         )
         monkeypatch.chdir(tmp_path)
 
@@ -303,6 +351,8 @@ class TestIntegerParsing:
     def test_invalid_integer_raises_error(self, monkeypatch) -> None:
         """非整数值应抛出 ConfigError。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_MAX_ITERATIONS", "not-a-number")
         with pytest.raises(ConfigError, match="整数"):
             load_config()
@@ -310,6 +360,8 @@ class TestIntegerParsing:
     def test_zero_integer_raises_error(self, monkeypatch) -> None:
         """零值应抛出 ConfigError（要求正整数）。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_MAX_ITERATIONS", "0")
         with pytest.raises(ConfigError, match="正整数"):
             load_config()
@@ -317,6 +369,8 @@ class TestIntegerParsing:
     def test_negative_integer_raises_error(self, monkeypatch) -> None:
         """负值应抛出 ConfigError。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_MAX_SESSIONS", "-5")
         with pytest.raises(ConfigError, match="正整数"):
             load_config()
@@ -328,6 +382,8 @@ class TestWorkspaceRoot:
     def test_workspace_root_from_env(self, monkeypatch, tmp_path) -> None:
         """EXCELMANUS_WORKSPACE_ROOT 应被正确读取。（需求 6.8）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", str(tmp_path))
         cfg = load_config()
         assert cfg.workspace_root == str(tmp_path)

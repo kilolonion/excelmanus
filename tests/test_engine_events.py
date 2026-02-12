@@ -17,7 +17,8 @@ from hypothesis import strategies as st
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.events import EventType, ToolCallEvent
-from excelmanus.skills import SkillRegistry, ToolDef
+from excelmanus.tools import ToolRegistry
+from excelmanus.tools.registry import ToolDef
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -37,9 +38,9 @@ def _make_config(**overrides) -> ExcelManusConfig:
     return ExcelManusConfig(**defaults)
 
 
-def _make_registry_with_echo_tool() -> SkillRegistry:
-    """创建包含 echo 工具的 SkillRegistry，工具返回参数的 JSON 字符串。"""
-    registry = SkillRegistry()
+def _make_registry_with_echo_tool() -> ToolRegistry:
+    """创建包含 echo 工具的 ToolRegistry，工具返回参数的 JSON 字符串。"""
+    registry = ToolRegistry()
 
     def echo_tool(**kwargs) -> str:
         return json.dumps(kwargs, ensure_ascii=False)
@@ -57,13 +58,13 @@ def _make_registry_with_echo_tool() -> SkillRegistry:
             func=echo_tool,
         ),
     ]
-    registry.register("echo_skill", "回显技能", tools)
+    registry.register_tools(tools)
     return registry
 
 
-def _make_registry_with_named_tool(tool_name: str, func) -> SkillRegistry:
-    """创建包含指定名称工具的 SkillRegistry。"""
-    registry = SkillRegistry()
+def _make_registry_with_named_tool(tool_name: str, func) -> ToolRegistry:
+    """创建包含指定名称工具的 ToolRegistry。"""
+    registry = ToolRegistry()
     tools = [
         ToolDef(
             name=tool_name,
@@ -72,7 +73,7 @@ def _make_registry_with_named_tool(tool_name: str, func) -> SkillRegistry:
             func=func,
         ),
     ]
-    registry.register("test_skill", "测试技能", tools)
+    registry.register_tools(tools)
     return registry
 
 
@@ -167,7 +168,7 @@ async def test_property_2_tool_call_start_event_data(
     **Feature: cli-beautify, Property 2: 工具调用开始事件包含正确数据**
     **Validates: Requirements 1.1**
     """
-    # 使用固定工具名，因为 SkillRegistry 需要注册真实工具
+    # 使用固定工具名，因为 ToolRegistry 需要注册真实工具
     fixed_tool_name = "echo_tool"
     registry = _make_registry_with_echo_tool()
     config = _make_config()

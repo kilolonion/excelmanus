@@ -6,11 +6,12 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
-from excelmanus.skills import SkillRegistry
+from excelmanus.skillpacks import SkillRouter
 
 logger = get_logger("session")
 
@@ -57,12 +58,14 @@ class SessionManager:
         ttl_seconds: int,
         *,
         config: ExcelManusConfig,
-        registry: SkillRegistry,
+        registry: Any,
+        skill_router: SkillRouter | None = None,
     ) -> None:
         self._max_sessions = max_sessions
         self._ttl_seconds = ttl_seconds
         self._config = config
         self._registry = registry
+        self._skill_router = skill_router
         self._sessions: dict[str, _SessionEntry] = {}
         self._lock = asyncio.Lock()
 
@@ -98,7 +101,11 @@ class SessionManager:
 
             # 创建新会话
             new_id = session_id if session_id is not None else str(uuid.uuid4())
-            engine = AgentEngine(config=self._config, registry=self._registry)
+            engine = AgentEngine(
+                config=self._config,
+                registry=self._registry,
+                skill_router=self._skill_router,
+            )
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
                 last_access=time.monotonic(),
@@ -132,7 +139,11 @@ class SessionManager:
                 )
 
             new_id = session_id if session_id is not None else str(uuid.uuid4())
-            engine = AgentEngine(config=self._config, registry=self._registry)
+            engine = AgentEngine(
+                config=self._config,
+                registry=self._registry,
+                skill_router=self._skill_router,
+            )
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
                 last_access=now,

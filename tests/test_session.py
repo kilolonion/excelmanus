@@ -13,7 +13,7 @@ from excelmanus.session import (
     SessionLimitExceededError,
     SessionManager,
 )
-from excelmanus.skills import SkillRegistry
+from excelmanus.tools import ToolRegistry
 
 
 # ── Fixtures ──────────────────────────────────────────────
@@ -24,19 +24,21 @@ def config() -> ExcelManusConfig:
     """创建测试用配置。"""
     return ExcelManusConfig(
         api_key="test-key",
+        base_url="https://test.example.com/v1",
+        model="test-model",
         session_ttl_seconds=60,
         max_sessions=5,
     )
 
 
 @pytest.fixture
-def registry() -> SkillRegistry:
-    """创建空的 SkillRegistry。"""
-    return SkillRegistry()
+def registry() -> ToolRegistry:
+    """创建空的 ToolRegistry。"""
+    return ToolRegistry()
 
 
 @pytest.fixture
-def manager(config: ExcelManusConfig, registry: SkillRegistry) -> SessionManager:
+def manager(config: ExcelManusConfig, registry: ToolRegistry) -> SessionManager:
     """创建 SessionManager 实例。"""
     return SessionManager(
         max_sessions=config.max_sessions,
@@ -273,7 +275,7 @@ class TestConcurrencySafety:
 
     @pytest.mark.asyncio
     async def test_concurrent_create_respects_limit(
-        self, config: ExcelManusConfig, registry: SkillRegistry
+        self, config: ExcelManusConfig, registry: ToolRegistry
     ) -> None:
         """并发创建会话时不应超过最大会话数限制。"""
         mgr = SessionManager(
@@ -325,8 +327,8 @@ class TestProperty18SessionTTLCleanup:
         self, ttl: int, idle_extra: int, n_sessions: int
     ) -> None:
         """任意 TTL 和空闲时间组合下，超时会话必须被全部清理。"""
-        config = ExcelManusConfig(api_key="test-key", max_sessions=1000)
-        registry = SkillRegistry()
+        config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
+        registry = ToolRegistry()
         mgr = SessionManager(
             max_sessions=1000,
             ttl_seconds=ttl,
@@ -360,8 +362,8 @@ class TestProperty18SessionTTLCleanup:
         self, ttl: int, n_sessions: int
     ) -> None:
         """未超时的会话不应被清理。"""
-        config = ExcelManusConfig(api_key="test-key", max_sessions=1000)
-        registry = SkillRegistry()
+        config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
+        registry = ToolRegistry()
         mgr = SessionManager(
             max_sessions=1000,
             ttl_seconds=ttl,

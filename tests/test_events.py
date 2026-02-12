@@ -102,6 +102,9 @@ class TestEventTypeEnum:
             "TOOL_CALL_END",
             "THINKING",
             "ITERATION_START",
+            "ROUTE_START",
+            "ROUTE_END",
+            "CHAT_SUMMARY",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -112,6 +115,9 @@ class TestEventTypeEnum:
         assert EventType.TOOL_CALL_END.value == "tool_call_end"
         assert EventType.THINKING.value == "thinking"
         assert EventType.ITERATION_START.value == "iteration_start"
+        assert EventType.ROUTE_START.value == "route_start"
+        assert EventType.ROUTE_END.value == "route_end"
+        assert EventType.CHAT_SUMMARY.value == "chat_summary"
 
 
 class TestToolCallEventFields:
@@ -192,5 +198,13 @@ class TestToolCallEventFields:
             "thinking",
             "iteration",
             "timestamp",
+            "route_mode",
+            "skills_used",
+            "tool_scope",
+            "total_iterations",
+            "total_tool_calls",
+            "success_count",
+            "failure_count",
+            "elapsed_seconds",
         }
         assert set(annotations.keys()) == expected_fields

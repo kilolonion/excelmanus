@@ -26,14 +26,13 @@ describe('MessageBubble', () => {
   })
 
   // ========== 代理回复 ==========
-  it('代理回复左对齐、白色气泡，渲染 Markdown', () => {
+  it('代理回复左对齐、自然布局，渲染 Markdown', () => {
     const wrapper = mount(MessageBubble, {
       props: { message: makeMsg({ role: 'assistant', content: '**加粗文本**' }) },
     })
     expect(wrapper.find('.message-row--assistant').exists()).toBe(true)
-    expect(wrapper.find('.bubble--assistant').exists()).toBe(true)
     // Markdown 渲染后应包含 <strong> 标签
-    const html = wrapper.find('.markdown-body').html()
+    const html = wrapper.find('.assistant-content').html()
     expect(html).toContain('<strong>')
     expect(html).toContain('加粗文本')
   })
@@ -44,7 +43,7 @@ describe('MessageBubble', () => {
       props: { message: makeMsg({ role: 'assistant', content }) },
     })
     // 使用 element.innerHTML 获取不含外层标签的内容
-    const inner = wrapper.find('.markdown-body').element.innerHTML
+    const inner = wrapper.find('.assistant-content').element.innerHTML
     expect(inner).toContain('<pre>')
     expect(inner).toContain('<code')
   })

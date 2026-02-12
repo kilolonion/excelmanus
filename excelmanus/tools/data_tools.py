@@ -81,6 +81,9 @@ def read_excel(file_path: str, sheet_name: str | None = None, max_rows: int | No
 def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") -> str:
     """将数据写入 Excel 文件。
 
+    当目标文件已存在时，仅写入/替换指定工作表，保留其他工作表。
+    当目标文件不存在时，创建新文件。
+
     Args:
         file_path: 目标 Excel 文件路径。
         data: 要写入的数据，每个字典代表一行。
@@ -93,7 +96,19 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     safe_path = guard.resolve_and_validate(file_path)
 
     df = pd.DataFrame(data)
-    df.to_excel(safe_path, sheet_name=sheet_name, index=False)
+
+    if safe_path.exists() and safe_path.suffix.lower() in (".xlsx", ".xlsm"):
+        # 已有文件：使用 append 模式，仅替换指定 sheet，保留其他 sheet
+        with pd.ExcelWriter(
+            safe_path,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace",
+        ) as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    else:
+        # 新文件：直接写入
+        df.to_excel(safe_path, sheet_name=sheet_name, index=False)
 
     return json.dumps(
         {"status": "success", "file": str(safe_path.name), "rows": len(df), "columns": len(df.columns)},

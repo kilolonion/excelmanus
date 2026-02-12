@@ -1,19 +1,19 @@
-# ExcelManus v2
+# ExcelManus v3
 
-基于大语言模型的 Excel 智能代理框架。通过自然语言描述 Excel 任务，系统自动拆解意图并调用工具完成操作。
+基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
+
+- `Tools`：基础能力执行层（工具函数 + schema + 安全边界）
+- `Skillpacks`：策略编排层（`SKILL.md` 元数据 + 路由 + `allowed_tools` 授权）
 
 支持两种运行模式：
 
-- **CLI 模式** — 终端对话式交互
-- **API 模式** — REST API 服务，供程序化调用
+- **CLI 模式**：终端交互
+- **API 模式**：REST API
 
 ## 安装
 
 ```bash
-# 从源码安装
 pip install .
-
-# 开发模式（含测试依赖）
 pip install -e ".[dev]"
 ```
 
@@ -21,31 +21,40 @@ pip install -e ".[dev]"
 
 ## 配置
 
-通过环境变量或项目根目录的 `.env` 文件配置。优先级：环境变量 > `.env` > 默认值。
+优先级：环境变量 > `.env` > 默认值。
+
+### 基础配置
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_API_KEY` | LLM API Key（**必填**） | — |
+| `EXCELMANUS_API_KEY` | LLM API Key（必填） | — |
 | `EXCELMANUS_BASE_URL` | LLM API 地址 | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | `EXCELMANUS_MODEL` | 模型名称 | `qwen-max-latest` |
 | `EXCELMANUS_MAX_ITERATIONS` | Agent 最大迭代轮数 | `20` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | 连续失败熔断阈值 | `3` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API 会话空闲超时（秒） | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | API 最大并发会话数 | `1000` |
-| `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `.`（当前工作目录） |
-| `EXCELMANUS_LOG_LEVEL` | 日志级别（DEBUG/INFO/WARNING/ERROR） | `INFO` |
+| `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `.` |
+| `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
+| `EXCELMANUS_EXTERNAL_SAFE_MODE` | 对外安全模式（隐藏思考/工具细节与路由元信息） | `true` |
 
-`.env` 文件示例：
+### Skillpack 路由配置
 
-```env
-EXCELMANUS_API_KEY=sk-your-api-key
-EXCELMANUS_MODEL=qwen-max-latest
-EXCELMANUS_WORKSPACE_ROOT=/data/excel-files
-```
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_SKILLS_SYSTEM_DIR` | 内置 Skillpacks 目录 | `excelmanus/skillpacks/system` |
+| `EXCELMANUS_SKILLS_USER_DIR` | 用户级 Skillpacks 目录 | `~/.excelmanus/skillpacks` |
+| `EXCELMANUS_SKILLS_PROJECT_DIR` | 项目级 Skillpacks 目录 | `<workspace_root>/.excelmanus/skillpacks` |
+| `EXCELMANUS_SKILLS_PREFILTER_TOPK` | 预筛候选数量 | `6` |
+| `EXCELMANUS_SKILLS_MAX_SELECTED` | 每轮最多命中技能包数 | `3` |
+| `EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM` | 是否跳过 LLM 二次确认 | `false` |
+| `EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE` | 快速路径最低分 | `6` |
+| `EXCELMANUS_SKILLS_FASTPATH_MIN_GAP` | 快速路径分差阈值 | `3` |
+| `EXCELMANUS_SYSTEM_MESSAGE_MODE` | system 注入策略（`auto\|multi\|merge`） | `auto` |
 
 ## 使用方式
 
-### CLI 模式
+### CLI
 
 ```bash
 excelmanus
@@ -53,152 +62,71 @@ excelmanus
 python -m excelmanus
 ```
 
-启动后进入交互式对话，支持以下命令：
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`exit`。
 
-| 命令 | 说明 |
-|---|---|
-| `/help` | 显示帮助信息 |
-| `/history` | 查看对话历史 |
-| `/clear` | 清除对话历史 |
-| `exit` / `quit` / `Ctrl+C` | 退出 |
-
-### API 模式
+### API
 
 ```bash
 excelmanus-api
 ```
 
-容器化部署：
+接口：
+
+- `POST /api/v1/chat`
+  - 请求：`message`、`session_id?`、`skill_hints?`
+  - 响应：`session_id`、`reply`、`skills_used`、`tool_scope`、`route_mode`
+- `DELETE /api/v1/sessions/{session_id}`
+- `GET /api/v1/health`
+  - 响应：`status`、`version`、`tools`、`skillpacks`
+
+示例：
 
 ```bash
-docker build -t excelmanus .
-docker run -p 8000:8000 -e EXCELMANUS_API_KEY=sk-your-key excelmanus
-```
-
-启动后访问 `http://localhost:8000/docs` 查看 OpenAPI 文档。
-
-API 端点：
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/v1/chat` | 发送消息，返回 `session_id` 和 `reply` |
-| DELETE | `/api/v1/sessions/{session_id}` | 删除会话 |
-| GET | `/api/v1/health` | 健康检查，返回版本和已加载 Skill |
-
-请求示例：
-
-```bash
-# 新建会话
 curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "读取 sales.xlsx 的前 10 行"}'
-
-# 复用会话
-curl -X POST http://localhost:8000/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "按销售额降序排列", "session_id": "your-session-id"}'
+  -d '{"message": "读取 sales.xlsx 前10行", "skill_hints": ["data_basic"]}'
 ```
 
-## Skill 扩展指南
+## Skillpack 扩展
 
-Skill 是按职责分组的工具集合。系统启动时自动扫描 `excelmanus/skills/` 下所有符合约定的模块。
+Skillpack 使用目录结构：
 
-### 创建自定义 Skill
-
-在 `excelmanus/skills/` 下创建 Python 模块，导出以下三个成员：
-
-```python
-# excelmanus/skills/my_skill.py
-
-from excelmanus.skills import ToolDef
-
-SKILL_NAME = "my_skill"
-SKILL_DESCRIPTION = "自定义工具集描述"
-
-
-def get_tools() -> list[ToolDef]:
-    """返回该 Skill 包含的工具列表。"""
-    return [
-        ToolDef(
-            name="my_tool",
-            description="工具功能描述",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "param1": {"type": "string", "description": "参数说明"},
-                },
-                "required": ["param1"],
-            },
-            func=my_tool_func,
-        ),
-    ]
-
-
-def my_tool_func(param1: str) -> str:
-    """工具实现。"""
-    return f"处理结果: {param1}"
+```text
+<dir>/<skill_name>/SKILL.md
 ```
 
-模块约定：
+`SKILL.md` frontmatter 必填字段：
 
-- `SKILL_NAME`：Skill 名称，全局唯一
-- `SKILL_DESCRIPTION`：Skill 描述
-- `get_tools()`：返回 `list[ToolDef]`，每个 `ToolDef` 包含 `name`、`description`、`input_schema`（JSON Schema）和 `func`
+- `name`
+- `description`
+- `allowed_tools`
+- `triggers`
 
-系统会在启动时通过 `SkillRegistry.auto_discover()` 自动加载，无需手动注册。
+可选字段：`file_patterns`、`resources`、`priority`、`version`、`disable_model_invocation`。
+
+加载优先级：`project > user > system`。
+
+当前内置（system）Skillpacks：
+- `general_excel`：通用兜底
+- `data_basic`：读取/分析/筛选/转换
+- `chart_basic`：图表生成
+- `format_basic`：样式调整
+- `file_ops`：文件操作
+- `excel_code_runner`：写脚本并运行 Python 处理大体量 Excel
 
 ## 安全边界
 
-### WORKSPACE_ROOT
-
-所有文件读写操作被限制在 `WORKSPACE_ROOT` 目录内。通过环境变量 `EXCELMANUS_WORKSPACE_ROOT` 配置，默认为当前工作目录。
-
-### 路径穿越防护
-
-系统对所有文件路径执行以下校验：
-
-1. 拒绝包含 `..` 的路径
-2. 规范化路径后校验是否位于 `WORKSPACE_ROOT` 之下
-3. 检测符号链接目标是否越界
-
-违规操作会抛出 `SecurityViolationError`，不执行任何文件操作。
-
-### 日志脱敏
-
-日志系统对以下敏感信息自动脱敏：API Key、Authorization Token、Cookie、绝对本地路径。
+- 所有文件读写仍受 `WORKSPACE_ROOT` 限制
+- 路径穿越与符号链接越界会被拒绝
+- `allowed_tools` 两阶段校验
+  - Loader 启动期软校验：未知工具仅告警
+  - Engine 运行期硬校验：未授权调用返回 `TOOL_NOT_ALLOWED`
 
 ## 开发
 
 ```bash
-# 安装开发依赖
 pip install -e ".[dev]"
-
-# 运行测试
 pytest
-
-# 运行测试（带覆盖率）
-pytest --cov=excelmanus
-```
-
-### 项目结构
-
-```
-excelmanus/
-├── __init__.py          # 版本定义
-├── __main__.py          # python -m excelmanus 入口
-├── config.py            # 配置管理
-├── logger.py            # 日志与脱敏
-├── security.py          # 文件访问守卫
-├── memory.py            # 对话记忆
-├── engine.py            # Agent 引擎（Tool Calling 循环）
-├── session.py           # 会话管理
-├── cli.py               # CLI 交互界面
-├── api.py               # FastAPI REST API
-└── skills/              # Skill 模块
-    ├── __init__.py      # ToolDef、SkillRegistry
-    ├── data_skill.py    # 数据操作（读写、分析、过滤、转换）
-    ├── chart_skill.py   # 可视化（柱状图、折线图、饼图等）
-    └── format_skill.py  # 格式化（单元格样式、列宽）
 ```
 
 ## 许可证

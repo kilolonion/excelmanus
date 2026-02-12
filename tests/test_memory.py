@@ -17,7 +17,7 @@ from excelmanus.memory import ConversationMemory, TokenCounter, _DEFAULT_SYSTEM_
 @pytest.fixture()
 def config() -> ExcelManusConfig:
     """创建测试用配置。"""
-    return ExcelManusConfig(api_key="test-key")
+    return ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
 
 
 @pytest.fixture()
@@ -279,7 +279,7 @@ def test_property_truncation_preserves_system_and_recent(
     # 阈值若低于 system 消息自身，无法同时满足“保留最近消息”。
     assume(threshold > system_tokens + min_last_msg_tokens)
 
-    config = ExcelManusConfig(api_key="test-key")
+    config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
     mem = ConversationMemory(config)
     mem._truncation_threshold = threshold
 
@@ -333,7 +333,7 @@ def test_property_truncation_no_orphan_tool_results(
 
     **Validates: Requirements 1.8**
     """
-    config = ExcelManusConfig(api_key="test-key")
+    config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
     mem = ConversationMemory(config)
     mem._truncation_threshold = 150  # 较低阈值以触发截断
 

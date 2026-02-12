@@ -11,7 +11,8 @@ import pytest
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
-from excelmanus.skills import SkillRegistry, ToolDef
+from excelmanus.tools import ToolRegistry
+from excelmanus.tools.registry import ToolDef
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -31,9 +32,9 @@ def _make_config(**overrides) -> ExcelManusConfig:
     return ExcelManusConfig(**defaults)
 
 
-def _make_registry_with_tools() -> SkillRegistry:
-    """创建包含简单测试工具的 SkillRegistry。"""
-    registry = SkillRegistry()
+def _make_registry_with_tools() -> ToolRegistry:
+    """创建包含简单测试工具的 ToolRegistry。"""
+    registry = ToolRegistry()
 
     def add_numbers(a: int, b: int) -> int:
         return a + b
@@ -62,7 +63,7 @@ def _make_registry_with_tools() -> SkillRegistry:
             func=fail_tool,
         ),
     ]
-    registry.register("test_skill", "测试技能", tools)
+    registry.register_tools(tools)
     return registry
 
 
@@ -107,7 +108,7 @@ class TestAgentEngineInit:
     def test_creates_async_client(self) -> None:
         """验证初始化时创建 AsyncOpenAI 客户端。"""
         config = _make_config()
-        registry = SkillRegistry()
+        registry = ToolRegistry()
         engine = AgentEngine(config, registry)
         assert engine._client is not None
         assert engine._config is config
@@ -456,7 +457,7 @@ class TestClearMemory:
     def test_clear_memory(self) -> None:
         """clear_memory 清除对话历史。"""
         config = _make_config()
-        registry = SkillRegistry()
+        registry = ToolRegistry()
         engine = AgentEngine(config, registry)
 
         engine.memory.add_user_message("测试消息")
@@ -586,7 +587,7 @@ def test_property_1_tools_schema_attached(n_tools: int) -> None:
 
     **Validates: Requirements 1.1, 1.7**
     """
-    registry = SkillRegistry()
+    registry = ToolRegistry()
     tools = []
     for i in range(n_tools):
         tools.append(
@@ -597,7 +598,7 @@ def test_property_1_tools_schema_attached(n_tools: int) -> None:
                 func=lambda: "ok",
             )
         )
-    registry.register("test_skill", "测试", tools)
+    registry.register_tools(tools)
 
     schemas = registry.get_openai_schemas()
 
@@ -792,8 +793,8 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
     def failing_tool() -> str:
         raise RuntimeError(error_msg)
 
-    registry = SkillRegistry()
-    registry.register("fail_skill", "失败技能", [
+    registry = ToolRegistry()
+    registry.register_tools([
         ToolDef(
             name="custom_fail",
             description="自定义失败工具",
@@ -848,8 +849,8 @@ async def test_property_6_consecutive_failure_circuit_breaker(
 
     **Validates: Requirements 1.6**
     """
-    registry = SkillRegistry()
-    registry.register("fail_skill", "失败技能", [
+    registry = ToolRegistry()
+    registry.register_tools([
         ToolDef(
             name="always_fail",
             description="总是失败",

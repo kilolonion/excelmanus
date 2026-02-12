@@ -44,7 +44,13 @@ describe('getErrorMessage', () => {
 
 describe('sendMessage', () => {
   it('成功发送消息并返回响应', async () => {
-    const mockResponse = { session_id: 'abc', reply: '你好' }
+    const mockResponse = {
+      session_id: 'abc',
+      reply: '你好',
+      skills_used: ['data_basic'],
+      tool_scope: ['read_excel'],
+      route_mode: 'hint_direct',
+    }
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockResponse),
@@ -62,7 +68,13 @@ describe('sendMessage', () => {
   it('携带 session_id 发送', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: () => Promise.resolve({ session_id: 's1', reply: 'ok' }),
+      json: () => Promise.resolve({
+        session_id: 's1',
+        reply: 'ok',
+        skills_used: ['data_basic'],
+        tool_scope: ['read_excel'],
+        route_mode: 'hint_direct',
+      }),
     })
 
     await sendMessage({ message: 'test', session_id: 's1' })
@@ -101,6 +113,17 @@ describe('sendMessage', () => {
       '网络连接失败',
     )
   })
+
+  it('缺少 v3 字段时抛出协议错误', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ session_id: 's1', reply: 'ok' }),
+    })
+
+    await expect(sendMessage({ message: 'hi' })).rejects.toThrow(
+      '后端响应格式不符合 v3 协议（chat）',
+    )
+  })
 })
 
 // ========== deleteSession 测试 ==========
@@ -130,7 +153,12 @@ describe('deleteSession', () => {
 
 describe('checkHealth', () => {
   it('成功返回健康状态', async () => {
-    const mockHealth = { status: 'ok', version: '0.2.0', skills: ['excel'] }
+    const mockHealth = {
+      status: 'ok',
+      version: '3.0.0',
+      tools: ['read_excel'],
+      skillpacks: ['data_basic'],
+    }
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockHealth),
@@ -145,5 +173,16 @@ describe('checkHealth', () => {
     mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
 
     await expect(checkHealth()).rejects.toThrow('网络连接失败')
+  })
+
+  it('缺少 v3 字段时抛出协议错误', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ status: 'ok', version: '3.0.0' }),
+    })
+
+    await expect(checkHealth()).rejects.toThrow(
+      '后端响应格式不符合 v3 协议（health）',
+    )
   })
 })

@@ -1,8 +1,10 @@
-"""Agent 核心引擎：Tool Calling 循环与 LLM 交互。"""
+"""Agent 核心引擎：Skillpack 路由 + Tool Calling 循环。"""
 
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Sequence
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,8 +15,8 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
-from excelmanus.security import FileAccessGuard
-from excelmanus.skills import SkillRegistry
+from excelmanus.skillpacks import SkillMatchResult, SkillRouter
+from excelmanus.tools.registry import ToolNotAllowedError
 
 logger = get_logger("engine")
 
@@ -40,11 +42,7 @@ def _to_plain(value: Any) -> Any:
         return _to_plain(to_dict())
 
     if hasattr(value, "__dict__"):
-        return {
-            k: _to_plain(v)
-            for k, v in vars(value).items()
-            if not k.startswith("_")
-        }
+        return {k: _to_plain(v) for k, v in vars(value).items() if not k.startswith("_")}
 
     return str(value)
 
@@ -69,9 +67,6 @@ def _summarize_text(text: str, max_len: int = 120) -> str:
     return f"{compact[: max_len - 3]}..."
 
 
-# ── 数据模型 ──────────────────────────────────────────────
-
-
 @dataclass
 class ToolCallResult:
     """单次工具调用的结果记录。"""
@@ -93,30 +88,63 @@ class ChatResult:
     truncated: bool = False
 
 
-# ── AgentEngine ───────────────────────────────────────────
-
-
 class AgentEngine:
-    """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。
+    """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
-    使用 AsyncOpenAI 客户端与 OpenAI Chat Completions API（tool calling 语义），
-    支持单轮多 tool_calls、迭代上限保护和连续失败熔断。
-    """
-
-    def __init__(self, config: ExcelManusConfig, registry: SkillRegistry) -> None:
+    def __init__(
+        self,
+        config: ExcelManusConfig,
+        registry: Any,
+        skill_router: SkillRouter | None = None,
+    ) -> None:
         self._client = openai.AsyncOpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
         )
+        # 路由子代理：优先使用独立的小模型，未配置时回退到主模型
+        if config.router_model:
+            self._router_client = openai.AsyncOpenAI(
+                api_key=config.router_api_key or config.api_key,
+                base_url=config.router_base_url or config.base_url,
+            )
+            self._router_model = config.router_model
+        else:
+            self._router_client = self._client
+            self._router_model = config.model
         self._config = config
         self._registry = registry
+        self._skill_router = skill_router
         self._memory = ConversationMemory(config)
-        self._file_guard = FileAccessGuard(config.workspace_root)
+        self._last_route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=self._all_tool_names(),
+            route_mode="legacy_all_tools",
+            system_contexts=[],
+        )
+        # auto 模式系统消息回退缓存：None | "merge"
+        self._system_mode_fallback: str | None = None
+        # 执行统计（每次 chat 调用后更新）
+        self._last_iteration_count: int = 0
+        self._last_tool_call_count: int = 0
+        self._last_success_count: int = 0
+        self._last_failure_count: int = 0
 
     @property
     def memory(self) -> ConversationMemory:
         """暴露 memory 供外部访问（如测试）。"""
         return self._memory
+
+    @property
+    def last_route_result(self) -> SkillMatchResult:
+        """最近一轮 skill 路由结果。"""
+        return self._last_route_result
+
+    def list_loaded_skillpacks(self) -> list[str]:
+        """返回当前已加载的 Skillpack 名称。"""
+        if self._skill_router is None:
+            return []
+        return sorted(self._skill_router._loader.get_skillpacks().keys())
+
     def _emit(self, on_event: EventCallback | None, event: ToolCallEvent) -> None:
         """安全地发出事件，捕获回调异常。"""
         if on_event is None:
@@ -130,36 +158,78 @@ class AgentEngine:
         self,
         user_message: str,
         on_event: EventCallback | None = None,
+        skill_hints: list[str] | None = None,
     ) -> str:
-        """执行 Tool Calling 循环，返回最终文本回复。
+        """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        chat_start = time.monotonic()
 
-        流程：
-        1) 追加 user message 到对话记忆
-        2) 调用 LLM（附 tools schema）
-        3) 若响应包含 tool_calls：解析、执行工具、结果回填，继续循环
-        4) 若响应为纯文本：返回最终回复
-        5) 达到 max_iterations：截断返回
-        6) 连续失败超过 max_consecutive_failures：熔断返回
+        # 发出路由开始事件
+        self._emit(
+            on_event,
+            ToolCallEvent(event_type=EventType.ROUTE_START),
+        )
 
-        Args:
-            user_message: 用户输入的自然语言指令。
-            on_event: 可选的事件回调函数，用于接收工具调用过程中的结构化事件。
-        """
+        route_result = await self._route_skills(user_message, skill_hints)
+        self._last_route_result = route_result
+
+        # 发出路由结束事件（含匹配结果）
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.ROUTE_END,
+                route_mode=route_result.route_mode,
+                skills_used=list(route_result.skills_used),
+                tool_scope=list(route_result.tool_scope) if route_result.tool_scope else [],
+            ),
+        )
+
         # 追加用户消息
         self._memory.add_user_message(user_message)
-        logger.info("用户指令摘要: %s", _summarize_text(user_message))
+        logger.info(
+            "用户指令摘要: %s | route_mode=%s | skills=%s",
+            _summarize_text(user_message),
+            route_result.route_mode,
+            route_result.skills_used,
+        )
 
-        # 获取工具 schema
-        # 当前实现使用 Chat Completions，需传入其兼容的 tool schema 结构。
-        tools = self._registry.get_openai_schemas(mode="chat_completions")
+        reply = await self._tool_calling_loop(route_result, on_event)
+
+        # 发出执行摘要事件
+        elapsed = time.monotonic() - chat_start
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.CHAT_SUMMARY,
+                total_iterations=self._last_iteration_count,
+                total_tool_calls=self._last_tool_call_count,
+                success_count=self._last_success_count,
+                failure_count=self._last_failure_count,
+                elapsed_seconds=round(elapsed, 2),
+            ),
+        )
+
+        return reply
+
+    async def _tool_calling_loop(
+        self,
+        route_result: SkillMatchResult,
+        on_event: EventCallback | None,
+    ) -> str:
+        """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
+        tool_scope = route_result.tool_scope
+        tools = self._get_openai_tools(tool_scope=tool_scope)
 
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
         all_tool_results: list[ToolCallResult] = []
+        # 重置统计
+        self._last_iteration_count = 0
+        self._last_tool_call_count = 0
+        self._last_success_count = 0
+        self._last_failure_count = 0
 
         for iteration in range(1, max_iter + 1):
-            # 发出迭代开始事件
             self._emit(
                 on_event,
                 ToolCallEvent(
@@ -168,21 +238,22 @@ class AgentEngine:
                 ),
             )
 
-            # 构建请求参数
-            messages = self._memory.get_messages()
-            kwargs: dict = {
+            messages = self._memory.get_messages(
+                system_prompts=self._build_system_prompts(route_result.system_contexts)
+            )
+
+            kwargs: dict[str, Any] = {
                 "model": self._config.model,
                 "messages": messages,
             }
             if tools:
                 kwargs["tools"] = tools
 
-            # 调用 LLM
-            response = await self._client.chat.completions.create(**kwargs)
+            response = await self._create_chat_completion_with_system_fallback(kwargs)
             choice = response.choices[0]
             message = choice.message
 
-            # 提取 LLM 思考内容（兼容不同供应商的字段名）
+            # 提取 thinking / reasoning 内容
             thinking_content = ""
             for thinking_key in ("thinking", "reasoning", "reasoning_content"):
                 candidate = getattr(message, thinking_key, None)
@@ -190,7 +261,6 @@ class AgentEngine:
                     thinking_content = str(candidate)
                     break
 
-            # 发出思考事件
             if thinking_content:
                 self._emit(
                     on_event,
@@ -201,33 +271,30 @@ class AgentEngine:
                     ),
                 )
 
-            # 情况 1：纯文本回复，终止循环
+            # 无工具调用 → 返回文本回复
             if not message.tool_calls:
                 reply_text = message.content or ""
                 self._memory.add_assistant_message(reply_text)
+                self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
                 return reply_text
 
-            # 情况 2：包含 tool_calls，逐个执行
-            # 先将完整的 assistant 消息（含所有 tool_calls）加入记忆
             assistant_msg = _assistant_message_to_dict(message)
             self._memory.add_assistant_tool_message(assistant_msg)
 
+            # 遍历工具调用
             breaker_triggered = False
             breaker_summary = ""
             breaker_skip_error = (
                 f"工具未执行：连续 {max_failures} 次工具调用失败，已触发熔断。"
             )
 
-            # 逐个处理 tool_calls
             for tc in message.tool_calls:
                 function = getattr(tc, "function", None)
                 tool_name = getattr(function, "name", "")
-                raw_args = getattr(function, "arguments", None)
                 tool_call_id = getattr(tc, "id", "")
 
                 if breaker_triggered:
-                    # 熔断后补齐当前轮剩余 tool_call 的 tool_result，保证消息闭环。
                     all_tool_results.append(
                         ToolCallResult(
                             tool_name=tool_name,
@@ -240,106 +307,24 @@ class AgentEngine:
                     self._memory.add_tool_result(tool_call_id, breaker_skip_error)
                     continue
 
-                # 解析参数
-                parse_error: str | None = None
-                try:
-                    if raw_args is None or raw_args == "":
-                        arguments: dict[str, Any] = {}
-                    elif isinstance(raw_args, dict):
-                        arguments = raw_args
-                    elif isinstance(raw_args, str):
-                        parsed = json.loads(raw_args)
-                        if not isinstance(parsed, dict):
-                            parse_error = (
-                                f"参数必须为 JSON 对象，当前类型: {type(parsed).__name__}"
-                            )
-                            arguments = {}
-                        else:
-                            arguments = parsed
-                    else:
-                        parse_error = (
-                            f"参数类型无效: {type(raw_args).__name__}"
-                        )
-                        arguments = {}
-                except (json.JSONDecodeError, TypeError) as exc:
-                    parse_error = f"JSON 解析失败: {exc}"
-                    arguments = {}
-
-                # 发出工具调用开始事件
-                self._emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.TOOL_CALL_START,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        iteration=iteration,
-                    ),
+                tc_result = await self._execute_tool_call(
+                    tc, tool_scope, on_event, iteration
                 )
 
-                if parse_error is not None:
-                    result_str = f"工具参数解析错误: {parse_error}"
-                    success = False
-                    error = result_str
-                    consecutive_failures += 1
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        {"_raw_arguments": raw_args},
-                        error=error,
-                    )
+                all_tool_results.append(tc_result)
+                self._memory.add_tool_result(tool_call_id, tc_result.result)
+
+                # 更新统计
+                self._last_tool_call_count += 1
+                if tc_result.success:
+                    self._last_success_count += 1
+                    consecutive_failures = 0
                 else:
-                    # 执行工具
-                    try:
-                        # 使用 asyncio.to_thread 隔离阻塞型工具调用
-                        result_value = await asyncio.to_thread(
-                            self._registry.call_tool, tool_name, arguments
-                        )
-                        result_str = str(result_value)
-                        success = True
-                        error = None
-                        consecutive_failures = 0  # 重置连续失败计数
+                    self._last_failure_count += 1
+                    consecutive_failures += 1
 
-                        log_tool_call(logger, tool_name, arguments, result=result_str)
-
-                    except Exception as exc:
-                        result_str = f"工具执行错误: {exc}"
-                        success = False
-                        error = str(exc)
-                        consecutive_failures += 1
-
-                        log_tool_call(logger, tool_name, arguments, error=error)
-
-                # 发出工具调用结束事件
-                self._emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.TOOL_CALL_END,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        result=result_str,
-                        success=success,
-                        error=error,
-                        iteration=iteration,
-                    ),
-                )
-
-                # 记录工具调用结果
-                all_tool_results.append(
-                    ToolCallResult(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        result=result_str,
-                        success=success,
-                        error=error,
-                    )
-                )
-
-                # 将工具结果回填到对话记忆
-                self._memory.add_tool_result(tool_call_id, result_str)
-
-                # 检查连续失败熔断
+                # 熔断检测
                 if (not breaker_triggered) and consecutive_failures >= max_failures:
-                    # 收集触发熔断前的最近失败摘要
                     recent_errors = [
                         f"- {r.tool_name}: {r.error}"
                         for r in all_tool_results[-max_failures:]
@@ -354,19 +339,273 @@ class AgentEngine:
                     f"错误摘要：\n{breaker_summary}"
                 )
                 self._memory.add_assistant_message(reply)
-                logger.warning(
-                    "连续 %d 次工具失败，熔断终止", max_failures
-                )
+                self._last_iteration_count = iteration
+                logger.warning("连续 %d 次工具失败，熔断终止", max_failures)
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
                 return reply
 
-        # 达到迭代上限
+        self._last_iteration_count = max_iter
         reply = f"已达到最大迭代次数（{max_iter}），返回当前结果。请尝试简化任务或分步执行。"
         self._memory.add_assistant_message(reply)
         logger.warning("达到迭代上限 %d，截断返回", max_iter)
         logger.info("最终结果摘要: %s", _summarize_text(reply))
         return reply
 
+    async def _execute_tool_call(
+        self,
+        tc: Any,
+        tool_scope: Sequence[str],
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> ToolCallResult:
+        """单个工具调用：参数解析 → 执行 → 事件发射 → 返回结果。"""
+        function = getattr(tc, "function", None)
+        tool_name = getattr(function, "name", "")
+        raw_args = getattr(function, "arguments", None)
+
+        # 参数解析
+        parse_error: str | None = None
+        try:
+            if raw_args is None or raw_args == "":
+                arguments: dict[str, Any] = {}
+            elif isinstance(raw_args, dict):
+                arguments = raw_args
+            elif isinstance(raw_args, str):
+                parsed = json.loads(raw_args)
+                if not isinstance(parsed, dict):
+                    parse_error = f"参数必须为 JSON 对象，当前类型: {type(parsed).__name__}"
+                    arguments = {}
+                else:
+                    arguments = parsed
+            else:
+                parse_error = f"参数类型无效: {type(raw_args).__name__}"
+                arguments = {}
+        except (json.JSONDecodeError, TypeError) as exc:
+            parse_error = f"JSON 解析失败: {exc}"
+            arguments = {}
+
+        # 发射 TOOL_CALL_START 事件
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.TOOL_CALL_START,
+                tool_name=tool_name,
+                arguments=arguments,
+                iteration=iteration,
+            ),
+        )
+
+        # 执行工具调用
+        if parse_error is not None:
+            result_str = f"工具参数解析错误: {parse_error}"
+            success = False
+            error = result_str
+            log_tool_call(
+                logger,
+                tool_name,
+                {"_raw_arguments": raw_args},
+                error=error,
+            )
+        else:
+            try:
+                result_value = await asyncio.to_thread(
+                    self._registry.call_tool,
+                    tool_name,
+                    arguments,
+                    tool_scope=tool_scope,
+                )
+                result_str = str(result_value)
+                success = True
+                error = None
+                log_tool_call(logger, tool_name, arguments, result=result_str)
+            except ToolNotAllowedError:
+                # 格式化为与原有逻辑一致的 JSON 错误结构
+                permission_error = {
+                    "error_code": "TOOL_NOT_ALLOWED",
+                    "tool": tool_name,
+                    "allowed_tools": list(tool_scope),
+                    "message": f"工具 '{tool_name}' 不在当前 Skillpack 授权范围内。",
+                }
+                result_str = json.dumps(permission_error, ensure_ascii=False)
+                success = False
+                error = result_str
+                log_tool_call(logger, tool_name, arguments, error=error)
+            except Exception as exc:
+                result_str = f"工具执行错误: {exc}"
+                success = False
+                error = str(exc)
+                log_tool_call(logger, tool_name, arguments, error=error)
+
+        # 发射 TOOL_CALL_END 事件
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.TOOL_CALL_END,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=result_str,
+                success=success,
+                error=error,
+                iteration=iteration,
+            ),
+        )
+
+        return ToolCallResult(
+            tool_name=tool_name,
+            arguments=arguments,
+            result=result_str,
+            success=success,
+            error=error,
+        )
+
     def clear_memory(self) -> None:
         """清除对话历史。"""
         self._memory.clear()
+
+    async def _route_skills(
+        self,
+        user_message: str,
+        skill_hints: list[str] | None,
+    ) -> SkillMatchResult:
+        if self._skill_router is None:
+            return SkillMatchResult(
+                skills_used=[],
+                tool_scope=self._all_tool_names(),
+                route_mode="legacy_all_tools",
+                system_contexts=[],
+            )
+
+        return await self._skill_router.route(
+            user_message,
+            skill_hints=skill_hints,
+            confirm_with_llm=self._confirm_with_llm,
+        )
+
+    async def _confirm_with_llm(self, user_message: str, candidates: list[Any]) -> list[str]:
+        """用同一个主模型做候选 Skillpack 二次确认。"""
+        if not candidates:
+            return []
+
+        skill_lines = [f"- {skill.name}: {skill.description}" for skill in candidates]
+        prompt = (
+            "请从候选 Skillpack 中选择最合适的最多 "
+            f"{self._config.skills_max_selected} 个名称，仅输出 JSON 数组，例如 "
+            "[\"data_basic\", \"chart_basic\"]。\n"
+            "候选列表：\n"
+            + "\n".join(skill_lines)
+            + "\n\n用户请求："
+            + user_message
+        )
+
+        response = await self._router_client.chat.completions.create(
+            model=self._router_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是路由器，仅输出 JSON 数组，不要输出解释。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        content = str(response.choices[0].message.content or "").strip()
+        if not content:
+            return []
+
+        selected: list[str]
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                selected = [str(item).strip() for item in parsed if str(item).strip()]
+            else:
+                selected = []
+        except json.JSONDecodeError:
+            selected = [seg.strip() for seg in content.replace("\n", ",").split(",") if seg.strip()]
+
+        valid_names = {skill.name for skill in candidates}
+        filtered: list[str] = []
+        for name in selected:
+            if name not in valid_names:
+                continue
+            if name in filtered:
+                continue
+            filtered.append(name)
+            if len(filtered) >= self._config.skills_max_selected:
+                break
+        return filtered
+
+    def _all_tool_names(self) -> list[str]:
+        get_tool_names = getattr(self._registry, "get_tool_names", None)
+        if callable(get_tool_names):
+            return list(get_tool_names())
+
+        get_all_tools = getattr(self._registry, "get_all_tools", None)
+        if callable(get_all_tools):
+            return [tool.name for tool in get_all_tools()]
+
+        return []
+
+    def _get_openai_tools(self, tool_scope: Sequence[str] | None) -> list[dict[str, Any]]:
+        get_openai_schemas = getattr(self._registry, "get_openai_schemas", None)
+        if not callable(get_openai_schemas):
+            return []
+        try:
+            return get_openai_schemas(mode="chat_completions", tool_scope=tool_scope)
+        except TypeError:
+            return get_openai_schemas(mode="chat_completions")
+
+
+    def _build_system_prompts(self, skill_contexts: list[str]) -> list[str]:
+        base_prompt = self._memory.system_prompt
+        if not skill_contexts:
+            return [base_prompt]
+
+        mode = self._effective_system_mode()
+        if mode == "merge":
+            merged = "\n\n".join([base_prompt, *skill_contexts])
+            return [merged]
+
+        return [base_prompt, *skill_contexts]
+
+    def _effective_system_mode(self) -> str:
+        configured = self._config.system_message_mode
+        if configured != "auto":
+            return configured
+        if self._system_mode_fallback == "merge":
+            return "merge"
+        return "multi"
+
+    async def _create_chat_completion_with_system_fallback(
+        self,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        try:
+            return await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if (
+                self._config.system_message_mode == "auto"
+                and self._effective_system_mode() == "multi"
+                and self._is_system_compatibility_error(exc)
+            ):
+                logger.warning("检测到多 system 兼容性错误，自动回退到 merge 模式")
+                self._system_mode_fallback = "merge"
+                merged_messages = self._memory.get_messages(
+                    system_prompts=self._build_system_prompts(
+                        self._last_route_result.system_contexts
+                    )
+                )
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["messages"] = merged_messages
+                return await self._client.chat.completions.create(**retry_kwargs)
+            raise
+
+    @staticmethod
+    def _is_system_compatibility_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        keywords = [
+            "multiple system",
+            "at most one system",
+            "only one system",
+            "system messages",
+            "role 'system'",
+        ]
+        return any(keyword in text for keyword in keywords)

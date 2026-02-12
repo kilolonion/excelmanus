@@ -3,15 +3,25 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import fc from 'fast-check'
+import type { StreamEvent } from '../api'
 
 // Mock api 模块，阻止真实网络请求
 vi.mock('../api', () => ({
-  sendMessage: vi.fn(),
+  sendMessageStream: vi.fn(),
 }))
 
-import { sendMessage as apiSendMessage } from '../api'
+import { sendMessageStream } from '../api'
 import { useChat } from './useChat'
 import { useSession } from './useSession'
+
+/** 模拟 SSE 流：依次触发事件回调 */
+function mockStreamSuccess(sessionId: string, reply: string) {
+  vi.mocked(sendMessageStream).mockImplementation(async (_req, onEvent) => {
+    onEvent({ type: 'session_init', session_id: sessionId } as StreamEvent)
+    onEvent({ type: 'reply', content: reply, skills_used: ['data_basic'], tool_scope: ['read_excel'], route_mode: 'hint_direct' } as StreamEvent)
+    onEvent({ type: 'done' } as StreamEvent)
+  })
+}
 
 describe('Property 6: 新建会话清空状态', () => {
   beforeEach(() => {
@@ -34,11 +44,8 @@ describe('Property 6: 新建会话清空状态', () => {
         vi.clearAllMocks()
         localStorage.clear()
 
-        // Mock API 返回固定 session_id
-        vi.mocked(apiSendMessage).mockResolvedValue({
-          session_id: fixedSessionId,
-          reply: '回复',
-        })
+        // Mock SSE 流返回固定 session_id
+        mockStreamSuccess(fixedSessionId, '回复')
 
         const { messages, sendMessage, clearMessages } = useChat()
         const { sessionId, clearSession } = useSession()
