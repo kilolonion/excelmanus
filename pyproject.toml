@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excelmanus"
+version = "2.0.0"
+description = "基于大语言模型的 Excel 智能代理框架，支持 Agent / MCP / API 三模式运行"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "openai>=1.0.0",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "matplotlib>=3.7.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "mcp>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.24.0",
+    "hypothesis>=6.0.0",
+]
+
+[project.scripts]
+excelmanus = "excelmanus.cli:main"
+excelmanus-api = "excelmanus.api:main"
+excelmanus-mcp = "excelmanus.mcp_server:run_stdio_server"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["excelmanus*"]

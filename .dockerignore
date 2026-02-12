@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.env
+*.egg-info
+dist
+build
+tests
+.kiro
+.venv
+.pytest_cache
+.mypy_cache
+_excelagent_old
