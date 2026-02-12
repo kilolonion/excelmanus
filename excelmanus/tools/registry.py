@@ -133,17 +133,23 @@ class ToolRegistry:
         """注册内置工具集。"""
         from excelmanus.tools import (
             chart_tools,
+            code_tools,
             data_tools,
             file_tools,
             format_tools,
+            sheet_tools,
         )
 
         data_tools.init_guard(workspace_root)
         chart_tools.init_guard(workspace_root)
         format_tools.init_guard(workspace_root)
         file_tools.init_guard(workspace_root)
+        code_tools.init_guard(workspace_root)
+        sheet_tools.init_guard(workspace_root)
 
         self.register_tools(data_tools.get_tools())
         self.register_tools(chart_tools.get_tools())
         self.register_tools(format_tools.get_tools())
         self.register_tools(file_tools.get_tools())
+        self.register_tools(code_tools.get_tools())
+        self.register_tools(sheet_tools.get_tools())

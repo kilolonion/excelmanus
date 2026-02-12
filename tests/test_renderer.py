@@ -27,7 +27,7 @@ from excelmanus.renderer import (
 
 def _make_console(width: int = 80) -> Console:
     """创建捕获输出的 Console 实例。"""
-    return Console(file=StringIO(), width=width, force_terminal=True)
+    return Console(file=StringIO(), width=width, force_terminal=True, highlight=False)
 
 
 def _get_output(console: Console) -> str:
@@ -238,7 +238,9 @@ class TestProperty7LongResultTruncation:
         assert len(truncated) <= _RESULT_MAX_LEN + 3, (
             f"截断后长度 {len(truncated)} 超过限制 {_RESULT_MAX_LEN + 3}"
         )
-        assert truncated.endswith("..."), "截断文本应以 '...' 结尾"
+        assert truncated.endswith("…") or truncated.endswith("..."), (
+            "截断文本应以 '…' 或 '...' 结尾"
+        )
 
     @given(long_text=long_result_st, name=tool_name_st)
     @settings(max_examples=100)
@@ -371,8 +373,8 @@ class TestProperty9ThinkingBlockRendering:
         assert "💭" in output, "输出应包含思考标记 💭"
         # 完整原始文本不应出现（因为已被截断）
         assert text not in output, "超长思考文本不应完整出现在输出中"
-        # 截断后应以 "..." 结尾
-        assert "..." in output, "输出中应包含省略标记 '...'"
+        # 截断后应以省略标记结尾
+        assert "…" in output or "..." in output, "输出中应包含省略标记"
 
     @given(text=long_thinking_st)
     @settings(max_examples=100)
@@ -384,7 +386,9 @@ class TestProperty9ThinkingBlockRendering:
         assert len(summary) <= _THINKING_SUMMARY_LEN + 3, (
             f"摘要长度 {len(summary)} 超过限制 {_THINKING_SUMMARY_LEN + 3}"
         )
-        assert summary.endswith("..."), "摘要应以 '...' 结尾"
+        assert summary.endswith("…") or summary.endswith("..."), (
+            "摘要应以 '…' 或 '...' 结尾"
+        )
 
     def test_empty_thinking_skipped(self) -> None:
         """空思考文本应跳过渲染，不产生输出。"""
@@ -600,7 +604,7 @@ class TestStreamRendererUnit:
     # ---- 渲染异常降级 (需求 2.1 异常处理) ----
 
     def test_render_exception_fallback_to_plain_text(self) -> None:
-        """当 Rich Panel 渲染抛出异常时，应降级为纯文本输出。
+        """当渲染方法抛出异常时，应降级为纯文本输出。
 
         **Validates: Requirements 2.1**
         """
@@ -613,9 +617,9 @@ class TestStreamRendererUnit:
             arguments={"file_path": "output.xlsx"},
         )
 
-        # Mock Panel 构造函数抛出异常，触发降级逻辑
-        with patch(
-            "excelmanus.renderer.Panel", side_effect=Exception("渲染失败")
+        # Mock _render_tool_start 抛出异常，触发降级逻辑
+        with patch.object(
+            renderer, "_render_tool_start", side_effect=Exception("渲染失败")
         ):
             renderer.handle_event(event)
 
@@ -643,9 +647,9 @@ class TestStreamRendererUnit:
             result="读取完成",
         )
 
-        # Mock Panel 构造函数抛出异常
-        with patch(
-            "excelmanus.renderer.Panel", side_effect=Exception("渲染失败")
+        # Mock _render_tool_end 抛出异常
+        with patch.object(
+            renderer, "_render_tool_end", side_effect=Exception("渲染失败")
         ):
             renderer.handle_event(event)
 

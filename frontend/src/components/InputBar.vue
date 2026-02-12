@@ -46,7 +46,9 @@ function handleKeydown(e: KeyboardEvent) {
       :disabled="disabled"
       @click="handleSend"
     >
-      发送
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+      </svg>
     </button>
   </div>
 </template>
@@ -57,32 +59,41 @@ function handleKeydown(e: KeyboardEvent) {
   flex-shrink: 0;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
-  padding: 12px 20px;
-  background-color: var(--color-card);
-  border-top: 1px solid var(--color-border);
+  gap: 10px;
+  padding: 14px calc(max(20px, (100% - 860px) / 2)) 18px;
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(243, 244, 246, 0.6);
 }
 
 /* 文本输入框 */
 .input-textarea {
   flex: 1;
-  min-height: 40px;
+  min-height: 44px;
   max-height: 120px;
-  padding: 8px 12px;
+  padding: 11px 16px;
   font-size: 14px;
   font-family: inherit;
-  line-height: 1.6;
-  color: var(--color-text);
-  background-color: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  line-height: 1.5;
+  color: #1f2937;
+  background-color: #ffffff;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 14px;
   resize: none;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
 
 .input-textarea:focus {
-  border-color: var(--color-primary);
+  border-color: #a78bfa;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.08), 0 2px 6px rgba(124, 58, 237, 0.06);
+  background-color: #fefeff;
+}
+
+.input-textarea::placeholder {
+  color: #b0b5bf;
 }
 
 .input-textarea:disabled {
@@ -93,23 +104,35 @@ function handleKeydown(e: KeyboardEvent) {
 /* 发送按钮 */
 .send-btn {
   flex-shrink: 0;
-  height: 40px;
-  padding: 0 20px;
+  height: 44px;
+  width: 44px;
+  padding: 0;
   font-size: 14px;
-  color: var(--color-user-text);
-  background-color: var(--color-primary);
+  color: #ffffff;
+  background: linear-gradient(135deg, #7c3aed 0%, #6366f1 100%);
   border: none;
-  border-radius: var(--radius);
+  border-radius: 14px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.3);
 }
 
 .send-btn:hover:not(:disabled) {
-  background-color: var(--color-primary-hover);
+  background: linear-gradient(135deg, #6d28d9 0%, #4f46e5 100%);
+  transform: scale(1.05);
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .send-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.35;
   cursor: not-allowed;
+  box-shadow: none;
 }
 </style>

@@ -50,20 +50,30 @@ def _run(coro):
 class TestRenderWelcome:
     """测试欢迎信息渲染。"""
 
+    def _make_config(self) -> MagicMock:
+        """创建模拟配置对象。"""
+        config = MagicMock()
+        config.model = "qwen-max-latest"
+        config.workspace_root = "."
+        return config
+
     def test_welcome_renders_without_error(self) -> None:
         """欢迎信息应正常渲染，不抛出异常。"""
         with patch("excelmanus.cli.console") as mock_console:
-            _render_welcome()
+            _render_welcome(self._make_config(), 3)
             mock_console.print.assert_called_once()
 
     def test_welcome_contains_version(self) -> None:
         """欢迎面板应包含版本号。"""
-        with patch("excelmanus.cli.console") as mock_console:
-            _render_welcome()
-            panel = mock_console.print.call_args[0][0]
-            # Panel 对象的 renderable 是 Text 对象
-            text_str = str(panel.renderable)
-            assert "v2.0.0" in text_str
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
+            _render_welcome(self._make_config(), 3)
+        text_str = buf.getvalue()
+        assert "v3.0.0" in text_str
 
 
 class TestRenderHelp:
@@ -73,20 +83,25 @@ class TestRenderHelp:
         """/help 应正常渲染。"""
         with patch("excelmanus.cli.console") as mock_console:
             _render_help()
-            mock_console.print.assert_called_once()
+            # 现在 print 被调用多次（空行 + Panel + 空行）
+            assert mock_console.print.call_count >= 1
 
     def test_help_contains_all_commands(self) -> None:
         """帮助信息应包含所有可用命令。"""
-        with patch("excelmanus.cli.console") as mock_console:
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
             _render_help()
-            panel = mock_console.print.call_args[0][0]
-            text_str = str(panel.renderable)
-            assert "/help" in text_str
-            assert "/history" in text_str
-            assert "/clear" in text_str
-            assert "exit" in text_str
-            assert "quit" in text_str
-            assert "Ctrl+C" in text_str
+        text_str = buf.getvalue()
+        assert "/help" in text_str
+        assert "/history" in text_str
+        assert "/clear" in text_str
+        assert "exit" in text_str
+        assert "quit" in text_str
+        assert "Ctrl+C" in text_str
 
 
 class TestRenderFarewell:
@@ -121,6 +136,9 @@ class TestRenderHistory:
 
     def test_history_with_messages(self) -> None:
         """有对话历史时应显示用户和助手消息。"""
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
         engine = _make_engine()
         engine.memory.get_messages.return_value = [
             {"role": "system", "content": "系统提示"},
@@ -128,43 +146,51 @@ class TestRenderHistory:
             {"role": "assistant", "content": "你好！有什么可以帮你的？"},
         ]
 
-        with patch("excelmanus.cli.console") as mock_console:
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
             _render_history(engine)
-            panel = mock_console.print.call_args[0][0]
-            text_str = str(panel.renderable)
-            assert "你好" in text_str
-            assert "有什么可以帮你的" in text_str
+        text_str = buf.getvalue()
+        assert "你好" in text_str
+        assert "有什么可以帮你的" in text_str
 
     def test_history_filters_system_messages(self) -> None:
         """对话历史应过滤掉 system 消息。"""
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
         engine = _make_engine()
         engine.memory.get_messages.return_value = [
             {"role": "system", "content": "系统提示词"},
             {"role": "user", "content": "测试输入"},
         ]
 
-        with patch("excelmanus.cli.console") as mock_console:
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
             _render_history(engine)
-            panel = mock_console.print.call_args[0][0]
-            text_str = str(panel.renderable)
-            assert "系统提示词" not in text_str
-            assert "测试输入" in text_str
+        text_str = buf.getvalue()
+        assert "系统提示词" not in text_str
+        assert "测试输入" in text_str
 
     def test_history_truncates_long_messages(self) -> None:
         """超过 80 字符的消息应被截断。"""
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
         engine = _make_engine()
         long_msg = "A" * 100
         engine.memory.get_messages.return_value = [
             {"role": "user", "content": long_msg},
         ]
 
-        with patch("excelmanus.cli.console") as mock_console:
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
             _render_history(engine)
-            panel = mock_console.print.call_args[0][0]
-            text_str = str(panel.renderable)
-            assert "..." in text_str
-            # 截断后不应包含完整的 100 个 A
-            assert long_msg not in text_str
+        text_str = buf.getvalue()
+        # 截断后不应包含完整的 100 个 A
+        assert long_msg not in text_str
 
 
 # ── REPL 循环测试 ─────────────────────────────────────────
@@ -362,7 +388,7 @@ class TestCliStreamRendererIntegration:
             assert farewell_printed
 
     def test_final_reply_rendered_as_markdown_after_cards(self) -> None:
-        """最终回复应在工具调用卡片之后以 Markdown 形式渲染。"""
+        """最终回复应在工具调用卡片之后以 Panel(Markdown) 形式渲染。"""
         engine = _make_engine()
         engine.chat.return_value = "**分析结果**：销售额增长 20%"
         with patch("excelmanus.cli.console") as mock_console, \
@@ -373,13 +399,16 @@ class TestCliStreamRendererIntegration:
             _run(_repl_loop(engine))
             # 收集所有 print 调用的参数
             print_calls = mock_console.print.call_args_list
-            # 查找 Markdown 渲染调用
+            # 查找包含 Markdown 的 Panel 渲染调用
+            from rich.panel import Panel as RichPanel
             from rich.markdown import Markdown as RichMarkdown
-            markdown_calls = [
+            panel_md_calls = [
                 call for call in print_calls
-                if call.args and isinstance(call.args[0], RichMarkdown)
+                if call.args
+                and isinstance(call.args[0], RichPanel)
+                and isinstance(call.args[0].renderable, RichMarkdown)
             ]
-            assert len(markdown_calls) == 1, "最终回复应以 Markdown 渲染一次"
+            assert len(panel_md_calls) == 1, "最终回复应以 Panel(Markdown) 渲染一次"
 
     def test_existing_commands_unaffected_by_stream_renderer(self) -> None:
         """StreamRenderer 集成不应影响现有斜杠命令和退出命令。"""

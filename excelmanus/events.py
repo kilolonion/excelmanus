@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 class EventType(Enum):
@@ -15,6 +15,9 @@ class EventType(Enum):
     TOOL_CALL_END = "tool_call_end"
     THINKING = "thinking"
     ITERATION_START = "iteration_start"
+    ROUTE_START = "route_start"
+    ROUTE_END = "route_end"
+    CHAT_SUMMARY = "chat_summary"
 
 
 @dataclass
@@ -34,6 +37,16 @@ class ToolCallEvent:
     thinking: str = ""
     iteration: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
+    # 路由事件字段
+    route_mode: str = ""
+    skills_used: List[str] = field(default_factory=list)
+    tool_scope: List[str] = field(default_factory=list)
+    # 执行摘要字段
+    total_iterations: int = 0
+    total_tool_calls: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    elapsed_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

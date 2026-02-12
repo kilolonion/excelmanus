@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ChatPanel from './ChatPanel.vue'
@@ -25,9 +25,10 @@ describe('ChatPanel', () => {
     expect(wrapper.find('.welcome-text').text()).toContain('👋 你好！请在下方输入框中描述你的 Excel 任务。')
   })
 
-  it('消息为空但 loading 时不显示欢迎提示', () => {
+  it('消息为空但 loading 时不显示欢迎提示（有流式消息占位）', () => {
+    // loading 时会有流式 assistant 消息占位，messages 不为空
     const wrapper = mount(ChatPanel, {
-      props: { messages: [], loading: true },
+      props: { messages: [makeMsg({ role: 'assistant', content: '', id: 'stream' })], loading: true },
     })
     expect(wrapper.find('.empty-state').exists()).toBe(false)
   })
@@ -53,20 +54,17 @@ describe('ChatPanel', () => {
     expect(wrapper.find('.empty-state').exists()).toBe(false)
   })
 
-  // ========== Loading 指示器 ==========
-  it('loading 为 true 时显示打字指示器', () => {
+  // ========== 流式状态渲染 ==========
+  it('loading 时渲染流式 assistant 消息', () => {
+    const messages: Message[] = [
+      makeMsg({ id: '1', role: 'user', content: '分析' }),
+      makeMsg({ id: '2', role: 'assistant', content: '', streaming: true }),
+    ]
     const wrapper = mount(ChatPanel, {
-      props: { messages: [makeMsg()], loading: true },
+      props: { messages, loading: true },
     })
-    expect(wrapper.find('.typing-indicator').exists()).toBe(true)
-    expect(wrapper.findAll('.dot')).toHaveLength(3)
-  })
-
-  it('loading 为 false 时不显示打字指示器', () => {
-    const wrapper = mount(ChatPanel, {
-      props: { messages: [makeMsg()], loading: false },
-    })
-    expect(wrapper.find('.typing-indicator').exists()).toBe(false)
+    const bubbles = wrapper.findAllComponents({ name: 'MessageBubble' })
+    expect(bubbles).toHaveLength(2)
   })
 
   // ========== 自动滚动 ==========

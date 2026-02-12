@@ -118,13 +118,22 @@ class ConversationMemory:
         })
         self._truncate_if_needed()
 
-    def get_messages(self) -> list[dict]:
+    def get_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
         """获取完整消息列表（system prompt + 对话历史）。
 
-        返回的列表以 system 消息开头，后接对话历史。
+        Args:
+            system_prompts:
+                可选的 system 消息列表；为空时使用默认 system prompt。
         """
-        system_msg = {"role": "system", "content": self._system_prompt}
-        return [system_msg] + list(self._messages)
+        prompts = system_prompts or [self._system_prompt]
+        system_msgs = [
+            {"role": "system", "content": prompt}
+            for prompt in prompts
+            if isinstance(prompt, str) and prompt.strip()
+        ]
+        if not system_msgs:
+            system_msgs = [{"role": "system", "content": self._system_prompt}]
+        return system_msgs + list(self._messages)
 
     def clear(self) -> None:
         """清除所有对话历史（保留 system prompt 配置）。"""

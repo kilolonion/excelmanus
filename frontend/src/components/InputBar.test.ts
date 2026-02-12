@@ -6,7 +6,7 @@ describe('InputBar', () => {
   it('渲染输入框和发送按钮', () => {
     const wrapper = mount(InputBar, { props: { disabled: false } })
     expect(wrapper.find('.input-textarea').exists()).toBe(true)
-    expect(wrapper.find('.send-btn').text()).toBe('发送')
+    expect(wrapper.find('.send-btn').exists()).toBe(true)
   })
 
   it('输入框显示正确的 placeholder', () => {
