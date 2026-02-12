@@ -2,11 +2,10 @@
 
 基于大语言模型的 Excel 智能代理框架。通过自然语言描述 Excel 任务，系统自动拆解意图并调用工具完成操作。
 
-支持三种运行模式：
+支持两种运行模式：
 
 - **CLI 模式** — 终端对话式交互
 - **API 模式** — REST API 服务，供程序化调用
-- **MCP 模式** — MCP Server，供 Kiro、Claude Desktop 等 AI 客户端调用
 
 ## 安装
 
@@ -99,26 +98,6 @@ curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "按销售额降序排列", "session_id": "your-session-id"}'
 ```
-
-### MCP 模式
-
-```bash
-excelmanus-mcp
-```
-
-通过 stdio 传输与 MCP 客户端通信。在 MCP 客户端配置中添加：
-
-```json
-{
-  "mcpServers": {
-    "excelmanus": {
-      "command": "excelmanus-mcp"
-    }
-  }
-}
-```
-
-MCP 模式直接暴露 Skill 工具，不经过 Agent Engine，由外部 AI 客户端自行编排调用。
 
 ## Skill 扩展指南
 
@@ -215,7 +194,6 @@ excelmanus/
 ├── session.py           # 会话管理
 ├── cli.py               # CLI 交互界面
 ├── api.py               # FastAPI REST API
-├── mcp_server.py        # MCP Server
 └── skills/              # Skill 模块
     ├── __init__.py      # ToolDef、SkillRegistry
     ├── data_skill.py    # 数据操作（读写、分析、过滤、转换）
