@@ -15,6 +15,7 @@ from typing import Annotated, AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StringConstraints
 
@@ -143,6 +144,15 @@ app = FastAPI(
     title="ExcelManus API",
     version=excelmanus.__version__,
     lifespan=lifespan,
+)
+
+# ── CORS 中间件（允许前端开发服务器跨域访问） ─────────────
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "excelmanus"
 version = "2.0.0"
-description = "基于大语言模型的 Excel 智能代理框架，支持 Agent / MCP / API 三模式运行"
+description = "基于大语言模型的 Excel 智能代理框架，支持 CLI / API 双模式运行"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -19,7 +19,6 @@ dependencies = [
     "uvicorn>=0.23.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
-    "mcp>=1.0.0",
     "python-dotenv>=1.0.0",
 ]
 
@@ -34,7 +33,6 @@ dev = [
 [project.scripts]
 excelmanus = "excelmanus.cli:main"
 excelmanus-api = "excelmanus.api:main"
-excelmanus-mcp = "excelmanus.mcp_server:run_stdio_server"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

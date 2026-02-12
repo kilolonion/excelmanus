@@ -239,7 +239,7 @@ class TestSkillRegistryUnit:
 
 
 class TestToolDefConversion:
-    """ToolDef 的 to_openai_schema / to_mcp_tool 转换测试。"""
+    """ToolDef 的 to_openai_schema 转换测试。"""
 
     def test_to_openai_schema_structure(self) -> None:
         """to_openai_schema 默认应返回 Responses API 兼容结构。"""
@@ -259,10 +259,3 @@ class TestToolDefConversion:
         assert schema["function"]["description"] == "测试描述"
         assert schema["function"]["parameters"] == tool.input_schema
 
-    def test_to_mcp_tool_structure(self) -> None:
-        """to_mcp_tool 应返回正确的 MCP 格式。"""
-        tool = _make_tool("test_tool", "测试描述")
-        mcp = tool.to_mcp_tool()
-        assert mcp["name"] == "test_tool"
-        assert mcp["description"] == "测试描述"
-        assert mcp["inputSchema"] == tool.input_schema

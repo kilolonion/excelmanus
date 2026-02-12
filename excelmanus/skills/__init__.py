@@ -73,14 +73,6 @@ class ToolDef:
 
         raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
 
-    def to_mcp_tool(self) -> dict:
-        """转换为 MCP 协议的工具定义格式。"""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "inputSchema": self.input_schema,
-        }
-
 
 # ── SkillRegistry ─────────────────────────────────────────
 
