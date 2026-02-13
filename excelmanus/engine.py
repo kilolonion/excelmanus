@@ -16,6 +16,9 @@ from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
 from excelmanus.skillpacks import SkillMatchResult, SkillRouter
+from excelmanus.skillpacks.context_builder import build_contexts_with_budget
+from excelmanus.task_list import TaskStore
+from excelmanus.tools import task_tools
 from excelmanus.tools.registry import ToolNotAllowedError
 
 logger = get_logger("engine")
@@ -121,6 +124,18 @@ class AgentEngine:
             route_mode="legacy_all_tools",
             system_contexts=[],
         )
+        # 任务清单存储：单会话内存级
+        self._task_store = TaskStore()
+        task_tools.init_store(self._task_store)
+        # 注入 SkillpackLoader 供 list_skills 工具使用
+        if self._skill_router is not None:
+            from excelmanus.tools import skill_tools
+            skill_tools.init_loader(self._skill_router._loader)
+        # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
+        self._full_access_enabled: bool = False
+        self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
+        # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
+        self._loaded_skill_names: set[str] = set()
         # auto 模式系统消息回退缓存：None | "merge"
         self._system_mode_fallback: str | None = None
         # 执行统计（每次 chat 调用后更新）
@@ -138,6 +153,11 @@ class AgentEngine:
     def last_route_result(self) -> SkillMatchResult:
         """最近一轮 skill 路由结果。"""
         return self._last_route_result
+
+    @property
+    def full_access_enabled(self) -> bool:
+        """当前会话是否启用 fullAccess。"""
+        return self._full_access_enabled
 
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
@@ -161,6 +181,11 @@ class AgentEngine:
         skill_hints: list[str] | None = None,
     ) -> str:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        control_reply = self._handle_control_command(user_message)
+        if control_reply is not None:
+            logger.info("控制命令执行: %s", _summarize_text(user_message))
+            return control_reply
+
         chat_start = time.monotonic()
 
         # 发出路由开始事件
@@ -169,7 +194,12 @@ class AgentEngine:
             ToolCallEvent(event_type=EventType.ROUTE_START),
         )
 
-        route_result = await self._route_skills(user_message, skill_hints)
+        manual_skill_name = self.resolve_skill_command(user_message)
+        effective_skill_hints = (
+            [manual_skill_name] if manual_skill_name else skill_hints
+        )
+        route_result = await self._route_skills(user_message, effective_skill_hints)
+        route_result = self._merge_with_loaded_skills(route_result)
         self._last_route_result = route_result
 
         # 发出路由结束事件（含匹配结果）
@@ -209,6 +239,54 @@ class AgentEngine:
         )
 
         return reply
+
+    @staticmethod
+    def _normalize_skill_command_name(name: str) -> str:
+        """命令名归一化：小写并移除连字符/下划线。"""
+        return name.strip().lower().replace("-", "").replace("_", "")
+
+    def _list_loaded_skill_names(self) -> list[str]:
+        """获取当前可匹配的 Skill 名称；为空时尝试主动加载。"""
+        if self._skill_router is None:
+            return []
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        return list(skillpacks.keys())
+
+    def resolve_skill_command(self, user_message: str) -> str | None:
+        """将 `/skill_name ...` 解析为 Skill 名称（用于手动调用）。"""
+        text = user_message.strip()
+        if not text.startswith("/"):
+            return None
+
+        first = text.split(maxsplit=1)[0]
+        if len(first) <= 1:
+            return None
+
+        command = first[1:]
+        # 排除路径形式，避免将 `/Users/...` 误识别为命令
+        if "/" in command or "\\" in command:
+            return None
+
+        skill_names = self._list_loaded_skill_names()
+        if not skill_names:
+            return None
+
+        lower_map = {name.lower(): name for name in skill_names}
+        direct = lower_map.get(command.lower())
+        if direct is not None:
+            return direct
+
+        normalized_cmd = self._normalize_skill_command_name(command)
+        normalized_matches = [
+            name
+            for name in skill_names
+            if self._normalize_skill_command_name(name) == normalized_cmd
+        ]
+        if len(normalized_matches) == 1:
+            return normalized_matches[0]
+        return None
 
     async def _tool_calling_loop(
         self,
@@ -415,6 +493,10 @@ class AgentEngine:
                     tool_scope=tool_scope,
                 )
                 result_str = str(result_value)
+                # 工具结果截断：超过 max_result_chars 时自动截断
+                tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                if tool_def is not None:
+                    result_str = tool_def.truncate_result(result_str)
                 success = True
                 error = None
                 log_tool_call(logger, tool_name, arguments, result=result_str)
@@ -450,6 +532,31 @@ class AgentEngine:
             ),
         )
 
+        # 任务清单事件：成功执行 task_create/task_update 后发射对应事件
+        if success and tool_name == "task_create":
+            task_list = self._task_store.current
+            if task_list is not None:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TASK_LIST_CREATED,
+                        task_list_data=task_list.to_dict(),
+                    ),
+                )
+        elif success and tool_name == "task_update":
+            task_list = self._task_store.current
+            if task_list is not None:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TASK_ITEM_UPDATED,
+                        task_index=arguments.get("task_index"),
+                        task_status=arguments.get("status", ""),
+                        task_result=arguments.get("result"),
+                        task_list_data=task_list.to_dict(),
+                    ),
+                )
+
         return ToolCallResult(
             tool_name=tool_name,
             arguments=arguments,
@@ -461,6 +568,70 @@ class AgentEngine:
     def clear_memory(self) -> None:
         """清除对话历史。"""
         self._memory.clear()
+        self._loaded_skill_names.clear()
+
+    def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
+        """将本轮路由结果与会话内历史已加载的 skill 合并。"""
+        if self._skill_router is None:
+            return route_result
+
+        # 更新累积记录
+        new_names = set(route_result.skills_used)
+        self._loaded_skill_names.update(new_names)
+
+        # 找出历史已加载但本轮未匹配的 skill
+        history_only = self._loaded_skill_names - new_names
+        if not history_only:
+            return route_result
+
+        # 查找历史 skill 对象并合并
+        loader = self._skill_router._loader
+        history_skills = [
+            loader.get_skillpack(name)
+            for name in sorted(history_only)
+            if loader.get_skillpack(name) is not None
+        ]
+        if not history_skills:
+            return route_result
+
+        # 合并 tool_scope（去重，保持顺序：本轮优先）
+        merged_tools = list(route_result.tool_scope)
+        seen_tools = set(merged_tools)
+        for skill in history_skills:
+            for tool in skill.allowed_tools:
+                if tool not in seen_tools:
+                    seen_tools.add(tool)
+                    merged_tools.append(tool)
+
+        # 合并 skills 对象并统一应用预算
+        route_skills = [
+            loader.get_skillpack(name)
+            for name in route_result.skills_used
+            if loader.get_skillpack(name) is not None
+        ]
+        merged_skill_objects = route_skills + history_skills
+        merged_contexts = build_contexts_with_budget(
+            merged_skill_objects, self._config.skills_context_char_budget
+        )
+
+        # 合并 skills_used
+        merged_skills = list(route_result.skills_used)
+        for skill in history_skills:
+            if skill.name not in new_names:
+                merged_skills.append(skill.name)
+
+        logger.info(
+            "skill 累积合并：本轮=%s，历史追加=%s",
+            list(new_names),
+            [s.name for s in history_skills],
+        )
+
+        return SkillMatchResult(
+            skills_used=merged_skills,
+            tool_scope=merged_tools,
+            route_mode=route_result.route_mode,
+            system_contexts=merged_contexts,
+        )
 
     async def _route_skills(
         self,
@@ -475,11 +646,53 @@ class AgentEngine:
                 system_contexts=[],
             )
 
+        blocked_skillpacks = (
+            set(self._restricted_code_skillpacks)
+            if not self._full_access_enabled
+            else None
+        )
         return await self._skill_router.route(
             user_message,
             skill_hints=skill_hints,
             confirm_with_llm=self._confirm_with_llm,
+            blocked_skillpacks=blocked_skillpacks,
         )
+
+    def _handle_control_command(self, user_message: str) -> str | None:
+        """处理会话级控制命令。命中时返回回复文本，否则返回 None。"""
+        text = user_message.strip()
+        if not text or not text.startswith("/"):
+            return None
+
+        parts = text.split()
+        command = parts[0].strip().lower().replace("_", "")
+        if command != "/fullaccess":
+            return None
+
+        if len(parts) == 1:
+            action = "on"
+        elif len(parts) == 2:
+            action = parts[1].strip().lower()
+        else:
+            action = ""
+
+        self._last_route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="control_command",
+            system_contexts=[],
+        )
+
+        if action in {"on", ""} and len(parts) <= 2:
+            self._full_access_enabled = True
+            return "已开启 fullAccess。当前代码技能权限：full_access。"
+        if action == "off":
+            self._full_access_enabled = False
+            return "已关闭 fullAccess。当前代码技能权限：restricted。"
+        if action == "status":
+            status = "full_access" if self._full_access_enabled else "restricted"
+            return f"当前代码技能权限：{status}。"
+        return "无效参数。用法：/fullAccess [on|off|status]。"
 
     async def _confirm_with_llm(self, user_message: str, candidates: list[Any]) -> list[str]:
         """用同一个主模型做候选 Skillpack 二次确认。"""

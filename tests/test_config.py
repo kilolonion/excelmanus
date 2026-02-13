@@ -264,6 +264,23 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.max_sessions == 1000
 
+    def test_default_skills_context_char_budget(self, monkeypatch) -> None:
+        """默认技能正文字符预算为 12000。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        cfg = load_config()
+        assert cfg.skills_context_char_budget == 12000
+
+    def test_skills_context_char_budget_zero_allowed(self, monkeypatch) -> None:
+        """技能正文字符预算允许设为 0（表示不限制）。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET", "0")
+        cfg = load_config()
+        assert cfg.skills_context_char_budget == 0
+
     def test_default_workspace_root(self, monkeypatch) -> None:
         """默认工作目录白名单根路径为当前目录。（需求 6.8）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")

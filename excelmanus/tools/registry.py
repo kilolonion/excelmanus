@@ -37,6 +37,14 @@ class ToolDef:
     input_schema: dict[str, Any]
     func: Callable[..., Any]
     sensitive_fields: set[str] = field(default_factory=set)
+    max_result_chars: int = 3000
+
+    def truncate_result(self, text: str) -> str:
+        """若文本超过 max_result_chars 则截断并附加提示。"""
+        limit = self.max_result_chars
+        if limit <= 0 or len(text) <= limit:
+            return text
+        return f"{text[:limit]}\n[结果已截断，原始长度: {len(text)} 字符]"
 
     def to_openai_schema(
         self, mode: OpenAISchemaMode = "responses"
@@ -88,6 +96,10 @@ class ToolRegistry:
             self._tools[tool.name] = tool
         if tools_list:
             logger.info("已批量注册 %d 个工具", len(tools_list))
+
+    def get_tool(self, tool_name: str) -> ToolDef | None:
+        """按名称查找工具定义，未找到返回 None。"""
+        return self._tools.get(tool_name)
 
     def get_all_tools(self) -> list[ToolDef]:
         """返回全部工具定义。"""
@@ -153,3 +165,8 @@ class ToolRegistry:
         self.register_tools(file_tools.get_tools())
         self.register_tools(code_tools.get_tools())
         self.register_tools(sheet_tools.get_tools())
+
+        from excelmanus.tools import skill_tools, task_tools
+
+        self.register_tools(task_tools.get_tools())
+        self.register_tools(skill_tools.get_tools())

@@ -18,6 +18,8 @@ class EventType(Enum):
     ROUTE_START = "route_start"
     ROUTE_END = "route_end"
     CHAT_SUMMARY = "chat_summary"
+    TASK_LIST_CREATED = "task_list_created"
+    TASK_ITEM_UPDATED = "task_item_updated"
 
 
 @dataclass
@@ -47,6 +49,11 @@ class ToolCallEvent:
     success_count: int = 0
     failure_count: int = 0
     elapsed_seconds: float = 0.0
+    # 任务清单事件字段
+    task_list_data: Optional[Dict[str, Any]] = None  # TaskList.to_dict() 的结果
+    task_index: Optional[int] = None                  # 更新的任务项索引
+    task_status: str = ""                             # 更新后的状态
+    task_result: Optional[str] = None                 # 任务项结果
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

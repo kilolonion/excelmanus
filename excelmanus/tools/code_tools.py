@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools.registry import ToolDef
@@ -190,6 +190,94 @@ def _resolve_python_command(
     )
 
 
+# ── 软沙盒 ───────────────────────────────────────────────
+
+_SANDBOX_ENV_ALLOWLIST = {
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TMP",
+    "TEMP",
+}
+
+
+def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
+    """构建最小环境变量白名单。"""
+    sandbox_env: dict[str, str] = {}
+    warnings: list[str] = []
+    for key in _SANDBOX_ENV_ALLOWLIST:
+        value = os.environ.get(key)
+        if value:
+            sandbox_env[key] = value
+
+    if os.name == "nt" and "SYSTEMROOT" not in sandbox_env:
+        warnings.append("缺少 SYSTEMROOT，Windows 子进程可能无法启动。")
+
+    sandbox_env["PYTHONNOUSERSITE"] = "1"
+    sandbox_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return sandbox_env, warnings
+
+
+def _ensure_isolated_python(command: list[str]) -> tuple[list[str], bool]:
+    """确保 Python 调用启用 -I 隔离模式。"""
+    if any(item == "-I" for item in command[1:]):
+        return command, True
+    return [*command, "-I"], True
+
+
+def _build_unix_limits_preexec(
+    timeout_seconds: int,
+) -> tuple[Callable[[], None] | None, bool, list[str]]:
+    """构建 Unix 平台资源限制 preexec_fn。"""
+    warnings: list[str] = []
+    if os.name == "nt":
+        warnings.append("当前平台不支持 Unix 资源限制，已跳过。")
+        return None, False, warnings
+
+    try:
+        import resource  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"加载 resource 模块失败，已跳过资源限制：{exc}")
+        return None, False, warnings
+
+    candidates: list[tuple[int, int, str]] = []
+    limit_plan = [
+        ("RLIMIT_CPU", max(1, min(timeout_seconds, 300))),
+        ("RLIMIT_AS", 512 * 1024 * 1024),
+        ("RLIMIT_NOFILE", 64),
+        ("RLIMIT_NPROC", 32),
+    ]
+    for name, value in limit_plan:
+        if hasattr(resource, name):
+            candidates.append((getattr(resource, name), value, name))
+        else:
+            warnings.append(f"{name} 不可用，已跳过。")
+
+    if not candidates:
+        warnings.append("无可用资源限制项，已跳过。")
+        return None, False, warnings
+
+    def _preexec() -> None:
+        for res_code, desired, _name in candidates:
+            try:
+                soft, hard = resource.getrlimit(res_code)
+                target = desired
+                if soft != resource.RLIM_INFINITY:
+                    target = min(target, int(soft))
+                if hard != resource.RLIM_INFINITY:
+                    target = min(target, int(hard))
+                resource.setrlimit(res_code, (target, target))
+            except Exception:
+                continue
+
+    return _preexec, True, warnings
+
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 
@@ -259,8 +347,14 @@ def run_python_script(
         python_command,
         require_excel_deps=require_excel_deps,
     )
+    sandbox_python_cmd, isolated_python = _ensure_isolated_python(python_cmd)
+    sandbox_env, env_warnings = _build_sandbox_env()
+    preexec_fn, limits_applied, limit_warnings = _build_unix_limits_preexec(
+        timeout_seconds
+    )
+    sandbox_warnings = [*env_warnings, *limit_warnings]
     safe_args = [str(item) for item in (args or [])]
-    command = [*python_cmd, str(script_safe), *safe_args]
+    command = [*sandbox_python_cmd, str(script_safe), *safe_args]
 
     started = time.time()
     timed_out = False
@@ -269,13 +363,22 @@ def run_python_script(
     stderr = ""
 
     try:
+        run_kwargs: dict[str, Any] = {
+            "cwd": workdir_safe,
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout_seconds,
+            "check": False,
+            "env": sandbox_env,
+            "stdin": subprocess.DEVNULL,
+            "close_fds": True,
+            "start_new_session": True,
+        }
+        if preexec_fn is not None:
+            run_kwargs["preexec_fn"] = preexec_fn
         completed = subprocess.run(
             command,
-            cwd=workdir_safe,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
+            **run_kwargs,
         )
         return_code = completed.returncode
         stdout = completed.stdout or ""
@@ -322,7 +425,7 @@ def run_python_script(
         "script": str(script_safe.relative_to(guard.workspace_root)),
         "workdir": str(workdir_safe.relative_to(guard.workspace_root)),
         "command": command,
-        "python_command": python_cmd,
+        "python_command": sandbox_python_cmd,
         "python_resolve_mode": mode,
         "python_probe_results": [
             {
@@ -336,6 +439,12 @@ def run_python_script(
         "stderr_tail": _tail(stderr, tail_lines),
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
+        "sandbox": {
+            "mode": "soft",
+            "isolated_python": isolated_python,
+            "limits_applied": limits_applied,
+            "warnings": sandbox_warnings,
+        },
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 

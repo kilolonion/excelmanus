@@ -62,7 +62,8 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`exit`。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/fullAccess [on|off|status]`、`/<skill_name> [args...]`、`exit`。
+输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`）。
 
 ### API
 
@@ -102,7 +103,7 @@ Skillpack 使用目录结构：
 - `allowed_tools`
 - `triggers`
 
-可选字段：`file_patterns`、`resources`、`priority`、`version`、`disable_model_invocation`。
+可选字段：`file_patterns`、`resources`、`priority`、`version`、`disable_model_invocation`、`user_invocable`。
 
 加载优先级：`project > user > system`。
 
@@ -118,6 +119,8 @@ Skillpack 使用目录结构：
 
 - 所有文件读写仍受 `WORKSPACE_ROOT` 限制
 - 路径穿越与符号链接越界会被拒绝
+- 代码 Skillpack 默认受限（`excel_code_runner`），仅可通过会话级 `/fullAccess` 临时解锁
+- `run_python_script` 始终使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制尽力应用）
 - `allowed_tools` 两阶段校验
   - Loader 启动期软校验：未知工具仅告警
   - Engine 运行期硬校验：未授权调用返回 `TOOL_NOT_ALLOWED`

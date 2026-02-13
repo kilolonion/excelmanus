@@ -39,6 +39,8 @@ def _write_skillpack(
     description: str,
     allowed_tools: list[str],
     triggers: list[str],
+    disable_model_invocation: bool | None = None,
+    user_invocable: bool | None = None,
 ) -> None:
     skill_dir = root_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -50,9 +52,15 @@ def _write_skillpack(
         *[f"  - {item}" for item in allowed_tools],
         "triggers:",
         *[f"  - {item}" for item in triggers],
-        "---",
-        "测试说明",
     ]
+    if disable_model_invocation is not None:
+        flag = "true" if disable_model_invocation else "false"
+        lines.append(f"disable_model_invocation: {flag}")
+    if user_invocable is not None:
+        flag = "true" if user_invocable else "false"
+        lines.append(f"user_invocable: {flag}")
+
+    lines.extend(["---", "测试说明"])
     (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -132,6 +140,49 @@ class TestSkillpackLoader:
         loader.load_all()
         assert any("unknown_tool" in warning for warning in loader.warnings)
 
+    def test_user_invocable_default_true(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="测试",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+
+        assert loaded["data_basic"].user_invocable is True
+
+    def test_user_invocable_false_from_frontmatter(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="测试",
+            allowed_tools=["read_excel"],
+            triggers=["excel"],
+            user_invocable=False,
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+
+        assert loaded["general_excel"].user_invocable is False
+
 
 class TestSkillRouter:
     @pytest.mark.asyncio
@@ -208,3 +259,170 @@ class TestSkillRouter:
         assert result.route_mode == "confident_direct"
         assert result.skills_used == ["data_basic"]
         assert result.tool_scope == ["read_excel"]
+
+    @pytest.mark.asyncio
+    async def test_hint_direct_ignores_invocation_flags(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "export_batch",
+            description="批量导出",
+            allowed_tools=["read_excel"],
+            triggers=["导出"],
+            disable_model_invocation=True,
+            user_invocable=False,
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route(
+            "执行导出",
+            skill_hints=["export_batch"],
+        )
+        assert result.route_mode == "hint_direct"
+        assert result.skills_used == ["export_batch"]
+
+    @pytest.mark.asyncio
+    async def test_hint_not_found_skips_scoring(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="分析",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route(
+            "请帮我分析这个文件",
+            skill_hints=["not_exists_skill"],
+        )
+
+        assert result.route_mode == "hint_not_found"
+        assert result.skills_used == []
+        assert "list_skills" in result.tool_scope
+
+    @pytest.mark.asyncio
+    async def test_auto_route_excludes_disable_model_invocation(
+        self, tmp_path: Path
+    ) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "export_batch",
+            description="批量导出",
+            allowed_tools=["read_excel"],
+            triggers=["导出"],
+            disable_model_invocation=True,
+        )
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="通用兜底",
+            allowed_tools=["read_excel"],
+            triggers=["excel"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("请导出所有报表")
+        assert "export_batch" not in result.skills_used
+
+    @pytest.mark.asyncio
+    async def test_auto_route_excludes_user_invocable_false(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="通用兜底",
+            allowed_tools=["read_excel"],
+            triggers=["excel"],
+            user_invocable=False,
+        )
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="分析",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("请处理 excel 文件")
+        assert "general_excel" not in result.skills_used
+
+    @pytest.mark.asyncio
+    async def test_blocked_skillpack_excluded_then_unlock(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "excel_code_runner",
+            description="代码执行",
+            allowed_tools=["read_excel"],
+            triggers=["代码"],
+        )
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="通用兜底",
+            allowed_tools=["read_excel"],
+            triggers=["excel"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        blocked_result = await router.route(
+            "请写代码处理文件",
+            skill_hints=["excel_code_runner"],
+            blocked_skillpacks={"excel_code_runner"},
+        )
+        assert "excel_code_runner" not in blocked_result.skills_used
+
+        unlocked_result = await router.route(
+            "请写代码处理文件",
+            skill_hints=["excel_code_runner"],
+        )
+        assert unlocked_result.skills_used == ["excel_code_runner"]
