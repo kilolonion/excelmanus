@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING, Any
 
 import openai
 
+from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
 from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
-from excelmanus.skillpacks import ForkPlan, SkillMatchResult, SkillRouter
+from excelmanus.skillpacks import SkillMatchResult, SkillRouter, Skillpack
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
@@ -27,6 +28,18 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 _FORK_SUMMARY_MAX_CHARS = 4000
+_META_TOOL_NAMES = ("select_skill", "explore_data", "list_skills")
+_READ_ONLY_TOOLS = (
+    "read_excel",
+    "analyze_data",
+    "filter_data",
+    "list_sheets",
+    "get_file_info",
+    "search_files",
+    "list_directory",
+    "read_text_file",
+    "read_cell_styles",
+)
 
 
 def _to_plain(value: Any) -> Any:
@@ -84,6 +97,9 @@ class ToolCallResult:
     result: str
     success: bool
     error: str | None = None
+    pending_approval: bool = False
+    approval_id: str | None = None
+    audit_record: AppliedApprovalRecord | None = None
 
 
 @dataclass
@@ -145,6 +161,8 @@ class AgentEngine:
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
         # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
         self._loaded_skill_names: set[str] = set()
+        # 当前激活技能：None 表示未激活状态
+        self._active_skill: Skillpack | None = None
         # auto 模式系统消息回退缓存：None | "merge"
         self._system_mode_fallback: str | None = None
         # 执行统计（每次 chat 调用后更新）
@@ -152,6 +170,7 @@ class AgentEngine:
         self._last_tool_call_count: int = 0
         self._last_success_count: int = 0
         self._last_failure_count: int = 0
+        self._approval = ApprovalManager(config.workspace_root)
 
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
@@ -254,236 +273,6 @@ class AgentEngine:
         except Exception as exc:
             logger.warning("事件回调异常: %s", exc)
 
-    async def _run_fork_subagent_if_needed(
-        self,
-        *,
-        route_result: SkillMatchResult,
-        user_message: str,
-        on_event: EventCallback | None,
-    ) -> str | None:
-        if not self._subagent_enabled:
-            return None
-        fork_plan = route_result.fork_plan
-        if fork_plan is None:
-            return None
-
-        safe_tool_scope = [tool for tool in fork_plan.tool_scope if tool and tool != "list_skills"]
-        if not safe_tool_scope:
-            logger.warning("fork 计划缺少可用只读工具，已跳过子代理执行")
-            return None
-
-        start_note = (
-            "[fork] 已触发子代理只读探索。"
-            f"原因：{fork_plan.reason}。"
-            f"工具范围：{', '.join(safe_tool_scope)}"
-        )
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.SUBAGENT_START,
-                subagent_reason=fork_plan.reason,
-                subagent_tools=list(safe_tool_scope),
-                thinking=start_note,
-            ),
-        )
-        logger.info(
-            "fork 子代理启动 | reason=%s | tools=%s",
-            fork_plan.reason,
-            safe_tool_scope,
-        )
-
-        summary = await self._execute_fork_plan_loop(
-            fork_plan=ForkPlan(
-                reason=fork_plan.reason,
-                tool_scope=safe_tool_scope,
-                prompt=fork_plan.prompt,
-                source_skills=list(fork_plan.source_skills),
-                detected_files=list(fork_plan.detected_files),
-            ),
-            route_result=route_result,
-            user_message=user_message,
-        )
-        if not summary:
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_END,
-                    subagent_reason=fork_plan.reason,
-                    subagent_tools=list(safe_tool_scope),
-                    subagent_success=False,
-                ),
-            )
-            return None
-
-        summarized = summary.strip()
-        if len(summarized) > _FORK_SUMMARY_MAX_CHARS:
-            summarized = summarized[:_FORK_SUMMARY_MAX_CHARS]
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.SUBAGENT_SUMMARY,
-                subagent_reason=fork_plan.reason,
-                subagent_tools=list(safe_tool_scope),
-                subagent_summary=summarized,
-                subagent_success=True,
-            ),
-        )
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.SUBAGENT_END,
-                subagent_reason=fork_plan.reason,
-                subagent_tools=list(safe_tool_scope),
-                subagent_success=True,
-            ),
-        )
-        logger.info("fork 子代理完成 | summary=%s", _summarize_text(summary, 200))
-        return summary
-
-    async def _execute_fork_plan_loop(
-        self,
-        *,
-        fork_plan: ForkPlan,
-        route_result: SkillMatchResult,
-        user_message: str,
-    ) -> str:
-        fork_memory = ConversationMemory(self._config)
-        fork_memory.add_user_message(user_message)
-        fork_system_prompt = self._build_fork_system_prompt(
-            route_result=route_result,
-            fork_plan=fork_plan,
-        )
-
-        tools = self._get_openai_tools(tool_scope=fork_plan.tool_scope)
-        model_name = self._config.subagent_model or self._config.model
-        max_iter = self._config.subagent_max_iterations
-        max_failures = self._config.subagent_max_consecutive_failures
-        consecutive_failures = 0
-
-        for iteration in range(1, max_iter + 1):
-            messages = fork_memory.get_messages(system_prompts=[fork_system_prompt])
-            kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": messages,
-            }
-            if tools:
-                kwargs["tools"] = tools
-
-            response = await self._client.chat.completions.create(**kwargs)
-            message = response.choices[0].message
-
-            if not message.tool_calls:
-                summary = str(message.content or "").strip()
-                if not summary:
-                    summary = "子代理未返回文本摘要。"
-                fork_memory.add_assistant_message(summary)
-                return summary
-
-            assistant_msg = _assistant_message_to_dict(message)
-            fork_memory.add_assistant_tool_message(assistant_msg)
-
-            breaker_triggered = False
-            breaker_skip_error = (
-                f"工具未执行：连续 {max_failures} 次工具调用失败，已触发子代理熔断。"
-            )
-            breaker_summary = ""
-            failed_results: list[ToolCallResult] = []
-
-            for tc in message.tool_calls:
-                tool_call_id = getattr(tc, "id", "")
-                function = getattr(tc, "function", None)
-                tool_name = getattr(function, "name", "")
-
-                if breaker_triggered:
-                    fork_memory.add_tool_result(tool_call_id, breaker_skip_error)
-                    continue
-
-                tc_result = await self._execute_tool_call(
-                    tc,
-                    fork_plan.tool_scope,
-                    None,
-                    iteration,
-                )
-                fork_memory.add_tool_result(tool_call_id, tc_result.result)
-
-                if tc_result.success:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    failed_results.append(tc_result)
-
-                if consecutive_failures >= max_failures:
-                    breaker_triggered = True
-                    recent_errors = [
-                        f"- {item.tool_name}: {item.error}"
-                        for item in failed_results[-max_failures:]
-                    ]
-                    breaker_summary = "\n".join(recent_errors)
-
-            if breaker_triggered:
-                return (
-                    f"子代理连续 {max_failures} 次工具调用失败，已提前终止。"
-                    f"错误摘要：\n{breaker_summary}"
-                )
-
-        return (
-            "子代理达到最大迭代次数，返回有限摘要："
-            "已完成部分只读探索，请主代理在执行前再次核对关键参数。"
-        )
-
-    def _build_fork_system_prompt(
-        self,
-        *,
-        route_result: SkillMatchResult,
-        fork_plan: ForkPlan,
-    ) -> str:
-        lines = [
-            "你是 ExcelManus 的 fork 子代理。",
-            "你运行在独立上下文中，只做只读数据探索。",
-            "禁止写入、删除、重命名、覆盖任何文件。",
-            "你必须在有限轮次内输出高密度摘要，供主代理执行。",
-            "允许工具："
-            + (", ".join(fork_plan.tool_scope) if fork_plan.tool_scope else "(空)"),
-            "触发原因：" + fork_plan.reason,
-            "执行提示：",
-            fork_plan.prompt.strip(),
-        ]
-        if route_result.system_contexts:
-            lines.append("参考技能上下文：")
-            lines.extend(route_result.system_contexts)
-        return "\n\n".join(line for line in lines if line)
-
-    def _attach_fork_summary(
-        self,
-        route_result: SkillMatchResult,
-        fork_summary: str,
-    ) -> SkillMatchResult:
-        summary = fork_summary.strip()
-        if len(summary) > _FORK_SUMMARY_MAX_CHARS:
-            summary = (
-                summary[:_FORK_SUMMARY_MAX_CHARS]
-                + f"\n[摘要已截断，原始长度: {len(fork_summary)} 字符]"
-            )
-
-        fork_context = (
-            "[ForkSummary] 以下内容来自子代理只读探索，请优先基于该摘要规划后续写入步骤：\n"
-            + summary
-        )
-        contexts = list(route_result.system_contexts)
-        contexts.append(fork_context)
-        route_mode = route_result.route_mode
-        if "+fork_executed" not in route_mode:
-            route_mode = f"{route_mode}+fork_executed"
-
-        return SkillMatchResult(
-            skills_used=route_result.skills_used,
-            tool_scope=route_result.tool_scope,
-            route_mode=route_mode,
-            system_contexts=contexts,
-            parameterized=route_result.parameterized,
-            fork_plan=route_result.fork_plan,
-        )
-
     async def chat(
         self,
         user_message: str,
@@ -493,10 +282,21 @@ class AgentEngine:
         raw_args: str | None = None,
     ) -> str:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
-        control_reply = self._handle_control_command(user_message)
+        control_reply = await self._handle_control_command(user_message)
         if control_reply is not None:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
             return control_reply
+
+        if self._approval.has_pending():
+            self._last_route_result = SkillMatchResult(
+                skills_used=[],
+                tool_scope=[],
+                route_mode="control_command",
+                system_contexts=[],
+            )
+            block_msg = self._approval.pending_block_message()
+            logger.info("存在待确认项，已阻塞普通请求")
+            return block_msg
 
         chat_start = time.monotonic()
 
@@ -506,7 +306,6 @@ class AgentEngine:
             ToolCallEvent(event_type=EventType.ROUTE_START),
         )
 
-        effective_skill_hints = skill_hints
         effective_slash_command = slash_command
         effective_raw_args = raw_args or ""
 
@@ -518,11 +317,9 @@ class AgentEngine:
                 effective_slash_command = manual_skill_name
                 _, _, tail = user_message.strip()[1:].partition(" ")
                 effective_raw_args = tail.strip()
-                effective_skill_hints = None
 
         route_result = await self._route_skills(
             user_message,
-            effective_skill_hints,
             slash_command=effective_slash_command,
             raw_args=effective_raw_args if effective_slash_command else None,
         )
@@ -539,15 +336,6 @@ class AgentEngine:
                 tool_scope=list(route_result.tool_scope) if route_result.tool_scope else [],
             ),
         )
-
-        fork_summary = await self._run_fork_subagent_if_needed(
-            route_result=route_result,
-            user_message=user_message,
-            on_event=on_event,
-        )
-        if fork_summary:
-            route_result = self._attach_fork_summary(route_result, fork_summary)
-            self._last_route_result = route_result
 
         # 追加用户消息
         self._memory.add_user_message(user_message)
@@ -624,15 +412,405 @@ class AgentEngine:
             return normalized_matches[0]
         return None
 
+    def _blocked_skillpacks(self) -> set[str] | None:
+        """返回当前会话被限制的技能包集合。"""
+        if self._full_access_enabled:
+            return None
+        return set(self._restricted_code_skillpacks)
+
+    def _build_meta_tools(self) -> list[dict[str, Any]]:
+        """构建 LLM-Native 元工具定义。"""
+        skill_catalog = "当前无可用技能。"
+        skill_names: list[str] = []
+        if self._skill_router is not None:
+            blocked = self._blocked_skillpacks()
+            build_catalog = getattr(self._skill_router, "build_skill_catalog", None)
+            built: Any = None
+            if callable(build_catalog):
+                built = build_catalog(blocked_skillpacks=blocked)
+
+            if isinstance(built, tuple) and len(built) == 2:
+                catalog_text, names = built
+                if isinstance(catalog_text, str) and catalog_text.strip():
+                    skill_catalog = catalog_text.strip()
+                if isinstance(names, list):
+                    skill_names = [str(name) for name in names]
+
+            # 兼容单测 mock router：无 build_skill_catalog 或返回值异常时，从 loader 兜底。
+            if not skill_names:
+                loader = getattr(self._skill_router, "_loader", None)
+                get_skillpacks = getattr(loader, "get_skillpacks", None)
+                load_all = getattr(loader, "load_all", None)
+                if callable(get_skillpacks):
+                    skillpacks = get_skillpacks()
+                else:
+                    skillpacks = {}
+                if not skillpacks and callable(load_all):
+                    skillpacks = load_all()
+                if isinstance(skillpacks, dict):
+                    if blocked:
+                        skillpacks = {
+                            name: skill
+                            for name, skill in skillpacks.items()
+                            if name not in blocked
+                        }
+                    skill_names = sorted(skillpacks.keys())
+                    if skill_names:
+                        lines = ["可用技能：\n"]
+                        for name in skill_names:
+                            skill = skillpacks[name]
+                            description = str(getattr(skill, "description", "")).strip()
+                            if description:
+                                lines.append(f"- {name}：{description}")
+                            else:
+                                lines.append(f"- {name}")
+                        skill_catalog = "\n".join(lines)
+
+        select_skill_description = (
+            "激活一个技能包来完成当前任务。"
+            "当用户提出明确的数据处理、图表制作、格式整理等执行任务时应优先调用本工具。\n"
+            "如果用户只是闲聊、问候、询问能力或不需要执行工具，请不要调用本工具，直接回复。\n\n"
+            "Skill_Catalog:\n"
+            f"{skill_catalog}"
+        )
+        explore_data_description = (
+            "启动只读数据探查子代理，适用于以下场景：\n"
+            "- 大体量 Excel 文件（担心一次性读全量开销过高）\n"
+            "- 数据结构未知，需要先摸清 sheet、列结构和质量问题\n"
+            "- 存在复杂数据质量问题，需要先探查再执行写入操作\n\n"
+            "不适用场景：\n"
+            "- 用户已经明确说明数据结构\n"
+            "- 仅做简单读取或一次性明确操作\n"
+            "- 仅询问能力或闲聊"
+        )
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "select_skill",
+                    "description": select_skill_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "skill_name": {
+                                "type": "string",
+                                "description": "要激活的技能名称",
+                                "enum": skill_names,
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "选择该技能的原因（可选，一句话）",
+                            },
+                        },
+                        "required": ["skill_name"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "explore_data",
+                    "description": explore_data_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": "需要探查的问题或目标",
+                            },
+                            "file_paths": {
+                                "type": "array",
+                                "description": "待探查文件路径列表（可选）",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["task"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
+    async def _handle_select_skill(self, skill_name: str, reason: str = "") -> str:
+        """处理 select_skill 调用：激活技能并返回技能上下文。"""
+        if self._skill_router is None:
+            return f"未找到技能: {skill_name}"
+
+        loader = self._skill_router._loader
+        skillpacks = loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = loader.load_all()
+
+        blocked = self._blocked_skillpacks()
+        if blocked:
+            skillpacks = {
+                name: skill
+                for name, skill in skillpacks.items()
+                if name not in blocked
+            }
+
+        if not skillpacks:
+            return f"未找到技能: {skill_name}"
+
+        selected = self._skill_router._find_skill_by_name(
+            skillpacks=skillpacks,
+            name=skill_name,
+        )
+        if selected is None:
+            return f"未找到技能: {skill_name}"
+
+        self._active_skill = selected
+        self._loaded_skill_names.add(selected.name)
+
+        context_text = selected.render_context()
+        reason_text = reason.strip()
+        if reason_text:
+            return (
+                f"已激活技能: {selected.name}\n"
+                f"选择原因: {reason_text}\n\n"
+                f"{context_text}"
+            )
+        return context_text
+
+    def _get_current_tool_scope(
+        self,
+        route_result: SkillMatchResult | None = None,
+    ) -> list[str]:
+        """根据当前状态返回主代理可用工具范围。"""
+        if self._active_skill is not None:
+            scope = list(self._active_skill.allowed_tools)
+            if "select_skill" not in scope:
+                scope.append("select_skill")
+            return scope
+
+        # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
+        if (
+            route_result is not None
+            and route_result.route_mode == "slash_direct"
+            and route_result.tool_scope
+        ):
+            scope = list(route_result.tool_scope)
+            if "select_skill" not in scope:
+                scope.append("select_skill")
+            return scope
+
+        scope = self._all_tool_names()
+        for tool_name in _META_TOOL_NAMES:
+            if tool_name not in scope:
+                scope.append(tool_name)
+        return scope
+
+    def _build_tools_for_scope(self, tool_scope: Sequence[str]) -> list[dict[str, Any]]:
+        """按当前 scope 组合常规工具和元工具定义。"""
+        schemas = self._get_openai_tools(tool_scope=tool_scope)
+        allowed = set(tool_scope)
+        for tool in self._build_meta_tools():
+            function = tool.get("function", {})
+            name = function.get("name")
+            if name in allowed:
+                schemas.append(tool)
+        return schemas
+
+    @staticmethod
+    def _normalize_explore_file_paths(file_paths: list[Any] | None) -> list[str]:
+        """规范化 explore_data 的 file_paths 参数。"""
+        if not file_paths:
+            return []
+        normalized: list[str] = []
+        for item in file_paths:
+            if not isinstance(item, str):
+                continue
+            path = item.strip()
+            if path:
+                normalized.append(path)
+        return normalized
+
+    def _build_explorer_system_prompt(self, task: str, file_paths: list[str]) -> str:
+        """构建 explore_data 子代理系统提示。"""
+        path_text = "、".join(file_paths) if file_paths else "未提供（请先用只读工具定位目标文件）"
+        read_only_tools = "、".join(_READ_ONLY_TOOLS)
+        return (
+            "你是 ExcelManus 的只读数据探查子代理。\n"
+            "目标：在有限轮次内完成结构探查并输出高密度摘要，供主代理后续执行。\n"
+            "硬性约束：禁止任何写入、删除、重命名、覆盖操作，只允许读取。\n"
+            f"只读工具范围：{read_only_tools}\n"
+            f"探查任务：{task.strip()}\n"
+            f"候选文件：{path_text}\n\n"
+            "输出要求：\n"
+            "1. 优先给出文件/工作表结构、关键字段、数据质量风险。\n"
+            "2. 明确指出后续执行前需要确认的参数或边界条件。\n"
+            "3. 结尾给出 3~8 条可执行建议，便于主代理直接落地。"
+        )
+
+    async def _execute_subagent_loop(
+        self,
+        *,
+        system_prompt: str,
+        tool_scope: list[str],
+        max_iterations: int,
+    ) -> str:
+        """子代理执行循环：LLM 调用 → 只读工具执行 → 熔断/迭代上限保护。"""
+        subagent_memory = ConversationMemory(self._config)
+        subagent_memory.add_user_message("请按系统提示完成只读探查并返回摘要。")
+
+        tools = self._get_openai_tools(tool_scope=tool_scope)
+        model_name = self._config.subagent_model or self._config.model
+        max_failures = self._config.subagent_max_consecutive_failures
+        consecutive_failures = 0
+
+        for iteration in range(1, max_iterations + 1):
+            messages = subagent_memory.get_messages(system_prompts=[system_prompt])
+            kwargs: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+
+            response = await self._client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                summary = str(message.content or "").strip()
+                if not summary:
+                    summary = "子代理未返回文本摘要。"
+                subagent_memory.add_assistant_message(summary)
+                return summary
+
+            assistant_msg = _assistant_message_to_dict(message)
+            subagent_memory.add_assistant_tool_message(assistant_msg)
+
+            breaker_triggered = False
+            breaker_skip_error = (
+                f"工具未执行：连续 {max_failures} 次工具调用失败，已触发子代理熔断。"
+            )
+            failed_results: list[ToolCallResult] = []
+
+            for tc in message.tool_calls:
+                tool_call_id = getattr(tc, "id", "")
+
+                if breaker_triggered:
+                    subagent_memory.add_tool_result(tool_call_id, breaker_skip_error)
+                    continue
+
+                tc_result = await self._execute_tool_call(
+                    tc,
+                    tool_scope,
+                    None,
+                    iteration,
+                )
+                subagent_memory.add_tool_result(tool_call_id, tc_result.result)
+
+                if tc_result.success:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    failed_results.append(tc_result)
+
+                if consecutive_failures >= max_failures:
+                    breaker_triggered = True
+
+            if breaker_triggered:
+                recent_errors = [
+                    f"- {item.tool_name}: {item.error}"
+                    for item in failed_results[-max_failures:]
+                ]
+                breaker_summary = "\n".join(recent_errors)
+                return (
+                    f"子代理连续 {max_failures} 次工具调用失败，已提前终止。"
+                    f"错误摘要：\n{breaker_summary}"
+                )
+
+        return (
+            f"子代理达到最大迭代次数（{max_iterations}），返回有限摘要："
+            "已完成部分只读探索，请主代理在执行前再次核对关键参数。"
+        )
+
+    async def _handle_explore_data(
+        self,
+        task: str,
+        file_paths: list[Any] | None = None,
+        *,
+        on_event: EventCallback | None = None,
+    ) -> str:
+        """处理 explore_data：启动只读子代理并返回摘要。"""
+        task_text = task.strip()
+        normalized_paths = self._normalize_explore_file_paths(file_paths)
+        tool_scope = list(_READ_ONLY_TOOLS)
+
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_START,
+                subagent_reason=task_text,
+                subagent_tools=tool_scope,
+                subagent_success=True,
+            ),
+        )
+
+        try:
+            system_prompt = self._build_explorer_system_prompt(task_text, normalized_paths)
+            summary = await self._execute_subagent_loop(
+                system_prompt=system_prompt,
+                tool_scope=tool_scope,
+                max_iterations=self._config.subagent_max_iterations,
+            )
+            output = summary.strip()
+            if len(output) > _FORK_SUMMARY_MAX_CHARS:
+                output = (
+                    output[:_FORK_SUMMARY_MAX_CHARS]
+                    + f"\n[摘要已截断，原始长度: {len(summary)} 字符]"
+                )
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_SUMMARY,
+                    subagent_reason=task_text,
+                    subagent_tools=tool_scope,
+                    subagent_summary=output,
+                    subagent_success=True,
+                ),
+            )
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_END,
+                    subagent_reason=task_text,
+                    subagent_tools=tool_scope,
+                    subagent_success=True,
+                ),
+            )
+            return output
+        except Exception as exc:
+            error_summary = f"子代理执行失败：{exc}"
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_SUMMARY,
+                    subagent_reason=task_text,
+                    subagent_tools=tool_scope,
+                    subagent_summary=error_summary,
+                    subagent_success=False,
+                ),
+            )
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_END,
+                    subagent_reason=task_text,
+                    subagent_tools=tool_scope,
+                    subagent_success=False,
+                ),
+            )
+            return error_summary
+
     async def _tool_calling_loop(
         self,
         route_result: SkillMatchResult,
         on_event: EventCallback | None,
     ) -> str:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
-        tool_scope = route_result.tool_scope
-        tools = self._get_openai_tools(tool_scope=tool_scope)
-
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
@@ -655,6 +833,9 @@ class AgentEngine:
             messages = self._memory.get_messages(
                 system_prompts=self._build_system_prompts(route_result.system_contexts)
             )
+
+            tool_scope = self._get_current_tool_scope(route_result=route_result)
+            tools = self._build_tools_for_scope(tool_scope=tool_scope)
 
             kwargs: dict[str, Any] = {
                 "model": self._config.model,
@@ -728,11 +909,21 @@ class AgentEngine:
                 all_tool_results.append(tc_result)
                 self._memory.add_tool_result(tool_call_id, tc_result.result)
 
+                if tc_result.pending_approval:
+                    reply = tc_result.result
+                    self._memory.add_assistant_message(reply)
+                    self._last_iteration_count = iteration
+                    logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
+                    logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    return reply
+
                 # 更新统计
                 self._last_tool_call_count += 1
                 if tc_result.success:
                     self._last_success_count += 1
                     consecutive_failures = 0
+                    if tc_result.tool_name == "select_skill":
+                        tool_scope = self._get_current_tool_scope(route_result=route_result)
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -809,6 +1000,10 @@ class AgentEngine:
             ),
         )
 
+        pending_approval = False
+        approval_id: str | None = None
+        audit_record: AppliedApprovalRecord | None = None
+
         # 执行工具调用
         if parse_error is not None:
             result_str = f"工具参数解析错误: {parse_error}"
@@ -822,20 +1017,111 @@ class AgentEngine:
             )
         else:
             try:
-                result_value = await asyncio.to_thread(
-                    self._registry.call_tool,
-                    tool_name,
-                    arguments,
-                    tool_scope=tool_scope,
-                )
-                result_str = str(result_value)
-                # 工具结果截断：超过 max_result_chars 时自动截断
-                tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
-                if tool_def is not None:
-                    result_str = tool_def.truncate_result(result_str)
-                success = True
-                error = None
-                log_tool_call(logger, tool_name, arguments, result=result_str)
+                if tool_scope is not None and tool_name not in set(tool_scope):
+                    raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+
+                if tool_name == "select_skill":
+                    selected_name = arguments.get("skill_name")
+                    if not isinstance(selected_name, str) or not selected_name.strip():
+                        result_str = "工具参数错误: skill_name 必须为非空字符串。"
+                        success = False
+                        error = result_str
+                    else:
+                        reason_value = arguments.get("reason", "")
+                        reason_text = (
+                            reason_value
+                            if isinstance(reason_value, str)
+                            else str(reason_value)
+                        )
+                        result_str = await self._handle_select_skill(
+                            selected_name.strip(),
+                            reason=reason_text,
+                        )
+                        success = not result_str.startswith("未找到技能:")
+                        error = None if success else result_str
+                    log_tool_call(
+                        logger,
+                        tool_name,
+                        arguments,
+                        result=result_str if success else None,
+                        error=error if not success else None,
+                    )
+                elif tool_name == "explore_data":
+                    task_value = arguments.get("task")
+                    if not isinstance(task_value, str) or not task_value.strip():
+                        result_str = "工具参数错误: task 必须为非空字符串。"
+                        success = False
+                        error = result_str
+                    else:
+                        raw_file_paths = arguments.get("file_paths")
+                        if raw_file_paths is not None and not isinstance(raw_file_paths, list):
+                            result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                            success = False
+                            error = result_str
+                        else:
+                            result_str = await self._handle_explore_data(
+                                task=task_value.strip(),
+                                file_paths=raw_file_paths,
+                                on_event=on_event,
+                            )
+                            success = not result_str.startswith("子代理执行失败：")
+                            error = None if success else result_str
+                    log_tool_call(
+                        logger,
+                        tool_name,
+                        arguments,
+                        result=result_str if success else None,
+                        error=error if not success else None,
+                    )
+                elif self._approval.is_high_risk_tool(tool_name):
+                    if not self._full_access_enabled:
+                        pending = self._approval.create_pending(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            tool_scope=tool_scope,
+                        )
+                        pending_approval = True
+                        approval_id = pending.approval_id
+                        result_str = self._format_pending_prompt(pending)
+                        success = True
+                        error = None
+                        log_tool_call(logger, tool_name, arguments, result=result_str)
+                    else:
+                        result_value, audit_record = await self._execute_tool_with_audit(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            tool_scope=tool_scope,
+                            approval_id=self._approval.new_approval_id(),
+                            created_at_utc=self._approval.utc_now(),
+                            undoable=tool_name != "run_python_script",
+                        )
+                        result_str = str(result_value)
+                        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                        if tool_def is not None:
+                            result_str = tool_def.truncate_result(result_str)
+                        success = True
+                        error = None
+                        log_tool_call(logger, tool_name, arguments, result=result_str)
+                else:
+                    result_value = await asyncio.to_thread(
+                        self._registry.call_tool,
+                        tool_name,
+                        arguments,
+                        tool_scope=tool_scope,
+                    )
+                    result_str = str(result_value)
+                    # 工具结果截断：超过 max_result_chars 时自动截断
+                    tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                    if tool_def is not None:
+                        result_str = tool_def.truncate_result(result_str)
+                    success = True
+                    error = None
+                    log_tool_call(logger, tool_name, arguments, result=result_str)
+            except ValueError as exc:
+                result_str = str(exc)
+                success = False
+                error = result_str
+                log_tool_call(logger, tool_name, arguments, error=error)
             except ToolNotAllowedError:
                 # 格式化为与原有逻辑一致的 JSON 错误结构
                 permission_error = {
@@ -899,12 +1185,76 @@ class AgentEngine:
             result=result_str,
             success=success,
             error=error,
+            pending_approval=pending_approval,
+            approval_id=approval_id,
+            audit_record=audit_record,
+        )
+
+    def _format_pending_prompt(self, pending: PendingApproval) -> str:
+        """构造待确认提示。"""
+        return (
+            "检测到高风险操作，已进入待确认队列。\n"
+            f"- ID: `{pending.approval_id}`\n"
+            f"- 工具: `{pending.tool_name}`\n"
+            "请执行以下命令之一：\n"
+            f"- `/accept {pending.approval_id}` 执行\n"
+            f"- `/reject {pending.approval_id}` 拒绝"
+        )
+
+    @staticmethod
+    def _prepare_approval_arguments(
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        force_delete_confirm: bool,
+    ) -> dict[str, Any]:
+        """按执行上下文调整参数。"""
+        copied = dict(arguments)
+        if force_delete_confirm and tool_name in {"delete_file", "delete_sheet"}:
+            copied["confirm"] = True
+        return copied
+
+    async def _execute_tool_with_audit(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str],
+        approval_id: str,
+        created_at_utc: str,
+        undoable: bool,
+        force_delete_confirm: bool = False,
+    ) -> tuple[str, AppliedApprovalRecord]:
+        """执行高风险工具并保存审计记录。"""
+        audited_arguments = self._prepare_approval_arguments(
+            tool_name,
+            arguments,
+            force_delete_confirm=force_delete_confirm,
+        )
+
+        def _execute(
+            name: str,
+            args: dict[str, Any],
+            scope: Sequence[str],
+        ) -> Any:
+            return self._registry.call_tool(name, args, tool_scope=scope)
+
+        return await asyncio.to_thread(
+            self._approval.execute_and_audit,
+            approval_id=approval_id,
+            tool_name=tool_name,
+            arguments=audited_arguments,
+            tool_scope=list(tool_scope),
+            execute=_execute,
+            undoable=undoable,
+            created_at_utc=created_at_utc,
         )
 
     def clear_memory(self) -> None:
         """清除对话历史。"""
         self._memory.clear()
         self._loaded_skill_names.clear()
+        self._active_skill = None
 
     def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
         """将本轮路由结果与会话内历史已加载的 skill 合并。"""
@@ -984,13 +1334,11 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=merged_contexts,
             parameterized=route_result.parameterized,
-            fork_plan=route_result.fork_plan,
         )
 
     async def _route_skills(
         self,
         user_message: str,
-        skill_hints: list[str] | None,
         *,
         slash_command: str | None = None,
         raw_args: str | None = None,
@@ -1010,14 +1358,12 @@ class AgentEngine:
         )
         return await self._skill_router.route(
             user_message,
-            skill_hints=skill_hints,
             slash_command=slash_command,
             raw_args=raw_args,
-            confirm_with_llm=self._confirm_with_llm,
             blocked_skillpacks=blocked_skillpacks,
         )
 
-    def _handle_control_command(self, user_message: str) -> str | None:
+    async def _handle_control_command(self, user_message: str) -> str | None:
         """处理会话级控制命令。命中时返回回复文本，否则返回 None。"""
         text = user_message.strip()
         if not text or not text.startswith("/"):
@@ -1025,7 +1371,7 @@ class AgentEngine:
 
         parts = text.split()
         command = parts[0].strip().lower().replace("_", "")
-        if command not in {"/fullaccess", "/subagent"}:
+        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo"}:
             return None
 
         self._last_route_result = SkillMatchResult(
@@ -1050,69 +1396,82 @@ class AgentEngine:
                 return f"当前代码技能权限：{status}。"
             return "无效参数。用法：/fullAccess [on|off|status]。"
 
-        # /subagent 默认行为为查询状态，避免误触启停
-        if action in {"status", ""} and not too_many_args:
-            status = "enabled" if self._subagent_enabled else "disabled"
-            return f"当前 fork 子代理状态：{status}。"
-        if action == "on" and not too_many_args:
-            self._subagent_enabled = True
-            return "已开启 fork 子代理。"
-        if action == "off" and not too_many_args:
-            self._subagent_enabled = False
-            return "已关闭 fork 子代理。"
-        return "无效参数。用法：/subagent [on|off|status]。"
+        if command == "/subagent":
+            # /subagent 默认行为为查询状态，避免误触启停
+            if action in {"status", ""} and not too_many_args:
+                status = "enabled" if self._subagent_enabled else "disabled"
+                return f"当前 fork 子代理状态：{status}。"
+            if action == "on" and not too_many_args:
+                self._subagent_enabled = True
+                return "已开启 fork 子代理。"
+            if action == "off" and not too_many_args:
+                self._subagent_enabled = False
+                return "已关闭 fork 子代理。"
+            return "无效参数。用法：/subagent [on|off|status]。"
 
-    async def _confirm_with_llm(self, user_message: str, candidates: list[Any]) -> list[str]:
-        """用同一个主模型做候选 Skillpack 二次确认。"""
-        if not candidates:
-            return []
+        if command == "/accept":
+            return await self._handle_accept_command(parts)
+        if command == "/reject":
+            return self._handle_reject_command(parts)
+        return self._handle_undo_command(parts)
 
-        skill_lines = [f"- {skill.name}: {skill.description}" for skill in candidates]
-        prompt = (
-            "请从候选 Skillpack 中选择最合适的最多 "
-            f"{self._config.skills_max_selected} 个名称，仅输出 JSON 数组，例如 "
-            "[\"data_basic\", \"chart_basic\"]。\n"
-            "候选列表：\n"
-            + "\n".join(skill_lines)
-            + "\n\n用户请求："
-            + user_message
-        )
+    async def _handle_accept_command(self, parts: list[str]) -> str:
+        """执行待确认操作。"""
+        if len(parts) != 2:
+            return "无效参数。用法：/accept <id>。"
 
-        response = await self._router_client.chat.completions.create(
-            model=self._router_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是路由器，仅输出 JSON 数组，不要输出解释。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-        content = str(response.choices[0].message.content or "").strip()
-        if not content:
-            return []
+        approval_id = parts[1].strip()
+        pending = self._approval.pending
+        if pending is None:
+            return "当前没有待确认操作。"
+        if pending.approval_id != approval_id:
+            return f"待确认 ID 不匹配。当前待确认 ID 为 `{pending.approval_id}`。"
 
-        selected: list[str]
         try:
-            parsed = json.loads(content)
-            if isinstance(parsed, list):
-                selected = [str(item).strip() for item in parsed if str(item).strip()]
-            else:
-                selected = []
-        except json.JSONDecodeError:
-            selected = [seg.strip() for seg in content.replace("\n", ",").split(",") if seg.strip()]
+            _, record = await self._execute_tool_with_audit(
+                tool_name=pending.tool_name,
+                arguments=pending.arguments,
+                tool_scope=pending.tool_scope,
+                approval_id=pending.approval_id,
+                created_at_utc=pending.created_at_utc,
+                undoable=pending.tool_name != "run_python_script",
+                force_delete_confirm=True,
+            )
+        except ToolNotAllowedError:
+            self._approval.clear_pending()
+            return (
+                f"accept 执行失败：工具 `{pending.tool_name}` 当前不在授权范围内。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._approval.clear_pending()
+            return f"accept 执行失败：{exc}"
 
-        valid_names = {skill.name for skill in candidates}
-        filtered: list[str] = []
-        for name in selected:
-            if name not in valid_names:
-                continue
-            if name in filtered:
-                continue
-            filtered.append(name)
-            if len(filtered) >= self._config.skills_max_selected:
-                break
-        return filtered
+        self._approval.clear_pending()
+        lines = [
+            f"已执行待确认操作 `{approval_id}`。",
+            f"- 工具: `{record.tool_name}`",
+            f"- 审计目录: `{record.audit_dir}`",
+            f"- 可回滚: {'是' if record.undoable else '否'}",
+        ]
+        if record.result_preview:
+            lines.append(f"- 结果摘要: {record.result_preview}")
+        if record.undoable:
+            lines.append(f"- 回滚命令: `/undo {approval_id}`")
+        return "\n".join(lines)
+
+    def _handle_reject_command(self, parts: list[str]) -> str:
+        """拒绝待确认操作。"""
+        if len(parts) != 2:
+            return "无效参数。用法：/reject <id>。"
+        approval_id = parts[1].strip()
+        return self._approval.reject_pending(approval_id)
+
+    def _handle_undo_command(self, parts: list[str]) -> str:
+        """回滚已确认操作。"""
+        if len(parts) != 2:
+            return "无效参数。用法：/undo <id>。"
+        approval_id = parts[1].strip()
+        return self._approval.undo(approval_id)
 
     def _all_tool_names(self) -> list[str]:
         get_tool_names = getattr(self._registry, "get_tool_names", None)

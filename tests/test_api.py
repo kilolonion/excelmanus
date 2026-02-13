@@ -420,6 +420,19 @@ class TestExternalSafeMode:
         assert data["tool_scope"] == []
 
     @pytest.mark.asyncio
+    async def test_accept_reject_undo_commands_keep_safe_mode_hidden(
+        self, client: AsyncClient
+    ) -> None:
+        """默认安全模式下，/accept /reject /undo 命令可执行且路由元信息仍隐藏。"""
+        for cmd in ("/accept apv_demo", "/reject apv_demo", "/undo apv_demo"):
+            resp = await client.post("/api/v1/chat", json={"message": cmd})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["route_mode"] == "hidden"
+            assert data["skills_used"] == []
+            assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
     async def test_chat_exposes_route_metadata_when_safe_mode_disabled(
         self,
     ) -> None:
@@ -476,6 +489,26 @@ class TestExternalSafeMode:
             ) as c:
                 resp = await c.post(
                     "/api/v1/chat", json={"message": "/subagent status"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["route_mode"] == "control_command"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
+    async def test_accept_route_mode_control_command_when_safe_mode_disabled(
+        self,
+    ) -> None:
+        """关闭安全模式后，/accept 请求应返回 control_command 路由模式。"""
+        config = _test_config(external_safe_mode=False)
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as c:
+                resp = await c.post(
+                    "/api/v1/chat", json={"message": "/accept apv_demo"},
                 )
         assert resp.status_code == 200
         data = resp.json()

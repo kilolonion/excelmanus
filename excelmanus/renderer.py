@@ -391,6 +391,9 @@ class StreamRenderer:
 
     def _is_narrow(self) -> bool:
         """判断终端是否为窄终端（宽度 < 60）。"""
+        explicit_width = getattr(self._console, "_width", None)
+        if isinstance(explicit_width, int) and explicit_width > 0:
+            return explicit_width < _NARROW_TERMINAL_WIDTH
         return self._console.width < _NARROW_TERMINAL_WIDTH
 
     def _fallback_render(self, event: ToolCallEvent) -> None:

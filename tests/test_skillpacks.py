@@ -313,43 +313,8 @@ class TestSkillpackLoader:
 
 class TestSkillRouter:
     @pytest.mark.asyncio
-    async def test_hint_direct(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "chart_basic",
-            description="图表",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
-        )
-        _write_skillpack(
-            system_dir,
-            "data_basic",
-            description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        router = SkillRouter(config, loader)
-
-        result = await router.route(
-            "帮我分析并画图",
-            skill_hints=["chart_basic"],
-        )
-        assert result.route_mode == "hint_direct"
-        assert result.skills_used == ["chart_basic"]
-        assert result.tool_scope == ["create_chart"]
-
-    @pytest.mark.asyncio
     async def test_slash_direct_parameterized(self, tmp_path: Path) -> None:
+        """斜杠命令直连路由：参数化分派。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -394,6 +359,7 @@ class TestSkillRouter:
 
     @pytest.mark.asyncio
     async def test_slash_command_not_found_returns_fallback(self, tmp_path: Path) -> None:
+        """斜杠命令未匹配技能时返回 slash_not_found。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -424,7 +390,8 @@ class TestSkillRouter:
         assert "list_skills" in result.tool_scope
 
     @pytest.mark.asyncio
-    async def test_confident_direct(self, tmp_path: Path) -> None:
+    async def test_non_slash_returns_fallback(self, tmp_path: Path) -> None:
+        """非斜杠消息返回 fallback 结果（全量工具 + 技能目录）。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -446,150 +413,20 @@ class TestSkillRouter:
             triggers=["图表"],
         )
 
-        config = _make_config(
-            system_dir,
-            user_dir,
-            project_dir,
-            skills_fastpath_min_score=3,
-            skills_fastpath_min_gap=1,
-        )
+        config = _make_config(system_dir, user_dir, project_dir)
         loader = SkillpackLoader(config, _tool_registry())
         loader.load_all()
         router = SkillRouter(config, loader)
 
         result = await router.route("请分析这个文件")
-        assert result.route_mode == "confident_direct"
-        assert result.skills_used == ["data_basic"]
-        assert result.tool_scope == ["read_excel"]
-
-    @pytest.mark.asyncio
-    async def test_hint_direct_ignores_invocation_flags(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "export_batch",
-            description="批量导出",
-            allowed_tools=["read_excel"],
-            triggers=["导出"],
-            disable_model_invocation=True,
-            user_invocable=False,
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        router = SkillRouter(config, loader)
-
-        result = await router.route(
-            "执行导出",
-            skill_hints=["export_batch"],
-        )
-        assert result.route_mode == "hint_direct"
-        assert result.skills_used == ["export_batch"]
-
-    @pytest.mark.asyncio
-    async def test_hint_not_found_skips_scoring(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "data_basic",
-            description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        router = SkillRouter(config, loader)
-
-        result = await router.route(
-            "请帮我分析这个文件",
-            skill_hints=["not_exists_skill"],
-        )
-
-        assert result.route_mode == "hint_not_found"
-        assert result.skills_used == []
+        assert result.route_mode == "fallback"
         assert "list_skills" in result.tool_scope
-
-    @pytest.mark.asyncio
-    async def test_auto_route_excludes_disable_model_invocation(
-        self, tmp_path: Path
-    ) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "export_batch",
-            description="批量导出",
-            allowed_tools=["read_excel"],
-            triggers=["导出"],
-            disable_model_invocation=True,
-        )
-        _write_skillpack(
-            system_dir,
-            "general_excel",
-            description="通用兜底",
-            allowed_tools=["read_excel"],
-            triggers=["excel"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        router = SkillRouter(config, loader)
-
-        result = await router.route("请导出所有报表")
-        assert "export_batch" not in result.skills_used
-
-    @pytest.mark.asyncio
-    async def test_auto_route_excludes_user_invocable_false(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "general_excel",
-            description="通用兜底",
-            allowed_tools=["read_excel"],
-            triggers=["excel"],
-            user_invocable=False,
-        )
-        _write_skillpack(
-            system_dir,
-            "data_basic",
-            description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        router = SkillRouter(config, loader)
-
-        result = await router.route("请处理 excel 文件")
-        assert "general_excel" not in result.skills_used
+        # 技能目录应注入到 system_contexts
+        assert any("可用技能" in ctx for ctx in result.system_contexts)
 
     @pytest.mark.asyncio
     async def test_blocked_skillpack_excluded_then_unlock(self, tmp_path: Path) -> None:
+        """被屏蔽的技能包不参与路由，解除屏蔽后可正常使用。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -616,21 +453,24 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
+        # 屏蔽后斜杠命令也无法匹配
         blocked_result = await router.route(
             "请写代码处理文件",
-            skill_hints=["excel_code_runner"],
+            slash_command="excel_code_runner",
             blocked_skillpacks={"excel_code_runner"},
         )
         assert "excel_code_runner" not in blocked_result.skills_used
 
+        # 解除屏蔽后可正常斜杠直连
         unlocked_result = await router.route(
             "请写代码处理文件",
-            skill_hints=["excel_code_runner"],
+            slash_command="excel_code_runner",
         )
         assert unlocked_result.skills_used == ["excel_code_runner"]
 
     @pytest.mark.asyncio
-    async def test_large_excel_adds_fork_hint_context(self, tmp_path: Path) -> None:
+    async def test_build_skill_catalog(self, tmp_path: Path) -> None:
+        """build_skill_catalog 返回技能目录文本和名称列表。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -640,35 +480,33 @@ class TestSkillRouter:
         _write_skillpack(
             system_dir,
             "data_basic",
-            description="分析",
+            description="数据分析",
             allowed_tools=["read_excel"],
             triggers=["分析"],
         )
-
-        big_file = tmp_path / "big.xlsx"
-        big_file.write_bytes(b"0" * 2048)
-
-        config = _make_config(
+        _write_skillpack(
             system_dir,
-            user_dir,
-            project_dir,
-            workspace_root=str(tmp_path),
-            large_excel_threshold_bytes=1024,
+            "chart_basic",
+            description="图表生成",
+            allowed_tools=["create_chart"],
+            triggers=["图表"],
         )
+
+        config = _make_config(system_dir, user_dir, project_dir)
         loader = SkillpackLoader(config, _tool_registry())
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("请分析 big.xlsx")
-        assert "large_excel" in result.route_mode
-        assert any("[ForkContextHint]" in ctx for ctx in result.system_contexts)
-        assert any("big.xlsx" in ctx for ctx in result.system_contexts)
-        assert result.fork_plan is not None
-        assert "read_excel" in result.fork_plan.tool_scope
-        assert "big.xlsx" in ",".join(result.fork_plan.detected_files)
+        catalog_text, skill_names = router.build_skill_catalog()
+        assert "data_basic" in catalog_text
+        assert "chart_basic" in catalog_text
+        assert "数据分析" in catalog_text
+        assert "图表生成" in catalog_text
+        assert sorted(skill_names) == ["chart_basic", "data_basic"]
 
     @pytest.mark.asyncio
-    async def test_fork_context_skill_adds_hint(self, tmp_path: Path) -> None:
+    async def test_build_skill_catalog_with_blocked(self, tmp_path: Path) -> None:
+        """build_skill_catalog 排除被屏蔽的技能包。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -677,11 +515,17 @@ class TestSkillRouter:
 
         _write_skillpack(
             system_dir,
-            "excel_code_runner",
-            description="代码执行",
+            "data_basic",
+            description="数据分析",
             allowed_tools=["read_excel"],
-            triggers=["代码"],
-            context="fork",
+            triggers=["分析"],
+        )
+        _write_skillpack(
+            system_dir,
+            "chart_basic",
+            description="图表生成",
+            allowed_tools=["create_chart"],
+            triggers=["图表"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -689,8 +533,26 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("请写代码处理这个文件")
-        assert "fork" in result.route_mode
-        assert any("[ForkContextSkill]" in ctx for ctx in result.system_contexts)
-        assert result.fork_plan is not None
-        assert "excel_code_runner" in result.fork_plan.source_skills
+        catalog_text, skill_names = router.build_skill_catalog(
+            blocked_skillpacks={"chart_basic"},
+        )
+        assert "data_basic" in catalog_text
+        assert "chart_basic" not in catalog_text
+        assert skill_names == ["data_basic"]
+
+    @pytest.mark.asyncio
+    async def test_no_skillpacks_returns_no_skillpack(self, tmp_path: Path) -> None:
+        """无技能包时返回 no_skillpack 路由模式。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("任意输入")
+        assert result.route_mode == "no_skillpack"
