@@ -35,12 +35,10 @@ def _make_config(
         api_key="test-key",
         base_url="https://test.example.com/v1",
         model="test-model",
+        workspace_root=str(system_dir.parent),
         skills_system_dir=str(system_dir),
         skills_user_dir=str(user_dir),
         skills_project_dir=str(project_dir),
-        skills_skip_llm_confirm=True,
-        skills_fastpath_min_score=3,
-        skills_fastpath_min_gap=1,
     )
 
 

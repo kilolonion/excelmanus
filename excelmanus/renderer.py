@@ -343,8 +343,12 @@ class StreamRenderer:
 
     def _render_chat_summary(self, event: ToolCallEvent) -> None:
         """渲染执行摘要面板。"""
-        # 没有工具调用时不显示摘要（纯对话）
+        # 没有工具调用时仅显示 token 用量（纯对话）
         if event.total_tool_calls == 0:
+            token_str = self._format_token_usage(event)
+            if token_str:
+                self._console.print()
+                self._console.print(f"  tokens：{token_str}", style="dim")
             return
 
         elapsed_str = _format_elapsed(event.elapsed_seconds)
@@ -358,7 +362,7 @@ class StreamRenderer:
                 f"⏱ {elapsed_str}",
             ]
             if token_str:
-                parts.append(f"🔤 {token_str}")
+                parts.append(f"tokens：{token_str}")
             self._console.print(" · ".join(parts), style="dim")
             return
 
@@ -376,7 +380,7 @@ class StreamRenderer:
         table.add_row("迭代轮次", f"{event.total_iterations}")
         table.add_row("总耗时", f"[bold]{elapsed_str}[/bold]")
         if token_str:
-            table.add_row("Token 用量", token_str)
+            table.add_row("tokens", token_str)
 
         self._console.print()
         self._console.print(
@@ -397,7 +401,7 @@ class StreamRenderer:
         prompt = f"{event.prompt_tokens:,}"
         completion = f"{event.completion_tokens:,}"
         total = f"{event.total_tokens:,}"
-        return f"[dim cyan]{prompt}[/dim cyan] 输入 + [dim cyan]{completion}[/dim cyan] 输出 = [bold cyan]{total}[/bold cyan]"
+        return f"[dim cyan]{prompt}[/dim cyan] tokens 输入 + [dim cyan]{completion}[/dim cyan] tokens 输出 = [bold cyan]{total}[/bold cyan] tokens"
 
     # ------------------------------------------------------------------
     # 辅助方法

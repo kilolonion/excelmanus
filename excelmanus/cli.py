@@ -902,7 +902,13 @@ async def _async_main() -> None:
     _render_welcome(config, skill_count)
 
     # 启动 REPL 循环
-    await _repl_loop(engine)
+    try:
+        await _repl_loop(engine)
+    finally:
+        try:
+            await engine.extract_and_save_memory()
+        except Exception:
+            logger.warning("CLI 退出时持久记忆提取失败，已跳过", exc_info=True)
 
 
 def main() -> None:

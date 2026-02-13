@@ -426,6 +426,15 @@ class AgentEngine:
             raw_args=effective_raw_args if effective_slash_command else None,
         )
         route_result = self._merge_with_loaded_skills(route_result)
+        # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
+        effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
+        route_result = SkillMatchResult(
+            skills_used=list(route_result.skills_used),
+            tool_scope=effective_tool_scope,
+            route_mode=route_result.route_mode,
+            system_contexts=list(route_result.system_contexts),
+            parameterized=route_result.parameterized,
+        )
         self._last_route_result = route_result
 
         # 发出路由结束事件（含匹配结果）
@@ -717,6 +726,15 @@ class AgentEngine:
             scope = list(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
+            return scope
+
+        # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
+        # 仅使用路由授权工具，并追加必要元工具。
+        if route_result is not None and route_result.tool_scope:
+            scope = list(route_result.tool_scope)
+            for tool_name in _META_TOOL_NAMES:
+                if tool_name not in scope:
+                    scope.append(tool_name)
             return scope
 
         scope = self._all_tool_names()
@@ -1231,7 +1249,7 @@ class AgentEngine:
                             tool_scope=tool_scope,
                             approval_id=self._approval.new_approval_id(),
                             created_at_utc=self._approval.utc_now(),
-                            undoable=tool_name != "run_code",
+                            undoable=tool_name not in {"run_code", "run_shell"},
                         )
                         result_str = str(result_value)
                         tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
@@ -1588,7 +1606,7 @@ class AgentEngine:
                 tool_scope=pending.tool_scope,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=pending.tool_name != "run_code",
+                undoable=pending.tool_name not in {"run_code", "run_shell"},
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:
@@ -1712,7 +1730,7 @@ class AgentEngine:
         return (
             f"【权限提示】当前 fullAccess 权限处于关闭状态。"
             f"以下技能需要 fullAccess 权限才能激活：{skill_list}。"
-            f"涉及代码执行的工具（如 write_text_file、run_code）"
+            f"涉及代码执行的工具（如 write_text_file、run_code、run_shell）"
             f"在未激活对应技能时不应主动使用。"
             f"当用户询问是否能执行代码/脚本时，你应当告知用户：该能力存在但当前受限，"
             f"需要先使用 /fullAccess on 命令开启权限。"

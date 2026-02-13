@@ -45,17 +45,16 @@ pip install -e ".[dev]"
 | `EXCELMANUS_SKILLS_SYSTEM_DIR` | 内置 Skillpacks 目录 | `excelmanus/skillpacks/system` |
 | `EXCELMANUS_SKILLS_USER_DIR` | 用户级 Skillpacks 目录 | `~/.excelmanus/skillpacks` |
 | `EXCELMANUS_SKILLS_PROJECT_DIR` | 项目级 Skillpacks 目录 | `<workspace_root>/.excelmanus/skillpacks` |
-| `EXCELMANUS_SKILLS_PREFILTER_TOPK` | 预筛候选数量 | `6` |
-| `EXCELMANUS_SKILLS_MAX_SELECTED` | 每轮最多命中技能包数 | `3` |
-| `EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM` | 是否跳过 LLM 二次确认 | `false` |
-| `EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE` | 快速路径最低分 | `6` |
-| `EXCELMANUS_SKILLS_FASTPATH_MIN_GAP` | 快速路径分差阈值 | `3` |
 | `EXCELMANUS_SYSTEM_MESSAGE_MODE` | system 注入策略（`auto\|multi\|merge`） | `auto` |
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 fork 提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 fork 子代理执行 | `true` |
 | `EXCELMANUS_SUBAGENT_MODEL` | fork 子代理模型（为空时回退主模型） | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | fork 子代理最大迭代轮数 | `6` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | fork 子代理连续失败熔断阈值 | `2` |
+
+v3 路由简化迁移说明：
+- 以下旧变量在 v3 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
+- 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心，运行时工具权限由 `tool_scope` 严格约束。
 
 ## 使用方式
 
@@ -67,8 +66,18 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status|list]`、`/subagent run -- <task>`、`/subagent run <agent> -- <task>`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
 输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`）。
+
+`/skills` 子命令示例：
+
+```bash
+/skills list
+/skills get data_basic
+/skills create api_skill --json '{"description":"api 创建","allowed_tools":["read_excel"],"triggers":[],"instructions":"说明"}'
+/skills patch api_skill --json '{"description":"api 更新"}'
+/skills delete api_skill --yes
+```
 
 ### Accept 门禁与审计
 
@@ -98,16 +107,20 @@ excelmanus-api
   - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情
 - `POST /api/v1/skills`
   - 请求：`name` + `payload`
+  - 错误：`403`（safe mode 开启）、`409`（冲突）、`422`（payload 非法）
 - `PATCH /api/v1/skills/{name}`
   - 请求：`payload`（字段级更新）
+  - 错误：`403`（safe mode 开启）、`404`（不存在）、`409`（非 project 来源）、`422`（payload 非法）
 - `DELETE /api/v1/skills/{name}`
   - 软删除并归档到 `.excelmanus/skillpacks_archive/`
+  - 错误：`403`（safe mode 开启）、`404`（不存在）、`409`（非 project 来源）
 - `DELETE /api/v1/sessions/{session_id}`
 - `GET /api/v1/health`
   - 响应：`status`、`version`、`tools`、`skillpacks`
 
 说明：
 - 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`POST/PATCH/DELETE /api/v1/skills*` 会返回 `403`。
+- 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`GET /api/v1/skills/{name}` 返回摘要；关闭后返回完整详情（含 `instructions` / `resource_contents` 等字段）。
 - Skillpack 写操作仅允许 project 层，system/user 层仅可读取。
 
 示例：
@@ -131,7 +144,7 @@ Skillpack 使用目录结构：
 - `name`
 - `description`
 - `allowed_tools`
-- `triggers`
+- `triggers`（必填，但允许空列表 `[]`，用于“仅兜底不触发”的技能）
 
 可选字段：`file_patterns`、`resources`、`priority`、`version`、`disable_model_invocation`、`user_invocable`。
 

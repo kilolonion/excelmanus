@@ -78,7 +78,6 @@ class MemoryExtractor:
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=extraction_messages,
-                temperature=0.1,
             )
         except Exception:
             logger.error("LLM 记忆提取调用失败", exc_info=True)

@@ -8,8 +8,14 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.subagent import SubagentRegistry
 
 
-def _make_config(tmp_path: Path, *, user_dir: Path, project_dir: Path) -> ExcelManusConfig:
-    return ExcelManusConfig(
+def _make_config(
+    tmp_path: Path,
+    *,
+    user_dir: Path,
+    project_dir: Path,
+    **overrides,
+) -> ExcelManusConfig:
+    defaults = dict(
         api_key="test-key",
         base_url="https://test.example.com/v1",
         model="test-model",
@@ -17,6 +23,8 @@ def _make_config(tmp_path: Path, *, user_dir: Path, project_dir: Path) -> ExcelM
         subagent_user_dir=str(user_dir),
         subagent_project_dir=str(project_dir),
     )
+    defaults.update(overrides)
+    return ExcelManusConfig(**defaults)
 
 
 def _write_agent(
@@ -27,21 +35,25 @@ def _write_agent(
     description: str,
     permission_mode: str = "default",
     tools: list[str] | None = None,
+    max_iterations: int | None = None,
+    max_consecutive_failures: int | None = None,
     body: str = "你是测试子代理。",
 ) -> None:
     tools = tools or ["read_excel"]
-    content = "\n".join(
-        [
-            "---",
-            f"name: {name}",
-            f"description: {description}",
-            f"permissionMode: {permission_mode}",
-            "tools:",
-            *[f"  - {tool}" for tool in tools],
-            "---",
-            body,
-        ]
-    )
+    lines = [
+        "---",
+        f"name: {name}",
+        f"description: {description}",
+        f"permissionMode: {permission_mode}",
+        "tools:",
+        *[f"  - {tool}" for tool in tools],
+    ]
+    if max_iterations is not None:
+        lines.append(f"max_iterations: {max_iterations}")
+    if max_consecutive_failures is not None:
+        lines.append(f"max_consecutive_failures: {max_consecutive_failures}")
+    lines.extend(["---", body])
+    content = "\n".join(lines)
     (root_dir / filename).write_text(content, encoding="utf-8")
 
 
@@ -123,3 +135,85 @@ def test_build_catalog_contains_agent_names(tmp_path: Path) -> None:
     catalog, names = registry.build_catalog()
     assert "finance_checker" in catalog
     assert "finance_checker" in names
+
+
+def test_external_agent_uses_global_threshold_defaults_when_not_declared(
+    tmp_path: Path,
+) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "finance.md",
+        name="finance_checker",
+        description="财务校验子代理",
+    )
+    registry = SubagentRegistry(
+        _make_config(
+            tmp_path,
+            user_dir=user_dir,
+            project_dir=project_dir,
+            subagent_max_iterations=9,
+            subagent_max_consecutive_failures=4,
+        )
+    )
+    loaded = registry.load_all()
+    finance = loaded["finance_checker"]
+    assert finance.max_iterations == 9
+    assert finance.max_consecutive_failures == 4
+
+
+def test_external_agent_explicit_thresholds_override_global_defaults(
+    tmp_path: Path,
+) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "finance.md",
+        name="finance_checker",
+        description="财务校验子代理",
+        max_iterations=3,
+        max_consecutive_failures=1,
+    )
+    registry = SubagentRegistry(
+        _make_config(
+            tmp_path,
+            user_dir=user_dir,
+            project_dir=project_dir,
+            subagent_max_iterations=9,
+            subagent_max_consecutive_failures=4,
+        )
+    )
+    loaded = registry.load_all()
+    finance = loaded["finance_checker"]
+    assert finance.max_iterations == 3
+    assert finance.max_consecutive_failures == 1
+
+
+def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
+    tmp_path: Path,
+) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    registry = SubagentRegistry(
+        _make_config(
+            tmp_path,
+            user_dir=user_dir,
+            project_dir=project_dir,
+            subagent_max_iterations=99,
+            subagent_max_consecutive_failures=99,
+        )
+    )
+    loaded = registry.load_all()
+    assert loaded["explorer"].max_iterations == 4
+    assert loaded["explorer"].max_consecutive_failures == 2
