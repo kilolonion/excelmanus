@@ -307,7 +307,7 @@ class SubagentExecutor:
                     arguments=arguments,
                     tool_scope=tool_scope,
                     execute=_execute,
-                    undoable=tool_name != "run_code",
+                    undoable=tool_name not in {"run_code", "run_shell"},
                     created_at_utc=created_at_utc,
                 )
             except Exception as exc:  # noqa: BLE001

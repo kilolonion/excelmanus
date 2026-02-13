@@ -324,11 +324,17 @@ class SkillpackManager:
                     value,
                     allow_empty=(key in {"argument_hint", "instructions"}),
                 )
-            elif key in {"allowed_tools", "triggers"}:
+            elif key == "allowed_tools":
                 normalized[key] = self._normalize_str_list(
                     key,
                     value,
                     allow_empty=False,
+                )
+            elif key == "triggers":
+                normalized[key] = self._normalize_str_list(
+                    key,
+                    value,
+                    allow_empty=True,
                 )
             elif key in {"file_patterns", "resources"}:
                 values = self._normalize_str_list(

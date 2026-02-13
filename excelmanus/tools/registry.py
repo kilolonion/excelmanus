@@ -149,6 +149,7 @@ class ToolRegistry:
             data_tools,
             file_tools,
             format_tools,
+            shell_tools,
             sheet_tools,
         )
 
@@ -157,6 +158,7 @@ class ToolRegistry:
         format_tools.init_guard(workspace_root)
         file_tools.init_guard(workspace_root)
         code_tools.init_guard(workspace_root)
+        shell_tools.init_guard(workspace_root)
         sheet_tools.init_guard(workspace_root)
 
         self.register_tools(data_tools.get_tools())
@@ -164,6 +166,7 @@ class ToolRegistry:
         self.register_tools(format_tools.get_tools())
         self.register_tools(file_tools.get_tools())
         self.register_tools(code_tools.get_tools())
+        self.register_tools(shell_tools.get_tools())
         self.register_tools(sheet_tools.get_tools())
 
         from excelmanus.tools import memory_tools, skill_tools, task_tools

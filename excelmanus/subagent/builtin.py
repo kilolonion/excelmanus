@@ -19,6 +19,7 @@ _READ_ONLY_TOOLS = [
 _ANALYSIS_TOOLS = [
     *_READ_ONLY_TOOLS,
     "run_code",
+    "run_shell",
     "write_text_file",
 ]
 
@@ -46,6 +47,7 @@ _WRITE_TOOLS = [
 
 _CODER_TOOLS = [
     "run_code",
+    "run_shell",
     "write_text_file",
     "read_text_file",
     "search_files",

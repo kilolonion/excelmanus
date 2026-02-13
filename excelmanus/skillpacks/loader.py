@@ -149,7 +149,11 @@ class SkillpackLoader:
         name = self._get_required_str(frontmatter, "name")
         description = self._get_required_str(frontmatter, "description")
         allowed_tools = self._get_required_str_list(frontmatter, "allowed_tools")
-        triggers = self._get_required_str_list(frontmatter, "triggers")
+        triggers = self._get_required_str_list(
+            frontmatter,
+            "triggers",
+            allow_empty=True,
+        )
         file_patterns = self._get_optional_str_list(frontmatter, "file_patterns")
         resources = self._get_optional_str_list(frontmatter, "resources")
         priority = self._get_optional_int(frontmatter, "priority", default=0)
@@ -304,10 +308,19 @@ class SkillpackLoader:
         return value or default
 
     @staticmethod
-    def _get_required_str_list(payload: dict[str, Any], key: str) -> list[str]:
+    def _get_required_str_list(
+        payload: dict[str, Any],
+        key: str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[str]:
         if key not in payload:
             raise SkillpackValidationError(f"frontmatter 缺少必填字段 '{key}'")
-        return SkillpackLoader._to_str_list(value=payload[key], key=key)
+        return SkillpackLoader._to_str_list(
+            value=payload[key],
+            key=key,
+            allow_empty=allow_empty,
+        )
 
     @staticmethod
     def _get_optional_str_list(payload: dict[str, Any], key: str) -> list[str]:
@@ -316,11 +329,18 @@ class SkillpackLoader:
         return SkillpackLoader._to_str_list(value=payload[key], key=key)
 
     @staticmethod
-    def _to_str_list(value: Any, key: str) -> list[str]:
+    def _to_str_list(
+        value: Any,
+        key: str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[str]:
         if isinstance(value, str):
             items = [value.strip()] if value.strip() else []
             if items:
                 return items
+            if allow_empty:
+                return []
             raise SkillpackValidationError(f"frontmatter 字段 '{key}' 不能为空")
 
         if not isinstance(value, list):
@@ -333,7 +353,7 @@ class SkillpackLoader:
                     f"frontmatter 字段 '{key}' 存在非字符串或空字符串项"
                 )
             items.append(item.strip())
-        if not items:
+        if not items and not allow_empty:
             raise SkillpackValidationError(f"frontmatter 字段 '{key}' 不能为空")
         return items
 

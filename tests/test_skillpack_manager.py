@@ -115,6 +115,63 @@ def test_create_skillpack_success(tmp_path: Path) -> None:
     assert "reporter" in loader.get_skillpacks()
 
 
+def test_create_skillpack_allows_empty_triggers(tmp_path: Path) -> None:
+    loader, manager, _ = _setup(tmp_path)
+
+    created = manager.create_skillpack(
+        name="general_excel",
+        payload={
+            "description": "通用兜底",
+            "allowed_tools": ["read_excel"],
+            "triggers": [],
+            "instructions": "兜底说明",
+            "user_invocable": False,
+        },
+        actor="cli",
+    )
+    assert created["name"] == "general_excel"
+    assert created["triggers"] == []
+    assert created["user_invocable"] is False
+    assert "general_excel" in loader.get_skillpacks()
+
+
+def test_patch_skillpack_allows_empty_triggers(tmp_path: Path) -> None:
+    _, manager, _ = _setup(tmp_path)
+    manager.create_skillpack(
+        name="route_only",
+        payload={
+            "description": "路由技能",
+            "allowed_tools": ["read_excel"],
+            "triggers": ["分析"],
+            "instructions": "说明",
+        },
+        actor="cli",
+    )
+
+    updated = manager.patch_skillpack(
+        name="route_only",
+        payload={"triggers": []},
+        actor="api",
+    )
+    assert updated["triggers"] == []
+
+
+def test_create_skillpack_rejects_empty_allowed_tools(tmp_path: Path) -> None:
+    _, manager, _ = _setup(tmp_path)
+
+    with pytest.raises(SkillpackInputError):
+        manager.create_skillpack(
+            name="invalid_tools",
+            payload={
+                "description": "非法",
+                "allowed_tools": [],
+                "triggers": [],
+                "instructions": "说明",
+            },
+            actor="api",
+        )
+
+
 def test_create_can_override_system_by_project(tmp_path: Path) -> None:
     loader, manager, _ = _setup(tmp_path)
     system_dir = Path(loader._config.skills_system_dir)
@@ -218,4 +275,3 @@ def test_resources_path_traversal_rejected(tmp_path: Path) -> None:
             },
             actor="api",
         )
-

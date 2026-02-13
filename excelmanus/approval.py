@@ -85,6 +85,7 @@ class ApprovalManager:
     HIGH_RISK_TOOLS: set[str] = {
         "write_text_file",
         "run_code",
+        "run_shell",
         "copy_file",
         "rename_file",
         "delete_file",

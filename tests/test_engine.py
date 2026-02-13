@@ -673,6 +673,126 @@ class TestMetaToolScopeUpdate:
         assert "3" in add_numbers_msg.get("content", "")
 
 
+class TestFallbackScopeGuard:
+    """fallback/slash_not_found 场景下工具权限收敛。"""
+
+    def test_get_current_tool_scope_for_fallback_adds_only_meta_tools(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["list_skills"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        assert "list_skills" in scope
+        assert "select_skill" in scope
+        assert "delegate_to_subagent" in scope
+        assert "list_subagents" in scope
+        assert "add_numbers" not in scope
+
+    @pytest.mark.asyncio
+    async def test_fallback_blocks_tool_until_select_skill_then_allows(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        data_skill = Skillpack(
+            name="data_basic",
+            description="数据处理技能",
+            allowed_tools=["add_numbers"],
+            triggers=["数据"],
+            instructions="使用 add_numbers 进行测试。",
+            source="system",
+            root_dir="/tmp/data_basic",
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"data_basic": data_skill}
+        mock_loader.get_skillpack.return_value = data_skill
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(return_value=data_skill)
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- data_basic：数据处理技能",
+            ["data_basic"],
+        )
+        engine._skill_router = mock_router
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["list_skills"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        initial_scope = engine._get_current_tool_scope(route_result=route_result)
+        forbidden_call = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 1, "b": 2}),
+            ),
+        )
+        forbidden_result = await engine._execute_tool_call(
+            tc=forbidden_call,
+            tool_scope=initial_scope,
+            on_event=None,
+            iteration=1,
+        )
+        assert forbidden_result.success is False
+        error_payload = json.loads(forbidden_result.result)
+        assert error_payload["error_code"] == "TOOL_NOT_ALLOWED"
+        assert error_payload["tool"] == "add_numbers"
+
+        await engine._handle_select_skill("data_basic")
+        upgraded_scope = engine._get_current_tool_scope(route_result=route_result)
+        assert "add_numbers" in upgraded_scope
+
+        allowed_call = SimpleNamespace(
+            id="call_2",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 1, "b": 2}),
+            ),
+        )
+        allowed_result = await engine._execute_tool_call(
+            tc=allowed_call,
+            tool_scope=upgraded_scope,
+            on_event=None,
+            iteration=1,
+        )
+        assert allowed_result.success is True
+        assert allowed_result.result == "3"
+
+    @pytest.mark.asyncio
+    async def test_chat_last_route_scope_matches_effective_scope(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["list_skills"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("ok")
+        )
+
+        result = await engine.chat("请分析这个文件")
+        assert result == "ok"
+        scope = engine.last_route_result.tool_scope
+        assert "list_skills" in scope
+        assert "select_skill" in scope
+        assert "delegate_to_subagent" in scope
+        assert "list_subagents" in scope
+        assert "add_numbers" not in scope
+
+
 class TestChatPureText:
     """纯文本回复场景（Requirement 1.3）。"""
 

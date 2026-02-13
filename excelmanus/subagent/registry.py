@@ -78,8 +78,7 @@ class SubagentRegistry:
             except Exception:
                 logger.warning("解析子代理失败: %s", md_file, exc_info=True)
 
-    @staticmethod
-    def _parse_agent_file(path: Path, *, source: str) -> SubagentConfig:
+    def _parse_agent_file(self, path: Path, *, source: str) -> SubagentConfig:
         """解析子代理 Markdown 文件（frontmatter + body）。"""
         text = path.read_text(encoding="utf-8")
         frontmatter, body = SkillpackLoader._split_frontmatter(text=text, skill_file=path)
@@ -114,11 +113,11 @@ class SubagentRegistry:
 
         max_iterations = SubagentRegistry._as_int(
             frontmatter.get("max_iterations"),
-            default=6,
+            default=self._config.subagent_max_iterations,
         )
         max_failures = SubagentRegistry._as_int(
             frontmatter.get("max_consecutive_failures"),
-            default=2,
+            default=self._config.subagent_max_consecutive_failures,
         )
 
         skills = SubagentRegistry._as_str_list(frontmatter.get("skills"))

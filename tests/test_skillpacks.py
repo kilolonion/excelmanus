@@ -25,9 +25,6 @@ def _make_config(
         skills_system_dir=str(system_dir),
         skills_user_dir=str(user_dir),
         skills_project_dir=str(project_dir),
-        skills_skip_llm_confirm=True,
-        skills_fastpath_min_score=3,
-        skills_fastpath_min_gap=1,
     )
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -250,6 +247,75 @@ class TestSkillpackLoader:
                     "triggers:",
                     "  - 分析",
                     "argument_hint: 123",
+                    "---",
+                    "测试说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        with pytest.raises(SkillpackValidationError):
+            loader._parse_skillpack_file(
+                source="system",
+                skill_dir=skill_dir,
+                skill_file=skill_file,
+            )
+
+    def test_triggers_allows_empty_list(self, tmp_path: Path) -> None:
+        """triggers 允许为空列表（兜底技能场景）。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        skill_dir = system_dir / "general_excel"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: general_excel",
+                    "description: 兜底技能",
+                    "allowed_tools:",
+                    "  - read_excel",
+                    "triggers: []",
+                    "user_invocable: false",
+                    "---",
+                    "测试说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert "general_excel" in loaded
+        assert loaded["general_excel"].triggers == []
+
+    def test_allowed_tools_empty_list_raises_validation_error(self, tmp_path: Path) -> None:
+        """allowed_tools 仍必须非空。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        skill_dir = system_dir / "broken_skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: broken_skill",
+                    "description: 非法技能",
+                    "allowed_tools: []",
+                    "triggers: []",
                     "---",
                     "测试说明",
                 ]

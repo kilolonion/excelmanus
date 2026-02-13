@@ -55,6 +55,7 @@ def _make_engine() -> MagicMock:
     engine.list_skillpack_commands = MagicMock(return_value=[])
     engine.get_skillpack_argument_hint = MagicMock(return_value="")
     engine.subagent_enabled = False
+    engine.extract_and_save_memory = AsyncMock(return_value=None)
     return engine
 
 
@@ -119,6 +120,11 @@ class TestRenderHelp:
         assert "/help" in text_str
         assert "/history" in text_str
         assert "/clear" in text_str
+        assert "/skills list" in text_str
+        assert "/skills get <name>" in text_str
+        assert "/skills create <name>" in text_str
+        assert "/skills patch <name>" in text_str
+        assert "/skills delete <name>" in text_str
         assert "/subagent" in text_str
         assert "/fullAccess" in text_str
         assert "/accept" in text_str
@@ -884,3 +890,66 @@ class TestCliEntryPoints:
         ), patch("excelmanus.cli._render_farewell") as mock_farewell:
             main()
             mock_farewell.assert_called_once()
+
+    def test_async_main_extracts_memory_on_exit(self) -> None:
+        """REPL 结束后应触发持久记忆提取。"""
+        config = SimpleNamespace(
+            log_level="INFO",
+            workspace_root=".",
+            memory_enabled=False,
+            model="test-model",
+            subagent_enabled=True,
+        )
+        engine = _make_engine()
+        engine.list_loaded_skillpacks.return_value = []
+
+        registry = MagicMock()
+        loader = MagicMock()
+        router = MagicMock()
+        loader.load_all.return_value = {}
+
+        with patch("excelmanus.cli.load_config", return_value=config), \
+             patch("excelmanus.cli.setup_logging"), \
+             patch("excelmanus.cli.ToolRegistry", return_value=registry), \
+             patch("excelmanus.cli.SkillpackLoader", return_value=loader), \
+             patch("excelmanus.cli.SkillRouter", return_value=router), \
+             patch("excelmanus.cli.AgentEngine", return_value=engine), \
+             patch("excelmanus.cli._sync_skill_command_suggestions"), \
+             patch("excelmanus.cli._render_welcome"), \
+             patch("excelmanus.cli._repl_loop", new=AsyncMock(return_value=None)):
+            _run(_async_main())
+
+        engine.extract_and_save_memory.assert_awaited_once()
+
+    def test_async_main_memory_extraction_error_is_logged_and_ignored(self) -> None:
+        """记忆提取异常仅记录日志，不影响 CLI 退出。"""
+        config = SimpleNamespace(
+            log_level="INFO",
+            workspace_root=".",
+            memory_enabled=False,
+            model="test-model",
+            subagent_enabled=True,
+        )
+        engine = _make_engine()
+        engine.extract_and_save_memory = AsyncMock(side_effect=RuntimeError("boom"))
+        engine.list_loaded_skillpacks.return_value = []
+
+        registry = MagicMock()
+        loader = MagicMock()
+        router = MagicMock()
+        loader.load_all.return_value = {}
+
+        with patch("excelmanus.cli.load_config", return_value=config), \
+             patch("excelmanus.cli.setup_logging"), \
+             patch("excelmanus.cli.ToolRegistry", return_value=registry), \
+             patch("excelmanus.cli.SkillpackLoader", return_value=loader), \
+             patch("excelmanus.cli.SkillRouter", return_value=router), \
+             patch("excelmanus.cli.AgentEngine", return_value=engine), \
+             patch("excelmanus.cli._sync_skill_command_suggestions"), \
+             patch("excelmanus.cli._render_welcome"), \
+             patch("excelmanus.cli._repl_loop", new=AsyncMock(return_value=None)), \
+             patch("excelmanus.cli.logger") as mock_logger:
+            _run(_async_main())
+
+        engine.extract_and_save_memory.assert_awaited_once()
+        mock_logger.warning.assert_called()

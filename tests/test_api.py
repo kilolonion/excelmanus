@@ -735,6 +735,49 @@ class TestSkillpackCrudEndpoints:
                 assert delete_resp.json()["status"] == "deleted"
 
     @pytest.mark.asyncio
+    async def test_read_detail_returns_full_fields_when_safe_mode_disabled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                create_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "api_skill",
+                        "payload": {
+                            "description": "api 创建",
+                            "allowed_tools": ["read_excel"],
+                            "triggers": [],
+                            "instructions": "说明正文",
+                        },
+                    },
+                )
+                assert create_resp.status_code == 201
+
+                detail_resp = await c.get("/api/v1/skills/api_skill")
+                assert detail_resp.status_code == 200
+                detail = detail_resp.json()
+                assert detail["name"] == "api_skill"
+                assert detail["instructions"] == "说明正文"
+                assert detail["triggers"] == []
+
+    @pytest.mark.asyncio
     async def test_patch_non_project_skillpack_returns_409(
         self,
         tmp_path: Path,
@@ -776,6 +819,227 @@ class TestSkillpackCrudEndpoints:
                     "/api/v1/skills/data_basic",
                     json={"payload": {"description": "更新"}},
                 )
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_create_returns_422_when_payload_invalid(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "bad_skill",
+                        "payload": {
+                            "allowed_tools": ["read_excel"],
+                            "triggers": ["分析"],
+                            "instructions": "缺少 description",
+                        },
+                    },
+                )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_returns_409_when_skillpack_conflicts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                first = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "dup_skill",
+                        "payload": {
+                            "description": "第一次创建",
+                            "allowed_tools": ["read_excel"],
+                            "triggers": ["分析"],
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert first.status_code == 201
+
+                second = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "dup_skill",
+                        "payload": {
+                            "description": "第二次创建",
+                            "allowed_tools": ["read_excel"],
+                            "triggers": ["分析"],
+                            "instructions": "说明",
+                        },
+                    },
+                )
+        assert second.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_patch_returns_404_when_skillpack_not_found(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.patch(
+                    "/api/v1/skills/not_exists",
+                    json={"payload": {"description": "更新"}},
+                )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_patch_returns_422_when_payload_invalid(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                create_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "api_skill",
+                        "payload": {
+                            "description": "api 创建",
+                            "allowed_tools": ["read_excel"],
+                            "triggers": ["分析"],
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert create_resp.status_code == 201
+
+                patch_resp = await c.patch(
+                    "/api/v1/skills/api_skill",
+                    json={"payload": {}},
+                )
+        assert patch_resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_delete_returns_404_when_skillpack_not_found(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.delete("/api/v1/skills/not_exists")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_non_project_skillpack_returns_409(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        skill_dir = system_dir / "data_basic"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: data_basic",
+                    "description: 系统版",
+                    "allowed_tools:",
+                    "  - read_excel",
+                    "triggers:",
+                    "  - 分析",
+                    "---",
+                    "说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.delete("/api/v1/skills/data_basic")
         assert resp.status_code == 409
 
 

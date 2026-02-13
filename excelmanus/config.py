@@ -34,12 +34,7 @@ class ExcelManusConfig:
     skills_system_dir: str = "excelmanus/skillpacks/system"
     skills_user_dir: str = "~/.excelmanus/skillpacks"
     skills_project_dir: str = ".excelmanus/skillpacks"
-    skills_prefilter_topk: int = 6
-    skills_max_selected: int = 3
     skills_context_char_budget: int = 12000  # 技能正文字符预算，0 表示不限制
-    skills_skip_llm_confirm: bool = False
-    skills_fastpath_min_score: int = 6
-    skills_fastpath_min_gap: int = 3
     system_message_mode: str = "auto"
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
@@ -195,35 +190,10 @@ def load_config() -> ExcelManusConfig:
     skills_project_dir = os.environ.get(
         "EXCELMANUS_SKILLS_PROJECT_DIR", str(default_project_skill_dir)
     )
-    skills_prefilter_topk = _parse_int(
-        os.environ.get("EXCELMANUS_SKILLS_PREFILTER_TOPK"),
-        "EXCELMANUS_SKILLS_PREFILTER_TOPK",
-        6,
-    )
-    skills_max_selected = _parse_int(
-        os.environ.get("EXCELMANUS_SKILLS_MAX_SELECTED"),
-        "EXCELMANUS_SKILLS_MAX_SELECTED",
-        3,
-    )
     skills_context_char_budget = _parse_int_allow_zero(
         os.environ.get("EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET"),
         "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
         12000,
-    )
-    skills_skip_llm_confirm = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM"),
-        "EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM",
-        False,
-    )
-    skills_fastpath_min_score = _parse_int(
-        os.environ.get("EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE"),
-        "EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE",
-        6,
-    )
-    skills_fastpath_min_gap = _parse_int(
-        os.environ.get("EXCELMANUS_SKILLS_FASTPATH_MIN_GAP"),
-        "EXCELMANUS_SKILLS_FASTPATH_MIN_GAP",
-        3,
     )
     system_message_mode = _parse_choice(
         os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE"),
@@ -308,12 +278,7 @@ def load_config() -> ExcelManusConfig:
         skills_system_dir=skills_system_dir,
         skills_user_dir=skills_user_dir,
         skills_project_dir=skills_project_dir,
-        skills_prefilter_topk=skills_prefilter_topk,
-        skills_max_selected=skills_max_selected,
         skills_context_char_budget=skills_context_char_budget,
-        skills_skip_llm_confirm=skills_skip_llm_confirm,
-        skills_fastpath_min_score=skills_fastpath_min_score,
-        skills_fastpath_min_gap=skills_fastpath_min_gap,
         system_message_mode=system_message_mode,
         large_excel_threshold_bytes=large_excel_threshold_bytes,
         external_safe_mode=external_safe_mode,
