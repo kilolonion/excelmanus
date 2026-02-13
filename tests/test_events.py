@@ -110,6 +110,7 @@ class TestEventTypeEnum:
             "SUBAGENT_SUMMARY",
             "TASK_LIST_CREATED",
             "TASK_ITEM_UPDATED",
+            "USER_QUESTION",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -227,5 +228,11 @@ class TestToolCallEventFields:
             "task_index",
             "task_status",
             "task_result",
+            "question_id",
+            "question_header",
+            "question_text",
+            "question_options",
+            "question_multi_select",
+            "question_queue_size",
         }
         assert set(annotations.keys()) == expected_fields

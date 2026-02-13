@@ -478,3 +478,54 @@ class TestCallbackExceptionIsolation:
         with patch("excelmanus.engine.logger") as mock_logger:
             engine._emit(bad_callback, event)
             mock_logger.warning.assert_called_once()
+
+
+class TestAskUserQuestionEvent:
+    """ask_user 事件字段测试。"""
+
+    @pytest.mark.asyncio
+    async def test_user_question_event_contains_expected_fields(self) -> None:
+        registry = _make_registry_with_echo_tool()
+        config = _make_config()
+        engine = AgentEngine(config, registry)
+
+        route_result = SimpleNamespace(
+            skills_used=[],
+            tool_scope=["ask_user"],
+            route_mode="llm_confirm",
+            system_contexts=[],
+            parameterized=False,
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        ask_payload = {
+            "question": {
+                "header": "实现",
+                "text": "请选择实现方式",
+                "options": [
+                    {"label": "方案A", "description": "快"},
+                    {"label": "方案B", "description": "稳"},
+                ],
+                "multiSelect": True,
+            }
+        }
+        ask_response = _make_tool_call_response(
+            [("call_q1", "ask_user", json.dumps(ask_payload, ensure_ascii=False))]
+        )
+        engine._client.chat.completions.create = AsyncMock(return_value=ask_response)
+
+        collector = EventCollector()
+        result = await engine.chat("测试提问", on_event=collector)
+        assert "请先回答这个问题后再继续" in result
+
+        events = collector.by_type(EventType.USER_QUESTION)
+        assert len(events) == 1
+        event = events[0]
+        assert event.question_id is not None
+        assert event.question_id.startswith("qst_")
+        assert event.question_header == "实现"
+        assert event.question_text == "请选择实现方式"
+        assert event.question_multi_select is True
+        assert event.question_queue_size == 1
+        labels = [opt["label"] for opt in event.question_options]
+        assert labels == ["方案A", "方案B", "Other"]

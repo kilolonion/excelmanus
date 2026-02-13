@@ -261,7 +261,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="create_chart",
-            description="从 Excel 数据生成图表（柱状图、折线图、饼图、散点图、雷达图）并保存为图片。调用前先用 read_excel 确认数据范围、列名和数据类型。",
+            description="从 Excel 数据生成图表（柱状图、折线图、饼图、散点图、雷达图）并保存为图片",
             input_schema={
                 "type": "object",
                 "properties": {

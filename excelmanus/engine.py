@@ -16,6 +16,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
+from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
 from excelmanus.skillpacks import (
     SkillMatchResult,
     SkillRouter,
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents")
+_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update")
 
 
@@ -95,6 +96,9 @@ class ToolCallResult:
     pending_approval: bool = False
     approval_id: str | None = None
     audit_record: AppliedApprovalRecord | None = None
+    pending_question: bool = False
+    question_id: str | None = None
+    defer_tool_result: bool = False
 
 
 @dataclass
@@ -206,6 +210,8 @@ class AgentEngine:
             parent_registry=registry,
             approval_manager=self._approval,
         )
+        self._question_flow = QuestionFlowManager(max_queue_size=8)
+        self._pending_question_route_result: SkillMatchResult | None = None
 
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
@@ -259,6 +265,19 @@ class AgentEngine:
     def subagent_enabled(self) -> bool:
         """当前会话是否启用 subagent。"""
         return self._subagent_enabled
+
+    def has_pending_question(self) -> bool:
+        """当前会话是否存在待回答问题。"""
+        return self._question_flow.has_pending()
+
+    def current_pending_question(self) -> PendingQuestion | None:
+        """返回当前待回答问题（队首）。"""
+        return self._question_flow.current()
+
+    def is_waiting_multiselect_answer(self) -> bool:
+        """是否正在等待多选题回答。"""
+        current = self._question_flow.current()
+        return bool(current and current.multi_select)
 
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
@@ -385,6 +404,30 @@ class AgentEngine:
         raw_args: str | None = None,
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        if self._question_flow.has_pending():
+            pending_chat_start = time.monotonic()
+            pending_result = await self._handle_pending_question_answer(
+                user_message=user_message,
+                on_event=on_event,
+            )
+            if pending_result.iterations > 0:
+                elapsed = time.monotonic() - pending_chat_start
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.CHAT_SUMMARY,
+                        total_iterations=self._last_iteration_count,
+                        total_tool_calls=self._last_tool_call_count,
+                        success_count=self._last_success_count,
+                        failure_count=self._last_failure_count,
+                        elapsed_seconds=round(elapsed, 2),
+                        prompt_tokens=pending_result.prompt_tokens,
+                        completion_tokens=pending_result.completion_tokens,
+                        total_tokens=pending_result.total_tokens,
+                    ),
+                )
+            return pending_result
+
         control_reply = await self._handle_control_command(user_message)
         if control_reply is not None:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
@@ -588,12 +631,24 @@ class AgentEngine:
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
-            "把任务委派给 subagent 执行，适用于复杂多步任务、数据探查、批量改写。"
-            "当任务需要专门角色（explorer/analyst/writer/coder）时优先调用。\n\n"
+            "把任务委派给 subagent 执行。适用场景："
+            "(1) 需要批量探查多个文件/sheet 结构时委派 explorer；"
+            "(2) 需要执行复杂数据分析时委派 analyst；"
+            "(3) 需要批量写入或格式化时委派 writer；"
+            "(4) 需要编写和调试 Python 脚本时委派 coder。"
+            "当搜索结果不确定、需要逐个检查多个目标时，优先委派 explorer 而非自己逐个尝试。\n\n"
             "Subagent_Catalog:\n"
             f"{subagent_catalog or '当前无可用子代理。'}"
         )
         list_subagents_description = "列出当前可用的全部 subagent 及职责。"
+        ask_user_description = (
+            "向用户发起结构化选择题以消除歧义。适用场景："
+            "(1) 搜索到多个候选文件/sheet，需要用户确认目标；"
+            "(2) 用户指令存在多种合理解读，需要确认意图；"
+            "(3) 操作涉及不可逆选择（如覆盖文件），需要用户决策。"
+            "规则：已知答案时不要问；选项应具体（如列出实际文件名），不要泛泛而问。"
+            "触发后暂停执行，等待用户回答后继续。"
+        )
         return [
             {
                 "type": "function",
@@ -655,6 +710,60 @@ class AgentEngine:
                         "type": "object",
                         "properties": {},
                         "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ask_user",
+                    "description": ask_user_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "description": "问题正文",
+                                    },
+                                    "header": {
+                                        "type": "string",
+                                        "description": "短标题（建议 <= 12 字符）",
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "候选项（2-4个），系统会自动追加 Other。",
+                                        "minItems": 2,
+                                        "maxItems": 4,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": {
+                                                    "type": "string",
+                                                    "description": "选项名称",
+                                                },
+                                                "description": {
+                                                    "type": "string",
+                                                    "description": "该选项的权衡说明",
+                                                },
+                                            },
+                                            "required": ["label", "description"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                    "multiSelect": {
+                                        "type": "boolean",
+                                        "description": "是否允许多选",
+                                    },
+                                },
+                                "required": ["text", "header", "options"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["question"],
                         "additionalProperties": False,
                     },
                 },
@@ -909,6 +1018,113 @@ class AgentEngine:
             lines.append(f"- {agent.name} ({agent.permission_mode})：{agent.description}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _question_options_payload(question: PendingQuestion) -> list[dict[str, str]]:
+        return [
+            {
+                "label": option.label,
+                "description": option.description,
+            }
+            for option in question.options
+        ]
+
+    def _emit_user_question_event(
+        self,
+        *,
+        question: PendingQuestion,
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> None:
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.USER_QUESTION,
+                question_id=question.question_id,
+                question_header=question.header,
+                question_text=question.text,
+                question_options=self._question_options_payload(question),
+                question_multi_select=question.multi_select,
+                question_queue_size=self._question_flow.queue_size(),
+                iteration=iteration,
+            ),
+        )
+
+    def _handle_ask_user(
+        self,
+        *,
+        arguments: dict[str, Any],
+        tool_call_id: str,
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> tuple[str, str]:
+        question_value = arguments.get("question")
+        if not isinstance(question_value, dict):
+            raise ValueError("工具参数错误: question 必须为对象。")
+
+        pending = self._question_flow.enqueue(
+            question_payload=question_value,
+            tool_call_id=tool_call_id,
+        )
+        self._emit_user_question_event(
+            question=pending,
+            on_event=on_event,
+            iteration=iteration,
+        )
+        return f"已创建待回答问题 `{pending.question_id}`。", pending.question_id
+
+    async def _handle_pending_question_answer(
+        self,
+        *,
+        user_message: str,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        text = user_message.strip()
+        current = self._question_flow.current()
+        if current is None:
+            self._pending_question_route_result = None
+            return ChatResult(reply="当前没有待回答问题。")
+
+        if text.startswith("/"):
+            return ChatResult(
+                reply=(
+                    "当前有待回答问题，请先回答后再使用命令。\n\n"
+                    f"{self._question_flow.format_prompt(current)}"
+                )
+            )
+
+        try:
+            parsed = self._question_flow.parse_answer(user_message, question=current)
+        except ValueError as exc:
+            return ChatResult(
+                reply=f"回答格式错误：{exc}\n\n{self._question_flow.format_prompt(current)}"
+            )
+
+        popped = self._question_flow.pop_current()
+        if popped is None:
+            self._pending_question_route_result = None
+            return ChatResult(reply="当前没有待回答问题。")
+
+        tool_result = json.dumps(parsed.to_tool_result(), ensure_ascii=False)
+        self._memory.add_tool_result(popped.tool_call_id, tool_result)
+        logger.info("已接收问题回答: %s", parsed.question_id)
+
+        # 队列仍有待答问题，继续前台追问（不触发路由，不恢复执行）。
+        if self._question_flow.has_pending():
+            next_question = self._question_flow.current()
+            assert next_question is not None
+            self._emit_user_question_event(
+                question=next_question,
+                on_event=on_event,
+                iteration=0,
+            )
+            return ChatResult(reply=self._question_flow.format_prompt(next_question))
+
+        route_to_resume = self._pending_question_route_result
+        self._pending_question_route_result = None
+        if route_to_resume is None:
+            return ChatResult(reply="已记录你的回答。")
+        return await self._tool_calling_loop(route_to_resume, on_event)
+
     async def _tool_calling_loop(
         self,
         route_result: SkillMatchResult,
@@ -1004,6 +1220,7 @@ class AgentEngine:
             breaker_skip_error = (
                 f"工具未执行：连续 {max_failures} 次工具调用失败，已触发熔断。"
             )
+            question_started = False
 
             for tc in message.tool_calls:
                 function = getattr(tc, "function", None)
@@ -1020,7 +1237,24 @@ class AgentEngine:
                             error=breaker_skip_error,
                         )
                     )
-                    self._memory.add_tool_result(tool_call_id, breaker_skip_error)
+                    if tool_call_id:
+                        self._memory.add_tool_result(tool_call_id, breaker_skip_error)
+                    continue
+
+                if question_started and tool_name != "ask_user":
+                    skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
+                    skipped_result = ToolCallResult(
+                        tool_name=tool_name,
+                        arguments={},
+                        result=skipped_msg,
+                        success=True,
+                        error=None,
+                    )
+                    all_tool_results.append(skipped_result)
+                    if tool_call_id:
+                        self._memory.add_tool_result(tool_call_id, skipped_msg)
+                    self._last_tool_call_count += 1
+                    self._last_success_count += 1
                     continue
 
                 tc_result = await self._execute_tool_call(
@@ -1028,7 +1262,8 @@ class AgentEngine:
                 )
 
                 all_tool_results.append(tc_result)
-                self._memory.add_tool_result(tool_call_id, tc_result.result)
+                if not tc_result.defer_tool_result and tool_call_id:
+                    self._memory.add_tool_result(tool_call_id, tc_result.result)
 
                 if tc_result.pending_approval:
                     reply = tc_result.result
@@ -1045,6 +1280,11 @@ class AgentEngine:
                         completion_tokens=total_completion_tokens,
                         total_tokens=total_prompt_tokens + total_completion_tokens,
                     )
+
+                if tc_result.pending_question:
+                    question_started = True
+                    if self._pending_question_route_result is None:
+                        self._pending_question_route_result = route_result
 
                 # 更新统计
                 self._last_tool_call_count += 1
@@ -1066,6 +1306,21 @@ class AgentEngine:
                     ]
                     breaker_summary = "\n".join(recent_errors)
                     breaker_triggered = True
+
+            if self._question_flow.has_pending():
+                reply = self._question_flow.format_prompt()
+                self._last_iteration_count = iteration
+                logger.info("命中 ask_user，进入待回答状态")
+                logger.info("最终结果摘要: %s", _summarize_text(reply))
+                return ChatResult(
+                    reply=reply,
+                    tool_calls=list(all_tool_results),
+                    iterations=iteration,
+                    truncated=False,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                )
 
             if breaker_triggered:
                 reply = (
@@ -1112,6 +1367,7 @@ class AgentEngine:
         function = getattr(tc, "function", None)
         tool_name = getattr(function, "name", "")
         raw_args = getattr(function, "arguments", None)
+        tool_call_id = getattr(tc, "id", "") or f"call_{int(time.time() * 1000)}"
 
         # 参数解析
         parse_error: str | None = None
@@ -1148,6 +1404,9 @@ class AgentEngine:
         pending_approval = False
         approval_id: str | None = None
         audit_record: AppliedApprovalRecord | None = None
+        pending_question = False
+        question_id: str | None = None
+        defer_tool_result = False
 
         # 执行工具调用
         if parse_error is not None:
@@ -1232,6 +1491,23 @@ class AgentEngine:
                     result_str = self._handle_list_subagents()
                     success = True
                     error = None
+                    log_tool_call(
+                        logger,
+                        tool_name,
+                        arguments,
+                        result=result_str,
+                    )
+                elif tool_name == "ask_user":
+                    result_str, question_id = self._handle_ask_user(
+                        arguments=arguments,
+                        tool_call_id=tool_call_id,
+                        on_event=on_event,
+                        iteration=iteration,
+                    )
+                    success = True
+                    error = None
+                    pending_question = True
+                    defer_tool_result = True
                     log_tool_call(
                         logger,
                         tool_name,
@@ -1353,6 +1629,9 @@ class AgentEngine:
             pending_approval=pending_approval,
             approval_id=approval_id,
             audit_record=audit_record,
+            pending_question=pending_question,
+            question_id=question_id,
+            defer_tool_result=defer_tool_result,
         )
 
     def _format_pending_prompt(self, pending: PendingApproval) -> str:
@@ -1420,6 +1699,8 @@ class AgentEngine:
         self._memory.clear()
         self._loaded_skill_names.clear()
         self._active_skill = None
+        self._question_flow.clear()
+        self._pending_question_route_result = None
 
     def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
         """将本轮路由结果与会话内历史已加载的 skill 合并。"""

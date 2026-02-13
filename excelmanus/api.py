@@ -266,6 +266,8 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
             ),
             "pending_approval": bool(item.pending_approval),
             "approval_id": item.approval_id,
+            "pending_question": bool(item.pending_question),
+            "question_id": item.question_id,
         })
     return rows
 
@@ -603,6 +605,7 @@ def _sse_event_to_sse(
         EventType.SUBAGENT_START: "subagent_start",
         EventType.SUBAGENT_SUMMARY: "subagent_summary",
         EventType.SUBAGENT_END: "subagent_end",
+        EventType.USER_QUESTION: "user_question",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -681,6 +684,31 @@ def _sse_event_to_sse(
             ),
             "iterations": event.subagent_iterations,
             "tool_calls": event.subagent_tool_calls,
+        }
+    elif event.event_type == EventType.USER_QUESTION:
+        options: list[dict[str, str]] = []
+        for option in event.question_options:
+            if not isinstance(option, dict):
+                continue
+            options.append(
+                {
+                    "label": sanitize_external_text(
+                        str(option.get("label", "") or ""),
+                        max_len=80,
+                    ),
+                    "description": sanitize_external_text(
+                        str(option.get("description", "") or ""),
+                        max_len=500,
+                    ),
+                }
+            )
+        data = {
+            "id": sanitize_external_text(event.question_id or "", max_len=120),
+            "header": sanitize_external_text(event.question_header or "", max_len=80),
+            "text": sanitize_external_text(event.question_text or "", max_len=2000),
+            "options": options,
+            "multi_select": bool(event.question_multi_select),
+            "queue_size": int(event.question_queue_size or 0),
         }
     elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
         data = {

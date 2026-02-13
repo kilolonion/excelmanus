@@ -467,6 +467,17 @@ async def _read_user_input() -> str:
     return console.input("\n [bold green]❯[/bold green] ")
 
 
+async def _read_multiline_user_input() -> str:
+    """读取多行输入：空行提交，返回换行拼接后的文本。"""
+    lines: list[str] = []
+    while True:
+        line = await _read_user_input()
+        if not line.strip():
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _render_help(engine: AgentEngine | None = None) -> None:
     """渲染帮助信息。"""
     table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
@@ -490,6 +501,7 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     table.add_row("/reject <id>", "拒绝待确认高风险操作")
     table.add_row("/undo <id>", "回滚已确认且可回滚的操作")
     table.add_row("/<skill_name> [args...]", "手动调用指定 Skillpack（如 /data_basic）")
+    table.add_row("多选回答", "待回答问题为多选时：每行一个选项，空行提交")
     skill_rows = _load_skill_command_rows(engine) if engine is not None else []
     for name, argument_hint in skill_rows:
         hint_text = argument_hint if argument_hint else "(无参数提示)"
@@ -713,8 +725,20 @@ async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
     _sync_skill_command_suggestions(engine)
     while True:
+        has_pending_question = bool(
+            getattr(engine, "has_pending_question", lambda: False)()
+        )
+        waiting_multiselect = bool(
+            getattr(engine, "is_waiting_multiselect_answer", lambda: False)()
+        )
         try:
-            user_input = (await _read_user_input()).strip()
+            if waiting_multiselect:
+                console.print(
+                    "  [dim]多选回答模式：每行输入一个选项，空行提交。[/dim]"
+                )
+                user_input = (await _read_multiline_user_input()).strip()
+            else:
+                user_input = (await _read_user_input()).strip()
         except (KeyboardInterrupt, EOFError):
             # Ctrl+C 或 Ctrl+D 优雅退出
             _render_farewell()
@@ -728,6 +752,32 @@ async def _repl_loop(engine: AgentEngine) -> None:
         if user_input.lower() in _EXIT_COMMANDS:
             _render_farewell()
             return
+
+        if has_pending_question:
+            try:
+                renderer = StreamRenderer(console)
+                console.print()
+                reply = await _chat_with_feedback(
+                    engine,
+                    user_input=user_input,
+                    renderer=renderer,
+                )
+                console.print()
+                console.print(
+                    Panel(
+                        Markdown(reply),
+                        border_style="dim cyan",
+                        padding=(1, 2),
+                        expand=False,
+                    )
+                )
+            except KeyboardInterrupt:
+                _render_farewell()
+                return
+            except Exception as exc:
+                logger.error("处理待回答问题时发生错误: %s", exc, exc_info=True)
+                console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
+            continue
 
         # 斜杠命令处理
         if user_input.lower() == "/help":

@@ -647,6 +647,32 @@ class TestStreamRendererUnit:
         assert "subagent" in output
         assert "完成" in output
 
+    def test_user_question_rendered_with_options(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+
+        event = ToolCallEvent(
+            event_type=EventType.USER_QUESTION,
+            question_id="qst_001",
+            question_header="技术选型",
+            question_text="请选择方案",
+            question_options=[
+                {"label": "方案A", "description": "快速"},
+                {"label": "方案B", "description": "稳健"},
+                {"label": "Other", "description": "可输入其他答案"},
+            ],
+            question_multi_select=True,
+            question_queue_size=2,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+
+        assert "技术选型" in output
+        assert "请选择方案" in output
+        assert "方案A" in output
+        assert "Other" in output
+        assert "空行提交" in output
+
     # ---- 渲染异常降级 (需求 2.1 异常处理) ----
 
     def test_render_exception_fallback_to_plain_text(self) -> None:
