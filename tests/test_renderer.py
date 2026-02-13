@@ -601,7 +601,7 @@ class TestStreamRendererUnit:
         assert "/tmp/input.xlsx" in output
         assert "/tmp/output.xlsx" in output
 
-    # ---- fork 子代理事件渲染 ----
+    # ---- subagent 事件渲染 ----
 
     def test_subagent_start_rendered(self) -> None:
         console = _make_console(width=120)
@@ -615,7 +615,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "fork 子代理启动" in output
+        assert "subagent 启动" in output
         assert "命中大文件" in output
         assert "read_excel" in output
 
@@ -630,7 +630,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "fork 子代理摘要" in output
+        assert "subagent 摘要" in output
         assert "关键列" in output
 
     def test_subagent_end_rendered(self) -> None:
@@ -644,7 +644,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "fork 子代理" in output
+        assert "subagent" in output
         assert "完成" in output
 
     # ---- 渲染异常降级 (需求 2.1 异常处理) ----

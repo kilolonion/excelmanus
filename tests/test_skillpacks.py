@@ -43,7 +43,6 @@ def _write_skillpack(
     disable_model_invocation: bool | None = None,
     user_invocable: bool | None = None,
     argument_hint: str | None = None,
-    context: str | None = None,
     instructions: str = "测试说明",
 ) -> None:
     skill_dir = root_dir / name
@@ -65,8 +64,6 @@ def _write_skillpack(
         lines.append(f"user_invocable: {flag}")
     if argument_hint is not None:
         lines.append(f"argument_hint: {argument_hint}")
-    if context is not None:
-        lines.append(f"context: {context}")
 
     lines.extend(["---", instructions])
     (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
@@ -269,27 +266,7 @@ class TestSkillpackLoader:
                 skill_file=skill_file,
             )
 
-    def test_context_defaults_to_inline(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "data_basic",
-            description="测试",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loaded = loader.load_all()
-        assert loaded["data_basic"].context == "inline"
-
-    def test_context_fork_parsed_from_frontmatter(self, tmp_path: Path) -> None:
+    def test_context_field_is_deprecated(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -302,13 +279,19 @@ class TestSkillpackLoader:
             description="大文件代码处理",
             allowed_tools=["read_excel"],
             triggers=["大文件"],
-            context="fork",
+            instructions="测试",
         )
+        # 手动插入已废弃字段
+        skill_file = system_dir / "excel_code_runner" / "SKILL.md"
+        content = skill_file.read_text(encoding="utf-8")
+        content = content.replace("---\n测试", "context: fork\n---\n测试")
+        skill_file.write_text(content, encoding="utf-8")
 
         config = _make_config(system_dir, user_dir, project_dir)
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
-        assert loaded["excel_code_runner"].context == "fork"
+        assert "excel_code_runner" not in loaded
+        assert any("context" in warning for warning in loader.warnings)
 
 
 class TestSkillRouter:
@@ -421,8 +404,91 @@ class TestSkillRouter:
         result = await router.route("请分析这个文件")
         assert result.route_mode == "fallback"
         assert "list_skills" in result.tool_scope
-        # 技能目录应注入到 system_contexts
-        assert any("可用技能" in ctx for ctx in result.system_contexts)
+        # 技能目录通过 select_skill 元工具 description 传递，不再注入 system_contexts
+        assert not any("可用技能" in ctx for ctx in result.system_contexts)
+
+    @pytest.mark.asyncio
+    async def test_non_slash_injects_large_file_context(self, tmp_path: Path) -> None:
+        """fallback 路由命中大文件时应注入提示上下文。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="分析",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+        large_file = tmp_path / "big.xlsx"
+        large_file.write_bytes(b"x" * 64)
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            large_excel_threshold_bytes=32,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route(
+            f"请分析文件 {large_file}",
+            file_paths=[str(large_file)],
+        )
+
+        joined = "\n".join(result.system_contexts)
+        assert "检测到大文件 Excel" in joined
+        assert str(large_file.resolve()) in joined
+
+    @pytest.mark.asyncio
+    async def test_slash_direct_parameterized_injects_large_file_context(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """斜杠参数化路由命中大文件时应追加提示上下文。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "chart_basic",
+            description="图表",
+            allowed_tools=["create_chart"],
+            triggers=["图表"],
+            instructions="文件：$0\n类型：$1",
+        )
+        large_file = tmp_path / "sales.xlsx"
+        large_file.write_bytes(b"x" * 64)
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            large_excel_threshold_bytes=32,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route(
+            "忽略自然语言",
+            slash_command="chart_basic",
+            raw_args=f'"{large_file}" bar',
+        )
+
+        assert result.system_contexts
+        assert "文件：" in result.system_contexts[0]
+        joined = "\n".join(result.system_contexts)
+        assert "检测到大文件 Excel" in joined
+        assert str(large_file.resolve()) in joined
 
     @pytest.mark.asyncio
     async def test_blocked_skillpack_excluded_then_unlock(self, tmp_path: Path) -> None:
@@ -537,8 +603,10 @@ class TestSkillRouter:
             blocked_skillpacks={"chart_basic"},
         )
         assert "data_basic" in catalog_text
-        assert "chart_basic" not in catalog_text
-        assert skill_names == ["data_basic"]
+        # 被限制的技能仍出现在目录中，但带有权限标注
+        assert "chart_basic" in catalog_text
+        assert "fullAccess" in catalog_text
+        assert sorted(skill_names) == ["chart_basic", "data_basic"]
 
     @pytest.mark.asyncio
     async def test_no_skillpacks_returns_no_skillpack(self, tmp_path: Path) -> None:

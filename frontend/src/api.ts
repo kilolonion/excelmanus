@@ -6,7 +6,6 @@
 export interface ChatRequest {
   message: string
   session_id?: string | null
-  skill_hints?: string[]
 }
 
 /** 聊天响应 */

@@ -19,24 +19,11 @@ _EXCEL_PATH_PATTERN = re.compile(
     r"""(?:"([^"]+\.(?:xlsx|xlsm|xls))"|'([^']+\.(?:xlsx|xlsm|xls))'|([^\s"'，。！？；：]+?\.(?:xlsx|xlsm|xls)))""",
     re.IGNORECASE,
 )
+_EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
 
 
 class SkillRouter:
     """简化后的技能路由器：仅负责斜杠直连路由和技能目录生成。"""
-
-    _EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xls"}
-    _MAX_LARGE_FILE_HINTS = 3
-    _READ_ONLY_TOOLS = (
-        "read_excel",
-        "analyze_data",
-        "filter_data",
-        "list_sheets",
-        "get_file_info",
-        "search_files",
-        "list_directory",
-        "read_text_file",
-        "read_cell_styles",
-    )
 
     def __init__(self, config: ExcelManusConfig, loader: SkillpackLoader) -> None:
         self._config = config
@@ -56,20 +43,24 @@ class SkillRouter:
         if not skillpacks:
             skillpacks = self._loader.load_all()
 
-        blocked = set(blocked_skillpacks or [])
-        if blocked:
-            skillpacks = {
-                name: skill
-                for name, skill in skillpacks.items()
-                if name not in blocked
-            }
-
         if not skillpacks:
             return self._build_fallback_result(
                 selected=[],
                 route_mode="no_skillpack",
                 all_skillpacks={},
             )
+
+        blocked = set(blocked_skillpacks or [])
+        # 斜杠直连路由使用排除被限制技能后的集合
+        available_skillpacks = (
+            {
+                name: skill
+                for name, skill in skillpacks.items()
+                if name not in blocked
+            }
+            if blocked
+            else skillpacks
+        )
 
         # ── 0. 斜杠命令直连路由（参数化）──
         candidate_file_paths = self._collect_candidate_file_paths(
@@ -79,7 +70,7 @@ class SkillRouter:
         )
         if slash_command and slash_command.strip():
             direct_skill = self._find_skill_by_name(
-                skillpacks=skillpacks,
+                skillpacks=available_skillpacks,
                 name=slash_command.strip(),
             )
             if direct_skill is None:
@@ -89,6 +80,7 @@ class SkillRouter:
                     all_skillpacks=skillpacks,
                     user_message=user_message,
                     candidate_file_paths=candidate_file_paths,
+                    blocked_skillpacks=blocked_skillpacks,
                 )
             return self._build_parameterized_result(
                 skill=direct_skill,
@@ -104,6 +96,7 @@ class SkillRouter:
             all_skillpacks=skillpacks,
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
+            blocked_skillpacks=blocked_skillpacks,
         )
 
     def build_skill_catalog(
@@ -112,6 +105,9 @@ class SkillRouter:
     ) -> tuple[str, list[str]]:
         """生成技能目录摘要和技能名称列表。
 
+        被限制的技能仍会出现在目录中（标注需要 fullAccess），
+        以便 LLM 知道其存在并在用户需要时给出权限提示。
+
         返回:
             (catalog_text, skill_names) 元组
         """
@@ -119,38 +115,25 @@ class SkillRouter:
         if not skillpacks:
             skillpacks = self._loader.load_all()
 
-        blocked = set(blocked_skillpacks or [])
-        if blocked:
-            skillpacks = {
-                name: skill
-                for name, skill in skillpacks.items()
-                if name not in blocked
-            }
-
         if not skillpacks:
             return ("", [])
 
+        blocked = set(blocked_skillpacks or [])
         skill_names = sorted(skillpacks.keys())
         lines = ["可用技能：\n"]
         for name in skill_names:
             skill = skillpacks[name]
-            lines.append(f"- {name}：{skill.description}")
+            if name in blocked:
+                lines.append(
+                    f"- {name}：{skill.description} "
+                    f"[⚠️ 需要 fullAccess 权限，使用 /fullAccess on 开启]"
+                )
+            else:
+                lines.append(f"- {name}：{skill.description}")
         catalog_text = "\n".join(lines)
         return (catalog_text, skill_names)
 
-    def _apply_selection_limit(self, selected: list[Skillpack]) -> list[Skillpack]:
-        if not selected:
-            return []
-        ordered = sorted(selected, key=lambda skill: (-skill.priority, skill.name))
-        return ordered[: self._config.skills_max_selected]
 
-    @staticmethod
-    def _fallback_skillpack(skillpacks: dict[str, Skillpack]) -> Skillpack | None:
-        if "general_excel" in skillpacks:
-            return skillpacks["general_excel"]
-        if not skillpacks:
-            return None
-        return sorted(skillpacks.values(), key=lambda skill: (-skill.priority, skill.name))[0]
 
     def _build_result(
         self,
@@ -188,8 +171,13 @@ class SkillRouter:
         *,
         user_message: str = "",
         candidate_file_paths: list[str] | None = None,
+        blocked_skillpacks: set[str] | None = None,
     ) -> SkillMatchResult:
-        """构建 fallback 路由结果：注入技能目录摘要 + list_skills 工具。"""
+        """构建 fallback 路由结果：注入 list_skills 工具。
+
+        技能目录不再注入 system_contexts（已通过 select_skill
+        元工具的 description 传递，避免双重注入浪费 token）。
+        """
         result = self._build_result(
             selected=selected,
             route_mode=route_mode,
@@ -199,18 +187,19 @@ class SkillRouter:
         tool_scope = list(result.tool_scope)
         if "list_skills" not in tool_scope:
             tool_scope.append("list_skills")
-
-        # 生成技能目录摘要并注入 system_contexts
-        catalog_text, _ = self.build_skill_catalog()
-        contexts = list(result.system_contexts)
-        if catalog_text:
-            contexts.append(catalog_text)
+        system_contexts = list(result.system_contexts)
+        large_file_context = self._build_large_file_context(
+            user_message=user_message,
+            candidate_file_paths=candidate_file_paths,
+        )
+        if large_file_context:
+            system_contexts.append(large_file_context)
 
         return SkillMatchResult(
             skills_used=result.skills_used,
             tool_scope=tool_scope,
             route_mode=result.route_mode,
-            system_contexts=contexts,
+            system_contexts=system_contexts,
             parameterized=result.parameterized,
         )
 
@@ -251,10 +240,24 @@ class SkillRouter:
         args = parse_arguments(raw_args)
         rendered_instructions = substitute(skill.instructions, args)
         parameterized_skill = replace(skill, instructions=rendered_instructions)
-        return self._build_result(
+        result = self._build_result(
             selected=[parameterized_skill],
             route_mode="slash_direct",
             parameterized=True,
+        )
+        system_contexts = list(result.system_contexts)
+        large_file_context = self._build_large_file_context(
+            user_message=user_message,
+            candidate_file_paths=candidate_file_paths,
+        )
+        if large_file_context:
+            system_contexts.append(large_file_context)
+        return SkillMatchResult(
+            skills_used=result.skills_used,
+            tool_scope=result.tool_scope,
+            route_mode=result.route_mode,
+            system_contexts=system_contexts,
+            parameterized=result.parameterized,
         )
 
     def _collect_candidate_file_paths(
@@ -278,6 +281,92 @@ class SkillRouter:
             seen.add(normalized)
         return deduped
 
+    def _build_large_file_context(
+        self,
+        *,
+        user_message: str,
+        candidate_file_paths: list[str] | None,
+    ) -> str:
+        large_files = self._detect_large_excel_files(candidate_file_paths)
+        if not large_files:
+            return ""
+
+        threshold = self._config.large_excel_threshold_bytes
+        normalized_message = (user_message or "").strip()
+        if normalized_message:
+            user_summary = normalized_message[:120]
+            if len(normalized_message) > 120:
+                user_summary += "..."
+        else:
+            user_summary = "(空)"
+
+        lines = [
+            "[路由提示] 检测到大文件 Excel，优先采用代码方式分步处理。",
+            f"- 用户请求：{user_summary}",
+            f"- 大文件阈值：{self._format_bytes(threshold)}（{threshold} bytes）",
+            "- 命中文件：",
+        ]
+        for file_path, file_size in large_files:
+            lines.append(f"  - {file_path}（{self._format_bytes(file_size)}）")
+        lines.append("- 建议优先选择 `excel_code_runner`，先抽样探查后再全量处理。")
+        return "\n".join(lines)
+
+    def _detect_large_excel_files(
+        self,
+        candidate_file_paths: list[str] | None,
+    ) -> list[tuple[str, int]]:
+        if not candidate_file_paths:
+            return []
+
+        threshold = self._config.large_excel_threshold_bytes
+        if threshold <= 0:
+            return []
+
+        large_files: list[tuple[str, int]] = []
+        seen_paths: set[str] = set()
+        for raw_path in candidate_file_paths:
+            normalized = (raw_path or "").strip()
+            if not normalized:
+                continue
+            try:
+                path_obj = Path(normalized).expanduser()
+                if not path_obj.is_absolute():
+                    path_obj = Path.cwd() / path_obj
+                resolved = path_obj.resolve(strict=False)
+            except OSError:
+                continue
+
+            normalized_resolved = str(resolved)
+            if normalized_resolved in seen_paths:
+                continue
+            seen_paths.add(normalized_resolved)
+
+            if resolved.suffix.lower() not in _EXCEL_SUFFIXES:
+                continue
+
+            try:
+                if not resolved.is_file():
+                    continue
+                file_size = resolved.stat().st_size
+            except OSError:
+                continue
+
+            if file_size >= threshold:
+                large_files.append((normalized_resolved, file_size))
+        return large_files
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        value = float(size)
+        units = ["KB", "MB", "GB", "TB"]
+        for unit in units:
+            value /= 1024
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.2f} {unit}"
+        return f"{size} B"
+
     @staticmethod
     def _extract_excel_paths(text: str) -> list[str]:
         if not text:
@@ -290,61 +379,4 @@ class SkillRouter:
                 paths.append(candidate)
         return paths
 
-    def _detect_large_excel_files(
-        self,
-        candidate_file_paths: list[str],
-    ) -> list[tuple[str, int]]:
-        threshold = self._config.large_excel_threshold_bytes
-        if threshold <= 0:
-            return []
-        workspace_root = Path(self._config.workspace_root).expanduser().resolve()
-        large_files: list[tuple[str, int]] = []
-        for raw_path in candidate_file_paths:
-            resolved = self._resolve_path_in_workspace(raw_path, workspace_root)
-            if resolved is None:
-                continue
-            if resolved.suffix.lower() not in self._EXCEL_EXTENSIONS:
-                continue
-            if not resolved.exists() or not resolved.is_file():
-                continue
-            try:
-                size_bytes = resolved.stat().st_size
-            except OSError:
-                continue
-            if size_bytes < threshold:
-                continue
-            try:
-                display_path = str(resolved.relative_to(workspace_root))
-            except ValueError:
-                display_path = str(resolved)
-            large_files.append((display_path, size_bytes))
-            if len(large_files) >= self._MAX_LARGE_FILE_HINTS:
-                break
-        return large_files
 
-    @staticmethod
-    def _resolve_path_in_workspace(
-        raw_path: str,
-        workspace_root: Path,
-    ) -> Path | None:
-        try:
-            candidate = Path(raw_path).expanduser()
-            if not candidate.is_absolute():
-                candidate = (workspace_root / candidate).resolve()
-            else:
-                candidate = candidate.resolve()
-            candidate.relative_to(workspace_root)
-            return candidate
-        except Exception:
-            return None
-
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        value = float(size_bytes)
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if value < 1024 or unit == "TB":
-                if unit == "B":
-                    return f"{int(value)}{unit}"
-                return f"{value:.1f}{unit}"
-            value /= 1024
-        return f"{int(size_bytes)}B"

@@ -84,7 +84,7 @@ class ApprovalManager:
 
     HIGH_RISK_TOOLS: set[str] = {
         "write_text_file",
-        "run_python_script",
+        "run_code",
         "copy_file",
         "rename_file",
         "delete_file",
@@ -251,7 +251,7 @@ class ApprovalManager:
         return result_text, record
 
     def undo(self, approval_id: str) -> str:
-        record = self._applied.get(approval_id)
+        record = self.get_applied(approval_id)
         if record is None:
             return f"未找到已执行记录 `{approval_id}`。"
         if not record.undoable:

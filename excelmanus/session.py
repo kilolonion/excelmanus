@@ -98,52 +98,6 @@ class SessionManager:
         )
         return persistent_memory, memory_extractor
 
-    # ── 公开接口 ──────────────────────────────────────────
-
-    async def get_or_create(
-        self, session_id: str | None
-    ) -> tuple[str, AgentEngine]:
-        """获取已有会话或创建新会话。
-
-        Args:
-            session_id: 会话 ID。为 None 时创建新会话。
-
-        Returns:
-            (session_id, engine) 元组。
-
-        Raises:
-            SessionLimitExceededError: 会话数达到上限且需要创建新会话时抛出。
-        """
-        async with self._lock:
-            # 已有会话：刷新访问时间并返回
-            if session_id is not None and session_id in self._sessions:
-                entry = self._sessions[session_id]
-                entry.last_access = time.monotonic()
-                logger.debug("复用会话 %s", session_id)
-                return session_id, entry.engine
-
-            # 需要创建新会话：检查容量上限
-            if len(self._sessions) >= self._max_sessions:
-                raise SessionLimitExceededError(
-                    f"会话数量已达上限（{self._max_sessions}），请稍后重试。"
-                )
-
-            # 创建新会话
-            new_id = session_id if session_id is not None else str(uuid.uuid4())
-            persistent_memory, memory_extractor = self._create_memory_components()
-            engine = AgentEngine(
-                config=self._config,
-                registry=self._registry,
-                skill_router=self._skill_router,
-                persistent_memory=persistent_memory,
-                memory_extractor=memory_extractor,
-            )
-            self._sessions[new_id] = _SessionEntry(
-                engine=engine,
-                last_access=time.monotonic(),
-            )
-            logger.info("创建新会话 %s（当前总数: %d）", new_id, len(self._sessions))
-            return new_id, engine
 
     async def acquire_for_chat(
         self, session_id: str | None

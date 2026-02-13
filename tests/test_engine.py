@@ -128,6 +128,7 @@ class TestControlCommandFullAccess:
         engine = AgentEngine(config, registry)
 
         result = await engine.chat("/fullAccess status")
+        assert isinstance(result, ChatResult)
         assert "restricted" in result
         assert engine.full_access_enabled is False
         assert engine.last_route_result.route_mode == "control_command"
@@ -234,7 +235,7 @@ class TestControlCommandSubagent:
         engine = AgentEngine(config, registry)
 
         result = await engine.chat("/subagent")
-        assert "当前 fork 子代理状态" in result
+        assert "当前 subagent 状态" in result
         assert engine.subagent_enabled is True
 
     @pytest.mark.asyncio
@@ -263,9 +264,63 @@ class TestControlCommandSubagent:
         after_count = len(engine.memory.get_messages())
         assert before_count == after_count == 1
 
+    @pytest.mark.asyncio
+    async def test_list_command_returns_catalog(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/subagent list")
+        assert "explorer" in result
+        assert "analyst" in result
+
+    @pytest.mark.asyncio
+    async def test_run_command_with_agent_routes_to_delegate(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._handle_delegate_to_subagent = AsyncMock(return_value="执行完成")
+
+        result = await engine.chat("/subagent run explorer -- 分析这个文件")
+        assert result == "执行完成"
+        engine._handle_delegate_to_subagent.assert_awaited_once_with(
+            task="分析这个文件",
+            agent_name="explorer",
+            on_event=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_command_without_agent_routes_to_delegate(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._handle_delegate_to_subagent = AsyncMock(return_value="执行完成")
+
+        result = await engine.chat("/subagent run -- 分析这个文件")
+        assert result == "执行完成"
+        engine._handle_delegate_to_subagent.assert_awaited_once_with(
+            task="分析这个文件",
+            agent_name=None,
+            on_event=None,
+        )
+
 
 class TestManualSkillSlashCommand:
     """手动 Skill 斜杠命令解析与路由。"""
+
+    @pytest.mark.asyncio
+    async def test_route_mode_is_all_tools_when_skill_router_missing(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._skill_router = None
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("ok")
+        )
+
+        result = await engine.chat("请读取数据")
+        assert result == "ok"
+        assert engine.last_route_result.route_mode == "all_tools"
 
     @pytest.mark.asyncio
     async def test_slash_skill_command_maps_to_slash_route_args(self) -> None:
@@ -295,36 +350,6 @@ class TestManualSkillSlashCommand:
         _, kwargs = mock_router.route.call_args
         assert kwargs["slash_command"] == "data_basic"
         assert kwargs["raw_args"] == "请分析这个文件"
-
-    @pytest.mark.asyncio
-    async def test_slash_skill_command_overrides_external_skill_hints(self) -> None:
-        """斜杠命令优先级高于外部 skill_hints（skill_hints 已不再传递给 route）。"""
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        route_result = SkillMatchResult(
-            skills_used=["data_basic"],
-            tool_scope=[],
-            route_mode="hint_direct",
-            system_contexts=[],
-        )
-        mock_loader = MagicMock()
-        mock_loader.get_skillpacks.return_value = {"data_basic": MagicMock()}
-        mock_router = MagicMock()
-        mock_router._loader = mock_loader
-        mock_router.route = AsyncMock(return_value=route_result)
-        engine._skill_router = mock_router
-        engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response("ok")
-        )
-
-        await engine.chat("/data_basic 请分析", skill_hints=["chart_basic"])
-        _, kwargs = mock_router.route.call_args
-        # skill_hints 已从 route 接口中移除，不再传递
-        assert "skill_hints" not in kwargs
-        assert kwargs["slash_command"] == "data_basic"
-        assert kwargs["raw_args"] == "请分析"
 
     @pytest.mark.asyncio
     async def test_explicit_slash_command_arguments_pass_through(self) -> None:
@@ -445,43 +470,38 @@ class TestForkSubagentExecution:
         assert "+fork_executed" not in engine.last_route_result.route_mode
 
 
-class TestExploreDataSubagent:
-    """explore_data 子代理工具测试（task5）。"""
+class TestDelegateSubagent:
+    """delegate_to_subagent 元工具测试。"""
 
     @pytest.mark.asyncio
-    async def test_explore_data_tool_call_runs_subagent_and_emits_events(self) -> None:
+    async def test_delegate_tool_call_runs_subagent_and_returns_summary(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._execute_subagent_loop = AsyncMock(return_value="探查摘要")
+        engine._handle_delegate_to_subagent = AsyncMock(return_value="子代理摘要")
 
         tc = SimpleNamespace(
             id="call_1",
             function=SimpleNamespace(
-                name="explore_data",
+                name="delegate_to_subagent",
                 arguments=json.dumps(
-                    {"task": "探查销量异常", "file_paths": ["sales.xlsx"]}
+                    {"task": "探查销量异常", "file_paths": ["sales.xlsx"]},
                 ),
             ),
         )
 
-        events = []
         result = await engine._execute_tool_call(
             tc=tc,
-            tool_scope=["explore_data"],
-            on_event=events.append,
+            tool_scope=["delegate_to_subagent"],
+            on_event=None,
             iteration=1,
         )
 
         assert result.success is True
-        assert result.result == "探查摘要"
-        event_types = [e.event_type for e in events]
-        assert EventType.SUBAGENT_START in event_types
-        assert EventType.SUBAGENT_SUMMARY in event_types
-        assert EventType.SUBAGENT_END in event_types
+        assert result.result == "子代理摘要"
 
     @pytest.mark.asyncio
-    async def test_explore_data_rejects_invalid_file_paths_type(self) -> None:
+    async def test_delegate_rejects_invalid_file_paths_type(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -489,7 +509,7 @@ class TestExploreDataSubagent:
         tc = SimpleNamespace(
             id="call_1",
             function=SimpleNamespace(
-                name="explore_data",
+                name="delegate_to_subagent",
                 arguments=json.dumps(
                     {"task": "探查销量异常", "file_paths": "sales.xlsx"}
                 ),
@@ -498,7 +518,7 @@ class TestExploreDataSubagent:
 
         result = await engine._execute_tool_call(
             tc=tc,
-            tool_scope=["explore_data"],
+            tool_scope=["delegate_to_subagent"],
             on_event=None,
             iteration=1,
         )
@@ -507,65 +527,29 @@ class TestExploreDataSubagent:
         assert "file_paths 必须为字符串数组" in result.result
 
     @pytest.mark.asyncio
-    async def test_execute_subagent_loop_circuit_breaker(self) -> None:
-        config = _make_config(subagent_max_consecutive_failures=2)
-        registry = ToolRegistry()
-
-        def fail_read_excel() -> str:
-            raise RuntimeError("读取失败")
-
-        registry.register_tool(
-            ToolDef(
-                name="read_excel",
-                description="读取表格",
-                input_schema={"type": "object", "properties": {}},
-                func=fail_read_excel,
-            )
-        )
-        engine = AgentEngine(config, registry)
-
-        # 每轮都让子代理调用 read_excel，触发连续失败熔断
-        tool_resp_1 = _make_tool_call_response([("c1", "read_excel", "{}")])
-        tool_resp_2 = _make_tool_call_response([("c2", "read_excel", "{}")])
-        engine._client.chat.completions.create = AsyncMock(
-            side_effect=[tool_resp_1, tool_resp_2]
-        )
-
-        summary = await engine._execute_subagent_loop(
-            system_prompt="测试提示",
-            tool_scope=["read_excel"],
-            max_iterations=5,
-        )
-        assert "子代理连续 2 次工具调用失败" in summary
-
-    @pytest.mark.asyncio
-    async def test_execute_subagent_loop_iteration_limit(self) -> None:
+    async def test_delegate_rejects_invalid_agent_name_type(self) -> None:
         config = _make_config()
-        registry = ToolRegistry()
-
-        def ok_read_excel() -> str:
-            return "ok"
-
-        registry.register_tool(
-            ToolDef(
-                name="read_excel",
-                description="读取表格",
-                input_schema={"type": "object", "properties": {}},
-                func=ok_read_excel,
-            )
-        )
+        registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
-        # 单轮始终返回 tool_call，触发迭代上限返回
-        tool_resp = _make_tool_call_response([("c1", "read_excel", "{}")])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_resp])
-
-        summary = await engine._execute_subagent_loop(
-            system_prompt="测试提示",
-            tool_scope=["read_excel"],
-            max_iterations=1,
+        tc = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="delegate_to_subagent",
+                arguments=json.dumps(
+                    {"task": "探查销量异常", "agent_name": 123},
+                ),
+            ),
         )
-        assert "子代理达到最大迭代次数（1）" in summary
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["delegate_to_subagent"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is False
+        assert "agent_name 必须为字符串" in result.result
 
 
 class TestMetaToolDefinitions:
@@ -584,10 +568,11 @@ class TestMetaToolDefinitions:
         engine._skill_router = mock_router
 
         meta_tools = engine._build_meta_tools()
-        assert len(meta_tools) == 2
+        assert len(meta_tools) == 3
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "select_skill" in by_name
-        assert "explore_data" in by_name
+        assert "delegate_to_subagent" in by_name
+        assert "list_subagents" in by_name
 
         select_tool = by_name["select_skill"]["function"]
         select_params = select_tool["parameters"]
@@ -599,10 +584,11 @@ class TestMetaToolDefinitions:
         ]
         assert "reason" in select_params["properties"]
 
-        explore_tool = by_name["explore_data"]["function"]
-        explore_params = explore_tool["parameters"]
-        assert explore_params["required"] == ["task"]
-        assert explore_params["properties"]["file_paths"]["type"] == "array"
+        delegate_tool = by_name["delegate_to_subagent"]["function"]
+        delegate_params = delegate_tool["parameters"]
+        assert delegate_params["required"] == ["task"]
+        assert delegate_params["properties"]["file_paths"]["type"] == "array"
+        assert "agent_name" in delegate_params["properties"]
 
     def test_build_meta_tools_reflects_updated_catalog(self) -> None:
         config = _make_config()
@@ -703,7 +689,12 @@ class TestChatPureText:
         )
 
         result = await engine.chat("你好")
+        assert isinstance(result, ChatResult)
         assert result == "你好，这是回复。"
+        assert result.reply == "你好，这是回复。"
+        assert result.iterations == 1
+        assert result.truncated is False
+        assert result.tool_calls == []
 
     @pytest.mark.asyncio
     async def test_empty_content_returns_empty_string(self) -> None:
@@ -745,7 +736,14 @@ class TestChatToolCalling:
         )
 
         result = await engine.chat("计算 3 + 5")
+        assert isinstance(result, ChatResult)
         assert result == "3 + 5 = 8"
+        assert result.reply == "3 + 5 = 8"
+        assert result.iterations == 2
+        assert result.truncated is False
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].tool_name == "add_numbers"
+        assert result.tool_calls[0].success is True
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_in_single_response(self) -> None:
@@ -990,6 +988,8 @@ class TestIterationLimit:
 
         result = await engine.chat("无限循环测试")
         assert "最大迭代次数" in result or "3" in result
+        assert result.truncated is True
+        assert result.iterations == 3
 
 
 class TestAsyncToolExecution:

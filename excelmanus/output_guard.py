@@ -89,6 +89,3 @@ def guard_public_reply(reply: str) -> str:
     return safe
 
 
-def build_public_tool_error_message() -> str:
-    """统一的对外工具错误文案。"""
-    return "工具执行失败，请检查输入后重试。"

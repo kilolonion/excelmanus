@@ -293,35 +293,35 @@ class StreamRenderer:
     # ------------------------------------------------------------------
 
     def _render_subagent_start(self, event: ToolCallEvent) -> None:
-        """渲染 fork 子代理开始。"""
+        """渲染 subagent 开始。"""
         reason = rich_escape(event.subagent_reason or "触发子代理")
         tools = ", ".join(event.subagent_tools) if event.subagent_tools else "(无)"
         if self._is_narrow():
-            self._console.print(f"  🧵 fork 子代理启动")
+            self._console.print("  🧵 subagent 启动")
             self._console.print(f"     原因: {reason}", style="dim")
             self._console.print(f"     工具: {rich_escape(tools)}", style="dim")
         else:
             self._console.print(
-                f"  🧵 [bold cyan]fork 子代理启动[/bold cyan] "
+                f"  🧵 [bold cyan]subagent 启动[/bold cyan] "
                 f"[dim]原因: {reason} | 工具: {rich_escape(tools)}[/dim]"
             )
 
     def _render_subagent_summary(self, event: ToolCallEvent) -> None:
-        """渲染 fork 子代理摘要。"""
+        """渲染 subagent 摘要。"""
         summary = (event.subagent_summary or "").strip()
         if not summary:
             return
         preview = _truncate(summary, _SUBAGENT_SUMMARY_PREVIEW)
 
         if self._is_narrow():
-            self._console.print("  🧾 fork 摘要", style="cyan")
+            self._console.print("  🧾 subagent 摘要", style="cyan")
             self._console.print(f"     {rich_escape(preview)}", style="dim")
             return
 
         self._console.print(
             Panel(
                 rich_escape(preview),
-                title="[bold cyan]🧾 fork 子代理摘要[/bold cyan]",
+                title="[bold cyan]🧾 subagent 摘要[/bold cyan]",
                 title_align="left",
                 border_style="dim cyan",
                 expand=False,
@@ -330,15 +330,15 @@ class StreamRenderer:
         )
 
     def _render_subagent_end(self, event: ToolCallEvent) -> None:
-        """渲染 fork 子代理结束。"""
+        """渲染 subagent 结束。"""
         status = "完成" if event.subagent_success else "失败"
         color = "green" if event.subagent_success else "red"
         if self._is_narrow():
             icon = "✅" if event.subagent_success else "❌"
-            self._console.print(f"  🧵 fork 子代理{icon}{status}")
+            self._console.print(f"  🧵 subagent {icon}{status}")
         else:
             self._console.print(
-                f"  🧵 fork 子代理 [bold {color}]{status}[/bold {color}]"
+                f"  🧵 subagent [bold {color}]{status}[/bold {color}]"
             )
 
     def _render_chat_summary(self, event: ToolCallEvent) -> None:
@@ -348,15 +348,18 @@ class StreamRenderer:
             return
 
         elapsed_str = _format_elapsed(event.elapsed_seconds)
+        token_str = self._format_token_usage(event)
 
         if self._is_narrow():
             self._console.print()
-            self._console.print(
-                f"📋 {event.total_tool_calls} 次调用 · "
-                f"✅{event.success_count} ❌{event.failure_count} · "
+            parts = [
+                f"📋 {event.total_tool_calls} 次调用",
+                f"✅{event.success_count} ❌{event.failure_count}",
                 f"⏱ {elapsed_str}",
-                style="dim",
-            )
+            ]
+            if token_str:
+                parts.append(f"🔤 {token_str}")
+            self._console.print(" · ".join(parts), style="dim")
             return
 
         # 构建摘要表格
@@ -372,6 +375,8 @@ class StreamRenderer:
         )
         table.add_row("迭代轮次", f"{event.total_iterations}")
         table.add_row("总耗时", f"[bold]{elapsed_str}[/bold]")
+        if token_str:
+            table.add_row("Token 用量", token_str)
 
         self._console.print()
         self._console.print(
@@ -384,6 +389,15 @@ class StreamRenderer:
                 padding=(0, 2),
             )
         )
+    @staticmethod
+    def _format_token_usage(event: ToolCallEvent) -> str:
+        """格式化 token 用量为可读字符串，无数据时返回空串。"""
+        if event.total_tokens <= 0:
+            return ""
+        prompt = f"{event.prompt_tokens:,}"
+        completion = f"{event.completion_tokens:,}"
+        total = f"{event.total_tokens:,}"
+        return f"[dim cyan]{prompt}[/dim cyan] 输入 + [dim cyan]{completion}[/dim cyan] 输出 = [bold cyan]{total}[/bold cyan]"
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -421,14 +435,14 @@ class StreamRenderer:
                 self._console.print(f"🔀 路由: {skills}")
             elif event.event_type == EventType.SUBAGENT_START:
                 reason = event.subagent_reason or "触发子代理"
-                self._console.print(f"🧵 fork 启动: {_truncate(reason, _THINKING_SUMMARY_LEN)}")
+                self._console.print(f"🧵 subagent 启动: {_truncate(reason, _THINKING_SUMMARY_LEN)}")
             elif event.event_type == EventType.SUBAGENT_SUMMARY:
                 summary = event.subagent_summary or ""
                 if summary:
-                    self._console.print(f"🧾 fork 摘要: {_truncate(summary, _THINKING_SUMMARY_LEN)}")
+                    self._console.print(f"🧾 subagent 摘要: {_truncate(summary, _THINKING_SUMMARY_LEN)}")
             elif event.event_type == EventType.SUBAGENT_END:
                 status = "完成" if event.subagent_success else "失败"
-                self._console.print(f"🧵 fork 结束: {status}")
+                self._console.print(f"🧵 subagent 结束: {status}")
             elif event.event_type == EventType.CHAT_SUMMARY:
                 if event.total_tool_calls > 0:
                     self._console.print(

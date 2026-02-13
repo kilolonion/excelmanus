@@ -7,10 +7,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
 import sys
+from contextlib import suppress
+from typing import Callable
 
 from rich.console import Console
+from rich.cells import cell_len
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -30,7 +35,8 @@ except ImportError:  # pragma: no cover - 依赖缺失时走 Rich 输入回退
 
 from excelmanus import __version__
 from excelmanus.config import ConfigError, load_config
-from excelmanus.engine import AgentEngine
+from excelmanus.engine import AgentEngine, ChatResult
+from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger, setup_logging
 from excelmanus.renderer import StreamRenderer
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
@@ -81,7 +87,7 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/undo",
 )
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
-_SUBAGENT_ARGUMENTS = ("status", "on", "off")
+_SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
 _DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
 
 
@@ -102,6 +108,168 @@ def _extract_slash_raw_args(user_input: str) -> str:
         return ""
     _, _, raw_args = user_input[1:].partition(" ")
     return raw_args.strip()
+
+
+def _parse_skills_payload_options(tokens: list[str], start_idx: int) -> dict:
+    """解析 `--json` / `--json-file` 负载参数。"""
+    json_text: str | None = None
+    json_file: str | None = None
+    idx = start_idx
+    while idx < len(tokens):
+        option = tokens[idx]
+        if option == "--json":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("`--json` 缺少参数。")
+            if json_text is not None or json_file is not None:
+                raise ValueError("`--json` 与 `--json-file` 只能二选一。")
+            json_text = tokens[idx]
+        elif option == "--json-file":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("`--json-file` 缺少文件路径。")
+            if json_text is not None or json_file is not None:
+                raise ValueError("`--json` 与 `--json-file` 只能二选一。")
+            json_file = tokens[idx]
+        else:
+            raise ValueError(f"未知参数：{option}")
+        idx += 1
+
+    if json_text is None and json_file is None:
+        raise ValueError("缺少 payload，请使用 `--json` 或 `--json-file`。")
+
+    if json_file is not None:
+        with open(json_file, "r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+    else:
+        assert json_text is not None
+        payload = json.loads(json_text)
+
+    if not isinstance(payload, dict):
+        raise ValueError("payload 必须为 JSON 对象。")
+    return payload
+
+
+def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
+    """处理 `/skills ...` 子命令。返回是否已处理。"""
+    if not user_input.startswith("/skills "):
+        return False
+    try:
+        tokens = shlex.split(user_input)
+    except ValueError as exc:
+        console.print(f"  [red]✗ 命令解析失败：{exc}[/red]")
+        return True
+
+    if len(tokens) < 2:
+        return False
+
+    sub = tokens[1].lower()
+    if sub == "list":
+        rows = engine.list_skillpacks_detail()
+        if not rows:
+            console.print("  [dim]当前没有已加载的 Skillpack。[/dim]")
+            return True
+        table = Table(show_header=True, expand=False)
+        table.add_column("name", style="magenta")
+        table.add_column("source", style="cyan")
+        table.add_column("writable", style="green")
+        table.add_column("description")
+        for row in rows:
+            table.add_row(
+                str(row.get("name", "")),
+                str(row.get("source", "")),
+                "yes" if bool(row.get("writable", False)) else "no",
+                str(row.get("description", "")),
+            )
+        console.print()
+        console.print(table)
+        return True
+
+    if sub == "get":
+        if len(tokens) != 3:
+            console.print("  [yellow]用法：/skills get <name>[/yellow]")
+            return True
+        name = tokens[2]
+        detail = engine.get_skillpack_detail(name)
+        console.print(
+            json.dumps(detail, ensure_ascii=False, indent=2)
+        )
+        return True
+
+    if sub == "create":
+        if len(tokens) < 5:
+            console.print(
+                "  [yellow]用法：/skills create <name> --json '<payload>' "
+                "或 --json-file <path>[/yellow]"
+            )
+            return True
+        name = tokens[2]
+        payload = _parse_skills_payload_options(tokens, 3)
+        detail = engine.create_skillpack(name, payload, actor="cli")
+        _sync_skill_command_suggestions(engine)
+        console.print(
+            json.dumps(
+                {"status": "created", "name": detail.get("name"), "detail": detail},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return True
+
+    if sub == "patch":
+        if len(tokens) < 5:
+            console.print(
+                "  [yellow]用法：/skills patch <name> --json '<payload>' "
+                "或 --json-file <path>[/yellow]"
+            )
+            return True
+        name = tokens[2]
+        payload = _parse_skills_payload_options(tokens, 3)
+        detail = engine.patch_skillpack(name, payload, actor="cli")
+        _sync_skill_command_suggestions(engine)
+        console.print(
+            json.dumps(
+                {"status": "updated", "name": detail.get("name"), "detail": detail},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return True
+
+    if sub == "delete":
+        if len(tokens) < 3:
+            console.print("  [yellow]用法：/skills delete <name> [--yes][/yellow]")
+            return True
+        name = tokens[2]
+        flags = set(tokens[3:])
+        if flags - {"--yes"}:
+            console.print("  [yellow]仅支持参数：--yes[/yellow]")
+            return True
+        if "--yes" not in flags:
+            console.print("  [yellow]删除需确认，请追加 `--yes`。[/yellow]")
+            return True
+        detail = engine.delete_skillpack(name, actor="cli", reason="cli_delete")
+        _sync_skill_command_suggestions(engine)
+        console.print(
+            json.dumps(
+                {"status": "deleted", "name": detail.get("name"), "detail": detail},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return True
+
+    console.print(
+        "  [yellow]未知 /skills 子命令。可用：list/get/create/patch/delete[/yellow]"
+    )
+    return True
+
+
+def _reply_text(result: ChatResult | str) -> str:
+    """兼容 chat() 新旧返回类型，统一提取展示文本。"""
+    if isinstance(result, ChatResult):
+        return result.reply
+    return str(result)
 
 
 def _load_skill_command_rows(engine: AgentEngine) -> list[tuple[str, str]]:
@@ -309,7 +477,14 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     table.add_row("/history", "显示当前会话的对话历史摘要")
     table.add_row("/clear", "清除当前对话历史")
     table.add_row("/skills", "查看已加载 Skillpacks 与本轮路由结果")
-    table.add_row("/subagent [on|off|status]", "会话级 fork 子代理开关")
+    table.add_row("/skills list", "列出全部 Skillpack 摘要")
+    table.add_row("/skills get <name>", "查看单个 Skillpack 详情")
+    table.add_row("/skills create <name> --json/--json-file", "创建 project Skillpack")
+    table.add_row("/skills patch <name> --json/--json-file", "更新 project Skillpack")
+    table.add_row("/skills delete <name> [--yes]", "软删除 project Skillpack")
+    table.add_row("/subagent [on|off|status|list]", "会话级 subagent 开关与列表")
+    table.add_row("/subagent run -- <task>", "自动选择 subagent 执行任务")
+    table.add_row("/subagent run <agent> -- <task>", "指定 subagent 执行任务")
     table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
     table.add_row("/accept <id>", "执行待确认高风险操作")
     table.add_row("/reject <id>", "拒绝待确认高风险操作")
@@ -421,6 +596,119 @@ def _render_skills(engine: AgentEngine) -> None:
     console.print()
 
 
+def _is_interactive_terminal() -> bool:
+    """判断当前是否交互式终端。"""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+class _LiveStatusTicker:
+    """CLI 动态状态提示：在等待回复期间输出灰色滚动文本。"""
+
+    _FRAMES = ("...", "..", ".")
+
+    def __init__(self, console: Console, *, enabled: bool, interval: float = 0.3) -> None:
+        self._console = console
+        self._enabled = enabled
+        self._interval = interval
+        self._status_label = "思考中"
+        self._frame_index = 0
+        self._task: asyncio.Task[None] | None = None
+        self._last_line_width = 0
+
+    async def start(self) -> None:
+        """启动动态提示。"""
+        if not self._enabled or self._task is not None:
+            return
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        """停止动态提示并清理状态行。"""
+        task = self._task
+        self._task = None
+
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        if self._enabled:
+            self._clear_line()
+
+    def wrap_handler(
+        self,
+        handler: Callable[[ToolCallEvent], None],
+    ) -> Callable[[ToolCallEvent], None]:
+        """包装事件回调：先更新状态提示，再执行原渲染逻辑。"""
+        if not self._enabled:
+            return handler
+
+        def _wrapped(event: ToolCallEvent) -> None:
+            self._clear_line()
+            self._update_state_from_event(event)
+            handler(event)
+
+        return _wrapped
+
+    async def _run(self) -> None:
+        while True:
+            suffix = self._FRAMES[self._frame_index % len(self._FRAMES)]
+            self._frame_index += 1
+            line = f"{self._status_label}{suffix}"
+            line_width = cell_len(line)
+            self._last_line_width = max(self._last_line_width, line_width)
+            padding = " " * max(self._last_line_width - line_width, 0)
+            self._console.print(Text(f"{line}{padding}", style="dim"), end="\r")
+            await asyncio.sleep(self._interval)
+
+    def _update_state_from_event(self, event: ToolCallEvent) -> None:
+        if event.event_type == EventType.TOOL_CALL_START:
+            tool_name = event.tool_name.strip()
+            self._status_label = (
+                f"调用工具 {tool_name}" if tool_name else "调用工具"
+            )
+            return
+        if event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_SUMMARY):
+            self._status_label = "调用子代理"
+            return
+        if event.event_type == EventType.CHAT_SUMMARY:
+            self._status_label = "整理结果"
+            return
+        # 默认回到思考态
+        self._status_label = "思考中"
+
+    def _clear_line(self) -> None:
+        if self._last_line_width <= 0:
+            return
+        self._console.print(" " * self._last_line_width, end="\r")
+
+
+async def _chat_with_feedback(
+    engine: AgentEngine,
+    *,
+    user_input: str,
+    renderer: StreamRenderer,
+    slash_command: str | None = None,
+    raw_args: str | None = None,
+) -> str:
+    """统一封装 chat 调用，增加等待期动态状态反馈。"""
+    ticker = _LiveStatusTicker(console, enabled=_is_interactive_terminal())
+    event_handler = ticker.wrap_handler(renderer.handle_event)
+
+    await ticker.start()
+    try:
+        chat_kwargs: dict[str, object] = {"on_event": event_handler}
+        if slash_command is not None:
+            chat_kwargs["slash_command"] = slash_command
+        if raw_args is not None:
+            chat_kwargs["raw_args"] = raw_args
+        return _reply_text(await engine.chat(user_input, **chat_kwargs))
+    finally:
+        await ticker.stop()
+
+
 async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
     _sync_skill_command_suggestions(engine)
@@ -459,11 +747,21 @@ async def _repl_loop(engine: AgentEngine) -> None:
             _render_skills(engine)
             continue
 
+        if user_input.startswith("/skills "):
+            try:
+                handled = _handle_skills_subcommand(engine, user_input)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("处理 /skills 子命令失败: %s", exc, exc_info=True)
+                console.print(f"  [red]✗ /skills 子命令执行失败：{exc}[/red]")
+                handled = True
+            if handled:
+                continue
+
         # 会话控制命令统一走 engine.chat（与 API 行为一致）
         lowered_parts = user_input.lower().split()
         lowered_cmd = lowered_parts[0] if lowered_parts else ""
         if lowered_cmd in _SESSION_CONTROL_COMMAND_ALIASES:
-            reply = await engine.chat(user_input)
+            reply = _reply_text(await engine.chat(user_input))
             console.print(f"  [cyan]{reply}[/cyan]")
             continue
 
@@ -486,9 +784,10 @@ async def _repl_loop(engine: AgentEngine) -> None:
             try:
                 renderer = StreamRenderer(console)
                 console.print()
-                reply = await engine.chat(
-                    user_input,
-                    on_event=renderer.handle_event,
+                reply = await _chat_with_feedback(
+                    engine,
+                    user_input=user_input,
+                    renderer=renderer,
                     slash_command=resolved_skill,
                     raw_args=raw_args,
                 )
@@ -523,7 +822,11 @@ async def _repl_loop(engine: AgentEngine) -> None:
         try:
             renderer = StreamRenderer(console)
             console.print()  # 空行分隔
-            reply = await engine.chat(user_input, on_event=renderer.handle_event)
+            reply = await _chat_with_feedback(
+                engine,
+                user_input=user_input,
+                renderer=renderer,
+            )
 
             # 使用 Rich Markdown 渲染最终回复
             console.print()

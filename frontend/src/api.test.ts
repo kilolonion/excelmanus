@@ -156,6 +156,7 @@ describe('checkHealth', () => {
     const mockHealth = {
       status: 'ok',
       version: '3.0.0',
+      model: 'test-model',
       tools: ['read_excel'],
       skillpacks: ['data_basic'],
     }
