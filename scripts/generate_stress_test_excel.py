@@ -30,7 +30,7 @@ from openpyxl.styles import (
     NamedStyle, Protection
 )
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
-from openpyxl.chart.series import DataPoint
+from openpyxl.chart.series import DataPoint, SeriesLabel
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.comments import Comment
@@ -694,12 +694,12 @@ def create_financial_report(wb: Workbook):
     # 营业收入
     data1 = Reference(ws, min_col=2, max_col=5, min_row=3, max_row=3)
     chart.add_data(data1, from_rows=True, titles_from_data=False)
-    chart.series[0].title = "营业收入"
+    chart.series[0].tx = SeriesLabel(v="营业收入")
 
     # 净利润
     data2 = Reference(ws, min_col=2, max_col=5, min_row=18, max_row=18)
     chart.add_data(data2, from_rows=True, titles_from_data=False)
-    chart.series[1].title = "净利润"
+    chart.series[1].tx = SeriesLabel(v="净利润")
 
     cats = Reference(ws, min_col=2, max_col=5, min_row=2)
     chart.set_categories(cats)
@@ -852,3 +852,488 @@ def create_matrix_sheet(wb: Workbook):
         ws.column_dimensions[get_column_letter(i)].width = 12
 
     return ws
+
+
+# ── Sheet 9: 日志数据（长文本、时间戳） ──────────────────
+
+def create_log_sheet(wb: Workbook):
+    ws = wb.create_sheet("系统日志")
+    ws.sheet_properties.tabColor = "808080"
+
+    headers = ["时间戳", "级别", "模块", "用户", "操作", "详细信息", "IP地址", "耗时(ms)"]
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=h)
+    apply_header_style(ws, 1, len(headers))
+
+    levels = ["INFO", "WARN", "ERROR", "DEBUG", "FATAL"]
+    level_fills = {
+        "INFO": FILL_LIGHT_BLUE, "WARN": FILL_LIGHT_YELLOW,
+        "ERROR": FILL_LIGHT_RED, "DEBUG": FILL_LIGHT_GREEN,
+        "FATAL": PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid"),
+    }
+    level_fonts = {
+        "FATAL": Font(bold=True, color="FFFFFF"),
+        "ERROR": Font(bold=True, color="CC0000"),
+    }
+
+    modules = ["auth", "payment", "order", "inventory", "report", "api", "scheduler", "cache"]
+    actions = [
+        "用户登录成功", "用户登录失败：密码错误", "创建订单", "取消订单",
+        "支付成功", "支付超时", "库存不足告警", "缓存命中",
+        "缓存未命中", "API调用超时", "数据库连接池耗尽", "定时任务执行完成",
+        "文件上传成功", "权限校验失败", "数据导出完成", "系统健康检查通过",
+    ]
+
+    for i in range(1000):
+        row = i + 2
+        ts = datetime.datetime(2025, 1, 1) + datetime.timedelta(
+            seconds=random.randint(0, 86400 * 30))
+        level = random.choices(levels, weights=[50, 20, 15, 10, 5])[0]
+        module = random.choice(modules)
+        user = rand_name()
+        action = random.choice(actions)
+
+        detail = f"[{module.upper()}] {action} | session={random.randint(10000,99999)} | " \
+                 f"trace_id={''.join(random.choices(string.hexdigits[:16], k=32))}"
+        ip = f"192.168.{random.randint(1,254)}.{random.randint(1,254)}"
+        elapsed = round(random.uniform(0.5, 5000), 2)
+
+        ws.cell(row=row, column=1, value=ts).number_format = "YYYY-MM-DD HH:MM:SS"
+        lvl_cell = ws.cell(row=row, column=2, value=level)
+        if level in level_fills:
+            lvl_cell.fill = level_fills[level]
+        if level in level_fonts:
+            lvl_cell.font = level_fonts[level]
+        ws.cell(row=row, column=3, value=module)
+        ws.cell(row=row, column=4, value=user)
+        ws.cell(row=row, column=5, value=action)
+
+        ws.cell(row=row, column=6, value=detail).alignment = Alignment(wrap_text=True)
+        ws.cell(row=row, column=7, value=ip)
+        elapsed_cell = ws.cell(row=row, column=8, value=elapsed)
+        elapsed_cell.number_format = "#,##0.00"
+        if elapsed > 3000:
+            elapsed_cell.fill = FILL_LIGHT_RED
+            elapsed_cell.font = Font(bold=True, color="FF0000")
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = "A1:H1001"
+    set_col_widths(ws, {"A": 22, "B": 8, "C": 12, "D": 10,
+                        "E": 20, "F": 60, "G": 16, "H": 12})
+    return ws
+
+
+# ── Sheet 10: KPI仪表盘（复杂布局） ─────────────────────
+
+def create_kpi_dashboard(wb: Workbook):
+    ws = wb.create_sheet("KPI仪表盘")
+    ws.sheet_properties.tabColor = "C00000"
+
+    ws.merge_cells("A1:L1")
+    ws["A1"] = "2025年度 KPI 仪表盘"
+    ws["A1"].font = Font(name="微软雅黑", size=20, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 50
+
+    # KPI 卡片区域
+    kpis = [
+        ("总营收", "98,000,000元", "↑ 19.5%", "C00000"),
+        ("净利润", "12,250,000元", "↑ 22.3%", "00B050"),
+        ("客户数", "15,832", "↑ 8.7%", "0070C0"),
+        ("订单量", "42,156", "↑ 15.2%", "7030A0"),
+        ("退货率", "3.2%", "↓ 1.1%", "ED7D31"),
+        ("满意度", "4.6/5.0", "↑ 0.3", "FFC000"),
+    ]
+
+    for i, (label, value, change, color) in enumerate(kpis):
+        col_start = i * 2 + 1
+        col_end = col_start + 1
+        # 标签行
+        ws.merge_cells(start_row=3, start_column=col_start, end_row=3, end_column=col_end)
+        cell = ws.cell(row=3, column=col_start, value=label)
+        cell.font = Font(size=10, color="808080")
+        cell.alignment = Alignment(horizontal="center")
+
+        # 数值行
+        ws.merge_cells(start_row=4, start_column=col_start, end_row=4, end_column=col_end)
+        val_cell = ws.cell(row=4, column=col_start, value=value)
+        val_cell.font = Font(size=18, bold=True, color=color)
+        val_cell.alignment = Alignment(horizontal="center")
+        # 变化行
+        ws.merge_cells(start_row=5, start_column=col_start, end_row=5, end_column=col_end)
+        chg_cell = ws.cell(row=5, column=col_start, value=change)
+        chg_color = "00B050" if "↑" in change else "FF0000"
+        chg_cell.font = Font(size=11, color=chg_color)
+        chg_cell.alignment = Alignment(horizontal="center")
+
+        # 卡片边框
+        for r in range(3, 6):
+            for c in range(col_start, col_end + 1):
+                ws.cell(row=r, column=c).border = Border(
+                    left=Side(style="medium" if c == col_start else "thin"),
+                    right=Side(style="medium" if c == col_end else "thin"),
+                    top=Side(style="medium" if r == 3 else "thin"),
+                    bottom=Side(style="medium" if r == 5 else "thin"),
+                )
+
+    # 月度趋势数据表
+    ws.merge_cells("A7:L7")
+    ws["A7"] = "月度关键指标趋势"
+    ws["A7"].font = Font(size=14, bold=True, color="333333")
+    ws["A7"].alignment = Alignment(horizontal="center")
+
+    trend_headers = ["月份", "营收", "成本", "利润", "订单量",
+                     "客单价", "新客户", "流失客户", "NPS评分",
+                     "转化率", "复购率", "库存周转"]
+    for col, h in enumerate(trend_headers, 1):
+        ws.cell(row=8, column=col, value=h)
+    apply_header_style(ws, 8, len(trend_headers))
+
+    for i in range(12):
+        row = i + 9
+        ws.cell(row=row, column=1, value=f"2025年{i+1:02d}月")
+        ws.cell(row=row, column=2, value=round(random.uniform(6e6, 12e6), 2)).number_format = MONEY_FMT
+        ws.cell(row=row, column=3, value=round(random.uniform(3e6, 7e6), 2)).number_format = MONEY_FMT
+        ws.cell(row=row, column=4).value = f"=B{row}-C{row}"
+        ws.cell(row=row, column=4).number_format = MONEY_FMT
+        ws.cell(row=row, column=5, value=random.randint(2000, 5000)).number_format = INT_FMT
+        ws.cell(row=row, column=6).value = f"=B{row}/E{row}"
+        ws.cell(row=row, column=6).number_format = MONEY_FMT
+        ws.cell(row=row, column=7, value=random.randint(100, 800)).number_format = INT_FMT
+        ws.cell(row=row, column=8, value=random.randint(20, 150)).number_format = INT_FMT
+        ws.cell(row=row, column=9, value=round(random.uniform(30, 80), 1))
+        ws.cell(row=row, column=10, value=round(random.uniform(0.02, 0.12), 4)).number_format = PCT_FMT
+        ws.cell(row=row, column=11, value=round(random.uniform(0.15, 0.45), 4)).number_format = PCT_FMT
+        ws.cell(row=row, column=12, value=round(random.uniform(3, 12), 2))
+        if i % 2 == 0:
+            for c in range(1, 13):
+                ws.cell(row=row, column=c).fill = FILL_LIGHT_RED
+
+    apply_data_border(ws, 8, 20, 12)
+
+    # 营收利润折线图
+    chart = LineChart()
+    chart.title = "月度营收与利润趋势"
+    chart.style = 10
+    chart.width = 24
+    chart.height = 14
+    rev_data = Reference(ws, min_col=2, min_row=8, max_row=20)
+    profit_data = Reference(ws, min_col=4, min_row=8, max_row=20)
+    cats = Reference(ws, min_col=1, min_row=9, max_row=20)
+    chart.add_data(rev_data, titles_from_data=True)
+    chart.add_data(profit_data, titles_from_data=True)
+    chart.set_categories(cats)
+    ws.add_chart(chart, "A22")
+
+    set_col_widths(ws, {get_column_letter(i): 14 for i in range(1, 13)})
+    return ws
+
+
+# ── Sheet 11: 数据类型大全 ──────────────────────────────
+
+def create_data_types_sheet(wb: Workbook):
+    """各种数据类型和格式的综合展示"""
+    ws = wb.create_sheet("数据类型大全")
+    ws.sheet_properties.tabColor = "00B0F0"
+
+    ws.merge_cells("A1:F1")
+    ws["A1"] = "数据类型与格式化综合测试"
+    ws["A1"].font = TITLE_FONT
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    sections = [
+        ("数字格式", [
+            ("整数", 12345, "#,##0"),
+            ("负数", -9876, "#,##0;[Red]-#,##0"),
+            ("小数", 3.14159265, "0.0000"),
+            ("科学计数", 0.00000123, "0.00E+00"),
+            ("百分比", 0.8567, "0.00%"),
+            ("分数", 0.333333, "# ?/?"),
+            ("人民币", 99999.99, '¥#,##0.00'),
+            ("美元", 1234.56, '$#,##0.00'),
+            ("千分位", 1234567890, "#,##0"),
+            ("自定义", 42, '000000'),
+        ]),
+
+        ("日期时间格式", [
+            ("标准日期", datetime.date(2025, 6, 15), "YYYY-MM-DD"),
+            ("中文日期", datetime.date(2025, 6, 15), 'YYYY"年"MM"月"DD"日"'),
+            ("短日期", datetime.date(2025, 6, 15), "MM/DD"),
+            ("时间", datetime.time(14, 30, 45), "HH:MM:SS"),
+            ("日期时间", datetime.datetime(2025, 6, 15, 14, 30), "YYYY-MM-DD HH:MM"),
+            ("星期", datetime.date(2025, 6, 15), "DDDD"),
+            ("月份名", datetime.date(2025, 6, 15), "MMMM YYYY"),
+        ]),
+        ("文本格式", [
+            ("短文本", "Hello World", "@"),
+            ("中文长文本", "这是一段较长的中文文本，用于测试单元格的自动换行和文本溢出处理能力。" * 3, "@"),
+            ("特殊字符", "!@#$%^&*()_+-=[]{}|;':\",./<>?", "@"),
+            ("Unicode", "🎉🚀💡📊🔥✅❌⚠️🎯📈", "@"),
+            ("换行文本", "第一行\n第二行\n第三行", "@"),
+            ("空字符串", "", "@"),
+            ("纯空格", "   ", "@"),
+        ]),
+
+        ("布尔与特殊值", [
+            ("True", True, ""),
+            ("False", False, ""),
+            ("零", 0, "#,##0"),
+            ("None/空", None, ""),
+            ("极大数", 99999999999999, "#,##0"),
+            ("极小数", 0.000000001, "0.000000000"),
+            ("负百分比", -0.1234, "0.00%"),
+        ]),
+    ]
+
+    row = 3
+    for section_name, items in sections:
+        # 分区标题
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        ws.cell(row=row, column=1, value=f"▶ {section_name}")
+        ws.cell(row=row, column=1).font = Font(size=13, bold=True, color="FFFFFF")
+        ws.cell(row=row, column=1).fill = PatternFill(
+            start_color="4472C4", end_color="4472C4", fill_type="solid")
+        ws.cell(row=row, column=1).alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[row].height = 28
+        row += 1
+
+        sub_headers = ["描述", "原始值", "格式化显示", "数据类型", "格式代码", "字节长度"]
+        for col, h in enumerate(sub_headers, 1):
+            ws.cell(row=row, column=col, value=h)
+        apply_header_style(ws, row, len(sub_headers))
+        row += 1
+
+        for desc, value, fmt in items:
+            ws.cell(row=row, column=1, value=desc)
+            ws.cell(row=row, column=2, value=repr(value) if value is not None else "None")
+            cell = ws.cell(row=row, column=3, value=value)
+            if fmt:
+                cell.number_format = fmt
+            if isinstance(value, str) and "\n" in value:
+                cell.alignment = Alignment(wrap_text=True)
+                ws.row_dimensions[row].height = 45
+            ws.cell(row=row, column=4, value=type(value).__name__ if value is not None else "NoneType")
+            ws.cell(row=row, column=5, value=fmt if fmt else "(默认)")
+            ws.cell(row=row, column=5).font = Font(name="Consolas", size=9)
+            byte_len = len(str(value).encode("utf-8")) if value is not None else 0
+            ws.cell(row=row, column=6, value=byte_len)
+            if row % 2 == 0:
+                for c in range(1, 7):
+                    ws.cell(row=row, column=c).fill = FILL_LIGHT_BLUE
+            row += 1
+        row += 1  # 分区间空行
+
+    apply_data_border(ws, 3, row - 2, 6)
+    set_col_widths(ws, {"A": 16, "B": 30, "C": 30, "D": 14, "E": 24, "F": 12})
+    return ws
+
+
+# ── Sheet 12: 考勤表（复杂合并+条件格式） ────────────────
+
+def create_attendance_sheet(wb: Workbook):
+    ws = wb.create_sheet("考勤表")
+    ws.sheet_properties.tabColor = "FF6600"
+
+    ws.merge_cells("A1:AG1")
+    ws["A1"] = "2025年1月 员工考勤表"
+    ws["A1"].font = Font(name="微软雅黑", size=16, bold=True, color="FFFFFF")
+    ws["A1"].fill = PatternFill(start_color="FF6600", end_color="FF6600", fill_type="solid")
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 40
+
+    # 表头：工号、姓名、部门 + 31天 + 出勤天数、迟到次数、缺勤天数
+    headers = ["工号", "姓名", "部门"]
+    for d in range(1, 32):
+        headers.append(f"{d}日")
+    headers.extend(["出勤", "迟到", "缺勤"])
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=2, column=col, value=h)
+    apply_header_style(ws, 2, len(headers))
+
+    # 日期列宽度较窄
+    for i in range(4, 35):
+        ws.column_dimensions[get_column_letter(i)].width = 5
+
+    marks = ["✓", "✓", "✓", "✓", "✓", "迟", "×", "假", "✓", "✓"]
+    mark_fills = {
+        "✓": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+        "迟": PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"),
+        "×": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
+        "假": PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid"),
+    }
+    mark_fonts = {
+        "✓": Font(color="006100"), "迟": Font(color="9C6500"),
+        "×": Font(color="9C0006", bold=True), "假": Font(color="003399"),
+    }
+
+    for i in range(80):
+        row = i + 3
+        ws.cell(row=row, column=1, value=f"EMP{i+1:04d}")
+        ws.cell(row=row, column=2, value=rand_name())
+        ws.cell(row=row, column=3, value=rand_department())
+
+        for d in range(31):
+            col = d + 4
+            # 周末自动标灰
+            day_date = datetime.date(2025, 1, d + 1)
+            if day_date.weekday() >= 5:
+                ws.cell(row=row, column=col, value="休")
+                ws.cell(row=row, column=col).fill = PatternFill(
+                    start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+                ws.cell(row=row, column=col).font = Font(color="808080")
+            else:
+                mark = random.choice(marks)
+                cell = ws.cell(row=row, column=col, value=mark)
+                cell.alignment = Alignment(horizontal="center")
+                if mark in mark_fills:
+                    cell.fill = mark_fills[mark]
+                if mark in mark_fonts:
+                    cell.font = mark_fonts[mark]
+
+        # 统计公式
+        day_range_start = get_column_letter(4)
+        day_range_end = get_column_letter(34)
+        # 出勤天数 = COUNTIF(D:AH, "✓")
+        ws.cell(row=row, column=35).value = \
+            f'=COUNTIF({day_range_start}{row}:{day_range_end}{row},"✓")'
+        ws.cell(row=row, column=35).number_format = INT_FMT
+        ws.cell(row=row, column=35).font = Font(bold=True)
+        # 迟到次数
+        ws.cell(row=row, column=36).value = \
+            f'=COUNTIF({day_range_start}{row}:{day_range_end}{row},"迟")'
+        ws.cell(row=row, column=36).number_format = INT_FMT
+        # 缺勤天数
+        ws.cell(row=row, column=37).value = \
+            f'=COUNTIF({day_range_start}{row}:{day_range_end}{row},"×")'
+        ws.cell(row=row, column=37).number_format = INT_FMT
+
+    apply_data_border(ws, 2, 82, 37)
+    ws.freeze_panes = "D3"
+    set_col_widths(ws, {"A": 10, "B": 10, "C": 10,
+                        "AI": 8, "AJ": 8, "AK": 8})
+    return ws
+
+
+# ── Sheet 13: 隐藏工作表（测试隐藏属性） ────────────────
+
+def create_hidden_sheet(wb: Workbook):
+    ws = wb.create_sheet("_隐藏配置")
+    ws.sheet_state = "hidden"
+
+    ws["A1"] = "此工作表为隐藏配置表"
+    ws["A1"].font = Font(bold=True, color="FF0000")
+
+    # 配置数据
+    configs = [
+        ("系统版本", "3.0.0"),
+        ("数据库连接", "postgresql://localhost:5432/excelmanus"),
+        ("缓存TTL", "3600"),
+        ("最大并发", "100"),
+        ("日志级别", "INFO"),
+        ("密钥哈希", "sha256:a1b2c3d4e5f6..."),
+        ("生成时间", str(datetime.datetime.now())),
+        ("生成工具", "generate_stress_test_excel.py"),
+    ]
+    for i, (key, val) in enumerate(configs):
+        ws.cell(row=i + 3, column=1, value=key).font = Font(bold=True)
+        ws.cell(row=i + 3, column=2, value=val)
+
+    # 下拉列表数据源
+    ws["D1"] = "状态列表"
+    ws["D1"].font = Font(bold=True)
+    statuses = ["已完成", "进行中", "已取消", "待审核", "已退款"]
+    for i, s in enumerate(statuses):
+        ws.cell(row=i + 2, column=4, value=s)
+
+    ws["E1"] = "部门列表"
+    ws["E1"].font = Font(bold=True)
+    depts = ["销售部", "市场部", "技术部", "财务部", "人事部",
+             "运营部", "产品部", "客服部", "法务部", "采购部"]
+    for i, d in enumerate(depts):
+        ws.cell(row=i + 2, column=5, value=d)
+
+    return ws
+
+
+# ── 主函数 ────────────────────────────────────────────────
+
+def main():
+    """生成压力测试 Excel 文件"""
+    print("🚀 开始生成压力测试 Excel 文件...")
+    random.seed(42)  # 固定种子，保证可复现
+
+    wb = Workbook()
+
+    print("  📊 [1/12] 销售明细（2000行）...")
+    create_sales_detail(wb)
+
+    print("  👥 [2/12] 员工花名册（500行）...")
+    create_employee_roster(wb)
+
+    print("  📈 [3/12] 月度汇总透视表...")
+    create_monthly_pivot(wb)
+
+    print("  🏙️ [4/12] 城市分析（含图表）...")
+    create_city_analysis(wb)
+
+    print("  📦 [5/12] 产品目录（120+产品）...")
+    create_product_catalog(wb)
+
+    print("  💰 [6/12] 财务报表（复杂公式）...")
+    create_financial_report(wb)
+
+    print("  🔗 [7/12] 跨表引用...")
+    create_cross_reference(wb)
+
+    print("  🧮 [8/12] 多维矩阵（大量合并）...")
+    create_matrix_sheet(wb)
+
+    print("  📝 [9/12] 系统日志（1000行）...")
+    create_log_sheet(wb)
+
+    print("  📊 [10/12] KPI仪表盘...")
+    create_kpi_dashboard(wb)
+
+    print("  🔢 [11/12] 数据类型大全...")
+    create_data_types_sheet(wb)
+
+    print("  📅 [12/12] 考勤表（80人×31天）...")
+    create_attendance_sheet(wb)
+
+    print("  🔒 [bonus] 隐藏配置表...")
+    create_hidden_sheet(wb)
+
+    # 保存文件
+    output_path = Path("stress_test_comprehensive.xlsx")
+    print(f"\n  💾 保存到 {output_path}...")
+    wb.save(str(output_path))
+
+    # 输出统计信息
+    file_size = output_path.stat().st_size
+    size_mb = file_size / (1024 * 1024)
+    print(f"\n✅ 生成完成！")
+    print(f"   文件：{output_path.absolute()}")
+    print(f"   大小：{size_mb:.2f} MB ({file_size:,} 字节)")
+    print(f"   工作表数：{len(wb.sheetnames)}")
+    print(f"   工作表列表：")
+    for i, name in enumerate(wb.sheetnames, 1):
+        print(f"     {i:2d}. {name}")
+    print(f"\n📋 覆盖特性：")
+    features = [
+        "2000+ 行销售数据", "500 行员工数据", "48 个月汇总",
+        "16 城市分析", "120+ 产品目录", "4 年财务报表",
+        "跨表公式引用", "三维矩阵（合并单元格）", "1000 行日志",
+        "KPI 仪表盘", "数据类型全覆盖", "80人考勤表",
+        "隐藏工作表", "条件格式（色阶/数据条/图标集）",
+        "数据验证（下拉列表）", "冻结窗格", "自动筛选",
+        "超链接", "批注", "多种图表（柱状/折线/饼图）",
+        "丰富样式（字体/填充/边框/对齐/数字格式）",
+        "SUM/AVERAGE/MAX/MIN/COUNTIF/IF/TEXT 等公式",
+    ]
+    for f in features:
+        print(f"     ✓ {f}")
+
+
+if __name__ == "__main__":
+    main()

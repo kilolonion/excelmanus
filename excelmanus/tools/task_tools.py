@@ -48,7 +48,16 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="task_create",
-            description="创建任务清单，将复杂任务拆解为有序子任务列表",
+            description=(
+                "创建任务清单，将复杂任务拆解为有序子任务列表。"
+                "主动使用此工具的场景："
+                "(1) 任务涉及 3 个或以上操作步骤；"
+                "(2) 需要读取多个文件/sheet 并综合处理；"
+                "(3) 用户一次提出多个相关任务；"
+                "(4) 涉及写入操作且需先读取确认。"
+                "不需要使用的场景：单一简单操作（仅读取一个文件、回答一个问题、少于 3 步的简单任务）。"
+                "如果拿不准是否需要规划，优先创建任务清单。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -69,7 +78,15 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="task_update",
-            description="更新任务项状态（pending → in_progress → completed/failed）",
+            description=(
+                "更新任务项状态（pending → in_progress → completed/failed）。"
+                "规则："
+                "(1) 开始执行某任务前立即标记为 in_progress；"
+                "(2) 完成后立即标记为 completed，不要批量标记；"
+                "(3) 同一时间只有一个任务处于 in_progress；"
+                "(4) 遇到阻塞或错误时保持 in_progress，不要标记为 completed；"
+                "(5) 任务未完全完成（部分实现、存在错误）时禁止标记 completed。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
