@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 _META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
-_ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update")
+_ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_to_subagent")
 
 
 def _to_plain(value: Any) -> Any:
