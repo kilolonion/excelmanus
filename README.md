@@ -67,8 +67,19 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/<skill_name> [args...]`、`exit`。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
 输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`）。
+
+### Accept 门禁与审计
+
+- 非 `fullAccess` 状态下，高风险写操作不会立即执行，而是先进入待确认队列。
+- 使用 `/accept <id>` 执行待确认操作，`/reject <id>` 放弃操作。
+- 每次已执行的高风险操作都会在 `outputs/approvals/<id>/` 下保存审计产物：
+  - `manifest.json`：操作元数据与变更摘要
+  - `changes.patch`：文本文件 unified diff（若有）
+  - `snapshots/`：回滚快照（按需）
+- 对支持回滚的记录可执行 `/undo <id>`。
+- `run_python_script` 仍会进入 accept 流程并落盘审计，但默认不支持自动回滚脚本副作用。
 
 ### API
 

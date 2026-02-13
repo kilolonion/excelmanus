@@ -116,6 +116,9 @@ class TestRenderHelp:
         assert "/clear" in text_str
         assert "/subagent" in text_str
         assert "/fullAccess" in text_str
+        assert "/accept" in text_str
+        assert "/reject" in text_str
+        assert "/undo" in text_str
         assert "exit" in text_str
         assert "quit" in text_str
         assert "Ctrl+C" in text_str
@@ -488,6 +491,30 @@ class TestReplSlashCommands:
             mock_console.input.side_effect = ["/sub_agent on", "exit"]
             _run(_repl_loop(engine))
             engine.chat.assert_called_once_with("/sub_agent on")
+
+    def test_accept_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已执行待确认操作。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/accept apv_1", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/accept apv_1")
+
+    def test_reject_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已拒绝待确认操作。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/reject apv_1", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/reject apv_1")
+
+    def test_undo_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已回滚。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/undo apv_1", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/undo apv_1")
 
     def test_unknown_slash_command(self) -> None:
         """未知斜杠命令应显示警告。"""

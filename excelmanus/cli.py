@@ -54,12 +54,16 @@ _SLASH_COMMANDS = {
     "/sub_agent",
     "/fullaccess",
     "/full_access",
+    "/accept",
+    "/reject",
+    "/undo",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
 _SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
+_APPROVAL_COMMAND_ALIASES = {"/accept", "/reject", "/undo"}
 _SESSION_CONTROL_COMMAND_ALIASES = (
-    _FULL_ACCESS_COMMAND_ALIASES | _SUBAGENT_COMMAND_ALIASES
+    _FULL_ACCESS_COMMAND_ALIASES | _SUBAGENT_COMMAND_ALIASES | _APPROVAL_COMMAND_ALIASES
 )
 
 _SLASH_COMMAND_SUGGESTIONS = (
@@ -72,6 +76,9 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/fullAccess",
     "/full_access",
     "/fullaccess",
+    "/accept",
+    "/reject",
+    "/undo",
 )
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
 _SUBAGENT_ARGUMENTS = ("status", "on", "off")
@@ -249,6 +256,9 @@ def _render_welcome(config: "ExcelManusConfig", skill_count: int) -> None:
     info.append("  /skills", style="green")
     info.append("  /subagent", style="green")
     info.append("  /fullAccess", style="green")
+    info.append("  /accept <id>", style="green")
+    info.append("  /reject <id>", style="green")
+    info.append("  /undo <id>", style="green")
     info.append("  /<skill_name>", style="green")
     info.append("  exit\n", style="green")
 
@@ -301,6 +311,9 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     table.add_row("/skills", "查看已加载 Skillpacks 与本轮路由结果")
     table.add_row("/subagent [on|off|status]", "会话级 fork 子代理开关")
     table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
+    table.add_row("/accept <id>", "执行待确认高风险操作")
+    table.add_row("/reject <id>", "拒绝待确认高风险操作")
+    table.add_row("/undo <id>", "回滚已确认且可回滚的操作")
     table.add_row("/<skill_name> [args...]", "手动调用指定 Skillpack（如 /data_basic）")
     skill_rows = _load_skill_command_rows(engine) if engine is not None else []
     for name, argument_hint in skill_rows:

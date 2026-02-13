@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,7 +13,7 @@ import pytest
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
 from excelmanus.events import EventType
-from excelmanus.skillpacks import ForkPlan, SkillMatchResult
+from excelmanus.skillpacks import SkillMatchResult, Skillpack
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
 
@@ -292,12 +293,12 @@ class TestManualSkillSlashCommand:
         assert result == "ok"
 
         _, kwargs = mock_router.route.call_args
-        assert kwargs["skill_hints"] is None
         assert kwargs["slash_command"] == "data_basic"
         assert kwargs["raw_args"] == "请分析这个文件"
 
     @pytest.mark.asyncio
     async def test_slash_skill_command_overrides_external_skill_hints(self) -> None:
+        """斜杠命令优先级高于外部 skill_hints（skill_hints 已不再传递给 route）。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -320,7 +321,8 @@ class TestManualSkillSlashCommand:
 
         await engine.chat("/data_basic 请分析", skill_hints=["chart_basic"])
         _, kwargs = mock_router.route.call_args
-        assert kwargs["skill_hints"] is None
+        # skill_hints 已从 route 接口中移除，不再传递
+        assert "skill_hints" not in kwargs
         assert kwargs["slash_command"] == "data_basic"
         assert kwargs["raw_args"] == "请分析"
 
@@ -387,10 +389,11 @@ class TestManualSkillSlashCommand:
 
 
 class TestForkSubagentExecution:
-    """真实 fork 子代理执行流程测试。"""
+    """fork 子代理执行流程测试（fork_plan 已移除，子代理不再自动触发）。"""
 
     @pytest.mark.asyncio
-    async def test_chat_runs_fork_subagent_and_injects_summary(self) -> None:
+    async def test_chat_skips_fork_after_fork_plan_removed(self) -> None:
+        """fork_plan 已从 SkillMatchResult 移除，子代理不再自动触发。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -398,22 +401,13 @@ class TestForkSubagentExecution:
         route_result = SkillMatchResult(
             skills_used=["excel_code_runner"],
             tool_scope=["add_numbers"],
-            route_mode="hint_direct+fork+fork_plan",
+            route_mode="hint_direct+fork",
             system_contexts=["[Skillpack] excel_code_runner"],
-            fork_plan=ForkPlan(
-                reason="命中 fork 技能",
-                tool_scope=["add_numbers"],
-                prompt="请先做只读探索并总结。",
-                source_skills=["excel_code_runner"],
-            ),
         )
         engine._route_skills = AsyncMock(return_value=route_result)
 
-        fork_reply = _make_text_response("fork 摘要：发现关键列 A/B，建议先过滤后聚合。")
         main_reply = _make_text_response("主代理执行完成。")
-        engine._client.chat.completions.create = AsyncMock(
-            side_effect=[fork_reply, main_reply]
-        )
+        engine._client.chat.completions.create = AsyncMock(return_value=main_reply)
 
         events = []
 
@@ -422,15 +416,11 @@ class TestForkSubagentExecution:
 
         result = await engine.chat("请处理这个大文件", on_event=_on_event)
         assert result == "主代理执行完成。"
-        assert engine._client.chat.completions.create.call_count == 2
-        assert "+fork_executed" in engine.last_route_result.route_mode
-        assert any(
-            "[ForkSummary]" in ctx for ctx in engine.last_route_result.system_contexts
-        )
+        # 只调用一次 LLM（主代理），不再触发 fork 子代理
+        assert engine._client.chat.completions.create.call_count == 1
+        assert "+fork_executed" not in engine.last_route_result.route_mode
         event_types = [e.event_type for e in events]
-        assert EventType.SUBAGENT_START in event_types
-        assert EventType.SUBAGENT_SUMMARY in event_types
-        assert EventType.SUBAGENT_END in event_types
+        assert EventType.SUBAGENT_START not in event_types
 
     @pytest.mark.asyncio
     async def test_chat_skips_fork_when_subagent_disabled(self) -> None:
@@ -441,14 +431,8 @@ class TestForkSubagentExecution:
         route_result = SkillMatchResult(
             skills_used=["excel_code_runner"],
             tool_scope=["add_numbers"],
-            route_mode="hint_direct+fork+fork_plan",
+            route_mode="hint_direct+fork",
             system_contexts=["[Skillpack] excel_code_runner"],
-            fork_plan=ForkPlan(
-                reason="命中 fork 技能",
-                tool_scope=["add_numbers"],
-                prompt="请先做只读探索并总结。",
-                source_skills=["excel_code_runner"],
-            ),
         )
         engine._route_skills = AsyncMock(return_value=route_result)
 
@@ -459,6 +443,248 @@ class TestForkSubagentExecution:
         assert result == "主代理执行完成。"
         assert engine._client.chat.completions.create.call_count == 1
         assert "+fork_executed" not in engine.last_route_result.route_mode
+
+
+class TestExploreDataSubagent:
+    """explore_data 子代理工具测试（task5）。"""
+
+    @pytest.mark.asyncio
+    async def test_explore_data_tool_call_runs_subagent_and_emits_events(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._execute_subagent_loop = AsyncMock(return_value="探查摘要")
+
+        tc = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="explore_data",
+                arguments=json.dumps(
+                    {"task": "探查销量异常", "file_paths": ["sales.xlsx"]}
+                ),
+            ),
+        )
+
+        events = []
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["explore_data"],
+            on_event=events.append,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.result == "探查摘要"
+        event_types = [e.event_type for e in events]
+        assert EventType.SUBAGENT_START in event_types
+        assert EventType.SUBAGENT_SUMMARY in event_types
+        assert EventType.SUBAGENT_END in event_types
+
+    @pytest.mark.asyncio
+    async def test_explore_data_rejects_invalid_file_paths_type(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        tc = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="explore_data",
+                arguments=json.dumps(
+                    {"task": "探查销量异常", "file_paths": "sales.xlsx"}
+                ),
+            ),
+        )
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["explore_data"],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is False
+        assert "file_paths 必须为字符串数组" in result.result
+
+    @pytest.mark.asyncio
+    async def test_execute_subagent_loop_circuit_breaker(self) -> None:
+        config = _make_config(subagent_max_consecutive_failures=2)
+        registry = ToolRegistry()
+
+        def fail_read_excel() -> str:
+            raise RuntimeError("读取失败")
+
+        registry.register_tool(
+            ToolDef(
+                name="read_excel",
+                description="读取表格",
+                input_schema={"type": "object", "properties": {}},
+                func=fail_read_excel,
+            )
+        )
+        engine = AgentEngine(config, registry)
+
+        # 每轮都让子代理调用 read_excel，触发连续失败熔断
+        tool_resp_1 = _make_tool_call_response([("c1", "read_excel", "{}")])
+        tool_resp_2 = _make_tool_call_response([("c2", "read_excel", "{}")])
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_resp_1, tool_resp_2]
+        )
+
+        summary = await engine._execute_subagent_loop(
+            system_prompt="测试提示",
+            tool_scope=["read_excel"],
+            max_iterations=5,
+        )
+        assert "子代理连续 2 次工具调用失败" in summary
+
+    @pytest.mark.asyncio
+    async def test_execute_subagent_loop_iteration_limit(self) -> None:
+        config = _make_config()
+        registry = ToolRegistry()
+
+        def ok_read_excel() -> str:
+            return "ok"
+
+        registry.register_tool(
+            ToolDef(
+                name="read_excel",
+                description="读取表格",
+                input_schema={"type": "object", "properties": {}},
+                func=ok_read_excel,
+            )
+        )
+        engine = AgentEngine(config, registry)
+
+        # 单轮始终返回 tool_call，触发迭代上限返回
+        tool_resp = _make_tool_call_response([("c1", "read_excel", "{}")])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_resp])
+
+        summary = await engine._execute_subagent_loop(
+            system_prompt="测试提示",
+            tool_scope=["read_excel"],
+            max_iterations=1,
+        )
+        assert "子代理达到最大迭代次数（1）" in summary
+
+
+class TestMetaToolDefinitions:
+    """元工具定义结构与动态更新测试（task6.4）。"""
+
+    def test_build_meta_tools_schema_structure(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mock_router = MagicMock()
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- data_basic：数据处理\n- chart_basic：图表生成",
+            ["data_basic", "chart_basic"],
+        )
+        engine._skill_router = mock_router
+
+        meta_tools = engine._build_meta_tools()
+        assert len(meta_tools) == 2
+        by_name = {tool["function"]["name"]: tool for tool in meta_tools}
+        assert "select_skill" in by_name
+        assert "explore_data" in by_name
+
+        select_tool = by_name["select_skill"]["function"]
+        select_params = select_tool["parameters"]
+        assert "Skill_Catalog" in select_tool["description"]
+        assert select_params["required"] == ["skill_name"]
+        assert select_params["properties"]["skill_name"]["enum"] == [
+            "data_basic",
+            "chart_basic",
+        ]
+        assert "reason" in select_params["properties"]
+
+        explore_tool = by_name["explore_data"]["function"]
+        explore_params = explore_tool["parameters"]
+        assert explore_params["required"] == ["task"]
+        assert explore_params["properties"]["file_paths"]["type"] == "array"
+
+    def test_build_meta_tools_reflects_updated_catalog(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mock_router = MagicMock()
+        mock_router.build_skill_catalog.side_effect = [
+            ("可用技能：\n- data_basic：数据处理", ["data_basic"]),
+            (
+                "可用技能：\n- data_basic：数据处理\n- chart_basic：图表生成",
+                ["data_basic", "chart_basic"],
+            ),
+        ]
+        engine._skill_router = mock_router
+
+        first = engine._build_meta_tools()
+        second = engine._build_meta_tools()
+
+        first_enum = first[0]["function"]["parameters"]["properties"]["skill_name"]["enum"]
+        second_enum = second[0]["function"]["parameters"]["properties"]["skill_name"]["enum"]
+        assert first_enum == ["data_basic"]
+        assert second_enum == ["data_basic", "chart_basic"]
+
+
+class TestMetaToolScopeUpdate:
+    """元工具调用后同轮更新工具范围（task6.1）。"""
+
+    @pytest.mark.asyncio
+    async def test_select_skill_updates_scope_within_same_iteration(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        data_skill = Skillpack(
+            name="data_basic",
+            description="数据处理技能",
+            allowed_tools=["add_numbers"],
+            triggers=["数据"],
+            instructions="使用 add_numbers 进行测试。",
+            source="system",
+            root_dir="/tmp/data_basic",
+        )
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"data_basic": data_skill}
+        mock_loader.get_skillpack.return_value = data_skill
+
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(return_value=data_skill)
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- data_basic：数据处理技能",
+            ["data_basic"],
+        )
+        engine._skill_router = mock_router
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["select_skill"],
+            route_mode="slash_direct",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        first_resp = _make_tool_call_response(
+            [
+                ("call_1", "select_skill", json.dumps({"skill_name": "data_basic"})),
+                ("call_2", "add_numbers", json.dumps({"a": 1, "b": 2})),
+            ]
+        )
+        second_resp = _make_text_response("done")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_resp, second_resp]
+        )
+
+        result = await engine.chat("测试同轮切换")
+        assert result == "done"
+
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        add_numbers_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_2")
+        assert "3" in add_numbers_msg.get("content", "")
 
 
 class TestChatPureText:
@@ -1281,3 +1507,129 @@ async def test_property_20_async_non_blocking(n_calls: int) -> None:
         # 不变量 3：每次调用传入了正确的工具名称
         called_tool_names = [call[0][1] for call in mock_to_thread.call_args_list]
         assert all(name == "add_numbers" for name in called_tool_names)
+
+
+class TestApprovalFlow:
+    """Accept 门禁主流程测试。"""
+
+    def _make_registry_with_write_tool(self, workspace: Path) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def write_text_file(
+            file_path: str,
+            content: str,
+            overwrite: bool = True,
+            encoding: str = "utf-8",
+        ) -> str:
+            target = workspace / file_path
+            if target.exists() and not overwrite:
+                return json.dumps({"status": "error", "error": "exists"}, ensure_ascii=False)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding=encoding)
+            return json.dumps({"status": "success", "file": file_path}, ensure_ascii=False)
+
+        registry.register_tools([
+            ToolDef(
+                name="write_text_file",
+                description="写文件",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "overwrite": {"type": "boolean"},
+                        "encoding": {"type": "string"},
+                    },
+                    "required": ["file_path", "content"],
+                },
+                func=write_text_file,
+            ),
+        ])
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_high_risk_tool_requires_accept(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "a.txt", "content": "hello"}))
+        ])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+
+        first_reply = await engine.chat("写入文件")
+        assert "待确认" in first_reply
+        assert "accept" in first_reply
+        assert not (tmp_path / "a.txt").exists()
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+
+        blocked = await engine.chat("继续执行")
+        assert "存在待确认操作" in blocked
+
+        accept_reply = await engine.chat(f"/accept {approval_id}")
+        assert "已执行待确认操作" in accept_reply
+        assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert (tmp_path / "outputs" / "approvals" / approval_id / "manifest.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_reject_pending(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "b.txt", "content": "world"}))
+        ])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        await engine.chat("写文件")
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+
+        reject_reply = await engine.chat(f"/reject {approval_id}")
+        assert "已拒绝" in reject_reply
+        assert engine._approval.pending is None
+        assert not (tmp_path / "b.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_undo_after_accept(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "c.txt", "content": "undo"}))
+        ])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        await engine.chat("写文件")
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+        await engine.chat(f"/accept {approval_id}")
+        assert (tmp_path / "c.txt").exists()
+
+        undo_reply = await engine.chat(f"/undo {approval_id}")
+        assert "已回滚" in undo_reply
+        assert not (tmp_path / "c.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_bypass_accept(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        on_reply = await engine.chat("/fullAccess on")
+        assert "已开启" in on_reply
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "d.txt", "content": "full"}))
+        ])
+        text_response = _make_text_response("完成")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+
+        reply = await engine.chat("直接写")
+        assert reply == "完成"
+        assert engine._approval.pending is None
+        assert (tmp_path / "d.txt").read_text(encoding="utf-8") == "full"

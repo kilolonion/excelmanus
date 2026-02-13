@@ -86,17 +86,6 @@ class Skillpack:
 
 
 @dataclass(frozen=True)
-class ForkPlan:
-    """子代理执行计划。"""
-
-    reason: str
-    tool_scope: list[str]
-    prompt: str
-    source_skills: list[str] = field(default_factory=list)
-    detected_files: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
 class SkillMatchResult:
     """Skill 路由结果。"""
 
@@ -105,4 +94,3 @@ class SkillMatchResult:
     route_mode: str
     system_contexts: list[str] = field(default_factory=list)
     parameterized: bool = False
-    fork_plan: ForkPlan | None = None

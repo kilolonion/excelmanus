@@ -7,7 +7,6 @@ from excelmanus.skillpacks.loader import (
     SkillpackValidationError,
 )
 from excelmanus.skillpacks.models import (
-    ForkPlan,
     SkillMatchResult,
     Skillpack,
     SkillpackSource,
@@ -18,7 +17,6 @@ __all__ = [
     "SkillMatchResult",
     "SkillRouter",
     "Skillpack",
-    "ForkPlan",
     "parse_arguments",
     "SkillpackLoader",
     "SkillpackLoaderError",
