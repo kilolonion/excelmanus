@@ -47,6 +47,9 @@ def _make_engine() -> MagicMock:
     )
     engine.full_access_enabled = False
     engine.resolve_skill_command = MagicMock(return_value=None)
+    engine.list_skillpack_commands = MagicMock(return_value=[])
+    engine.get_skillpack_argument_hint = MagicMock(return_value="")
+    engine.subagent_enabled = False
     return engine
 
 
@@ -66,6 +69,7 @@ class TestRenderWelcome:
         config = MagicMock()
         config.model = "qwen-max-latest"
         config.workspace_root = "."
+        config.subagent_enabled = True
         return config
 
     def test_welcome_renders_without_error(self) -> None:
@@ -110,10 +114,30 @@ class TestRenderHelp:
         assert "/help" in text_str
         assert "/history" in text_str
         assert "/clear" in text_str
+        assert "/subagent" in text_str
         assert "/fullAccess" in text_str
         assert "exit" in text_str
         assert "quit" in text_str
         assert "Ctrl+C" in text_str
+
+    def test_help_contains_skillpack_argument_hints(self) -> None:
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
+        engine = _make_engine()
+        engine.list_skillpack_commands.return_value = [
+            ("data_basic", "<file>"),
+            ("chart_basic", "<file> <chart_type>"),
+        ]
+
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=140)
+        with patch("excelmanus.cli.console", real_console):
+            _render_help(engine)
+        text_str = buf.getvalue()
+        assert "/data_basic" in text_str
+        assert "/chart_basic" in text_str
+        assert "<file> <chart_type>" in text_str
 
 
 class TestRenderFarewell:
@@ -223,6 +247,21 @@ class TestRenderSkills:
         assert "代码技能权限" in text_str
         assert "restricted" in text_str
 
+    def test_render_skills_contains_subagent_status(self) -> None:
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
+        engine = _make_engine()
+        engine.subagent_enabled = True
+
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
+            _render_skills(engine)
+        text_str = buf.getvalue()
+        assert "子代理状态" in text_str
+        assert "enabled" in text_str
+
 
 class TestInlineSuggestion:
     """测试斜杠命令的内联补全计算。"""
@@ -239,6 +278,14 @@ class TestInlineSuggestion:
         """输入 /fullAccess 空格后应默认建议 status。"""
         assert _compute_inline_suggestion("/fullAccess ") == "status"
 
+    def test_subagent_argument_suggestion(self) -> None:
+        """输入 /subagent s 应补全 status。"""
+        assert _compute_inline_suggestion("/subagent s") == "tatus"
+
+    def test_subagent_empty_argument_suggestion(self) -> None:
+        """输入 /subagent 空格后应默认建议 status。"""
+        assert _compute_inline_suggestion("/subagent ") == "status"
+
     def test_non_slash_input_returns_none(self) -> None:
         """普通自然语言输入不应触发斜杠补全。"""
         assert _compute_inline_suggestion("分析销售数据") is None
@@ -246,6 +293,14 @@ class TestInlineSuggestion:
     def test_unknown_command_returns_none(self) -> None:
         """未知斜杠命令不应给出错误补全。"""
         assert _compute_inline_suggestion("/unknown") is None
+
+    def test_skill_command_suggestion(self) -> None:
+        """已加载 Skillpack 命令应可参与补全。"""
+        with patch(
+            "excelmanus.cli._DYNAMIC_SKILL_SLASH_COMMANDS",
+            ("/data_basic", "/chart_basic"),
+        ):
+            assert _compute_inline_suggestion("/dat") == "a_basic"
 
 
 class TestPromptToolkitInput:
@@ -414,6 +469,26 @@ class TestReplSlashCommands:
             _run(_repl_loop(engine))
             engine.chat.assert_called_once_with("/full_access")
 
+    def test_subagent_command_routes_to_engine_chat(self) -> None:
+        """/subagent 命令应通过 engine.chat 处理。"""
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="当前 fork 子代理状态：disabled。")
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+            mock_console.input.side_effect = ["/subagent status", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/subagent status")
+            mock_renderer_cls.assert_not_called()
+
+    def test_sub_agent_alias_routes_to_engine_chat(self) -> None:
+        """/sub_agent 也应通过 engine.chat 处理。"""
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已开启 fork 子代理。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/sub_agent on", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/sub_agent on")
+
     def test_unknown_slash_command(self) -> None:
         """未知斜杠命令应显示警告。"""
         engine = _make_engine()
@@ -429,6 +504,7 @@ class TestReplSlashCommands:
         """Skill 斜杠命令应走 engine.chat + StreamRenderer。"""
         engine = _make_engine()
         engine.resolve_skill_command.return_value = "data_basic"
+        engine.get_skillpack_argument_hint.return_value = "<file>"
         with patch("excelmanus.cli.console") as mock_console, \
              patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/data_basic 分析 sales.xlsx", "exit"]
@@ -440,7 +516,26 @@ class TestReplSlashCommands:
             engine.chat.assert_called_once_with(
                 "/data_basic 分析 sales.xlsx",
                 on_event=mock_renderer.handle_event,
+                slash_command="data_basic",
+                raw_args="分析 sales.xlsx",
             )
+
+    def test_skill_slash_command_without_args_shows_argument_hint(self) -> None:
+        engine = _make_engine()
+        engine.resolve_skill_command.return_value = "chart_basic"
+        engine.get_skillpack_argument_hint.return_value = "<file> <chart_type>"
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+            mock_console.input.side_effect = ["/chart_basic", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
+            _run(_repl_loop(engine))
+
+            hint_printed = any(
+                "参数提示" in str(call) and "<file> <chart_type>" in str(call)
+                for call in mock_console.print.call_args_list
+            )
+            assert hint_printed
 
 
 class TestReplInput:

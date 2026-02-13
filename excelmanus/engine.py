@@ -7,7 +7,7 @@ import time
 from collections.abc import Sequence
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import openai
 
@@ -15,13 +15,18 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
-from excelmanus.skillpacks import SkillMatchResult, SkillRouter
+from excelmanus.skillpacks import ForkPlan, SkillMatchResult, SkillRouter
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
 from excelmanus.tools.registry import ToolNotAllowedError
 
+if TYPE_CHECKING:
+    from excelmanus.persistent_memory import PersistentMemory
+    from excelmanus.memory_extractor import MemoryExtractor
+
 logger = get_logger("engine")
+_FORK_SUMMARY_MAX_CHARS = 4000
 
 
 def _to_plain(value: Any) -> Any:
@@ -99,6 +104,8 @@ class AgentEngine:
         config: ExcelManusConfig,
         registry: Any,
         skill_router: SkillRouter | None = None,
+        persistent_memory: PersistentMemory | None = None,
+        memory_extractor: MemoryExtractor | None = None,
     ) -> None:
         self._client = openai.AsyncOpenAI(
             api_key=config.api_key,
@@ -133,6 +140,8 @@ class AgentEngine:
             skill_tools.init_loader(self._skill_router._loader)
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
         self._full_access_enabled: bool = False
+        # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
+        self._subagent_enabled: bool = config.subagent_enabled
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
         # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
         self._loaded_skill_names: set[str] = set()
@@ -143,6 +152,39 @@ class AgentEngine:
         self._last_tool_call_count: int = 0
         self._last_success_count: int = 0
         self._last_failure_count: int = 0
+
+        # ── 持久记忆集成 ──────────────────────────────────
+        self._persistent_memory = persistent_memory
+        self._memory_extractor = memory_extractor
+        # 初始化 memory_tools 模块的 PersistentMemory 引用
+        from excelmanus.tools import memory_tools
+        memory_tools.init_memory(persistent_memory)
+        # 会话启动时加载核心记忆到 system prompt
+        if persistent_memory is not None:
+            core_memory = persistent_memory.load_core()
+            if core_memory:
+                original = self._memory.system_prompt
+                self._memory.system_prompt = (
+                    f"{original}\n\n## 持久记忆\n{core_memory}"
+                )
+
+    async def extract_and_save_memory(self) -> None:
+        """会话结束时调用：从对话历史中提取记忆并持久化。
+
+        若 MemoryExtractor 或 PersistentMemory 未配置则静默跳过。
+        所有异常均被捕获并记录日志，不影响会话正常结束。
+        """
+        if self._memory_extractor is None or self._persistent_memory is None:
+            return
+        try:
+            messages = self._memory.get_messages()
+            entries = await self._memory_extractor.extract(messages)
+            if entries:
+                self._persistent_memory.save_entries(entries)
+                logger.info("持久记忆提取完成，保存了 %d 条记忆条目", len(entries))
+        except Exception:
+            logger.exception("持久记忆提取或保存失败，已跳过")
+
 
     @property
     def memory(self) -> ConversationMemory:
@@ -159,11 +201,49 @@ class AgentEngine:
         """当前会话是否启用 fullAccess。"""
         return self._full_access_enabled
 
+    @property
+    def subagent_enabled(self) -> bool:
+        """当前会话是否启用 fork 子代理。"""
+        return self._subagent_enabled
+
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
         if self._skill_router is None:
             return []
-        return sorted(self._skill_router._loader.get_skillpacks().keys())
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        return sorted(skillpacks.keys())
+
+    def list_skillpack_commands(self) -> list[tuple[str, str]]:
+        """返回可用于 CLI 展示的 Skillpack 斜杠命令与参数提示。"""
+        if self._skill_router is None:
+            return []
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        commands = [
+            (skill.name, skill.argument_hint)
+            for skill in skillpacks.values()
+        ]
+        return sorted(commands, key=lambda item: item[0].lower())
+
+    def get_skillpack_argument_hint(self, name: str) -> str:
+        """按技能名返回 argument_hint。"""
+        if self._skill_router is None:
+            return ""
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        skill = skillpacks.get(name)
+        if skill is not None:
+            return skill.argument_hint
+
+        lower_name = name.lower()
+        for candidate in skillpacks.values():
+            if candidate.name.lower() == lower_name:
+                return candidate.argument_hint
+        return ""
 
     def _emit(self, on_event: EventCallback | None, event: ToolCallEvent) -> None:
         """安全地发出事件，捕获回调异常。"""
@@ -174,11 +254,243 @@ class AgentEngine:
         except Exception as exc:
             logger.warning("事件回调异常: %s", exc)
 
+    async def _run_fork_subagent_if_needed(
+        self,
+        *,
+        route_result: SkillMatchResult,
+        user_message: str,
+        on_event: EventCallback | None,
+    ) -> str | None:
+        if not self._subagent_enabled:
+            return None
+        fork_plan = route_result.fork_plan
+        if fork_plan is None:
+            return None
+
+        safe_tool_scope = [tool for tool in fork_plan.tool_scope if tool and tool != "list_skills"]
+        if not safe_tool_scope:
+            logger.warning("fork 计划缺少可用只读工具，已跳过子代理执行")
+            return None
+
+        start_note = (
+            "[fork] 已触发子代理只读探索。"
+            f"原因：{fork_plan.reason}。"
+            f"工具范围：{', '.join(safe_tool_scope)}"
+        )
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_START,
+                subagent_reason=fork_plan.reason,
+                subagent_tools=list(safe_tool_scope),
+                thinking=start_note,
+            ),
+        )
+        logger.info(
+            "fork 子代理启动 | reason=%s | tools=%s",
+            fork_plan.reason,
+            safe_tool_scope,
+        )
+
+        summary = await self._execute_fork_plan_loop(
+            fork_plan=ForkPlan(
+                reason=fork_plan.reason,
+                tool_scope=safe_tool_scope,
+                prompt=fork_plan.prompt,
+                source_skills=list(fork_plan.source_skills),
+                detected_files=list(fork_plan.detected_files),
+            ),
+            route_result=route_result,
+            user_message=user_message,
+        )
+        if not summary:
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_END,
+                    subagent_reason=fork_plan.reason,
+                    subagent_tools=list(safe_tool_scope),
+                    subagent_success=False,
+                ),
+            )
+            return None
+
+        summarized = summary.strip()
+        if len(summarized) > _FORK_SUMMARY_MAX_CHARS:
+            summarized = summarized[:_FORK_SUMMARY_MAX_CHARS]
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_SUMMARY,
+                subagent_reason=fork_plan.reason,
+                subagent_tools=list(safe_tool_scope),
+                subagent_summary=summarized,
+                subagent_success=True,
+            ),
+        )
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_END,
+                subagent_reason=fork_plan.reason,
+                subagent_tools=list(safe_tool_scope),
+                subagent_success=True,
+            ),
+        )
+        logger.info("fork 子代理完成 | summary=%s", _summarize_text(summary, 200))
+        return summary
+
+    async def _execute_fork_plan_loop(
+        self,
+        *,
+        fork_plan: ForkPlan,
+        route_result: SkillMatchResult,
+        user_message: str,
+    ) -> str:
+        fork_memory = ConversationMemory(self._config)
+        fork_memory.add_user_message(user_message)
+        fork_system_prompt = self._build_fork_system_prompt(
+            route_result=route_result,
+            fork_plan=fork_plan,
+        )
+
+        tools = self._get_openai_tools(tool_scope=fork_plan.tool_scope)
+        model_name = self._config.subagent_model or self._config.model
+        max_iter = self._config.subagent_max_iterations
+        max_failures = self._config.subagent_max_consecutive_failures
+        consecutive_failures = 0
+
+        for iteration in range(1, max_iter + 1):
+            messages = fork_memory.get_messages(system_prompts=[fork_system_prompt])
+            kwargs: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+
+            response = await self._client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                summary = str(message.content or "").strip()
+                if not summary:
+                    summary = "子代理未返回文本摘要。"
+                fork_memory.add_assistant_message(summary)
+                return summary
+
+            assistant_msg = _assistant_message_to_dict(message)
+            fork_memory.add_assistant_tool_message(assistant_msg)
+
+            breaker_triggered = False
+            breaker_skip_error = (
+                f"工具未执行：连续 {max_failures} 次工具调用失败，已触发子代理熔断。"
+            )
+            breaker_summary = ""
+            failed_results: list[ToolCallResult] = []
+
+            for tc in message.tool_calls:
+                tool_call_id = getattr(tc, "id", "")
+                function = getattr(tc, "function", None)
+                tool_name = getattr(function, "name", "")
+
+                if breaker_triggered:
+                    fork_memory.add_tool_result(tool_call_id, breaker_skip_error)
+                    continue
+
+                tc_result = await self._execute_tool_call(
+                    tc,
+                    fork_plan.tool_scope,
+                    None,
+                    iteration,
+                )
+                fork_memory.add_tool_result(tool_call_id, tc_result.result)
+
+                if tc_result.success:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    failed_results.append(tc_result)
+
+                if consecutive_failures >= max_failures:
+                    breaker_triggered = True
+                    recent_errors = [
+                        f"- {item.tool_name}: {item.error}"
+                        for item in failed_results[-max_failures:]
+                    ]
+                    breaker_summary = "\n".join(recent_errors)
+
+            if breaker_triggered:
+                return (
+                    f"子代理连续 {max_failures} 次工具调用失败，已提前终止。"
+                    f"错误摘要：\n{breaker_summary}"
+                )
+
+        return (
+            "子代理达到最大迭代次数，返回有限摘要："
+            "已完成部分只读探索，请主代理在执行前再次核对关键参数。"
+        )
+
+    def _build_fork_system_prompt(
+        self,
+        *,
+        route_result: SkillMatchResult,
+        fork_plan: ForkPlan,
+    ) -> str:
+        lines = [
+            "你是 ExcelManus 的 fork 子代理。",
+            "你运行在独立上下文中，只做只读数据探索。",
+            "禁止写入、删除、重命名、覆盖任何文件。",
+            "你必须在有限轮次内输出高密度摘要，供主代理执行。",
+            "允许工具："
+            + (", ".join(fork_plan.tool_scope) if fork_plan.tool_scope else "(空)"),
+            "触发原因：" + fork_plan.reason,
+            "执行提示：",
+            fork_plan.prompt.strip(),
+        ]
+        if route_result.system_contexts:
+            lines.append("参考技能上下文：")
+            lines.extend(route_result.system_contexts)
+        return "\n\n".join(line for line in lines if line)
+
+    def _attach_fork_summary(
+        self,
+        route_result: SkillMatchResult,
+        fork_summary: str,
+    ) -> SkillMatchResult:
+        summary = fork_summary.strip()
+        if len(summary) > _FORK_SUMMARY_MAX_CHARS:
+            summary = (
+                summary[:_FORK_SUMMARY_MAX_CHARS]
+                + f"\n[摘要已截断，原始长度: {len(fork_summary)} 字符]"
+            )
+
+        fork_context = (
+            "[ForkSummary] 以下内容来自子代理只读探索，请优先基于该摘要规划后续写入步骤：\n"
+            + summary
+        )
+        contexts = list(route_result.system_contexts)
+        contexts.append(fork_context)
+        route_mode = route_result.route_mode
+        if "+fork_executed" not in route_mode:
+            route_mode = f"{route_mode}+fork_executed"
+
+        return SkillMatchResult(
+            skills_used=route_result.skills_used,
+            tool_scope=route_result.tool_scope,
+            route_mode=route_mode,
+            system_contexts=contexts,
+            parameterized=route_result.parameterized,
+            fork_plan=route_result.fork_plan,
+        )
+
     async def chat(
         self,
         user_message: str,
         on_event: EventCallback | None = None,
         skill_hints: list[str] | None = None,
+        slash_command: str | None = None,
+        raw_args: str | None = None,
     ) -> str:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
         control_reply = self._handle_control_command(user_message)
@@ -194,11 +506,26 @@ class AgentEngine:
             ToolCallEvent(event_type=EventType.ROUTE_START),
         )
 
-        manual_skill_name = self.resolve_skill_command(user_message)
-        effective_skill_hints = (
-            [manual_skill_name] if manual_skill_name else skill_hints
+        effective_skill_hints = skill_hints
+        effective_slash_command = slash_command
+        effective_raw_args = raw_args or ""
+
+        # 兼容直接调用 engine.chat("/skill ...") 的旧路径：
+        # 若调用方未显式传 slash_command，自动从用户输入中解析。
+        if effective_slash_command is None:
+            manual_skill_name = self.resolve_skill_command(user_message)
+            if manual_skill_name is not None:
+                effective_slash_command = manual_skill_name
+                _, _, tail = user_message.strip()[1:].partition(" ")
+                effective_raw_args = tail.strip()
+                effective_skill_hints = None
+
+        route_result = await self._route_skills(
+            user_message,
+            effective_skill_hints,
+            slash_command=effective_slash_command,
+            raw_args=effective_raw_args if effective_slash_command else None,
         )
-        route_result = await self._route_skills(user_message, effective_skill_hints)
         route_result = self._merge_with_loaded_skills(route_result)
         self._last_route_result = route_result
 
@@ -212,6 +539,15 @@ class AgentEngine:
                 tool_scope=list(route_result.tool_scope) if route_result.tool_scope else [],
             ),
         )
+
+        fork_summary = await self._run_fork_subagent_if_needed(
+            route_result=route_result,
+            user_message=user_message,
+            on_event=on_event,
+        )
+        if fork_summary:
+            route_result = self._attach_fork_summary(route_result, fork_summary)
+            self._last_route_result = route_result
 
         # 追加用户消息
         self._memory.add_user_message(user_message)
@@ -604,15 +940,31 @@ class AgentEngine:
                     merged_tools.append(tool)
 
         # 合并 skills 对象并统一应用预算
-        route_skills = [
-            loader.get_skillpack(name)
-            for name in route_result.skills_used
-            if loader.get_skillpack(name) is not None
-        ]
-        merged_skill_objects = route_skills + history_skills
-        merged_contexts = build_contexts_with_budget(
-            merged_skill_objects, self._config.skills_context_char_budget
-        )
+        if route_result.parameterized:
+            merged_contexts = list(route_result.system_contexts)
+            budget = self._config.skills_context_char_budget
+            if budget <= 0:
+                remaining_budget = 0
+            else:
+                used_chars = sum(len(ctx) for ctx in merged_contexts)
+                remaining_budget = budget - used_chars
+
+            if budget <= 0 or remaining_budget > 0:
+                history_contexts = build_contexts_with_budget(
+                    history_skills,
+                    remaining_budget,
+                )
+                merged_contexts.extend(history_contexts)
+        else:
+            route_skills = [
+                loader.get_skillpack(name)
+                for name in route_result.skills_used
+                if loader.get_skillpack(name) is not None
+            ]
+            merged_skill_objects = route_skills + history_skills
+            merged_contexts = build_contexts_with_budget(
+                merged_skill_objects, self._config.skills_context_char_budget
+            )
 
         # 合并 skills_used
         merged_skills = list(route_result.skills_used)
@@ -631,12 +983,17 @@ class AgentEngine:
             tool_scope=merged_tools,
             route_mode=route_result.route_mode,
             system_contexts=merged_contexts,
+            parameterized=route_result.parameterized,
+            fork_plan=route_result.fork_plan,
         )
 
     async def _route_skills(
         self,
         user_message: str,
         skill_hints: list[str] | None,
+        *,
+        slash_command: str | None = None,
+        raw_args: str | None = None,
     ) -> SkillMatchResult:
         if self._skill_router is None:
             return SkillMatchResult(
@@ -654,6 +1011,8 @@ class AgentEngine:
         return await self._skill_router.route(
             user_message,
             skill_hints=skill_hints,
+            slash_command=slash_command,
+            raw_args=raw_args,
             confirm_with_llm=self._confirm_with_llm,
             blocked_skillpacks=blocked_skillpacks,
         )
@@ -666,15 +1025,8 @@ class AgentEngine:
 
         parts = text.split()
         command = parts[0].strip().lower().replace("_", "")
-        if command != "/fullaccess":
+        if command not in {"/fullaccess", "/subagent"}:
             return None
-
-        if len(parts) == 1:
-            action = "on"
-        elif len(parts) == 2:
-            action = parts[1].strip().lower()
-        else:
-            action = ""
 
         self._last_route_result = SkillMatchResult(
             skills_used=[],
@@ -683,16 +1035,32 @@ class AgentEngine:
             system_contexts=[],
         )
 
-        if action in {"on", ""} and len(parts) <= 2:
-            self._full_access_enabled = True
-            return "已开启 fullAccess。当前代码技能权限：full_access。"
-        if action == "off":
-            self._full_access_enabled = False
-            return "已关闭 fullAccess。当前代码技能权限：restricted。"
-        if action == "status":
-            status = "full_access" if self._full_access_enabled else "restricted"
-            return f"当前代码技能权限：{status}。"
-        return "无效参数。用法：/fullAccess [on|off|status]。"
+        action = parts[1].strip().lower() if len(parts) == 2 else ""
+        too_many_args = len(parts) > 2
+
+        if command == "/fullaccess":
+            if (action in {"on", ""}) and not too_many_args:
+                self._full_access_enabled = True
+                return "已开启 fullAccess。当前代码技能权限：full_access。"
+            if action == "off" and not too_many_args:
+                self._full_access_enabled = False
+                return "已关闭 fullAccess。当前代码技能权限：restricted。"
+            if action == "status" and not too_many_args:
+                status = "full_access" if self._full_access_enabled else "restricted"
+                return f"当前代码技能权限：{status}。"
+            return "无效参数。用法：/fullAccess [on|off|status]。"
+
+        # /subagent 默认行为为查询状态，避免误触启停
+        if action in {"status", ""} and not too_many_args:
+            status = "enabled" if self._subagent_enabled else "disabled"
+            return f"当前 fork 子代理状态：{status}。"
+        if action == "on" and not too_many_args:
+            self._subagent_enabled = True
+            return "已开启 fork 子代理。"
+        if action == "off" and not too_many_args:
+            self._subagent_enabled = False
+            return "已关闭 fork 子代理。"
+        return "无效参数。用法：/subagent [on|off|status]。"
 
     async def _confirm_with_llm(self, user_message: str, candidates: list[Any]) -> list[str]:
         """用同一个主模型做候选 Skillpack 二次确认。"""

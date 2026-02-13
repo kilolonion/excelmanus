@@ -27,6 +27,7 @@ _RESULT_MAX_LEN = 200
 _THINKING_THRESHOLD = 500
 _THINKING_SUMMARY_LEN = 80
 _NARROW_TERMINAL_WIDTH = 60
+_SUBAGENT_SUMMARY_PREVIEW = 300
 
 # 工具名称到图标的映射
 # 任务状态到图标的映射
@@ -116,6 +117,9 @@ class StreamRenderer:
             EventType.ITERATION_START: self._render_iteration,
             EventType.ROUTE_START: self._render_route_start,
             EventType.ROUTE_END: self._render_route_end,
+            EventType.SUBAGENT_START: self._render_subagent_start,
+            EventType.SUBAGENT_END: self._render_subagent_end,
+            EventType.SUBAGENT_SUMMARY: self._render_subagent_summary,
             EventType.CHAT_SUMMARY: self._render_chat_summary,
             EventType.TASK_LIST_CREATED: self._render_task_list_created,
             EventType.TASK_ITEM_UPDATED: self._render_task_item_updated,
@@ -288,6 +292,55 @@ class StreamRenderer:
     # 执行摘要渲染
     # ------------------------------------------------------------------
 
+    def _render_subagent_start(self, event: ToolCallEvent) -> None:
+        """渲染 fork 子代理开始。"""
+        reason = rich_escape(event.subagent_reason or "触发子代理")
+        tools = ", ".join(event.subagent_tools) if event.subagent_tools else "(无)"
+        if self._is_narrow():
+            self._console.print(f"  🧵 fork 子代理启动")
+            self._console.print(f"     原因: {reason}", style="dim")
+            self._console.print(f"     工具: {rich_escape(tools)}", style="dim")
+        else:
+            self._console.print(
+                f"  🧵 [bold cyan]fork 子代理启动[/bold cyan] "
+                f"[dim]原因: {reason} | 工具: {rich_escape(tools)}[/dim]"
+            )
+
+    def _render_subagent_summary(self, event: ToolCallEvent) -> None:
+        """渲染 fork 子代理摘要。"""
+        summary = (event.subagent_summary or "").strip()
+        if not summary:
+            return
+        preview = _truncate(summary, _SUBAGENT_SUMMARY_PREVIEW)
+
+        if self._is_narrow():
+            self._console.print("  🧾 fork 摘要", style="cyan")
+            self._console.print(f"     {rich_escape(preview)}", style="dim")
+            return
+
+        self._console.print(
+            Panel(
+                rich_escape(preview),
+                title="[bold cyan]🧾 fork 子代理摘要[/bold cyan]",
+                title_align="left",
+                border_style="dim cyan",
+                expand=False,
+                padding=(0, 1),
+            )
+        )
+
+    def _render_subagent_end(self, event: ToolCallEvent) -> None:
+        """渲染 fork 子代理结束。"""
+        status = "完成" if event.subagent_success else "失败"
+        color = "green" if event.subagent_success else "red"
+        if self._is_narrow():
+            icon = "✅" if event.subagent_success else "❌"
+            self._console.print(f"  🧵 fork 子代理{icon}{status}")
+        else:
+            self._console.print(
+                f"  🧵 fork 子代理 [bold {color}]{status}[/bold {color}]"
+            )
+
     def _render_chat_summary(self, event: ToolCallEvent) -> None:
         """渲染执行摘要面板。"""
         # 没有工具调用时不显示摘要（纯对话）
@@ -363,6 +416,16 @@ class StreamRenderer:
             elif event.event_type == EventType.ROUTE_END:
                 skills = ", ".join(event.skills_used) if event.skills_used else "通用"
                 self._console.print(f"🔀 路由: {skills}")
+            elif event.event_type == EventType.SUBAGENT_START:
+                reason = event.subagent_reason or "触发子代理"
+                self._console.print(f"🧵 fork 启动: {_truncate(reason, _THINKING_SUMMARY_LEN)}")
+            elif event.event_type == EventType.SUBAGENT_SUMMARY:
+                summary = event.subagent_summary or ""
+                if summary:
+                    self._console.print(f"🧾 fork 摘要: {_truncate(summary, _THINKING_SUMMARY_LEN)}")
+            elif event.event_type == EventType.SUBAGENT_END:
+                status = "完成" if event.subagent_success else "失败"
+                self._console.print(f"🧵 fork 结束: {status}")
             elif event.event_type == EventType.CHAT_SUMMARY:
                 if event.total_tool_calls > 0:
                     self._console.print(

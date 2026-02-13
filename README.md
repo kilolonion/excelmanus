@@ -51,6 +51,11 @@ pip install -e ".[dev]"
 | `EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE` | 快速路径最低分 | `6` |
 | `EXCELMANUS_SKILLS_FASTPATH_MIN_GAP` | 快速路径分差阈值 | `3` |
 | `EXCELMANUS_SYSTEM_MESSAGE_MODE` | system 注入策略（`auto\|multi\|merge`） | `auto` |
+| `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 fork 提示的阈值（字节） | `8388608` |
+| `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 fork 子代理执行 | `true` |
+| `EXCELMANUS_SUBAGENT_MODEL` | fork 子代理模型（为空时回退主模型） | — |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | fork 子代理最大迭代轮数 | `6` |
+| `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | fork 子代理连续失败熔断阈值 | `2` |
 
 ## 使用方式
 
@@ -62,8 +67,8 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/fullAccess [on|off|status]`、`/<skill_name> [args...]`、`exit`。
-输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`）。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/<skill_name> [args...]`、`exit`。
+输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`）。
 
 ### API
 

@@ -31,7 +31,11 @@ from typing import Any
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.logger import get_logger
-from excelmanus.skillpacks.models import Skillpack, SkillpackSource
+from excelmanus.skillpacks.models import (
+    Skillpack,
+    SkillpackContextMode,
+    SkillpackSource,
+)
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("skillpacks.loader")
@@ -155,6 +159,16 @@ class SkillpackLoader:
             "user_invocable",
             default=True,
         )
+        argument_hint = self._get_optional_str(
+            frontmatter,
+            "argument_hint",
+            default="",
+        )
+        context = self._get_optional_context_mode(
+            frontmatter,
+            "context",
+            default="inline",
+        )
 
         resource_contents = self._load_resources(
             resources=resources, skill_dir=skill_dir, skill_name=name
@@ -175,6 +189,8 @@ class SkillpackLoader:
             version=version,
             disable_model_invocation=disable_model_invocation,
             user_invocable=user_invocable,
+            argument_hint=argument_hint,
+            context=context,
             resource_contents=resource_contents,
         )
 
@@ -399,3 +415,19 @@ class SkillpackLoader:
             if lowered == "false":
                 return False
         raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是布尔值")
+
+    @staticmethod
+    def _get_optional_context_mode(
+        payload: dict[str, Any],
+        key: str,
+        default: SkillpackContextMode,
+    ) -> SkillpackContextMode:
+        value = payload.get(key, default)
+        if not isinstance(value, str):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
+        normalized = value.strip().lower()
+        if normalized in {"inline", "fork"}:
+            return normalized  # type: ignore[return-value]
+        raise SkillpackValidationError(
+            f"frontmatter 字段 '{key}' 仅支持 inline 或 fork，当前值: {value!r}"
+        )

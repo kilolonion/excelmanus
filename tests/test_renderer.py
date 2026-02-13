@@ -601,6 +601,52 @@ class TestStreamRendererUnit:
         assert "/tmp/input.xlsx" in output
         assert "/tmp/output.xlsx" in output
 
+    # ---- fork 子代理事件渲染 ----
+
+    def test_subagent_start_rendered(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+
+        event = ToolCallEvent(
+            event_type=EventType.SUBAGENT_START,
+            subagent_reason="命中大文件",
+            subagent_tools=["read_excel", "analyze_data"],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+
+        assert "fork 子代理启动" in output
+        assert "命中大文件" in output
+        assert "read_excel" in output
+
+    def test_subagent_summary_rendered(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+
+        event = ToolCallEvent(
+            event_type=EventType.SUBAGENT_SUMMARY,
+            subagent_summary="检测到关键列: 月份, 销售额",
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+
+        assert "fork 子代理摘要" in output
+        assert "关键列" in output
+
+    def test_subagent_end_rendered(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+
+        event = ToolCallEvent(
+            event_type=EventType.SUBAGENT_END,
+            subagent_success=True,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+
+        assert "fork 子代理" in output
+        assert "完成" in output
+
     # ---- 渲染异常降级 (需求 2.1 异常处理) ----
 
     def test_render_exception_fallback_to_plain_text(self) -> None:

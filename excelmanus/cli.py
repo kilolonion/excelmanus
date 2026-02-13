@@ -50,22 +50,32 @@ _SLASH_COMMANDS = {
     "/history",
     "/clear",
     "/skills",
+    "/subagent",
+    "/sub_agent",
     "/fullaccess",
     "/full_access",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
+_SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
+_SESSION_CONTROL_COMMAND_ALIASES = (
+    _FULL_ACCESS_COMMAND_ALIASES | _SUBAGENT_COMMAND_ALIASES
+)
 
 _SLASH_COMMAND_SUGGESTIONS = (
     "/help",
     "/history",
     "/clear",
     "/skills",
+    "/subagent",
+    "/sub_agent",
     "/fullAccess",
     "/full_access",
     "/fullaccess",
 )
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
+_SUBAGENT_ARGUMENTS = ("status", "on", "off")
+_DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
 
 
 def _resolve_skill_slash_command(engine: AgentEngine, user_input: str) -> str | None:
@@ -77,6 +87,56 @@ def _resolve_skill_slash_command(engine: AgentEngine, user_input: str) -> str | 
     if isinstance(resolved, str) and resolved.strip():
         return resolved.strip()
     return None
+
+
+def _extract_slash_raw_args(user_input: str) -> str:
+    """提取 '/command ...' 中的参数字符串。"""
+    if not user_input.startswith("/"):
+        return ""
+    _, _, raw_args = user_input[1:].partition(" ")
+    return raw_args.strip()
+
+
+def _load_skill_command_rows(engine: AgentEngine) -> list[tuple[str, str]]:
+    """读取技能命令列表，格式为 [(name, argument_hint), ...]。"""
+    list_commands = getattr(engine, "list_skillpack_commands", None)
+    if callable(list_commands):
+        rows = list_commands()
+        normalized: list[tuple[str, str]] = []
+        for row in rows:
+            if (
+                isinstance(row, tuple)
+                and len(row) == 2
+                and isinstance(row[0], str)
+                and isinstance(row[1], str)
+            ):
+                normalized.append((row[0], row[1]))
+        return normalized
+
+    list_loaded = getattr(engine, "list_loaded_skillpacks", None)
+    if callable(list_loaded):
+        names = list_loaded()
+        return [
+            (name, "")
+            for name in names
+            if isinstance(name, str) and name.strip()
+        ]
+    return []
+
+
+def _sync_skill_command_suggestions(engine: AgentEngine) -> None:
+    """将已加载 Skillpack 更新到斜杠命令补全缓存。"""
+    global _DYNAMIC_SKILL_SLASH_COMMANDS
+    rows = _load_skill_command_rows(engine)
+    _DYNAMIC_SKILL_SLASH_COMMANDS = tuple(f"/{name}" for name, _ in rows)
+
+
+def _list_known_slash_commands() -> tuple[str, ...]:
+    ordered = list(_SLASH_COMMAND_SUGGESTIONS)
+    ordered.extend(_DYNAMIC_SKILL_SLASH_COMMANDS)
+    # 保序去重
+    return tuple(dict.fromkeys(ordered))
+
 
 # ASCII Logo
 _LOGO = r"""
@@ -99,25 +159,32 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
 
     # 先补全命令本体：如 /ful -> /fullAccess
     if not separator:
-        for suggestion in _SLASH_COMMAND_SUGGESTIONS:
+        for suggestion in _list_known_slash_commands():
             if suggestion.lower() == lowered_command:
                 return None
             if suggestion.lower().startswith(lowered_command):
                 return suggestion[len(user_input) :]
         return None
 
-    # 再补全 fullAccess 的参数：如 /fullAccess s -> /fullAccess status
-    if lowered_command not in _FULL_ACCESS_COMMAND_ALIASES:
+    # 再补全控制命令参数：如 /fullAccess s -> /fullAccess status
+    command_arguments = {
+        alias: _FULL_ACCESS_ARGUMENTS for alias in _FULL_ACCESS_COMMAND_ALIASES
+    }
+    command_arguments.update(
+        {alias: _SUBAGENT_ARGUMENTS for alias in _SUBAGENT_COMMAND_ALIASES}
+    )
+    available_arguments = command_arguments.get(lowered_command)
+    if available_arguments is None:
         return None
 
     current_arg = remainder.strip()
     if not current_arg:
-        return _FULL_ACCESS_ARGUMENTS[0]
+        return available_arguments[0]
     if " " in current_arg:
         return None
 
     lowered_arg = current_arg.lower()
-    for candidate in _FULL_ACCESS_ARGUMENTS:
+    for candidate in available_arguments:
         if candidate == lowered_arg:
             return None
         if candidate.startswith(lowered_arg):
@@ -166,6 +233,11 @@ def _render_welcome(config: "ExcelManusConfig", skill_count: int) -> None:
     info.append(f"{model_display}\n", style="bold yellow")
     info.append("  技能  ", style="dim")
     info.append(f"{skill_count} 个 Skillpack 已加载\n", style="bold green")
+    info.append("  子代理  ", style="dim")
+    info.append(
+        ("已启用" if config.subagent_enabled else "已禁用") + "\n",
+        style="bold cyan" if config.subagent_enabled else "bold red",
+    )
     info.append("  目录  ", style="dim")
     info.append(f"{os.path.abspath(config.workspace_root)}\n\n", style="")
 
@@ -175,6 +247,7 @@ def _render_welcome(config: "ExcelManusConfig", skill_count: int) -> None:
     info.append("  /history", style="green")
     info.append("  /clear", style="green")
     info.append("  /skills", style="green")
+    info.append("  /subagent", style="green")
     info.append("  /fullAccess", style="green")
     info.append("  /<skill_name>", style="green")
     info.append("  exit\n", style="green")
@@ -216,7 +289,7 @@ async def _read_user_input() -> str:
     return console.input("\n [bold green]❯[/bold green] ")
 
 
-def _render_help() -> None:
+def _render_help(engine: AgentEngine | None = None) -> None:
     """渲染帮助信息。"""
     table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
     table.add_column("命令", style="green", min_width=14)
@@ -226,8 +299,13 @@ def _render_help() -> None:
     table.add_row("/history", "显示当前会话的对话历史摘要")
     table.add_row("/clear", "清除当前对话历史")
     table.add_row("/skills", "查看已加载 Skillpacks 与本轮路由结果")
+    table.add_row("/subagent [on|off|status]", "会话级 fork 子代理开关")
     table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
     table.add_row("/<skill_name> [args...]", "手动调用指定 Skillpack（如 /data_basic）")
+    skill_rows = _load_skill_command_rows(engine) if engine is not None else []
+    for name, argument_hint in skill_rows:
+        hint_text = argument_hint if argument_hint else "(无参数提示)"
+        table.add_row(f"/{name}", f"Skillpack 参数：{hint_text}")
     table.add_row("exit / quit", "退出程序")
     table.add_row("Ctrl+C", "退出程序")
 
@@ -311,6 +389,10 @@ def _render_skills(engine: AgentEngine) -> None:
     table.add_row("工具范围", f"{tool_count} 个工具")
     permission = "full_access" if engine.full_access_enabled else "restricted"
     table.add_row("代码技能权限", permission)
+    table.add_row(
+        "子代理状态",
+        "enabled" if engine.subagent_enabled else "disabled",
+    )
 
     console.print()
     console.print(
@@ -328,6 +410,7 @@ def _render_skills(engine: AgentEngine) -> None:
 
 async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
+    _sync_skill_command_suggestions(engine)
     while True:
         try:
             user_input = (await _read_user_input()).strip()
@@ -347,7 +430,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         # 斜杠命令处理
         if user_input.lower() == "/help":
-            _render_help()
+            _render_help(engine)
             continue
 
         if user_input.lower() == "/history":
@@ -363,20 +446,39 @@ async def _repl_loop(engine: AgentEngine) -> None:
             _render_skills(engine)
             continue
 
-        # fullAccess 控制命令统一走 engine.chat（与 API 行为一致）
+        # 会话控制命令统一走 engine.chat（与 API 行为一致）
         lowered_parts = user_input.lower().split()
         lowered_cmd = lowered_parts[0] if lowered_parts else ""
-        if lowered_cmd in _FULL_ACCESS_COMMAND_ALIASES:
+        if lowered_cmd in _SESSION_CONTROL_COMMAND_ALIASES:
             reply = await engine.chat(user_input)
             console.print(f"  [cyan]{reply}[/cyan]")
             continue
 
         # Skill 斜杠命令：如 /data_basic ...（走手动 Skill 路由）
-        if user_input.startswith("/") and _resolve_skill_slash_command(engine, user_input):
+        resolved_skill = (
+            _resolve_skill_slash_command(engine, user_input)
+            if user_input.startswith("/")
+            else None
+        )
+        if resolved_skill:
+            raw_args = _extract_slash_raw_args(user_input)
+            argument_hint_getter = getattr(engine, "get_skillpack_argument_hint", None)
+            argument_hint = (
+                argument_hint_getter(resolved_skill)
+                if callable(argument_hint_getter)
+                else ""
+            )
+            if not raw_args and isinstance(argument_hint, str) and argument_hint.strip():
+                console.print(f"  [yellow]参数提示：{argument_hint.strip()}[/yellow]")
             try:
                 renderer = StreamRenderer(console)
                 console.print()
-                reply = await engine.chat(user_input, on_event=renderer.handle_event)
+                reply = await engine.chat(
+                    user_input,
+                    on_event=renderer.handle_event,
+                    slash_command=resolved_skill,
+                    raw_args=raw_args,
+                )
 
                 console.print()
                 console.print(
@@ -397,8 +499,10 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         # 未知斜杠命令提示
         if user_input.startswith("/"):
+            known_commands = _list_known_slash_commands()
+            suggestion = ", ".join(known_commands[:8]) if known_commands else "/help"
             console.print(
-                f"  [yellow]未知命令：{user_input}。输入 /help 查看可用命令。[/yellow]"
+                f"  [yellow]未知命令：{user_input}。可用命令示例：{suggestion}[/yellow]"
             )
             continue
 
@@ -448,8 +552,34 @@ async def _async_main() -> None:
     loader.load_all()
     router = SkillRouter(config, loader)
 
+    # 根据 memory_enabled 创建持久记忆组件
+    persistent_memory = None
+    memory_extractor = None
+    if config.memory_enabled:
+        from excelmanus.persistent_memory import PersistentMemory
+        from excelmanus.memory_extractor import MemoryExtractor
+
+        import openai as _openai
+
+        persistent_memory = PersistentMemory(
+            memory_dir=config.memory_dir,
+            auto_load_lines=config.memory_auto_load_lines,
+        )
+        _client = _openai.AsyncOpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url,
+        )
+        memory_extractor = MemoryExtractor(client=_client, model=config.model)
+
     # 创建 AgentEngine
-    engine = AgentEngine(config, registry, skill_router=router)
+    engine = AgentEngine(
+        config,
+        registry,
+        skill_router=router,
+        persistent_memory=persistent_memory,
+        memory_extractor=memory_extractor,
+    )
+    _sync_skill_command_suggestions(engine)
 
     # 渲染欢迎信息
     skill_count = len(engine.list_loaded_skillpacks())

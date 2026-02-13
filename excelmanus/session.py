@@ -68,6 +68,35 @@ class SessionManager:
         self._skill_router = skill_router
         self._sessions: dict[str, _SessionEntry] = {}
         self._lock = asyncio.Lock()
+    def _create_memory_components(
+        self,
+    ) -> tuple["PersistentMemory | None", "MemoryExtractor | None"]:
+        """根据 config.memory_enabled 创建持久记忆组件。
+
+        memory_enabled 为 False 时返回 (None, None)，跳过所有记忆操作。
+        使用局部导入避免循环依赖。
+        """
+        if not self._config.memory_enabled:
+            return None, None
+
+        from excelmanus.persistent_memory import PersistentMemory
+        from excelmanus.memory_extractor import MemoryExtractor
+
+        import openai
+
+        persistent_memory = PersistentMemory(
+            memory_dir=self._config.memory_dir,
+            auto_load_lines=self._config.memory_auto_load_lines,
+        )
+        client = openai.AsyncOpenAI(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+        )
+        memory_extractor = MemoryExtractor(
+            client=client,
+            model=self._config.model,
+        )
+        return persistent_memory, memory_extractor
 
     # ── 公开接口 ──────────────────────────────────────────
 
@@ -101,10 +130,13 @@ class SessionManager:
 
             # 创建新会话
             new_id = session_id if session_id is not None else str(uuid.uuid4())
+            persistent_memory, memory_extractor = self._create_memory_components()
             engine = AgentEngine(
                 config=self._config,
                 registry=self._registry,
                 skill_router=self._skill_router,
+                persistent_memory=persistent_memory,
+                memory_extractor=memory_extractor,
             )
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
@@ -139,10 +171,13 @@ class SessionManager:
                 )
 
             new_id = session_id if session_id is not None else str(uuid.uuid4())
+            persistent_memory, memory_extractor = self._create_memory_components()
             engine = AgentEngine(
                 config=self._config,
                 registry=self._registry,
                 skill_router=self._skill_router,
+                persistent_memory=persistent_memory,
+                memory_extractor=memory_extractor,
             )
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
@@ -167,25 +202,37 @@ class SessionManager:
     async def delete(self, session_id: str) -> bool:
         """删除指定会话。
 
+        删除前会提取会话记忆并持久化（在锁外执行，避免长时间持有锁）。
+
         Args:
             session_id: 要删除的会话 ID。
 
         Returns:
             True 表示成功删除，False 表示会话不存在。
         """
+        engine: AgentEngine | None = None
         async with self._lock:
             if session_id in self._sessions:
                 if self._sessions[session_id].in_flight:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，暂无法删除。"
                     )
+                engine = self._sessions[session_id].engine
                 del self._sessions[session_id]
                 logger.info("已删除会话 %s", session_id)
-                return True
-            return False
+
+        if engine is not None:
+            try:
+                await engine.extract_and_save_memory()
+            except Exception:
+                logger.warning("会话 %s 记忆提取失败", session_id, exc_info=True)
+            return True
+        return False
 
     async def cleanup_expired(self, now: float | None = None) -> int:
         """清理超过 TTL 的空闲会话。
+
+        清理前会提取每个过期会话的记忆并持久化（在锁外执行）。
 
         Args:
             now: 当前时间戳（monotonic），默认使用 time.monotonic()。
@@ -197,6 +244,7 @@ class SessionManager:
         if now is None:
             now = time.monotonic()
 
+        expired_engines: list[tuple[str, AgentEngine]] = []
         async with self._lock:
             expired_ids = [
                 sid
@@ -205,11 +253,21 @@ class SessionManager:
                 and (now - entry.last_access) > self._ttl_seconds
             ]
             for sid in expired_ids:
+                expired_engines.append((sid, self._sessions[sid].engine))
                 del self._sessions[sid]
 
             if expired_ids:
                 logger.info("已清理 %d 个过期会话", len(expired_ids))
-            return len(expired_ids)
+            count = len(expired_ids)
+
+        # 在锁外逐个提取记忆，避免长时间持有锁
+        for sid, engine in expired_engines:
+            try:
+                await engine.extract_and_save_memory()
+            except Exception:
+                logger.warning("过期会话 %s 记忆提取失败", sid, exc_info=True)
+
+        return count
 
     @property
     def active_count(self) -> int:

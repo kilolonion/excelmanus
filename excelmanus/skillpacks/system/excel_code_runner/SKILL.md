@@ -30,11 +30,13 @@ resources:
   - references/largefile_code_workflow.md
 priority: 9
 version: "1.0.0"
+context: fork
 ---
 优先采用“探查 -> 写脚本 -> 执行 -> 验证”的四步流程：
 
 1. 探查阶段
 - 先确认目标文件路径和 sheet 信息，避免盲目全量读取。
+- 先用 `get_file_info` 查看 `size_bytes`，超过阈值时保持“子上下文只读探索 + 摘要返回”。
 - 必要时用 `read_excel(max_rows=200)` 获取列名与样本数据。
 
 2. 写脚本阶段
