@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 SkillpackSource = Literal["system", "user", "project"]
+SkillpackContextMode = Literal["inline", "fork"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class Skillpack:
     version: str = "1.0.0"
     disable_model_invocation: bool = False
     user_invocable: bool = True
+    argument_hint: str = ""
+    context: SkillpackContextMode = "inline"
     resource_contents: dict[str, str] = field(default_factory=dict)
 
     def render_context(self) -> str:
@@ -32,6 +35,7 @@ class Skillpack:
         lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
+            f"上下文模式：{self.context}",
             f"授权工具：{', '.join(self.allowed_tools) if self.allowed_tools else '(空)'}",
             "执行指引：",
             self.instructions.strip() or "(无)",
@@ -53,6 +57,7 @@ class Skillpack:
         header_lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
+            f"上下文模式：{self.context}",
             f"授权工具：{', '.join(self.allowed_tools) if self.allowed_tools else '(空)'}",
             "执行指引：",
         ]
@@ -81,6 +86,17 @@ class Skillpack:
 
 
 @dataclass(frozen=True)
+class ForkPlan:
+    """子代理执行计划。"""
+
+    reason: str
+    tool_scope: list[str]
+    prompt: str
+    source_skills: list[str] = field(default_factory=list)
+    detected_files: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class SkillMatchResult:
     """Skill 路由结果。"""
 
@@ -88,3 +104,5 @@ class SkillMatchResult:
     tool_scope: list[str]
     route_mode: str
     system_contexts: list[str] = field(default_factory=list)
+    parameterized: bool = False
+    fork_plan: ForkPlan | None = None

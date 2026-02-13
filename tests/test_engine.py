@@ -11,7 +11,8 @@ import pytest
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
-from excelmanus.skillpacks import SkillMatchResult
+from excelmanus.events import EventType
+from excelmanus.skillpacks import ForkPlan, SkillMatchResult
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
 
@@ -195,11 +196,78 @@ class TestControlCommandFullAccess:
         assert kwargs_unlocked["blocked_skillpacks"] is None
 
 
+class TestControlCommandSubagent:
+    """会话级 /subagent 控制命令测试。"""
+
+    @pytest.mark.asyncio
+    async def test_status_defaults_to_enabled(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/subagent status")
+        assert "enabled" in result
+        assert engine.subagent_enabled is True
+        assert engine.last_route_result.route_mode == "control_command"
+
+    @pytest.mark.asyncio
+    async def test_off_then_on(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        off_result = await engine.chat("/subagent off")
+        assert "已关闭" in off_result
+        assert engine.subagent_enabled is False
+        assert engine.last_route_result.route_mode == "control_command"
+
+        on_result = await engine.chat("/subagent on")
+        assert "已开启" in on_result
+        assert engine.subagent_enabled is True
+        assert engine.last_route_result.route_mode == "control_command"
+
+    @pytest.mark.asyncio
+    async def test_no_args_defaults_to_status(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/subagent")
+        assert "当前 fork 子代理状态" in result
+        assert engine.subagent_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_alias_sub_agent_supported(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/sub_agent off")
+        assert "已关闭" in result
+        assert engine.subagent_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_command_does_not_invoke_llm_or_write_memory(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mocked_create = AsyncMock(return_value=_make_text_response("不应被调用"))
+        engine._client.chat.completions.create = mocked_create
+        before_count = len(engine.memory.get_messages())
+
+        result = await engine.chat("/subagent off")
+        assert "已关闭" in result
+        mocked_create.assert_not_called()
+        after_count = len(engine.memory.get_messages())
+        assert before_count == after_count == 1
+
+
 class TestManualSkillSlashCommand:
     """手动 Skill 斜杠命令解析与路由。"""
 
     @pytest.mark.asyncio
-    async def test_slash_skill_command_maps_to_skill_hints(self) -> None:
+    async def test_slash_skill_command_maps_to_slash_route_args(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -224,7 +292,9 @@ class TestManualSkillSlashCommand:
         assert result == "ok"
 
         _, kwargs = mock_router.route.call_args
-        assert kwargs["skill_hints"] == ["data_basic"]
+        assert kwargs["skill_hints"] is None
+        assert kwargs["slash_command"] == "data_basic"
+        assert kwargs["raw_args"] == "请分析这个文件"
 
     @pytest.mark.asyncio
     async def test_slash_skill_command_overrides_external_skill_hints(self) -> None:
@@ -250,7 +320,41 @@ class TestManualSkillSlashCommand:
 
         await engine.chat("/data_basic 请分析", skill_hints=["chart_basic"])
         _, kwargs = mock_router.route.call_args
-        assert kwargs["skill_hints"] == ["data_basic"]
+        assert kwargs["skill_hints"] is None
+        assert kwargs["slash_command"] == "data_basic"
+        assert kwargs["raw_args"] == "请分析"
+
+    @pytest.mark.asyncio
+    async def test_explicit_slash_command_arguments_pass_through(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["data_basic"],
+            tool_scope=[],
+            route_mode="slash_direct",
+            system_contexts=[],
+            parameterized=True,
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"data_basic": MagicMock()}
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router.route = AsyncMock(return_value=route_result)
+        engine._skill_router = mock_router
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("ok")
+        )
+
+        await engine.chat(
+            "执行技能",
+            slash_command="data_basic",
+            raw_args='"sales data.xlsx" bar',
+        )
+        _, kwargs = mock_router.route.call_args
+        assert kwargs["slash_command"] == "data_basic"
+        assert kwargs["raw_args"] == '"sales data.xlsx" bar'
 
     def test_resolve_skill_command_normalizes_dash_and_underscore(self) -> None:
         config = _make_config()
@@ -280,6 +384,81 @@ class TestManualSkillSlashCommand:
 
         assert engine.resolve_skill_command("/Users/test/file.xlsx") is None
         assert engine.resolve_skill_command("/tmp/data.xlsx") is None
+
+
+class TestForkSubagentExecution:
+    """真实 fork 子代理执行流程测试。"""
+
+    @pytest.mark.asyncio
+    async def test_chat_runs_fork_subagent_and_injects_summary(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["excel_code_runner"],
+            tool_scope=["add_numbers"],
+            route_mode="hint_direct+fork+fork_plan",
+            system_contexts=["[Skillpack] excel_code_runner"],
+            fork_plan=ForkPlan(
+                reason="命中 fork 技能",
+                tool_scope=["add_numbers"],
+                prompt="请先做只读探索并总结。",
+                source_skills=["excel_code_runner"],
+            ),
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        fork_reply = _make_text_response("fork 摘要：发现关键列 A/B，建议先过滤后聚合。")
+        main_reply = _make_text_response("主代理执行完成。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[fork_reply, main_reply]
+        )
+
+        events = []
+
+        def _on_event(event) -> None:
+            events.append(event)
+
+        result = await engine.chat("请处理这个大文件", on_event=_on_event)
+        assert result == "主代理执行完成。"
+        assert engine._client.chat.completions.create.call_count == 2
+        assert "+fork_executed" in engine.last_route_result.route_mode
+        assert any(
+            "[ForkSummary]" in ctx for ctx in engine.last_route_result.system_contexts
+        )
+        event_types = [e.event_type for e in events]
+        assert EventType.SUBAGENT_START in event_types
+        assert EventType.SUBAGENT_SUMMARY in event_types
+        assert EventType.SUBAGENT_END in event_types
+
+    @pytest.mark.asyncio
+    async def test_chat_skips_fork_when_subagent_disabled(self) -> None:
+        config = _make_config(subagent_enabled=False)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["excel_code_runner"],
+            tool_scope=["add_numbers"],
+            route_mode="hint_direct+fork+fork_plan",
+            system_contexts=["[Skillpack] excel_code_runner"],
+            fork_plan=ForkPlan(
+                reason="命中 fork 技能",
+                tool_scope=["add_numbers"],
+                prompt="请先做只读探索并总结。",
+                source_skills=["excel_code_runner"],
+            ),
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        main_reply = _make_text_response("主代理执行完成。")
+        engine._client.chat.completions.create = AsyncMock(return_value=main_reply)
+
+        result = await engine.chat("请处理这个大文件")
+        assert result == "主代理执行完成。"
+        assert engine._client.chat.completions.create.call_count == 1
+        assert "+fork_executed" not in engine.last_route_result.route_mode
 
 
 class TestChatPureText:

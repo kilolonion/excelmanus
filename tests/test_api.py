@@ -463,6 +463,26 @@ class TestExternalSafeMode:
         assert data["skills_used"] == []
         assert data["tool_scope"] == []
 
+    @pytest.mark.asyncio
+    async def test_subagent_route_mode_control_command_when_safe_mode_disabled(
+        self,
+    ) -> None:
+        """关闭安全模式后，/subagent 请求应返回 control_command 路由模式。"""
+        config = _test_config(external_safe_mode=False)
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as c:
+                resp = await c.post(
+                    "/api/v1/chat", json={"message": "/subagent status"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["route_mode"] == "control_command"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
     def test_sse_safe_mode_filters_internal_events(self) -> None:
         """SSE 在安全模式下不发送思考与工具事件。"""
         thinking_event = ToolCallEvent(
@@ -478,11 +498,20 @@ class TestExternalSafeMode:
             error="Traceback (most recent call last): boom",
             iteration=1,
         )
+        subagent_event = ToolCallEvent(
+            event_type=EventType.SUBAGENT_SUMMARY,
+            subagent_reason="命中大文件",
+            subagent_tools=["read_excel"],
+            subagent_summary="发现关键列 A/B",
+        )
         assert api_module._sse_event_to_sse(
             thinking_event, safe_mode=True
         ) is None
         assert api_module._sse_event_to_sse(
             tool_event, safe_mode=True
+        ) is None
+        assert api_module._sse_event_to_sse(
+            subagent_event, safe_mode=True
         ) is None
 
         raw_sse = api_module._sse_event_to_sse(
@@ -491,6 +520,12 @@ class TestExternalSafeMode:
         assert raw_sse is not None
         assert "/Users/demo/private.xlsx" not in raw_sse
         assert "Traceback" not in raw_sse
+
+        subagent_sse = api_module._sse_event_to_sse(
+            subagent_event, safe_mode=False
+        )
+        assert subagent_sse is not None
+        assert "subagent_summary" in subagent_sse
 
 
 # ── 单元测试：Health 端点 ────────────────────────────────

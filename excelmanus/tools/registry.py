@@ -166,7 +166,8 @@ class ToolRegistry:
         self.register_tools(code_tools.get_tools())
         self.register_tools(sheet_tools.get_tools())
 
-        from excelmanus.tools import skill_tools, task_tools
+        from excelmanus.tools import memory_tools, skill_tools, task_tools
 
         self.register_tools(task_tools.get_tools())
         self.register_tools(skill_tools.get_tools())
+        self.register_tools(memory_tools.get_tools())

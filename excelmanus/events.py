@@ -17,6 +17,9 @@ class EventType(Enum):
     ITERATION_START = "iteration_start"
     ROUTE_START = "route_start"
     ROUTE_END = "route_end"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_END = "subagent_end"
+    SUBAGENT_SUMMARY = "subagent_summary"
     CHAT_SUMMARY = "chat_summary"
     TASK_LIST_CREATED = "task_list_created"
     TASK_ITEM_UPDATED = "task_item_updated"
@@ -43,6 +46,11 @@ class ToolCallEvent:
     route_mode: str = ""
     skills_used: List[str] = field(default_factory=list)
     tool_scope: List[str] = field(default_factory=list)
+    # fork 子代理事件字段
+    subagent_reason: str = ""
+    subagent_tools: List[str] = field(default_factory=list)
+    subagent_summary: str = ""
+    subagent_success: bool = True
     # 执行摘要字段
     total_iterations: int = 0
     total_tool_calls: int = 0

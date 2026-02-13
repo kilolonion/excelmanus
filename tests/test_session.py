@@ -28,6 +28,7 @@ def config() -> ExcelManusConfig:
         model="test-model",
         session_ttl_seconds=60,
         max_sessions=5,
+        memory_enabled=False,
     )
 
 

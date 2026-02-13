@@ -289,6 +289,49 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.workspace_root == "."
 
+    def test_default_large_excel_threshold_bytes(self, monkeypatch) -> None:
+        """默认大文件阈值为 8MB。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        cfg = load_config()
+        assert cfg.large_excel_threshold_bytes == 8 * 1024 * 1024
+
+    def test_large_excel_threshold_bytes_from_env(self, monkeypatch) -> None:
+        """允许通过环境变量覆盖大文件阈值。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES", "4096")
+        cfg = load_config()
+        assert cfg.large_excel_threshold_bytes == 4096
+
+    def test_default_subagent_config(self, monkeypatch) -> None:
+        """fork 子代理配置默认值。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        cfg = load_config()
+        assert cfg.subagent_enabled is True
+        assert cfg.subagent_model is None
+        assert cfg.subagent_max_iterations == 6
+        assert cfg.subagent_max_consecutive_failures == 2
+
+    def test_subagent_config_from_env(self, monkeypatch) -> None:
+        """支持通过环境变量覆盖 fork 子代理配置。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "qwen-turbo")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_ITERATIONS", "4")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES", "1")
+        cfg = load_config()
+        assert cfg.subagent_enabled is False
+        assert cfg.subagent_model == "qwen-turbo"
+        assert cfg.subagent_max_iterations == 4
+        assert cfg.subagent_max_consecutive_failures == 1
+
     def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
         """默认开启对外安全模式。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
@@ -404,3 +447,81 @@ class TestWorkspaceRoot:
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", str(tmp_path))
         cfg = load_config()
         assert cfg.workspace_root == str(tmp_path)
+
+
+class TestMemoryConfig:
+    """跨会话持久记忆配置项测试。（需求 8.1, 8.2, 8.3）"""
+
+    def _set_required_env(self, monkeypatch) -> None:
+        """设置必填环境变量。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_default_memory_enabled(self, monkeypatch) -> None:
+        """memory_enabled 默认值为 True。（需求 8.1）"""
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.memory_enabled is True
+
+    def test_memory_enabled_false(self, monkeypatch) -> None:
+        """通过环境变量关闭 memory_enabled。（需求 8.1）"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_ENABLED", "false")
+        cfg = load_config()
+        assert cfg.memory_enabled is False
+
+    def test_memory_enabled_true_explicit(self, monkeypatch) -> None:
+        """通过环境变量显式开启 memory_enabled。（需求 8.1）"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_ENABLED", "true")
+        cfg = load_config()
+        assert cfg.memory_enabled is True
+
+    def test_memory_enabled_invalid_raises_error(self, monkeypatch) -> None:
+        """memory_enabled 非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_ENABLED", "maybe")
+        with pytest.raises(ConfigError, match="布尔值"):
+            load_config()
+
+    def test_default_memory_dir(self, monkeypatch) -> None:
+        """memory_dir 默认值为 ~/.excelmanus/memory。（需求 8.2）"""
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.memory_dir == "~/.excelmanus/memory"
+
+    def test_memory_dir_from_env(self, monkeypatch, tmp_path) -> None:
+        """通过环境变量自定义 memory_dir。（需求 8.2）"""
+        self._set_required_env(monkeypatch)
+        custom_dir = str(tmp_path / "custom_memory")
+        monkeypatch.setenv("EXCELMANUS_MEMORY_DIR", custom_dir)
+        cfg = load_config()
+        assert cfg.memory_dir == custom_dir
+
+    def test_default_memory_auto_load_lines(self, monkeypatch) -> None:
+        """memory_auto_load_lines 默认值为 200。（需求 8.3）"""
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.memory_auto_load_lines == 200
+
+    def test_memory_auto_load_lines_from_env(self, monkeypatch) -> None:
+        """通过环境变量自定义 memory_auto_load_lines。（需求 8.3）"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_LOAD_LINES", "500")
+        cfg = load_config()
+        assert cfg.memory_auto_load_lines == 500
+
+    def test_memory_auto_load_lines_invalid_raises_error(self, monkeypatch) -> None:
+        """memory_auto_load_lines 非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_LOAD_LINES", "abc")
+        with pytest.raises(ConfigError, match="整数"):
+            load_config()
+
+    def test_memory_auto_load_lines_zero_raises_error(self, monkeypatch) -> None:
+        """memory_auto_load_lines 为 0 应抛出 ConfigError（要求正整数）。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_LOAD_LINES", "0")
+        with pytest.raises(ConfigError, match="正整数"):
+            load_config()

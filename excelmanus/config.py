@@ -41,12 +41,22 @@ class ExcelManusConfig:
     skills_fastpath_min_score: int = 6
     skills_fastpath_min_gap: int = 3
     system_message_mode: str = "auto"
+    large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
     cors_allow_origins: tuple[str, ...] = ("http://localhost:5173",)
     # 路由子代理配置（可选，默认回退到主模型）
     router_api_key: str | None = None
     router_base_url: str | None = None
     router_model: str | None = None
+    # fork 子代理执行配置
+    subagent_enabled: bool = True
+    subagent_model: str | None = None
+    subagent_max_iterations: int = 6
+    subagent_max_consecutive_failures: int = 2
+    # 跨会话持久记忆配置
+    memory_enabled: bool = True
+    memory_dir: str = "~/.excelmanus/memory"
+    memory_auto_load_lines: int = 200
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -217,6 +227,11 @@ def load_config() -> ExcelManusConfig:
         "auto",
         {"auto", "multi", "merge"},
     )
+    large_excel_threshold_bytes = _parse_int(
+        os.environ.get("EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES"),
+        "EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES",
+        8 * 1024 * 1024,
+    )
     external_safe_mode = _parse_bool(
         os.environ.get("EXCELMANUS_EXTERNAL_SAFE_MODE"),
         "EXCELMANUS_EXTERNAL_SAFE_MODE",
@@ -231,6 +246,37 @@ def load_config() -> ExcelManusConfig:
     if router_base_url:
         _validate_base_url(router_base_url)
     router_model = os.environ.get("EXCELMANUS_ROUTER_MODEL") or None
+
+    # fork 子代理执行配置
+    subagent_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_SUBAGENT_ENABLED"),
+        "EXCELMANUS_SUBAGENT_ENABLED",
+        True,
+    )
+    subagent_model = os.environ.get("EXCELMANUS_SUBAGENT_MODEL") or None
+    subagent_max_iterations = _parse_int(
+        os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
+        "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
+        6,
+    )
+    subagent_max_consecutive_failures = _parse_int(
+        os.environ.get("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
+        "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
+        2,
+    )
+
+    # 跨会话持久记忆配置
+    memory_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_MEMORY_ENABLED"),
+        "EXCELMANUS_MEMORY_ENABLED",
+        True,
+    )
+    memory_dir = os.environ.get("EXCELMANUS_MEMORY_DIR", "~/.excelmanus/memory")
+    memory_auto_load_lines = _parse_int(
+        os.environ.get("EXCELMANUS_MEMORY_AUTO_LOAD_LINES"),
+        "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
+        200,
+    )
 
     return ExcelManusConfig(
         api_key=api_key,
@@ -252,9 +298,17 @@ def load_config() -> ExcelManusConfig:
         skills_fastpath_min_score=skills_fastpath_min_score,
         skills_fastpath_min_gap=skills_fastpath_min_gap,
         system_message_mode=system_message_mode,
+        large_excel_threshold_bytes=large_excel_threshold_bytes,
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         router_api_key=router_api_key,
         router_base_url=router_base_url,
         router_model=router_model,
+        subagent_enabled=subagent_enabled,
+        subagent_model=subagent_model,
+        subagent_max_iterations=subagent_max_iterations,
+        subagent_max_consecutive_failures=subagent_max_consecutive_failures,
+        memory_enabled=memory_enabled,
+        memory_dir=memory_dir,
+        memory_auto_load_lines=memory_auto_load_lines,
     )

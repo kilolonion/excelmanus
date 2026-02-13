@@ -436,6 +436,9 @@ def _sse_event_to_sse(
         EventType.TOOL_CALL_START,
         EventType.TOOL_CALL_END,
         EventType.ITERATION_START,
+        EventType.SUBAGENT_START,
+        EventType.SUBAGENT_SUMMARY,
+        EventType.SUBAGENT_END,
     }:
         return None
 
@@ -444,6 +447,9 @@ def _sse_event_to_sse(
         EventType.TOOL_CALL_START: "tool_call_start",
         EventType.TOOL_CALL_END: "tool_call_end",
         EventType.ITERATION_START: "iteration_start",
+        EventType.SUBAGENT_START: "subagent_start",
+        EventType.SUBAGENT_SUMMARY: "subagent_summary",
+        EventType.SUBAGENT_END: "subagent_end",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -475,6 +481,23 @@ def _sse_event_to_sse(
         }
     elif event.event_type == EventType.ITERATION_START:
         data = {"iteration": event.iteration}
+    elif event.event_type == EventType.SUBAGENT_START:
+        data = {
+            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
+            "tools": event.subagent_tools,
+        }
+    elif event.event_type == EventType.SUBAGENT_SUMMARY:
+        data = {
+            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
+            "summary": sanitize_external_text(event.subagent_summary, max_len=4000),
+            "tools": event.subagent_tools,
+        }
+    elif event.event_type == EventType.SUBAGENT_END:
+        data = {
+            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
+            "success": event.subagent_success,
+            "tools": event.subagent_tools,
+        }
     elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
         data = {
             "task_list": event.task_list_data,

@@ -105,6 +105,11 @@ class TestEventTypeEnum:
             "ROUTE_START",
             "ROUTE_END",
             "CHAT_SUMMARY",
+            "SUBAGENT_START",
+            "SUBAGENT_END",
+            "SUBAGENT_SUMMARY",
+            "TASK_LIST_CREATED",
+            "TASK_ITEM_UPDATED",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -206,5 +211,13 @@ class TestToolCallEventFields:
             "success_count",
             "failure_count",
             "elapsed_seconds",
+            "subagent_reason",
+            "subagent_tools",
+            "subagent_summary",
+            "subagent_success",
+            "task_list_data",
+            "task_index",
+            "task_status",
+            "task_result",
         }
         assert set(annotations.keys()) == expected_fields
