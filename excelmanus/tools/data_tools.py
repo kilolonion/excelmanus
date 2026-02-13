@@ -45,13 +45,19 @@ def init_guard(workspace_root: str) -> None:
 # ── 工具函数 ──────────────────────────────────────────────
 
 
-def read_excel(file_path: str, sheet_name: str | None = None, max_rows: int | None = None) -> str:
+def read_excel(
+    file_path: str,
+    sheet_name: str | None = None,
+    max_rows: int | None = None,
+    include_style_summary: bool = False,
+) -> str:
     """读取 Excel 文件并返回数据摘要。
 
     Args:
         file_path: Excel 文件路径（相对或绝对）。
         sheet_name: 工作表名称，默认读取第一个。
         max_rows: 最大读取行数，默认全部读取。
+        include_style_summary: 是否附带样式概览（使用的颜色、合并单元格等）。
 
     Returns:
         JSON 格式的数据摘要字符串。
@@ -68,13 +74,17 @@ def read_excel(file_path: str, sheet_name: str | None = None, max_rows: int | No
     df = pd.read_excel(**kwargs)
 
     # 构建摘要信息
-    summary = {
+    summary: dict[str, Any] = {
         "file": str(safe_path.name),
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
         "columns": list(df.columns),
         "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
         "preview": json.loads(df.head(10).to_json(orient="records", force_ascii=False)),
     }
+
+    if include_style_summary:
+        summary["style_summary"] = _collect_style_summary(safe_path, sheet_name)
+
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
@@ -300,6 +310,64 @@ def transform_data(
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+# ── 样式概览辅助函数 ──────────────────────────────────────
+
+
+def _collect_style_summary(file_path: Any, sheet_name: str | None) -> dict[str, Any]:
+    """用 openpyxl 扫描工作表，收集样式概览信息。"""
+    from pathlib import Path
+
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    path = Path(file_path) if not isinstance(file_path, Path) else file_path
+    wb = load_workbook(path, data_only=True)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    fill_colors: set[str] = set()
+    font_colors: set[str] = set()
+    has_colored_cells = False
+
+    # 抽样扫描（最多前 100 行）避免大文件性能问题
+    max_scan_rows = min(ws.max_row or 0, 100)
+    for row in ws.iter_rows(min_row=1, max_row=max_scan_rows):
+        for cell in row:
+            # 填充色
+            if cell.fill and cell.fill.fgColor:
+                fg = cell.fill.fgColor
+                if hasattr(fg, "rgb") and fg.rgb and fg.rgb not in ("00000000", "FFFFFFFF"):
+                    rgb = str(fg.rgb)
+                    color = rgb[2:] if len(rgb) == 8 else rgb
+                    fill_colors.add(color)
+                    has_colored_cells = True
+            # 字体色
+            if cell.font and cell.font.color:
+                fc = cell.font.color
+                if hasattr(fc, "rgb") and fc.rgb and fc.rgb not in ("00000000", "FF000000"):
+                    rgb = str(fc.rgb)
+                    color = rgb[2:] if len(rgb) == 8 else rgb
+                    font_colors.add(color)
+                    has_colored_cells = True
+
+    # 合并单元格
+    merged_ranges = [str(mr) for mr in ws.merged_cells.ranges]
+
+    # 条件格式
+    has_conditional = len(ws.conditional_formatting) > 0
+
+    wb.close()
+
+    return {
+        "has_colored_cells": has_colored_cells,
+        "fill_colors_used": sorted(fill_colors),
+        "font_colors_used": sorted(font_colors),
+        "has_merged_cells": len(merged_ranges) > 0,
+        "merged_ranges": merged_ranges,
+        "has_conditional_formatting": has_conditional,
+        "rows_scanned": max_scan_rows,
+    }
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
 
 
@@ -308,7 +376,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_excel",
-            description="读取 Excel 文件并返回数据摘要（形状、列名、类型、前10行预览）",
+            description="读取 Excel 文件并返回数据摘要（形状、列名、类型、前10行预览），可选附带样式概览",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -323,6 +391,11 @@ def get_tools() -> list[ToolDef]:
                     "max_rows": {
                         "type": "integer",
                         "description": "最大读取行数，默认全部",
+                    },
+                    "include_style_summary": {
+                        "type": "boolean",
+                        "description": "是否附带样式概览（填充色、字体色、合并单元格等），默认关闭",
+                        "default": False,
                     },
                 },
                 "required": ["file_path"],

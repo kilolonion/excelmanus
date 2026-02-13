@@ -10,6 +10,10 @@ allowed_tools:
   - create_chart
   - format_cells
   - adjust_column_width
+  - adjust_row_height
+  - read_cell_styles
+  - merge_cells
+  - unmerge_cells
   - list_directory
   - get_file_info
   - search_files
@@ -31,6 +35,7 @@ file_patterns:
   - "*.txt"
 priority: 1
 version: "2.0.0"
+user_invocable: false
 ---
 通用 Excel 助手，当用户需求不明确或跨多个领域时作为兜底技能包执行。
 
@@ -42,7 +47,9 @@ version: "2.0.0"
 
 跨领域协调：
 - 涉及数据分析 → 优先用 analyze_data、filter_data。
-- 涉及格式美化 → 优先用 format_cells、adjust_column_width。
+- 涉及格式美化 → 优先用 format_cells、adjust_column_width、adjust_row_height。
+- 涉及样式感知 → 先用 read_cell_styles 了解现有样式，再决定修改方案。
+- 涉及合并单元格 → 使用 merge_cells / unmerge_cells。
 - 涉及图表生成 → 优先用 create_chart。
 - 涉及文件管理 → 优先用 copy_file、rename_file 等文件工具。
 - 涉及多工作表 → 先用 list_sheets 了解结构，再用 copy_range_between_sheets 跨表传输数据。

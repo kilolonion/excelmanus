@@ -150,6 +150,11 @@ class SkillpackLoader:
             "disable_model_invocation",
             default=False,
         )
+        user_invocable = self._get_optional_bool(
+            frontmatter,
+            "user_invocable",
+            default=True,
+        )
 
         resource_contents = self._load_resources(
             resources=resources, skill_dir=skill_dir, skill_name=name
@@ -169,6 +174,7 @@ class SkillpackLoader:
             priority=priority,
             version=version,
             disable_model_invocation=disable_model_invocation,
+            user_invocable=user_invocable,
             resource_contents=resource_contents,
         )
 

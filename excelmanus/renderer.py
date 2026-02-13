@@ -29,6 +29,14 @@ _THINKING_SUMMARY_LEN = 80
 _NARROW_TERMINAL_WIDTH = 60
 
 # 工具名称到图标的映射
+# 任务状态到图标的映射
+_STATUS_ICONS: dict[str, str] = {
+    "pending": "⬜",
+    "in_progress": "🔄",
+    "completed": "✅",
+    "failed": "❌",
+}
+
 _TOOL_ICONS: dict[str, str] = {
     "read_excel": "📖",
     "write_excel": "📝",
@@ -109,6 +117,8 @@ class StreamRenderer:
             EventType.ROUTE_START: self._render_route_start,
             EventType.ROUTE_END: self._render_route_end,
             EventType.CHAT_SUMMARY: self._render_chat_summary,
+            EventType.TASK_LIST_CREATED: self._render_task_list_created,
+            EventType.TASK_ITEM_UPDATED: self._render_task_item_updated,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -223,6 +233,56 @@ class StreamRenderer:
                 self._console.print(
                     f"     [red]❌ 失败[/red]{elapsed_str} [red]→ {error_msg}[/red]"
                 )
+
+    # ------------------------------------------------------------------
+    # 任务清单渲染
+    # ------------------------------------------------------------------
+
+    def _render_task_list_created(self, event: ToolCallEvent) -> None:
+        """渲染新建任务清单。"""
+        data = event.task_list_data
+        if not data:
+            return
+        title = data.get("title", "")
+        items = data.get("items", [])
+        if self._is_narrow():
+            # 窄终端紧凑格式
+            lines = [f"📋 {title}"]
+            for i, item in enumerate(items):
+                icon = _STATUS_ICONS.get(item["status"], "⬜")
+                lines.append(f"{icon}{i}.{item['title']}")
+        else:
+            lines = [f"  📋 [bold]{title}[/bold]"]
+            for i, item in enumerate(items):
+                icon = _STATUS_ICONS.get(item["status"], "⬜")
+                lines.append(f"     {icon} {i}. {item['title']}")
+        self._console.print("\n".join(lines))
+
+    def _render_task_item_updated(self, event: ToolCallEvent) -> None:
+        """渲染任务项状态更新。"""
+        idx = event.task_index
+        status = event.task_status
+        icon = _STATUS_ICONS.get(status, "❓")
+        data = event.task_list_data or {}
+        items = data.get("items", [])
+        if idx is not None and 0 <= idx < len(items):
+            title = items[idx]["title"]
+        else:
+            title = f"#{idx}"
+
+        if self._is_narrow():
+            self._console.print(f"{icon}{idx}.{title}")
+        else:
+            self._console.print(f"     {icon} {idx}. {title}")
+
+        # 检查是否全部完成
+        progress = data.get("progress", {})
+        total = sum(progress.values())
+        done = progress.get("completed", 0) + progress.get("failed", 0)
+        if total > 0 and done == total:
+            self._console.print(
+                f"  📋 全部完成: ✅{progress.get('completed', 0)} ❌{progress.get('failed', 0)}"
+            )
 
     # ------------------------------------------------------------------
     # 执行摘要渲染

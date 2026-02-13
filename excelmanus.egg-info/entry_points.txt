@@ -1,4 +1,3 @@
 [console_scripts]
 excelmanus = excelmanus.cli:main
 excelmanus-api = excelmanus.api:main
-excelmanus-mcp = excelmanus.mcp_server:run_stdio_server

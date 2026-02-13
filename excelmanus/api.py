@@ -475,6 +475,13 @@ def _sse_event_to_sse(
         }
     elif event.event_type == EventType.ITERATION_START:
         data = {"iteration": event.iteration}
+    elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
+        data = {
+            "task_list": event.task_list_data,
+            "task_index": event.task_index,
+            "task_status": event.task_status,
+        }
+        sse_type = "task_update"
     else:
         data = event.to_dict()
 

@@ -66,6 +66,30 @@ class TestRunPythonScript:
         assert result["status"] == "success"
         assert result["return_code"] == 0
         assert "hello" in result["stdout_tail"]
+        assert result["sandbox"]["mode"] == "soft"
+        assert result["sandbox"]["isolated_python"] is True
+        assert isinstance(result["sandbox"]["limits_applied"], bool)
+        assert isinstance(result["sandbox"]["warnings"], list)
+
+    def test_run_uses_sandbox_env_whitelist(self, workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        script = workspace / "scripts" / "temp" / "env_check.py"
+        script.write_text(
+            "import os\n"
+            "print(os.getenv('EXCELMANUS_TEST_SECRET'))\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("EXCELMANUS_TEST_SECRET", "TOP_SECRET")
+
+        result = json.loads(
+            code_tools.run_python_script(
+                script_path="scripts/temp/env_check.py",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert "None" in result["stdout_tail"]
+        assert result["sandbox"]["mode"] == "soft"
 
     def test_run_timeout(self, workspace: Path) -> None:
         script = workspace / "scripts" / "temp" / "slow.py"

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,9 +18,11 @@ import pytest
 from excelmanus.config import ConfigError
 from excelmanus.cli import (
     _async_main,
+    _compute_inline_suggestion,
     _render_farewell,
     _render_help,
     _render_history,
+    _render_skills,
     _render_welcome,
     _repl_loop,
     main,
@@ -36,6 +39,14 @@ def _make_engine() -> MagicMock:
     engine.clear_memory = MagicMock()
     engine.memory = MagicMock()
     engine.memory.get_messages.return_value = []
+    engine.list_loaded_skillpacks.return_value = []
+    engine.last_route_result = SimpleNamespace(
+        route_mode="hidden",
+        skills_used=[],
+        tool_scope=[],
+    )
+    engine.full_access_enabled = False
+    engine.resolve_skill_command = MagicMock(return_value=None)
     return engine
 
 
@@ -99,6 +110,7 @@ class TestRenderHelp:
         assert "/help" in text_str
         assert "/history" in text_str
         assert "/clear" in text_str
+        assert "/fullAccess" in text_str
         assert "exit" in text_str
         assert "quit" in text_str
         assert "Ctrl+C" in text_str
@@ -191,6 +203,86 @@ class TestRenderHistory:
         text_str = buf.getvalue()
         # 截断后不应包含完整的 100 个 A
         assert long_msg not in text_str
+
+
+class TestRenderSkills:
+    """测试技能面板渲染。"""
+
+    def test_render_skills_contains_permission_status(self) -> None:
+        from io import StringIO
+        from rich.console import Console as RealConsole
+
+        engine = _make_engine()
+        engine.full_access_enabled = False
+
+        buf = StringIO()
+        real_console = RealConsole(file=buf, width=120)
+        with patch("excelmanus.cli.console", real_console):
+            _render_skills(engine)
+        text_str = buf.getvalue()
+        assert "代码技能权限" in text_str
+        assert "restricted" in text_str
+
+
+class TestInlineSuggestion:
+    """测试斜杠命令的内联补全计算。"""
+
+    def test_command_prefix_suggestion(self) -> None:
+        """输入 /ful 应补全到 /fullAccess。"""
+        assert _compute_inline_suggestion("/ful") == "lAccess"
+
+    def test_fullaccess_argument_suggestion(self) -> None:
+        """输入 /fullAccess s 应补全 status。"""
+        assert _compute_inline_suggestion("/fullAccess s") == "tatus"
+
+    def test_fullaccess_empty_argument_suggestion(self) -> None:
+        """输入 /fullAccess 空格后应默认建议 status。"""
+        assert _compute_inline_suggestion("/fullAccess ") == "status"
+
+    def test_non_slash_input_returns_none(self) -> None:
+        """普通自然语言输入不应触发斜杠补全。"""
+        assert _compute_inline_suggestion("分析销售数据") is None
+
+    def test_unknown_command_returns_none(self) -> None:
+        """未知斜杠命令不应给出错误补全。"""
+        assert _compute_inline_suggestion("/unknown") is None
+
+
+class TestPromptToolkitInput:
+    """测试 prompt_toolkit 异步输入路径。"""
+
+    def test_repl_uses_prompt_async_when_tty(self) -> None:
+        """在 TTY 环境中应使用 prompt_async 读取输入。"""
+        engine = _make_engine()
+        mock_session = MagicMock()
+        mock_session.prompt_async = AsyncMock(return_value="exit")
+
+        with patch("excelmanus.cli._PROMPT_TOOLKIT_ENABLED", True), \
+             patch("excelmanus.cli._PROMPT_SESSION", mock_session), \
+             patch("excelmanus.cli.sys.stdin.isatty", return_value=True), \
+             patch("excelmanus.cli.sys.stdout.isatty", return_value=True), \
+             patch("excelmanus.cli.console") as mock_console:
+            _run(_repl_loop(engine))
+            mock_session.prompt_async.assert_awaited_once()
+            mock_console.input.assert_not_called()
+
+    def test_prompt_async_failure_falls_back_to_console_input(self) -> None:
+        """prompt_async 异常时应记录告警并回退到 console.input。"""
+        engine = _make_engine()
+        mock_session = MagicMock()
+        mock_session.prompt_async = AsyncMock(side_effect=RuntimeError("loop conflict"))
+
+        with patch("excelmanus.cli._PROMPT_TOOLKIT_ENABLED", True), \
+             patch("excelmanus.cli._PROMPT_SESSION", mock_session), \
+             patch("excelmanus.cli.sys.stdin.isatty", return_value=True), \
+             patch("excelmanus.cli.sys.stdout.isatty", return_value=True), \
+             patch("excelmanus.cli.logger") as mock_logger, \
+             patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.return_value = "exit"
+            _run(_repl_loop(engine))
+            mock_session.prompt_async.assert_awaited_once()
+            mock_console.input.assert_called_once()
+            mock_logger.warning.assert_called()
 
 
 # ── REPL 循环测试 ─────────────────────────────────────────
@@ -302,6 +394,26 @@ class TestReplSlashCommands:
             )
             assert clear_confirmed
 
+    def test_fullaccess_command_routes_to_engine_chat(self) -> None:
+        """/fullAccess 命令应通过 engine.chat 处理。"""
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="当前代码技能权限：full_access。")
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+            mock_console.input.side_effect = ["/fullAccess status", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/fullAccess status")
+            mock_renderer_cls.assert_not_called()
+
+    def test_full_access_alias_routes_to_engine_chat(self) -> None:
+        """/full_access 也应通过 engine.chat 处理。"""
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已开启 fullAccess。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/full_access", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/full_access")
+
     def test_unknown_slash_command(self) -> None:
         """未知斜杠命令应显示警告。"""
         engine = _make_engine()
@@ -312,6 +424,23 @@ class TestReplSlashCommands:
                 "未知命令" in str(call) for call in mock_console.print.call_args_list
             )
             assert warning_printed
+
+    def test_skill_slash_command_routes_to_engine_chat_with_renderer(self) -> None:
+        """Skill 斜杠命令应走 engine.chat + StreamRenderer。"""
+        engine = _make_engine()
+        engine.resolve_skill_command.return_value = "data_basic"
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+            mock_console.input.side_effect = ["/data_basic 分析 sales.xlsx", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
+            _run(_repl_loop(engine))
+
+            mock_renderer_cls.assert_called_once_with(mock_console)
+            engine.chat.assert_called_once_with(
+                "/data_basic 分析 sales.xlsx",
+                on_event=mock_renderer.handle_event,
+            )
 
 
 class TestReplInput:

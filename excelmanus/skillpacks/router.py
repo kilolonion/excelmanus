@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.logger import get_logger
+from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import SkillMatchResult, Skillpack
 
@@ -30,54 +31,78 @@ class SkillRouter:
         skill_hints: list[str] | None = None,
         file_paths: list[str] | None = None,
         confirm_with_llm: ConfirmWithLLM | None = None,
+        blocked_skillpacks: set[str] | None = None,
     ) -> SkillMatchResult:
         """执行本轮技能路由。"""
         skillpacks = self._loader.get_skillpacks()
         if not skillpacks:
             skillpacks = self._loader.load_all()
 
+        blocked = set(blocked_skillpacks or [])
+        if blocked:
+            skillpacks = {
+                name: skill
+                for name, skill in skillpacks.items()
+                if name not in blocked
+            }
+
         if not skillpacks:
-            return SkillMatchResult(
-                skills_used=[],
-                tool_scope=[],
+            return self._build_fallback_result(
+                selected=[],
                 route_mode="no_skillpack",
-                system_contexts=[],
+                all_skillpacks={},
             )
 
-        # ── 1. hint 直连 ──
+        # ── 1. 用户显式 hint 直连（手动调用）──
         hints = [hint.strip() for hint in (skill_hints or []) if hint and hint.strip()]
-        hinted = self._pick_by_hints(hints=hints, skillpacks=skillpacks)
-        if hinted:
-            selected = self._apply_selection_limit(hinted)
-            return self._build_result(selected=selected, route_mode="hint_direct")
+        if hints:
+            hinted = self._pick_by_hints(hints=hints, skillpacks=skillpacks)
+            if hinted:
+                selected = self._apply_selection_limit(hinted)
+                return self._build_result(selected=selected, route_mode="hint_direct")
+            return self._build_fallback_result(
+                selected=[],
+                route_mode="hint_not_found",
+                all_skillpacks=skillpacks,
+            )
 
-        # ── 2. 预筛选 ──
+        # ── 2. 模型自动路由前过滤（禁用自动调用 / 禁止用户手动调用）──
+        auto_skillpacks = self._filter_auto_routable_skillpacks(skillpacks)
+        if not auto_skillpacks:
+            return self._build_fallback_result(
+                selected=[],
+                route_mode="no_skillpack",
+                all_skillpacks=skillpacks,
+            )
+
+        # ── 3. 预筛选 ──
         candidates = self._prefilter_candidates(
             user_message=user_message,
-            skillpacks=skillpacks,
+            skillpacks=auto_skillpacks,
             file_paths=file_paths or [],
         )
 
-        # ── 3. 零候选：让 LLM 从全量 skillpacks 中判断，否则 fallback ──
+        # ── 4. 零候选：让 LLM 从可自动路由 skillpacks 中判断，否则 fallback ──
         if not candidates:
             if not self._config.skills_skip_llm_confirm and confirm_with_llm is not None:
-                all_skillpacks = list(skillpacks.values())
+                all_skillpacks = list(auto_skillpacks.values())
                 selected = await self._llm_select(
                     user_message=user_message,
                     confirm_with_llm=confirm_with_llm,
                     candidate_skillpacks=all_skillpacks,
                     fallback_skillpacks=[],
-                    skillpacks=skillpacks,
+                    skillpacks=auto_skillpacks,
                 )
                 if selected:
                     return self._build_result(selected=selected, route_mode="llm_confirm")
-            fallback = self._fallback_skillpack(skillpacks=skillpacks)
-            return self._build_result(
+            fallback = self._fallback_skillpack(skillpacks=auto_skillpacks)
+            return self._build_fallback_result(
                 selected=[fallback] if fallback else [],
                 route_mode="fallback",
+                all_skillpacks=auto_skillpacks,
             )
 
-        # ── 4. 高分领先：confident_direct ──
+        # ── 5. 高分领先：confident_direct ──
         top1, top1_score = candidates[0]
         top2_score = candidates[1][1] if len(candidates) > 1 else 0
         if (
@@ -87,22 +112,22 @@ class SkillRouter:
             selected = self._apply_selection_limit([top1])
             return self._build_result(selected=selected, route_mode="confident_direct")
 
-        # ── 5. 分数不够突出 + skip_llm → 直接用 topK ──
+        # ── 6. 分数不够突出 + skip_llm → 直接用 topK ──
         topk_skillpacks = [skill for skill, _ in candidates[: self._config.skills_prefilter_topk]]
         if self._config.skills_skip_llm_confirm or confirm_with_llm is None:
             selected = self._apply_selection_limit(topk_skillpacks)
             if not selected:
-                fallback = self._fallback_skillpack(skillpacks=skillpacks)
+                fallback = self._fallback_skillpack(skillpacks=auto_skillpacks)
                 selected = [fallback] if fallback else []
             return self._build_result(selected=selected, route_mode="topk_direct")
 
-        # ── 6. 调 LLM 从候选中确认，失败则降级 topK ──
+        # ── 7. 调 LLM 从候选中确认，失败则降级 topK ──
         selected = await self._llm_select(
             user_message=user_message,
             confirm_with_llm=confirm_with_llm,
             candidate_skillpacks=topk_skillpacks,
             fallback_skillpacks=topk_skillpacks,
-            skillpacks=skillpacks,
+            skillpacks=auto_skillpacks,
         )
         return self._build_result(selected=selected, route_mode="llm_confirm")
 
@@ -158,6 +183,17 @@ class SkillRouter:
             selected.append(skill)
             seen.add(skill.name)
         return selected
+
+    @staticmethod
+    def _filter_auto_routable_skillpacks(
+        skillpacks: dict[str, Skillpack],
+    ) -> dict[str, Skillpack]:
+        """过滤可参与模型自动路由的 Skillpack。"""
+        return {
+            name: skill
+            for name, skill in skillpacks.items()
+            if not skill.disable_model_invocation and skill.user_invocable
+        }
 
     def _prefilter_candidates(
         self,
@@ -260,8 +296,7 @@ class SkillRouter:
             return None
         return sorted(skillpacks.values(), key=lambda skill: (-skill.priority, skill.name))[0]
 
-    @staticmethod
-    def _build_result(selected: list[Skillpack], route_mode: str) -> SkillMatchResult:
+    def _build_result(self, selected: list[Skillpack], route_mode: str) -> SkillMatchResult:
         skills_used = [skill.name for skill in selected]
         tool_scope: list[str] = []
         seen_tools: set[str] = set()
@@ -271,10 +306,52 @@ class SkillRouter:
                     continue
                 seen_tools.add(tool)
                 tool_scope.append(tool)
-        contexts = [skill.render_context() for skill in selected]
+        contexts = build_contexts_with_budget(
+            selected, self._config.skills_context_char_budget
+        )
         return SkillMatchResult(
             skills_used=skills_used,
             tool_scope=tool_scope,
             route_mode=route_mode,
             system_contexts=contexts,
         )
+
+    def _build_fallback_result(
+        self,
+        selected: list[Skillpack],
+        route_mode: str,
+        all_skillpacks: dict[str, Skillpack],
+    ) -> SkillMatchResult:
+        """构建 fallback 路由结果：注入技能目录摘要 + list_skills 工具。"""
+        result = self._build_result(selected=selected, route_mode=route_mode)
+
+        # 将 list_skills 加入 tool_scope
+        tool_scope = list(result.tool_scope)
+        if "list_skills" not in tool_scope:
+            tool_scope.append("list_skills")
+
+        # 生成技能目录摘要并注入 system_contexts
+        catalog = SkillRouter._build_skill_catalog(all_skillpacks)
+        contexts = list(result.system_contexts)
+        if catalog:
+            contexts.append(catalog)
+
+        return SkillMatchResult(
+            skills_used=result.skills_used,
+            tool_scope=tool_scope,
+            route_mode=result.route_mode,
+            system_contexts=contexts,
+        )
+
+    @staticmethod
+    def _build_skill_catalog(skillpacks: dict[str, Skillpack]) -> str:
+        """生成所有 skillpack 的摘要目录文本。"""
+        if not skillpacks:
+            return ""
+        lines = [
+            "[技能目录] 当前未匹配到明确的技能包。以下是所有可用技能，"
+            "你可以根据用户需求判断是否需要调用 list_skills 工具获取详情：\n",
+        ]
+        for name, skill in sorted(skillpacks.items()):
+            lines.append(f"- {name}：{skill.description}")
+        return "\n".join(lines)

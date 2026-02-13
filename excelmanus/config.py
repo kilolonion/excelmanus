@@ -36,6 +36,7 @@ class ExcelManusConfig:
     skills_project_dir: str = ".excelmanus/skillpacks"
     skills_prefilter_topk: int = 6
     skills_max_selected: int = 3
+    skills_context_char_budget: int = 12000  # 技能正文字符预算，0 表示不限制
     skills_skip_llm_confirm: bool = False
     skills_fastpath_min_score: int = 6
     skills_fastpath_min_gap: int = 3
@@ -58,6 +59,19 @@ def _parse_int(value: str | None, name: str, default: int) -> int:
         raise ConfigError(f"配置项 {name} 必须为整数，当前值: {value!r}")
     if result <= 0:
         raise ConfigError(f"配置项 {name} 必须为正整数，当前值: {result}")
+    return result
+
+
+def _parse_int_allow_zero(value: str | None, name: str, default: int) -> int:
+    """将字符串解析为非负整数，0 表示不限制。"""
+    if value is None:
+        return default
+    try:
+        result = int(value)
+    except (ValueError, TypeError):
+        raise ConfigError(f"配置项 {name} 必须为整数，当前值: {value!r}")
+    if result < 0:
+        raise ConfigError(f"配置项 {name} 必须为非负整数，当前值: {result}")
     return result
 
 
@@ -177,6 +191,11 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SKILLS_MAX_SELECTED",
         3,
     )
+    skills_context_char_budget = _parse_int_allow_zero(
+        os.environ.get("EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET"),
+        "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
+        12000,
+    )
     skills_skip_llm_confirm = _parse_bool(
         os.environ.get("EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM"),
         "EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM",
@@ -228,6 +247,7 @@ def load_config() -> ExcelManusConfig:
         skills_project_dir=skills_project_dir,
         skills_prefilter_topk=skills_prefilter_topk,
         skills_max_selected=skills_max_selected,
+        skills_context_char_budget=skills_context_char_budget,
         skills_skip_llm_confirm=skills_skip_llm_confirm,
         skills_fastpath_min_score=skills_fastpath_min_score,
         skills_fastpath_min_gap=skills_fastpath_min_gap,

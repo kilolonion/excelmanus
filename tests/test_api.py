@@ -405,6 +405,21 @@ class TestExternalSafeMode:
         assert data["tool_scope"] == []
 
     @pytest.mark.asyncio
+    async def test_fullaccess_command_works_and_keeps_safe_mode_hidden(
+        self, client: AsyncClient
+    ) -> None:
+        """默认安全模式下，/fullAccess 命令可执行且路由元信息仍隐藏。"""
+        resp = await client.post(
+            "/api/v1/chat", json={"message": "/fullAccess status"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "代码技能权限" in data["reply"]
+        assert data["route_mode"] == "hidden"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
     async def test_chat_exposes_route_metadata_when_safe_mode_disabled(
         self,
     ) -> None:
@@ -427,6 +442,26 @@ class TestExternalSafeMode:
         data = resp.json()
         assert data["route_mode"] != "hidden"
         assert isinstance(data["tool_scope"], list)
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_route_mode_control_command_when_safe_mode_disabled(
+        self,
+    ) -> None:
+        """关闭安全模式后，/fullAccess 请求应返回 control_command 路由模式。"""
+        config = _test_config(external_safe_mode=False)
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as c:
+                resp = await c.post(
+                    "/api/v1/chat", json={"message": "/fullAccess"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["route_mode"] == "control_command"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
 
     def test_sse_safe_mode_filters_internal_events(self) -> None:
         """SSE 在安全模式下不发送思考与工具事件。"""
