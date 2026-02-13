@@ -16,6 +16,18 @@ from excelmanus.session import (
 from excelmanus.tools import ToolRegistry
 
 
+# ── 辅助函数 ──────────────────────────────────────────────
+
+
+async def _create_session(
+    manager: SessionManager, session_id: str | None = None
+) -> tuple[str, object]:
+    """创建会话并立即释放锁，用于测试中不需要并发保护的场景。"""
+    sid, engine = await manager.acquire_for_chat(session_id)
+    await manager.release_for_chat(sid)
+    return sid, engine
+
+
 # ── Fixtures ──────────────────────────────────────────────
 
 
@@ -53,14 +65,14 @@ def manager(config: ExcelManusConfig, registry: ToolRegistry) -> SessionManager:
 
 
 class TestGetOrCreate:
-    """get_or_create 方法测试。"""
+    """acquire_for_chat + release_for_chat 创建/复用会话测试。"""
 
     @pytest.mark.asyncio
     async def test_create_new_session_with_none_id(
         self, manager: SessionManager
     ) -> None:
         """session_id 为 None 时应创建新会话并返回 UUID。"""
-        sid, engine = await manager.get_or_create(None)
+        sid, engine = await _create_session(manager)
         assert sid is not None
         assert len(sid) == 36  # UUID4 格式
         assert engine is not None
@@ -71,7 +83,7 @@ class TestGetOrCreate:
         self, manager: SessionManager
     ) -> None:
         """传入不存在的 session_id 时应创建新会话并使用该 ID。"""
-        sid, engine = await manager.get_or_create("custom-id-123")
+        sid, engine = await _create_session(manager, "custom-id-123")
         assert sid == "custom-id-123"
         assert engine is not None
         assert manager.active_count == 1
@@ -79,8 +91,8 @@ class TestGetOrCreate:
     @pytest.mark.asyncio
     async def test_reuse_existing_session(self, manager: SessionManager) -> None:
         """传入已有 session_id 时应复用同一 engine。"""
-        sid1, engine1 = await manager.get_or_create(None)
-        sid2, engine2 = await manager.get_or_create(sid1)
+        sid1, engine1 = await _create_session(manager)
+        sid2, engine2 = await _create_session(manager, sid1)
         assert sid1 == sid2
         assert engine1 is engine2
         assert manager.active_count == 1
@@ -90,12 +102,12 @@ class TestGetOrCreate:
         """超过最大会话数时应抛出 SessionLimitExceededError。"""
         # 填满 5 个会话
         for _ in range(5):
-            await manager.get_or_create(None)
+            await _create_session(manager)
         assert manager.active_count == 5
 
         # 第 6 个应失败
         with pytest.raises(SessionLimitExceededError, match="上限"):
-            await manager.get_or_create(None)
+            await _create_session(manager)
 
     @pytest.mark.asyncio
     async def test_reuse_does_not_count_toward_limit(
@@ -104,11 +116,11 @@ class TestGetOrCreate:
         """复用已有会话不应触发容量上限。"""
         sids = []
         for _ in range(5):
-            sid, _ = await manager.get_or_create(None)
+            sid, _ = await _create_session(manager)
             sids.append(sid)
 
         # 复用不应报错
-        sid, engine = await manager.get_or_create(sids[0])
+        sid, engine = await _create_session(manager, sids[0])
         assert sid == sids[0]
 
 
@@ -148,7 +160,7 @@ class TestDelete:
     @pytest.mark.asyncio
     async def test_delete_existing_session(self, manager: SessionManager) -> None:
         """删除已有会话应返回 True。"""
-        sid, _ = await manager.get_or_create(None)
+        sid, _ = await _create_session(manager)
         result = await manager.delete(sid)
         assert result is True
         assert manager.active_count == 0
@@ -164,7 +176,7 @@ class TestDelete:
         """删除会话后应释放容量，允许创建新会话。"""
         sids = []
         for _ in range(5):
-            sid, _ = await manager.get_or_create(None)
+            sid, _ = await _create_session(manager)
             sids.append(sid)
 
         # 删除一个
@@ -172,7 +184,7 @@ class TestDelete:
         assert manager.active_count == 4
 
         # 现在可以创建新的
-        sid, engine = await manager.get_or_create(None)
+        sid, engine = await _create_session(manager)
         assert engine is not None
         assert manager.active_count == 5
 
@@ -196,7 +208,7 @@ class TestCleanupExpired:
         self, manager: SessionManager
     ) -> None:
         """超过 TTL 的会话应被清理。"""
-        sid, _ = await manager.get_or_create(None)
+        sid, _ = await _create_session(manager)
         assert manager.active_count == 1
 
         # 模拟时间流逝：注入 now = last_access + ttl + 1
@@ -210,7 +222,7 @@ class TestCleanupExpired:
         self, manager: SessionManager
     ) -> None:
         """未超过 TTL 的会话不应被清理。"""
-        sid, _ = await manager.get_or_create(None)
+        sid, _ = await _create_session(manager)
         # now 刚好等于 last_access，远未过期
         current_time = manager._sessions[sid].last_access
         removed = await manager.cleanup_expired(now=current_time)
@@ -220,8 +232,8 @@ class TestCleanupExpired:
     @pytest.mark.asyncio
     async def test_cleanup_partial_expiry(self, manager: SessionManager) -> None:
         """部分过期时只清理过期的会话。"""
-        sid1, _ = await manager.get_or_create(None)
-        sid2, _ = await manager.get_or_create(None)
+        sid1, _ = await _create_session(manager)
+        sid2, _ = await _create_session(manager)
 
         # 手动设置 sid1 的 last_access 为很早之前
         manager._sessions[sid1].last_access = 0.0
@@ -243,7 +255,7 @@ class TestCleanupExpired:
     async def test_cleanup_frees_capacity(self, manager: SessionManager) -> None:
         """清理过期会话后应释放容量。"""
         for _ in range(5):
-            await manager.get_or_create(None)
+            await _create_session(manager)
         assert manager.active_count == 5
 
         # 将所有会话标记为过期
@@ -255,7 +267,7 @@ class TestCleanupExpired:
         assert manager.active_count == 0
 
         # 现在可以创建新会话
-        sid, engine = await manager.get_or_create(None)
+        sid, engine = await _create_session(manager)
         assert engine is not None
 
     @pytest.mark.asyncio
@@ -290,7 +302,9 @@ class TestConcurrencySafety:
 
         async def create_one() -> tuple[str, object] | Exception:
             try:
-                return await mgr.get_or_create(None)
+                sid, engine = await mgr.acquire_for_chat(None)
+                await mgr.release_for_chat(sid)
+                return (sid, engine)
             except SessionLimitExceededError as e:
                 return e
 
@@ -339,7 +353,8 @@ class TestProperty18SessionTTLCleanup:
 
         # 创建 n 个会话
         for _ in range(n_sessions):
-            await mgr.get_or_create(None)
+            sid, _ = await mgr.acquire_for_chat(None)
+            await mgr.release_for_chat(sid)
 
         # 将所有会话标记为 base_time 访问
         base_time = 10000.0
@@ -373,7 +388,8 @@ class TestProperty18SessionTTLCleanup:
         )
 
         for _ in range(n_sessions):
-            await mgr.get_or_create(None)
+            sid, _ = await mgr.acquire_for_chat(None)
+            await mgr.release_for_chat(sid)
 
         # 将所有会话标记为 base_time 访问
         base_time = 10000.0

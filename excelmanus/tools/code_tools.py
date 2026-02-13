@@ -1,4 +1,4 @@
-"""代码执行工具：写入脚本并运行 Python 脚本。"""
+"""代码执行工具：写入文本文件与运行 Python 代码。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -315,34 +316,96 @@ def write_text_file(
     )
 
 
-def run_python_script(
-    script_path: str,
+def run_code(
+    code: str | None = None,
+    script_path: str | None = None,
     args: list[str] | None = None,
     workdir: str = ".",
-    timeout_seconds: int = 300,
+    timeout_seconds: int = 120,
     python_command: str = "auto",
     tail_lines: int = 80,
     require_excel_deps: bool = True,
     stdout_file: str | None = None,
     stderr_file: str | None = None,
 ) -> str:
-    """运行 Python 脚本并返回结构化结果。"""
+    """执行 Python 代码。支持内联代码片段或磁盘脚本文件。
+
+    两种模式（互斥，必须且只能指定其一）：
+    - **内联模式**：传入 ``code`` 参数，内部写临时文件执行后清理。
+    - **文件模式**：传入 ``script_path`` 参数，直接执行已有 ``.py`` 文件。
+    """
+    # ── 参数互斥校验 ──
+    if code is not None and script_path is not None:
+        raise ValueError("code 与 script_path 互斥，请只传其中一个")
+    if code is None and script_path is None:
+        raise ValueError("必须指定 code 或 script_path 其中之一")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds 必须大于 0")
     if tail_lines < 0:
         raise ValueError("tail_lines 不能小于 0")
 
     guard = _get_guard()
-    script_safe = guard.resolve_and_validate(script_path)
     workdir_safe = guard.resolve_and_validate(workdir)
-
-    if not script_safe.exists() or not script_safe.is_file():
-        raise FileNotFoundError(f"脚本不存在: {script_safe}")
-    if script_safe.suffix.lower() != ".py":
-        raise ValueError(f"仅允许运行 .py 文件: {script_safe}")
     if not workdir_safe.exists() or not workdir_safe.is_dir():
         raise NotADirectoryError(f"工作目录不存在: {workdir_safe}")
 
+    # ── 确定脚本路径 ──
+    inline_mode = code is not None
+    temp_script: Path | None = None
+    if inline_mode:
+        temp_dir = guard.workspace_root / "scripts" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_name = f"_rc_{uuid.uuid4().hex[:12]}.py"
+        temp_script = temp_dir / temp_name
+        temp_script.write_text(code, encoding="utf-8")
+        script_safe = temp_script
+    else:
+        assert script_path is not None
+        script_safe = guard.resolve_and_validate(script_path)
+        if not script_safe.exists() or not script_safe.is_file():
+            raise FileNotFoundError(f"脚本不存在: {script_safe}")
+        if script_safe.suffix.lower() != ".py":
+            raise ValueError(f"仅允许运行 .py 文件: {script_safe}")
+
+    try:
+        result_json = _execute_script(
+            guard=guard,
+            script_safe=script_safe,
+            workdir_safe=workdir_safe,
+            args=args,
+            timeout_seconds=timeout_seconds,
+            python_command=python_command,
+            tail_lines=tail_lines,
+            require_excel_deps=require_excel_deps,
+            stdout_file=stdout_file,
+            stderr_file=stderr_file,
+            inline_mode=inline_mode,
+        )
+    finally:
+        # 内联模式清理临时文件
+        if temp_script is not None and temp_script.exists():
+            try:
+                temp_script.unlink()
+            except OSError:
+                pass
+    return result_json
+
+
+def _execute_script(
+    *,
+    guard: FileAccessGuard,
+    script_safe: Path,
+    workdir_safe: Path,
+    args: list[str] | None,
+    timeout_seconds: int,
+    python_command: str,
+    tail_lines: int,
+    require_excel_deps: bool,
+    stdout_file: str | None,
+    stderr_file: str | None,
+    inline_mode: bool,
+) -> str:
+    """内部执行脚本核心逻辑（供 run_code 调用）。"""
     python_cmd, probes, mode = _resolve_python_command(
         python_command,
         require_excel_deps=require_excel_deps,
@@ -417,11 +480,12 @@ def run_python_script(
     else:
         status = "failed"
 
-    result = {
+    result: dict[str, Any] = {
         "status": status,
         "return_code": return_code,
         "timed_out": timed_out,
         "duration_seconds": round(time.time() - started, 3),
+        "mode": "inline" if inline_mode else "file",
         "script": str(script_safe.relative_to(guard.workspace_root)),
         "workdir": str(workdir_safe.relative_to(guard.workspace_root)),
         "command": command,
@@ -477,16 +541,23 @@ def get_tools() -> list[ToolDef]:
             func=write_text_file,
         ),
         ToolDef(
-            name="run_python_script",
-            description="运行 Python 脚本并返回执行结果（支持自动探测解释器）",
+            name="run_code",
+            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "script_path": {"type": "string", "description": "脚本路径（.py）"},
+                    "code": {
+                        "type": "string",
+                        "description": "内联 Python 代码（与 script_path 互斥）",
+                    },
+                    "script_path": {
+                        "type": "string",
+                        "description": "磁盘脚本路径 .py（与 code 互斥）",
+                    },
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "传递给脚本的位置参数",
+                        "description": "传递给脚本的位置参数（仅文件模式）",
                     },
                     "workdir": {
                         "type": "string",
@@ -496,7 +567,7 @@ def get_tools() -> list[ToolDef]:
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "超时秒数",
-                        "default": 300,
+                        "default": 120,
                     },
                     "python_command": {
                         "type": "string",
@@ -522,9 +593,8 @@ def get_tools() -> list[ToolDef]:
                         "description": "完整 stderr 日志输出路径（可选）",
                     },
                 },
-                "required": ["script_path"],
                 "additionalProperties": False,
             },
-            func=run_python_script,
+            func=run_code,
         ),
     ]

@@ -10,14 +10,18 @@
 from __future__ import annotations
 
 import asyncio
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from rich.console import Console as RealConsole
 
 from excelmanus.config import ConfigError
 from excelmanus.cli import (
+    _LiveStatusTicker,
     _async_main,
+    _chat_with_feedback,
     _compute_inline_suggestion,
     _render_farewell,
     _render_help,
@@ -27,6 +31,7 @@ from excelmanus.cli import (
     _repl_loop,
     main,
 )
+from excelmanus.events import EventType, ToolCallEvent
 
 
 # ── 辅助工具 ──────────────────────────────────────────────
@@ -289,6 +294,10 @@ class TestInlineSuggestion:
         """输入 /subagent 空格后应默认建议 status。"""
         assert _compute_inline_suggestion("/subagent ") == "status"
 
+    def test_subagent_list_argument_suggestion(self) -> None:
+        """输入 /subagent l 应补全 list。"""
+        assert _compute_inline_suggestion("/subagent l") == "ist"
+
     def test_non_slash_input_returns_none(self) -> None:
         """普通自然语言输入不应触发斜杠补全。"""
         assert _compute_inline_suggestion("分析销售数据") is None
@@ -341,6 +350,75 @@ class TestPromptToolkitInput:
             mock_session.prompt_async.assert_awaited_once()
             mock_console.input.assert_called_once()
             mock_logger.warning.assert_called()
+
+
+class TestLiveStatusTicker:
+    """测试 CLI 动态状态提示。"""
+
+    def test_wrap_handler_returns_original_when_disabled(self) -> None:
+        ticker = _LiveStatusTicker(MagicMock(), enabled=False)
+
+        def _handler(event: ToolCallEvent) -> None:
+            return None
+
+        wrapped = ticker.wrap_handler(_handler)
+        assert wrapped is _handler
+
+    def test_event_updates_tool_and_thinking_states(self) -> None:
+        ticker = _LiveStatusTicker(MagicMock(), enabled=True)
+
+        wrapped = ticker.wrap_handler(lambda event: None)
+        wrapped(
+            ToolCallEvent(
+                event_type=EventType.TOOL_CALL_START,
+                tool_name="read_excel",
+            )
+        )
+        assert ticker._status_label == "调用工具 read_excel"
+
+        wrapped(
+            ToolCallEvent(
+                event_type=EventType.TOOL_CALL_END,
+                tool_name="read_excel",
+                success=True,
+            )
+        )
+        assert ticker._status_label == "思考中"
+
+    def test_ticker_frames_shrinking_are_space_padded(self) -> None:
+        """帧从 ... 缩短到 .. / . 时应补空格，避免残留旧字符。"""
+
+        async def _run_ticker() -> str:
+            buf = StringIO()
+            real_console = RealConsole(file=buf, force_terminal=True, width=80)
+            ticker = _LiveStatusTicker(real_console, enabled=True, interval=0.01)
+            await ticker.start()
+            await asyncio.sleep(0.06)
+            await ticker.stop()
+            return buf.getvalue()
+
+        output = _run(_run_ticker())
+        assert "思考中.. " in output
+        assert "思考中.  " in output
+
+
+class TestChatWithFeedback:
+    """测试 chat 包装逻辑。"""
+
+    def test_chat_with_feedback_passes_original_handler_when_not_tty(self) -> None:
+        engine = _make_engine()
+        renderer = MagicMock()
+
+        with patch("excelmanus.cli._is_interactive_terminal", return_value=False):
+            _run(
+                _chat_with_feedback(
+                    engine,
+                    user_input="读取文件",
+                    renderer=renderer,
+                )
+            )
+
+        engine.chat.assert_called_once_with("读取文件", on_event=renderer.handle_event)
 
 
 # ── REPL 循环测试 ─────────────────────────────────────────
@@ -475,7 +553,7 @@ class TestReplSlashCommands:
     def test_subagent_command_routes_to_engine_chat(self) -> None:
         """/subagent 命令应通过 engine.chat 处理。"""
         engine = _make_engine()
-        engine.chat = AsyncMock(return_value="当前 fork 子代理状态：disabled。")
+        engine.chat = AsyncMock(return_value="当前 subagent 状态：disabled。")
         with patch("excelmanus.cli.console") as mock_console, \
              patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/subagent status", "exit"]
@@ -486,11 +564,27 @@ class TestReplSlashCommands:
     def test_sub_agent_alias_routes_to_engine_chat(self) -> None:
         """/sub_agent 也应通过 engine.chat 处理。"""
         engine = _make_engine()
-        engine.chat = AsyncMock(return_value="已开启 fork 子代理。")
+        engine.chat = AsyncMock(return_value="已开启 subagent。")
         with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/sub_agent on", "exit"]
             _run(_repl_loop(engine))
             engine.chat.assert_called_once_with("/sub_agent on")
+
+    def test_subagent_list_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="共 4 个可用子代理。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/subagent list", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/subagent list")
+
+    def test_subagent_run_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="执行完成")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/subagent run explorer -- 分析", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/subagent run explorer -- 分析")
 
     def test_accept_command_routes_to_engine_chat(self) -> None:
         engine = _make_engine()
@@ -615,6 +709,72 @@ class TestCliStreamRendererIntegration:
             )
             # 验证未使用 console.status（即 spinner）
             mock_console.status.assert_not_called()
+
+
+class TestSkillsSubcommands:
+    """/skills 子命令测试。"""
+
+    def test_skills_list_subcommand_calls_engine_manager(self) -> None:
+        engine = _make_engine()
+        engine.list_skillpacks_detail.return_value = [
+            {
+                "name": "data_basic",
+                "source": "system",
+                "writable": False,
+                "description": "分析",
+            }
+        ]
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/skills list", "exit"]
+            _run(_repl_loop(engine))
+            engine.list_skillpacks_detail.assert_called_once()
+            engine.chat.assert_not_called()
+
+    def test_skills_get_subcommand_calls_engine_manager(self) -> None:
+        engine = _make_engine()
+        engine.get_skillpack_detail.return_value = {
+            "name": "data_basic",
+            "description": "分析",
+        }
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/skills get data_basic", "exit"]
+            _run(_repl_loop(engine))
+            engine.get_skillpack_detail.assert_called_once_with("data_basic")
+
+    def test_skills_create_subcommand_uses_json_payload(self) -> None:
+        engine = _make_engine()
+        engine.create_skillpack.return_value = {"name": "api_skill"}
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli._sync_skill_command_suggestions") as sync_mock:
+            mock_console.input.side_effect = [
+                '/skills create api_skill --json \'{"description":"d","allowed_tools":["read_excel"],"triggers":["分析"],"instructions":"说明"}\'',
+                "exit",
+            ]
+            _run(_repl_loop(engine))
+            engine.create_skillpack.assert_called_once()
+            args, kwargs = engine.create_skillpack.call_args
+            assert args[0] == "api_skill"
+            assert kwargs["actor"] == "cli"
+            assert sync_mock.call_count >= 2
+
+    def test_skills_delete_requires_yes_flag(self) -> None:
+        engine = _make_engine()
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/skills delete demo_skill", "exit"]
+            _run(_repl_loop(engine))
+            engine.delete_skillpack.assert_not_called()
+
+    def test_skills_delete_with_yes_calls_engine(self) -> None:
+        engine = _make_engine()
+        engine.delete_skillpack.return_value = {"name": "demo_skill"}
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli._sync_skill_command_suggestions") as sync_mock:
+            mock_console.input.side_effect = ["/skills delete demo_skill --yes", "exit"]
+            _run(_repl_loop(engine))
+            engine.delete_skillpack.assert_called_once_with(
+                "demo_skill", actor="cli", reason="cli_delete"
+            )
+            assert sync_mock.call_count >= 2
 
     def test_exception_during_chat_repl_continues(self) -> None:
         """engine.chat 抛出异常后，REPL 应继续运行，用户可继续输入。"""

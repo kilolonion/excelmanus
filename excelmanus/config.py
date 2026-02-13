@@ -48,15 +48,19 @@ class ExcelManusConfig:
     router_api_key: str | None = None
     router_base_url: str | None = None
     router_model: str | None = None
-    # fork 子代理执行配置
+    # subagent 执行配置
     subagent_enabled: bool = True
     subagent_model: str | None = None
     subagent_max_iterations: int = 6
     subagent_max_consecutive_failures: int = 2
+    subagent_user_dir: str = "~/.excelmanus/agents"
+    subagent_project_dir: str = ".excelmanus/agents"
     # 跨会话持久记忆配置
     memory_enabled: bool = True
     memory_dir: str = "~/.excelmanus/memory"
     memory_auto_load_lines: int = 200
+    # 对话记忆上下文窗口大小（token 数），用于截断策略
+    max_context_tokens: int = 128_000
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -247,7 +251,7 @@ def load_config() -> ExcelManusConfig:
         _validate_base_url(router_base_url)
     router_model = os.environ.get("EXCELMANUS_ROUTER_MODEL") or None
 
-    # fork 子代理执行配置
+    # subagent 执行配置
     subagent_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_SUBAGENT_ENABLED"),
         "EXCELMANUS_SUBAGENT_ENABLED",
@@ -264,6 +268,14 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
         2,
     )
+    subagent_user_dir = os.environ.get(
+        "EXCELMANUS_SUBAGENT_USER_DIR",
+        "~/.excelmanus/agents",
+    )
+    subagent_project_dir = os.environ.get(
+        "EXCELMANUS_SUBAGENT_PROJECT_DIR",
+        str(Path(workspace_root) / ".excelmanus" / "agents"),
+    )
 
     # 跨会话持久记忆配置
     memory_enabled = _parse_bool(
@@ -276,6 +288,11 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_MEMORY_AUTO_LOAD_LINES"),
         "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
         200,
+    )
+    max_context_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"),
+        "EXCELMANUS_MAX_CONTEXT_TOKENS",
+        128_000,
     )
 
     return ExcelManusConfig(
@@ -308,7 +325,10 @@ def load_config() -> ExcelManusConfig:
         subagent_model=subagent_model,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
+        subagent_user_dir=subagent_user_dir,
+        subagent_project_dir=subagent_project_dir,
         memory_enabled=memory_enabled,
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
+        max_context_tokens=max_context_tokens,
     )

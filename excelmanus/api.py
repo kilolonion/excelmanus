@@ -3,6 +3,11 @@
 端点：
 - POST   /api/v1/chat                  对话接口（完整 JSON）
 - POST   /api/v1/chat/stream            对话接口（SSE 流式）
+- GET    /api/v1/skills                列出 Skillpack 摘要
+- GET    /api/v1/skills/{name}         查询 Skillpack 详情
+- POST   /api/v1/skills                创建 project Skillpack
+- PATCH  /api/v1/skills/{name}         更新 project Skillpack
+- DELETE /api/v1/skills/{name}         软删除 project Skillpack
 - DELETE /api/v1/sessions/{session_id}  删除会话
 - GET    /api/v1/health                 健康检查
 """
@@ -13,13 +18,13 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, AsyncIterator
+from typing import Annotated, Any, AsyncIterator
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 import excelmanus
 from excelmanus.config import (
@@ -27,6 +32,7 @@ from excelmanus.config import (
     load_config,
     load_cors_allow_origins,
 )
+from excelmanus.engine import ChatResult, ToolCallResult
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger, setup_logging
 from excelmanus.output_guard import guard_public_reply, sanitize_external_text
@@ -36,7 +42,13 @@ from excelmanus.session import (
     SessionManager,
     SessionNotFoundError,
 )
-from excelmanus.skillpacks import SkillpackLoader, SkillRouter
+from excelmanus.skillpacks import (
+    SkillpackConflictError,
+    SkillpackInputError,
+    SkillpackLoader,
+    SkillpackNotFoundError,
+    SkillRouter,
+)
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("api")
@@ -47,13 +59,14 @@ logger = get_logger("api")
 class ChatRequest(BaseModel):
     """对话请求体。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     message: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1)
     ]
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
-    skill_hints: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -64,6 +77,13 @@ class ChatResponse(BaseModel):
     skills_used: list[str]
     tool_scope: list[str]
     route_mode: str
+    iterations: int = 0
+    truncated: bool = False
+    tool_calls: list[dict] = Field(default_factory=list)
+    # token 使用统计
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 class ErrorResponse(BaseModel):
@@ -71,6 +91,56 @@ class ErrorResponse(BaseModel):
 
     error: str
     error_id: str
+
+
+class SkillpackSummaryResponse(BaseModel):
+    """Skillpack 摘要响应。"""
+
+    name: str
+    description: str
+    source: str
+    writable: bool
+    argument_hint: str
+
+
+class SkillpackDetailResponse(SkillpackSummaryResponse):
+    """Skillpack 详情响应。"""
+
+    allowed_tools: list[str]
+    triggers: list[str]
+    file_patterns: list[str]
+    resources: list[str]
+    priority: int
+    version: str
+    disable_model_invocation: bool
+    user_invocable: bool
+    instructions: str
+    resource_contents: dict[str, str]
+
+
+class SkillpackCreateRequest(BaseModel):
+    """创建 skillpack 请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ]
+    payload: dict[str, Any]
+
+
+class SkillpackPatchRequest(BaseModel):
+    """更新 skillpack 请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+    payload: dict[str, Any]
+
+
+class SkillpackMutationResponse(BaseModel):
+    """写操作响应。"""
+
+    status: str
+    name: str
+    detail: dict[str, Any] | None = None
 
 
 # ── 全局状态（由 lifespan 初始化） ────────────────────────
@@ -115,6 +185,89 @@ def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: li
     if _is_external_safe_mode():
         return "hidden", [], []
     return route_mode, skills_used, tool_scope
+
+
+def _error_json_response(status_code: int, message: str) -> JSONResponse:
+    """构建统一错误响应。"""
+    error_id = str(uuid.uuid4())
+    body = ErrorResponse(error=message, error_id=error_id)
+    return JSONResponse(status_code=status_code, content=body.model_dump())
+
+
+def _require_skill_engine():
+    """创建临时 AgentEngine 实例用于 skillpack 管理。"""
+    assert _config is not None, "服务未初始化"
+    assert _tool_registry is not None, "服务未初始化"
+    assert _skill_router is not None, "服务未初始化"
+    from excelmanus.engine import AgentEngine
+
+    return AgentEngine(
+        config=_config,
+        registry=_tool_registry,
+        skill_router=_skill_router,
+    )
+
+
+def _to_skill_summary(detail: dict[str, Any]) -> SkillpackSummaryResponse:
+    """从详情字典提取摘要响应。"""
+    return SkillpackSummaryResponse(
+        name=str(detail.get("name", "")),
+        description=str(detail.get("description", "")),
+        source=str(detail.get("source", "")),
+        writable=bool(detail.get("writable", False)),
+        argument_hint=str(detail.get("argument_hint", "") or ""),
+    )
+
+
+def _to_skill_detail(detail: dict[str, Any]) -> SkillpackDetailResponse:
+    """详情字典转换为响应模型。"""
+    return SkillpackDetailResponse(
+        name=str(detail.get("name", "")),
+        description=str(detail.get("description", "")),
+        source=str(detail.get("source", "")),
+        writable=bool(detail.get("writable", False)),
+        argument_hint=str(detail.get("argument_hint", "") or ""),
+        allowed_tools=list(detail.get("allowed_tools", []) or []),
+        triggers=list(detail.get("triggers", []) or []),
+        file_patterns=list(detail.get("file_patterns", []) or []),
+        resources=list(detail.get("resources", []) or []),
+        priority=int(detail.get("priority", 0)),
+        version=str(detail.get("version", "1.0.0")),
+        disable_model_invocation=bool(detail.get("disable_model_invocation", False)),
+        user_invocable=bool(detail.get("user_invocable", True)),
+        instructions=str(detail.get("instructions", "") or ""),
+        resource_contents=dict(detail.get("resource_contents", {}) or {}),
+    )
+
+
+def _normalize_chat_result(value: ChatResult | str | None) -> ChatResult:
+    """兼容测试桩仍返回 str 的场景。"""
+    if isinstance(value, ChatResult):
+        return value
+    return ChatResult(reply="" if value is None else str(value))
+
+
+def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
+    """根据安全模式裁剪工具调用明细。"""
+    if _is_external_safe_mode():
+        return []
+
+    rows: list[dict] = []
+    for item in tool_calls:
+        rows.append({
+            "tool_name": item.tool_name,
+            "arguments": item.arguments if isinstance(item.arguments, dict) else {},
+            "result": sanitize_external_text(item.result or "", max_len=3000),
+            "success": bool(item.success),
+            "error": (
+                sanitize_external_text(item.error, max_len=1000)
+                if item.error
+                else None
+            ),
+            "pending_approval": bool(item.pending_approval),
+            "approval_id": item.approval_id,
+        })
+    return rows
 
 
 # ── Lifespan ──────────────────────────────────────────────
@@ -207,10 +360,9 @@ async def _handle_session_not_found(
     request: Request, exc: SessionNotFoundError
 ) -> JSONResponse:
     """会话不存在 → 404。"""
-    return JSONResponse(
-        status_code=404,
-        content={"error": str(exc)},
-    )
+    error_id = str(uuid.uuid4())
+    body = ErrorResponse(error=str(exc), error_id=error_id)
+    return JSONResponse(status_code=404, content=body.model_dump())
 
 
 @app.exception_handler(SessionLimitExceededError)
@@ -218,10 +370,9 @@ async def _handle_session_limit(
     request: Request, exc: SessionLimitExceededError
 ) -> JSONResponse:
     """会话数量超限 → 429。"""
-    return JSONResponse(
-        status_code=429,
-        content={"error": str(exc)},
-    )
+    error_id = str(uuid.uuid4())
+    body = ErrorResponse(error=str(exc), error_id=error_id)
+    return JSONResponse(status_code=429, content=body.model_dump())
 
 
 @app.exception_handler(SessionBusyError)
@@ -229,10 +380,9 @@ async def _handle_session_busy(
     request: Request, exc: SessionBusyError
 ) -> JSONResponse:
     """会话正在处理中 → 409。"""
-    return JSONResponse(
-        status_code=409,
-        content={"error": str(exc)},
-    )
+    error_id = str(uuid.uuid4())
+    body = ErrorResponse(error=str(exc), error_id=error_id)
+    return JSONResponse(status_code=409, content=body.model_dump())
 
 
 @app.exception_handler(Exception)
@@ -244,19 +394,24 @@ async def _handle_unexpected(
     logger.error(
         "未预期异常 [error_id=%s]: %s", error_id, exc, exc_info=True
     )
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "服务内部错误，请联系管理员。",
-            "error_id": error_id,
-        },
-    )
+    body = ErrorResponse(error="服务内部错误，请联系管理员。", error_id=error_id)
+    return JSONResponse(status_code=500, content=body.model_dump())
 
 
 # ── 端点 ──────────────────────────────────────────────────
 
+# OpenAPI 错误响应 schema（供路由 responses 参数引用）
+_error_responses: dict = {
+    403: {"model": ErrorResponse, "description": "无权限执行"},
+    404: {"model": ErrorResponse, "description": "会话不存在"},
+    409: {"model": ErrorResponse, "description": "会话正在处理中"},
+    422: {"model": ErrorResponse, "description": "请求参数错误"},
+    429: {"model": ErrorResponse, "description": "会话数量超限"},
+    500: {"model": ErrorResponse, "description": "服务内部错误"},
+}
 
-@app.post("/api/v1/chat", response_model=ChatResponse)
+
+@app.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
 async def chat(request: ChatRequest) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     assert _session_manager is not None, "服务未初始化"
@@ -265,17 +420,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
         request.session_id
     )
     try:
-        if request.skill_hints:
-            reply = await engine.chat(
-                request.message,
-                skill_hints=request.skill_hints,
-            )
-        else:
-            reply = await engine.chat(request.message)
+        chat_result = _normalize_chat_result(await engine.chat(request.message))
     finally:
         await _session_manager.release_for_chat(session_id)
 
-    normalized_reply = guard_public_reply(reply.strip())
+    normalized_reply = guard_public_reply(chat_result.reply.strip())
     route = engine.last_route_result
     route_mode, skills_used, tool_scope = _public_route_fields(
         route.route_mode,
@@ -288,10 +437,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
         skills_used=skills_used,
         tool_scope=tool_scope,
         route_mode=route_mode,
+        iterations=chat_result.iterations,
+        truncated=chat_result.truncated,
+        tool_calls=_public_tool_calls(chat_result.tool_calls),
+        prompt_tokens=chat_result.prompt_tokens,
+        completion_tokens=chat_result.completion_tokens,
+        total_tokens=chat_result.total_tokens,
     )
 
 
-@app.post("/api/v1/chat/stream")
+@app.post("/api/v1/chat/stream", responses=_error_responses)
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。"""
     assert _session_manager is not None, "服务未初始化"
@@ -307,21 +462,14 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         """引擎事件回调：将事件放入队列。"""
         event_queue.put_nowait(event)
 
-    async def _run_chat() -> str:
+    async def _run_chat() -> ChatResult:
         """后台执行 engine.chat，完成后向队列发送结束信号。"""
         try:
-            if request.skill_hints:
-                reply = await engine.chat(
-                    request.message,
-                    on_event=_on_event,
-                    skill_hints=request.skill_hints,
-                )
-            else:
-                reply = await engine.chat(
-                    request.message,
-                    on_event=_on_event,
-                )
-            return reply
+            result = await engine.chat(
+                request.message,
+                on_event=_on_event,
+            )
+            return _normalize_chat_result(result)
         except Exception:
             raise
         finally:
@@ -375,8 +523,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         yield sse
 
             # chat 任务完成：获取结果
-            reply = chat_task.result()
-            normalized_reply = guard_public_reply((reply or "").strip())
+            chat_result = chat_task.result()
+            normalized_reply = guard_public_reply((chat_result.reply or "").strip())
             route = engine.last_route_result
             route_mode, skills_used, tool_scope = _public_route_fields(
                 route.route_mode,
@@ -388,6 +536,11 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 "skills_used": skills_used,
                 "tool_scope": tool_scope,
                 "route_mode": route_mode,
+                "iterations": chat_result.iterations,
+                "truncated": chat_result.truncated,
+                "prompt_tokens": chat_result.prompt_tokens,
+                "completion_tokens": chat_result.completion_tokens,
+                "total_tokens": chat_result.total_tokens,
             })
             yield _sse_format("done", {})
 
@@ -483,20 +636,51 @@ def _sse_event_to_sse(
         data = {"iteration": event.iteration}
     elif event.event_type == EventType.SUBAGENT_START:
         data = {
+            "name": sanitize_external_text(event.subagent_name, max_len=100),
             "reason": sanitize_external_text(event.subagent_reason, max_len=500),
             "tools": event.subagent_tools,
+            "permission_mode": sanitize_external_text(
+                event.subagent_permission_mode,
+                max_len=40,
+            ),
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
         }
     elif event.event_type == EventType.SUBAGENT_SUMMARY:
         data = {
+            "name": sanitize_external_text(event.subagent_name, max_len=100),
             "reason": sanitize_external_text(event.subagent_reason, max_len=500),
             "summary": sanitize_external_text(event.subagent_summary, max_len=4000),
             "tools": event.subagent_tools,
+            "permission_mode": sanitize_external_text(
+                event.subagent_permission_mode,
+                max_len=40,
+            ),
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
+            "iterations": event.subagent_iterations,
+            "tool_calls": event.subagent_tool_calls,
         }
     elif event.event_type == EventType.SUBAGENT_END:
         data = {
+            "name": sanitize_external_text(event.subagent_name, max_len=100),
             "reason": sanitize_external_text(event.subagent_reason, max_len=500),
             "success": event.subagent_success,
             "tools": event.subagent_tools,
+            "permission_mode": sanitize_external_text(
+                event.subagent_permission_mode,
+                max_len=40,
+            ),
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
+            "iterations": event.subagent_iterations,
+            "tool_calls": event.subagent_tool_calls,
         }
     elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
         data = {
@@ -511,7 +695,165 @@ def _sse_event_to_sse(
     return _sse_format(sse_type, data)
 
 
-@app.delete("/api/v1/sessions/{session_id}")
+@app.get(
+    "/api/v1/skills",
+    response_model=list[SkillpackSummaryResponse],
+    responses={
+        500: _error_responses[500],
+    },
+)
+async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
+    """列出全部已加载 skillpack 摘要。"""
+    engine = _require_skill_engine()
+    details = engine.list_skillpacks_detail()
+    return [_to_skill_summary(detail) for detail in details]
+
+
+@app.get(
+    "/api/v1/skills/{name}",
+    response_model=SkillpackDetailResponse | SkillpackSummaryResponse,
+    responses={
+        404: _error_responses[404],
+        422: _error_responses[422],
+        500: _error_responses[500],
+    },
+)
+async def get_skill(name: str) -> SkillpackDetailResponse | SkillpackSummaryResponse | JSONResponse:
+    """查询单个 skillpack。"""
+    engine = _require_skill_engine()
+    try:
+        detail = engine.get_skillpack_detail(name)
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    except SkillpackNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+
+    if _is_external_safe_mode():
+        return _to_skill_summary(detail)
+    return _to_skill_detail(detail)
+
+
+@app.post(
+    "/api/v1/skills",
+    status_code=201,
+    response_model=SkillpackMutationResponse,
+    responses={
+        403: _error_responses[403],
+        409: _error_responses[409],
+        422: _error_responses[422],
+        500: _error_responses[500],
+    },
+)
+async def create_skill(
+    request: SkillpackCreateRequest,
+) -> SkillpackMutationResponse | JSONResponse:
+    """创建 project 层 skillpack。"""
+    if _is_external_safe_mode():
+        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
+
+    engine = _require_skill_engine()
+    try:
+        detail = engine.create_skillpack(
+            name=request.name,
+            payload=request.payload,
+            actor="api",
+        )
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    except SkillpackConflictError as exc:
+        return _error_json_response(409, str(exc))
+
+    return SkillpackMutationResponse(
+        status="created",
+        name=str(detail.get("name", request.name)),
+        detail=detail,
+    )
+
+
+@app.patch(
+    "/api/v1/skills/{name}",
+    response_model=SkillpackMutationResponse,
+    responses={
+        403: _error_responses[403],
+        404: _error_responses[404],
+        409: _error_responses[409],
+        422: _error_responses[422],
+        500: _error_responses[500],
+    },
+)
+async def patch_skill(
+    name: str,
+    request: SkillpackPatchRequest,
+) -> SkillpackMutationResponse | JSONResponse:
+    """更新 project 层 skillpack。"""
+    if _is_external_safe_mode():
+        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
+
+    engine = _require_skill_engine()
+    try:
+        detail = engine.patch_skillpack(
+            name=name,
+            payload=request.payload,
+            actor="api",
+        )
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    except SkillpackNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+    except SkillpackConflictError as exc:
+        return _error_json_response(409, str(exc))
+
+    return SkillpackMutationResponse(
+        status="updated",
+        name=str(detail.get("name", name)),
+        detail=detail,
+    )
+
+
+@app.delete(
+    "/api/v1/skills/{name}",
+    response_model=SkillpackMutationResponse,
+    responses={
+        403: _error_responses[403],
+        404: _error_responses[404],
+        409: _error_responses[409],
+        422: _error_responses[422],
+        500: _error_responses[500],
+    },
+)
+async def delete_skill(
+    name: str,
+    reason: str = "",
+) -> SkillpackMutationResponse | JSONResponse:
+    """软删除 project 层 skillpack。"""
+    if _is_external_safe_mode():
+        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
+
+    engine = _require_skill_engine()
+    try:
+        detail = engine.delete_skillpack(
+            name=name,
+            actor="api",
+            reason=reason,
+        )
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    except SkillpackNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+    except SkillpackConflictError as exc:
+        return _error_json_response(409, str(exc))
+
+    return SkillpackMutationResponse(
+        status="deleted",
+        name=str(detail.get("name", name)),
+        detail=detail,
+    )
+
+
+@app.delete("/api/v1/sessions/{session_id}", responses={
+    404: _error_responses[404],
+    500: _error_responses[500],
+})
 async def delete_session(session_id: str) -> dict:
     """删除指定会话并释放资源。"""
     assert _session_manager is not None, "服务未初始化"
@@ -541,12 +883,17 @@ async def health() -> dict:
     if _skillpack_loader is not None:
         skillpacks = sorted(_skillpack_loader.get_skillpacks().keys())
 
+    active_sessions = 0
+    if _session_manager is not None:
+        active_sessions = _session_manager.active_count
+
     return {
         "status": "ok",
         "version": excelmanus.__version__,
         "model": _config.model if _config is not None else "",
         "tools": tools,
         "skillpacks": skillpacks,
+        "active_sessions": active_sessions,
     }
 
 

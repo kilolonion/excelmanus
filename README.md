@@ -67,7 +67,7 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status]`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
 输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`）。
 
 ### Accept 门禁与审计
@@ -79,7 +79,7 @@ python -m excelmanus
   - `changes.patch`：文本文件 unified diff（若有）
   - `snapshots/`：回滚快照（按需）
 - 对支持回滚的记录可执行 `/undo <id>`。
-- `run_python_script` 仍会进入 accept 流程并落盘审计，但默认不支持自动回滚脚本副作用。
+- `run_code` 仍会进入 accept 流程并落盘审计，但默认不支持自动回滚代码执行副作用。
 
 ### API
 
@@ -90,18 +90,32 @@ excelmanus-api
 接口：
 
 - `POST /api/v1/chat`
-  - 请求：`message`、`session_id?`、`skill_hints?`
+  - 请求：`message`、`session_id?`
   - 响应：`session_id`、`reply`、`skills_used`、`tool_scope`、`route_mode`
+- `GET /api/v1/skills`
+  - 响应：Skillpack 摘要列表（`name`、`description`、`source`、`writable`、`argument_hint`）
+- `GET /api/v1/skills/{name}`
+  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情
+- `POST /api/v1/skills`
+  - 请求：`name` + `payload`
+- `PATCH /api/v1/skills/{name}`
+  - 请求：`payload`（字段级更新）
+- `DELETE /api/v1/skills/{name}`
+  - 软删除并归档到 `.excelmanus/skillpacks_archive/`
 - `DELETE /api/v1/sessions/{session_id}`
 - `GET /api/v1/health`
   - 响应：`status`、`version`、`tools`、`skillpacks`
+
+说明：
+- 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`POST/PATCH/DELETE /api/v1/skills*` 会返回 `403`。
+- Skillpack 写操作仅允许 project 层，system/user 层仅可读取。
 
 示例：
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "读取 sales.xlsx 前10行", "skill_hints": ["data_basic"]}'
+  -d '{"message": "读取 sales.xlsx 前10行"}'
 ```
 
 ## Skillpack 扩展
@@ -136,7 +150,7 @@ Skillpack 使用目录结构：
 - 所有文件读写仍受 `WORKSPACE_ROOT` 限制
 - 路径穿越与符号链接越界会被拒绝
 - 代码 Skillpack 默认受限（`excel_code_runner`），仅可通过会话级 `/fullAccess` 临时解锁
-- `run_python_script` 始终使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制尽力应用）
+- `run_code` 始终使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制尽力应用）
 - `allowed_tools` 两阶段校验
   - Loader 启动期软校验：未知工具仅告警
   - Engine 运行期硬校验：未授权调用返回 `TOOL_NOT_ALLOWED`

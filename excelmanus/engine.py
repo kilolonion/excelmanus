@@ -16,8 +16,14 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
-from excelmanus.skillpacks import SkillMatchResult, SkillRouter, Skillpack
+from excelmanus.skillpacks import (
+    SkillMatchResult,
+    SkillRouter,
+    Skillpack,
+    SkillpackManager,
+)
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
+from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
 from excelmanus.tools.registry import ToolNotAllowedError
@@ -27,19 +33,7 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_FORK_SUMMARY_MAX_CHARS = 4000
-_META_TOOL_NAMES = ("select_skill", "explore_data", "list_skills")
-_READ_ONLY_TOOLS = (
-    "read_excel",
-    "analyze_data",
-    "filter_data",
-    "list_sheets",
-    "get_file_info",
-    "search_files",
-    "list_directory",
-    "read_text_file",
-    "read_cell_styles",
-)
+_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents")
 
 
 def _to_plain(value: Any) -> Any:
@@ -110,6 +104,35 @@ class ChatResult:
     tool_calls: list[ToolCallResult] = field(default_factory=list)
     iterations: int = 0
     truncated: bool = False
+    # token 使用统计（来自 LLM API 的 usage 字段）
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def __str__(self) -> str:
+        """兼容旧调用方将 chat 结果当作字符串直接使用。"""
+        return self.reply
+
+    def __eq__(self, other: object) -> bool:
+        """兼容与 str 比较，同时保留 ChatResult 间的结构化比较。"""
+        if isinstance(other, str):
+            return self.reply == other
+        if isinstance(other, ChatResult):
+            return (
+                self.reply == other.reply
+                and self.tool_calls == other.tool_calls
+                and self.iterations == other.iterations
+                and self.truncated == other.truncated
+            )
+        return NotImplemented
+
+    def __contains__(self, item: str) -> bool:
+        """兼容 `'xx' in result` 形式。"""
+        return item in self.reply
+
+    def __getattr__(self, name: str) -> Any:
+        """兼容 result.strip()/startswith() 等字符串方法。"""
+        return getattr(self.reply, name)
 
 
 class AgentEngine:
@@ -140,11 +163,16 @@ class AgentEngine:
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
+        self._skillpack_manager = (
+            SkillpackManager(config, skill_router._loader)
+            if skill_router is not None
+            else None
+        )
         self._memory = ConversationMemory(config)
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             tool_scope=self._all_tool_names(),
-            route_mode="legacy_all_tools",
+            route_mode="all_tools",
             system_contexts=[],
         )
         # 任务清单存储：单会话内存级
@@ -158,6 +186,7 @@ class AgentEngine:
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
         self._subagent_enabled: bool = config.subagent_enabled
+        self._subagent_registry = SubagentRegistry(config)
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
         # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
         self._loaded_skill_names: set[str] = set()
@@ -171,6 +200,11 @@ class AgentEngine:
         self._last_success_count: int = 0
         self._last_failure_count: int = 0
         self._approval = ApprovalManager(config.workspace_root)
+        self._subagent_executor = SubagentExecutor(
+            parent_config=config,
+            parent_registry=registry,
+            approval_manager=self._approval,
+        )
 
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
@@ -222,11 +256,14 @@ class AgentEngine:
 
     @property
     def subagent_enabled(self) -> bool:
-        """当前会话是否启用 fork 子代理。"""
+        """当前会话是否启用 subagent。"""
         return self._subagent_enabled
 
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
+        if self._skillpack_manager is not None:
+            rows = self._skillpack_manager.list_skillpacks()
+            return sorted(str(item["name"]) for item in rows)
         if self._skill_router is None:
             return []
         skillpacks = self._skill_router._loader.get_skillpacks()
@@ -236,6 +273,13 @@ class AgentEngine:
 
     def list_skillpack_commands(self) -> list[tuple[str, str]]:
         """返回可用于 CLI 展示的 Skillpack 斜杠命令与参数提示。"""
+        if self._skillpack_manager is not None:
+            rows = self._skillpack_manager.list_skillpacks()
+            commands = [
+                (str(item["name"]), str(item.get("argument_hint", "") or ""))
+                for item in rows
+            ]
+            return sorted(commands, key=lambda item: item[0].lower())
         if self._skill_router is None:
             return []
         skillpacks = self._skill_router._loader.get_skillpacks()
@@ -249,6 +293,13 @@ class AgentEngine:
 
     def get_skillpack_argument_hint(self, name: str) -> str:
         """按技能名返回 argument_hint。"""
+        if self._skillpack_manager is not None:
+            try:
+                detail = self._skillpack_manager.get_skillpack(name)
+            except Exception:
+                return ""
+            hint = detail.get("argument_hint")
+            return hint if isinstance(hint, str) else ""
         if self._skill_router is None:
             return ""
         skillpacks = self._skill_router._loader.get_skillpacks()
@@ -264,6 +315,58 @@ class AgentEngine:
                 return candidate.argument_hint
         return ""
 
+    def list_skillpacks_detail(self) -> list[dict[str, Any]]:
+        """返回全部技能详情（按名称排序）。"""
+        manager = self._require_skillpack_manager()
+        return manager.list_skillpacks()
+
+    def get_skillpack_detail(self, name: str) -> dict[str, Any]:
+        """返回指定技能详情。"""
+        manager = self._require_skillpack_manager()
+        return manager.get_skillpack(name)
+
+    def create_skillpack(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        """创建 project 层技能。"""
+        manager = self._require_skillpack_manager()
+        return manager.create_skillpack(name=name, payload=payload, actor=actor)
+
+    def patch_skillpack(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        """更新 project 层技能。"""
+        manager = self._require_skillpack_manager()
+        return manager.patch_skillpack(name=name, payload=payload, actor=actor)
+
+    def delete_skillpack(
+        self,
+        name: str,
+        *,
+        actor: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """软删除 project 层技能。"""
+        manager = self._require_skillpack_manager()
+        return manager.delete_skillpack(
+            name=name,
+            actor=actor,
+            reason=reason,
+        )
+
+    def _require_skillpack_manager(self) -> SkillpackManager:
+        if self._skillpack_manager is None:
+            raise RuntimeError("skillpack 管理器不可用。")
+        return self._skillpack_manager
+
     def _emit(self, on_event: EventCallback | None, event: ToolCallEvent) -> None:
         """安全地发出事件，捕获回调异常。"""
         if on_event is None:
@@ -277,15 +380,14 @@ class AgentEngine:
         self,
         user_message: str,
         on_event: EventCallback | None = None,
-        skill_hints: list[str] | None = None,
         slash_command: str | None = None,
         raw_args: str | None = None,
-    ) -> str:
+    ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
         control_reply = await self._handle_control_command(user_message)
         if control_reply is not None:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
-            return control_reply
+            return ChatResult(reply=control_reply)
 
         if self._approval.has_pending():
             self._last_route_result = SkillMatchResult(
@@ -296,7 +398,7 @@ class AgentEngine:
             )
             block_msg = self._approval.pending_block_message()
             logger.info("存在待确认项，已阻塞普通请求")
-            return block_msg
+            return ChatResult(reply=block_msg)
 
         chat_start = time.monotonic()
 
@@ -346,7 +448,7 @@ class AgentEngine:
             route_result.skills_used,
         )
 
-        reply = await self._tool_calling_loop(route_result, on_event)
+        chat_result = await self._tool_calling_loop(route_result, on_event)
 
         # 发出执行摘要事件
         elapsed = time.monotonic() - chat_start
@@ -359,10 +461,13 @@ class AgentEngine:
                 success_count=self._last_success_count,
                 failure_count=self._last_failure_count,
                 elapsed_seconds=round(elapsed, 2),
+                prompt_tokens=chat_result.prompt_tokens,
+                completion_tokens=chat_result.completion_tokens,
+                total_tokens=chat_result.total_tokens,
             ),
         )
 
-        return reply
+        return chat_result
 
     @staticmethod
     def _normalize_skill_command_name(name: str) -> str:
@@ -448,22 +553,20 @@ class AgentEngine:
                 if not skillpacks and callable(load_all):
                     skillpacks = load_all()
                 if isinstance(skillpacks, dict):
-                    if blocked:
-                        skillpacks = {
-                            name: skill
-                            for name, skill in skillpacks.items()
-                            if name not in blocked
-                        }
                     skill_names = sorted(skillpacks.keys())
                     if skill_names:
                         lines = ["可用技能：\n"]
                         for name in skill_names:
                             skill = skillpacks[name]
                             description = str(getattr(skill, "description", "")).strip()
-                            if description:
-                                lines.append(f"- {name}：{description}")
+                            if blocked and name in blocked:
+                                suffix = " [⚠️ 需要 fullAccess 权限，使用 /fullAccess on 开启]"
                             else:
-                                lines.append(f"- {name}")
+                                suffix = ""
+                            if description:
+                                lines.append(f"- {name}：{description}{suffix}")
+                            else:
+                                lines.append(f"- {name}{suffix}")
                         skill_catalog = "\n".join(lines)
 
         select_skill_description = (
@@ -473,16 +576,14 @@ class AgentEngine:
             "Skill_Catalog:\n"
             f"{skill_catalog}"
         )
-        explore_data_description = (
-            "启动只读数据探查子代理，适用于以下场景：\n"
-            "- 大体量 Excel 文件（担心一次性读全量开销过高）\n"
-            "- 数据结构未知，需要先摸清 sheet、列结构和质量问题\n"
-            "- 存在复杂数据质量问题，需要先探查再执行写入操作\n\n"
-            "不适用场景：\n"
-            "- 用户已经明确说明数据结构\n"
-            "- 仅做简单读取或一次性明确操作\n"
-            "- 仅询问能力或闲聊"
+        subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
+        delegate_description = (
+            "把任务委派给 subagent 执行，适用于复杂多步任务、数据探查、批量改写。"
+            "当任务需要专门角色（explorer/analyst/writer/coder）时优先调用。\n\n"
+            "Subagent_Catalog:\n"
+            f"{subagent_catalog or '当前无可用子代理。'}"
         )
+        list_subagents_description = "列出当前可用的全部 subagent 及职责。"
         return [
             {
                 "type": "function",
@@ -510,22 +611,40 @@ class AgentEngine:
             {
                 "type": "function",
                 "function": {
-                    "name": "explore_data",
-                    "description": explore_data_description,
+                    "name": "delegate_to_subagent",
+                    "description": delegate_description,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "task": {
                                 "type": "string",
-                                "description": "需要探查的问题或目标",
+                                "description": "需要子代理完成的任务描述",
+                            },
+                            "agent_name": {
+                                "type": "string",
+                                "description": "可选，指定子代理名称；不传则自动选择",
+                                "enum": subagent_names,
                             },
                             "file_paths": {
                                 "type": "array",
-                                "description": "待探查文件路径列表（可选）",
+                                "description": "可选，相关文件路径列表",
                                 "items": {"type": "string"},
                             },
                         },
                         "required": ["task"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_subagents",
+                    "description": list_subagents_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
                         "additionalProperties": False,
                     },
                 },
@@ -542,13 +661,18 @@ class AgentEngine:
         if not skillpacks:
             skillpacks = loader.load_all()
 
+        # 检查是否尝试激活被限制的技能
         blocked = self._blocked_skillpacks()
-        if blocked:
-            skillpacks = {
-                name: skill
-                for name, skill in skillpacks.items()
-                if name not in blocked
-            }
+        if blocked and skill_name in blocked:
+            # 从全量技能包中获取描述
+            desc = ""
+            skill_obj = skillpacks.get(skill_name)
+            if skill_obj is not None:
+                desc = f"\n该技能用于：{skill_obj.description}"
+            return (
+                f"⚠️ 技能 '{skill_name}' 需要 fullAccess 权限才能使用。{desc}\n"
+                f"请告知用户使用 /fullAccess on 命令开启完全访问权限后重试。"
+            )
 
         if not skillpacks:
             return f"未找到技能: {skill_name}"
@@ -613,8 +737,8 @@ class AgentEngine:
         return schemas
 
     @staticmethod
-    def _normalize_explore_file_paths(file_paths: list[Any] | None) -> list[str]:
-        """规范化 explore_data 的 file_paths 参数。"""
+    def _normalize_subagent_file_paths(file_paths: list[Any] | None) -> list[str]:
+        """规范化 subagent 输入文件路径。"""
         if not file_paths:
             return []
         normalized: list[str] = []
@@ -626,190 +750,143 @@ class AgentEngine:
                 normalized.append(path)
         return normalized
 
-    def _build_explorer_system_prompt(self, task: str, file_paths: list[str]) -> str:
-        """构建 explore_data 子代理系统提示。"""
-        path_text = "、".join(file_paths) if file_paths else "未提供（请先用只读工具定位目标文件）"
-        read_only_tools = "、".join(_READ_ONLY_TOOLS)
-        return (
-            "你是 ExcelManus 的只读数据探查子代理。\n"
-            "目标：在有限轮次内完成结构探查并输出高密度摘要，供主代理后续执行。\n"
-            "硬性约束：禁止任何写入、删除、重命名、覆盖操作，只允许读取。\n"
-            f"只读工具范围：{read_only_tools}\n"
-            f"探查任务：{task.strip()}\n"
-            f"候选文件：{path_text}\n\n"
-            "输出要求：\n"
-            "1. 优先给出文件/工作表结构、关键字段、数据质量风险。\n"
-            "2. 明确指出后续执行前需要确认的参数或边界条件。\n"
-            "3. 结尾给出 3~8 条可执行建议，便于主代理直接落地。"
-        )
+    def _build_parent_context_summary(self) -> str:
+        """构建主会话上下文摘要。"""
+        messages = self._memory.get_messages()
+        lines: list[str] = []
+        for msg in messages[-6:]:
+            role = str(msg.get("role", "")).strip()
+            content = str(msg.get("content", "")).strip()
+            if not content:
+                continue
+            if role == "user":
+                lines.append(f"用户: {content[:200]}")
+            elif role == "assistant":
+                lines.append(f"助手: {content[:200]}")
+        return "\n".join(lines)
 
-    async def _execute_subagent_loop(
+    async def _auto_select_subagent(
         self,
         *,
-        system_prompt: str,
-        tool_scope: list[str],
-        max_iterations: int,
-    ) -> str:
-        """子代理执行循环：LLM 调用 → 只读工具执行 → 熔断/迭代上限保护。"""
-        subagent_memory = ConversationMemory(self._config)
-        subagent_memory.add_user_message("请按系统提示完成只读探查并返回摘要。")
-
-        tools = self._get_openai_tools(tool_scope=tool_scope)
-        model_name = self._config.subagent_model or self._config.model
-        max_failures = self._config.subagent_max_consecutive_failures
-        consecutive_failures = 0
-
-        for iteration in range(1, max_iterations + 1):
-            messages = subagent_memory.get_messages(system_prompts=[system_prompt])
-            kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": messages,
-            }
-            if tools:
-                kwargs["tools"] = tools
-
-            response = await self._client.chat.completions.create(**kwargs)
-            message = response.choices[0].message
-
-            if not message.tool_calls:
-                summary = str(message.content or "").strip()
-                if not summary:
-                    summary = "子代理未返回文本摘要。"
-                subagent_memory.add_assistant_message(summary)
-                return summary
-
-            assistant_msg = _assistant_message_to_dict(message)
-            subagent_memory.add_assistant_tool_message(assistant_msg)
-
-            breaker_triggered = False
-            breaker_skip_error = (
-                f"工具未执行：连续 {max_failures} 次工具调用失败，已触发子代理熔断。"
-            )
-            failed_results: list[ToolCallResult] = []
-
-            for tc in message.tool_calls:
-                tool_call_id = getattr(tc, "id", "")
-
-                if breaker_triggered:
-                    subagent_memory.add_tool_result(tool_call_id, breaker_skip_error)
-                    continue
-
-                tc_result = await self._execute_tool_call(
-                    tc,
-                    tool_scope,
-                    None,
-                    iteration,
-                )
-                subagent_memory.add_tool_result(tool_call_id, tc_result.result)
-
-                if tc_result.success:
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    failed_results.append(tc_result)
-
-                if consecutive_failures >= max_failures:
-                    breaker_triggered = True
-
-            if breaker_triggered:
-                recent_errors = [
-                    f"- {item.tool_name}: {item.error}"
-                    for item in failed_results[-max_failures:]
-                ]
-                breaker_summary = "\n".join(recent_errors)
-                return (
-                    f"子代理连续 {max_failures} 次工具调用失败，已提前终止。"
-                    f"错误摘要：\n{breaker_summary}"
-                )
-
-        return (
-            f"子代理达到最大迭代次数（{max_iterations}），返回有限摘要："
-            "已完成部分只读探索，请主代理在执行前再次核对关键参数。"
-        )
-
-    async def _handle_explore_data(
-        self,
         task: str,
-        file_paths: list[Any] | None = None,
+        file_paths: list[str],
+    ) -> str:
+        """自动选择最合适的子代理，失败时回退 explorer。"""
+        _, candidates = self._subagent_registry.build_catalog()
+        if not candidates:
+            return "explorer"
+
+        joined_candidates = ", ".join(candidates)
+        file_hint = "、".join(file_paths) if file_paths else "无"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是子代理分派器。只输出 JSON："
+                    '{"agent_name":"候选中的一个名称"}。'
+                    "不要输出解释。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"候选子代理：{joined_candidates}\n"
+                    f"任务：{task}\n"
+                    f"相关文件：{file_hint}"
+                ),
+            },
+        ]
+        try:
+            response = await self._router_client.chat.completions.create(
+                model=self._router_model,
+                messages=messages,
+            )
+            content = str(response.choices[0].message.content or "").strip()
+            parsed = json.loads(content) if content else {}
+            picked = str(parsed.get("agent_name", "")).strip()
+            if picked in set(candidates):
+                return picked
+        except Exception:
+            logger.warning("自动选择子代理失败，回退 explorer", exc_info=True)
+        return "explorer"
+
+    async def run_subagent(
+        self,
         *,
+        agent_name: str,
+        prompt: str,
+        on_event: EventCallback | None = None,
+    ) -> SubagentResult:
+        """执行指定子代理。"""
+        config = self._subagent_registry.get(agent_name)
+        if config is None:
+            return SubagentResult(
+                success=False,
+                summary=f"未找到子代理: {agent_name}",
+                error=f"SubagentNotFound: {agent_name}",
+                subagent_name=agent_name,
+                permission_mode="default",
+                conversation_id="",
+            )
+        return await self._subagent_executor.run(
+            config=config,
+            prompt=prompt,
+            parent_context=self._build_parent_context_summary(),
+            on_event=on_event,
+        )
+
+    async def _handle_delegate_to_subagent(
+        self,
+        *,
+        task: str,
+        agent_name: str | None = None,
+        file_paths: list[Any] | None = None,
         on_event: EventCallback | None = None,
     ) -> str:
-        """处理 explore_data：启动只读子代理并返回摘要。"""
+        """处理 delegate_to_subagent 元工具。"""
+        if not self._subagent_enabled:
+            return "subagent 当前处于关闭状态，请先执行 `/subagent on`。"
+
         task_text = task.strip()
-        normalized_paths = self._normalize_explore_file_paths(file_paths)
-        tool_scope = list(_READ_ONLY_TOOLS)
+        if not task_text:
+            return "工具参数错误: task 必须为非空字符串。"
+        normalized_paths = self._normalize_subagent_file_paths(file_paths)
 
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.SUBAGENT_START,
-                subagent_reason=task_text,
-                subagent_tools=tool_scope,
-                subagent_success=True,
-            ),
+        picked_agent = (agent_name or "").strip()
+        if not picked_agent:
+            picked_agent = await self._auto_select_subagent(
+                task=task_text,
+                file_paths=normalized_paths,
+            )
+
+        prompt = task_text
+        if normalized_paths:
+            prompt += f"\n\n相关文件：{', '.join(normalized_paths)}"
+
+        result = await self.run_subagent(
+            agent_name=picked_agent,
+            prompt=prompt,
+            on_event=on_event,
         )
+        if result.success:
+            return result.summary
+        return f"子代理执行失败（{picked_agent}）：{result.summary}"
 
-        try:
-            system_prompt = self._build_explorer_system_prompt(task_text, normalized_paths)
-            summary = await self._execute_subagent_loop(
-                system_prompt=system_prompt,
-                tool_scope=tool_scope,
-                max_iterations=self._config.subagent_max_iterations,
-            )
-            output = summary.strip()
-            if len(output) > _FORK_SUMMARY_MAX_CHARS:
-                output = (
-                    output[:_FORK_SUMMARY_MAX_CHARS]
-                    + f"\n[摘要已截断，原始长度: {len(summary)} 字符]"
-                )
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_SUMMARY,
-                    subagent_reason=task_text,
-                    subagent_tools=tool_scope,
-                    subagent_summary=output,
-                    subagent_success=True,
-                ),
-            )
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_END,
-                    subagent_reason=task_text,
-                    subagent_tools=tool_scope,
-                    subagent_success=True,
-                ),
-            )
-            return output
-        except Exception as exc:
-            error_summary = f"子代理执行失败：{exc}"
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_SUMMARY,
-                    subagent_reason=task_text,
-                    subagent_tools=tool_scope,
-                    subagent_summary=error_summary,
-                    subagent_success=False,
-                ),
-            )
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_END,
-                    subagent_reason=task_text,
-                    subagent_tools=tool_scope,
-                    subagent_success=False,
-                ),
-            )
-            return error_summary
+    def _handle_list_subagents(self) -> str:
+        """列出可用子代理。"""
+        agents = self._subagent_registry.list_all()
+        if not agents:
+            return "当前没有可用子代理。"
+        lines: list[str] = [f"共 {len(agents)} 个可用子代理：\n"]
+        for agent in agents:
+            lines.append(f"- {agent.name} ({agent.permission_mode})：{agent.description}")
+        return "\n".join(lines)
 
     async def _tool_calling_loop(
         self,
         route_result: SkillMatchResult,
         on_event: EventCallback | None,
-    ) -> str:
+    ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
@@ -820,6 +897,9 @@ class AgentEngine:
         self._last_tool_call_count = 0
         self._last_success_count = 0
         self._last_failure_count = 0
+        # token 使用累计
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
 
         for iteration in range(1, max_iter + 1):
             self._emit(
@@ -845,6 +925,12 @@ class AgentEngine:
                 kwargs["tools"] = tools
 
             response = await self._create_chat_completion_with_system_fallback(kwargs)
+
+            # 累计 token 使用量
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                total_prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                total_completion_tokens += getattr(usage, "completion_tokens", 0) or 0
             choice = response.choices[0]
             message = choice.message
 
@@ -872,7 +958,15 @@ class AgentEngine:
                 self._memory.add_assistant_message(reply_text)
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
-                return reply_text
+                return ChatResult(
+                    reply=reply_text,
+                    tool_calls=list(all_tool_results),
+                    iterations=iteration,
+                    truncated=False,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                )
 
             assistant_msg = _assistant_message_to_dict(message)
             self._memory.add_assistant_tool_message(assistant_msg)
@@ -915,7 +1009,15 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    return reply
+                    return ChatResult(
+                        reply=reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
 
                 # 更新统计
                 self._last_tool_call_count += 1
@@ -947,14 +1049,30 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.warning("连续 %d 次工具失败，熔断终止", max_failures)
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
-                return reply
+                return ChatResult(
+                    reply=reply,
+                    tool_calls=list(all_tool_results),
+                    iterations=iteration,
+                    truncated=False,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                )
 
         self._last_iteration_count = max_iter
         reply = f"已达到最大迭代次数（{max_iter}），返回当前结果。请尝试简化任务或分步执行。"
         self._memory.add_assistant_message(reply)
         logger.warning("达到迭代上限 %d，截断返回", max_iter)
         logger.info("最终结果摘要: %s", _summarize_text(reply))
-        return reply
+        return ChatResult(
+            reply=reply,
+            tool_calls=list(all_tool_results),
+            iterations=max_iter,
+            truncated=True,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_prompt_tokens + total_completion_tokens,
+        )
 
     async def _execute_tool_call(
         self,
@@ -1046,32 +1164,52 @@ class AgentEngine:
                         result=result_str if success else None,
                         error=error if not success else None,
                     )
-                elif tool_name == "explore_data":
+                elif tool_name == "delegate_to_subagent":
                     task_value = arguments.get("task")
                     if not isinstance(task_value, str) or not task_value.strip():
                         result_str = "工具参数错误: task 必须为非空字符串。"
                         success = False
                         error = result_str
                     else:
-                        raw_file_paths = arguments.get("file_paths")
-                        if raw_file_paths is not None and not isinstance(raw_file_paths, list):
-                            result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                        agent_name_value = arguments.get("agent_name")
+                        if agent_name_value is not None and not isinstance(agent_name_value, str):
+                            result_str = "工具参数错误: agent_name 必须为字符串。"
                             success = False
                             error = result_str
                         else:
-                            result_str = await self._handle_explore_data(
-                                task=task_value.strip(),
-                                file_paths=raw_file_paths,
-                                on_event=on_event,
-                            )
-                            success = not result_str.startswith("子代理执行失败：")
-                            error = None if success else result_str
+                            raw_file_paths = arguments.get("file_paths")
+                            if raw_file_paths is not None and not isinstance(raw_file_paths, list):
+                                result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                                success = False
+                                error = result_str
+                            else:
+                                result_str = await self._handle_delegate_to_subagent(
+                                    task=task_value.strip(),
+                                    agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
+                                    file_paths=raw_file_paths,
+                                    on_event=on_event,
+                                )
+                                success = not (
+                                    result_str.startswith("子代理执行失败")
+                                    or result_str.startswith("subagent 当前处于关闭状态")
+                                )
+                                error = None if success else result_str
                     log_tool_call(
                         logger,
                         tool_name,
                         arguments,
                         result=result_str if success else None,
                         error=error if not success else None,
+                    )
+                elif tool_name == "list_subagents":
+                    result_str = self._handle_list_subagents()
+                    success = True
+                    error = None
+                    log_tool_call(
+                        logger,
+                        tool_name,
+                        arguments,
+                        result=result_str,
                     )
                 elif self._approval.is_high_risk_tool(tool_name):
                     if not self._full_access_enabled:
@@ -1093,7 +1231,7 @@ class AgentEngine:
                             tool_scope=tool_scope,
                             approval_id=self._approval.new_approval_id(),
                             created_at_utc=self._approval.utc_now(),
-                            undoable=tool_name != "run_python_script",
+                            undoable=tool_name != "run_code",
                         )
                         result_str = str(result_value)
                         tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
@@ -1347,7 +1485,7 @@ class AgentEngine:
             return SkillMatchResult(
                 skills_used=[],
                 tool_scope=self._all_tool_names(),
-                route_mode="legacy_all_tools",
+                route_mode="all_tools",
                 system_contexts=[],
             )
 
@@ -1381,7 +1519,7 @@ class AgentEngine:
             system_contexts=[],
         )
 
-        action = parts[1].strip().lower() if len(parts) == 2 else ""
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
         too_many_args = len(parts) > 2
 
         if command == "/fullaccess":
@@ -1398,16 +1536,32 @@ class AgentEngine:
 
         if command == "/subagent":
             # /subagent 默认行为为查询状态，避免误触启停
-            if action in {"status", ""} and not too_many_args:
+            if action in {"status", ""} and len(parts) <= 2:
                 status = "enabled" if self._subagent_enabled else "disabled"
-                return f"当前 fork 子代理状态：{status}。"
-            if action == "on" and not too_many_args:
+                return f"当前 subagent 状态：{status}。"
+            if action == "on" and len(parts) == 2:
                 self._subagent_enabled = True
-                return "已开启 fork 子代理。"
-            if action == "off" and not too_many_args:
+                return "已开启 subagent。"
+            if action == "off" and len(parts) == 2:
                 self._subagent_enabled = False
-                return "已关闭 fork 子代理。"
-            return "无效参数。用法：/subagent [on|off|status]。"
+                return "已关闭 subagent。"
+            if action == "list" and len(parts) == 2:
+                return self._handle_list_subagents()
+            if action == "run":
+                agent_name, task, parse_error = self._parse_subagent_run_command(text)
+                if parse_error is not None:
+                    return parse_error
+                assert task is not None
+                return await self._handle_delegate_to_subagent(
+                    task=task,
+                    agent_name=agent_name,
+                    on_event=None,
+                )
+            return (
+                "无效参数。用法：/subagent [on|off|status|list]，"
+                "或 /subagent run -- <task>，"
+                "或 /subagent run <agent_name> -- <task>。"
+            )
 
         if command == "/accept":
             return await self._handle_accept_command(parts)
@@ -1434,7 +1588,7 @@ class AgentEngine:
                 tool_scope=pending.tool_scope,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=pending.tool_name != "run_python_script",
+                undoable=pending.tool_name != "run_code",
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:
@@ -1473,6 +1627,41 @@ class AgentEngine:
         approval_id = parts[1].strip()
         return self._approval.undo(approval_id)
 
+    @staticmethod
+    def _parse_subagent_run_command(
+        text: str,
+    ) -> tuple[str | None, str | None, str | None]:
+        """解析 `/subagent run` 命令。"""
+        raw = text.strip()
+        lowered = raw.lower()
+        prefix = ""
+        for candidate in ("/subagent run", "/sub_agent run"):
+            if lowered.startswith(candidate):
+                prefix = candidate
+                break
+        if not prefix:
+            return None, None, "无效参数。用法：/subagent run [agent_name] -- <task>。"
+
+        rest = raw[len(prefix):].strip()
+        if not rest:
+            return None, None, "无效参数。用法：/subagent run [agent_name] -- <task>。"
+
+        if rest.startswith("--"):
+            task = rest[2:].strip()
+            if not task:
+                return None, None, "无效参数。`--` 后必须提供任务描述。"
+            return None, task, None
+
+        sep = " -- "
+        if sep not in rest:
+            return None, None, "无效参数。用法：/subagent run [agent_name] -- <task>。"
+        agent_name, task = rest.split(sep, 1)
+        agent_name = agent_name.strip()
+        task = task.strip()
+        if not agent_name or not task:
+            return None, None, "无效参数。agent_name 与 task 都不能为空。"
+        return agent_name, task, None
+
     def _all_tool_names(self) -> list[str]:
         get_tool_names = getattr(self._registry, "get_tool_names", None)
         if callable(get_tool_names):
@@ -1496,6 +1685,12 @@ class AgentEngine:
 
     def _build_system_prompts(self, skill_contexts: list[str]) -> list[str]:
         base_prompt = self._memory.system_prompt
+
+        # 注入权限状态说明，让 LLM 明确知道代码执行能力受限
+        access_notice = self._build_access_notice()
+        if access_notice:
+            base_prompt = base_prompt + "\n\n" + access_notice
+
         if not skill_contexts:
             return [base_prompt]
 
@@ -1505,6 +1700,23 @@ class AgentEngine:
             return [merged]
 
         return [base_prompt, *skill_contexts]
+
+    def _build_access_notice(self) -> str:
+        """当 fullAccess 关闭时，生成权限限制说明注入 system prompt。"""
+        if self._full_access_enabled:
+            return ""
+        restricted = self._restricted_code_skillpacks
+        if not restricted:
+            return ""
+        skill_list = "、".join(sorted(restricted))
+        return (
+            f"【权限提示】当前 fullAccess 权限处于关闭状态。"
+            f"以下技能需要 fullAccess 权限才能激活：{skill_list}。"
+            f"涉及代码执行的工具（如 write_text_file、run_code）"
+            f"在未激活对应技能时不应主动使用。"
+            f"当用户询问是否能执行代码/脚本时，你应当告知用户：该能力存在但当前受限，"
+            f"需要先使用 /fullAccess on 命令开启权限。"
+        )
 
     def _effective_system_mode(self) -> str:
         configured = self._config.system_message_mode

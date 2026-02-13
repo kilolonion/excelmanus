@@ -16,7 +16,8 @@ from hypothesis import given, settings, assume, HealthCheck
 from hypothesis import strategies as st
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.engine import AgentEngine, _READ_ONLY_TOOLS
+from excelmanus.engine import AgentEngine
+from excelmanus.subagent import SubagentResult
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
 from excelmanus.tools import ToolDef, ToolRegistry
 
@@ -450,7 +451,7 @@ class TestToolScopeTransitions:
 
             initial_scope = engine._get_current_tool_scope()
             expected_initial = list(engine._registry.get_tool_names())
-            for meta_tool in ("select_skill", "explore_data", "list_skills"):
+            for meta_tool in ("select_skill", "delegate_to_subagent", "list_subagents"):
                 if meta_tool not in expected_initial:
                     expected_initial.append(meta_tool)
             assert initial_scope == expected_initial
@@ -470,11 +471,11 @@ class TestToolScopeTransitions:
             assert scope_b == expected_b
 
 
-# ── Property 8：子代理只读工具集约束 ───────────────────────────────
+# ── Property 8：delegate_to_subagent 参数透传约束 ───────────────────────────────
 
 
-class TestExploreDataReadOnlyConstraint:
-    """Feature: llm-native-routing, Property 8: 子代理只读工具集约束"""
+class TestDelegateSubagentConstraint:
+    """Feature: llm-native-routing, Property 8: delegate_to_subagent 参数约束"""
 
     @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
@@ -485,12 +486,12 @@ class TestExploreDataReadOnlyConstraint:
             max_size=5,
         ),
     )
-    def test_property_8_explore_data_passes_read_only_tool_scope(
+    def test_property_8_delegate_to_subagent_passes_agent_and_paths(
         self,
         task: str,
         file_paths: list[str],
     ) -> None:
-        """explore_data 传给子代理的 tool_scope 必须是只读工具集合的子集。"""
+        """delegate_to_subagent 应正确透传 agent_name 和规范化后的 file_paths。"""
         assume(task.strip() != "")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -501,21 +502,34 @@ class TestExploreDataReadOnlyConstraint:
                 ],
             )
 
-            captured: dict[str, list[str]] = {}
+            captured: dict[str, str] = {}
 
-            async def _fake_subagent_loop(
+            async def _fake_run_subagent(
                 *,
-                system_prompt: str,
-                tool_scope: list[str],
-                max_iterations: int,
-            ) -> str:
-                captured["tool_scope"] = list(tool_scope)
-                return "子代理摘要"
+                agent_name: str,
+                prompt: str,
+                on_event=None,
+            ) -> SubagentResult:
+                captured["agent_name"] = agent_name
+                captured["prompt"] = prompt
+                return SubagentResult(
+                    success=True,
+                    summary="子代理摘要",
+                    subagent_name=agent_name,
+                    permission_mode="readOnly",
+                    conversation_id="c1",
+                )
 
-            engine._execute_subagent_loop = AsyncMock(side_effect=_fake_subagent_loop)
-            result = asyncio.run(engine._handle_explore_data(task=task, file_paths=file_paths))
+            engine.run_subagent = AsyncMock(side_effect=_fake_run_subagent)
+            result = asyncio.run(
+                engine._handle_delegate_to_subagent(
+                    task=task,
+                    agent_name="explorer",
+                    file_paths=file_paths,
+                )
+            )
             assert result == "子代理摘要"
 
-            scope = set(captured.get("tool_scope", []))
-            assert scope
-            assert scope.issubset(set(_READ_ONLY_TOOLS))
+            assert captured.get("agent_name") == "explorer"
+            prompt = captured.get("prompt", "")
+            assert task.strip() in prompt

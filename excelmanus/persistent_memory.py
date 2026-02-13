@@ -93,8 +93,8 @@ class PersistentMemory:
             parts.append(f"{header}\n\n{entry.content}\n\n---")
         return "\n\n".join(parts)
 
-    def parse_entries(self, content: str) -> list[MemoryEntry]:
-        """将 Markdown 文本解析为 MemoryEntry 列表。
+    def _parse_entries(self, content: str) -> list[MemoryEntry]:
+        """将 Markdown 文本解析为 MemoryEntry 列表（内部实现）。
 
         解析规则：
         - 以 ``### [时间戳] 类别`` 开头的行标记一条新条目
@@ -158,6 +158,15 @@ class PersistentMemory:
             )
 
         return entries
+
+    def parse_entries(self, content: str) -> list[MemoryEntry]:
+        """兼容入口：解析 Markdown 为结构化条目。
+
+        当前运行时主流程仅做写入和按行加载原始文本，不依赖结构化解析。
+        本方法主要用于测试 round-trip 验证，以及未来可能的记忆管理能力
+        （例如检索、过滤、去重合并）。
+        """
+        return self._parse_entries(content)
 
     def load_topic(self, topic_name: str) -> str:
         """按需读取指定主题文件的全部内容。
@@ -306,5 +315,4 @@ class PersistentMemory:
             except OSError:
                 pass
             raise
-
 

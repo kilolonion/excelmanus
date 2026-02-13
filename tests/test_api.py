@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from excelmanus.tools import ToolRegistry
 
 import excelmanus.api as api_module
 from excelmanus.api import app
+from excelmanus.engine import ChatResult, ToolCallResult
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
@@ -118,7 +120,19 @@ class TestProperty12ChatResponseFormat:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="测试回复",
+            return_value=ChatResult(
+                reply="测试回复",
+                tool_calls=[
+                    ToolCallResult(
+                        tool_name="add_numbers",
+                        arguments={"a": 1, "b": 2},
+                        result="3",
+                        success=True,
+                    )
+                ],
+                iterations=2,
+                truncated=False,
+            ),
         ):
             resp = await client.post(
                 "/api/v1/chat", json={"message": "你好"},
@@ -129,6 +143,10 @@ class TestProperty12ChatResponseFormat:
         assert "reply" in data
         assert len(data["session_id"]) > 0
         assert data["reply"] == "测试回复"
+        assert data["iterations"] == 2
+        assert data["truncated"] is False
+        # 默认 external_safe_mode=true，工具明细不对外暴露
+        assert data["tool_calls"] == []
 
     @pytest.mark.asyncio
     async def test_chat_with_explicit_session_id(
@@ -182,6 +200,15 @@ class TestRequestValidation:
         resp = await client.post(
             "/api/v1/chat",
             json={"message": "你好", "session_id": "   "},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_deprecated_skill_hints_returns_422(self, client: AsyncClient) -> None:
+        """废弃字段 skill_hints 应被严格拒绝。"""
+        resp = await client.post(
+            "/api/v1/chat",
+            json={"message": "你好", "skill_hints": ["data_basic"]},
         )
         assert resp.status_code == 422
 
@@ -281,7 +308,8 @@ class TestProperty14SessionDeletion:
                 "/api/v1/chat", json={"message": "创建会话"},
             )
         sid = resp1.json()["session_id"]
-        _, engine_before = await manager.get_or_create(sid)
+        _, engine_before = await manager.acquire_for_chat(sid)
+        await manager.release_for_chat(sid)
 
         del_resp = await client.delete(f"/api/v1/sessions/{sid}")
         assert del_resp.status_code == 200
@@ -297,7 +325,8 @@ class TestProperty14SessionDeletion:
             )
         assert resp2.status_code == 200
         assert resp2.json()["session_id"] == sid
-        _, engine_after = await manager.get_or_create(sid)
+        _, engine_after = await manager.acquire_for_chat(sid)
+        await manager.release_for_chat(sid)
         assert engine_before is not engine_after
 
     @pytest.mark.asyncio
@@ -446,7 +475,19 @@ class TestExternalSafeMode:
                 with patch(
                     "excelmanus.engine.AgentEngine.chat",
                     new_callable=AsyncMock,
-                    return_value="正常回复",
+                    return_value=ChatResult(
+                        reply="正常回复",
+                        tool_calls=[
+                            ToolCallResult(
+                                tool_name="read_excel",
+                                arguments={"file_path": "sales.xlsx"},
+                                result="ok",
+                                success=True,
+                            )
+                        ],
+                        iterations=3,
+                        truncated=False,
+                    ),
                 ):
                     resp = await c.post(
                         "/api/v1/chat", json={"message": "你好"},
@@ -455,6 +496,11 @@ class TestExternalSafeMode:
         data = resp.json()
         assert data["route_mode"] != "hidden"
         assert isinstance(data["tool_scope"], list)
+        assert data["iterations"] == 3
+        assert data["truncated"] is False
+        assert isinstance(data["tool_calls"], list)
+        assert len(data["tool_calls"]) == 1
+        assert data["tool_calls"][0]["tool_name"] == "read_excel"
 
     @pytest.mark.asyncio
     async def test_fullaccess_route_mode_control_command_when_safe_mode_disabled(
@@ -533,9 +579,14 @@ class TestExternalSafeMode:
         )
         subagent_event = ToolCallEvent(
             event_type=EventType.SUBAGENT_SUMMARY,
+            subagent_name="explorer",
             subagent_reason="命中大文件",
             subagent_tools=["read_excel"],
             subagent_summary="发现关键列 A/B",
+            subagent_permission_mode="readOnly",
+            subagent_conversation_id="conv-1",
+            subagent_iterations=2,
+            subagent_tool_calls=3,
         )
         assert api_module._sse_event_to_sse(
             thinking_event, safe_mode=True
@@ -559,6 +610,8 @@ class TestExternalSafeMode:
         )
         assert subagent_sse is not None
         assert "subagent_summary" in subagent_sse
+        assert "explorer" in subagent_sse
+        assert "readOnly" in subagent_sse
 
 
 # ── 单元测试：Health 端点 ────────────────────────────────
@@ -581,6 +634,149 @@ class TestHealthEndpoint:
         assert isinstance(data["tools"], list)
         assert "skillpacks" in data
         assert isinstance(data["skillpacks"], list)
+
+
+class TestSkillpackCrudEndpoints:
+    """/api/v1/skills CRUD 端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_read_endpoints_return_summary_in_safe_mode(
+        self, client: AsyncClient
+    ) -> None:
+        list_resp = await client.get("/api/v1/skills")
+        assert list_resp.status_code == 200
+        rows = list_resp.json()
+        assert isinstance(rows, list)
+
+        if rows:
+            name = rows[0]["name"]
+            detail_resp = await client.get(f"/api/v1/skills/{name}")
+            assert detail_resp.status_code == 200
+            detail = detail_resp.json()
+            assert "name" in detail
+            assert "description" in detail
+            assert "instructions" not in detail
+
+    @pytest.mark.asyncio
+    async def test_write_endpoints_blocked_when_safe_mode_enabled(
+        self, client: AsyncClient
+    ) -> None:
+        create_resp = await client.post(
+            "/api/v1/skills",
+            json={
+                "name": "api_skill",
+                "payload": {
+                    "description": "api 创建",
+                    "allowed_tools": ["read_excel"],
+                    "triggers": ["分析"],
+                    "instructions": "说明",
+                },
+            },
+        )
+        assert create_resp.status_code == 403
+
+        patch_resp = await client.patch(
+            "/api/v1/skills/api_skill",
+            json={"payload": {"description": "更新"}},
+        )
+        assert patch_resp.status_code == 403
+
+        delete_resp = await client.delete("/api/v1/skills/api_skill")
+        assert delete_resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_create_patch_delete_success_when_safe_mode_disabled(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://test",
+            ) as c:
+                create_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "api_skill",
+                        "payload": {
+                            "description": "api 创建",
+                            "allowed_tools": ["read_excel"],
+                            "triggers": ["分析"],
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert create_resp.status_code == 201
+
+                patch_resp = await c.patch(
+                    "/api/v1/skills/api_skill",
+                    json={"payload": {"description": "api 更新"}},
+                )
+                assert patch_resp.status_code == 200
+                assert patch_resp.json()["detail"]["description"] == "api 更新"
+
+                delete_resp = await c.delete("/api/v1/skills/api_skill")
+                assert delete_resp.status_code == 200
+                assert delete_resp.json()["status"] == "deleted"
+
+    @pytest.mark.asyncio
+    async def test_patch_non_project_skillpack_returns_409(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        skill_dir = system_dir / "data_basic"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: data_basic",
+                    "description: 系统版",
+                    "allowed_tools:",
+                    "  - read_excel",
+                    "triggers:",
+                    "  - 分析",
+                    "---",
+                    "说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.patch(
+                    "/api/v1/skills/data_basic",
+                    json={"payload": {"description": "更新"}},
+                )
+        assert resp.status_code == 409
 
 
 class TestCleanupIntervalStrategy:
@@ -812,7 +1008,8 @@ class TestPBTProperty14SessionDeletion:
                 assert resp1.status_code == 200
 
                 # 记录原始 engine 的 id
-                _, engine_before = await manager.get_or_create(session_id)
+                _, engine_before = await manager.acquire_for_chat(session_id)
+                await manager.release_for_chat(session_id)
                 engine_before_id = id(engine_before)
 
                 # 删除会话
@@ -833,7 +1030,8 @@ class TestPBTProperty14SessionDeletion:
                 # 不变量 2：返回相同的 session_id
                 assert resp2.json()["session_id"] == session_id
                 # 不变量 3：新 engine 实例与旧的不同
-                _, engine_after = await manager.get_or_create(session_id)
+                _, engine_after = await manager.acquire_for_chat(session_id)
+                await manager.release_for_chat(session_id)
                 assert id(engine_after) != engine_before_id
 
 
@@ -927,7 +1125,8 @@ class TestPBTProperty18TTLCleanupAPI:
         )
 
         for _ in range(n_sessions):
-            await manager.get_or_create(None)
+            sid, _ = await manager.acquire_for_chat(None)
+            await manager.release_for_chat(sid)
 
         base_time = 10000.0
         for entry in manager._sessions.values():

@@ -34,6 +34,9 @@ def test_text_file_audit_and_undo(tmp_path: Path) -> None:
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["approval_id"] == approval_id
+    applied = manager.get_applied(approval_id)
+    assert applied is not None
+    assert applied.approval_id == approval_id
     assert target.read_text(encoding="utf-8") == "new\n"
 
     undo_msg = manager.undo(approval_id)
@@ -82,9 +85,9 @@ def test_non_undoable_record_returns_message(tmp_path: Path) -> None:
 
     manager.execute_and_audit(
         approval_id=approval_id,
-        tool_name="run_python_script",
-        arguments={"script_path": "scripts/temp/job.py"},
-        tool_scope=["run_python_script"],
+        tool_name="run_code",
+        arguments={"code": "print('hello')"},
+        tool_scope=["run_code"],
         execute=execute,
         undoable=False,
         created_at_utc=manager.utc_now(),

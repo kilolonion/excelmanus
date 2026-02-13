@@ -1,4 +1,4 @@
-"""工具注册中心测试：ToolRegistry 属性测试 + 旧 SkillRegistry 迁移提示测试。
+"""工具注册中心测试：ToolRegistry 属性测试 + 废弃模块清理测试。
 
 **Validates: Requirements 2.1, 2.2, 2.5, 4.1, 4.2, 4.3**
 """
@@ -87,35 +87,17 @@ class TestProperty8ToolRegistration:
             assert isinstance(schema["parameters"], dict)
 
 
-# ── 旧 SkillRegistry 迁移提示测试 ────────────────────────
+# ── 废弃模块清理测试 ──────────────────────────────────────
 
 
-class TestSkillRegistryMigrationStub:
-    """验证旧 SkillRegistry 实例化时抛出 ImportError。
+class TestDeprecatedSkillsModuleRemoved:
+    """验证废弃的 excelmanus.skills 模块已被彻底移除。"""
 
-    **Validates: Requirements 4.1, 4.2, 4.3**
-    """
+    def test_skills_module_not_found(self) -> None:
+        import importlib
 
-    def test_skill_registry_raises_import_error(self) -> None:
-        """SkillRegistry() 应抛出 ImportError 并附带迁移提示。"""
-        from excelmanus.skills import SkillRegistry
-
-        with pytest.raises(ImportError, match="废弃"):
-            SkillRegistry()
-
-    def test_skill_registry_error_still_importable(self) -> None:
-        """SkillRegistryError 仍可导入（兼容异常捕获）。"""
-        from excelmanus.skills import SkillRegistryError
-
-        assert issubclass(SkillRegistryError, Exception)
-
-    def test_skills_directory_has_no_skill_modules(self) -> None:
-        """excelmanus/skills/ 目录不应包含 *_skill.py 模块。"""
-        from pathlib import Path
-
-        skills_dir = Path("excelmanus/skills")
-        skill_files = list(skills_dir.glob("*_skill.py"))
-        assert skill_files == [], f"发现残留 skill 文件: {skill_files}"
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("excelmanus.skills")
 
 
 # ── ToolRegistry 单元测试 ────────────────────────────────

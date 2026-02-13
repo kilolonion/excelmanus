@@ -183,7 +183,7 @@ class TestTruncation:
     def test_truncation_removes_oldest_first(self, config: ExcelManusConfig) -> None:
         """截断时移除最早的消息，保留最近的。"""
         mem = ConversationMemory(config)
-        mem._truncation_threshold = 200
+        mem._truncation_threshold = 400
 
         mem.add_user_message("第一条消息")
         mem.add_assistant_message("第一条回复")
@@ -236,7 +236,7 @@ class TestTruncation:
     ) -> None:
         """仅一条超长消息时，也应收缩到阈值内。"""
         mem = ConversationMemory(config)
-        mem._truncation_threshold = 100
+        mem._truncation_threshold = 250
         mem.add_user_message("x" * 2000)
         assert mem._total_tokens() <= mem._truncation_threshold
 

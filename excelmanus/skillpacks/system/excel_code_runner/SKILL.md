@@ -3,7 +3,7 @@ name: excel_code_runner
 description: 通过生成并运行 Python 脚本处理大体量 Excel 文件，适用于 read_excel 全量读取成本高、需要分批处理或复杂计算的任务。
 allowed_tools:
   - write_text_file
-  - run_python_script
+  - run_code
   - read_excel
   - analyze_data
   - filter_data
@@ -30,7 +30,6 @@ resources:
   - references/largefile_code_workflow.md
 priority: 9
 version: "1.0.0"
-context: fork
 ---
 优先采用“探查 -> 写脚本 -> 执行 -> 验证”的四步流程：
 

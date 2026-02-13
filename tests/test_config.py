@@ -307,7 +307,7 @@ class TestDefaultValues:
         assert cfg.large_excel_threshold_bytes == 4096
 
     def test_default_subagent_config(self, monkeypatch) -> None:
-        """fork 子代理配置默认值。"""
+        """subagent 配置默认值。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
@@ -316,9 +316,11 @@ class TestDefaultValues:
         assert cfg.subagent_model is None
         assert cfg.subagent_max_iterations == 6
         assert cfg.subagent_max_consecutive_failures == 2
+        assert cfg.subagent_user_dir == "~/.excelmanus/agents"
+        assert cfg.subagent_project_dir == ".excelmanus/agents"
 
     def test_subagent_config_from_env(self, monkeypatch) -> None:
-        """支持通过环境变量覆盖 fork 子代理配置。"""
+        """支持通过环境变量覆盖 subagent 配置。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
@@ -326,11 +328,15 @@ class TestDefaultValues:
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "qwen-turbo")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_ITERATIONS", "4")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES", "1")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_USER_DIR", "~/.my-agents")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_PROJECT_DIR", ".my-agents")
         cfg = load_config()
         assert cfg.subagent_enabled is False
         assert cfg.subagent_model == "qwen-turbo"
         assert cfg.subagent_max_iterations == 4
         assert cfg.subagent_max_consecutive_failures == 1
+        assert cfg.subagent_user_dir == "~/.my-agents"
+        assert cfg.subagent_project_dir == ".my-agents"
 
     def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
         """默认开启对外安全模式。"""

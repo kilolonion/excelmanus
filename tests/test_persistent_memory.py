@@ -187,6 +187,12 @@ class TestFormatEntries:
 class TestParseEntries:
     """parse_entries 方法测试。"""
 
+    def test_public_api_matches_internal_parser(self, tmp_path: Path) -> None:
+        """公开兼容入口与内部解析实现结果一致。"""
+        pm = PersistentMemory(str(tmp_path))
+        md = "### [2025-01-15 14:30] general\n\n测试内容\n\n---"
+        assert pm.parse_entries(md) == pm._parse_entries(md)
+
     def test_empty_string_returns_empty(self, tmp_path: Path) -> None:
         """空字符串返回空列表。"""
         pm = PersistentMemory(str(tmp_path))

@@ -1,0 +1,125 @@
+"""SubagentRegistry 单元测试。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from excelmanus.config import ExcelManusConfig
+from excelmanus.subagent import SubagentRegistry
+
+
+def _make_config(tmp_path: Path, *, user_dir: Path, project_dir: Path) -> ExcelManusConfig:
+    return ExcelManusConfig(
+        api_key="test-key",
+        base_url="https://test.example.com/v1",
+        model="test-model",
+        workspace_root=str(tmp_path),
+        subagent_user_dir=str(user_dir),
+        subagent_project_dir=str(project_dir),
+    )
+
+
+def _write_agent(
+    root_dir: Path,
+    filename: str,
+    *,
+    name: str,
+    description: str,
+    permission_mode: str = "default",
+    tools: list[str] | None = None,
+    body: str = "你是测试子代理。",
+) -> None:
+    tools = tools or ["read_excel"]
+    content = "\n".join(
+        [
+            "---",
+            f"name: {name}",
+            f"description: {description}",
+            f"permissionMode: {permission_mode}",
+            "tools:",
+            *[f"  - {tool}" for tool in tools],
+            "---",
+            body,
+        ]
+    )
+    (root_dir / filename).write_text(content, encoding="utf-8")
+
+
+def test_builtin_agents_loaded(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+
+    loaded = registry.load_all()
+    assert "explorer" in loaded
+    assert "analyst" in loaded
+    assert "writer" in loaded
+    assert "coder" in loaded
+
+
+def test_project_overrides_user_and_builtin(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        user_dir,
+        "explorer.md",
+        name="explorer",
+        description="用户覆盖版本",
+        permission_mode="readOnly",
+    )
+    _write_agent(
+        project_dir,
+        "explorer.md",
+        name="explorer",
+        description="项目覆盖版本",
+        permission_mode="default",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert loaded["explorer"].description == "项目覆盖版本"
+    assert loaded["explorer"].source == "project"
+
+
+def test_invalid_frontmatter_skipped(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # permissionMode 非法，应该被跳过
+    _write_agent(
+        project_dir,
+        "bad.md",
+        name="bad_agent",
+        description="坏配置",
+        permission_mode="unknown",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert "bad_agent" not in loaded
+
+
+def test_build_catalog_contains_agent_names(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "finance.md",
+        name="finance_checker",
+        description="财务校验子代理",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    catalog, names = registry.build_catalog()
+    assert "finance_checker" in catalog
+    assert "finance_checker" in names

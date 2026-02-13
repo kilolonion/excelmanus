@@ -46,17 +46,26 @@ class ToolCallEvent:
     route_mode: str = ""
     skills_used: List[str] = field(default_factory=list)
     tool_scope: List[str] = field(default_factory=list)
-    # fork 子代理事件字段
+    # subagent 事件字段
     subagent_reason: str = ""
     subagent_tools: List[str] = field(default_factory=list)
     subagent_summary: str = ""
     subagent_success: bool = True
+    subagent_name: str = ""
+    subagent_permission_mode: str = ""
+    subagent_conversation_id: str = ""
+    subagent_iterations: int = 0
+    subagent_tool_calls: int = 0
     # 执行摘要字段
     total_iterations: int = 0
     total_tool_calls: int = 0
     success_count: int = 0
     failure_count: int = 0
     elapsed_seconds: float = 0.0
+    # token 使用统计
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
     # 任务清单事件字段
     task_list_data: Optional[Dict[str, Any]] = None  # TaskList.to_dict() 的结果
     task_index: Optional[int] = None                  # 更新的任务项索引

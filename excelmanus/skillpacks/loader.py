@@ -31,9 +31,14 @@ from typing import Any
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.logger import get_logger
+from excelmanus.skillpacks.frontmatter import (
+    FrontmatterError,
+    parse_frontmatter as parse_frontmatter_text,
+    parse_scalar as parse_frontmatter_scalar,
+    serialize_frontmatter as serialize_frontmatter_text,
+)
 from excelmanus.skillpacks.models import (
     Skillpack,
-    SkillpackContextMode,
     SkillpackSource,
 )
 from excelmanus.tools import ToolRegistry
@@ -75,7 +80,7 @@ class SkillpackLoader:
 
     def get_skillpacks(self) -> dict[str, Skillpack]:
         """返回技能包映射（副本）。"""
-        return dict(self._skillpacks)
+        return {skill.name: skill for skill in self.list_skillpacks()}
 
     def load_all(self) -> dict[str, Skillpack]:
         """加载 system/user/project 三层 Skillpack。"""
@@ -164,11 +169,10 @@ class SkillpackLoader:
             "argument_hint",
             default="",
         )
-        context = self._get_optional_context_mode(
-            frontmatter,
-            "context",
-            default="inline",
-        )
+        if "context" in frontmatter:
+            raise SkillpackValidationError(
+                "frontmatter 字段 'context' 已废弃，请移除该字段"
+            )
 
         resource_contents = self._load_resources(
             resources=resources, skill_dir=skill_dir, skill_name=name
@@ -190,7 +194,6 @@ class SkillpackLoader:
             disable_model_invocation=disable_model_invocation,
             user_invocable=user_invocable,
             argument_hint=argument_hint,
-            context=context,
             resource_contents=resource_contents,
         )
 
@@ -243,104 +246,44 @@ class SkillpackLoader:
                 f"缺少 frontmatter（文件应以 --- 开始）: {skill_file}"
             )
         frontmatter_raw, body = match.groups()
-        frontmatter = SkillpackLoader._parse_frontmatter(frontmatter_raw)
+        frontmatter = SkillpackLoader.parse_frontmatter(frontmatter_raw)
         return frontmatter, body
 
     @staticmethod
+    def parse_frontmatter(raw: str) -> dict[str, Any]:
+        """公开 frontmatter 解析入口。"""
+        try:
+            return parse_frontmatter_text(raw)
+        except FrontmatterError as exc:
+            raise SkillpackValidationError(str(exc))
+
+    @staticmethod
     def _parse_frontmatter(raw: str) -> dict[str, Any]:
-        data: dict[str, Any] = {}
-        current_list_key: str | None = None
+        """兼容旧测试/调用方。"""
+        return SkillpackLoader.parse_frontmatter(raw)
 
-        for raw_line in raw.splitlines():
-            line = raw_line.rstrip()
-            if not line.strip():
-                continue
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                continue
-
-            if stripped.startswith("- "):
-                if current_list_key is None:
-                    raise SkillpackValidationError(f"无效 frontmatter 列表项: {line}")
-                data.setdefault(current_list_key, []).append(
-                    SkillpackLoader._parse_scalar(stripped[2:].strip())
-                )
-                continue
-
-            if ":" not in line:
-                raise SkillpackValidationError(f"frontmatter 行缺少 ':'：{line}")
-            key, value = line.split(":", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                raise SkillpackValidationError("frontmatter 存在空 key")
-
-            if value == "":
-                data[key] = []
-                current_list_key = key
-                continue
-
-            # 拒绝不支持的 YAML 语法：多行字符串块和嵌套对象
-            if value.startswith("|"):
-                raise SkillpackValidationError(
-                    f"不支持多行字符串块语法（'|'）: {line}"
-                )
-            if value.startswith(">"):
-                raise SkillpackValidationError(
-                    f"不支持折叠字符串块语法（'>'）: {line}"
-                )
-            if value.startswith("{"):
-                raise SkillpackValidationError(
-                    f"不支持嵌套对象 / flow mapping 语法（'{{'）: {line}"
-                )
-
-            data[key] = SkillpackLoader._parse_scalar(value)
-            current_list_key = None
-        return data
+    @staticmethod
+    def parse_scalar(value: str) -> Any:
+        """公开标量解析入口。"""
+        return parse_frontmatter_scalar(value)
 
     @staticmethod
     def _parse_scalar(value: str) -> Any:
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            return value[1:-1]
+        """兼容旧测试/调用方。"""
+        return SkillpackLoader.parse_scalar(value)
 
-        lowered = value.lower()
-        if lowered == "true":
-            return True
-        if lowered == "false":
-            return False
-        if re.fullmatch(r"-?\d+", value):
-            return int(value)
-
-        if value.startswith("[") and value.endswith("]"):
-            inner = value[1:-1].strip()
-            if not inner:
-                return []
-            parts = [part.strip() for part in inner.split(",")]
-            return [SkillpackLoader._parse_scalar(part) for part in parts]
-
-        return value
+    @staticmethod
+    def format_frontmatter(data: dict[str, Any]) -> str:
+        """公开 frontmatter 序列化入口。"""
+        try:
+            return serialize_frontmatter_text(data)
+        except FrontmatterError as exc:
+            raise SkillpackValidationError(str(exc))
 
     @staticmethod
     def _format_frontmatter(data: dict[str, Any]) -> str:
-        """将字典格式化为 frontmatter 文本。
-
-        支持的值类型：str、int、float、bool、list[str|int|float|bool]。
-        """
-        lines: list[str] = []
-        for key, value in data.items():
-            if isinstance(value, list):
-                lines.append(f"{key}:")
-                for item in value:
-                    if isinstance(item, bool):
-                        lines.append(f"  - {'true' if item else 'false'}")
-                    else:
-                        lines.append(f"  - {item}")
-            elif isinstance(value, bool):
-                # bool 必须在 int 之前判断（bool 是 int 的子类）
-                lines.append(f"{key}: {'true' if value else 'false'}")
-            else:
-                lines.append(f"{key}: {value}")
-        return "\n".join(lines)
+        """兼容旧测试/调用方。"""
+        return SkillpackLoader.format_frontmatter(data)
 
 
     @staticmethod
@@ -415,19 +358,3 @@ class SkillpackLoader:
             if lowered == "false":
                 return False
         raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是布尔值")
-
-    @staticmethod
-    def _get_optional_context_mode(
-        payload: dict[str, Any],
-        key: str,
-        default: SkillpackContextMode,
-    ) -> SkillpackContextMode:
-        value = payload.get(key, default)
-        if not isinstance(value, str):
-            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
-        normalized = value.strip().lower()
-        if normalized in {"inline", "fork"}:
-            return normalized  # type: ignore[return-value]
-        raise SkillpackValidationError(
-            f"frontmatter 字段 '{key}' 仅支持 inline 或 fork，当前值: {value!r}"
-        )
