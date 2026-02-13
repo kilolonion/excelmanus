@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tiktoken
+
 from excelmanus.config import ExcelManusConfig
 
 # 默认系统提示词 v2：分段协议式结构
@@ -16,9 +18,11 @@ _DEFAULT_SYSTEM_PROMPT = (
     "## 工具策略\n"
     "- 参数不足时先读取或询问，不猜测路径和字段名。\n"
     "- 写入前先读取目标区域，优先使用可逆操作。\n"
-    "- 用户意图明确时默认执行，不仅给出建议；信息不足时用合理假设行动，除非真正受阻才提问。\n"
+    "- 用户意图明确时默认执行，不仅给出建议；信息不足但只有一条合理路径时默认行动。\n"
     "- 优先使用专用 Excel 工具，仅在专用工具无法完成时使用代码执行。\n"
     "- 独立操作应并行调用：先规划需要的读取，批量执行，再根据结果决定下一步。\n"
+    "- 发现多个候选目标（文件、sheet、列名）且无法确定时，用 ask_user 让用户选择，不要逐个猜测。\n"
+    "- 需要批量探查多个文件结构时，委派 explorer 子代理，避免在主对话中逐个试错。\n"
     "- 每次工具调用前用一句话说明目的。\n\n"
     "## 任务管理\n"
     "- 复杂任务（3 步以上）开始前，使用 task_create 创建任务清单。\n"
@@ -48,22 +52,24 @@ _DEFAULT_SYSTEM_PROMPT = (
 
 
 class TokenCounter:
-    """简易 token 计数器。
+    """基于 tiktoken 的 token 计数器。
 
-    采用启发式估算：英文约 4 字符/token，中文约 2 字符/token。
-    为简化实现，统一使用 1 token ≈ 3 字符的折中估算。
+    使用 cl100k_base 编码（GPT-4 系列），对 Qwen 等模型也能提供
+    比字符估算更准确的近似值，用于 memory 截断判断。
     """
+
+    _encoding = tiktoken.get_encoding("cl100k_base")
 
     @staticmethod
     def count(text: str) -> int:
-        """估算文本的 token 数量。"""
+        """计算文本的 token 数量。"""
         if not text:
             return 0
-        return max(1, len(text) // 3)
+        return len(TokenCounter._encoding.encode(text))
 
     @staticmethod
     def count_message(message: dict) -> int:
-        """估算单条消息的 token 数量（含结构开销）。"""
+        """计算单条消息的 token 数量（含结构开销）。"""
         tokens = 4  # 每条消息的固定开销（role、分隔符等）
         for key, value in message.items():
             if value is None:
@@ -71,7 +77,7 @@ class TokenCounter:
             if isinstance(value, str):
                 tokens += TokenCounter.count(value)
             elif isinstance(value, list):
-                # tool_calls 列表：序列化后估算
+                # tool_calls 列表：序列化后计算
                 tokens += TokenCounter.count(str(value))
         return tokens
 

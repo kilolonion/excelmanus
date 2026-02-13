@@ -449,7 +449,7 @@ class TestToolScopeTransitions:
 
             initial_scope = engine._get_current_tool_scope()
             expected_initial = list(engine._registry.get_tool_names())
-            for meta_tool in ("select_skill", "delegate_to_subagent", "list_subagents"):
+            for meta_tool in ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user"):
                 if meta_tool not in expected_initial:
                     expected_initial.append(meta_tool)
             for always_tool in ("task_create", "task_update"):

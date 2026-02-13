@@ -63,7 +63,7 @@ _CODER_TOOLS = [
 BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
     "explorer": SubagentConfig(
         name="explorer",
-        description="只读探查 Excel 结构与数据概览。",
+        description="只读探查 Excel 与文件夹目录结构，输出结构化总结。",
         allowed_tools=_READ_ONLY_TOOLS,
         permission_mode="readOnly",
         max_iterations=4,
@@ -72,10 +72,14 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         system_prompt=(
             "你是 ExcelManus 的只读探查子代理。\n\n"
             "## 职责\n"
-            "识别文件结构、sheet 列表、关键字段、样本数据和数据质量风险。\n"
+            "识别目录结构、文件分布、sheet 列表、关键字段、样本数据和数据质量风险。\n"
             "严格禁止写入、重命名、删除、覆盖等修改操作。\n\n"
             "## 完成标准\n"
-            "输出必须包含：文件/sheet 结构摘要、关键字段列表、数据行数与样本、发现的质量问题。\n\n"
+            "输出必须包含：\n"
+            "- 目录/文件结构摘要（按类型归类，并标注可疑大文件）\n"
+            "- 文件/sheet 结构摘要\n"
+            "- 关键字段列表、数据行数与样本\n"
+            "- 发现的数据质量问题与风险\n\n"
             "## 失败策略\n"
             "文件不存在或格式异常时，立即报告错误信息，不要重复尝试。"
         ),

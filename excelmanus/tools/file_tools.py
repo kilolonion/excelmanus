@@ -527,7 +527,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="delete_file",
-            description="安全删除文件（仅限文件，不删目录）。此为不可逆操作——首次调用仅返回文件信息预览，需 confirm=true 二次确认才执行删除。遇到障碍时不要用删除走捷径。",
+            description="安全删除文件（仅限文件，不删目录）。首次调用返回文件信息，需 confirm=true 二次确认才执行删除",
             input_schema={
                 "type": "object",
                 "properties": {

@@ -23,6 +23,7 @@ from excelmanus.cli import (
     _async_main,
     _chat_with_feedback,
     _compute_inline_suggestion,
+    _read_multiline_user_input,
     _render_farewell,
     _render_help,
     _render_history,
@@ -55,6 +56,8 @@ def _make_engine() -> MagicMock:
     engine.list_skillpack_commands = MagicMock(return_value=[])
     engine.get_skillpack_argument_hint = MagicMock(return_value="")
     engine.subagent_enabled = False
+    engine.has_pending_question = MagicMock(return_value=False)
+    engine.is_waiting_multiselect_answer = MagicMock(return_value=False)
     engine.extract_and_save_memory = AsyncMock(return_value=None)
     return engine
 
@@ -358,6 +361,18 @@ class TestPromptToolkitInput:
             mock_logger.warning.assert_called()
 
 
+class TestMultilineInput:
+    """多行输入读取测试。"""
+
+    def test_read_multiline_user_input_joins_lines_until_blank(self) -> None:
+        with patch(
+            "excelmanus.cli._read_user_input",
+            new=AsyncMock(side_effect=["1", "方案A", ""]),
+        ):
+            text = _run(_read_multiline_user_input())
+        assert text == "1\n方案A"
+
+
 class TestLiveStatusTicker:
     """测试 CLI 动态状态提示。"""
 
@@ -444,6 +459,41 @@ class TestReplExitCommands:
                 "再见" in str(call) for call in mock_console.print.call_args_list
             )
             assert farewell_printed
+
+    def test_pending_question_slash_is_forwarded_to_engine_instead_of_local_help(self) -> None:
+        """待回答状态下，/help 不应走本地命令分支。"""
+        engine = _make_engine()
+        engine.has_pending_question.side_effect = [True, False]
+        engine.is_waiting_multiselect_answer.side_effect = [False, False]
+
+        with patch("excelmanus.cli._read_user_input", new=AsyncMock(side_effect=["/help", "exit"])), \
+             patch("excelmanus.cli._chat_with_feedback", new=AsyncMock(return_value="请先回答当前问题")), \
+             patch("excelmanus.cli._render_help") as mock_help, \
+             patch("excelmanus.cli.console") as mock_console:
+            _run(_repl_loop(engine))
+            mock_help.assert_not_called()
+
+    def test_pending_multiselect_uses_multiline_mode(self) -> None:
+        """多选待答时应进入多行输入模式，并将换行文本提交给引擎。"""
+        engine = _make_engine()
+        engine.has_pending_question.side_effect = [True, False]
+        engine.is_waiting_multiselect_answer.side_effect = [True, False]
+
+        chat_mock = AsyncMock(return_value="收到答案")
+        with patch("excelmanus.cli._read_multiline_user_input", new=AsyncMock(return_value="1\n2")), \
+             patch("excelmanus.cli._read_user_input", new=AsyncMock(return_value="exit")), \
+             patch("excelmanus.cli._chat_with_feedback", new=chat_mock), \
+             patch("excelmanus.cli.console") as mock_console:
+            _run(_repl_loop(engine))
+
+        assert chat_mock.await_count == 1
+        _, kwargs = chat_mock.await_args
+        assert kwargs["user_input"] == "1\n2"
+        hint_printed = any(
+            "每行输入一个选项" in str(call)
+            for call in mock_console.print.call_args_list
+        )
+        assert hint_printed
 
     def test_quit_command(self) -> None:
         """输入 quit 应终止循环并显示告别信息。"""

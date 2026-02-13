@@ -23,6 +23,7 @@ class EventType(Enum):
     CHAT_SUMMARY = "chat_summary"
     TASK_LIST_CREATED = "task_list_created"
     TASK_ITEM_UPDATED = "task_item_updated"
+    USER_QUESTION = "user_question"
 
 
 @dataclass
@@ -71,6 +72,13 @@ class ToolCallEvent:
     task_index: Optional[int] = None                  # 更新的任务项索引
     task_status: str = ""                             # 更新后的状态
     task_result: Optional[str] = None                 # 任务项结果
+    # ask_user 问题事件字段
+    question_id: Optional[str] = None
+    question_header: str = ""
+    question_text: str = ""
+    question_options: List[Dict[str, Any]] = field(default_factory=list)
+    question_multi_select: bool = False
+    question_queue_size: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

@@ -123,6 +123,7 @@ class StreamRenderer:
             EventType.CHAT_SUMMARY: self._render_chat_summary,
             EventType.TASK_LIST_CREATED: self._render_task_list_created,
             EventType.TASK_ITEM_UPDATED: self._render_task_item_updated,
+            EventType.USER_QUESTION: self._render_user_question,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -287,6 +288,50 @@ class StreamRenderer:
             self._console.print(
                 f"  📋 全部完成: ✅{progress.get('completed', 0)} ❌{progress.get('failed', 0)}"
             )
+
+    def _render_user_question(self, event: ToolCallEvent) -> None:
+        """渲染 ask_user 问题卡片。"""
+        header = (event.question_header or "").strip() or "待确认"
+        text = (event.question_text or "").strip()
+        options = event.question_options or []
+
+        lines: list[str] = []
+        if text:
+            lines.append(text)
+            lines.append("")
+
+        for i, option in enumerate(options, start=1):
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label", "")).strip()
+            description = str(option.get("description", "")).strip()
+            if label and description:
+                lines.append(f"{i}. {label} - {description}")
+            elif label:
+                lines.append(f"{i}. {label}")
+
+        if options:
+            lines.append("")
+        if event.question_multi_select:
+            lines.append("多选：每行输入一个选项，空行提交。")
+        else:
+            lines.append("单选：输入一个选项（编号或文本）。")
+
+        if event.question_queue_size > 1:
+            lines.append(f"队列中还有 {event.question_queue_size - 1} 个待回答问题。")
+
+        content = "\n".join(lines) if lines else "请先回答当前问题。"
+        self._console.print()
+        self._console.print(
+            Panel(
+                rich_escape(content),
+                title=f"[bold yellow]❓ {rich_escape(header)}[/bold yellow]",
+                title_align="left",
+                border_style="yellow",
+                expand=False,
+                padding=(1, 2),
+            )
+        )
 
     # ------------------------------------------------------------------
     # 执行摘要渲染
@@ -454,6 +499,10 @@ class StreamRenderer:
                         f"✅{event.success_count} ❌{event.failure_count} · "
                         f"⏱ {_format_elapsed(event.elapsed_seconds)}"
                     )
+            elif event.event_type == EventType.USER_QUESTION:
+                header = event.question_header or "待确认"
+                text = event.question_text or ""
+                self._console.print(f"❓ {header}: {_truncate(text, _THINKING_SUMMARY_LEN)}")
         except Exception as exc:
             # 最终兜底：即使纯文本也失败，仅记录日志，绝不崩溃
             logger.error("纯文本降级渲染也失败: %s", exc)

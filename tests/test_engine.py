@@ -14,6 +14,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
 from excelmanus.events import EventType
 from excelmanus.skillpacks import SkillMatchResult, Skillpack
+from excelmanus.subagent import SubagentConfig
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
 
@@ -551,6 +552,254 @@ class TestDelegateSubagent:
         assert result.success is False
         assert "agent_name 必须为字符串" in result.result
 
+    @pytest.mark.asyncio
+    async def test_auto_select_subagent_uses_description_catalog(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.list_all.return_value = [
+            SubagentConfig(
+                name="explorer",
+                description="目录与 Excel 结构探查",
+            ),
+            SubagentConfig(
+                name="analyst",
+                description="统计分析与异常定位",
+            ),
+        ]
+        engine._subagent_registry.build_catalog.return_value = (
+            "可用子代理：\n- explorer：目录与 Excel 结构探查\n- analyst：统计分析与异常定位",
+            ["explorer", "analyst"],
+        )
+        engine._router_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response('{"agent_name":"explorer"}')
+        )
+
+        picked = await engine._auto_select_subagent(
+            task="请先总结这个文件夹结构",
+            file_paths=["data"],
+        )
+
+        assert picked == "explorer"
+        _, kwargs = engine._router_client.chat.completions.create.call_args
+        messages = kwargs["messages"]
+        assert "候选子代理：" in messages[1]["content"]
+        assert "explorer" in messages[1]["content"]
+        assert "analyst" in messages[1]["content"]
+        assert "相关文件：data" in messages[1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_auto_select_subagent_fallbacks_to_explorer_on_invalid_choice(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.list_all.return_value = [
+            SubagentConfig(name="explorer", description="目录探查"),
+            SubagentConfig(name="writer", description="写入改造"),
+        ]
+        engine._subagent_registry.build_catalog.return_value = (
+            "可用子代理：\n- explorer：目录探查\n- writer：写入改造",
+            ["explorer", "writer"],
+        )
+        engine._router_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response('{"agent_name":"unknown"}')
+        )
+
+        picked = await engine._auto_select_subagent(
+            task="请分析一下",
+            file_paths=[],
+        )
+
+        assert picked == "explorer"
+
+
+class TestAskUserFlow:
+    """ask_user 挂起恢复与队列行为测试。"""
+
+    @staticmethod
+    def _ask_question_payload(
+        *,
+        header: str = "实现方案",
+        text: str = "请选择实现方案",
+        multi_select: bool = False,
+    ) -> dict:
+        return {
+            "question": {
+                "header": header,
+                "text": text,
+                "options": [
+                    {"label": "方案A", "description": "快速实现"},
+                    {"label": "方案B", "description": "稳健实现"},
+                ],
+                "multiSelect": multi_select,
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_ask_user_suspends_and_resumes_without_reroute(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["ask_user", "add_numbers"],
+            route_mode="llm_confirm",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        ask_response = _make_tool_call_response(
+            [
+                (
+                    "call_q1",
+                    "ask_user",
+                    json.dumps(self._ask_question_payload(), ensure_ascii=False),
+                )
+            ]
+        )
+        do_work_response = _make_tool_call_response(
+            [("call_add", "add_numbers", json.dumps({"a": 1, "b": 2}))]
+        )
+        final_response = _make_text_response("已按你的选择完成，结果是 3。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[ask_response, do_work_response, final_response]
+        )
+
+        first = await engine.chat("请完成任务")
+        assert "请先回答这个问题后再继续" in first.reply
+        assert engine.has_pending_question() is True
+        assert engine._route_skills.await_count == 1
+
+        resumed = await engine.chat("1")
+        assert resumed.reply == "已按你的选择完成，结果是 3。"
+        assert engine.has_pending_question() is False
+        # 回答问题后直接恢复执行，不应重新路由
+        assert engine._route_skills.await_count == 1
+
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        ask_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_q1")
+        ask_payload = json.loads(ask_msg["content"])
+        assert ask_payload["question_id"].startswith("qst_")
+        assert ask_payload["multi_select"] is False
+        assert ask_payload["selected_options"][0]["label"] == "方案A"
+
+    @pytest.mark.asyncio
+    async def test_fifo_multiple_questions_and_skip_non_ask_user(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["ask_user", "add_numbers"],
+            route_mode="llm_confirm",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        first_round = _make_tool_call_response(
+            [
+                (
+                    "call_q1",
+                    "ask_user",
+                    json.dumps(
+                        self._ask_question_payload(
+                            header="语言",
+                            text="选择开发语言",
+                            multi_select=False,
+                        ),
+                        ensure_ascii=False,
+                    ),
+                ),
+                ("call_skip", "add_numbers", json.dumps({"a": 10, "b": 20})),
+                (
+                    "call_q2",
+                    "ask_user",
+                    json.dumps(
+                        self._ask_question_payload(
+                            header="约束",
+                            text="选择约束策略",
+                            multi_select=True,
+                        ),
+                        ensure_ascii=False,
+                    ),
+                ),
+            ]
+        )
+        final_response = _make_text_response("两个问题都确认完毕。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_round, final_response]
+        )
+
+        asked = await engine.chat("开始执行")
+        assert "选择开发语言" in asked.reply
+        assert engine.has_pending_question() is True
+        assert len(asked.tool_calls) == 3
+        skipped = next(r for r in asked.tool_calls if r.tool_name == "add_numbers")
+        assert skipped.success is True
+        assert "已跳过" in skipped.result
+
+        second_prompt = await engine.chat("1")
+        assert "选择约束策略" in second_prompt.reply
+        assert engine.has_pending_question() is True
+
+        done = await engine.chat("1\n自定义策略")
+        assert done.reply == "两个问题都确认完毕。"
+        assert engine.has_pending_question() is False
+        assert engine._route_skills.await_count == 1
+
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        assert any(m.get("tool_call_id") == "call_q1" for m in tool_msgs)
+        q2_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_q2")
+        q2_payload = json.loads(q2_msg["content"])
+        assert q2_payload["multi_select"] is True
+        assert any(item["label"] == "方案A" for item in q2_payload["selected_options"])
+        assert q2_payload["other_text"] == "自定义策略"
+
+    @pytest.mark.asyncio
+    async def test_pending_question_blocks_slash_command(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["ask_user"],
+            route_mode="llm_confirm",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        ask_response = _make_tool_call_response(
+            [
+                (
+                    "call_q1",
+                    "ask_user",
+                    json.dumps(self._ask_question_payload(), ensure_ascii=False),
+                )
+            ]
+        )
+        final_response = _make_text_response("已恢复执行。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[ask_response, final_response]
+        )
+
+        first = await engine.chat("发起提问")
+        assert engine.has_pending_question() is True
+        assert "请先回答这个问题后再继续" in first.reply
+
+        blocked = await engine.chat("/help")
+        assert "请先回答后再使用命令" in blocked.reply
+        assert engine.has_pending_question() is True
+        # 待回答状态不触发重路由
+        assert engine._route_skills.await_count == 1
+
+        resumed = await engine.chat("1")
+        assert resumed.reply == "已恢复执行。"
+        assert engine.has_pending_question() is False
 
 class TestMetaToolDefinitions:
     """元工具定义结构与动态更新测试（task6.4）。"""
@@ -566,13 +815,19 @@ class TestMetaToolDefinitions:
             ["data_basic", "chart_basic"],
         )
         engine._skill_router = mock_router
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.build_catalog.return_value = (
+            "可用子代理：\n- folder_summarizer：目录总结",
+            ["folder_summarizer"],
+        )
 
         meta_tools = engine._build_meta_tools()
-        assert len(meta_tools) == 3
+        assert len(meta_tools) == 4
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "select_skill" in by_name
         assert "delegate_to_subagent" in by_name
         assert "list_subagents" in by_name
+        assert "ask_user" in by_name
 
         select_tool = by_name["select_skill"]["function"]
         select_params = select_tool["parameters"]
@@ -589,6 +844,17 @@ class TestMetaToolDefinitions:
         assert delegate_params["required"] == ["task"]
         assert delegate_params["properties"]["file_paths"]["type"] == "array"
         assert "agent_name" in delegate_params["properties"]
+        assert delegate_params["properties"]["agent_name"]["enum"] == ["folder_summarizer"]
+        assert "Subagent_Catalog" in delegate_tool["description"]
+        assert "folder_summarizer" in delegate_tool["description"]
+
+        ask_user_tool = by_name["ask_user"]["function"]
+        ask_user_params = ask_user_tool["parameters"]
+        assert ask_user_params["required"] == ["question"]
+        question_schema = ask_user_params["properties"]["question"]
+        assert question_schema["required"] == ["text", "header", "options"]
+        assert question_schema["properties"]["options"]["minItems"] == 2
+        assert question_schema["properties"]["options"]["maxItems"] == 4
 
     def test_build_meta_tools_reflects_updated_catalog(self) -> None:
         config = _make_config()
@@ -692,6 +958,7 @@ class TestFallbackScopeGuard:
         assert "select_skill" in scope
         assert "delegate_to_subagent" in scope
         assert "list_subagents" in scope
+        assert "ask_user" in scope
         assert "add_numbers" not in scope
 
     @pytest.mark.asyncio
@@ -790,6 +1057,7 @@ class TestFallbackScopeGuard:
         assert "select_skill" in scope
         assert "delegate_to_subagent" in scope
         assert "list_subagents" in scope
+        assert "ask_user" in scope
         assert "add_numbers" not in scope
 
 

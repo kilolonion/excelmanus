@@ -501,6 +501,8 @@ class TestExternalSafeMode:
         assert isinstance(data["tool_calls"], list)
         assert len(data["tool_calls"]) == 1
         assert data["tool_calls"][0]["tool_name"] == "read_excel"
+        assert data["tool_calls"][0]["pending_question"] is False
+        assert data["tool_calls"][0]["question_id"] is None
 
     @pytest.mark.asyncio
     async def test_fullaccess_route_mode_control_command_when_safe_mode_disabled(
@@ -612,6 +614,28 @@ class TestExternalSafeMode:
         assert "subagent_summary" in subagent_sse
         assert "explorer" in subagent_sse
         assert "readOnly" in subagent_sse
+
+    def test_sse_user_question_visible_in_safe_mode(self) -> None:
+        """safe_mode=true 时仍应透出 user_question。"""
+        question_event = ToolCallEvent(
+            event_type=EventType.USER_QUESTION,
+            question_id="qst_001",
+            question_header="技术选型",
+            question_text="请选择方案",
+            question_options=[
+                {"label": "A", "description": "快"},
+                {"label": "B", "description": "稳"},
+                {"label": "Other", "description": "可输入其他答案"},
+            ],
+            question_multi_select=True,
+            question_queue_size=2,
+        )
+        safe_sse = api_module._sse_event_to_sse(question_event, safe_mode=True)
+        assert safe_sse is not None
+        assert "event: user_question" in safe_sse
+        assert '"id": "qst_001"' in safe_sse
+        assert '"multi_select": true' in safe_sse
+        assert '"queue_size": 2' in safe_sse
 
 
 # ── 单元测试：Health 端点 ────────────────────────────────
