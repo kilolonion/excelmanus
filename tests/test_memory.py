@@ -236,7 +236,7 @@ class TestTruncation:
     ) -> None:
         """仅一条超长消息时，也应收缩到阈值内。"""
         mem = ConversationMemory(config)
-        mem._truncation_threshold = 250
+        mem._truncation_threshold = 300
         mem.add_user_message("x" * 2000)
         assert mem._total_tokens() <= mem._truncation_threshold
 

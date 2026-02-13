@@ -405,7 +405,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="write_excel",
-            description="将数据写入 Excel 文件",
+            description="将数据写入 Excel 文件。写入前必须先用 read_excel 确认目标区域现有内容；优先批量写入，避免逐行调用。",
             input_schema={
                 "type": "object",
                 "properties": {

@@ -452,6 +452,9 @@ class TestToolScopeTransitions:
             for meta_tool in ("select_skill", "delegate_to_subagent", "list_subagents"):
                 if meta_tool not in expected_initial:
                     expected_initial.append(meta_tool)
+            for always_tool in ("task_create", "task_update"):
+                if always_tool not in expected_initial:
+                    expected_initial.append(always_tool)
             assert initial_scope == expected_initial
 
             asyncio.run(engine._handle_select_skill(skill_a))
@@ -459,6 +462,9 @@ class TestToolScopeTransitions:
             expected_a = list(tools_a)
             if "select_skill" not in expected_a:
                 expected_a.append("select_skill")
+            for always_tool in ("task_create", "task_update"):
+                if always_tool not in expected_a:
+                    expected_a.append(always_tool)
             assert scope_a == expected_a
 
             asyncio.run(engine._handle_select_skill(skill_b))
@@ -466,6 +472,9 @@ class TestToolScopeTransitions:
             expected_b = list(tools_b)
             if "select_skill" not in expected_b:
                 expected_b.append("select_skill")
+            for always_tool in ("task_create", "task_update"):
+                if always_tool not in expected_b:
+                    expected_b.append(always_tool)
             assert scope_b == expected_b
 
 

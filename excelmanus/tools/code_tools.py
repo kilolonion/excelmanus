@@ -542,7 +542,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="run_code",
-            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）",
+            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）。仅在专用 Excel 工具无法完成任务时使用；优先编写小步可验证脚本，执行后立即检查结果。",
             input_schema={
                 "type": "object",
                 "properties": {

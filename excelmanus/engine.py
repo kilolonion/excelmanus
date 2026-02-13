@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 _META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents")
+_ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update")
 
 
 def _to_plain(value: Any) -> Any:
@@ -715,7 +716,7 @@ class AgentEngine:
             scope = list(self._active_skill.allowed_tools)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return scope
+            return self._ensure_always_available(scope)
 
         # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
         if (
@@ -726,7 +727,7 @@ class AgentEngine:
             scope = list(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return scope
+            return self._ensure_always_available(scope)
 
         # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
         # 仅使用路由授权工具，并追加必要元工具。
@@ -735,10 +736,18 @@ class AgentEngine:
             for tool_name in _META_TOOL_NAMES:
                 if tool_name not in scope:
                     scope.append(tool_name)
-            return scope
+            return self._ensure_always_available(scope)
 
         scope = self._all_tool_names()
         for tool_name in _META_TOOL_NAMES:
+            if tool_name not in scope:
+                scope.append(tool_name)
+        return self._ensure_always_available(scope)
+
+    @staticmethod
+    def _ensure_always_available(scope: list[str]) -> list[str]:
+        """确保任务管理工具始终在 scope 中可用。"""
+        for tool_name in _ALWAYS_AVAILABLE_TOOLS:
             if tool_name not in scope:
                 scope.append(tool_name)
         return scope
