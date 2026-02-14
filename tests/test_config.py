@@ -312,6 +312,50 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.large_excel_threshold_bytes == 4096
 
+    def test_default_tool_result_hard_cap_chars(self, monkeypatch) -> None:
+        """默认工具结果全局硬截断上限为 12000。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        cfg = load_config()
+        assert cfg.tool_result_hard_cap_chars == 12000
+
+    def test_tool_result_hard_cap_chars_from_env(self, monkeypatch) -> None:
+        """允许通过环境变量覆盖工具结果全局硬截断上限。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS", "2048")
+        cfg = load_config()
+        assert cfg.tool_result_hard_cap_chars == 2048
+
+    def test_system_message_mode_supports_replace(self, monkeypatch) -> None:
+        """system_message_mode 支持 replace。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SYSTEM_MESSAGE_MODE", "replace")
+        cfg = load_config()
+        assert cfg.system_message_mode == "replace"
+
+    def test_system_message_mode_legacy_multi_maps_to_replace(self, monkeypatch) -> None:
+        """兼容旧值 multi，加载后映射为 replace。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SYSTEM_MESSAGE_MODE", "multi")
+        cfg = load_config()
+        assert cfg.system_message_mode == "replace"
+
+    def test_system_message_mode_rejects_invalid_value(self, monkeypatch) -> None:
+        """非法 system_message_mode 应报错。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SYSTEM_MESSAGE_MODE", "invalid")
+        with pytest.raises(ConfigError, match="EXCELMANUS_SYSTEM_MESSAGE_MODE"):
+            load_config()
+
     def test_default_subagent_config(self, monkeypatch) -> None:
         """subagent 配置默认值。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")

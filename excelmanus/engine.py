@@ -22,7 +22,7 @@ from excelmanus.hooks import (
     SkillHookRunner,
 )
 from excelmanus.logger import get_logger, log_tool_call
-from excelmanus.memory import ConversationMemory
+from excelmanus.memory import ConversationMemory, TokenCounter
 from excelmanus.plan_mode import (
     PendingPlanState,
     PlanDraft,
@@ -56,6 +56,8 @@ _ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_t
 _PLAN_CONTEXT_MAX_CHARS = 6000
 _RECENT_EXCEL_FILE_MAX = 5
 _RECENT_SUBAGENT_TASK_MAX_CHARS = 160
+_MIN_SYSTEM_CONTEXT_CHARS = 256
+_SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
@@ -337,9 +339,11 @@ class AgentEngine:
                 base_url=config.router_base_url or config.base_url,
             )
             self._router_model = config.router_model
+            self._router_follow_active_model = False
         else:
             self._router_client = self._client
             self._router_model = config.model
+            self._router_follow_active_model = True
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
@@ -872,31 +876,6 @@ class AgentEngine:
             )
             return chat_result
 
-        if selected_skill is not None and selected_skill.context == "fork":
-            self._memory.add_user_message(user_message)
-            chat_result = await self._run_fork_skill(
-                skill=selected_skill,
-                user_message=user_message,
-                raw_args=effective_raw_args if effective_slash_command else "",
-                on_event=on_event,
-            )
-            elapsed = time.monotonic() - chat_start
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.CHAT_SUMMARY,
-                    total_iterations=self._last_iteration_count,
-                    total_tool_calls=self._last_tool_call_count,
-                    success_count=self._last_success_count,
-                    failure_count=self._last_failure_count,
-                    elapsed_seconds=round(elapsed, 2),
-                    prompt_tokens=chat_result.prompt_tokens,
-                    completion_tokens=chat_result.completion_tokens,
-                    total_tokens=chat_result.total_tokens,
-                ),
-            )
-            return chat_result
-
         # 追加用户消息
         self._memory.add_user_message(user_message)
         logger.info(
@@ -1338,13 +1317,6 @@ class AgentEngine:
         self._loaded_skill_names.add(selected.name)
 
         context_text = selected.render_context()
-        if selected.context == "fork":
-            agent_name = self._normalize_skill_agent_name(selected.agent) or "explorer"
-            return (
-                "OK\n"
-                f"{context_text}\n"
-                f"[该技能为 fork 模式，请优先调用 delegate_to_subagent（agent={agent_name}）。]"
-            )
         return f"OK\n{context_text}"
 
     @staticmethod
@@ -1555,17 +1527,6 @@ class AgentEngine:
             if path:
                 normalized.append(path)
         return normalized
-
-    def _latest_user_message(self) -> str:
-        """获取最近一条用户消息，用于 fork 技能即时委派。"""
-        messages = self._memory.get_messages()
-        for msg in reversed(messages):
-            if str(msg.get("role", "")).strip() != "user":
-                continue
-            content = str(msg.get("content", "")).strip()
-            if content:
-                return content
-        return "请根据当前请求执行任务。"
 
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""
@@ -2222,8 +2183,27 @@ class AgentEngine:
                 ),
             )
 
-            messages = self._memory.get_messages(
-                system_prompts=self._build_system_prompts(route_result.system_contexts)
+            system_prompts, context_error = self._prepare_system_prompts_for_request(
+                route_result.system_contexts
+            )
+            if context_error is not None:
+                self._last_iteration_count = iteration
+                self._last_failure_count += 1
+                self._memory.add_assistant_message(context_error)
+                logger.warning("系统上下文预算检查失败，终止执行: %s", context_error)
+                return ChatResult(
+                    reply=context_error,
+                    tool_calls=list(all_tool_results),
+                    iterations=iteration,
+                    truncated=False,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                )
+
+            messages = self._memory.trim_for_request(
+                system_prompts=system_prompts,
+                max_context_tokens=self._config.max_context_tokens,
             )
 
             tool_scope = self._get_current_tool_scope(route_result=route_result)
@@ -2393,39 +2373,6 @@ class AgentEngine:
                     question_started = True
                     if self._pending_question_route_result is None:
                         self._pending_question_route_result = route_result
-
-                if (
-                    tc_result.success
-                    and tc_result.tool_name == "select_skill"
-                    and self._active_skill is not None
-                    and self._active_skill.context == "fork"
-                ):
-                    self._last_tool_call_count += 1
-                    self._last_success_count += 1
-                    agent_name = (
-                        self._normalize_skill_agent_name(self._active_skill.agent)
-                        or "explorer"
-                    )
-                    delegate_outcome = await self._delegate_to_subagent(
-                        task=self._latest_user_message(),
-                        agent_name=agent_name,
-                        file_paths=None,
-                        on_event=on_event,
-                    )
-                    reply = delegate_outcome.reply
-                    self._memory.add_assistant_message(reply)
-                    self._last_iteration_count = iteration
-                    logger.info("fork 技能已激活，直接委派子代理: %s", agent_name)
-                    logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    return ChatResult(
-                        reply=reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
-                    )
 
                 # 更新统计
                 self._last_tool_call_count += 1
@@ -2748,6 +2695,22 @@ class AgentEngine:
                             result=result_str if success else None,
                             error=error if not success else None,
                         )
+                    elif self._approval.is_audit_only_tool(tool_name):
+                        result_value, audit_record = await self._execute_tool_with_audit(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            tool_scope=tool_scope,
+                            approval_id=self._approval.new_approval_id(),
+                            created_at_utc=self._approval.utc_now(),
+                            undoable=tool_name not in {"run_code", "run_shell"},
+                        )
+                        result_str = str(result_value)
+                        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                        if tool_def is not None:
+                            result_str = tool_def.truncate_result(result_str)
+                        success = True
+                        error = None
+                        log_tool_call(logger, tool_name, arguments, result=result_str)
                     elif self._approval.is_high_risk_tool(tool_name):
                         if not self._full_access_enabled:
                             pending = self._approval.create_pending(
@@ -2761,14 +2724,13 @@ class AgentEngine:
                             success = True
                             error = None
                             log_tool_call(logger, tool_name, arguments, result=result_str)
-                        else:
-                            result_value, audit_record = await self._execute_tool_with_audit(
-                                tool_name=tool_name,
-                                arguments=arguments,
+                        elif self._approval.is_mcp_tool(tool_name):
+                            # 非白名单 MCP 工具在 fullAccess 下可直接执行（不做文件审计）。
+                            result_value = await asyncio.to_thread(
+                                self._registry.call_tool,
+                                tool_name,
+                                arguments,
                                 tool_scope=tool_scope,
-                                approval_id=self._approval.new_approval_id(),
-                                created_at_utc=self._approval.utc_now(),
-                                undoable=tool_name not in {"run_code", "run_shell"},
                             )
                             result_str = str(result_value)
                             tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
@@ -2777,29 +2739,14 @@ class AgentEngine:
                             success = True
                             error = None
                             log_tool_call(logger, tool_name, arguments, result=result_str)
-                    elif (
-                        self._approval.is_mcp_tool(tool_name)
-                        and not self._approval.is_mcp_auto_approved(tool_name)
-                    ):
-                        # MCP 工具默认需要审批，fullAccess 开启时自动批准
-                        if not self._full_access_enabled:
-                            pending = self._approval.create_pending(
+                        else:
+                            result_value, audit_record = await self._execute_tool_with_audit(
                                 tool_name=tool_name,
                                 arguments=arguments,
                                 tool_scope=tool_scope,
-                            )
-                            pending_approval = True
-                            approval_id = pending.approval_id
-                            result_str = self._format_pending_prompt(pending)
-                            success = True
-                            error = None
-                            log_tool_call(logger, tool_name, arguments, result=result_str)
-                        else:
-                            result_value = await asyncio.to_thread(
-                                self._registry.call_tool,
-                                tool_name,
-                                arguments,
-                                tool_scope=tool_scope,
+                                approval_id=self._approval.new_approval_id(),
+                                created_at_utc=self._approval.utc_now(),
+                                undoable=tool_name not in {"run_code", "run_shell"},
                             )
                             result_str = str(result_value)
                             tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
@@ -2869,6 +2816,10 @@ class AgentEngine:
                     error = reason
                     result_str = f"{result_str}\n[Hook 拒绝] {reason}"
 
+        result_str = self._apply_tool_result_hard_cap(result_str)
+        if error:
+            error = self._apply_tool_result_hard_cap(str(error))
+
         # 发射 TOOL_CALL_END 事件
         self._emit(
             on_event,
@@ -2922,6 +2873,18 @@ class AgentEngine:
             pending_plan=pending_plan,
             plan_id=plan_id,
             defer_tool_result=defer_tool_result,
+        )
+
+    def _apply_tool_result_hard_cap(self, text: str) -> str:
+        """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
+        normalized = str(text or "")
+        cap = int(self._config.tool_result_hard_cap_chars)
+        if cap <= 0 or len(normalized) <= cap:
+            return normalized
+        return (
+            f"{normalized[:cap]}\n"
+            f"[结果已全局截断，原始长度: {len(normalized)} 字符，"
+            f"上限: {cap} 字符]"
         )
 
     def _format_pending_prompt(self, pending: PendingApproval) -> str:
@@ -3069,6 +3032,7 @@ class AgentEngine:
                 api_key=self._active_api_key,
                 base_url=self._active_base_url,
             )
+            self._sync_router_model_runtime()
             return f"已切换到默认模型：{self._config.model}"
 
         # 在 profiles 中查找：精确匹配 > 前缀匹配 > 包含匹配
@@ -3103,8 +3067,16 @@ class AgentEngine:
             api_key=self._active_api_key,
             base_url=self._active_base_url,
         )
+        self._sync_router_model_runtime()
         desc = f"（{matched.description}）" if matched.description else ""
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
+
+    def _sync_router_model_runtime(self) -> None:
+        """在主模型切换后同步路由模型运行时（仅跟随模式）。"""
+        if not self._router_follow_active_model:
+            return
+        self._router_client = self._client
+        self._router_model = self._active_model
 
     def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
         """将本轮路由结果与会话内历史已加载的 skill 合并。"""
@@ -3328,45 +3300,6 @@ class AgentEngine:
         return ChatResult(
             reply=reply,
             tool_calls=[tc_result],
-            iterations=1,
-            truncated=False,
-        )
-
-    @staticmethod
-    def _extract_excel_paths_from_raw_args(raw_args: str) -> list[str]:
-        values: list[str] = []
-        for token in raw_args.split():
-            normalized = token.strip().strip('"').strip("'")
-            lowered = normalized.lower()
-            if lowered.endswith((".xlsx", ".xlsm", ".xls")):
-                values.append(normalized)
-        return values
-
-    async def _run_fork_skill(
-        self,
-        *,
-        skill: Skillpack,
-        user_message: str,
-        raw_args: str,
-        on_event: EventCallback | None,
-    ) -> ChatResult:
-        agent_name = self._normalize_skill_agent_name(skill.agent) or "explorer"
-        file_paths = self._extract_excel_paths_from_raw_args(raw_args)
-        outcome = await self._delegate_to_subagent(
-            task=user_message.strip(),
-            agent_name=agent_name,
-            file_paths=file_paths,
-            on_event=on_event,
-        )
-        reply = outcome.reply
-        self._memory.add_assistant_message(reply)
-        self._last_iteration_count = 1
-        self._last_tool_call_count = 0
-        self._last_success_count = 1 if outcome.success else 0
-        self._last_failure_count = 0 if outcome.success else 1
-        return ChatResult(
-            reply=reply,
-            tool_calls=[],
             iterations=1,
             truncated=False,
         )
@@ -3738,6 +3671,130 @@ class AgentEngine:
         except TypeError:
             return get_openai_schemas(mode="chat_completions")
 
+    @staticmethod
+    def _system_prompts_token_count(system_prompts: Sequence[str]) -> int:
+        total = 0
+        for prompt in system_prompts:
+            total += TokenCounter.count_message({"role": "system", "content": prompt})
+        return total
+
+    @staticmethod
+    def _shrink_context_text(text: str) -> str:
+        normalized = (text or "").strip()
+        if not normalized:
+            return ""
+        if len(normalized) <= _MIN_SYSTEM_CONTEXT_CHARS:
+            return ""
+        keep_chars = max(_MIN_SYSTEM_CONTEXT_CHARS, len(normalized) // 2)
+        shrinked = normalized[:keep_chars].rstrip()
+        if _SYSTEM_CONTEXT_SHRINK_MARKER in shrinked:
+            return shrinked
+        return f"{shrinked}\n{_SYSTEM_CONTEXT_SHRINK_MARKER}"
+
+    @staticmethod
+    def _minimize_skill_context(text: str) -> str:
+        lines = [line for line in str(text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        head = lines[0]
+        second = lines[1] if len(lines) > 1 else ""
+        minimal_parts = [head]
+        if second:
+            minimal_parts.append(second)
+        minimal_parts.append("[Skillpack 正文已省略以适配上下文窗口]")
+        return "\n".join(minimal_parts)
+
+    def _prepare_system_prompts_for_request(
+        self,
+        skill_contexts: list[str],
+    ) -> tuple[list[str], str | None]:
+        """构建用于本轮请求的 system prompts，并在必要时压缩上下文。"""
+        base_prompt = self._memory.system_prompt
+
+        access_notice = self._build_access_notice()
+        if access_notice:
+            base_prompt = base_prompt + "\n\n" + access_notice
+
+        mcp_context = self._build_mcp_context_notice()
+        if mcp_context:
+            base_prompt = base_prompt + "\n\n" + mcp_context
+
+        if self._transient_hook_contexts:
+            hook_context = "\n".join(self._transient_hook_contexts).strip()
+            self._transient_hook_contexts.clear()
+            if hook_context:
+                base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
+
+        approved_plan_context = self._build_approved_plan_context_notice()
+        recent_excel_context = self._build_recent_excel_context_notice()
+        current_skill_contexts = [
+            ctx for ctx in skill_contexts if isinstance(ctx, str) and ctx.strip()
+        ]
+
+        def _compose_prompts() -> list[str]:
+            mode = self._effective_system_mode()
+            if mode == "merge":
+                merged_parts = [base_prompt]
+                if approved_plan_context:
+                    merged_parts.append(approved_plan_context)
+                if recent_excel_context:
+                    merged_parts.append(recent_excel_context)
+                merged_parts.extend(current_skill_contexts)
+                return ["\n\n".join(merged_parts)]
+
+            prompts = [base_prompt]
+            if approved_plan_context:
+                prompts.append(approved_plan_context)
+            if recent_excel_context:
+                prompts.append(recent_excel_context)
+            prompts.extend(current_skill_contexts)
+            return prompts
+
+        threshold = max(1, int(self._config.max_context_tokens * 0.9))
+        prompts = _compose_prompts()
+        total_tokens = self._system_prompts_token_count(prompts)
+        if total_tokens <= threshold:
+            return prompts, None
+
+        if approved_plan_context:
+            approved_plan_context = self._shrink_context_text(approved_plan_context)
+            prompts = _compose_prompts()
+            total_tokens = self._system_prompts_token_count(prompts)
+            if total_tokens <= threshold:
+                return prompts, None
+            approved_plan_context = ""
+
+        if recent_excel_context:
+            recent_excel_context = self._shrink_context_text(recent_excel_context)
+            prompts = _compose_prompts()
+            total_tokens = self._system_prompts_token_count(prompts)
+            if total_tokens <= threshold:
+                return prompts, None
+            recent_excel_context = ""
+
+        for idx in range(len(current_skill_contexts) - 1, -1, -1):
+            minimized = self._minimize_skill_context(current_skill_contexts[idx])
+            if minimized and minimized != current_skill_contexts[idx]:
+                current_skill_contexts[idx] = minimized
+                prompts = _compose_prompts()
+                total_tokens = self._system_prompts_token_count(prompts)
+                if total_tokens <= threshold:
+                    return prompts, None
+
+        while current_skill_contexts:
+            current_skill_contexts.pop()
+            prompts = _compose_prompts()
+            total_tokens = self._system_prompts_token_count(prompts)
+            if total_tokens <= threshold:
+                return prompts, None
+
+        if self._system_prompts_token_count(prompts) > threshold:
+            return [], (
+                "系统上下文过长，已无法在当前上下文窗口内继续执行。"
+                "请减少附加上下文或拆分任务后重试。"
+            )
+        return prompts, None
+
 
     def _build_system_prompts(self, skill_contexts: list[str]) -> list[str]:
         base_prompt = self._memory.system_prompt
@@ -3890,7 +3947,7 @@ class AgentEngine:
             return configured
         if self._system_mode_fallback == "merge":
             return "merge"
-        return "multi"
+        return "replace"
 
     def _format_html_endpoint_error(self, raw_text: str) -> str:
         """将 HTML 错配响应转换为可操作的配置提示。"""
@@ -3913,20 +3970,52 @@ class AgentEngine:
         except Exception as exc:
             if (
                 self._config.system_message_mode == "auto"
-                and self._effective_system_mode() == "multi"
+                and self._effective_system_mode() == "replace"
                 and self._is_system_compatibility_error(exc)
             ):
-                logger.warning("检测到多 system 兼容性错误，自动回退到 merge 模式")
+                logger.warning("检测到 replace(system 分段) 兼容性错误，自动回退到 merge 模式")
                 self._system_mode_fallback = "merge"
-                merged_messages = self._memory.get_messages(
-                    system_prompts=self._build_system_prompts(
-                        self._last_route_result.system_contexts
-                    )
-                )
+                source_messages = kwargs.get("messages")
+                if not isinstance(source_messages, list):
+                    raise
+                merged_messages = self._merge_leading_system_messages(source_messages)
                 retry_kwargs = dict(kwargs)
                 retry_kwargs["messages"] = merged_messages
                 return await self._client.chat.completions.create(**retry_kwargs)
             raise
+
+    @staticmethod
+    def _merge_leading_system_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        """将开头连续的多条 system 消息合并为一条，保持其余消息不变。"""
+        normalized: list[dict[str, Any]] = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                normalized.append(dict(msg))
+            else:
+                normalized.append({"role": "user", "content": str(msg)})
+
+        if not normalized:
+            return normalized
+
+        idx = 0
+        parts: list[str] = []
+        while idx < len(normalized):
+            msg = normalized[idx]
+            if msg.get("role") != "system":
+                break
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content.strip())
+            elif content is not None:
+                parts.append(str(content))
+            idx += 1
+
+        if idx <= 1:
+            return normalized
+
+        merged_content = "\n\n".join(parts).strip()
+        merged_message = {"role": "system", "content": merged_content}
+        return [merged_message, *normalized[idx:]]
 
     @staticmethod
     def _is_system_compatibility_error(exc: Exception) -> bool:

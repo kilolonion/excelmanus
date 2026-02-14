@@ -240,6 +240,45 @@ class TestTruncation:
         mem.add_user_message("x" * 8000)
         assert mem._total_tokens() <= mem._truncation_threshold
 
+    def test_trim_for_request_enforces_final_message_budget(self, config: ExcelManusConfig) -> None:
+        """trim_for_request 应按最终请求消息预算裁剪历史。"""
+        mem = ConversationMemory(config)
+        for i in range(30):
+            mem.add_user_message(f"用户消息 {i} " * 20)
+            mem.add_assistant_message(f"助手回复 {i} " * 20)
+
+        system_prompts = ["系统提示 A", "系统提示 B"]
+        result = mem.trim_for_request(
+            system_prompts=system_prompts,
+            max_context_tokens=2000,
+            reserve_ratio=0.1,
+        )
+        total_tokens = sum(TokenCounter.count_message(m) for m in result)
+        assert total_tokens <= int(2000 * 0.9)
+
+    def test_trim_for_request_keeps_tool_call_and_result_consistency(
+        self, config: ExcelManusConfig
+    ) -> None:
+        """trim_for_request 截断后不应出现孤立 tool result。"""
+        mem = ConversationMemory(config)
+        mem.add_tool_call("call_1", "read_excel", '{"file_path":"a.xlsx"}')
+        mem.add_tool_result("call_1", "读取结果")
+        mem.add_user_message("后续问题 " * 50)
+
+        msgs = mem.trim_for_request(
+            system_prompts=["系统提示"],
+            max_context_tokens=1200,
+            reserve_ratio=0.1,
+        )
+        call_ids: set[str] = set()
+        for msg in msgs:
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    call_ids.add(tc["id"])
+        for msg in msgs:
+            if msg.get("role") == "tool":
+                assert msg.get("tool_call_id") in call_ids
+
 
 # ---------------------------------------------------------------------------
 # Property 7：对话截断属性测试

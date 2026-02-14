@@ -146,7 +146,14 @@ class SessionManager:
         if created:
             try:
                 await engine.initialize_mcp()
-            except BaseException:
+            except BaseException as exc:
+                # initialize_mcp 失败不应中断主请求；若内部抛出 CancelledError，
+                # 需要显式清除当前任务的取消状态，避免后续 await 被级联取消。
+                if isinstance(exc, asyncio.CancelledError):
+                    task = asyncio.current_task()
+                    if task is not None:
+                        while task.cancelling():
+                            task.uncancel()
                 logger.warning("会话 %s MCP 初始化失败，已跳过", new_id, exc_info=True)
         return new_id, engine
 

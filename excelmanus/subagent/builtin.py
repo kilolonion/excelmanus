@@ -3,48 +3,35 @@
 from __future__ import annotations
 
 from excelmanus.subagent.models import SubagentConfig
+from excelmanus.tools.policy import (
+    SUBAGENT_ANALYSIS_EXTRA_TOOLS,
+    SUBAGENT_READ_ONLY_TOOLS,
+    SUBAGENT_WRITE_EXTRA_TOOLS,
+)
 
-_READ_ONLY_TOOLS = [
-    "read_excel",
-    "analyze_data",
-    "filter_data",
-    "list_sheets",
-    "get_file_info",
-    "search_files",
-    "list_directory",
-    "read_text_file",
-    "read_cell_styles",
-    "scan_excel_files",
-]
+def _merge_tools(*groups: tuple[str, ...] | list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for tool_name in group:
+            if tool_name in seen:
+                continue
+            seen.add(tool_name)
+            merged.append(tool_name)
+    return merged
 
-_ANALYSIS_TOOLS = [
-    *_READ_ONLY_TOOLS,
-    "run_code",
-    "run_shell",
-    "write_text_file",
-]
 
-_WRITE_TOOLS = [
-    *_READ_ONLY_TOOLS,
-    "write_excel",
-    "transform_data",
-    "format_cells",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "create_chart",
-    "create_sheet",
-    "copy_sheet",
-    "rename_sheet",
-    "delete_sheet",
-    "copy_range_between_sheets",
-    "copy_file",
-    "rename_file",
-    "delete_file",
-    "write_text_file",
-    "run_code",
-]
+_READ_ONLY_TOOLS = list(SUBAGENT_READ_ONLY_TOOLS)
+
+_ANALYSIS_TOOLS = _merge_tools(
+    SUBAGENT_READ_ONLY_TOOLS,
+    SUBAGENT_ANALYSIS_EXTRA_TOOLS,
+)
+
+_WRITE_TOOLS = _merge_tools(
+    SUBAGENT_READ_ONLY_TOOLS,
+    SUBAGENT_WRITE_EXTRA_TOOLS,
+)
 
 _CODER_TOOLS = [
     "run_code",

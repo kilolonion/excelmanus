@@ -1,5 +1,7 @@
 # LLM-Native 路由与子代理架构方案（v2）
 
+> **历史文档声明（Skillpack 协议）**：本文为历史设计/执行记录，可能包含已过时术语（如 `hint_direct`、`confident_direct`、`llm_confirm`、`fork_plan`、`Skillpack.context`）。现行规则请以 [`../../docs/skillpack_protocol.md`](../../docs/skillpack_protocol.md) 为准。
+
 > **任务类型**：架构重构  
 > **优先级**：高  
 > **预计工期**：3-5 天  

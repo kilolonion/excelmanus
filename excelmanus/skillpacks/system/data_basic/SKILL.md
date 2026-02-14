@@ -8,6 +8,7 @@ allowed_tools:
   - filter_data
   - transform_data
   - group_aggregate
+  - analyze_sheet_mapping
   - list_sheets
   - scan_excel_files
   - write_cells

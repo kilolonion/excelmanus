@@ -14,7 +14,7 @@ from excelmanus.skillpacks.frontmatter import (
     parse_scalar as parse_frontmatter_scalar,
     serialize_frontmatter as serialize_frontmatter_text,
 )
-from excelmanus.skillpacks.models import SkillCommandDispatchMode, SkillContextMode, Skillpack
+from excelmanus.skillpacks.models import SkillCommandDispatchMode, Skillpack
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("skillpacks.loader")
@@ -156,7 +156,7 @@ class SkillpackLoader:
         if self._config.skills_discovery_include_claude:
             _append("project", workspace_root / ".claude" / "skills")
         if self._config.skills_discovery_include_openclaw:
-            _append("project", workspace_root / "skills")
+            _append("project", workspace_root / ".openclaw" / "skills")
 
         for raw in self._config.skills_discovery_extra_dirs:
             _append("project", Path(raw))
@@ -227,9 +227,16 @@ class SkillpackLoader:
         argument_hint = self._get_optional_str(frontmatter, "argument_hint", default="")
 
         context = self._get_optional_context(frontmatter, default="normal")
-        agent = self._get_optional_str_or_none(frontmatter, "agent")
-        if context == "fork" and not agent:
-            agent = "explorer"
+        if "agent" in frontmatter:
+            raise SkillpackValidationError(
+                "frontmatter 字段 'agent' 已移除。"
+                "请改为常规技能，并在执行阶段显式调用 "
+                "`delegate_to_subagent(agent_name=...)`。"
+            )
+        if context != "normal":
+            raise SkillpackValidationError(
+                "frontmatter 字段 'context' 仅支持 normal。"
+            )
 
         hooks = self._get_optional_dict(frontmatter, "hooks")
         model = self._get_optional_str_or_none(frontmatter, "model")
@@ -280,8 +287,6 @@ class SkillpackLoader:
             disable_model_invocation=disable_model_invocation,
             user_invocable=user_invocable,
             argument_hint=argument_hint,
-            context=context,
-            agent=agent,
             hooks=hooks,
             model=model,
             metadata=metadata,
@@ -588,16 +593,22 @@ class SkillpackLoader:
     def _get_optional_context(
         payload: dict[str, Any],
         key: str = "context",
-        default: SkillContextMode = "normal",
-    ) -> SkillContextMode:
+        default: str = "normal",
+    ) -> str:
         raw = payload.get(key, default)
         if not isinstance(raw, str):
             raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
         normalized = raw.strip().lower()
-        if normalized in {"normal", "fork"}:
-            return normalized  # type: ignore[return-value]
+        if normalized == "normal":
+            return normalized
+        if normalized == "fork":
+            raise SkillpackValidationError(
+                "frontmatter 字段 'context: fork' 已移除。"
+                "请改为常规技能，并在需要时显式调用 "
+                "`delegate_to_subagent(agent_name=...)`。"
+            )
         raise SkillpackValidationError(
-            f"frontmatter 字段 '{key}' 必须是 normal/fork"
+            f"frontmatter 字段 '{key}' 仅支持 normal"
         )
 
     @staticmethod

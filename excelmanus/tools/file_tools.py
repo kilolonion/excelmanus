@@ -261,10 +261,13 @@ def read_text_file(
     try:
         with open(safe_path, "r", encoding=encoding) as f:
             lines = []
+            truncated = False
             for i, line in enumerate(f):
-                if i >= max_lines:
+                if i < max_lines:
+                    lines.append(line.rstrip("\n"))
+                else:
+                    truncated = True
                     break
-                lines.append(line.rstrip("\n"))
     except UnicodeDecodeError:
         return json.dumps(
             {"error": f"无法以 {encoding} 编码读取文件 '{file_path}'，可能是二进制文件"},
@@ -276,7 +279,7 @@ def read_text_file(
         "file": safe_path.name,
         "encoding": encoding,
         "lines_read": total_lines,
-        "truncated": total_lines >= max_lines,
+        "truncated": truncated,
         "content": "\n".join(lines),
     }
     return json.dumps(result, ensure_ascii=False, indent=2)

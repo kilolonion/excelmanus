@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 SkillpackSource = Literal["system", "user", "project"]
-SkillContextMode = Literal["normal", "fork"]
 SkillCommandDispatchMode = Literal["none", "tool"]
 
 
@@ -28,8 +27,6 @@ class Skillpack:
     disable_model_invocation: bool = False
     user_invocable: bool = True
     argument_hint: str = ""
-    context: SkillContextMode = "normal"
-    agent: str | None = None
     hooks: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

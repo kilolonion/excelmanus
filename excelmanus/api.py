@@ -141,8 +141,6 @@ class SkillpackDetailResponse(SkillpackSummaryResponse):
     )
     instructions: str
     resource_contents: dict[str, str]
-    context: str = "normal"
-    agent: str | None = None
     hooks: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -309,12 +307,6 @@ def _to_skill_detail(detail: dict[str, Any]) -> SkillpackDetailResponse:
         ),
         instructions=str(detail.get("instructions", "") or ""),
         resource_contents=dict(detail.get("resource_contents", {}) or {}),
-        context=str(detail.get("context", "normal") or "normal"),
-        agent=(
-            str(detail.get("agent")).strip()
-            if detail.get("agent") is not None and str(detail.get("agent")).strip()
-            else None
-        ),
         hooks=dict(detail.get("hooks", {}) or {}),
         model=(
             str(detail.get("model")).strip()

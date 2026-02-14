@@ -13,12 +13,14 @@ import openai
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
+from excelmanus.logger import get_logger
 from excelmanus.memory import ConversationMemory
 from excelmanus.subagent.models import SubagentConfig, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
 _SUMMARY_MAX_CHARS = 4000
 _SUBAGENT_BLOCKED_META_TOOLS = {"select_skill", "delegate_to_subagent", "list_subagents"}
+logger = get_logger("subagent.executor")
 
 
 @dataclass
@@ -28,6 +30,7 @@ class _ExecResult:
     error: str | None = None
     pending_approval_id: str | None = None
     file_changes: list[str] | None = None
+    raw_result: str | None = None
 
 
 class SubagentExecutor:
@@ -70,18 +73,18 @@ class SubagentExecutor:
         memory = ConversationMemory(self._parent_config)
         memory.add_user_message(prompt)
 
-        if on_event:
-            on_event(
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_START,
-                    subagent_name=config.name,
-                    subagent_reason=prompt,
-                    subagent_tools=tool_scope,
-                    subagent_success=True,
-                    subagent_permission_mode=config.permission_mode,
-                    subagent_conversation_id=conversation_id,
-                )
-            )
+        self._emit_safe(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_START,
+                subagent_name=config.name,
+                subagent_reason=prompt,
+                subagent_tools=tool_scope,
+                subagent_success=True,
+                subagent_permission_mode=config.permission_mode,
+                subagent_conversation_id=conversation_id,
+            ),
+        )
 
         iterations = 0
         tool_calls = 0
@@ -154,10 +157,11 @@ class SubagentExecutor:
                     )
                     content = result.result[:_SUMMARY_MAX_CHARS]
                     memory.add_tool_result(call_id, content)
+                    observed_source = result.raw_result if result.raw_result is not None else result.result
                     observed_files.update(
                         self._extract_excel_paths_from_tool_result(
                             tool_name=tool_name,
-                            text=result.result,
+                            text=observed_source,
                         )
                     )
 
@@ -198,34 +202,35 @@ class SubagentExecutor:
             last_summary = f"子代理执行失败：{exc}"
 
         last_summary = self._truncate(last_summary)
-        if on_event:
-            on_event(
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_SUMMARY,
-                    subagent_name=config.name,
-                    subagent_reason=prompt,
-                    subagent_tools=tool_scope,
-                    subagent_summary=last_summary,
-                    subagent_success=success,
-                    subagent_permission_mode=config.permission_mode,
-                    subagent_conversation_id=conversation_id,
-                    subagent_iterations=iterations,
-                    subagent_tool_calls=tool_calls,
-                )
-            )
-            on_event(
-                ToolCallEvent(
-                    event_type=EventType.SUBAGENT_END,
-                    subagent_name=config.name,
-                    subagent_reason=prompt,
-                    subagent_tools=tool_scope,
-                    subagent_success=success,
-                    subagent_permission_mode=config.permission_mode,
-                    subagent_conversation_id=conversation_id,
-                    subagent_iterations=iterations,
-                    subagent_tool_calls=tool_calls,
-                )
-            )
+        self._emit_safe(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_SUMMARY,
+                subagent_name=config.name,
+                subagent_reason=prompt,
+                subagent_tools=tool_scope,
+                subagent_summary=last_summary,
+                subagent_success=success,
+                subagent_permission_mode=config.permission_mode,
+                subagent_conversation_id=conversation_id,
+                subagent_iterations=iterations,
+                subagent_tool_calls=tool_calls,
+            ),
+        )
+        self._emit_safe(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.SUBAGENT_END,
+                subagent_name=config.name,
+                subagent_reason=prompt,
+                subagent_tools=tool_scope,
+                subagent_success=success,
+                subagent_permission_mode=config.permission_mode,
+                subagent_conversation_id=conversation_id,
+                subagent_iterations=iterations,
+                subagent_tool_calls=tool_calls,
+            ),
+        )
 
         return SubagentResult(
             success=success,
@@ -240,6 +245,15 @@ class SubagentExecutor:
             file_changes=sorted(set(file_changes)),
             observed_files=sorted(observed_files),
         )
+
+    @staticmethod
+    def _emit_safe(on_event: EventCallback | None, event: ToolCallEvent) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:  # noqa: BLE001
+            logger.warning("子代理事件回调异常，已忽略。", exc_info=True)
 
     def _build_system_prompt(self, *, config: SubagentConfig, parent_context: str) -> str:
         """构建子代理系统提示。"""
@@ -275,14 +289,16 @@ class SubagentExecutor:
                 error=f"ToolNotAllowed: {tool_name}",
             )
 
-        high_risk = self._approval.is_high_risk_tool(tool_name)
         mode = config.permission_mode
+        read_only_safe = self._approval.is_read_only_safe_tool(tool_name)
+        confirm_required = self._approval.is_confirm_required_tool(tool_name)
+        audit_only = self._approval.is_audit_only_tool(tool_name)
+        if mode == "readOnly":
+            if not read_only_safe:
+                msg = f"只读模式仅允许白名单工具：{tool_name}"
+                return _ExecResult(success=False, result=msg, error=msg)
 
-        if high_risk and mode == "readOnly":
-            msg = f"只读模式禁止高风险工具：{tool_name}"
-            return _ExecResult(success=False, result=msg, error=msg)
-
-        if high_risk and mode == "default" and not full_access_enabled:
+        if confirm_required and mode == "default" and not full_access_enabled:
             try:
                 pending = self._approval.create_pending(
                     tool_name=tool_name,
@@ -304,12 +320,39 @@ class SubagentExecutor:
                 pending_approval_id=pending.approval_id,
             )
 
-        if high_risk and (
-            mode in {"acceptEdits", "dontAsk"}
-            or (mode == "default" and full_access_enabled)
-        ):
+        should_execute_with_audit = audit_only or (
+            confirm_required
+            and (
+                mode in {"acceptEdits", "dontAsk"}
+                or (mode == "default" and full_access_enabled)
+            )
+        )
+        if should_execute_with_audit:
             approval_id = self._approval.new_approval_id()
             created_at_utc = self._approval.utc_now()
+
+            # MCP 工具不做本地文件快照审计（由远端系统自行审计）。
+            if self._approval.is_mcp_tool(tool_name):
+                try:
+                    raw_result = await asyncio.to_thread(
+                        registry.call_tool,
+                        tool_name,
+                        arguments,
+                        tool_scope=tool_scope,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = f"工具执行错误: {exc}"
+                    return _ExecResult(success=False, result=error, error=str(exc))
+                raw_text = str(raw_result)
+                return _ExecResult(
+                    success=True,
+                    result=self._truncate_tool_result(
+                        registry=registry,
+                        tool_name=tool_name,
+                        text=raw_text,
+                    ),
+                    raw_result=raw_text,
+                )
 
             def _execute(name: str, args: dict[str, Any], scope: list[str]) -> Any:
                 return registry.call_tool(name, args, tool_scope=scope)
@@ -332,39 +375,13 @@ class SubagentExecutor:
             changes = [change.path for change in record.changes]
             return _ExecResult(
                 success=True,
-                result=self._truncate_tool_result(registry=registry, tool_name=tool_name, text=result_text),
-                file_changes=changes,
-            )
-
-        # MCP 工具审批：非白名单的 MCP 工具需要用户确认
-        mcp_needs_approval = (
-            self._approval.is_mcp_tool(tool_name)
-            and not self._approval.is_mcp_auto_approved(tool_name)
-        )
-        if mcp_needs_approval and mode == "readOnly":
-            msg = f"只读模式禁止 MCP 工具：{tool_name}"
-            return _ExecResult(success=False, result=msg, error=msg)
-
-        if mcp_needs_approval and mode == "default" and not full_access_enabled:
-            try:
-                pending = self._approval.create_pending(
+                result=self._truncate_tool_result(
+                    registry=registry,
                     tool_name=tool_name,
-                    arguments=arguments,
-                    tool_scope=tool_scope,
-                )
-            except ValueError:
-                block = self._approval.pending_block_message()
-                return _ExecResult(success=False, result=block, error=block)
-            pending_text = (
-                "子代理命中 MCP 工具审批，已创建待确认项：\n"
-                f"- ID: `{pending.approval_id}`\n"
-                f"- 工具: `{tool_name}`\n"
-                "请先执行 `/accept <id>` 或 `/reject <id>`。"
-            )
-            return _ExecResult(
-                success=False,
-                result=pending_text,
-                pending_approval_id=pending.approval_id,
+                    text=result_text,
+                ),
+                file_changes=changes,
+                raw_result=result_text,
             )
 
         try:
@@ -374,12 +391,13 @@ class SubagentExecutor:
                 arguments,
                 tool_scope=tool_scope,
             )
+            raw_text = str(raw_result)
             text = self._truncate_tool_result(
                 registry=registry,
                 tool_name=tool_name,
-                text=str(raw_result),
+                text=raw_text,
             )
-            return _ExecResult(success=True, result=text)
+            return _ExecResult(success=True, result=text, raw_result=raw_text)
         except Exception as exc:  # noqa: BLE001
             error = f"工具执行错误: {exc}"
             return _ExecResult(success=False, result=error, error=str(exc))

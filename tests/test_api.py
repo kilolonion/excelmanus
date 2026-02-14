@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -51,6 +52,11 @@ def _setup_api_globals(config=None):
     """上下文管理器：注入 API 全局状态，退出时清理。"""
     if config is None:
         config = _test_config()
+    initialize_mcp_patcher = patch(
+        "excelmanus.engine.AgentEngine.initialize_mcp",
+        new=AsyncMock(return_value=None),
+    )
+    initialize_mcp_patcher.start()
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
     loader = SkillpackLoader(config, registry)
@@ -79,6 +85,7 @@ def _setup_api_globals(config=None):
     try:
         yield {"config": config, "registry": registry, "manager": manager}
     finally:
+        initialize_mcp_patcher.stop()
         api_module._config = old_config
         api_module._tool_registry = old_registry
         api_module._skillpack_loader = old_loader
@@ -672,6 +679,46 @@ class TestExternalSafeMode:
         assert '"multi_select": true' in safe_sse
         assert '"queue_size": 2' in safe_sse
 
+    def test_sse_task_item_updated_maps_to_task_update(self) -> None:
+        """TASK_ITEM_UPDATED 事件应稳定映射为 task_update。"""
+        event = ToolCallEvent(
+            event_type=EventType.TASK_ITEM_UPDATED,
+            task_index=1,
+            task_status="completed",
+            task_list_data={
+                "title": "执行计划",
+                "items": [
+                    {"title": "步骤1", "status": "completed"},
+                    {"title": "步骤2", "status": "completed"},
+                ],
+            },
+        )
+        sse = api_module._sse_event_to_sse(event, safe_mode=True)
+        assert sse is not None
+        assert "event: task_update" in sse
+        assert '"task_index": 1' in sse
+        assert '"task_status": "completed"' in sse
+
+    def test_sse_task_update_contract_stable_in_safe_mode_on_off(self) -> None:
+        """TASK_LIST_CREATED 在 safe_mode 开关下都应映射为 task_update。"""
+        event = ToolCallEvent(
+            event_type=EventType.TASK_LIST_CREATED,
+            task_list_data={
+                "title": "计划",
+                "items": [{"title": "步骤1", "status": "pending"}],
+            },
+        )
+
+        for safe_mode in (True, False):
+            sse = api_module._sse_event_to_sse(event, safe_mode=safe_mode)
+            assert sse is not None
+            lines = [line for line in sse.splitlines() if line]
+            assert lines[0] == "event: task_update"
+            payload = json.loads(lines[1].removeprefix("data: "))
+            assert payload["task_list"]["title"] == "计划"
+            assert payload["task_index"] is None
+            assert payload["task_status"] == ""
+
 
 # ── 单元测试：Health 端点 ────────────────────────────────
 
@@ -848,6 +895,8 @@ class TestSkillpackCrudEndpoints:
                 assert detail["command-tool"] == "read_excel"
                 assert detail["required-mcp-servers"] == ["context7"]
                 assert detail["required-mcp-tools"] == ["context7:query_docs"]
+                assert "context" not in detail
+                assert "agent" not in detail
 
     @pytest.mark.asyncio
     async def test_patch_non_project_skillpack_returns_409(
@@ -927,6 +976,54 @@ class TestSkillpackCrudEndpoints:
                     },
                 )
         assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_returns_422_when_payload_contains_removed_context_or_agent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                context_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "bad_context_skill",
+                        "payload": {
+                            "description": "bad",
+                            "context": "fork",
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert context_resp.status_code == 422
+
+                agent_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "bad_agent_skill",
+                        "payload": {
+                            "description": "bad",
+                            "agent": "explorer",
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert agent_resp.status_code == 422
 
     @pytest.mark.asyncio
     async def test_create_returns_409_when_skillpack_conflicts(
@@ -1047,6 +1144,53 @@ class TestSkillpackCrudEndpoints:
                     json={"payload": {}},
                 )
         assert patch_resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_patch_returns_422_when_payload_contains_removed_context_or_agent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _test_config(
+            external_safe_mode=False,
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=str(project_dir),
+        )
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                create_resp = await c.post(
+                    "/api/v1/skills",
+                    json={
+                        "name": "api_skill",
+                        "payload": {
+                            "description": "api 创建",
+                            "allowed_tools": ["read_excel"],
+                            "instructions": "说明",
+                        },
+                    },
+                )
+                assert create_resp.status_code == 201
+
+                patch_context = await c.patch(
+                    "/api/v1/skills/api_skill",
+                    json={"payload": {"context": "normal"}},
+                )
+                assert patch_context.status_code == 422
+
+                patch_agent = await c.patch(
+                    "/api/v1/skills/api_skill",
+                    json={"payload": {"agent": "explorer"}},
+                )
+                assert patch_agent.status_code == 422
 
     @pytest.mark.asyncio
     async def test_delete_returns_404_when_skillpack_not_found(

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -54,6 +57,7 @@ class ExcelManusConfig:
     skills_discovery_include_openclaw: bool = True
     skills_discovery_extra_dirs: tuple[str, ...] = ()
     system_message_mode: str = "auto"
+    tool_result_hard_cap_chars: int = 12000
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
     cors_allow_origins: tuple[str, ...] = ("http://localhost:5173",)
@@ -139,6 +143,25 @@ def _parse_choice(
     if normalized not in choices:
         raise ConfigError(
             f"配置项 {name} 必须是 {sorted(choices)} 之一，当前值: {value!r}"
+        )
+    return normalized
+
+
+def _parse_system_message_mode(value: str | None) -> str:
+    """解析 system_message_mode，兼容旧值 multi。"""
+    if value is None:
+        return "auto"
+    normalized = value.strip().lower()
+    if normalized == "multi":
+        logger.warning(
+            "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE=multi 已废弃，将按 replace 处理。"
+        )
+        return "replace"
+    if normalized not in {"auto", "merge", "replace"}:
+        raise ConfigError(
+            "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE 必须是 "
+            "['auto', 'merge', 'replace'] 之一，当前值: "
+            f"{value!r}"
         )
     return normalized
 
@@ -320,11 +343,13 @@ def load_config() -> ExcelManusConfig:
     skills_discovery_extra_dirs = _parse_csv_tuple(
         os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS")
     )
-    system_message_mode = _parse_choice(
-        os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE"),
-        "EXCELMANUS_SYSTEM_MESSAGE_MODE",
-        "auto",
-        {"auto", "multi", "merge"},
+    system_message_mode = _parse_system_message_mode(
+        os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE")
+    )
+    tool_result_hard_cap_chars = _parse_int_allow_zero(
+        os.environ.get("EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS"),
+        "EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS",
+        12000,
     )
     large_excel_threshold_bytes = _parse_int(
         os.environ.get("EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES"),
@@ -436,6 +461,7 @@ def load_config() -> ExcelManusConfig:
         skills_discovery_include_openclaw=skills_discovery_include_openclaw,
         skills_discovery_extra_dirs=skills_discovery_extra_dirs,
         system_message_mode=system_message_mode,
+        tool_result_hard_cap_chars=tool_result_hard_cap_chars,
         large_excel_threshold_bytes=large_excel_threshold_bytes,
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,

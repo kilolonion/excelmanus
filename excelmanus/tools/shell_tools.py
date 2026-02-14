@@ -89,52 +89,48 @@ def _validate_command(command: str) -> tuple[bool, str]:
     if not stripped:
         return False, "命令不能为空"
 
+    if re.search(r"\|\||&&|\|", stripped):
+        return False, "当前不支持管道/逻辑运算，请拆分命令"
+
     # 检测危险元字符
     for pattern in _DANGEROUS_PATTERNS:
         if pattern.search(stripped):
             return False, f"检测到危险字符模式: {pattern.pattern}"
 
-    # 按管道和逻辑运算符拆分段
-    segments = re.split(r"\s*\|\s*|\s*&&\s*|\s*\|\|\s*", stripped)
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError as exc:
+        return False, f"命令解析失败: {exc}"
+    if not tokens:
+        return False, "命令不能为空"
 
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-        try:
-            tokens = shlex.split(segment)
-        except ValueError as exc:
-            return False, f"命令解析失败: {exc}"
-        if not tokens:
-            continue
+    cmd_name = Path(tokens[0]).name  # 提取命令名（去除路径前缀）
 
-        cmd_name = Path(tokens[0]).name  # 提取命令名（去除路径前缀）
+    # 黑名单检查
+    if cmd_name in BLOCKED_COMMANDS:
+        return False, f"命令被禁止: {cmd_name}"
 
-        # 黑名单检查
-        if cmd_name in BLOCKED_COMMANDS:
-            return False, f"命令被禁止: {cmd_name}"
+    # 白名单检查
+    if cmd_name not in ALLOWED_COMMANDS:
+        return False, f"命令不在白名单中: {cmd_name}"
 
-        # 白名单检查
-        if cmd_name not in ALLOWED_COMMANDS:
-            return False, f"命令不在白名单中: {cmd_name}"
+    # python/pip 子命令限制
+    if cmd_name in ("python", "python3") and len(tokens) > 1:
+        sub = tokens[1]
+        # 仅允许 --version / -V / -c（内联代码用 run_code）
+        if sub not in ("--version", "-V", "-c"):
+            return False, (
+                f"run_shell 仅允许 {cmd_name} --version / -V，"
+                "执行 Python 代码请使用 run_code 工具"
+            )
 
-        # python/pip 子命令限制
-        if cmd_name in ("python", "python3") and len(tokens) > 1:
-            sub = tokens[1]
-            # 仅允许 --version / -V / -c（内联代码用 run_code）
-            if sub not in ("--version", "-V", "-c"):
-                return False, (
-                    f"run_shell 仅允许 {cmd_name} --version / -V，"
-                    "执行 Python 代码请使用 run_code 工具"
-                )
-
-        if cmd_name in ("pip", "pip3") and len(tokens) > 1:
-            sub = tokens[1]
-            # 仅允许 list / show / freeze / --version
-            if sub not in ("list", "show", "freeze", "--version", "-V"):
-                return False, (
-                    f"run_shell 仅允许 {cmd_name} list/show/freeze/--version"
-                )
+    if cmd_name in ("pip", "pip3") and len(tokens) > 1:
+        sub = tokens[1]
+        # 仅允许 list / show / freeze / --version
+        if sub not in ("list", "show", "freeze", "--version", "-V"):
+            return False, (
+                f"run_shell 仅允许 {cmd_name} list/show/freeze/--version"
+            )
 
     return True, "ok"
 

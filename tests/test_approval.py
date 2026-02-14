@@ -130,3 +130,63 @@ def test_reject_pending_clears_queue(tmp_path: Path) -> None:
     msg = manager.reject_pending(pending.approval_id)
     assert "已拒绝" in msg
     assert manager.has_pending() is False
+
+
+def test_unknown_tool_not_high_risk_by_default(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    assert manager.is_high_risk_tool("custom_tool") is False
+
+
+def test_audit_only_tool_not_high_risk_but_mutating(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    assert manager.is_audit_only_tool("create_chart") is True
+    assert manager.is_high_risk_tool("create_chart") is False
+    assert manager.is_mutating_tool("create_chart") is True
+
+
+def test_read_only_safe_tool_not_high_risk(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    assert manager.is_high_risk_tool("read_excel") is False
+
+
+def test_non_whitelisted_mcp_high_risk_until_auto_approve(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    tool_name = "mcp_context7_query_docs"
+    assert manager.is_high_risk_tool(tool_name) is True
+    manager.register_mcp_auto_approve([tool_name])
+    assert manager.is_high_risk_tool(tool_name) is False
+
+
+def test_resolve_target_paths_covers_new_mutating_tools(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    cases = [
+        ("create_excel_chart", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("write_cells", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("insert_rows", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("insert_columns", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("apply_threshold_icon_format", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("style_card_blocks", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("scale_range_unit", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("apply_dashboard_dark_theme", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("add_color_scale", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("add_data_bar", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("add_conditional_rule", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("set_print_layout", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("set_page_header_footer", {"file_path": "book.xlsx"}, ["book.xlsx"]),
+        ("create_chart", {"output_path": "charts/out.png"}, ["charts/out.png"]),
+        (
+            "copy_range_between_sheets",
+            {"source_file": "src.xlsx", "target_file": "dst.xlsx"},
+            ["dst.xlsx"],
+        ),
+        (
+            "transform_data",
+            {"file_path": "src.xlsx", "output_path": "out.xlsx"},
+            ["out.xlsx"],
+        ),
+    ]
+
+    for tool_name, arguments, expected in cases:
+        resolved = manager._resolve_target_paths(tool_name, arguments)
+        relative = [str(path.relative_to(tmp_path)) for path in resolved]
+        assert relative == expected

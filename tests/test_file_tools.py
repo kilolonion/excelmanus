@@ -160,6 +160,11 @@ class TestReadTextFile:
         assert result["lines_read"] == 1
         assert result["truncated"] is True
 
+    def test_read_exact_max_lines_not_truncated(self, workspace: Path) -> None:
+        result = json.loads(file_tools.read_text_file("hello.txt", max_lines=3))
+        assert result["lines_read"] == 3
+        assert result["truncated"] is False
+
     def test_read_binary_file_error(self, workspace: Path) -> None:
         result = json.loads(file_tools.read_text_file("report.xlsx"))
         # 二进制文件可能不报错（取决于内容），但不会崩溃

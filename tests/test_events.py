@@ -124,6 +124,24 @@ class TestEventTypeEnum:
         assert EventType.ROUTE_END.value == "route_end"
         assert EventType.CHAT_SUMMARY.value == "chat_summary"
 
+    def test_enum_snapshot_stable(self) -> None:
+        """EventType 对外协议快照，避免无意破坏命名或顺序。"""
+        assert [(member.name, member.value) for member in EventType] == [
+            ("TOOL_CALL_START", "tool_call_start"),
+            ("TOOL_CALL_END", "tool_call_end"),
+            ("THINKING", "thinking"),
+            ("ITERATION_START", "iteration_start"),
+            ("ROUTE_START", "route_start"),
+            ("ROUTE_END", "route_end"),
+            ("SUBAGENT_START", "subagent_start"),
+            ("SUBAGENT_END", "subagent_end"),
+            ("SUBAGENT_SUMMARY", "subagent_summary"),
+            ("CHAT_SUMMARY", "chat_summary"),
+            ("TASK_LIST_CREATED", "task_list_created"),
+            ("TASK_ITEM_UPDATED", "task_item_updated"),
+            ("USER_QUESTION", "user_question"),
+        ]
+
 
 class TestToolCallEventFields:
     """ToolCallEvent 字段完整性与默认值验证。

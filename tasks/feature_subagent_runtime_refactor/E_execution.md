@@ -1,5 +1,7 @@
 # E 执行日志
 
+> **历史文档声明（Skillpack 协议）**：本文为历史执行记录，可能包含已过时术语（如 `hint_direct`、`confident_direct`、`llm_confirm`、`fork_plan`、`Skillpack.context`）。现行规则请以 [`../../docs/skillpack_protocol.md`](../../docs/skillpack_protocol.md) 为准。
+
 ### 任务 #1: 初始化任务目录 ✅
 **状态**：已完成
 **时间**：2026-02-13
@@ -69,3 +71,35 @@
 - `tests/test_renderer.py`
 - `tests/test_skillpacks.py`
 - `tests/test_pbt_llm_routing.py`
+
+### 任务 #5: 安全收敛与 fork 硬移除收尾 ✅
+**状态**：已完成
+**时间**：2026-02-14
+**执行者**：Codex
+
+#### 实现结果
+- ✅ `ApprovalManager` 改为只读白名单策略：非白名单本地工具（含未知工具）默认高风险；非白名单 MCP 默认高风险。
+- ✅ `SubagentExecutor` 的 `readOnly` 模式收敛为“仅允许白名单工具”；新增 `_emit_safe()`，回调异常不再中断执行。
+- ✅ 子代理长结果路径提取改为基于 `raw_result`，修复截断导致的 `observed_files` 丢失。
+- ✅ `memory_scope` 继续保留为预留字段，运行时静默 no-op（不新增日志噪音）。
+- ✅ 主引擎彻底移除 fork 运行路径与旧审计分支，仅保留显式 `delegate_to_subagent`。
+- ✅ Skillpack/API 协议移除 `context`、`agent` 出入参；`context: fork` 与 `agent` 给出迁移报错。
+- ✅ 指定回归集合通过：`233 passed`。
+
+#### 回归命令
+- `uv run --with pytest --with hypothesis --with pytest-asyncio pytest tests/test_subagent_registry.py tests/test_subagent_executor.py tests/test_engine.py tests/test_api.py tests/test_skillpacks.py tests/test_renderer.py tests/test_pbt_llm_routing.py -q`
+
+#### 相关文件
+- `excelmanus/approval.py`
+- `excelmanus/engine.py`
+- `excelmanus/subagent/executor.py`
+- `excelmanus/skillpacks/models.py`
+- `excelmanus/skillpacks/loader.py`
+- `excelmanus/skillpacks/manager.py`
+- `excelmanus/api.py`
+- `tests/test_approval.py`
+- `tests/test_subagent_executor.py`
+- `tests/test_engine.py`
+- `tests/test_skillpacks.py`
+- `tests/test_api.py`
+- `README.md`

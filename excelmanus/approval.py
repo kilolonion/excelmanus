@@ -12,6 +12,13 @@ import secrets
 import subprocess
 from typing import Any, Callable, Sequence
 
+from excelmanus.tools.policy import (
+    MUTATING_ALL_TOOLS,
+    MUTATING_AUDIT_ONLY_TOOLS,
+    MUTATING_CONFIRM_TOOLS,
+    READ_ONLY_SAFE_TOOLS,
+)
+
 
 @dataclass
 class FileChangeRecord:
@@ -82,27 +89,16 @@ class _FileSnapshot:
 class ApprovalManager:
     """审批状态与审计管理器。"""
 
-    HIGH_RISK_TOOLS: set[str] = {
-        "write_text_file",
-        "run_code",
-        "run_shell",
-        "copy_file",
-        "rename_file",
-        "delete_file",
-        "write_excel",
-        "transform_data",
-        "format_cells",
-        "adjust_column_width",
-        "adjust_row_height",
-        "merge_cells",
-        "unmerge_cells",
-        "create_sheet",
-        "copy_sheet",
-        "rename_sheet",
-        "delete_sheet",
-        "copy_range_between_sheets",
-        "create_chart",
-    }
+    # 显式只读白名单
+    READ_ONLY_SAFE_TOOLS: set[str] = set(READ_ONLY_SAFE_TOOLS)
+    # Tier A：需 /accept 确认后执行
+    CONFIRM_TOOLS: set[str] = set(MUTATING_CONFIRM_TOOLS)
+    # Tier B：不拦截确认，但必须进入审计
+    AUDIT_ONLY_TOOLS: set[str] = set(MUTATING_AUDIT_ONLY_TOOLS)
+    # 兼容历史字段：保留高风险集合别名（等价于 Tier A）。
+    HIGH_RISK_TOOLS: set[str] = set(MUTATING_CONFIRM_TOOLS)
+    # 所有会修改工作区文件的工具（Tier A + Tier B）
+    MUTATING_TOOLS: set[str] = set(MUTATING_ALL_TOOLS)
 
     def __init__(self, workspace_root: str, audit_root: str = "outputs/approvals") -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
@@ -117,6 +113,10 @@ class ApprovalManager:
         """注册 MCP 工具白名单（自动批准，无需用户确认）。"""
         self._mcp_auto_approved.update(prefixed_names)
 
+    def register_read_only_safe_tools(self, tool_names: Sequence[str]) -> None:
+        """注册额外只读安全工具（用于扩展白名单）。"""
+        self.READ_ONLY_SAFE_TOOLS.update(str(name).strip() for name in tool_names if str(name).strip())
+
     @property
     def pending(self) -> PendingApproval | None:
         return self._pending
@@ -124,8 +124,28 @@ class ApprovalManager:
     def has_pending(self) -> bool:
         return self._pending is not None
 
+    def is_read_only_safe_tool(self, tool_name: str) -> bool:
+        return tool_name in self.READ_ONLY_SAFE_TOOLS
+
+    def is_audit_only_tool(self, tool_name: str) -> bool:
+        return tool_name in self.AUDIT_ONLY_TOOLS
+
+    def is_mutating_tool(self, tool_name: str) -> bool:
+        return tool_name in self.MUTATING_TOOLS
+
+    def is_confirm_required_tool(self, tool_name: str) -> bool:
+        if self.is_read_only_safe_tool(tool_name):
+            return False
+        if self.is_mcp_tool(tool_name):
+            return not self.is_mcp_auto_approved(tool_name)
+        if self.is_audit_only_tool(tool_name):
+            return False
+        if tool_name in self.CONFIRM_TOOLS:
+            return True
+        return False
+
     def is_high_risk_tool(self, tool_name: str) -> bool:
-        return tool_name in self.HIGH_RISK_TOOLS
+        return self.is_confirm_required_tool(tool_name)
 
     def is_mcp_tool(self, tool_name: str) -> bool:
         """判断工具名是否为 MCP 远程工具（以 mcp_ 前缀开头）。"""
@@ -344,6 +364,19 @@ class ApprovalManager:
             "copy_sheet",
             "rename_sheet",
             "delete_sheet",
+            "create_excel_chart",
+            "write_cells",
+            "insert_rows",
+            "insert_columns",
+            "apply_threshold_icon_format",
+            "style_card_blocks",
+            "scale_range_unit",
+            "apply_dashboard_dark_theme",
+            "add_color_scale",
+            "add_data_bar",
+            "add_conditional_rule",
+            "set_print_layout",
+            "set_page_header_footer",
         }:
             path_args = [str(arguments.get("file_path", ""))]
         elif tool_name == "copy_range_between_sheets":
