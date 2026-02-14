@@ -440,6 +440,11 @@ class AgentEngine:
         """
         await self._mcp_manager.initialize(self._registry)
 
+        # 将 MCP 白名单注册到审批管理器
+        auto_approved = self._mcp_manager.auto_approved_tools
+        if auto_approved:
+            self._approval.register_mcp_auto_approve(auto_approved)
+
         if self._skill_router is None or not self._mcp_manager.connected_servers:
             return
 
@@ -2290,6 +2295,37 @@ class AgentEngine:
                             approval_id=self._approval.new_approval_id(),
                             created_at_utc=self._approval.utc_now(),
                             undoable=tool_name not in {"run_code", "run_shell"},
+                        )
+                        result_str = str(result_value)
+                        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                        if tool_def is not None:
+                            result_str = tool_def.truncate_result(result_str)
+                        success = True
+                        error = None
+                        log_tool_call(logger, tool_name, arguments, result=result_str)
+                elif (
+                    self._approval.is_mcp_tool(tool_name)
+                    and not self._approval.is_mcp_auto_approved(tool_name)
+                ):
+                    # MCP 工具默认需要审批，fullAccess 开启时自动批准
+                    if not self._full_access_enabled:
+                        pending = self._approval.create_pending(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            tool_scope=tool_scope,
+                        )
+                        pending_approval = True
+                        approval_id = pending.approval_id
+                        result_str = self._format_pending_prompt(pending)
+                        success = True
+                        error = None
+                        log_tool_call(logger, tool_name, arguments, result=result_str)
+                    else:
+                        result_value = await asyncio.to_thread(
+                            self._registry.call_tool,
+                            tool_name,
+                            arguments,
+                            tool_scope=tool_scope,
                         )
                         result_str = str(result_value)
                         tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)

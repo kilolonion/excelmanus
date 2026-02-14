@@ -416,6 +416,8 @@ class MCPManager:
         self._workspace_root = workspace_root
         self._clients: dict[str, MCPClientWrapper] = {}
         self._managed_workspace_pids: set[int] = set()
+        # 初始化后填充：白名单中的 MCP 工具（prefixed_name 列表）
+        self._auto_approved_tools: list[str] = []
 
     async def initialize(self, registry: "ToolRegistry") -> None:
         """加载配置 → 预安装包 → 连接所有 Server → 注册远程工具到 ToolRegistry。
@@ -473,6 +475,7 @@ class MCPManager:
         # ── 第二阶段：连接 Server 并注册工具 ──────────────
         # 收集所有待注册的 ToolDef
         all_tool_defs: list[ToolDef] = []
+        auto_approved_names: list[str] = []
         known_workspace_pids = snapshot_workspace_mcp_pids(self._workspace_root)
 
         for cfg in configs:
@@ -547,9 +550,17 @@ class MCPManager:
                 all_tool_defs.append(tool_def)
                 pending_names.add(tool_def.name)
 
+                # 收集白名单：autoApprove 含 "*" 或匹配原始工具名
+                original_name: str = getattr(tool, "name", "")
+                if "*" in cfg.auto_approve or original_name in cfg.auto_approve:
+                    auto_approved_names.append(tool_def.name)
+
         # 批量注册
         if all_tool_defs:
             registry.register_tools(all_tool_defs)
+
+        # 保存白名单信息
+        self._auto_approved_tools = auto_approved_names
 
         logger.info(
             "MCP 初始化完成：%d 个 Server 已连接，%d 个远程工具已注册",
@@ -604,6 +615,11 @@ class MCPManager:
     def connected_servers(self) -> list[str]:
         """返回已连接的 Server 名称列表。"""
         return list(self._clients.keys())
+
+    @property
+    def auto_approved_tools(self) -> list[str]:
+        """返回白名单中的 MCP 工具名列表（prefixed_name）。"""
+        return list(self._auto_approved_tools)
 
     def get_server_info(self) -> list[dict[str, Any]]:
         """返回所有已连接 Server 的摘要信息。
