@@ -15,6 +15,12 @@ import openai
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
+from excelmanus.hooks import (
+    HookCallContext,
+    HookDecision,
+    HookEvent,
+    SkillHookRunner,
+)
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
 from excelmanus.plan_mode import (
@@ -54,6 +60,12 @@ _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
+_SKILL_AGENT_ALIASES = {
+    "explore": "explorer",
+    "plan": "planner",
+    "general-purpose": "analyst",
+    "generalpurpose": "analyst",
+}
 
 
 def _to_plain(value: Any) -> Any:
@@ -373,6 +385,9 @@ class AgentEngine:
             parent_registry=registry,
             approval_manager=self._approval,
         )
+        self._hook_runner = SkillHookRunner(config)
+        self._transient_hook_contexts: list[str] = []
+        self._hook_started_skills: set[str] = set()
         self._question_flow = QuestionFlowManager(max_queue_size=8)
         self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
@@ -430,13 +445,9 @@ class AgentEngine:
 
         由 CLI 或 API 入口在启动时显式调用。
 
-        流程：
-        1. MCPManager 完成配置加载、连接建立和工具注册
-        2. 检查本地 Skillpack 缓存：
-           - 缓存命中且工具指纹匹配 → 加载缓存 + 异步后台刷新
-           - 缓存未命中或指纹变化 → 同步调 LLM 生成
-           - LLM 失败 → 回退到程序化生成
-        3. 将生成的 MCP Skillpack 注入 loader
+        注意：
+        破坏性重构后，不再将 MCP Server 自动注入为 Skillpack。
+        MCP 仅负责工具注册；Skill 仅负责策略与授权。
         """
         await self._mcp_manager.initialize(self._registry)
 
@@ -445,40 +456,35 @@ class AgentEngine:
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
 
-        if self._skill_router is None or not self._mcp_manager.connected_servers:
-            return
-
-        loader = self._skill_router._loader
-        # 确保文件系统 skillpack 已加载
-        if not loader.get_skillpacks():
-            loader.load_all()
-
-        # 使用 LLM 增强的 Skillpack 生成器
-        from excelmanus.mcp.skillpack_generator import MCPSkillpackGenerator
-
-        generator = MCPSkillpackGenerator(
-            mcp_manager=self._mcp_manager,
-            llm_client=self._client,
-            model=self._config.model,
-        )
-        self._mcp_skillpack_generator = generator
-
-        try:
-            mcp_skillpacks = await generator.generate()
-        except Exception:
-            logger.warning("MCP Skillpack 生成异常，回退到程序化生成", exc_info=True)
-            mcp_skillpacks = self._mcp_manager.generate_skillpacks()
-
-        if mcp_skillpacks:
-            injected = loader.inject_skillpacks(mcp_skillpacks)
-            if injected:
-                logger.info("已注入 %d 个 MCP Skillpack", injected)
-
-        # 后台异步刷新：提升已缓存 Skillpack 的内容质量
-        generator.schedule_background_refresh()
-
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
+        if self._active_skill is not None:
+            self._run_skill_hook(
+                skill=self._active_skill,
+                event=HookEvent.STOP,
+                payload={"reason": "shutdown_mcp"},
+            )
+            self._run_skill_hook(
+                skill=self._active_skill,
+                event=HookEvent.SESSION_END,
+                payload={"reason": "shutdown_mcp"},
+            )
+        else:
+            for skill_name in list(self._hook_started_skills):
+                skill = self._get_loaded_skill(skill_name)
+                if skill is None:
+                    continue
+                self._run_skill_hook(
+                    skill=skill,
+                    event=HookEvent.STOP,
+                    payload={"reason": "shutdown_mcp"},
+                )
+                self._run_skill_hook(
+                    skill=skill,
+                    event=HookEvent.SESSION_END,
+                    payload={"reason": "shutdown_mcp"},
+                )
+        self._hook_started_skills.clear()
         await self._mcp_manager.shutdown()
     def mcp_server_info(self) -> list[dict[str, Any]]:
         """返回 MCP Server 连接状态摘要，供 CLI 展示。"""
@@ -546,6 +552,7 @@ class AgentEngine:
             commands = [
                 (str(item["name"]), str(item.get("argument_hint", "") or ""))
                 for item in rows
+                if bool(item.get("user_invocable", True))
             ]
             return sorted(commands, key=lambda item: item[0].lower())
         if self._skill_router is None:
@@ -556,6 +563,7 @@ class AgentEngine:
         commands = [
             (skill.name, skill.argument_hint)
             for skill in skillpacks.values()
+            if skill.user_invocable
         ]
         return sorted(commands, key=lambda item: item[0].lower())
 
@@ -752,6 +760,143 @@ class AgentEngine:
             ),
         )
 
+        if effective_slash_command and route_result.route_mode == "slash_not_user_invocable":
+            reply = f"技能 `{effective_slash_command}` 不允许手动调用。"
+            self._memory.add_user_message(user_message)
+            self._memory.add_assistant_message(reply)
+            self._last_iteration_count = 1
+            self._last_tool_call_count = 0
+            self._last_success_count = 0
+            self._last_failure_count = 1
+            elapsed = time.monotonic() - chat_start
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.CHAT_SUMMARY,
+                    total_iterations=self._last_iteration_count,
+                    total_tool_calls=self._last_tool_call_count,
+                    success_count=self._last_success_count,
+                    failure_count=self._last_failure_count,
+                    elapsed_seconds=round(elapsed, 2),
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                ),
+            )
+            return ChatResult(
+                reply=reply,
+                tool_calls=[],
+                iterations=1,
+                truncated=False,
+            )
+
+        selected_skill = self._pick_route_skill(route_result)
+        if selected_skill is not None:
+            user_prompt_hook = self._run_skill_hook(
+                skill=selected_skill,
+                event=HookEvent.USER_PROMPT_SUBMIT,
+                payload={
+                    "user_message": user_message,
+                    "slash_command": effective_slash_command or "",
+                    "raw_args": effective_raw_args,
+                    "route_mode": route_result.route_mode,
+                    "skills_used": list(route_result.skills_used),
+                },
+            )
+            if (
+                user_prompt_hook is not None
+                and isinstance(user_prompt_hook.updated_input, dict)
+            ):
+                updated_message = user_prompt_hook.updated_input.get("user_message")
+                if isinstance(updated_message, str) and updated_message.strip():
+                    user_message = updated_message.strip()
+            if user_prompt_hook is not None and user_prompt_hook.decision == HookDecision.DENY:
+                reason = user_prompt_hook.reason or "Hook 拒绝了当前请求。"
+                reply = f"请求已被 Hook 拦截：{reason}"
+                self._memory.add_user_message(user_message)
+                self._memory.add_assistant_message(reply)
+                self._last_iteration_count = 1
+                self._last_tool_call_count = 0
+                self._last_success_count = 0
+                self._last_failure_count = 1
+                elapsed = time.monotonic() - chat_start
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.CHAT_SUMMARY,
+                        total_iterations=self._last_iteration_count,
+                        total_tool_calls=self._last_tool_call_count,
+                        success_count=self._last_success_count,
+                        failure_count=self._last_failure_count,
+                        elapsed_seconds=round(elapsed, 2),
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        total_tokens=0,
+                    ),
+                )
+                return ChatResult(
+                    reply=reply,
+                    tool_calls=[],
+                    iterations=1,
+                    truncated=False,
+                )
+
+        if (
+            effective_slash_command
+            and route_result.route_mode == "slash_direct"
+            and selected_skill is not None
+            and selected_skill.command_dispatch == "tool"
+            and selected_skill.command_tool
+        ):
+            self._memory.add_user_message(user_message)
+            chat_result = await self._run_command_dispatch_skill(
+                skill=selected_skill,
+                raw_args=effective_raw_args,
+                route_result=route_result,
+                on_event=on_event,
+            )
+            elapsed = time.monotonic() - chat_start
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.CHAT_SUMMARY,
+                    total_iterations=self._last_iteration_count,
+                    total_tool_calls=self._last_tool_call_count,
+                    success_count=self._last_success_count,
+                    failure_count=self._last_failure_count,
+                    elapsed_seconds=round(elapsed, 2),
+                    prompt_tokens=chat_result.prompt_tokens,
+                    completion_tokens=chat_result.completion_tokens,
+                    total_tokens=chat_result.total_tokens,
+                ),
+            )
+            return chat_result
+
+        if selected_skill is not None and selected_skill.context == "fork":
+            self._memory.add_user_message(user_message)
+            chat_result = await self._run_fork_skill(
+                skill=selected_skill,
+                user_message=user_message,
+                raw_args=effective_raw_args if effective_slash_command else "",
+                on_event=on_event,
+            )
+            elapsed = time.monotonic() - chat_start
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.CHAT_SUMMARY,
+                    total_iterations=self._last_iteration_count,
+                    total_tool_calls=self._last_tool_call_count,
+                    success_count=self._last_success_count,
+                    failure_count=self._last_failure_count,
+                    elapsed_seconds=round(elapsed, 2),
+                    prompt_tokens=chat_result.prompt_tokens,
+                    completion_tokens=chat_result.completion_tokens,
+                    total_tokens=chat_result.total_tokens,
+                ),
+            )
+            return chat_result
+
         # 追加用户消息
         self._memory.add_user_message(user_message)
         logger.info(
@@ -796,30 +941,66 @@ class AgentEngine:
             skillpacks = self._skill_router._loader.load_all()
         return list(skillpacks.keys())
 
+    def _list_manual_invocable_skill_names(self) -> list[str]:
+        """获取可手动调用的技能名（user_invocable=true）。"""
+        if self._skillpack_manager is not None:
+            rows = self._skillpack_manager.list_skillpacks()
+            return [
+                str(item["name"])
+                for item in rows
+                if bool(item.get("user_invocable", True))
+            ]
+        if self._skill_router is None:
+            return []
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        names: list[str] = []
+        for name, skill in skillpacks.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if bool(getattr(skill, "user_invocable", True)):
+                names.append(name)
+        return names
+
     def resolve_skill_command(self, user_message: str) -> str | None:
         """将 `/skill_name ...` 解析为 Skill 名称（用于手动调用）。"""
         text = user_message.strip()
         if not text.startswith("/"):
             return None
 
-        first = text.split(maxsplit=1)[0]
-        if len(first) <= 1:
+        command_line = text[1:]
+        if not command_line:
             return None
 
-        command = first[1:]
-        # 排除路径形式，避免将 `/Users/...` 误识别为命令
-        if "/" in command or "\\" in command:
-            return None
-
-        skill_names = self._list_loaded_skill_names()
+        # 手动命令解析仅允许 user_invocable=True 的技能。
+        skill_names = self._list_manual_invocable_skill_names()
         if not skill_names:
             return None
 
-        lower_map = {name.lower(): name for name in skill_names}
-        direct = lower_map.get(command.lower())
-        if direct is not None:
-            return direct
+        lower_to_name = {name.lower(): name for name in skill_names}
+        command_line_lower = command_line.lower()
 
+        # 1) 精确匹配（含命名空间）
+        exact = lower_to_name.get(command_line_lower)
+        if exact is not None:
+            return exact
+
+        # 2) 前缀匹配（/skill_name 后跟参数）
+        for candidate in sorted(skill_names, key=len, reverse=True):
+            lower_candidate = candidate.lower()
+            if command_line_lower == lower_candidate:
+                return candidate
+            if command_line_lower.startswith(lower_candidate + " "):
+                return candidate
+
+        # 先尝试已注册技能匹配，之后再按路径输入兜底排除，避免误伤命名空间技能。
+        command_token = command_line.split(maxsplit=1)[0]
+        if "/" in command_token and "." in command_token:
+            return None
+
+        # 3) 无分隔符归一兜底匹配（兼容旧命令）
+        command = command_token
         normalized_cmd = self._normalize_skill_command_name(command)
         normalized_matches = [
             name
@@ -835,6 +1016,83 @@ class AgentEngine:
         if self._full_access_enabled:
             return None
         return set(self._restricted_code_skillpacks)
+
+    def _get_loaded_skill(self, name: str) -> Skillpack | None:
+        if self._skill_router is None:
+            return None
+        loader = self._skill_router._loader
+        skill = loader.get_skillpack(name)
+        if skill is not None:
+            return skill
+        skillpacks = loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = loader.load_all()
+        return skillpacks.get(name)
+
+    def _pick_route_skill(self, route_result: SkillMatchResult | None) -> Skillpack | None:
+        if self._active_skill is not None:
+            return self._active_skill
+        if route_result is None or not route_result.skills_used:
+            return None
+        return self._get_loaded_skill(route_result.skills_used[0])
+
+    @staticmethod
+    def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
+        if not agent_name:
+            return None
+        normalized = agent_name.strip()
+        if not normalized:
+            return None
+        lowered = normalized.lower()
+        return _SKILL_AGENT_ALIASES.get(lowered, normalized)
+
+    def _push_hook_context(self, text: str) -> None:
+        normalized = text.strip()
+        if not normalized:
+            return
+        self._transient_hook_contexts.append(normalized)
+
+    def _run_skill_hook(
+        self,
+        *,
+        skill: Skillpack | None,
+        event: HookEvent,
+        payload: dict[str, Any],
+        tool_name: str = "",
+    ):
+        if skill is None:
+            return None
+
+        def _invoke(target_event: HookEvent, target_payload: dict[str, Any]):
+            context = HookCallContext(
+                event=target_event,
+                skill_name=skill.name,
+                payload=target_payload,
+                tool_name=tool_name,
+                full_access_enabled=self._full_access_enabled,
+            )
+            hook_result = self._hook_runner.run(skill=skill, context=context)
+            if hook_result.additional_context:
+                self._push_hook_context(hook_result.additional_context)
+            return hook_result
+
+        if event == HookEvent.SESSION_START:
+            self._hook_started_skills.add(skill.name)
+            return _invoke(event, payload)
+
+        if skill.name not in self._hook_started_skills:
+            start_result = _invoke(
+                HookEvent.SESSION_START,
+                {"trigger_event": event.value, **payload},
+            )
+            self._hook_started_skills.add(skill.name)
+            if start_result is not None and start_result.decision == HookDecision.DENY:
+                return start_result
+
+        result = _invoke(event, payload)
+        if event in {HookEvent.STOP, HookEvent.SESSION_END}:
+            self._hook_started_skills.discard(skill.name)
+        return result
 
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """构建 LLM-Native 元工具定义。"""
@@ -866,7 +1124,15 @@ class AgentEngine:
                 if not skillpacks and callable(load_all):
                     skillpacks = load_all()
                 if isinstance(skillpacks, dict):
-                    skill_names = sorted(skillpacks.keys())
+                    skill_names = sorted(
+                        [
+                            name
+                            for name, skill in skillpacks.items()
+                            if not bool(
+                                getattr(skill, "disable_model_invocation", False)
+                            )
+                        ]
+                    )
                     if skill_names:
                         lines = ["可用技能：\n"]
                         for name in skill_names:
@@ -1064,12 +1330,99 @@ class AgentEngine:
         )
         if selected is None:
             return f"未找到技能: {skill_name}"
+        mcp_requirements_error = self._validate_skill_mcp_requirements(selected)
+        if mcp_requirements_error:
+            return mcp_requirements_error
 
         self._active_skill = selected
         self._loaded_skill_names.add(selected.name)
 
         context_text = selected.render_context()
+        if selected.context == "fork":
+            agent_name = self._normalize_skill_agent_name(selected.agent) or "explorer"
+            return (
+                "OK\n"
+                f"{context_text}\n"
+                f"[该技能为 fork 模式，请优先调用 delegate_to_subagent（agent={agent_name}）。]"
+            )
         return f"OK\n{context_text}"
+
+    @staticmethod
+    def _normalize_mcp_identifier(name: str) -> str:
+        return name.strip().replace("-", "_").lower()
+
+    def _available_mcp_server_set(self) -> set[str]:
+        return {
+            self._normalize_mcp_identifier(name)
+            for name in self._mcp_manager.connected_servers
+            if isinstance(name, str) and name.strip()
+        }
+
+    def _available_mcp_tool_pairs(self) -> set[tuple[str, str]]:
+        pairs: set[tuple[str, str]] = set()
+        for tool_name in self._all_tool_names():
+            if not tool_name.startswith("mcp_"):
+                continue
+            try:
+                server_name, original_tool = parse_tool_prefix(tool_name)
+            except ValueError:
+                continue
+            pairs.add(
+                (
+                    self._normalize_mcp_identifier(server_name),
+                    original_tool.strip().lower(),
+                )
+            )
+        return pairs
+
+    def _validate_skill_mcp_requirements(self, skill: Skillpack) -> str | None:
+        required_servers = [
+            item.strip()
+            for item in skill.required_mcp_servers
+            if isinstance(item, str) and item.strip()
+        ]
+        required_tools = [
+            item.strip()
+            for item in skill.required_mcp_tools
+            if isinstance(item, str) and item.strip()
+        ]
+        if not required_servers and not required_tools:
+            return None
+
+        connected_servers = self._available_mcp_server_set()
+        available_tool_pairs = self._available_mcp_tool_pairs()
+
+        missing_servers: list[str] = []
+        for server in required_servers:
+            normalized = self._normalize_mcp_identifier(server)
+            if normalized not in connected_servers:
+                missing_servers.append(server)
+
+        missing_tools: list[str] = []
+        for token in required_tools:
+            server_name, sep, tool_name = token.partition(":")
+            if not sep:
+                missing_tools.append(token)
+                continue
+            normalized_server = self._normalize_mcp_identifier(server_name)
+            target_tool = tool_name.strip().lower()
+            if target_tool == "*":
+                matched = any(srv == normalized_server for srv, _ in available_tool_pairs)
+            else:
+                matched = (normalized_server, target_tool) in available_tool_pairs
+            if not matched:
+                missing_tools.append(token)
+
+        if not missing_servers and not missing_tools:
+            return None
+
+        lines = [f"⚠️ 技能 '{skill.name}' 的 MCP 依赖未满足。"]
+        if missing_servers:
+            lines.append(f"- 缺少 MCP Server：{', '.join(missing_servers)}")
+        if missing_tools:
+            lines.append(f"- 缺少 MCP 工具：{', '.join(missing_tools)}")
+        lines.append("请先配置并连接对应 MCP（mcp.json）后重试该技能。")
+        return "\n".join(lines)
 
     def _get_current_tool_scope(
         self,
@@ -1080,7 +1433,7 @@ class AgentEngine:
             scope = self._expand_tool_scope_patterns(self._active_skill.allowed_tools)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return self._ensure_always_available(scope)
+            return self._append_global_mcp_tools(self._ensure_always_available(scope))
 
         # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
         if (
@@ -1091,7 +1444,7 @@ class AgentEngine:
             scope = self._expand_tool_scope_patterns(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return self._ensure_always_available(scope)
+            return self._append_global_mcp_tools(self._ensure_always_available(scope))
 
         # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
         # 仅使用路由授权工具，并追加必要元工具。
@@ -1100,19 +1453,26 @@ class AgentEngine:
             for tool_name in _META_TOOL_NAMES:
                 if tool_name not in scope:
                     scope.append(tool_name)
-            return self._ensure_always_available(scope)
+            return self._append_global_mcp_tools(self._ensure_always_available(scope))
 
         scope = self._all_tool_names()
         for tool_name in _META_TOOL_NAMES:
             if tool_name not in scope:
                 scope.append(tool_name)
-        return self._ensure_always_available(scope)
+        return self._append_global_mcp_tools(self._ensure_always_available(scope))
 
     @staticmethod
     def _ensure_always_available(scope: list[str]) -> list[str]:
         """确保任务管理工具始终在 scope 中可用。"""
         for tool_name in _ALWAYS_AVAILABLE_TOOLS:
             if tool_name not in scope:
+                scope.append(tool_name)
+        return scope
+
+    def _append_global_mcp_tools(self, scope: list[str]) -> list[str]:
+        """将全局 MCP 工具追加到当前 scope（去重）。"""
+        for tool_name in self._all_tool_names():
+            if tool_name.startswith("mcp_") and tool_name not in scope:
                 scope.append(tool_name)
         return scope
 
@@ -1195,6 +1555,17 @@ class AgentEngine:
             if path:
                 normalized.append(path)
         return normalized
+
+    def _latest_user_message(self) -> str:
+        """获取最近一条用户消息，用于 fork 技能即时委派。"""
+        messages = self._memory.get_messages()
+        for msg in reversed(messages):
+            if str(msg.get("role", "")).strip() != "user":
+                continue
+            content = str(msg.get("content", "")).strip()
+            if content:
+                return content
+        return "请根据当前请求执行任务。"
 
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""
@@ -1312,6 +1683,27 @@ class AgentEngine:
                 task=task_text,
                 file_paths=normalized_paths,
             )
+        picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
+
+        hook_skill = self._active_skill
+        pre_subagent_hook = self._run_skill_hook(
+            skill=hook_skill,
+            event=HookEvent.SUBAGENT_START,
+            payload={
+                "task": task_text,
+                "agent_name": picked_agent,
+                "file_paths": normalized_paths,
+            },
+        )
+        if pre_subagent_hook is not None and pre_subagent_hook.decision == HookDecision.DENY:
+            reason = pre_subagent_hook.reason or "Hook 拒绝了子代理执行。"
+            return DelegateSubagentOutcome(
+                reply=f"子代理执行已被 Hook 拦截：{reason}",
+                success=False,
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+            )
 
         prompt = task_text
         if normalized_paths:
@@ -1321,6 +1713,16 @@ class AgentEngine:
             agent_name=picked_agent,
             prompt=prompt,
             on_event=on_event,
+        )
+        self._run_skill_hook(
+            skill=hook_skill,
+            event=HookEvent.SUBAGENT_STOP,
+            payload={
+                "task": task_text,
+                "agent_name": picked_agent,
+                "success": result.success,
+                "summary": result.summary,
+            },
         )
         if result.success:
             self._update_recent_excel_context(
@@ -1992,6 +2394,39 @@ class AgentEngine:
                     if self._pending_question_route_result is None:
                         self._pending_question_route_result = route_result
 
+                if (
+                    tc_result.success
+                    and tc_result.tool_name == "select_skill"
+                    and self._active_skill is not None
+                    and self._active_skill.context == "fork"
+                ):
+                    self._last_tool_call_count += 1
+                    self._last_success_count += 1
+                    agent_name = (
+                        self._normalize_skill_agent_name(self._active_skill.agent)
+                        or "explorer"
+                    )
+                    delegate_outcome = await self._delegate_to_subagent(
+                        task=self._latest_user_message(),
+                        agent_name=agent_name,
+                        file_paths=None,
+                        on_event=on_event,
+                    )
+                    reply = delegate_outcome.reply
+                    self._memory.add_assistant_message(reply)
+                    self._last_iteration_count = iteration
+                    logger.info("fork 技能已激活，直接委派子代理: %s", agent_name)
+                    logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    return ChatResult(
+                        reply=reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
+
                 # 更新统计
                 self._last_tool_call_count += 1
                 if tc_result.success:
@@ -2129,197 +2564,250 @@ class AgentEngine:
                 error=error,
             )
         else:
-            try:
-                if tool_scope is not None and tool_name not in set(tool_scope):
-                    raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+            hook_skill = self._pick_route_skill(route_result)
+            pre_hook = self._run_skill_hook(
+                skill=hook_skill,
+                event=HookEvent.PRE_TOOL_USE,
+                payload={
+                    "tool_name": tool_name,
+                    "arguments": dict(arguments),
+                    "iteration": iteration,
+                },
+                tool_name=tool_name,
+            )
+            if pre_hook is not None and isinstance(pre_hook.updated_input, dict):
+                arguments = dict(pre_hook.updated_input)
 
-                skip_plan_once_for_task_create = False
-                if tool_name == "task_create" and self._suspend_task_create_plan_once:
-                    skip_plan_once_for_task_create = True
-                    self._suspend_task_create_plan_once = False
-
-                if tool_name == "select_skill":
-                    selected_name = arguments.get("skill_name")
-                    if not isinstance(selected_name, str) or not selected_name.strip():
-                        result_str = "工具参数错误: skill_name 必须为非空字符串。"
-                        success = False
-                        error = result_str
-                    else:
-                        reason_value = arguments.get("reason", "")
-                        reason_text = (
-                            reason_value
-                            if isinstance(reason_value, str)
-                            else str(reason_value)
-                        )
-                        result_str = await self._handle_select_skill(
-                            selected_name.strip(),
-                            reason=reason_text,
-                        )
-                        success = not result_str.startswith("未找到技能:")
-                        error = None if success else result_str
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        arguments,
-                        result=result_str if success else None,
-                        error=error if not success else None,
+            if pre_hook is not None and pre_hook.decision == HookDecision.DENY:
+                reason = pre_hook.reason or "Hook 拒绝执行该工具。"
+                result_str = f"工具调用被 Hook 拒绝：{reason}"
+                success = False
+                error = result_str
+                log_tool_call(logger, tool_name, arguments, error=error)
+            elif pre_hook is not None and pre_hook.decision == HookDecision.ASK:
+                try:
+                    pending = self._approval.create_pending(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        tool_scope=tool_scope,
                     )
-                elif tool_name == "delegate_to_subagent":
-                    task_value = arguments.get("task")
-                    if not isinstance(task_value, str) or not task_value.strip():
-                        result_str = "工具参数错误: task 必须为非空字符串。"
-                        success = False
-                        error = result_str
-                    else:
-                        agent_name_value = arguments.get("agent_name")
-                        if agent_name_value is not None and not isinstance(agent_name_value, str):
-                            result_str = "工具参数错误: agent_name 必须为字符串。"
+                    pending_approval = True
+                    approval_id = pending.approval_id
+                    result_str = self._format_pending_prompt(pending)
+                    success = True
+                    error = None
+                    log_tool_call(logger, tool_name, arguments, result=result_str)
+                except ValueError:
+                    result_str = self._approval.pending_block_message()
+                    success = False
+                    error = result_str
+                    log_tool_call(logger, tool_name, arguments, error=error)
+            else:
+                try:
+                    if tool_scope is not None and tool_name not in set(tool_scope):
+                        raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+
+                    skip_plan_once_for_task_create = False
+                    if tool_name == "task_create" and self._suspend_task_create_plan_once:
+                        skip_plan_once_for_task_create = True
+                        self._suspend_task_create_plan_once = False
+
+                    if tool_name == "select_skill":
+                        selected_name = arguments.get("skill_name")
+                        if not isinstance(selected_name, str) or not selected_name.strip():
+                            result_str = "工具参数错误: skill_name 必须为非空字符串。"
                             success = False
                             error = result_str
                         else:
-                            raw_file_paths = arguments.get("file_paths")
-                            if raw_file_paths is not None and not isinstance(raw_file_paths, list):
-                                result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                            reason_value = arguments.get("reason", "")
+                            reason_text = (
+                                reason_value
+                                if isinstance(reason_value, str)
+                                else str(reason_value)
+                            )
+                            result_str = await self._handle_select_skill(
+                                selected_name.strip(),
+                                reason=reason_text,
+                            )
+                            success = not result_str.startswith("未找到技能:")
+                            error = None if success else result_str
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str if success else None,
+                            error=error if not success else None,
+                        )
+                    elif tool_name == "delegate_to_subagent":
+                        task_value = arguments.get("task")
+                        if not isinstance(task_value, str) or not task_value.strip():
+                            result_str = "工具参数错误: task 必须为非空字符串。"
+                            success = False
+                            error = result_str
+                        else:
+                            agent_name_value = arguments.get("agent_name")
+                            if agent_name_value is not None and not isinstance(agent_name_value, str):
+                                result_str = "工具参数错误: agent_name 必须为字符串。"
                                 success = False
                                 error = result_str
                             else:
-                                delegate_outcome = await self._delegate_to_subagent(
-                                    task=task_value.strip(),
-                                    agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
-                                    file_paths=raw_file_paths,
-                                    on_event=on_event,
-                                )
-                                result_str = delegate_outcome.reply
-                                success = delegate_outcome.success
-                                error = None if success else result_str
-
-                                sub_result = delegate_outcome.subagent_result
-                                if (
-                                    not success
-                                    and sub_result is not None
-                                    and sub_result.pending_approval_id is not None
-                                ):
-                                    pending = self._approval.pending
-                                    approval_id_value = sub_result.pending_approval_id
-                                    high_risk_tool = (
-                                        pending.tool_name
-                                        if pending is not None and pending.approval_id == approval_id_value
-                                        else "高风险工具"
-                                    )
-                                    question = self._enqueue_subagent_approval_question(
-                                        approval_id=approval_id_value,
-                                        tool_name=high_risk_tool,
-                                        picked_agent=delegate_outcome.picked_agent or "subagent",
-                                        task_text=delegate_outcome.task_text,
-                                        normalized_paths=delegate_outcome.normalized_paths,
-                                        tool_call_id=tool_call_id,
+                                raw_file_paths = arguments.get("file_paths")
+                                if raw_file_paths is not None and not isinstance(raw_file_paths, list):
+                                    result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                                    success = False
+                                    error = result_str
+                                else:
+                                    delegate_outcome = await self._delegate_to_subagent(
+                                        task=task_value.strip(),
+                                        agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
+                                        file_paths=raw_file_paths,
                                         on_event=on_event,
-                                        iteration=iteration,
                                     )
-                                    result_str = f"已创建待回答问题 `{question.question_id}`。"
-                                    question_id = question.question_id
-                                    pending_question = True
-                                    defer_tool_result = True
-                                    success = True
-                                    error = None
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        arguments,
-                        result=result_str if success else None,
-                        error=error if not success else None,
-                    )
-                elif tool_name == "list_subagents":
-                    result_str = self._handle_list_subagents()
-                    success = True
-                    error = None
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        arguments,
-                        result=result_str,
-                    )
-                elif tool_name == "ask_user":
-                    result_str, question_id = self._handle_ask_user(
-                        arguments=arguments,
-                        tool_call_id=tool_call_id,
-                        on_event=on_event,
-                        iteration=iteration,
-                    )
-                    success = True
-                    error = None
-                    pending_question = True
-                    defer_tool_result = True
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        arguments,
-                        result=result_str,
-                    )
-                elif tool_name == "task_create" and not skip_plan_once_for_task_create:
-                    result_str, plan_id, plan_error = await self._intercept_task_create_with_plan(
-                        arguments=arguments,
-                        route_result=route_result,
-                        tool_call_id=tool_call_id,
-                        on_event=on_event,
-                    )
-                    success = plan_error is None
-                    error = plan_error
-                    pending_plan = success
-                    defer_tool_result = success
-                    log_tool_call(
-                        logger,
-                        tool_name,
-                        arguments,
-                        result=result_str if success else None,
-                        error=error if not success else None,
-                    )
-                elif self._approval.is_high_risk_tool(tool_name):
-                    if not self._full_access_enabled:
-                        pending = self._approval.create_pending(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            tool_scope=tool_scope,
+                                    result_str = delegate_outcome.reply
+                                    success = delegate_outcome.success
+                                    error = None if success else result_str
+
+                                    sub_result = delegate_outcome.subagent_result
+                                    if (
+                                        not success
+                                        and sub_result is not None
+                                        and sub_result.pending_approval_id is not None
+                                    ):
+                                        pending = self._approval.pending
+                                        approval_id_value = sub_result.pending_approval_id
+                                        high_risk_tool = (
+                                            pending.tool_name
+                                            if pending is not None and pending.approval_id == approval_id_value
+                                            else "高风险工具"
+                                        )
+                                        question = self._enqueue_subagent_approval_question(
+                                            approval_id=approval_id_value,
+                                            tool_name=high_risk_tool,
+                                            picked_agent=delegate_outcome.picked_agent or "subagent",
+                                            task_text=delegate_outcome.task_text,
+                                            normalized_paths=delegate_outcome.normalized_paths,
+                                            tool_call_id=tool_call_id,
+                                            on_event=on_event,
+                                            iteration=iteration,
+                                        )
+                                        result_str = f"已创建待回答问题 `{question.question_id}`。"
+                                        question_id = question.question_id
+                                        pending_question = True
+                                        defer_tool_result = True
+                                        success = True
+                                        error = None
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str if success else None,
+                            error=error if not success else None,
                         )
-                        pending_approval = True
-                        approval_id = pending.approval_id
-                        result_str = self._format_pending_prompt(pending)
+                    elif tool_name == "list_subagents":
+                        result_str = self._handle_list_subagents()
                         success = True
                         error = None
-                        log_tool_call(logger, tool_name, arguments, result=result_str)
-                    else:
-                        result_value, audit_record = await self._execute_tool_with_audit(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            tool_scope=tool_scope,
-                            approval_id=self._approval.new_approval_id(),
-                            created_at_utc=self._approval.utc_now(),
-                            undoable=tool_name not in {"run_code", "run_shell"},
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str,
                         )
-                        result_str = str(result_value)
-                        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
-                        if tool_def is not None:
-                            result_str = tool_def.truncate_result(result_str)
+                    elif tool_name == "ask_user":
+                        result_str, question_id = self._handle_ask_user(
+                            arguments=arguments,
+                            tool_call_id=tool_call_id,
+                            on_event=on_event,
+                            iteration=iteration,
+                        )
                         success = True
                         error = None
-                        log_tool_call(logger, tool_name, arguments, result=result_str)
-                elif (
-                    self._approval.is_mcp_tool(tool_name)
-                    and not self._approval.is_mcp_auto_approved(tool_name)
-                ):
-                    # MCP 工具默认需要审批，fullAccess 开启时自动批准
-                    if not self._full_access_enabled:
-                        pending = self._approval.create_pending(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            tool_scope=tool_scope,
+                        pending_question = True
+                        defer_tool_result = True
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str,
                         )
-                        pending_approval = True
-                        approval_id = pending.approval_id
-                        result_str = self._format_pending_prompt(pending)
-                        success = True
-                        error = None
-                        log_tool_call(logger, tool_name, arguments, result=result_str)
+                    elif tool_name == "task_create" and not skip_plan_once_for_task_create:
+                        result_str, plan_id, plan_error = await self._intercept_task_create_with_plan(
+                            arguments=arguments,
+                            route_result=route_result,
+                            tool_call_id=tool_call_id,
+                            on_event=on_event,
+                        )
+                        success = plan_error is None
+                        error = plan_error
+                        pending_plan = success
+                        defer_tool_result = success
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str if success else None,
+                            error=error if not success else None,
+                        )
+                    elif self._approval.is_high_risk_tool(tool_name):
+                        if not self._full_access_enabled:
+                            pending = self._approval.create_pending(
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                tool_scope=tool_scope,
+                            )
+                            pending_approval = True
+                            approval_id = pending.approval_id
+                            result_str = self._format_pending_prompt(pending)
+                            success = True
+                            error = None
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
+                        else:
+                            result_value, audit_record = await self._execute_tool_with_audit(
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                tool_scope=tool_scope,
+                                approval_id=self._approval.new_approval_id(),
+                                created_at_utc=self._approval.utc_now(),
+                                undoable=tool_name not in {"run_code", "run_shell"},
+                            )
+                            result_str = str(result_value)
+                            tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                            if tool_def is not None:
+                                result_str = tool_def.truncate_result(result_str)
+                            success = True
+                            error = None
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
+                    elif (
+                        self._approval.is_mcp_tool(tool_name)
+                        and not self._approval.is_mcp_auto_approved(tool_name)
+                    ):
+                        # MCP 工具默认需要审批，fullAccess 开启时自动批准
+                        if not self._full_access_enabled:
+                            pending = self._approval.create_pending(
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                tool_scope=tool_scope,
+                            )
+                            pending_approval = True
+                            approval_id = pending.approval_id
+                            result_str = self._format_pending_prompt(pending)
+                            success = True
+                            error = None
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
+                        else:
+                            result_value = await asyncio.to_thread(
+                                self._registry.call_tool,
+                                tool_name,
+                                arguments,
+                                tool_scope=tool_scope,
+                            )
+                            result_str = str(result_value)
+                            tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                            if tool_def is not None:
+                                result_str = tool_def.truncate_result(result_str)
+                            success = True
+                            error = None
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
                     else:
                         result_value = await asyncio.to_thread(
                             self._registry.call_tool,
@@ -2328,49 +2816,58 @@ class AgentEngine:
                             tool_scope=tool_scope,
                         )
                         result_str = str(result_value)
+                        # 工具结果截断：超过 max_result_chars 时自动截断
                         tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
                         if tool_def is not None:
                             result_str = tool_def.truncate_result(result_str)
                         success = True
                         error = None
                         log_tool_call(logger, tool_name, arguments, result=result_str)
-                else:
-                    result_value = await asyncio.to_thread(
-                        self._registry.call_tool,
-                        tool_name,
-                        arguments,
-                        tool_scope=tool_scope,
-                    )
-                    result_str = str(result_value)
-                    # 工具结果截断：超过 max_result_chars 时自动截断
-                    tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
-                    if tool_def is not None:
-                        result_str = tool_def.truncate_result(result_str)
-                    success = True
-                    error = None
-                    log_tool_call(logger, tool_name, arguments, result=result_str)
-            except ValueError as exc:
-                result_str = str(exc)
-                success = False
-                error = result_str
-                log_tool_call(logger, tool_name, arguments, error=error)
-            except ToolNotAllowedError:
-                # 格式化为与原有逻辑一致的 JSON 错误结构
-                permission_error = {
-                    "error_code": "TOOL_NOT_ALLOWED",
-                    "tool": tool_name,
-                    "allowed_tools": list(tool_scope),
-                    "message": f"工具 '{tool_name}' 不在当前 Skillpack 授权范围内。",
-                }
-                result_str = json.dumps(permission_error, ensure_ascii=False)
-                success = False
-                error = result_str
-                log_tool_call(logger, tool_name, arguments, error=error)
-            except Exception as exc:
-                result_str = f"工具执行错误: {exc}"
-                success = False
-                error = str(exc)
-                log_tool_call(logger, tool_name, arguments, error=error)
+                except ValueError as exc:
+                    result_str = str(exc)
+                    success = False
+                    error = result_str
+                    log_tool_call(logger, tool_name, arguments, error=error)
+                except ToolNotAllowedError:
+                    # 格式化为与原有逻辑一致的 JSON 错误结构
+                    permission_error = {
+                        "error_code": "TOOL_NOT_ALLOWED",
+                        "tool": tool_name,
+                        "allowed_tools": list(tool_scope),
+                        "message": f"工具 '{tool_name}' 不在当前 Skillpack 授权范围内。",
+                    }
+                    result_str = json.dumps(permission_error, ensure_ascii=False)
+                    success = False
+                    error = result_str
+                    log_tool_call(logger, tool_name, arguments, error=error)
+                except Exception as exc:
+                    result_str = f"工具执行错误: {exc}"
+                    success = False
+                    error = str(exc)
+                    log_tool_call(logger, tool_name, arguments, error=error)
+
+            post_hook_event = HookEvent.POST_TOOL_USE if success else HookEvent.POST_TOOL_USE_FAILURE
+            post_hook = self._run_skill_hook(
+                skill=hook_skill,
+                event=post_hook_event,
+                payload={
+                    "tool_name": tool_name,
+                    "arguments": dict(arguments),
+                    "success": success,
+                    "result": result_str,
+                    "error": error,
+                    "iteration": iteration,
+                },
+                tool_name=tool_name,
+            )
+            if post_hook is not None:
+                if post_hook.additional_context:
+                    result_str = f"{result_str}\n[Hook] {post_hook.additional_context}"
+                if post_hook.decision == HookDecision.DENY:
+                    reason = post_hook.reason or "post hook 拒绝"
+                    success = False
+                    error = reason
+                    result_str = f"{result_str}\n[Hook 拒绝] {reason}"
 
         # 发射 TOOL_CALL_END 事件
         self._emit(
@@ -2489,8 +2986,20 @@ class AgentEngine:
 
     def clear_memory(self) -> None:
         """清除对话历史。"""
+        if self._active_skill is not None:
+            self._run_skill_hook(
+                skill=self._active_skill,
+                event=HookEvent.STOP,
+                payload={"reason": "clear_memory"},
+            )
+            self._run_skill_hook(
+                skill=self._active_skill,
+                event=HookEvent.SESSION_END,
+                payload={"reason": "clear_memory"},
+            )
         self._memory.clear()
         self._loaded_skill_names.clear()
+        self._hook_started_skills.clear()
         self._active_skill = None
         self._question_flow.clear()
         self._system_question_actions.clear()
@@ -2702,6 +3211,164 @@ class AgentEngine:
             slash_command=slash_command,
             raw_args=raw_args,
             blocked_skillpacks=blocked_skillpacks,
+        )
+
+    @staticmethod
+    def _schema_accepts_string(schema: Any) -> bool:
+        if not isinstance(schema, dict):
+            return False
+        type_value = schema.get("type")
+        if type_value == "string":
+            return True
+        if isinstance(type_value, list) and "string" in type_value:
+            return True
+        return False
+
+    def _map_command_dispatch_arguments(
+        self,
+        *,
+        tool_name: str,
+        raw_args: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        normalized_raw = raw_args.strip()
+        if not normalized_raw:
+            return {}, None
+
+        try:
+            parsed = json.loads(normalized_raw)
+        except Exception:  # noqa: BLE001
+            parsed = None
+
+        if isinstance(parsed, dict):
+            return parsed, None
+
+        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+        if tool_def is None:
+            return None, f"未找到命令分发目标工具：{tool_name}"
+
+        schema = getattr(tool_def, "input_schema", {}) or {}
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            return None, "命令分发失败：目标工具参数 schema 非法。"
+
+        if len(properties) == 1:
+            key, val = next(iter(properties.items()))
+            if self._schema_accepts_string(val):
+                return {key: normalized_raw}, None
+
+        for candidate in ("input", "query", "text", "path"):
+            if candidate in properties and self._schema_accepts_string(properties[candidate]):
+                return {candidate: normalized_raw}, None
+
+        return (
+            None,
+            "命令分发失败：无法将参数自动映射到工具入参。请使用 JSON 对象参数。",
+        )
+
+    async def _run_command_dispatch_skill(
+        self,
+        *,
+        skill: Skillpack,
+        raw_args: str,
+        route_result: SkillMatchResult,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        tool_name = skill.command_tool or ""
+        arguments, error_message = self._map_command_dispatch_arguments(
+            tool_name=tool_name,
+            raw_args=raw_args,
+        )
+        if arguments is None:
+            reply = error_message or "命令分发失败。"
+            self._memory.add_assistant_message(reply)
+            self._last_iteration_count = 1
+            self._last_tool_call_count = 0
+            self._last_success_count = 0
+            self._last_failure_count = 1
+            return ChatResult(
+                reply=reply,
+                tool_calls=[],
+                iterations=1,
+                truncated=False,
+            )
+
+        tool_call_id = f"dispatch_{int(time.time() * 1000)}"
+        tc = SimpleNamespace(
+            id=tool_call_id,
+            function=SimpleNamespace(
+                name=tool_name,
+                arguments=json.dumps(arguments, ensure_ascii=False),
+            ),
+        )
+        tool_scope = self._get_current_tool_scope(route_result=route_result)
+        tc_result = await self._execute_tool_call(
+            tc,
+            tool_scope,
+            on_event,
+            iteration=1,
+            route_result=route_result,
+        )
+
+        if not tc_result.defer_tool_result:
+            self._memory.add_tool_result(tool_call_id, tc_result.result)
+
+        if tc_result.pending_question and self._pending_question_route_result is None:
+            self._pending_question_route_result = route_result
+
+        if self._question_flow.has_pending():
+            reply = self._question_flow.format_prompt()
+        else:
+            reply = tc_result.result
+
+        self._memory.add_assistant_message(reply)
+        self._last_iteration_count = 1
+        self._last_tool_call_count = 1
+        self._last_success_count = 1 if tc_result.success else 0
+        self._last_failure_count = 0 if tc_result.success else 1
+        return ChatResult(
+            reply=reply,
+            tool_calls=[tc_result],
+            iterations=1,
+            truncated=False,
+        )
+
+    @staticmethod
+    def _extract_excel_paths_from_raw_args(raw_args: str) -> list[str]:
+        values: list[str] = []
+        for token in raw_args.split():
+            normalized = token.strip().strip('"').strip("'")
+            lowered = normalized.lower()
+            if lowered.endswith((".xlsx", ".xlsm", ".xls")):
+                values.append(normalized)
+        return values
+
+    async def _run_fork_skill(
+        self,
+        *,
+        skill: Skillpack,
+        user_message: str,
+        raw_args: str,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        agent_name = self._normalize_skill_agent_name(skill.agent) or "explorer"
+        file_paths = self._extract_excel_paths_from_raw_args(raw_args)
+        outcome = await self._delegate_to_subagent(
+            task=user_message.strip(),
+            agent_name=agent_name,
+            file_paths=file_paths,
+            on_event=on_event,
+        )
+        reply = outcome.reply
+        self._memory.add_assistant_message(reply)
+        self._last_iteration_count = 1
+        self._last_tool_call_count = 0
+        self._last_success_count = 1 if outcome.success else 0
+        self._last_failure_count = 0 if outcome.success else 1
+        return ChatResult(
+            reply=reply,
+            tool_calls=[],
+            iterations=1,
+            truncated=False,
         )
 
     async def _handle_control_command(
@@ -3092,6 +3759,12 @@ class AgentEngine:
         mcp_context = self._build_mcp_context_notice()
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
+
+        if self._transient_hook_contexts:
+            hook_context = "\n".join(self._transient_hook_contexts).strip()
+            self._transient_hook_contexts.clear()
+            if hook_context:
+                base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
 
         if not skill_contexts:
             return [base_prompt]

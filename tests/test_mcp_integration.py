@@ -274,156 +274,26 @@ class TestAgentEngineMCPIntegration:
         assert isinstance(engine._mcp_manager, MCPManager)
         assert engine._mcp_manager._workspace_root == "/tmp/test"
 
-
-# ══════════════════════════════════════════════════════════
-# 测试 4：MCP Skillpack 自动生成
-# ══════════════════════════════════════════════════════════
-
-
-class TestMCPSkillpackGeneration:
-    """验证从已连接 MCP Server 的工具元数据自动生成 Skillpack。"""
-
-    def test_generate_skillpacks_from_connected_servers(self):
-        """每个已连接 MCP Server 应生成一个对应的 Skillpack。"""
-        manager = MCPManager()
-        cfg = _make_mcp_server_config(name="context7")
-        mock_client = _make_mock_client(
-            config=cfg,
-            tools=[
-                _make_mcp_tool("resolve-library-id", "解析库标识符"),
-                _make_mcp_tool("query-docs", "查询文档"),
-            ],
-        )
-        # 模拟已连接状态
-        manager._clients["context7"] = mock_client
-        mock_client._tools = mock_client.discover_tools.return_value
-
-        skillpacks = manager.generate_skillpacks()
-
-        assert len(skillpacks) == 1
-        sp = skillpacks[0]
-        assert sp.name == "mcp_context7"
-        assert sp.allowed_tools == ["mcp:context7:*"]
-        assert sp.source == "system"
-        assert sp.priority == 3
-        assert sp.user_invocable is True
-        assert "resolve-library-id" in sp.instructions
-        assert "query-docs" in sp.instructions
-
-    def test_generate_skillpacks_normalizes_server_name(self):
-        """server name 中的 - 应被替换为 _ 作为 Skillpack 名称。"""
-        manager = MCPManager()
-        cfg = _make_mcp_server_config(name="sequential-thinking")
-        mock_client = _make_mock_client(
-            config=cfg,
-            tools=[_make_mcp_tool("think", "思考工具")],
-        )
-        manager._clients["sequential-thinking"] = mock_client
-        mock_client._tools = mock_client.discover_tools.return_value
-
-        skillpacks = manager.generate_skillpacks()
-
-        assert len(skillpacks) == 1
-        assert skillpacks[0].name == "mcp_sequential_thinking"
-        # allowed_tools 使用原始 server name（含 -）
-        assert skillpacks[0].allowed_tools == ["mcp:sequential-thinking:*"]
-
-    def test_generate_skillpacks_multiple_servers(self):
-        """多个 MCP Server 应各生成独立的 Skillpack。"""
-        manager = MCPManager()
-        for name, tools in [
-            ("context7", [_make_mcp_tool("resolve-library-id")]),
-            ("excel", [_make_mcp_tool("read_sheet"), _make_mcp_tool("write_sheet")]),
-            ("git", [_make_mcp_tool("git_status")]),
-        ]:
-            cfg = _make_mcp_server_config(name=name)
-            client = _make_mock_client(config=cfg, tools=tools)
-            client._tools = client.discover_tools.return_value
-            manager._clients[name] = client
-
-        skillpacks = manager.generate_skillpacks()
-
-        assert len(skillpacks) == 3
-        names = {sp.name for sp in skillpacks}
-        assert names == {"mcp_context7", "mcp_excel", "mcp_git"}
-
-    def test_generate_skillpacks_skips_server_with_no_tools(self):
-        """无工具的 MCP Server 不应生成 Skillpack。"""
-        manager = MCPManager()
-        cfg = _make_mcp_server_config(name="empty-server")
-        mock_client = _make_mock_client(config=cfg, tools=[])
-        mock_client._tools = []
-        manager._clients["empty-server"] = mock_client
-
-        skillpacks = manager.generate_skillpacks()
-
-        assert skillpacks == []
-
-    def test_generate_skillpacks_no_connected_servers(self):
-        """无已连接 Server 时返回空列表。"""
-        manager = MCPManager()
-        assert manager.generate_skillpacks() == []
-
-
-class TestSkillpackInjection:
-    """验证 SkillpackLoader.inject_skillpacks() 注入逻辑。"""
-
-    def _make_loader(self):
-        """创建一个最小化的 SkillpackLoader。"""
-        from excelmanus.skillpacks.loader import SkillpackLoader
+    @pytest.mark.asyncio
+    async def test_initialize_mcp_no_longer_injects_mcp_skillpacks(self):
+        """解耦后 initialize_mcp 不再自动注入 MCP Skillpack。"""
         config = _make_config()
         registry = ToolRegistry()
-        return SkillpackLoader(config=config, tool_registry=registry)
 
-    def _make_skillpack(self, name: str = "mcp_test"):
-        """创建一个测试用 Skillpack。"""
-        from excelmanus.skillpacks.models import Skillpack
-        return Skillpack(
-            name=name,
-            description="测试 MCP Skillpack",
-            allowed_tools=[f"mcp:test:*"],
-            triggers=[],
-            instructions="测试指引",
-            source="system",
-            root_dir="",
-        )
+        with patch("openai.AsyncOpenAI"):
+            engine = AgentEngine(config=config, registry=registry)
 
-    def test_inject_adds_to_skillpacks(self):
-        """注入的 Skillpack 应出现在 get_skillpacks() 中。"""
-        loader = self._make_loader()
-        sp = self._make_skillpack("mcp_context7")
+        mock_manager = AsyncMock(spec=MCPManager)
+        mock_manager.auto_approved_tools = []
+        mock_manager.connected_servers = ["context7"]
+        engine._mcp_manager = mock_manager
 
-        count = loader.inject_skillpacks([sp])
+        mock_loader = MagicMock()
+        engine._skill_router = SimpleNamespace(_loader=mock_loader)
 
-        assert count == 1
-        assert "mcp_context7" in loader.get_skillpacks()
+        await engine.initialize_mcp()
 
-    def test_inject_does_not_overwrite_existing(self):
-        """同名 Skillpack 已存在时应跳过注入。"""
-        loader = self._make_loader()
-        existing = self._make_skillpack("mcp_excel")
-        loader._skillpacks["mcp_excel"] = existing
-
-        new_sp = self._make_skillpack("mcp_excel")
-        count = loader.inject_skillpacks([new_sp])
-
-        assert count == 0
-        # 原有的保留不变
-        assert loader.get_skillpacks()["mcp_excel"] is existing
-
-    def test_inject_multiple(self):
-        """批量注入多个 Skillpack。"""
-        loader = self._make_loader()
-        sps = [
-            self._make_skillpack("mcp_a"),
-            self._make_skillpack("mcp_b"),
-            self._make_skillpack("mcp_c"),
-        ]
-
-        count = loader.inject_skillpacks(sps)
-
-        assert count == 3
-        assert set(loader.get_skillpacks().keys()) == {"mcp_a", "mcp_b", "mcp_c"}
+        assert mock_loader.mock_calls == []
 
 
 class TestExcelMCPPathAdaptation:

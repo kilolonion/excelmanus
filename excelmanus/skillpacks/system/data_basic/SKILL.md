@@ -10,6 +10,9 @@ allowed_tools:
   - group_aggregate
   - list_sheets
   - scan_excel_files
+  - write_cells
+  - insert_rows
+  - insert_columns
 triggers:
   - 读取
   - 分析

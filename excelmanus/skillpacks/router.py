@@ -97,6 +97,15 @@ class SkillRouter:
                     candidate_file_paths=candidate_file_paths,
                     blocked_skillpacks=blocked_skillpacks,
                 )
+            if not direct_skill.user_invocable:
+                return self._build_fallback_result(
+                    selected=[],
+                    route_mode="slash_not_user_invocable",
+                    all_skillpacks=skillpacks,
+                    user_message=user_message,
+                    candidate_file_paths=candidate_file_paths,
+                    blocked_skillpacks=blocked_skillpacks,
+                )
             return self._build_parameterized_result(
                 skill=direct_skill,
                 raw_args=raw_args or "",
@@ -134,10 +143,17 @@ class SkillRouter:
             return ("", [])
 
         blocked = set(blocked_skillpacks or [])
-        skill_names = sorted(skillpacks.keys())
+        visible_pairs = sorted(
+            (
+                (name, skill)
+                for name, skill in skillpacks.items()
+                if not skill.disable_model_invocation
+            ),
+            key=lambda item: item[0].lower(),
+        )
+        skill_names = [name for name, _ in visible_pairs]
         lines = ["可用技能：\n"]
-        for name in skill_names:
-            skill = skillpacks[name]
+        for name, skill in visible_pairs:
             if name in blocked:
                 lines.append(
                     f"- {name}：{skill.description} "

@@ -19,6 +19,12 @@ logger = get_logger("subagent.registry")
 
 _VALID_PERMISSION_MODES: set[str] = {"default", "acceptEdits", "readOnly", "dontAsk"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
+_SUBAGENT_NAME_ALIASES: dict[str, str] = {
+    "explore": "explorer",
+    "plan": "planner",
+    "general-purpose": "analyst",
+    "generalpurpose": "analyst",
+}
 
 
 class SubagentRegistry:
@@ -42,7 +48,17 @@ class SubagentRegistry:
         """按名称获取子代理。"""
         if not self._agents:
             self.load_all()
-        return self._agents.get(name)
+        normalized = (name or "").strip()
+        if not normalized:
+            return None
+        alias = _SUBAGENT_NAME_ALIASES.get(normalized.lower(), normalized)
+        if alias in self._agents:
+            return self._agents[alias]
+        lowered = alias.lower()
+        for candidate, config in self._agents.items():
+            if candidate.lower() == lowered:
+                return config
+        return None
 
     def list_all(self) -> list[SubagentConfig]:
         """返回全部子代理（按名称排序）。"""

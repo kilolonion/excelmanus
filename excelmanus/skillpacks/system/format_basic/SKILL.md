@@ -12,6 +12,11 @@ allowed_tools:
   - style_card_blocks
   - scale_range_unit
   - apply_dashboard_dark_theme
+  - add_color_scale
+  - add_data_bar
+  - add_conditional_rule
+  - set_print_layout
+  - set_page_header_footer
   - read_excel
 triggers:
   - 格式

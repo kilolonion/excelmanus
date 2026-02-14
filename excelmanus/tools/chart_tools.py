@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from openpyxl import load_workbook
+
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools import data_tools
@@ -264,6 +266,150 @@ def _draw_radar(
     return fig, ax
 
 
+EXCEL_CHART_TYPES = ("bar", "line", "pie", "scatter", "area")
+
+
+def create_excel_chart(
+    file_path: str,
+    chart_type: str,
+    data_range: str,
+    categories_range: str | None = None,
+    sheet_name: str | None = None,
+    target_cell: str = "A1",
+    target_sheet: str | None = None,
+    title: str | None = None,
+    x_title: str | None = None,
+    y_title: str | None = None,
+    style: int | None = None,
+    width: float = 15.0,
+    height: float = 10.0,
+    from_rows: bool = False,
+) -> str:
+    """在 Excel 工作表中插入原生图表对象（嵌入式图表，非图片）。
+
+    Args:
+        file_path: Excel 文件路径。
+        chart_type: 图表类型，支持 bar/line/pie/scatter/area。
+        data_range: 数据区域引用（如 "B1:B20"），包含数值数据。
+            多系列时可指定多列范围（如 "B1:D20"）。
+        categories_range: 分类轴标签区域（如 "A2:A20"），可选。
+        sheet_name: 数据源工作表名称，默认活动工作表。
+        target_cell: 图表放置位置的锚点单元格（如 "E1"），默认 "A1"。
+        target_sheet: 图表放置的目标工作表，默认与数据源相同。
+        title: 图表标题。
+        x_title: X 轴标题。
+        y_title: Y 轴标题。
+        style: Excel 图表样式编号（1-48），可选。
+        width: 图表宽度（厘米），默认 15。
+        height: 图表高度（厘米），默认 10。
+        from_rows: 是否按行读取数据（默认按列），True 则每一行是一个系列。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    from openpyxl.chart import (
+        AreaChart,
+        BarChart,
+        LineChart,
+        PieChart,
+        Reference,
+        ScatterChart,
+    )
+
+    if chart_type not in EXCEL_CHART_TYPES:
+        return json.dumps(
+            {"status": "error", "message": f"不支持的图表类型 '{chart_type}'，支持: {list(EXCEL_CHART_TYPES)}"},
+            ensure_ascii=False,
+        )
+
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    # 创建图表对象
+    chart_class_map = {
+        "bar": BarChart,
+        "line": LineChart,
+        "pie": PieChart,
+        "scatter": ScatterChart,
+        "area": AreaChart,
+    }
+    chart = chart_class_map[chart_type]()
+
+    if title:
+        chart.title = title
+    if style is not None:
+        chart.style = style
+    chart.width = width
+    chart.height = height
+
+    # 非饼图/散点图设置轴标题
+    if chart_type not in ("pie",):
+        if x_title:
+            chart.x_axis.title = x_title
+        if y_title:
+            chart.y_axis.title = y_title
+
+    # 解析数据范围
+    from openpyxl.utils.cell import range_boundaries
+    min_col, min_row, max_col, max_row = range_boundaries(data_range)
+
+    data_ref = Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
+
+    # 分类轴
+    cats_ref = None
+    if categories_range:
+        c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
+        cats_ref = Reference(ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
+
+    if chart_type == "scatter":
+        # 散点图需要特殊处理：X 值引用 + Y 值引用
+        from openpyxl.chart import Series as ChartSeries
+        if cats_ref is not None:
+            x_values = cats_ref
+        else:
+            # 默认取第一列作为 X
+            x_values = Reference(ws, min_col=min_col, min_row=min_row + 1, max_row=max_row)
+        # 数据列从第二列开始
+        for col_idx in range(min_col if cats_ref else min_col + 1, max_col + 1):
+            y_values = Reference(ws, min_col=col_idx, min_row=min_row + 1, max_row=max_row)
+            series = ChartSeries(y_values, xvalues=x_values, title_from_data=False)
+            chart.series.append(series)
+    else:
+        chart.add_data(data_ref, titles_from_data=True, from_rows=from_rows)
+        if cats_ref is not None:
+            chart.set_categories(cats_ref)
+
+    # 放置图表到目标工作表
+    target_ws = ws
+    if target_sheet and target_sheet in wb.sheetnames:
+        target_ws = wb[target_sheet]
+    elif target_sheet and target_sheet not in wb.sheetnames:
+        target_ws = wb.create_sheet(title=target_sheet)
+
+    target_ws.add_chart(chart, target_cell)
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info(
+        "create_excel_chart: %s[%s] %s at %s",
+        safe_path.name, target_ws.title, chart_type, target_cell,
+    )
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "chart_type": chart_type,
+            "data_range": data_range,
+            "target_sheet": target_ws.title,
+            "target_cell": target_cell,
+        },
+        ensure_ascii=False,
+    )
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
 
 
@@ -314,5 +460,82 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=create_chart,
+        ),
+        ToolDef(
+            name="create_excel_chart",
+            description=(
+                "在 Excel 工作表中插入原生图表对象（嵌入式，非图片）。"
+                "支持 bar/line/pie/scatter/area。"
+                "通过 data_range 指定数值数据区域，categories_range 指定分类标签"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径",
+                    },
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["bar", "line", "pie", "scatter", "area"],
+                        "description": "图表类型",
+                    },
+                    "data_range": {
+                        "type": "string",
+                        "description": "数值数据区域（如 'B1:B20' 或多列 'B1:D20'），第一行作为系列名",
+                    },
+                    "categories_range": {
+                        "type": "string",
+                        "description": "分类轴标签区域（如 'A2:A20'），可选",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "数据源工作表名称，默认活动工作表",
+                    },
+                    "target_cell": {
+                        "type": "string",
+                        "description": "图表放置位置（如 'E1'），默认 A1",
+                        "default": "A1",
+                    },
+                    "target_sheet": {
+                        "type": "string",
+                        "description": "图表放置的目标工作表名，默认与数据源相同。不存在时自动创建",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "图表标题",
+                    },
+                    "x_title": {
+                        "type": "string",
+                        "description": "X 轴标题",
+                    },
+                    "y_title": {
+                        "type": "string",
+                        "description": "Y 轴标题",
+                    },
+                    "style": {
+                        "type": "integer",
+                        "description": "Excel 图表样式编号（1-48）",
+                    },
+                    "width": {
+                        "type": "number",
+                        "description": "图表宽度（厘米），默认 15",
+                        "default": 15.0,
+                    },
+                    "height": {
+                        "type": "number",
+                        "description": "图表高度（厘米），默认 10",
+                        "default": 10.0,
+                    },
+                    "from_rows": {
+                        "type": "boolean",
+                        "description": "是否按行读取数据系列（默认按列）",
+                        "default": False,
+                    },
+                },
+                "required": ["file_path", "chart_type", "data_range"],
+                "additionalProperties": False,
+            },
+            func=create_excel_chart,
         ),
     ]

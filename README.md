@@ -3,7 +3,7 @@
 基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
 
 - `Tools`：基础能力执行层（工具函数 + schema + 安全边界）
-- `Skillpacks`：策略编排层（`SKILL.md` 元数据 + 路由 + `allowed_tools` 授权）
+- `Skillpacks`：策略编排层（`SKILL.md` 元数据 + 路由 + `allowed-tools` 授权）
 
 支持两种运行模式：
 
@@ -45,12 +45,22 @@ pip install -e ".[dev]"
 | `EXCELMANUS_SKILLS_SYSTEM_DIR` | 内置 Skillpacks 目录 | `excelmanus/skillpacks/system` |
 | `EXCELMANUS_SKILLS_USER_DIR` | 用户级 Skillpacks 目录 | `~/.excelmanus/skillpacks` |
 | `EXCELMANUS_SKILLS_PROJECT_DIR` | 项目级 Skillpacks 目录 | `<workspace_root>/.excelmanus/skillpacks` |
+| `EXCELMANUS_SKILLS_DISCOVERY_ENABLED` | 是否启用通用目录发现 | `true` |
+| `EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS` | 是否扫描 cwd→workspace 祖先链 `.agents/skills` | `true` |
+| `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS` | 是否发现 `.agents/skills` | `true` |
+| `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE` | 是否发现 `.claude/skills` | `true` |
+| `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW` | 是否发现 `skills`/`~/.openclaw/skills` | `true` |
+| `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | 额外扫描目录（逗号分隔） | 空 |
 | `EXCELMANUS_SYSTEM_MESSAGE_MODE` | system 注入策略（`auto\|multi\|merge`） | `auto` |
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 fork 提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 fork 子代理执行 | `true` |
 | `EXCELMANUS_SUBAGENT_MODEL` | fork 子代理模型（为空时回退主模型） | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | fork 子代理最大迭代轮数 | `6` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | fork 子代理连续失败熔断阈值 | `2` |
+| `EXCELMANUS_HOOKS_COMMAND_ENABLED` | 是否允许 `command` hook 执行 | `false` |
+| `EXCELMANUS_HOOKS_COMMAND_ALLOWLIST` | `command` hook 白名单前缀（逗号分隔） | 空 |
+| `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
+| `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
 
 v3 路由简化迁移说明：
 - 以下旧变量在 v3 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
@@ -65,6 +75,11 @@ v3 路由简化迁移说明：
 - 如需强制重装，删除 `./.excelmanus/mcp/` 后重启即可
 
 可通过环境变量 `EXCELMANUS_MCP_STATE_DIR` 自定义缓存目录。
+
+> 破坏性变更（MCP/Skills 解耦）：
+> 启动时不再自动将 MCP Server 生成并注入为临时 Skillpack。  
+> MCP 仅负责注册 `mcp_*` 工具；Skillpack 仅负责策略与授权。  
+> 若 Skillpack 需要 MCP，请在 `SKILL.md` 中显式声明 `allowed-tools`（如 `mcp:context7:*`），可选声明 `required-mcp-servers` / `required-mcp-tools`。
 
 ## 使用方式
 
@@ -84,7 +99,7 @@ python -m excelmanus
 ```bash
 /skills list
 /skills get data_basic
-/skills create api_skill --json '{"description":"api 创建","allowed_tools":["read_excel"],"triggers":[],"instructions":"说明"}'
+/skills create api_skill --json '{"description":"api 创建","allowed-tools":["read_excel"],"triggers":[],"instructions":"说明"}'
 /skills patch api_skill --json '{"description":"api 更新"}'
 /skills delete api_skill --yes
 ```
@@ -112,9 +127,9 @@ excelmanus-api
   - 请求：`message`、`session_id?`
   - 响应：`session_id`、`reply`、`skills_used`、`tool_scope`、`route_mode`
 - `GET /api/v1/skills`
-  - 响应：Skillpack 摘要列表（`name`、`description`、`source`、`writable`、`argument_hint`）
+  - 响应：Skillpack 摘要列表（`name`、`description`、`source`、`writable`、`argument-hint`）
 - `GET /api/v1/skills/{name}`
-  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情
+  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情（标准字段：如 `allowed-tools`、`command-dispatch`、`context`、`hooks` 等）
 - `POST /api/v1/skills`
   - 请求：`name` + `payload`
   - 错误：`403`（safe mode 开启）、`409`（冲突）、`422`（payload 非法）
@@ -131,6 +146,7 @@ excelmanus-api
 说明：
 - 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`POST/PATCH/DELETE /api/v1/skills*` 会返回 `403`。
 - 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`GET /api/v1/skills/{name}` 返回摘要；关闭后返回完整详情（含 `instructions` / `resource_contents` 等字段）。
+- `/api/v1/skills*` 的写入请求同时接受 `snake_case` 与 `kebab-case` 字段；响应统一使用标准别名字段（`kebab-case`）。
 - Skillpack 写操作仅允许 project 层，system/user 层仅可读取。
 
 示例：
@@ -146,19 +162,49 @@ curl -X POST http://localhost:8000/api/v1/chat \
 Skillpack 使用目录结构：
 
 ```text
-<dir>/<skill_name>/SKILL.md
+<dir>/<namespace_or_name>/SKILL.md
 ```
 
 `SKILL.md` frontmatter 必填字段：
 
 - `name`
 - `description`
-- `allowed_tools`
-- `triggers`（必填，但允许空列表 `[]`，用于“仅兜底不触发”的技能）
 
-可选字段：`file_patterns`、`resources`、`priority`、`version`、`disable_model_invocation`、`user_invocable`。
+可选字段（标准键）：
 
-加载优先级：`project > user > system`。
+- `allowed-tools`、`triggers`、`file-patterns`、`resources`
+- `priority`、`version`
+- `disable-model-invocation`、`user-invocable`
+- `argument-hint`
+- `context`（`normal`/`fork`）、`agent`
+- `hooks`、`model`、`metadata`
+- `command-dispatch`（`none`/`tool`）、`command-tool`
+- `required-mcp-servers`、`required-mcp-tools`（技能激活前的 MCP 依赖校验）
+
+命名规范：
+
+- 支持命名空间（例如 `team/data-cleaner`）
+- 分段正则：`[a-z0-9][a-z0-9._-]{0,63}`
+- 全名长度最大 255
+
+目录发现与加载优先级（高→低）：
+
+1. workspace 显式目录：`.excelmanus/skillpacks`、`.agents/skills`、`.claude/skills`、`skills`
+2. 祖先链 `.agents/skills`（从 workspace 根到 cwd，越近越高）
+3. 用户目录：`~/.excelmanus/skillpacks`、`~/.claude/skills`、`~/.openclaw/skills`
+4. 系统目录：`excelmanus/skillpacks/system`
+
+同名技能按优先级覆盖，最终只保留一个生效版本。
+
+兼容说明：
+
+- 历史 `snake_case` frontmatter 仍可作为输入读取（兼容模式）
+- 产品行为按新协议执行，推荐统一使用标准 `kebab-case`
+- 可使用迁移脚本：
+
+```bash
+python scripts/migrate_skills_to_standard.py --workspace-root .
+```
 
 当前内置（system）Skillpacks：
 - `general_excel`：通用兜底

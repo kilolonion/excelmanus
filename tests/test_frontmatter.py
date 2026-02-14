@@ -27,9 +27,27 @@ def test_frontmatter_round_trip() -> None:
     assert parsed == payload
 
 
-def test_frontmatter_rejects_unsupported_multiline_syntax() -> None:
-    with pytest.raises(FrontmatterError):
-        parse_frontmatter("description: |hello")
+def test_frontmatter_supports_multiline_and_nested_yaml() -> None:
+    parsed = parse_frontmatter(
+        "\n".join(
+            [
+                "name: demo",
+                "description: |",
+                "  第一行",
+                "  第二行",
+                "hooks:",
+                "  PreToolUse:",
+                "    - matcher: read_*",
+                "      hooks:",
+                "        - type: prompt",
+                "          decision: allow",
+            ]
+        )
+    )
+    assert parsed["name"] == "demo"
+    assert parsed["description"] == "第一行\n第二行\n"
+    assert isinstance(parsed["hooks"], dict)
+    assert "PreToolUse" in parsed["hooks"]
 
 
 def test_loader_private_frontmatter_helpers_delegate_public_api() -> None:
@@ -46,4 +64,3 @@ def test_loader_private_frontmatter_helpers_delegate_public_api() -> None:
 def test_loader_public_frontmatter_api_keeps_validation_error_type() -> None:
     with pytest.raises(SkillpackValidationError):
         SkillpackLoader.parse_frontmatter("bad line without colon")
-

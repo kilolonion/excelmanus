@@ -137,6 +137,23 @@ def test_build_catalog_contains_agent_names(tmp_path: Path) -> None:
     assert "finance_checker" in names
 
 
+def test_get_supports_ecosystem_aliases(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    registry.load_all()
+
+    assert registry.get("Explore") is not None
+    assert registry.get("Explore").name == "explorer"  # type: ignore[union-attr]
+    assert registry.get("Plan") is not None
+    assert registry.get("Plan").name == "planner"  # type: ignore[union-attr]
+    assert registry.get("General-purpose") is not None
+    assert registry.get("General-purpose").name == "analyst"  # type: ignore[union-attr]
+
+
 def test_external_agent_uses_global_threshold_defaults_when_not_declared(
     tmp_path: Path,
 ) -> None:

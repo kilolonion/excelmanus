@@ -1,27 +1,4 @@
-"""Skillpack 加载器：三层目录扫描、解析、覆盖与软校验。
-
-Frontmatter 解析器支持的 YAML 语法子集
-========================================
-
-支持的语法：
-- 简单键值对：``key: value``
-- 引号字符串：``key: "value"`` 或 ``key: 'value'``（首尾匹配引号会被去除）
-- 布尔值：``true`` / ``false``（不区分大小写）
-- 整数：``123``、``-42``
-- 内联列表：``key: [a, b, c]``
-- 多行列表::
-
-    key:
-      - item1
-      - item2
-
-- 包含冒号的值：``url: https://example.com``（仅按第一个冒号分割）
-- 注释行：以 ``#`` 开头的行会被忽略
-
-不支持的语法（会抛出 SkillpackValidationError）：
-- 多行字符串块：``|``、``>`` 开头的值
-- 嵌套对象 / flow mapping：``{`` 开头的值
-"""
+"""Skillpack 加载器：多目录扫描、协议兼容解析、覆盖与软校验。"""
 
 from __future__ import annotations
 
@@ -37,10 +14,7 @@ from excelmanus.skillpacks.frontmatter import (
     parse_scalar as parse_frontmatter_scalar,
     serialize_frontmatter as serialize_frontmatter_text,
 )
-from excelmanus.skillpacks.models import (
-    Skillpack,
-    SkillpackSource,
-)
+from excelmanus.skillpacks.models import SkillCommandDispatchMode, SkillContextMode, Skillpack
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("skillpacks.loader")
@@ -54,6 +28,33 @@ class SkillpackLoaderError(Exception):
 
 class SkillpackValidationError(SkillpackLoaderError):
     """Skillpack 内容不合法。"""
+
+
+_CANONICAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "name": ("name",),
+    "description": ("description",),
+    "allowed_tools": ("allowed_tools", "allowed-tools"),
+    "triggers": ("triggers",),
+    "file_patterns": ("file_patterns", "file-patterns"),
+    "resources": ("resources",),
+    "priority": ("priority",),
+    "version": ("version",),
+    "disable_model_invocation": (
+        "disable_model_invocation",
+        "disable-model-invocation",
+    ),
+    "user_invocable": ("user_invocable", "user-invocable"),
+    "argument_hint": ("argument_hint", "argument-hint"),
+    "context": ("context",),
+    "agent": ("agent",),
+    "hooks": ("hooks",),
+    "model": ("model",),
+    "metadata": ("metadata",),
+    "command_dispatch": ("command_dispatch", "command-dispatch"),
+    "command_tool": ("command_tool", "command-tool"),
+    "required_mcp_servers": ("required_mcp_servers", "required-mcp-servers"),
+    "required_mcp_tools": ("required_mcp_tools", "required-mcp-tools"),
+}
 
 
 class SkillpackLoader:
@@ -82,75 +83,104 @@ class SkillpackLoader:
         """返回技能包映射（副本）。"""
         return {skill.name: skill for skill in self.list_skillpacks()}
 
-    def inject_skillpacks(self, skillpacks: list[Skillpack]) -> int:
-        """注入外部生成的 Skillpack（如 MCP 自动生成）。
-
-        仅在同名 Skillpack 尚未被文件系统加载时注入，
-        避免覆盖用户或项目层的同名自定义 Skillpack。
-
-        Args:
-            skillpacks: 待注入的 Skillpack 列表。
-
-        Returns:
-            实际注入的数量。
-        """
-        injected = 0
-        for skill in skillpacks:
-            if skill.name in self._skillpacks:
-                logger.info(
-                    "跳过注入 Skillpack '%s'：同名技能包已由文件系统加载",
-                    skill.name,
-                )
-                continue
-            self._skillpacks[skill.name] = skill
-            injected += 1
-            logger.info("注入外部 Skillpack '%s'", skill.name)
-        return injected
-
     def load_all(self) -> dict[str, Skillpack]:
-        """加载 system/user/project 三层 Skillpack。"""
+        """加载所有兼容目录下的 Skillpack，冲突按优先级覆盖。"""
         self._warnings.clear()
         merged: dict[str, Skillpack] = {}
 
-        source_dirs: list[tuple[SkillpackSource, Path]] = [
-            ("system", Path(self._config.skills_system_dir).expanduser()),
-            ("user", Path(self._config.skills_user_dir).expanduser()),
-            ("project", Path(self._config.skills_project_dir).expanduser()),
-        ]
-
-        for source, root_dir in source_dirs:
+        for source, root_dir in self._iter_discovery_roots():
             source_skillpacks = self._scan_source(source=source, root_dir=root_dir)
-            # 覆盖优先级：project > user > system
             merged.update(source_skillpacks)
 
         self._skillpacks = merged
-        logger.info(
-            "已加载 %d 个 Skillpack（system/user/project 合并后）",
-            len(self._skillpacks),
-        )
+        logger.info("已加载 %d 个 Skillpack（全量发现后）", len(self._skillpacks))
         return dict(self._skillpacks)
 
-    def _scan_source(
-        self, source: SkillpackSource, root_dir: Path
-    ) -> dict[str, Skillpack]:
+    def _iter_discovery_roots(self) -> list[tuple[str, Path]]:
+        """返回按覆盖优先级排序的扫描根目录（低优先级在前）。"""
+        roots: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+
+        def _append(source: str, path: Path) -> None:
+            resolved = path.expanduser().resolve()
+            key = f"{source}:{resolved}"
+            if key in seen:
+                return
+            seen.add(key)
+            roots.append((source, resolved))
+
+        # 兼容旧 system 目录（最低优先级）
+        _append("system", Path(self._config.skills_system_dir))
+
+        if not self._config.skills_discovery_enabled:
+            _append("user", Path(self._config.skills_user_dir))
+            _append("project", Path(self._config.skills_project_dir))
+            return roots
+
+        workspace_root = Path(self._config.workspace_root).expanduser()
+        if not workspace_root.is_absolute():
+            workspace_root = (Path.cwd() / workspace_root).resolve()
+        else:
+            workspace_root = workspace_root.resolve()
+
+        # user 级目录：低于任意 project 目录
+        _append("user", Path(self._config.skills_user_dir))
+        if self._config.skills_discovery_include_claude:
+            _append("user", Path("~/.claude/skills"))
+        if self._config.skills_discovery_include_openclaw:
+            _append("user", Path("~/.openclaw/skills"))
+
+        # ancestor .agents/skills：越靠近 cwd 优先级越高（从远到近追加）。
+        # 祖先链上限为 workspace_root（若 cwd 在其内），避免扫描到文件系统根目录。
+        if (
+            self._config.skills_discovery_include_agents
+            and self._config.skills_discovery_scan_workspace_ancestors
+        ):
+            chain: list[Path] = []
+            cursor = Path.cwd().resolve()
+            while True:
+                chain.append(cursor)
+                if cursor == workspace_root:
+                    break
+                if cursor == cursor.parent:
+                    break
+                cursor = cursor.parent
+            chain.reverse()
+            for parent in chain:
+                _append("project", parent / ".agents" / "skills")
+
+        # project 显式目录（workspace 下），优先级最高
+        _append("project", Path(self._config.skills_project_dir))
+        if self._config.skills_discovery_include_agents:
+            _append("project", workspace_root / ".agents" / "skills")
+        if self._config.skills_discovery_include_claude:
+            _append("project", workspace_root / ".claude" / "skills")
+        if self._config.skills_discovery_include_openclaw:
+            _append("project", workspace_root / "skills")
+
+        for raw in self._config.skills_discovery_extra_dirs:
+            _append("project", Path(raw))
+
+        return roots
+
+    def _scan_source(self, source: str, root_dir: Path) -> dict[str, Skillpack]:
         if not root_dir.exists():
-            logger.info("Skillpack 目录不存在，跳过: %s", root_dir)
             return {}
         if not root_dir.is_dir():
             self._append_warning(f"Skillpack 路径不是目录，已跳过: {root_dir}")
             return {}
 
         loaded: dict[str, Skillpack] = {}
-        for child in sorted(root_dir.iterdir(), key=lambda p: p.name.lower()):
-            if not child.is_dir():
-                continue
-            skill_md = child / "SKILL.md"
-            if not skill_md.exists():
-                continue
+        skill_files = sorted(
+            root_dir.rglob("SKILL.md"),
+            key=lambda p: str(p.relative_to(root_dir)).lower(),
+        )
+        for skill_md in skill_files:
+            skill_dir = skill_md.parent
             try:
                 skillpack = self._parse_skillpack_file(
                     source=source,
-                    skill_dir=child,
+                    skill_dir=skill_dir,
                     skill_file=skill_md,
                 )
             except SkillpackValidationError as exc:
@@ -161,26 +191,27 @@ class SkillpackLoader:
 
     def _parse_skillpack_file(
         self,
-        source: SkillpackSource,
+        source: str,
         skill_dir: Path,
         skill_file: Path,
     ) -> Skillpack:
         text = skill_file.read_text(encoding="utf-8")
         frontmatter, body = self._split_frontmatter(text=text, skill_file=skill_file)
+        frontmatter = self._normalize_frontmatter(frontmatter)
+
         line_count = len(body.splitlines())
         if line_count > 500:
             self._append_warning(f"{skill_file}: 正文超过 500 行（当前 {line_count} 行）")
 
         name = self._get_required_str(frontmatter, "name")
+        self._validate_skill_name(name)
         description = self._get_required_str(frontmatter, "description")
-        allowed_tools = self._get_required_str_list(frontmatter, "allowed_tools")
-        triggers = self._get_required_str_list(
-            frontmatter,
-            "triggers",
-            allow_empty=True,
-        )
+
+        allowed_tools = self._get_optional_str_list(frontmatter, "allowed_tools")
+        triggers = self._get_optional_str_list(frontmatter, "triggers")
         file_patterns = self._get_optional_str_list(frontmatter, "file_patterns")
         resources = self._get_optional_str_list(frontmatter, "resources")
+
         priority = self._get_optional_int(frontmatter, "priority", default=0)
         version = self._get_optional_str(frontmatter, "version", default="1.0.0")
         disable_model_invocation = self._get_optional_bool(
@@ -193,20 +224,46 @@ class SkillpackLoader:
             "user_invocable",
             default=True,
         )
-        argument_hint = self._get_optional_str(
+        argument_hint = self._get_optional_str(frontmatter, "argument_hint", default="")
+
+        context = self._get_optional_context(frontmatter, default="normal")
+        agent = self._get_optional_str_or_none(frontmatter, "agent")
+        if context == "fork" and not agent:
+            agent = "explorer"
+
+        hooks = self._get_optional_dict(frontmatter, "hooks")
+        model = self._get_optional_str_or_none(frontmatter, "model")
+        metadata = self._get_optional_dict(frontmatter, "metadata")
+
+        command_dispatch = self._get_optional_command_dispatch(
             frontmatter,
-            "argument_hint",
-            default="",
+            default="none",
         )
-        if "context" in frontmatter:
+        command_tool = self._get_optional_str_or_none(frontmatter, "command_tool")
+        if command_dispatch == "tool" and not command_tool:
             raise SkillpackValidationError(
-                "frontmatter 字段 'context' 已废弃，请移除该字段"
+                "frontmatter 字段 'command_dispatch=tool' 时，'command_tool' 必填"
             )
+        required_mcp_servers = self._normalize_required_mcp_servers(
+            self._get_optional_str_list(frontmatter, "required_mcp_servers")
+        )
+        required_mcp_tools = self._normalize_required_mcp_tools(
+            self._get_optional_str_list(frontmatter, "required_mcp_tools")
+        )
 
         resource_contents = self._load_resources(
-            resources=resources, skill_dir=skill_dir, skill_name=name
+            resources=resources,
+            skill_dir=skill_dir,
+            skill_name=name,
         )
         self._validate_allowed_tools_soft(name=name, allowed_tools=allowed_tools)
+
+        known_keys = set(_CANONICAL_FIELD_ALIASES.keys())
+        extensions = {
+            key: value
+            for key, value in frontmatter.items()
+            if key not in known_keys
+        }
 
         return Skillpack(
             name=name,
@@ -223,10 +280,56 @@ class SkillpackLoader:
             disable_model_invocation=disable_model_invocation,
             user_invocable=user_invocable,
             argument_hint=argument_hint,
+            context=context,
+            agent=agent,
+            hooks=hooks,
+            model=model,
+            metadata=metadata,
+            command_dispatch=command_dispatch,
+            command_tool=command_tool,
+            required_mcp_servers=required_mcp_servers,
+            required_mcp_tools=required_mcp_tools,
+            extensions=extensions,
             resource_contents=resource_contents,
         )
 
+    def _normalize_frontmatter(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """将 kebab/snake 字段归一到 snake_case，并保留未知字段。"""
+        normalized = dict(payload)
+        for canonical, aliases in _CANONICAL_FIELD_ALIASES.items():
+            chosen: Any = None
+            found = False
+            for alias in aliases:
+                if alias in payload:
+                    if not found:
+                        chosen = payload[alias]
+                        found = True
+                    elif payload[alias] != chosen:
+                        raise SkillpackValidationError(
+                            f"frontmatter 字段冲突: {aliases}"
+                        )
+                    if alias != canonical:
+                        normalized.pop(alias, None)
+            if found:
+                normalized[canonical] = chosen
+        return normalized
+
+    @staticmethod
+    def _validate_skill_name(name: str) -> None:
+        if len(name) > 255:
+            raise SkillpackValidationError("frontmatter 字段 'name' 长度不能超过 255")
+        segments = name.split("/")
+        seg_pattern = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+        for seg in segments:
+            if not seg_pattern.fullmatch(seg):
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'name' 非法，支持命名空间段模式 "
+                    "[a-z0-9][a-z0-9._-]{0,63}"
+                )
+
     def _validate_allowed_tools_soft(self, name: str, allowed_tools: list[str]) -> None:
+        if not allowed_tools:
+            return
         known_tools = set(self._tool_registry.get_tool_names())
         unknown_tools = sorted(
             tool
@@ -252,6 +355,59 @@ class SkillpackLoader:
         server_name = parts[1].strip()
         tool_name = parts[2].strip()
         return bool(server_name and tool_name)
+
+    @staticmethod
+    def _normalize_required_mcp_servers(servers: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in servers:
+            name = raw.strip()
+            if not name:
+                continue
+            if not re.fullmatch(r"[a-zA-Z0-9._-]+", name):
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'required_mcp_servers' 存在非法 server 名称"
+                )
+            lower_name = name.lower()
+            if lower_name in seen:
+                continue
+            seen.add(lower_name)
+            normalized.append(name)
+        return normalized
+
+    @staticmethod
+    def _normalize_required_mcp_tools(tools: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in tools:
+            token = raw.strip()
+            if not token:
+                continue
+            parts = token.split(":", 1)
+            if len(parts) != 2:
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'required_mcp_tools' 必须是 server:tool 形式"
+                )
+            server_name = parts[0].strip()
+            tool_name = parts[1].strip()
+            if not server_name or not tool_name:
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'required_mcp_tools' 不能为空"
+                )
+            if not re.fullmatch(r"[a-zA-Z0-9._-]+", server_name):
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'required_mcp_tools' 的 server 名称非法"
+                )
+            if tool_name != "*" and not re.fullmatch(r"[a-zA-Z0-9._-]+", tool_name):
+                raise SkillpackValidationError(
+                    "frontmatter 字段 'required_mcp_tools' 的 tool 名称非法"
+                )
+            lower_token = f"{server_name.lower()}:{tool_name.lower()}"
+            if lower_token in seen:
+                continue
+            seen.add(lower_token)
+            normalized.append(f"{server_name}:{tool_name}")
+        return normalized
 
     def _load_resources(
         self,
@@ -333,7 +489,6 @@ class SkillpackLoader:
         """兼容旧测试/调用方。"""
         return SkillpackLoader.format_frontmatter(data)
 
-
     @staticmethod
     def _get_required_str(payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)
@@ -352,19 +507,16 @@ class SkillpackLoader:
         return value or default
 
     @staticmethod
-    def _get_required_str_list(
-        payload: dict[str, Any],
-        key: str,
-        *,
-        allow_empty: bool = False,
-    ) -> list[str]:
+    def _get_optional_str_or_none(payload: dict[str, Any], key: str) -> str | None:
         if key not in payload:
-            raise SkillpackValidationError(f"frontmatter 缺少必填字段 '{key}'")
-        return SkillpackLoader._to_str_list(
-            value=payload[key],
-            key=key,
-            allow_empty=allow_empty,
-        )
+            return None
+        value = payload[key]
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
+        value = value.strip()
+        return value or None
 
     @staticmethod
     def _get_optional_str_list(payload: dict[str, Any], key: str) -> list[str]:
@@ -373,37 +525,33 @@ class SkillpackLoader:
         return SkillpackLoader._to_str_list(value=payload[key], key=key)
 
     @staticmethod
-    def _to_str_list(
-        value: Any,
-        key: str,
-        *,
-        allow_empty: bool = False,
-    ) -> list[str]:
+    def _to_str_list(value: Any, key: str) -> list[str]:
+        if value is None:
+            return []
         if isinstance(value, str):
-            items = [value.strip()] if value.strip() else []
-            if items:
-                return items
-            if allow_empty:
-                return []
-            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 不能为空")
-
+            item = value.strip()
+            return [item] if item else []
         if not isinstance(value, list):
             raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串列表")
 
         items: list[str] = []
         for item in value:
-            if not isinstance(item, str) or not item.strip():
-                raise SkillpackValidationError(
-                    f"frontmatter 字段 '{key}' 存在非字符串或空字符串项"
-                )
-            items.append(item.strip())
-        if not items and not allow_empty:
-            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 不能为空")
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                item = str(item)
+            normalized = item.strip()
+            if normalized:
+                items.append(normalized)
         return items
 
     @staticmethod
     def _get_optional_int(payload: dict[str, Any], key: str, default: int) -> int:
         value = payload.get(key, default)
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是整数")
         if isinstance(value, int):
             return value
         if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
@@ -413,6 +561,8 @@ class SkillpackLoader:
     @staticmethod
     def _get_optional_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
         value = payload.get(key, default)
+        if value is None:
+            return default
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -422,3 +572,46 @@ class SkillpackLoader:
             if lowered == "false":
                 return False
         raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是布尔值")
+
+    @staticmethod
+    def _get_optional_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
+        if key not in payload:
+            return {}
+        value = payload.get(key)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是对象")
+        return dict(value)
+
+    @staticmethod
+    def _get_optional_context(
+        payload: dict[str, Any],
+        key: str = "context",
+        default: SkillContextMode = "normal",
+    ) -> SkillContextMode:
+        raw = payload.get(key, default)
+        if not isinstance(raw, str):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
+        normalized = raw.strip().lower()
+        if normalized in {"normal", "fork"}:
+            return normalized  # type: ignore[return-value]
+        raise SkillpackValidationError(
+            f"frontmatter 字段 '{key}' 必须是 normal/fork"
+        )
+
+    @staticmethod
+    def _get_optional_command_dispatch(
+        payload: dict[str, Any],
+        key: str = "command_dispatch",
+        default: SkillCommandDispatchMode = "none",
+    ) -> SkillCommandDispatchMode:
+        raw = payload.get(key, default)
+        if not isinstance(raw, str):
+            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
+        normalized = raw.strip().lower()
+        if normalized in {"none", "tool"}:
+            return normalized  # type: ignore[return-value]
+        raise SkillpackValidationError(
+            f"frontmatter 字段 '{key}' 必须是 none/tool"
+        )

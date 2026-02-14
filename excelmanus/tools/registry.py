@@ -145,6 +145,7 @@ class ToolRegistry:
         """注册内置工具集。"""
         from excelmanus.tools import (
             advanced_format_tools,
+            cell_tools,
             chart_tools,
             code_tools,
             data_tools,
@@ -152,6 +153,7 @@ class ToolRegistry:
             format_tools,
             shell_tools,
             sheet_tools,
+            worksheet_tools,
         )
 
         data_tools.init_guard(workspace_root)
@@ -162,6 +164,8 @@ class ToolRegistry:
         code_tools.init_guard(workspace_root)
         shell_tools.init_guard(workspace_root)
         sheet_tools.init_guard(workspace_root)
+        cell_tools.init_guard(workspace_root)
+        worksheet_tools.init_guard(workspace_root)
 
         self.register_tools(data_tools.get_tools())
         self.register_tools(chart_tools.get_tools())
@@ -171,6 +175,8 @@ class ToolRegistry:
         self.register_tools(code_tools.get_tools())
         self.register_tools(shell_tools.get_tools())
         self.register_tools(sheet_tools.get_tools())
+        self.register_tools(cell_tools.get_tools())
+        self.register_tools(worksheet_tools.get_tools())
 
         from excelmanus.tools import memory_tools, skill_tools, task_tools
 
