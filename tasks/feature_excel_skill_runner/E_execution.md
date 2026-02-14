@@ -44,7 +44,7 @@
 **执行者**：TE
 
 #### 实现结果
-- ✅ `profile_excel.py` 对 `销售数据示例.xlsx` 生成探查摘要
+- ✅ `profile_excel.py` 对 `examples/demo/销售数据示例.xlsx` 生成探查摘要
 - ✅ `run_excel_task.py` 成功执行示例任务脚本并写出结果文件
 - ✅ `quick_validate.py` 校验通过（Skill is valid）
 
