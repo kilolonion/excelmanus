@@ -1,0 +1,83 @@
+"""窗口感知层数据模型。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class WindowType(str, Enum):
+    """窗口类型。"""
+
+    EXPLORER = "explorer"
+    SHEET = "sheet"
+
+
+class WindowRenderAction(str, Enum):
+    """窗口渲染动作。"""
+
+    KEEP = "keep"
+    MINIMIZE = "minimize"
+    CLOSE = "close"
+
+
+@dataclass
+class Viewport:
+    """窗口视口信息。"""
+
+    range_ref: str = "A1:J25"
+    visible_rows: int = 25
+    visible_cols: int = 10
+    total_rows: int = 0
+    total_cols: int = 0
+
+
+@dataclass
+class WindowState:
+    """单个窗口状态。"""
+
+    id: str
+    type: WindowType
+    title: str
+    file_path: str | None = None
+    sheet_name: str | None = None
+    directory: str | None = None
+    sheet_tabs: list[str] = field(default_factory=list)
+    viewport: Viewport | None = None
+    freeze_panes: str | None = None
+    style_summary: str = ""
+    preview_rows: list[Any] = field(default_factory=list)
+    summary: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # 空闲轮次：每次 build_system_notice 周期内，未被访问窗口递增。
+    idle_turns: int = 0
+    # 操作序号（非对话 turn），用于窗口优先级排序。
+    last_access_seq: int = 0
+    # 休眠窗口不参与当前轮渲染，但保留缓存以便后续唤醒复用。
+    dormant: bool = False
+
+
+@dataclass
+class WindowSnapshot:
+    """单个窗口渲染快照。"""
+
+    window_id: str
+    action: WindowRenderAction
+    rendered_text: str
+    estimated_tokens: int
+
+
+@dataclass
+class PerceptionBudget:
+    """窗口感知预算配置。"""
+
+    system_budget_tokens: int = 3000
+    tool_append_tokens: int = 500
+    max_windows: int = 6
+    default_rows: int = 25
+    default_cols: int = 10
+    minimized_tokens: int = 80
+    background_after_idle: int = 1
+    suspend_after_idle: int = 3
+    terminate_after_idle: int = 5

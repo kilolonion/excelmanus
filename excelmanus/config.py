@@ -82,6 +82,17 @@ class ExcelManusConfig:
     hooks_command_allowlist: tuple[str, ...] = ()
     hooks_command_timeout_seconds: int = 10
     hooks_output_max_chars: int = 32000
+    # 窗口感知层配置（v4）
+    window_perception_enabled: bool = True
+    window_perception_system_budget_tokens: int = 3000
+    window_perception_tool_append_tokens: int = 500
+    window_perception_max_windows: int = 6
+    window_perception_default_rows: int = 25
+    window_perception_default_cols: int = 10
+    window_perception_minimized_tokens: int = 80
+    window_perception_background_after_idle: int = 1
+    window_perception_suspend_after_idle: int = 3
+    window_perception_terminate_after_idle: int = 5
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -434,6 +445,56 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
         32000,
     )
+    window_perception_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ENABLED"),
+        "EXCELMANUS_WINDOW_PERCEPTION_ENABLED",
+        True,
+    )
+    window_perception_system_budget_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS",
+        3000,
+    )
+    window_perception_tool_append_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS",
+        500,
+    )
+    window_perception_max_windows = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS",
+        6,
+    )
+    window_perception_default_rows = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS",
+        25,
+    )
+    window_perception_default_cols = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS",
+        10,
+    )
+    window_perception_minimized_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS",
+        80,
+    )
+    window_perception_background_after_idle = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE"),
+        "EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE",
+        1,
+    )
+    window_perception_suspend_after_idle = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE"),
+        "EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE",
+        3,
+    )
+    window_perception_terminate_after_idle = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE"),
+        "EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE",
+        5,
+    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -485,5 +546,15 @@ def load_config() -> ExcelManusConfig:
         hooks_command_allowlist=hooks_command_allowlist,
         hooks_command_timeout_seconds=hooks_command_timeout_seconds,
         hooks_output_max_chars=hooks_output_max_chars,
+        window_perception_enabled=window_perception_enabled,
+        window_perception_system_budget_tokens=window_perception_system_budget_tokens,
+        window_perception_tool_append_tokens=window_perception_tool_append_tokens,
+        window_perception_max_windows=window_perception_max_windows,
+        window_perception_default_rows=window_perception_default_rows,
+        window_perception_default_cols=window_perception_default_cols,
+        window_perception_minimized_tokens=window_perception_minimized_tokens,
+        window_perception_background_after_idle=window_perception_background_after_idle,
+        window_perception_suspend_after_idle=window_perception_suspend_after_idle,
+        window_perception_terminate_after_idle=window_perception_terminate_after_idle,
         models=models,
     )

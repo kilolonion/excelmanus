@@ -1,0 +1,40 @@
+{
+  "suite_name": "15_多轮对话",
+  "description": "多轮对话测试：验证消息组（messages）在同一会话中的上下文保持能力",
+  "cases": [
+    {
+      "id": "01",
+      "name": "先读后分析",
+      "messages": [
+        "读取 examples/bench/stress_test_comprehensive.xlsx 中「销售明细」工作表的前 5 行数据，告诉我有哪些列",
+        "基于刚才看到的数据结构，统计每个城市的总销售额，按降序排列"
+      ],
+      "tags": ["multi_turn", "data_read", "group_aggregate"]
+    },
+    {
+      "id": "02",
+      "name": "探查后写入",
+      "messages": [
+        "帮我看看 examples/bench/stress_test_comprehensive.xlsx 有哪些工作表，每个表有多少行",
+        "把刚才的统计结果写入该文件的一个新工作表「工作表统计」中"
+      ],
+      "tags": ["multi_turn", "discovery", "write"]
+    },
+    {
+      "id": "03",
+      "name": "三轮渐进分析",
+      "messages": [
+        "读取 examples/bench/stress_test_comprehensive.xlsx「员工花名册」的前 3 行，告诉我列名",
+        "统计各部门的员工人数",
+        "找出平均工资最高的部门"
+      ],
+      "tags": ["multi_turn", "data_read", "group_aggregate", "analyze"]
+    },
+    {
+      "id": "04",
+      "name": "单轮兼容（message字段）",
+      "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中「销售明细」的前 3 行",
+      "tags": ["single_turn", "data_read"]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "suite_name": "窗口感知AB对比",
+  "description": "窗口感知层启用/禁用对比测试：基础读取、多sheet发现、跨表操作",
+  "cases": [
+    {
+      "id": "wp_01",
+      "name": "基础读取_前10行及列名",
+      "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中「销售明细」工作表的前 10 行数据，告诉我有哪些列",
+      "tags": ["data_read", "window_perception"]
+    },
+    {
+      "id": "wp_02",
+      "name": "多sheet发现_统计工作表",
+      "message": "examples/bench/stress_test_comprehensive.xlsx 有多少个工作表？每个工作表分别有多少行数据？",
+      "tags": ["discovery", "multi_sheet", "window_perception"]
+    },
+    {
+      "id": "wp_03",
+      "name": "跨表操作_产品销售额汇总",
+      "message": "从 examples/bench/stress_test_comprehensive.xlsx「销售明细」中提取每个产品的总销售额，写入「产品目录」的新列中",
+      "tags": ["cross_sheet", "aggregate", "write", "window_perception"]
+    }
+  ]
+}

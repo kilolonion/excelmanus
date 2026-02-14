@@ -47,6 +47,7 @@ from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
+from excelmanus.window_perception import PerceptionBudget, WindowPerceptionManager
 
 if TYPE_CHECKING:
     from excelmanus.persistent_memory import PersistentMemory
@@ -56,8 +57,6 @@ logger = get_logger("engine")
 _META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_to_subagent")
 _PLAN_CONTEXT_MAX_CHARS = 6000
-_RECENT_EXCEL_FILE_MAX = 5
-_RECENT_SUBAGENT_TASK_MAX_CHARS = 160
 _MIN_SYSTEM_CONTEXT_CHARS = 256
 _SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
@@ -404,9 +403,20 @@ class AgentEngine:
         self._pending_plan: PendingPlanState | None = None
         self._approved_plan_context: str | None = None
         self._suspend_task_create_plan_once: bool = False
-        self._recent_excel_files: list[str] = []
-        self._last_subagent_name: str | None = None
-        self._last_subagent_task: str | None = None
+        self._window_perception = WindowPerceptionManager(
+            enabled=config.window_perception_enabled,
+            budget=PerceptionBudget(
+                system_budget_tokens=config.window_perception_system_budget_tokens,
+                tool_append_tokens=config.window_perception_tool_append_tokens,
+                max_windows=config.window_perception_max_windows,
+                default_rows=config.window_perception_default_rows,
+                default_cols=config.window_perception_default_cols,
+                minimized_tokens=config.window_perception_minimized_tokens,
+                background_after_idle=config.window_perception_background_after_idle,
+                suspend_after_idle=config.window_perception_suspend_after_idle,
+                terminate_after_idle=config.window_perception_terminate_after_idle,
+            ),
+        )
 
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
@@ -1887,7 +1897,7 @@ class AgentEngine:
                 subagent_result=result,
             )
         if result.success:
-            self._update_recent_excel_context(
+            self._window_perception.observe_subagent_context(
                 candidate_paths=[*normalized_paths, *result.observed_files],
                 subagent_name=picked_agent,
                 task=task_text,
@@ -3059,6 +3069,12 @@ class AgentEngine:
                     error = reason
                     result_str = f"{result_str}\n[Hook 拒绝] {reason}"
 
+        result_str = self._enrich_tool_result_with_window_perception(
+            tool_name=tool_name,
+            arguments=arguments,
+            result_text=result_str,
+            success=success,
+        )
         result_str = self._apply_tool_result_hard_cap(result_str)
         if error:
             error = self._apply_tool_result_hard_cap(str(error))
@@ -3117,6 +3133,30 @@ class AgentEngine:
             plan_id=plan_id,
             defer_tool_result=defer_tool_result,
         )
+
+    def _enrich_tool_result_with_window_perception(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        success: bool,
+    ) -> str:
+        """在工具返回中附加窗口感知信息。"""
+        try:
+            return self._window_perception.enrich_tool_result(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_text=result_text,
+                success=success,
+            )
+        except Exception:
+            logger.warning(
+                "窗口感知增强失败，已回退原始工具结果: tool=%s",
+                tool_name,
+                exc_info=True,
+            )
+            return result_text
 
     def _apply_tool_result_hard_cap(self, text: str) -> str:
         """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
@@ -3235,9 +3275,7 @@ class AgentEngine:
         self._pending_question_route_result = None
         self._pending_plan = None
         self._approved_plan_context = None
-        self._recent_excel_files.clear()
-        self._last_subagent_name = None
-        self._last_subagent_task = None
+        self._window_perception.reset()
 
     # ── 多模型切换 ──────────────────────────────────
 
@@ -3996,7 +4034,7 @@ class AgentEngine:
                 base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
 
         approved_plan_context = self._build_approved_plan_context_notice()
-        recent_excel_context = self._build_recent_excel_context_notice()
+        window_perception_context = self._build_window_perception_notice()
         current_skill_contexts = [
             ctx for ctx in skill_contexts if isinstance(ctx, str) and ctx.strip()
         ]
@@ -4007,16 +4045,16 @@ class AgentEngine:
                 merged_parts = [base_prompt]
                 if approved_plan_context:
                     merged_parts.append(approved_plan_context)
-                if recent_excel_context:
-                    merged_parts.append(recent_excel_context)
+                if window_perception_context:
+                    merged_parts.append(window_perception_context)
                 merged_parts.extend(current_skill_contexts)
                 return ["\n\n".join(merged_parts)]
 
             prompts = [base_prompt]
             if approved_plan_context:
                 prompts.append(approved_plan_context)
-            if recent_excel_context:
-                prompts.append(recent_excel_context)
+            if window_perception_context:
+                prompts.append(window_perception_context)
             prompts.extend(current_skill_contexts)
             return prompts
 
@@ -4034,13 +4072,13 @@ class AgentEngine:
                 return prompts, None
             approved_plan_context = ""
 
-        if recent_excel_context:
-            recent_excel_context = self._shrink_context_text(recent_excel_context)
+        if window_perception_context:
+            window_perception_context = self._shrink_context_text(window_perception_context)
             prompts = _compose_prompts()
             total_tokens = self._system_prompts_token_count(prompts)
             if total_tokens <= threshold:
                 return prompts, None
-            recent_excel_context = ""
+            window_perception_context = ""
 
         for idx in range(len(current_skill_contexts) - 1, -1, -1):
             minimized = self._minimize_skill_context(current_skill_contexts[idx])
@@ -4078,9 +4116,9 @@ class AgentEngine:
         if approved_plan_context:
             base_prompt = base_prompt + "\n\n" + approved_plan_context
 
-        recent_excel_context = self._build_recent_excel_context_notice()
-        if recent_excel_context:
-            base_prompt = base_prompt + "\n\n" + recent_excel_context
+        window_perception_context = self._build_window_perception_notice()
+        if window_perception_context:
+            base_prompt = base_prompt + "\n\n" + window_perception_context
 
         # 注入 MCP 服务器概要，让 LLM 感知已连接的外部能力
         mcp_context = self._build_mcp_context_notice()
@@ -4151,65 +4189,9 @@ class AgentEngine:
         )
         return "\n".join(lines)
 
-    def _build_recent_excel_context_notice(self) -> str:
-        """注入近期 Excel 上下文，减少“这个文件”类追问的二次探查。"""
-        if not self._recent_excel_files and not self._last_subagent_name:
-            return ""
-
-        lines = ["## 会话文件上下文（最近）"]
-        if self._recent_excel_files:
-            lines.append(
-                "最近确认的 Excel 文件（按新到旧）："
-                + "，".join(self._recent_excel_files)
-            )
-        if self._last_subagent_name:
-            task = (self._last_subagent_task or "").strip()
-            if task:
-                lines.append(f"最近子代理任务：{self._last_subagent_name} / {task}")
-            else:
-                lines.append(f"最近子代理任务：{self._last_subagent_name}")
-        lines.append(
-            "当用户提到“这个文件/该文件”且无冲突时，优先指代上述最近文件；"
-            "存在歧义时先澄清。"
-        )
-        return "\n".join(lines)
-
-    def _update_recent_excel_context(
-        self,
-        *,
-        candidate_paths: Sequence[str],
-        subagent_name: str,
-        task: str,
-    ) -> None:
-        """更新会话内最近 Excel 文件上下文。"""
-        merged = list(self._recent_excel_files)
-        seen = set(merged)
-        for raw in candidate_paths:
-            normalized = self._normalize_excel_path(raw)
-            if not normalized or not self._is_excel_path(normalized):
-                continue
-            if normalized in seen:
-                merged.remove(normalized)
-            merged.insert(0, normalized)
-            seen.add(normalized)
-        self._recent_excel_files = merged[:_RECENT_EXCEL_FILE_MAX]
-        self._last_subagent_name = subagent_name
-        compact_task = " ".join(task.strip().split())
-        if len(compact_task) > _RECENT_SUBAGENT_TASK_MAX_CHARS:
-            compact_task = compact_task[:_RECENT_SUBAGENT_TASK_MAX_CHARS] + "..."
-        self._last_subagent_task = compact_task or None
-
-    @staticmethod
-    def _normalize_excel_path(path: str) -> str:
-        normalized = str(path).strip().replace("\\", "/")
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        return normalized
-
-    @staticmethod
-    def _is_excel_path(path: str) -> bool:
-        lower = path.lower()
-        return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")
+    def _build_window_perception_notice(self) -> str:
+        """渲染窗口感知系统注入文本。"""
+        return self._window_perception.build_system_notice()
 
     def _effective_system_mode(self) -> str:
         configured = self._config.system_message_mode
