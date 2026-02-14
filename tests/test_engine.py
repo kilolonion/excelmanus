@@ -11,10 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
+from excelmanus.engine import AgentEngine, ChatResult, DelegateSubagentOutcome, ToolCallResult
 from excelmanus.events import EventType
+from excelmanus.mcp.manager import add_tool_prefix
+from excelmanus.plan_mode import PendingPlanState, PlanDraft
 from excelmanus.skillpacks import SkillMatchResult, Skillpack
-from excelmanus.subagent import SubagentConfig
+from excelmanus.subagent import SubagentConfig, SubagentResult
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
 
@@ -280,11 +282,20 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._handle_delegate_to_subagent = AsyncMock(return_value="执行完成")
+        engine._delegate_to_subagent = AsyncMock(
+            return_value=DelegateSubagentOutcome(
+                reply="执行完成",
+                success=True,
+                picked_agent="explorer",
+                task_text="分析这个文件",
+                normalized_paths=[],
+                subagent_result=None,
+            )
+        )
 
         result = await engine.chat("/subagent run explorer -- 分析这个文件")
         assert result == "执行完成"
-        engine._handle_delegate_to_subagent.assert_awaited_once_with(
+        engine._delegate_to_subagent.assert_awaited_once_with(
             task="分析这个文件",
             agent_name="explorer",
             on_event=None,
@@ -295,15 +306,197 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._handle_delegate_to_subagent = AsyncMock(return_value="执行完成")
+        engine._delegate_to_subagent = AsyncMock(
+            return_value=DelegateSubagentOutcome(
+                reply="执行完成",
+                success=True,
+                picked_agent="explorer",
+                task_text="分析这个文件",
+                normalized_paths=[],
+                subagent_result=None,
+            )
+        )
 
         result = await engine.chat("/subagent run -- 分析这个文件")
         assert result == "执行完成"
-        engine._handle_delegate_to_subagent.assert_awaited_once_with(
+        engine._delegate_to_subagent.assert_awaited_once_with(
             task="分析这个文件",
             agent_name=None,
             on_event=None,
         )
+
+
+class TestPlanModeControl:
+    """plan mode 控制命令与执行流测试。"""
+
+    @pytest.mark.asyncio
+    async def test_plan_status_on_off(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        status = await engine.chat("/plan status")
+        assert "disabled" in status.reply
+
+        turn_on = await engine.chat("/plan on")
+        assert "已开启" in turn_on.reply
+        assert engine.plan_mode_enabled is True
+
+        turn_off = await engine.chat("/plan off")
+        assert "已关闭" in turn_off.reply
+        assert engine.plan_mode_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_message_generates_pending_plan_only(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._plan_mode_enabled = True
+        engine._route_skills = AsyncMock()
+
+        draft = PlanDraft(
+            plan_id="pln_test_001",
+            markdown="# 计划\n\n## 任务清单\n- [ ] A",
+            title="测试计划",
+            subtasks=["A"],
+            file_path="outputs/plans/plan_test.md",
+            source="plan_mode",
+            objective="请规划测试任务",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+
+        async def _fake_create_pending(**kwargs):
+            engine._pending_plan = PendingPlanState(draft=draft)
+            return draft, None
+
+        engine._create_pending_plan_draft = AsyncMock(side_effect=_fake_create_pending)
+        result = await engine.chat("请规划测试任务")
+        assert "待你审批" in result.reply
+        assert engine._route_skills.await_count == 0
+        assert engine._pending_plan is not None
+
+    @pytest.mark.asyncio
+    async def test_plan_approve_from_plan_mode_creates_tasklist_and_executes(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._plan_mode_enabled = True
+
+        draft = PlanDraft(
+            plan_id="pln_test_approve_1",
+            markdown="# 自动化计划\n\n## 任务清单\n- [ ] 第一步\n- [ ] 第二步",
+            title="自动化计划",
+            subtasks=["第一步", "第二步"],
+            file_path="outputs/plans/plan_test.md",
+            source="plan_mode",
+            objective="执行自动化任务",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+        engine._pending_plan = PendingPlanState(draft=draft)
+        engine._route_skills = AsyncMock(
+            return_value=SkillMatchResult(
+                skills_used=[],
+                tool_scope=["add_numbers"],
+                route_mode="fallback",
+                system_contexts=[],
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("执行完成")
+        )
+
+        result = await engine.chat("/plan approve pln_test_approve_1")
+        assert "执行完成" in result.reply
+        assert engine.plan_mode_enabled is False
+        assert engine._task_store.current is not None
+        assert engine._task_store.current.title == "自动化计划"
+        assert "来源: outputs/plans/plan_test.md" in (engine._approved_plan_context or "")
+
+    @pytest.mark.asyncio
+    async def test_task_create_hook_enters_pending_plan(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        draft = PlanDraft(
+            plan_id="pln_task_create_hook",
+            markdown="# 计划\n\n## 任务清单\n- [ ] A",
+            title="任务清单",
+            subtasks=["A"],
+            file_path="outputs/plans/plan_hook.md",
+            source="task_create_hook",
+            objective="草稿任务",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+
+        async def _fake_create_pending(**kwargs):
+            engine._pending_plan = PendingPlanState(
+                draft=draft,
+                tool_call_id="call_tc",
+                route_to_resume=kwargs.get("route_to_resume"),
+            )
+            return draft, None
+
+        engine._create_pending_plan_draft = AsyncMock(side_effect=_fake_create_pending)
+        tc = SimpleNamespace(
+            id="call_tc",
+            function=SimpleNamespace(
+                name="task_create",
+                arguments=json.dumps({"title": "任务清单", "subtasks": ["A"]}),
+            ),
+        )
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["task_create"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["task_create"],
+            on_event=None,
+            iteration=1,
+            route_result=route_result,
+        )
+        assert result.success is True
+        assert result.pending_plan is True
+        assert result.defer_tool_result is True
+        assert engine._task_store.current is None
+
+    @pytest.mark.asyncio
+    async def test_pending_plan_blocks_and_reject_unblocks(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        draft = PlanDraft(
+            plan_id="pln_block_1",
+            markdown="# 计划\n\n## 任务清单\n- [ ] A",
+            title="阻塞计划",
+            subtasks=["A"],
+            file_path="outputs/plans/plan_block.md",
+            source="plan_mode",
+            objective="阻塞目标",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+        engine._pending_plan = PendingPlanState(draft=draft)
+
+        blocked = await engine.chat("继续执行")
+        assert "待你审批" in blocked.reply
+
+        rejected = await engine.chat("/plan reject pln_block_1")
+        assert "已拒绝计划" in rejected.reply
+        assert engine._pending_plan is None
+
+    def test_build_system_prompts_includes_approved_plan_context(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._approved_plan_context = "来源: outputs/plans/plan_x.md\n# 计划"
+
+        prompts = engine._build_system_prompts([])
+        assert len(prompts) == 1
+        assert "## 已批准计划上下文" in prompts[0]
+        assert "plan_x.md" in prompts[0]
 
 
 class TestManualSkillSlashCommand:
@@ -479,7 +672,16 @@ class TestDelegateSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._handle_delegate_to_subagent = AsyncMock(return_value="子代理摘要")
+        engine._delegate_to_subagent = AsyncMock(
+            return_value=DelegateSubagentOutcome(
+                reply="子代理摘要",
+                success=True,
+                picked_agent="explorer",
+                task_text="探查销量异常",
+                normalized_paths=["sales.xlsx"],
+                subagent_result=None,
+            )
+        )
 
         tc = SimpleNamespace(
             id="call_1",
@@ -500,6 +702,109 @@ class TestDelegateSubagent:
 
         assert result.success is True
         assert result.result == "子代理摘要"
+
+    @pytest.mark.asyncio
+    async def test_delegate_updates_recent_excel_context_from_subagent(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine.run_subagent = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="子代理摘要",
+                subagent_name="explorer",
+                permission_mode="readOnly",
+                conversation_id="conv_1",
+                observed_files=["./stress_test_comprehensive.xlsx"],
+            )
+        )
+
+        result = await engine._handle_delegate_to_subagent(
+            task="查找包含销售明细工作表的文件",
+            agent_name="explorer",
+            file_paths=None,
+        )
+        assert result == "子代理摘要"
+
+        notice = engine._build_recent_excel_context_notice()
+        assert "stress_test_comprehensive.xlsx" in notice
+        assert "explorer" in notice
+
+        prompts = engine._build_system_prompts([])
+        assert len(prompts) == 1
+        assert "stress_test_comprehensive.xlsx" in prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_delegate_pending_approval_asks_user_and_supports_fullaccess_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        pending = engine._approval.create_pending(
+            tool_name="run_code",
+            arguments={"script": "print('ok')"},
+            tool_scope=["run_code"],
+        )
+
+        engine.run_subagent = AsyncMock(
+            side_effect=[
+                SubagentResult(
+                    success=False,
+                    summary="子代理命中高风险操作",
+                    subagent_name="analyst",
+                    permission_mode="default",
+                    conversation_id="conv_1",
+                    pending_approval_id=pending.approval_id,
+                ),
+                SubagentResult(
+                    success=True,
+                    summary="重试完成",
+                    subagent_name="analyst",
+                    permission_mode="default",
+                    conversation_id="conv_2",
+                ),
+            ]
+        )
+
+        tc = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="delegate_to_subagent",
+                arguments=json.dumps(
+                    {
+                        "task": "统计城市销售额",
+                        "agent_name": "analyst",
+                        "file_paths": ["stress_test_comprehensive.xlsx"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        first = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["delegate_to_subagent"],
+            on_event=None,
+            iteration=1,
+        )
+        assert first.success is True
+        assert first.pending_question is True
+        assert engine.has_pending_question() is True
+        prompt = engine._question_flow.format_prompt()
+        assert "fullAccess" in prompt
+        assert pending.approval_id in prompt
+
+        resumed = await engine.chat("2")
+        assert "已开启 fullAccess" in resumed.reply
+        assert "已拒绝待确认操作" in resumed.reply
+        assert "重试完成" in resumed.reply
+        assert engine.full_access_enabled is True
+        assert engine._approval.pending is None
+        assert engine.run_subagent.await_count == 2
 
     @pytest.mark.asyncio
     async def test_delegate_rejects_invalid_file_paths_type(self) -> None:
@@ -1061,6 +1366,121 @@ class TestFallbackScopeGuard:
         assert "add_numbers" not in scope
 
 
+class TestMCPScopeSelector:
+    """MCP 工具授权选择器展开。"""
+
+    def test_scope_expands_mcp_all_selector(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool_a = add_tool_prefix("context7", "query_docs")
+        mcp_tool_b = add_tool_prefix("filesystem", "read_file")
+        registry.register_tools(
+            [
+                ToolDef(
+                    name=mcp_tool_a,
+                    description="mcp-a",
+                    input_schema={"type": "object", "properties": {}},
+                    func=lambda: "ok-a",
+                ),
+                ToolDef(
+                    name=mcp_tool_b,
+                    description="mcp-b",
+                    input_schema={"type": "object", "properties": {}},
+                    func=lambda: "ok-b",
+                ),
+            ]
+        )
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["mcp_skill"],
+            tool_scope=["mcp:*"],
+            route_mode="slash_direct",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        assert mcp_tool_a in scope
+        assert mcp_tool_b in scope
+        assert "select_skill" in scope
+
+    def test_scope_expands_server_level_mcp_selector(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        context_tool_a = add_tool_prefix("context7", "query_docs")
+        context_tool_b = add_tool_prefix("context7", "resolve_library_id")
+        fs_tool = add_tool_prefix("filesystem", "read_file")
+        registry.register_tools(
+            [
+                ToolDef(
+                    name=context_tool_a,
+                    description="context-a",
+                    input_schema={"type": "object", "properties": {}},
+                    func=lambda: "ok-a",
+                ),
+                ToolDef(
+                    name=context_tool_b,
+                    description="context-b",
+                    input_schema={"type": "object", "properties": {}},
+                    func=lambda: "ok-b",
+                ),
+                ToolDef(
+                    name=fs_tool,
+                    description="fs",
+                    input_schema={"type": "object", "properties": {}},
+                    func=lambda: "ok-c",
+                ),
+            ]
+        )
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["mcp_skill"],
+            tool_scope=["mcp:context7:*"],
+            route_mode="slash_direct",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        assert context_tool_a in scope
+        assert context_tool_b in scope
+        assert fs_tool not in scope
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_accepts_expanded_mcp_selector(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        context_tool = add_tool_prefix("context7", "query_docs")
+        registry.register_tool(
+            ToolDef(
+                name=context_tool,
+                description="context-tool",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda: "mcp-ok",
+            )
+        )
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["mcp_skill"],
+            tool_scope=["mcp:context7:query_docs"],
+            route_mode="slash_direct",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+
+        call = SimpleNamespace(
+            id="call_mcp",
+            function=SimpleNamespace(name=context_tool, arguments=json.dumps({})),
+        )
+        result = await engine._execute_tool_call(
+            tc=call,
+            tool_scope=scope,
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.result == "mcp-ok"
+
+
 class TestChatPureText:
     """纯文本回复场景（Requirement 1.3）。"""
 
@@ -1100,6 +1520,38 @@ class TestChatPureText:
 
         result = await engine.chat("测试")
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_string_response_is_treated_as_text_reply(self) -> None:
+        """兼容某些网关直接返回纯字符串。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine._client.chat.completions.create = AsyncMock(return_value="你好，字符串响应。")
+
+        result = await engine.chat("你好")
+        assert isinstance(result, ChatResult)
+        assert result.reply == "你好，字符串响应。"
+        assert result.tool_calls == []
+        assert result.iterations == 1
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_html_document_response_returns_endpoint_hint(self) -> None:
+        """当上游返回 HTML 页面时，返回可操作的配置提示。"""
+        config = _make_config(base_url="https://example.invalid/")
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine._client.chat.completions.create = AsyncMock(
+            return_value="<!doctype html><html><head><meta charset='utf-8'></head><body>oops</body></html>"
+        )
+
+        result = await engine.chat("你是谁")
+        assert "EXCELMANUS_BASE_URL" in result.reply
+        assert "/v1" in result.reply
+        assert "<!doctype html>" not in result.reply.lower()
 
 
 class TestChatToolCalling:
@@ -1452,7 +1904,7 @@ class TestDataModels:
 # 使用 hypothesis 框架，每项至少 100 次迭代
 
 import string
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 
@@ -1489,7 +1941,6 @@ tool_call_id_st = st.from_regex(r"call_[a-z0-9]{4,10}", fullmatch=True)
     ),
     new_input=nonempty_text_st,
 )
-@settings(max_examples=100)
 def test_property_1_message_construction_completeness(
     history: list[tuple[str, str]],
     new_input: str,
@@ -1541,7 +1992,6 @@ def test_property_1_message_construction_completeness(
 @given(
     n_tools=st.integers(min_value=1, max_value=5),
 )
-@settings(max_examples=100)
 def test_property_1_tools_schema_attached(n_tools: int) -> None:
     """Property 1 补充：Engine 构建请求时附全量 tools schema。
 
@@ -1590,7 +2040,6 @@ def test_property_1_tools_schema_attached(n_tools: int) -> None:
     a_values=st.lists(st.integers(min_value=0, max_value=100), min_size=4, max_size=4),
     b_values=st.lists(st.integers(min_value=0, max_value=100), min_size=4, max_size=4),
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_2_tool_call_parsing_and_invocation(
     n_calls: int,
@@ -1650,7 +2099,6 @@ async def test_property_2_tool_call_parsing_and_invocation(
 @given(
     reply_text=nonempty_text_st,
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
     """Property 3：纯文本终止循环。
@@ -1693,7 +2141,6 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
 @given(
     max_iter=st.integers(min_value=1, max_value=10),
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
     """Property 4：迭代上限保护。
@@ -1740,7 +2187,6 @@ async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
         max_size=100,
     ),
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
     """Property 5：工具异常反馈。
@@ -1798,7 +2244,6 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
 @given(
     max_failures=st.integers(min_value=1, max_value=5),
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_6_consecutive_failure_circuit_breaker(
     max_failures: int,
@@ -1851,7 +2296,6 @@ async def test_property_6_consecutive_failure_circuit_breaker(
 @given(
     n_calls=st.integers(min_value=1, max_value=3),
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_20_async_non_blocking(n_calls: int) -> None:
     """Property 20：异步不阻塞。

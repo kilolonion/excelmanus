@@ -56,6 +56,16 @@ v3 路由简化迁移说明：
 - 以下旧变量在 v3 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
 - 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心，运行时工具权限由 `tool_scope` 严格约束。
 
+### MCP 启动缓存（避免每次重装）
+
+项目根目录 `mcp.json` 已改为使用 `scripts/mcp/*.sh` 启动器：
+
+- 首次启动时按固定版本自动安装到 `./.excelmanus/mcp/`
+- 后续启动直接复用本地缓存，不再每次通过 `npx/uvx` 在线安装
+- 如需强制重装，删除 `./.excelmanus/mcp/` 后重启即可
+
+可通过环境变量 `EXCELMANUS_MCP_STATE_DIR` 自定义缓存目录。
+
 ## 使用方式
 
 ### CLI
@@ -66,8 +76,8 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status|list]`、`/subagent run -- <task>`、`/subagent run <agent> -- <task>`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/<skill_name> [args...]`、`exit`。
-输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`）。
+可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status|list]`、`/subagent run -- <task>`、`/subagent run <agent> -- <task>`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/plan [on|off|status]`、`/plan approve [plan_id]`、`/plan reject [plan_id]`、`/<skill_name> [args...]`、`exit`。
+输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`，输入 `/plan a` 会提示 `approve`）。
 
 `/skills` 子命令示例：
 

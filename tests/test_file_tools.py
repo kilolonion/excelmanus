@@ -63,6 +63,22 @@ class TestListDirectory:
         with pytest.raises(SecurityViolationError):
             file_tools.list_directory("..")
 
+    def test_pagination(self, workspace: Path) -> None:
+        full = json.loads(file_tools.list_directory())
+        page = json.loads(file_tools.list_directory(offset=0, limit=2))
+        assert page["total"] == full["total"]
+        assert page["offset"] == 0
+        assert page["limit"] == 2
+        assert page["returned"] == 2
+        assert page["entries"] == full["entries"][:2]
+        assert page["has_more"] is True
+
+    def test_pagination_invalid_args(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(offset=-1, limit=10))
+        assert "error" in result
+        result = json.loads(file_tools.list_directory(offset=0, limit=0))
+        assert "error" in result
+
 
 # ── get_file_info ────────────────────────────────────────
 
@@ -270,3 +286,7 @@ class TestGetTools:
             "delete_file",
         }
         assert names == expected
+
+    def test_list_directory_disables_global_truncation(self) -> None:
+        tools = {tool.name: tool for tool in file_tools.get_tools()}
+        assert tools["list_directory"].max_result_chars == 0

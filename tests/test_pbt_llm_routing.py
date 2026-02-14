@@ -157,7 +157,7 @@ class TestSlashDirectRouting:
     **Validates: Requirements 1.1, 1.2**
     """
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_name=_skill_name_st,
         user_message=_user_message_st,
@@ -177,7 +177,7 @@ class TestSlashDirectRouting:
             assert result.route_mode == "slash_direct"
             assert skill_name in result.skills_used
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_name=_skill_name_st,
         nonexistent_name=_skill_name_st,
@@ -231,7 +231,7 @@ class TestSlashNameNormalization:
     **Validates: Requirements 1.3**
     """
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_name=_skill_name_st,
         data=st.data(),
@@ -271,7 +271,7 @@ class TestSkillCatalogIntegrity:
     **Validates: Requirements 2.2, 6.2, 8.2**
     """
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_names=st.lists(
             _skill_name_st,
@@ -321,7 +321,7 @@ class TestSkillCatalogIntegrity:
 class TestSelectSkillCalls:
     """Feature: llm-native-routing, Property 4/5/7: select_skill 调用正确性"""
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_names=st.lists(
             _skill_name_st,
@@ -355,7 +355,7 @@ class TestSelectSkillCalls:
             assert skill is not None
             assert skill.render_context() in result
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_names=st.lists(
             _skill_name_st,
@@ -385,7 +385,7 @@ class TestSelectSkillCalls:
             assert f"未找到技能: {invalid_name}" == result
             assert engine._active_skill is None
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_names=st.lists(
             _skill_name_st,
@@ -420,7 +420,7 @@ class TestSelectSkillCalls:
 class TestToolScopeTransitions:
     """Feature: llm-native-routing, Property 6: 工具范围状态转换正确性"""
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         skill_a=_skill_name_st,
         tools_a=_allowed_tools_st,
@@ -447,35 +447,26 @@ class TestToolScopeTransitions:
                 ],
             )
 
+            # 初始态：全量工具 + META + ALWAYS
             initial_scope = engine._get_current_tool_scope()
-            expected_initial = list(engine._registry.get_tool_names())
-            for meta_tool in ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user"):
-                if meta_tool not in expected_initial:
-                    expected_initial.append(meta_tool)
-            for always_tool in ("task_create", "task_update"):
-                if always_tool not in expected_initial:
-                    expected_initial.append(always_tool)
-            assert initial_scope == expected_initial
+            expected_initial = set(engine._registry.get_tool_names())
+            expected_initial |= {"select_skill", "delegate_to_subagent", "list_subagents", "ask_user"}
+            expected_initial |= {"task_create", "task_update"}
+            assert set(initial_scope) == expected_initial
 
+            # 激活技能 A：allowed_tools + select_skill + _ALWAYS_AVAILABLE_TOOLS
             asyncio.run(engine._handle_select_skill(skill_a))
             scope_a = engine._get_current_tool_scope()
-            expected_a = list(tools_a)
-            if "select_skill" not in expected_a:
-                expected_a.append("select_skill")
-            for always_tool in ("task_create", "task_update"):
-                if always_tool not in expected_a:
-                    expected_a.append(always_tool)
-            assert scope_a == expected_a
+            expected_a = set(tools_a) | {"select_skill"}
+            expected_a |= {"task_create", "task_update", "ask_user", "delegate_to_subagent"}
+            assert set(scope_a) == expected_a
 
+            # 激活技能 B：同理
             asyncio.run(engine._handle_select_skill(skill_b))
             scope_b = engine._get_current_tool_scope()
-            expected_b = list(tools_b)
-            if "select_skill" not in expected_b:
-                expected_b.append("select_skill")
-            for always_tool in ("task_create", "task_update"):
-                if always_tool not in expected_b:
-                    expected_b.append(always_tool)
-            assert scope_b == expected_b
+            expected_b = set(tools_b) | {"select_skill"}
+            expected_b |= {"task_create", "task_update", "ask_user", "delegate_to_subagent"}
+            assert set(scope_b) == expected_b
 
 
 # ── Property 8：delegate_to_subagent 参数透传约束 ───────────────────────────────
@@ -484,7 +475,7 @@ class TestToolScopeTransitions:
 class TestDelegateSubagentConstraint:
     """Feature: llm-native-routing, Property 8: delegate_to_subagent 参数约束"""
 
-    @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         task=st.text(min_size=1, max_size=80),
         file_paths=st.lists(

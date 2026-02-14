@@ -51,6 +51,7 @@ class SubagentExecutor:
         prompt: str,
         parent_context: str = "",
         on_event: EventCallback | None = None,
+        full_access_enabled: bool = False,
     ) -> SubagentResult:
         """执行单次子代理任务。"""
         conversation_id = str(uuid4())
@@ -86,6 +87,7 @@ class SubagentExecutor:
         tool_calls = 0
         pending_id: str | None = None
         file_changes: list[str] = []
+        observed_files: set[str] = set()
         consecutive_failures = 0
         last_summary = ""
         success = True
@@ -141,15 +143,23 @@ class SubagentExecutor:
                             break
                         continue
 
+                    observed_files.update(self._extract_excel_paths_from_arguments(args))
                     result = await self._execute_tool(
                         config=config,
                         registry=filtered_registry,
                         tool_name=tool_name,
                         arguments=args,
                         tool_scope=tool_scope,
+                        full_access_enabled=full_access_enabled,
                     )
                     content = result.result[:_SUMMARY_MAX_CHARS]
                     memory.add_tool_result(call_id, content)
+                    observed_files.update(
+                        self._extract_excel_paths_from_tool_result(
+                            tool_name=tool_name,
+                            text=result.result,
+                        )
+                    )
 
                     if result.file_changes:
                         file_changes.extend(result.file_changes)
@@ -228,6 +238,7 @@ class SubagentExecutor:
             error=error,
             pending_approval_id=pending_id,
             file_changes=sorted(set(file_changes)),
+            observed_files=sorted(observed_files),
         )
 
     def _build_system_prompt(self, *, config: SubagentConfig, parent_context: str) -> str:
@@ -254,6 +265,7 @@ class SubagentExecutor:
         tool_name: str,
         arguments: dict[str, Any],
         tool_scope: list[str],
+        full_access_enabled: bool,
     ) -> _ExecResult:
         """执行子代理内单次工具调用（含审批桥接）。"""
         if not registry.is_tool_available(tool_name):
@@ -270,7 +282,7 @@ class SubagentExecutor:
             msg = f"只读模式禁止高风险工具：{tool_name}"
             return _ExecResult(success=False, result=msg, error=msg)
 
-        if high_risk and mode == "default":
+        if high_risk and mode == "default" and not full_access_enabled:
             try:
                 pending = self._approval.create_pending(
                     tool_name=tool_name,
@@ -292,7 +304,10 @@ class SubagentExecutor:
                 pending_approval_id=pending.approval_id,
             )
 
-        if high_risk and mode in {"acceptEdits", "dontAsk"}:
+        if high_risk and (
+            mode in {"acceptEdits", "dontAsk"}
+            or (mode == "default" and full_access_enabled)
+        ):
             approval_id = self._approval.new_approval_id()
             created_at_utc = self._approval.utc_now()
 
@@ -365,3 +380,91 @@ class SubagentExecutor:
         if tool_def is None:
             return text
         return tool_def.truncate_result(text)
+
+    @classmethod
+    def _extract_excel_paths_from_arguments(cls, arguments: dict[str, Any]) -> list[str]:
+        """从工具参数中提取 Excel 文件路径。"""
+        keys = (
+            "file_path",
+            "output_path",
+            "source_file",
+            "target_file",
+            "path",
+            "file",
+        )
+        paths: list[str] = []
+        for key in keys:
+            value = arguments.get(key)
+            if isinstance(value, str):
+                normalized = cls._normalize_path(value)
+                if cls._is_excel_path(normalized):
+                    paths.append(normalized)
+
+        raw_file_paths = arguments.get("file_paths")
+        if isinstance(raw_file_paths, list):
+            for item in raw_file_paths:
+                if not isinstance(item, str):
+                    continue
+                normalized = cls._normalize_path(item)
+                if cls._is_excel_path(normalized):
+                    paths.append(normalized)
+        return paths
+
+    @classmethod
+    def _extract_excel_paths_from_tool_result(
+        cls,
+        *,
+        tool_name: str,
+        text: str,
+    ) -> list[str]:
+        """从工具返回结果中补充提取 Excel 文件路径。"""
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return []
+
+        paths: list[str] = []
+        if isinstance(payload, dict):
+            paths.extend(cls._collect_excel_paths_from_mapping(payload))
+            if tool_name == "scan_excel_files":
+                files = payload.get("files")
+                if isinstance(files, list):
+                    for item in files:
+                        if not isinstance(item, dict):
+                            continue
+                        path = item.get("path") or item.get("file")
+                        if isinstance(path, str):
+                            normalized = cls._normalize_path(path)
+                            if cls._is_excel_path(normalized):
+                                paths.append(normalized)
+        elif isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    paths.extend(cls._collect_excel_paths_from_mapping(item))
+        return paths
+
+    @classmethod
+    def _collect_excel_paths_from_mapping(cls, mapping: dict[str, Any]) -> list[str]:
+        keys = ("file", "path", "file_path", "output_path")
+        paths: list[str] = []
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, str):
+                normalized = cls._normalize_path(value)
+                if cls._is_excel_path(normalized):
+                    paths.append(normalized)
+        return paths
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        normalized = path.strip().replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    @staticmethod
+    def _is_excel_path(path: str) -> bool:
+        lower = path.lower()
+        return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")

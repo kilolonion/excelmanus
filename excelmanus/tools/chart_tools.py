@@ -17,6 +17,7 @@ import pandas as pd
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools import data_tools
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.chart")
@@ -106,6 +107,7 @@ def create_chart(
     output_path: str,
     title: str | None = None,
     sheet_name: str | None = None,
+    header_row: int | None = None,
 ) -> str:
     """从 Excel 数据生成图表并保存为图片文件。
 
@@ -117,6 +119,7 @@ def create_chart(
         output_path: 输出图片文件路径（如 output.png）。
         title: 图表标题，默认自动生成。
         sheet_name: 工作表名称，默认读取第一个。
+        header_row: 表头行号（从0开始），默认自动检测。
 
     Returns:
         JSON 格式的操作结果。
@@ -133,8 +136,16 @@ def create_chart(
 
     # 读取数据
     kwargs: dict[str, Any] = {"io": safe_input}
+    detected_header_row: int | None = None
     if sheet_name is not None:
         kwargs["sheet_name"] = sheet_name
+    if header_row is not None:
+        kwargs["header"] = header_row
+    else:
+        detected = data_tools._detect_header_row(safe_input, sheet_name)
+        if detected is not None and detected > 0:
+            kwargs["header"] = detected
+            detected_header_row = detected
 
     df = pd.read_excel(**kwargs)
 
@@ -210,10 +221,10 @@ def create_chart(
 
     logger.info("已生成 %s 图表 -> %s", chart_type, safe_output.name)
 
-    return json.dumps(
-        {"status": "success", "chart_type": chart_type, "output_file": str(safe_output.name)},
-        ensure_ascii=False,
-    )
+    result: dict[str, Any] = {"status": "success", "chart_type": chart_type, "output_file": str(safe_output.name)}
+    if header_row is None and detected_header_row is not None:
+        result["detected_header_row"] = detected_header_row
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _draw_radar(
@@ -293,6 +304,10 @@ def get_tools() -> list[ToolDef]:
                     "sheet_name": {
                         "type": "string",
                         "description": "工作表名称，默认读取第一个",
+                    },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "表头行号（从0开始），默认自动检测",
                     },
                 },
                 "required": ["file_path", "chart_type", "x_column", "y_column", "output_path"],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -12,6 +13,38 @@ from excelmanus.security import FileAccessGuard
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.data")
+
+# ── 表头识别配置 ──────────────────────────────────────────
+
+_HEADER_MIN_NON_EMPTY = 3
+_HEADER_SCAN_ROWS = 30
+_HEADER_SCAN_COLS = 200
+_HEADER_KEYWORDS = (
+    "月份",
+    "日期",
+    "时间",
+    "城市",
+    "地区",
+    "产品",
+    "部门",
+    "姓名",
+    "工号",
+    "编号",
+    "金额",
+    "数量",
+    "状态",
+    "营收",
+    "利润",
+    "成本",
+)
+_TITLE_HINT_PREFIXES = (
+    "生成时间",
+    "汇总",
+    "分析",
+    "报表",
+    "仪表盘",
+    "机密",
+)
 
 # ── Skill 元数据 ──────────────────────────────────────────
 
@@ -42,7 +75,336 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
+def _is_date_like(value: Any) -> bool:
+    """判断值是否为日期/时间类型。"""
+    return isinstance(value, (date, datetime, pd.Timestamp))
+
+
+def _normalize_cell(value: Any) -> Any:
+    """将单元格值规范化为便于表头检测的格式。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    return value
+
+
+def _trim_trailing_nulls_generic(row: list[Any]) -> list[Any]:
+    """裁剪尾部空值，减少噪音列影响。"""
+    end = len(row)
+    while end > 0 and row[end - 1] is None:
+        end -= 1
+    return row[:end]
+
+
+def _looks_like_title_row(first_cell: Any) -> bool:
+    """判断首单元格是否更像标题而非字段名。"""
+    if not isinstance(first_cell, str):
+        return False
+    text = first_cell.strip()
+    if not text:
+        return False
+    if any(token in text for token in ("──", "——", "年度", "季度")):
+        return True
+    return any(hint in text for hint in _TITLE_HINT_PREFIXES)
+
+
+def _header_row_score(
+    row_values: list[Any],
+    row_idx0: int,
+    next_row_values: list[Any] | None = None,
+) -> float:
+    """计算候选表头行分数。分数越高越可能是表头。"""
+    non_empty = [v for v in row_values if v is not None]
+    if len(non_empty) < _HEADER_MIN_NON_EMPTY:
+        return float("-inf")
+
+    text_values = [str(v).strip() for v in non_empty if isinstance(v, str) and str(v).strip()]
+    numeric_count = sum(1 for v in non_empty if isinstance(v, (int, float)))
+    date_count = sum(1 for v in non_empty if _is_date_like(v))
+    string_count = len(text_values)
+    unique_ratio = len(set(map(str, non_empty))) / max(len(non_empty), 1)
+    keyword_hits = sum(
+        1
+        for text in text_values
+        if any(k in text for k in _HEADER_KEYWORDS)
+    )
+
+    score = 0.0
+    score += len(non_empty) * 2.0
+    score += string_count * 1.6
+    score -= numeric_count * 1.4
+    score -= date_count * 1.0
+    score += unique_ratio * 2.5
+    score += keyword_hits * 2.8
+    score -= row_idx0 * 0.03  # 轻微偏好靠前行
+
+    first_cell = row_values[0] if row_values else None
+    if _looks_like_title_row(first_cell):
+        score -= 6.0
+
+    if next_row_values is not None:
+        next_non_empty = [v for v in next_row_values if v is not None]
+        if next_non_empty:
+            next_numeric_ratio = sum(1 for v in next_non_empty if isinstance(v, (int, float))) / len(next_non_empty)
+            # 表头下一行常见“数据占比更高”
+            score += next_numeric_ratio * 1.8
+    return score
+
+
+def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None = None) -> int | None:
+    """基于抽样行猜测 header 行号（0-indexed）。"""
+    if not rows:
+        return None
+
+    upper = len(rows) if max_scan is None else min(len(rows), max_scan)
+    best_row: int | None = None
+    best_score = float("-inf")
+
+    for idx in range(upper):
+        row = _trim_trailing_nulls_generic(rows[idx])
+        next_row = _trim_trailing_nulls_generic(rows[idx + 1]) if idx + 1 < upper else None
+        score = _header_row_score(row, idx, next_row)
+        if score > best_score:
+            best_score = score
+            best_row = idx
+
+    if best_row is None or best_score == float("-inf"):
+        return None
+    return best_row
+
+def _detect_header_row(
+    safe_path: Any,
+    sheet_name: str | None,
+    max_scan: int = _HEADER_SCAN_ROWS,
+    max_scan_columns: int = _HEADER_SCAN_COLS,
+) -> int | None:
+    """启发式检测 header 行号（0-indexed）。
+
+    策略：
+    1. 扫描前 N 行（默认 30）和前 M 列（默认 200）；
+    2. 对每一行按“文本占比、关键字、唯一性、数据行特征”打分；
+    3. 选择分数最高者作为表头。
+
+    Returns:
+        检测到的 header 行号（从0开始），无法确定时返回 None。
+    """
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(safe_path, read_only=True, data_only=True)
+    except Exception:
+        return None
+
+    try:
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+        if ws is None:
+            return None
+
+        rows: list[list[Any]] = []
+        scan_cols = max(1, min(max_scan_columns, ws.max_column or max_scan_columns))
+        for row in ws.iter_rows(
+            min_row=1,
+            max_row=max_scan,
+            min_col=1,
+            max_col=scan_cols,
+            values_only=True,
+        ):
+            rows.append([_normalize_cell(c) for c in row])
+
+        if not rows:
+            return None
+
+        return _guess_header_row_from_rows(rows, max_scan=max_scan)
+    finally:
+        wb.close()
+
+
+def _build_read_kwargs(
+    safe_path: Any,
+    sheet_name: str | None,
+    max_rows: int | None = None,
+    header_row: int | None = None,
+) -> dict[str, Any]:
+    """构建 pd.read_excel 的公共参数，统一处理 header_row。
+
+    Args:
+        safe_path: 已校验的文件路径。
+        sheet_name: 工作表名称。
+        max_rows: 最大读取行数。
+        header_row: 列头所在行号（从0开始），默认0。
+            当 Excel 文件有合并标题行时，需指定真正的列头行。
+
+    Returns:
+        可直接传给 pd.read_excel 的关键字参数字典。
+    """
+    kwargs: dict[str, Any] = {"io": safe_path}
+    if sheet_name is not None:
+        kwargs["sheet_name"] = sheet_name
+    if max_rows is not None:
+        kwargs["nrows"] = max_rows
+    if header_row is not None:
+        kwargs["header"] = header_row
+    else:
+        # 启发式自动检测 header 行（仅当用户未显式指定时）
+        detected = _detect_header_row(safe_path, sheet_name)
+        if detected is not None and detected > 0:
+            kwargs["header"] = detected
+            logger.info("自动检测 header_row=%d (sheet=%s)", detected, sheet_name)
+    return kwargs
+
+
+def _resolve_formula_columns(
+    df: pd.DataFrame,
+    safe_path: Any,
+    sheet_name: str | None,
+    header_row: int,
+) -> pd.DataFrame:
+    """对公式列进行求值：当 data_only 模式读到全 NaN 时，
+    尝试解析公式并用已有列数据计算。
+
+    仅处理同行引用的简单算术公式（如 =G4*H4, =I4*(1-J4)）。
+    复杂公式（跨行引用、函数调用等）会被静默跳过。
+    """
+    import re
+
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    formula_meta: dict[str, Any] = {
+        "resolved_columns": [],
+        "unresolved_columns": [],
+        "unresolved_details": {},
+    }
+    if df.empty:
+        df.attrs["formula_resolution"] = formula_meta
+        return df
+
+    # 找出全 NaN 的列
+    nan_cols_idx = [
+        i for i, col in enumerate(df.columns)
+        if df[col].isna().all()
+    ]
+    if not nan_cols_idx:
+        df.attrs["formula_resolution"] = formula_meta
+        return df
+
+    wb = load_workbook(safe_path, data_only=False, read_only=True)
+    try:
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        if ws is None:
+            df.attrs["formula_resolution"] = formula_meta
+            return df
+
+        excel_header_row = header_row + 1  # 0-indexed → 1-indexed
+        first_data_row = excel_header_row + 1
+
+        # 列字母 → DataFrame 列索引映射
+        col_names = list(df.columns)
+        letter_to_idx: dict[str, int] = {}
+        for i in range(len(col_names)):
+            letter_to_idx[get_column_letter(i + 1)] = i
+
+        cell_ref_pattern = re.compile(r'([A-Z]+)(\d+)')
+        data_row_str = str(first_data_row)
+
+        resolved_cols: set[str] = set()
+        unresolved: dict[str, str] = {}
+
+        for col_idx in nan_cols_idx:
+            col_name = str(col_names[col_idx])
+            cell = ws.cell(row=first_data_row, column=col_idx + 1)
+            formula = cell.value
+            if not isinstance(formula, str) or not formula.startswith('='):
+                continue
+
+            formula_body = formula[1:]
+
+            # 提取所有单元格引用
+            refs = cell_ref_pattern.findall(formula_body)
+            if not refs:
+                unresolved[col_name] = "不支持的公式结构（无单元格引用）"
+                continue
+
+            # 仅处理同行引用
+            if not all(row_num == data_row_str for _, row_num in refs):
+                unresolved[col_name] = "不支持跨行/跨区引用公式"
+                continue
+
+            # 检查所有引用列是否存在
+            all_valid = True
+            for letter, _ in refs:
+                if letter not in letter_to_idx:
+                    all_valid = False
+                    break
+            if not all_valid:
+                unresolved[col_name] = "公式引用超出可读列范围"
+                continue
+
+            # 构建求值表达式：将单元格引用替换为变量名
+            expr = formula_body
+            namespace: dict[str, Any] = {}
+            # 按字母长度降序替换，避免 A 替换 AA 的子串问题
+            sorted_refs = sorted(set(refs), key=lambda r: (-len(r[0]), r[0]))
+            for letter, row_num in sorted_refs:
+                ref_idx = letter_to_idx[letter]
+                var_name = f'_c{ref_idx}'
+                namespace[var_name] = df.iloc[:, ref_idx]
+                expr = expr.replace(f'{letter}{row_num}', var_name)
+
+            try:
+                result = eval(expr, {"__builtins__": {}}, namespace)  # noqa: S307
+                if isinstance(result, pd.Series):
+                    df.iloc[:, col_idx] = result
+                    resolved_cols.add(col_name)
+                    unresolved.pop(col_name, None)
+                    logger.info(
+                        "公式列 '%s' 求值成功 (formula=%s)",
+                        col_names[col_idx], formula,
+                    )
+                else:
+                    unresolved[col_name] = "公式求值未返回可用序列"
+            except Exception:
+                unresolved[col_name] = "公式求值失败"
+                logger.debug(
+                    "公式列 '%s' 求值失败 (formula=%s), 已跳过",
+                    col_names[col_idx], formula,
+                )
+                continue
+    finally:
+        wb.close()
+
+    formula_meta["resolved_columns"] = sorted(resolved_cols)
+    formula_meta["unresolved_columns"] = sorted(unresolved)
+    formula_meta["unresolved_details"] = unresolved
+    df.attrs["formula_resolution"] = formula_meta
+
+    return df
+
+
+def _read_df(
+    safe_path: Any,
+    sheet_name: str | None,
+    max_rows: int | None = None,
+    header_row: int | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """统一读取 Excel 为 DataFrame，含 header 自动检测 + 公式列求值。
+
+    Returns:
+        (DataFrame, effective_header_row) 元组。
+    """
+    kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
+    effective_header = kwargs.get("header", 0)
+    df = pd.read_excel(**kwargs)
+    df = _resolve_formula_columns(df, safe_path, sheet_name, effective_header)
+    return df, effective_header
+
+
 # ── 工具函数 ──────────────────────────────────────────────
+
 
 
 def read_excel(
@@ -50,6 +412,7 @@ def read_excel(
     sheet_name: str | None = None,
     max_rows: int | None = None,
     include_style_summary: bool = False,
+    header_row: int | None = None,
 ) -> str:
     """读取 Excel 文件并返回数据摘要。
 
@@ -58,6 +421,8 @@ def read_excel(
         sheet_name: 工作表名称，默认读取第一个。
         max_rows: 最大读取行数，默认全部读取。
         include_style_summary: 是否附带样式概览（使用的颜色、合并单元格等）。
+        header_row: 列头所在行号（从0开始），默认0。
+            当工作表有合并标题行时，需指定真正的列头行号。
 
     Returns:
         JSON 格式的数据摘要字符串。
@@ -65,27 +430,30 @@ def read_excel(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    kwargs: dict[str, Any] = {"io": safe_path}
-    if sheet_name is not None:
-        kwargs["sheet_name"] = sheet_name
-    if max_rows is not None:
-        kwargs["nrows"] = max_rows
-
-    df = pd.read_excel(**kwargs)
+    df, effective_header = _read_df(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
 
     # 构建摘要信息
     summary: dict[str, Any] = {
         "file": str(safe_path.name),
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
-        "columns": list(df.columns),
-        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-        "preview": json.loads(df.head(10).to_json(orient="records", force_ascii=False)),
+        "columns": [str(c) for c in df.columns],
+        "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+        "preview": json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso")),
     }
+    formula_meta = df.attrs.get("formula_resolution")
+    if isinstance(formula_meta, dict):
+        if formula_meta.get("resolved_columns") or formula_meta.get("unresolved_columns"):
+            summary["formula_resolution"] = formula_meta
+
+    # 当 header_row 被自动检测时，告知 LLM 实际使用的行号
+    if header_row is None and effective_header != 0:
+        summary["detected_header_row"] = effective_header
 
     if include_style_summary:
         summary["style_summary"] = _collect_style_summary(safe_path, sheet_name)
 
-    return json.dumps(summary, ensure_ascii=False, indent=2)
+    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+
 
 
 def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") -> str:
@@ -126,12 +494,18 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     )
 
 
-def analyze_data(file_path: str, sheet_name: str | None = None) -> str:
+
+def analyze_data(
+    file_path: str,
+    sheet_name: str | None = None,
+    header_row: int | None = None,
+) -> str:
     """对 Excel 数据进行基本统计分析。
 
     Args:
         file_path: Excel 文件路径。
         sheet_name: 工作表名称，默认第一个。
+        header_row: 列头所在行号（从0开始），默认0。
 
     Returns:
         JSON 格式的统计分析结果。
@@ -139,18 +513,14 @@ def analyze_data(file_path: str, sheet_name: str | None = None) -> str:
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    kwargs: dict[str, Any] = {"io": safe_path}
-    if sheet_name is not None:
-        kwargs["sheet_name"] = sheet_name
-
-    df = pd.read_excel(**kwargs)
+    df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
     # 基本统计信息
     result: dict[str, Any] = {
         "file": str(safe_path.name),
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
-        "columns": list(df.columns),
-        "missing_values": {col: int(count) for col, count in df.isnull().sum().items() if count > 0},
+        "columns": [str(c) for c in df.columns],
+        "missing_values": {str(col): int(count) for col, count in df.isnull().sum().items() if count > 0},
     }
 
     # 数值列统计
@@ -159,11 +529,13 @@ def analyze_data(file_path: str, sheet_name: str | None = None) -> str:
         stats = numeric_df.describe().to_dict()
         # 将 numpy 类型转为 Python 原生类型
         result["numeric_stats"] = {
-            col: {k: float(v) for k, v in col_stats.items()}
+            str(col): {k: float(v) for k, v in col_stats.items()}
             for col, col_stats in stats.items()
         }
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
 
 
 def filter_data(
@@ -172,6 +544,8 @@ def filter_data(
     operator: str,
     value: Any,
     sheet_name: str | None = None,
+    header_row: int | None = None,
+    columns: list[str] | None = None,
 ) -> str:
     """根据条件过滤 Excel 数据行。
 
@@ -181,6 +555,8 @@ def filter_data(
         operator: 比较运算符，支持 eq/ne/gt/ge/lt/le/contains。
         value: 比较值。
         sheet_name: 工作表名称，默认第一个。
+        header_row: 列头所在行号（从0开始），默认0。
+        columns: 只返回指定列（投影），默认返回全部列。
 
     Returns:
         JSON 格式的过滤结果。
@@ -188,16 +564,13 @@ def filter_data(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    kwargs: dict[str, Any] = {"io": safe_path}
-    if sheet_name is not None:
-        kwargs["sheet_name"] = sheet_name
-
-    df = pd.read_excel(**kwargs)
+    df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
     if column not in df.columns:
         return json.dumps(
-            {"error": f"列 '{column}' 不存在，可用列: {list(df.columns)}"},
+            {"error": f"列 '{column}' 不存在，可用列: {[str(c) for c in df.columns]}"},
             ensure_ascii=False,
+            default=str,
         )
 
     # 根据运算符过滤
@@ -220,14 +593,27 @@ def filter_data(
     mask = ops[operator](df[column], value)
     filtered = df[mask]
 
-    result = {
+    # 投影：只保留指定列
+    if columns:
+        valid_cols = [c for c in columns if c in filtered.columns]
+        missing_cols = [c for c in columns if c not in filtered.columns]
+        filtered = filtered[valid_cols]
+    else:
+        missing_cols = []
+
+    result: dict[str, Any] = {
         "file": str(safe_path.name),
         "filter": {"column": column, "operator": operator, "value": value},
         "original_rows": len(df),
-        "filtered_rows": len(filtered),
-        "preview": json.loads(filtered.head(20).to_json(orient="records", force_ascii=False)),
+        "filtered_rows": int(mask.sum()),
+        "data": json.loads(filtered.to_json(orient="records", force_ascii=False)),
     }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    if missing_cols:
+        result["missing_columns"] = missing_cols
+
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
 
 
 def transform_data(
@@ -235,6 +621,7 @@ def transform_data(
     operations: list[dict[str, Any]],
     sheet_name: str | None = None,
     output_path: str | None = None,
+    header_row: int | None = None,
 ) -> str:
     """对 Excel 数据执行转换操作。
 
@@ -249,6 +636,7 @@ def transform_data(
         operations: 转换操作列表，每项包含 type 和对应参数。
         sheet_name: 工作表名称，默认第一个。
         output_path: 输出文件路径，默认覆盖源文件。
+        header_row: 列头所在行号（从0开始），默认0。
 
     Returns:
         JSON 格式的转换结果。
@@ -256,11 +644,7 @@ def transform_data(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    kwargs: dict[str, Any] = {"io": safe_path}
-    if sheet_name is not None:
-        kwargs["sheet_name"] = sheet_name
-
-    df = pd.read_excel(**kwargs)
+    df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
     applied: list[str] = []
     for op in operations:
@@ -308,6 +692,153 @@ def transform_data(
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+
+def scan_excel_files(
+    directory: str = ".",
+    max_files: int = 20,
+    preview_rows: int = 3,
+    max_columns: int = 15,
+) -> str:
+    """批量扫描目录下所有 Excel 文件，返回轻量级概览。
+
+    使用 openpyxl 只读模式，仅读取 sheet 元信息和少量预览行，
+    避免加载完整 DataFrame，适合快速了解工作区全貌。
+
+    Args:
+        directory: 扫描目录（相对于工作目录），默认当前目录。
+        max_files: 最多扫描文件数，默认 20。
+        preview_rows: 每个 sheet 预览行数，默认 3。
+        max_columns: header/preview 最多展示列数，默认 15。
+
+    Returns:
+        JSON 格式的批量概览结果。
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from openpyxl import load_workbook
+
+    guard = _get_guard()
+    safe_dir = guard.resolve_and_validate(directory)
+
+    if not safe_dir.is_dir():
+        return json.dumps(
+            {"error": f"路径 '{directory}' 不是一个有效的目录"},
+            ensure_ascii=False,
+        )
+
+    # 收集 Excel 文件（.xlsx / .xlsm），跳过隐藏文件和临时文件
+    excel_paths: list[Path] = []
+    for ext in ("*.xlsx", "*.xlsm"):
+        for p in safe_dir.glob(ext):
+            if p.name.startswith((".", "~$")):
+                continue
+            excel_paths.append(p)
+            if len(excel_paths) >= max_files:
+                break
+        if len(excel_paths) >= max_files:
+            break
+    excel_paths.sort(key=lambda p: p.name.lower())
+
+    files_summary: list[dict[str, Any]] = []
+    for fp in excel_paths:
+        stat = fp.stat()
+        file_info: dict[str, Any] = {
+            "file": fp.name,
+            "path": str(fp.relative_to(guard.workspace_root)),
+            "size": _format_size(stat.st_size),
+            "modified": datetime.fromtimestamp(
+                stat.st_mtime, tz=timezone.utc
+            ).strftime("%Y-%m-%d"),
+        }
+
+        sheets_info: list[dict[str, Any]] = []
+        try:
+            wb = load_workbook(fp, read_only=True, data_only=True)
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                total_cols = ws.max_column or 0
+                sheet_data: dict[str, Any] = {
+                    "name": sn,
+                    "rows": ws.max_row or 0,
+                    "columns": total_cols,
+                }
+
+                # 读取抽样行，用于表头识别与预览
+                scan_rows = max(8, preview_rows + 8)
+                scan_cols = max(1, min(total_cols if total_cols > 0 else _HEADER_SCAN_COLS, _HEADER_SCAN_COLS))
+                rows_raw: list[list[Any]] = []
+                for row in ws.iter_rows(
+                    min_row=1,
+                    max_row=scan_rows,
+                    min_col=1,
+                    max_col=scan_cols,
+                    values_only=True,
+                ):
+                    rows_raw.append([_normalize_cell(c) for c in row])
+
+                if rows_raw:
+                    header_idx = _guess_header_row_from_rows(rows_raw, max_scan=scan_rows)
+                    if header_idx is None:
+                        header_idx = 0
+
+                    header_raw = rows_raw[header_idx] if header_idx < len(rows_raw) else []
+                    header = _trim_trailing_nulls([_cell_to_str(c) for c in header_raw])
+
+                    preview_raw = rows_raw[header_idx + 1:header_idx + 1 + preview_rows]
+                    preview = [_trim_trailing_nulls([_cell_to_str(c) for c in r]) for r in preview_raw]
+
+                    # 仅对 preview 数据行限宽，header 完整保留以确保 agent 理解全部列语义
+                    if any(len(r) > max_columns for r in preview):
+                        preview = [r[:max_columns] for r in preview]
+                        sheet_data["preview_columns_truncated"] = max_columns
+
+                    sheet_data["header_row_hint"] = header_idx
+                    sheet_data["business_columns"] = len(header)
+                    sheet_data["header"] = header
+                    sheet_data["preview"] = preview
+
+                sheets_info.append(sheet_data)
+            wb.close()
+        except Exception as exc:  # noqa: BLE001
+            file_info["error"] = f"无法读取: {exc}"
+
+        file_info["sheets"] = sheets_info
+        files_summary.append(file_info)
+
+    result = {
+        "directory": directory,
+        "excel_files_found": len(excel_paths),
+        "truncated": len(excel_paths) >= max_files,
+        "files": files_summary,
+    }
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+
+
+def _cell_to_str(value: Any) -> str | None:
+    """将单元格值转换为紧凑字符串，None 保持为 None。"""
+    if value is None:
+        return None
+    return str(value)
+
+
+def _trim_trailing_nulls(row: list[Any]) -> list[Any]:
+    """去除列表尾部连续的 None 值，减少 JSON 体积。"""
+    end = len(row)
+    while end > 0 and row[end - 1] is None:
+        end -= 1
+    return row[:end]
+
+
+def _format_size(size_bytes: int) -> str:
+    """将字节数格式化为可读字符串。"""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f}{unit}" if unit != "B" else f"{size_bytes}{unit}"
+        size_bytes /= 1024  # type: ignore[assignment]
+    return f"{size_bytes:.1f}TB"
 
 
 # ── 样式概览辅助函数 ──────────────────────────────────────
@@ -368,7 +899,315 @@ def _collect_style_summary(file_path: Any, sheet_name: str | None) -> dict[str, 
     }
 
 
+# ── 数值强制转换辅助 ──────────────────────────────────────
+
+
+def _coerce_numeric(series: pd.Series) -> pd.Series:
+    """尝试将含文本格式的数值列转换为 float。
+
+    处理常见格式：千分位逗号 "1,234.56"、带单位后缀 "1,234.56元"、
+    百分号 "16.36%"。无法转换的值保留 NaN。
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return series
+
+    cleaned = series.astype(str).str.strip()
+    # 移除常见中文单位后缀
+    cleaned = cleaned.str.replace(r'[元万亿份个台件套]$', '', regex=True)
+    # 移除百分号并标记
+    is_pct = cleaned.str.endswith('%')
+    cleaned = cleaned.str.replace('%', '', regex=False)
+    # 移除千分位逗号
+    cleaned = cleaned.str.replace(',', '', regex=False)
+    # 转换为数值
+    result = pd.to_numeric(cleaned, errors='coerce')
+    # 百分比列除以 100
+    if is_pct.any() and not is_pct.all():
+        # 混合格式，不做百分比转换
+        pass
+    elif is_pct.all():
+        result = result / 100
+    return result
+
+
+def group_aggregate(
+    file_path: str,
+    group_by: str | list[str],
+    aggregations: dict[str, str | list[str]],
+    sheet_name: str | None = None,
+    header_row: int | None = None,
+    sort_by: str | None = None,
+    ascending: bool = True,
+    limit: int | None = None,
+) -> str:
+    """按指定列分组并执行聚合统计。
+
+    Args:
+        file_path: Excel 文件路径。
+        group_by: 分组列名（单个字符串或列表）。
+        aggregations: 聚合配置，键为列名，值为聚合函数名或列表。
+            支持的聚合函数：count, sum, mean, min, max, median, std, nunique, first, last。
+            特殊值 "*" 作为键表示对所有行计数（等价于 COUNT(*)）。
+        sheet_name: 工作表名称，默认第一个。
+        header_row: 列头所在行号（从0开始），默认0。
+        sort_by: 结果排序列名，默认不排序。
+        ascending: 排序方向，默认升序。
+        limit: 限制返回行数，默认全部返回。
+
+    Returns:
+        JSON 格式的聚合结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
+
+    # 规范化 group_by 为列表
+    if isinstance(group_by, str):
+        group_by_cols = [group_by]
+    else:
+        group_by_cols = list(group_by)
+
+    # 校验分组列
+    missing_group = [c for c in group_by_cols if c not in df.columns]
+    if missing_group:
+        return json.dumps(
+            {"error": f"分组列不存在: {missing_group}，可用列: {[str(c) for c in df.columns]}"},
+            ensure_ascii=False,
+            default=str,
+        )
+
+    _VALID_AGGS = {"count", "sum", "mean", "min", "max", "median", "std", "nunique", "first", "last"}
+    numeric_funcs = {"sum", "mean", "min", "max", "median", "std"}
+    formula_meta = df.attrs.get("formula_resolution", {})
+    unresolved_formula_cols = set(formula_meta.get("unresolved_columns", [])) if isinstance(formula_meta, dict) else set()
+
+    # 构建 pandas 聚合字典
+    agg_dict: dict[str, list[str]] = {}
+    has_star_count = False
+    risky_formula_cols: set[str] = set()
+    for col, funcs in aggregations.items():
+        if col == "*":
+            has_star_count = True
+            continue
+        if col not in df.columns:
+            return json.dumps(
+                {"error": f"聚合列 '{col}' 不存在，可用列: {[str(c) for c in df.columns]}"},
+                ensure_ascii=False,
+                default=str,
+            )
+        func_list = [funcs] if isinstance(funcs, str) else list(funcs)
+        invalid = [f for f in func_list if f not in _VALID_AGGS]
+        if invalid:
+            return json.dumps(
+                {"error": f"不支持的聚合函数: {invalid}，支持: {sorted(_VALID_AGGS)}"},
+                ensure_ascii=False,
+            )
+        if col in unresolved_formula_cols and any(f in numeric_funcs for f in func_list):
+            risky_formula_cols.add(col)
+        # 对需要数值的聚合函数，尝试强制转换列类型
+        if any(f in numeric_funcs for f in func_list):
+            df[col] = _coerce_numeric(df[col])
+        agg_dict[col] = func_list
+
+    if risky_formula_cols:
+        unresolved_details = formula_meta.get("unresolved_details", {}) if isinstance(formula_meta, dict) else {}
+        blocked_details = {c: unresolved_details.get(c, "未解析公式列") for c in sorted(risky_formula_cols)}
+        return json.dumps(
+            {
+                "error": "检测到未解析公式列，已阻止高风险数值聚合（避免返回误导性结果）",
+                "blocked_columns": sorted(risky_formula_cols),
+                "unresolved_formula_details": blocked_details,
+                "suggestion": "请先在 Excel 重算并保存，或改用脚本直接计算这些列后再聚合",
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+
+    if not agg_dict and not has_star_count:
+        return json.dumps(
+            {"error": "aggregations 不能为空，至少指定一个聚合列或 '*' 进行计数"},
+            ensure_ascii=False,
+        )
+
+    grouped = df.groupby(group_by_cols, dropna=False)
+
+    if agg_dict:
+        result_df = grouped.agg(agg_dict)
+        # 扁平化多级列名
+        result_df.columns = [
+            f"{col}_{func}" if len(funcs) > 1 or has_star_count else f"{col}_{func}"
+            for col, funcs in agg_dict.items()
+            for func in funcs
+        ]
+        result_df = result_df.reset_index()
+    else:
+        result_df = pd.DataFrame({c: [] for c in group_by_cols})
+
+    # COUNT(*) 行计数
+    if has_star_count:
+        count_series = grouped.size().reset_index(name="count")
+        if result_df.empty or len(result_df) == 0:
+            result_df = count_series
+        else:
+            result_df = result_df.merge(count_series, on=group_by_cols, how="left")
+
+    # 排序
+    if sort_by and sort_by in result_df.columns:
+        result_df = result_df.sort_values(by=sort_by, ascending=ascending)
+    elif sort_by:
+        # sort_by 可能是原始列名，尝试匹配生成的列名
+        candidates = [c for c in result_df.columns if c.startswith(sort_by)]
+        if candidates:
+            result_df = result_df.sort_values(by=candidates[0], ascending=ascending)
+
+    # 限制行数
+    if limit is not None and limit > 0:
+        result_df = result_df.head(limit)
+
+    result: dict[str, Any] = {
+        "file": str(safe_path.name),
+        "group_by": group_by_cols,
+        "aggregations": {k: v if isinstance(v, list) else [v] for k, v in aggregations.items()},
+        "total_groups": int(grouped.ngroups),
+        "rows_returned": len(result_df),
+        "columns": [str(c) for c in result_df.columns],
+        "data": json.loads(result_df.to_json(orient="records", force_ascii=False, date_format="iso")),
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
+def _normalize_mapping_keys(series: pd.Series) -> pd.Series:
+    """标准化映射键：转字符串、去首尾空格、移除空值。"""
+    normalized = series.astype(str).str.strip()
+    normalized = normalized[normalized.notna()]
+    normalized = normalized[normalized != ""]
+    normalized = normalized[normalized.str.lower() != "nan"]
+    return normalized
+
+
+def analyze_sheet_mapping(
+    file_path: str,
+    left_sheet: str,
+    left_key: str,
+    right_sheet: str,
+    right_key: str | None = None,
+    right_key_candidates: list[str] | None = None,
+    left_header_row: int | None = None,
+    right_header_row: int | None = None,
+    max_unmatched_samples: int = 20,
+) -> str:
+    """分析两个工作表键字段的可映射性，输出覆盖率与未匹配样本。
+
+    用于跨表写回前先确认映射口径是否可靠，避免误写。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    left_df, _ = _read_df(safe_path, left_sheet, header_row=left_header_row)
+    if left_key not in left_df.columns:
+        return json.dumps(
+            {"error": f"左表字段 '{left_key}' 不存在，可用列: {[str(c) for c in left_df.columns]}"},
+            ensure_ascii=False,
+            default=str,
+        )
+
+    candidates: list[str] = []
+    if right_key:
+        candidates.append(right_key)
+    if right_key_candidates:
+        candidates.extend(right_key_candidates)
+    # 去重且保序
+    seen: set[str] = set()
+    unique_candidates: list[str] = []
+    for col in candidates:
+        c = str(col).strip()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        unique_candidates.append(c)
+
+    if not unique_candidates:
+        return json.dumps(
+            {"error": "right_key 或 right_key_candidates 至少提供一个候选字段"},
+            ensure_ascii=False,
+        )
+
+    right_df, _ = _read_df(safe_path, right_sheet, header_row=right_header_row)
+    left_keys = _normalize_mapping_keys(left_df[left_key])
+    left_set = set(left_keys.unique().tolist())
+    if not left_set:
+        return json.dumps(
+            {"error": f"左表字段 '{left_key}' 没有可用键值"},
+            ensure_ascii=False,
+        )
+
+    analyses: list[dict[str, Any]] = []
+    for candidate in unique_candidates:
+        if candidate not in right_df.columns:
+            analyses.append(
+                {
+                    "right_key": candidate,
+                    "error": f"字段不存在，可用列: {[str(c) for c in right_df.columns]}",
+                }
+            )
+            continue
+
+        right_keys = _normalize_mapping_keys(right_df[candidate])
+        right_set = set(right_keys.unique().tolist())
+        matched = left_set & right_set
+        unmatched_left = sorted(left_set - right_set)
+        unmatched_right = sorted(right_set - left_set)
+
+        left_cov = len(matched) / max(len(left_set), 1)
+        right_cov = len(matched) / max(len(right_set), 1) if right_set else 0.0
+
+        analyses.append(
+            {
+                "right_key": candidate,
+                "left_unique_count": len(left_set),
+                "right_unique_count": len(right_set),
+                "matched_count": len(matched),
+                "left_coverage": round(left_cov, 4),
+                "right_coverage": round(right_cov, 4),
+                "unmatched_left_samples": unmatched_left[:max_unmatched_samples],
+                "unmatched_right_samples": unmatched_right[:max_unmatched_samples],
+            }
+        )
+
+    valid_analyses = [a for a in analyses if "error" not in a]
+    best = None
+    if valid_analyses:
+        best = max(
+            valid_analyses,
+            key=lambda x: (x["left_coverage"], x["matched_count"], -x["right_unique_count"]),
+        )
+
+    result: dict[str, Any] = {
+        "file": str(safe_path.name),
+        "left_sheet": left_sheet,
+        "left_key": left_key,
+        "right_sheet": right_sheet,
+        "right_candidates": unique_candidates,
+        "analysis": analyses,
+    }
+    if best is not None:
+        result["best_candidate"] = best["right_key"]
+        result["best_left_coverage"] = best["left_coverage"]
+        result["mapping_recommendation"] = (
+            "可自动映射"
+            if best["left_coverage"] >= 0.8
+            else "映射覆盖不足，建议人工确认口径"
+        )
+    else:
+        result["mapping_recommendation"] = "候选字段均不可用"
+
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
+
 
 
 def get_tools() -> list[ToolDef]:
@@ -396,6 +1235,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "是否附带样式概览（填充色、字体色、合并单元格等），默认关闭",
                         "default": False,
+                    },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时，需指定真正的列头行号（例如标题占1行则传1）",
                     },
                 },
                 "required": ["file_path"],
@@ -443,6 +1286,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "工作表名称，默认第一个",
                     },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                    },
                 },
                 "required": ["file_path"],
                 "additionalProperties": False,
@@ -451,7 +1298,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="filter_data",
-            description="根据条件过滤 Excel 数据行，支持 eq/ne/gt/ge/lt/le/contains 运算符",
+            description="根据条件过滤 Excel 数据行，支持 eq/ne/gt/ge/lt/le/contains 运算符。可通过 columns 参数只返回指定列以减少数据量",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -475,11 +1322,52 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "工作表名称，默认第一个",
                     },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "只返回指定列名列表（投影），默认返回全部列",
+                    },
                 },
                 "required": ["file_path", "column", "operator", "value"],
                 "additionalProperties": False,
             },
             func=filter_data,
+        ),
+        ToolDef(
+            name="scan_excel_files",
+            description="批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。适合快速了解工作区全貌",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": "扫描目录（相对于工作目录），默认当前目录",
+                        "default": ".",
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "最多扫描文件数，默认 20",
+                        "default": 20,
+                    },
+                    "preview_rows": {
+                        "type": "integer",
+                        "description": "每个 sheet 预览数据行数（不含标题行），默认 3",
+                        "default": 3,
+                    },
+                    "max_columns": {
+                        "type": "integer",
+                        "description": "header/preview 最多展示列数，默认 15",
+                        "default": 15,
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            func=scan_excel_files,
         ),
         ToolDef(
             name="transform_data",
@@ -514,10 +1402,118 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "输出文件路径，默认覆盖源文件",
                     },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                    },
                 },
                 "required": ["file_path", "operations"],
                 "additionalProperties": False,
             },
             func=transform_data,
+        ),
+        ToolDef(
+            name="group_aggregate",
+            description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等），支持排序和行数限制。适用于"统计每个X的Y总和/数量"类需求。自动处理含千分位逗号、中文单位后缀的文本型数值列',
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径",
+                    },
+                    "group_by": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": "分组列名（单个字符串或列表）",
+                    },
+                    "aggregations": {
+                        "type": "object",
+                        "description": "聚合配置，键为列名，值为聚合函数名或列表。支持: count/sum/mean/min/max/median/std/nunique/first/last。用 \"*\" 作为键表示 COUNT(*) 行计数",
+                        "additionalProperties": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                            ],
+                        },
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "工作表名称，默认第一个",
+                    },
+                    "header_row": {
+                        "type": "integer",
+                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "结果排序列名（可用聚合后的列名如 '总金额(元)_sum'，或原始列名自动匹配）",
+                    },
+                    "ascending": {
+                        "type": "boolean",
+                        "description": "排序方向，默认升序。设为 false 表示降序",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "限制返回行数，默认全部返回",
+                    },
+                },
+                "required": ["file_path", "group_by", "aggregations"],
+                "additionalProperties": False,
+            },
+            func=group_aggregate,
+        ),
+        ToolDef(
+            name="analyze_sheet_mapping",
+            description="分析两个工作表键字段的映射覆盖率，输出最佳映射候选和未匹配样本。适合跨表写回前做口径校验",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径",
+                    },
+                    "left_sheet": {
+                        "type": "string",
+                        "description": "左表工作表名称（待写回来源）",
+                    },
+                    "left_key": {
+                        "type": "string",
+                        "description": "左表映射键字段名",
+                    },
+                    "right_sheet": {
+                        "type": "string",
+                        "description": "右表工作表名称（目标维表）",
+                    },
+                    "right_key": {
+                        "type": "string",
+                        "description": "右表映射键字段名（单候选）",
+                    },
+                    "right_key_candidates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "右表候选键字段名列表（多候选自动评分）",
+                    },
+                    "left_header_row": {
+                        "type": "integer",
+                        "description": "左表表头行号（从0开始），默认自动检测",
+                    },
+                    "right_header_row": {
+                        "type": "integer",
+                        "description": "右表表头行号（从0开始），默认自动检测",
+                    },
+                    "max_unmatched_samples": {
+                        "type": "integer",
+                        "description": "未匹配样本最多返回条数，默认20",
+                        "default": 20,
+                    },
+                },
+                "required": ["file_path", "left_sheet", "left_key", "right_sheet"],
+                "additionalProperties": False,
+            },
+            func=analyze_sheet_mapping,
         ),
     ]

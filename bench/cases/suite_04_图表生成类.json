@@ -1,0 +1,24 @@
+{
+  "suite_name": "04_图表生成类",
+  "description": "realtest.md 图表生成类",
+  "cases": [
+    {
+      "id": "01",
+      "name": "城市满意度横向柱状图",
+      "message": "基于 stress_test_comprehensive.xlsx「城市分析」数据，生成一个横向柱状图展示各城市客户满意度",
+      "tags": ["chart", "bar"]
+    },
+    {
+      "id": "02",
+      "name": "2024年产品堆叠柱状图",
+      "message": "基于 stress_test_comprehensive.xlsx「月度汇总」数据，生成 2024 年各产品的堆叠柱状图",
+      "tags": ["chart", "stacked_bar"]
+    },
+    {
+      "id": "03",
+      "name": "KPI仪表盘趋势线折线图",
+      "message": "基于 stress_test_comprehensive.xlsx「KPI仪表盘」的月度营收数据，生成带趋势线的折线图",
+      "tags": ["chart", "line"]
+    }
+  ]
+}

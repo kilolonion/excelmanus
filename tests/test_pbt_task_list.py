@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 from excelmanus.task_list import (
@@ -66,7 +66,6 @@ _task_list_strategy = st.builds(
 
 
 @given(task_list=_task_list_strategy)
-@settings(max_examples=100)
 def test_pbt_property_1_task_list_round_trip(task_list: TaskList) -> None:
     """Property 1：对于任意合法的 TaskList 实例，
     TaskList.from_dict(task_list.to_dict()) 应产生等价的 TaskList。
@@ -104,7 +103,6 @@ _subtask_titles_strategy = st.lists(_title_strategy, min_size=1, max_size=20)
 
 
 @given(title=_title_strategy, subtask_titles=_subtask_titles_strategy)
-@settings(max_examples=100)
 def test_pbt_property_2_new_task_list_all_pending(
     title: str, subtask_titles: list[str]
 ) -> None:
@@ -141,7 +139,6 @@ _LEGAL_TRANSITIONS = {
     current_status=_status_strategy,
     target_status=_status_strategy,
 )
-@settings(max_examples=100)
 def test_pbt_property_3_state_transition_validity(
     current_status: TaskStatus, target_status: TaskStatus
 ) -> None:
@@ -172,7 +169,6 @@ def test_pbt_property_3_state_transition_validity(
 
 
 @given(task_list=_task_list_strategy)
-@settings(max_examples=100)
 def test_pbt_property_4_progress_summary_invariant(task_list: TaskList) -> None:
     """Property 4：对于任意 TaskList，progress_summary() 返回的各状态计数之和
     等于 len(items)，且每个状态的计数等于 items 中处于该状态的实际数量。
@@ -203,7 +199,6 @@ def test_pbt_property_4_progress_summary_invariant(task_list: TaskList) -> None:
 
 
 @given(title=_title_strategy, subtask_titles=_subtask_titles_strategy)
-@settings(max_examples=100)
 def test_pbt_property_5_task_create_produces_valid_task_list(
     title: str, subtask_titles: list[str]
 ) -> None:
@@ -248,7 +243,6 @@ _oob_positive_offset = st.integers(min_value=0, max_value=1000)
     negative_index=_oob_negative,
     positive_offset=_oob_positive_offset,
 )
-@settings(max_examples=100)
 def test_pbt_property_6_out_of_bounds_index_returns_error(
     title: str,
     subtask_titles: list[str],
@@ -322,7 +316,6 @@ _task_result_strategy = st.one_of(st.none(), _title_strategy)
     task_status=_task_status_strategy,
     task_result=_task_result_strategy,
 )
-@settings(max_examples=100)
 def test_pbt_property_8_tool_call_event_task_fields_serialization(
     task_list_data: dict,
     task_index: int | None,
@@ -389,7 +382,6 @@ _task_list_data_for_render = st.fixed_dictionaries({
 
 
 @given(task_list_data=_task_list_data_for_render)
-@settings(max_examples=100)
 def test_pbt_property_7_render_output_contains_correct_status_icons(
     task_list_data: dict,
 ) -> None:

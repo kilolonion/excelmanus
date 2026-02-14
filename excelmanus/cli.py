@@ -23,10 +23,14 @@ from rich.text import Text
 
 try:
     from prompt_toolkit import PromptSession
+    from prompt_toolkit.application import Application
     from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
-    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.formatted_text import ANSI, FormattedText
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
     from prompt_toolkit.styles import Style
 
     _PROMPT_TOOLKIT_ENABLED = True
@@ -37,6 +41,7 @@ from excelmanus import __version__
 from excelmanus.config import ConfigError, load_config
 from excelmanus.engine import AgentEngine, ChatResult
 from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.question_flow import PendingQuestion
 from excelmanus.logger import get_logger, setup_logging
 from excelmanus.renderer import StreamRenderer
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
@@ -63,13 +68,23 @@ _SLASH_COMMANDS = {
     "/accept",
     "/reject",
     "/undo",
+    "/plan",
+    "/planmode",
+    "/plan_mode",
+    "/model",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
 _SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
 _APPROVAL_COMMAND_ALIASES = {"/accept", "/reject", "/undo"}
+_PLAN_COMMAND_ALIASES = {"/plan", "/planmode", "/plan_mode"}
+_MODEL_COMMAND_ALIASES = {"/model"}
 _SESSION_CONTROL_COMMAND_ALIASES = (
-    _FULL_ACCESS_COMMAND_ALIASES | _SUBAGENT_COMMAND_ALIASES | _APPROVAL_COMMAND_ALIASES
+    _FULL_ACCESS_COMMAND_ALIASES
+    | _SUBAGENT_COMMAND_ALIASES
+    | _APPROVAL_COMMAND_ALIASES
+    | _PLAN_COMMAND_ALIASES
+    | _MODEL_COMMAND_ALIASES
 )
 
 _SLASH_COMMAND_SUGGESTIONS = (
@@ -79,15 +94,22 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/skills",
     "/subagent",
     "/sub_agent",
+    "/mcp",
     "/fullAccess",
     "/full_access",
     "/fullaccess",
     "/accept",
     "/reject",
     "/undo",
+    "/plan",
+    "/planmode",
+    "/plan_mode",
+    "/model",
 )
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
 _SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
+_PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
+_MODEL_ARGUMENTS: tuple[str, ...] = ("list",)  # 动态模型名称在运行时追加
 _DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
 
 
@@ -167,11 +189,11 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
     if sub == "list":
         rows = engine.list_skillpacks_detail()
         if not rows:
-            console.print("  [dim]当前没有已加载的 Skillpack。[/dim]")
+            console.print("  [dim white]当前没有已加载的 Skillpack。[/dim white]")
             return True
         table = Table(show_header=True, expand=False)
-        table.add_column("name", style="magenta")
-        table.add_column("source", style="cyan")
+        table.add_column("name", style="#b294bb")
+        table.add_column("source", style="#81a2be")
         table.add_column("writable", style="green")
         table.add_column("description")
         for row in rows:
@@ -187,7 +209,7 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
 
     if sub == "get":
         if len(tokens) != 3:
-            console.print("  [yellow]用法：/skills get <name>[/yellow]")
+            console.print("  [#de935f]用法：/skills get <name>[/#de935f]")
             return True
         name = tokens[2]
         detail = engine.get_skillpack_detail(name)
@@ -199,8 +221,8 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
     if sub == "create":
         if len(tokens) < 5:
             console.print(
-                "  [yellow]用法：/skills create <name> --json '<payload>' "
-                "或 --json-file <path>[/yellow]"
+                "  [#de935f]用法：/skills create <name> --json '<payload>' "
+                "或 --json-file <path>[/#de935f]"
             )
             return True
         name = tokens[2]
@@ -219,8 +241,8 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
     if sub == "patch":
         if len(tokens) < 5:
             console.print(
-                "  [yellow]用法：/skills patch <name> --json '<payload>' "
-                "或 --json-file <path>[/yellow]"
+                "  [#de935f]用法：/skills patch <name> --json '<payload>' "
+                "或 --json-file <path>[/#de935f]"
             )
             return True
         name = tokens[2]
@@ -238,15 +260,15 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
 
     if sub == "delete":
         if len(tokens) < 3:
-            console.print("  [yellow]用法：/skills delete <name> [--yes][/yellow]")
+            console.print("  [#de935f]用法：/skills delete <name> [--yes][/#de935f]")
             return True
         name = tokens[2]
         flags = set(tokens[3:])
         if flags - {"--yes"}:
-            console.print("  [yellow]仅支持参数：--yes[/yellow]")
+            console.print("  [#de935f]仅支持参数：--yes[/#de935f]")
             return True
         if "--yes" not in flags:
-            console.print("  [yellow]删除需确认，请追加 `--yes`。[/yellow]")
+            console.print("  [#de935f]删除需确认，请追加 `--yes`。[/#de935f]")
             return True
         detail = engine.delete_skillpack(name, actor="cli", reason="cli_delete")
         _sync_skill_command_suggestions(engine)
@@ -260,7 +282,7 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
         return True
 
     console.print(
-        "  [yellow]未知 /skills 子命令。可用：list/get/create/patch/delete[/yellow]"
+        "  [#de935f]未知 /skills 子命令。可用：list/get/create/patch/delete[/#de935f]"
     )
     return True
 
@@ -306,6 +328,13 @@ def _sync_skill_command_suggestions(engine: AgentEngine) -> None:
     _DYNAMIC_SKILL_SLASH_COMMANDS = tuple(f"/{name}" for name, _ in rows)
 
 
+def _sync_model_suggestions(engine: AgentEngine) -> None:
+    """将可用模型名称同步到 /model 命令的补全参数。"""
+    global _MODEL_ARGUMENTS
+    names = engine.model_names()
+    _MODEL_ARGUMENTS = tuple(["list"] + names)
+
+
 def _list_known_slash_commands() -> tuple[str, ...]:
     ordered = list(_SLASH_COMMAND_SUGGESTIONS)
     ordered.extend(_DYNAMIC_SKILL_SLASH_COMMANDS)
@@ -342,11 +371,17 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
         return None
 
     # 再补全控制命令参数：如 /fullAccess s -> /fullAccess status
-    command_arguments = {
+    command_arguments: dict[str, tuple[str, ...]] = {
         alias: _FULL_ACCESS_ARGUMENTS for alias in _FULL_ACCESS_COMMAND_ALIASES
     }
     command_arguments.update(
         {alias: _SUBAGENT_ARGUMENTS for alias in _SUBAGENT_COMMAND_ALIASES}
+    )
+    command_arguments.update(
+        {alias: _PLAN_ARGUMENTS for alias in _PLAN_COMMAND_ALIASES}
+    )
+    command_arguments.update(
+        {alias: _MODEL_ARGUMENTS for alias in _MODEL_COMMAND_ALIASES}
     )
     available_arguments = command_arguments.get(lowered_command)
     if available_arguments is None:
@@ -392,48 +427,59 @@ if _PROMPT_TOOLKIT_ENABLED:
             event.current_buffer.insert_text(suggestion.text)
 
 
-def _render_welcome(config: "ExcelManusConfig", skill_count: int) -> None:
-    """渲染欢迎信息面板 — 含 Logo、版本、模型、技能包信息。"""
+def _render_welcome(
+    config: "ExcelManusConfig", skill_count: int, mcp_count: int = 0
+) -> None:
+    """渲染欢迎信息面板 — 含 Logo、版本、模型、技能包、MCP 信息。"""
     from excelmanus.config import ExcelManusConfig  # noqa: F811 避免循环导入
 
     # 构建信息区
     info = Text()
-    info.append(_LOGO, style="bold cyan")
+    info.append(_LOGO, style="bold green")
     info.append(f"\n  v{__version__}", style="bold white")
-    info.append("  ·  基于大语言模型的 Excel 智能代理\n\n", style="dim")
+    info.append("  ·  基于大语言模型的 Excel 智能代理\n\n", style="dim white")
 
     # 环境信息
     model_display = config.model
-    info.append("  模型  ", style="dim")
-    info.append(f"{model_display}\n", style="bold yellow")
-    info.append("  技能  ", style="dim")
-    info.append(f"{skill_count} 个 Skillpack 已加载\n", style="bold green")
-    info.append("  子代理  ", style="dim")
+    info.append("  模型  ", style="dim white")
+    info.append(f"{model_display}\n", style="bold #f0c674")
+    info.append("  技能  ", style="dim white")
+    info.append(f"{skill_count} 个 Skillpack 已加载\n", style="bold #b5bd68")
+    info.append("  子代理  ", style="dim white")
     info.append(
         ("已启用" if config.subagent_enabled else "已禁用") + "\n",
-        style="bold cyan" if config.subagent_enabled else "bold red",
+        style="bold #81a2be" if config.subagent_enabled else "bold #cc6666",
     )
-    info.append("  目录  ", style="dim")
-    info.append(f"{os.path.abspath(config.workspace_root)}\n\n", style="")
+    # MCP 状态
+    info.append("  MCP   ", style="dim white")
+    if mcp_count > 0:
+        info.append(f"{mcp_count} 个 Server 已连接\n", style="bold #b294bb")
+    else:
+        info.append("未配置\n", style="dim white")
+    info.append("  目录  ", style="dim white")
+    info.append(f"{os.path.abspath(config.workspace_root)}\n\n", style="white")
 
     # 快捷命令
-    info.append("  命令  ", style="dim")
-    info.append("/help", style="green")
-    info.append("  /history", style="green")
-    info.append("  /clear", style="green")
-    info.append("  /skills", style="green")
-    info.append("  /subagent", style="green")
-    info.append("  /fullAccess", style="green")
-    info.append("  /accept <id>", style="green")
-    info.append("  /reject <id>", style="green")
-    info.append("  /undo <id>", style="green")
-    info.append("  /<skill_name>", style="green")
-    info.append("  exit\n", style="green")
+    info.append("  命令  ", style="dim white")
+    info.append("/help", style="#b5bd68")
+    info.append("  /history", style="#b5bd68")
+    info.append("  /clear", style="#b5bd68")
+    info.append("  /skills", style="#b5bd68")
+    info.append("  /subagent", style="#b5bd68")
+    info.append("  /mcp", style="#b5bd68")
+    info.append("  /fullAccess", style="#b5bd68")
+    info.append("  /accept <id>", style="#b5bd68")
+    info.append("  /reject <id>", style="#b5bd68")
+    info.append("  /undo <id>", style="#b5bd68")
+    info.append("  /plan", style="#b5bd68")
+    info.append("  /model", style="#b5bd68")
+    info.append("  /<skill_name>", style="#b5bd68")
+    info.append("  exit\n", style="#b5bd68")
 
     console.print(
         Panel(
             info,
-            border_style="cyan",
+            border_style="#5f875f",
             padding=(0, 1),
         )
     )
@@ -447,6 +493,213 @@ if _PROMPT_TOOLKIT_ENABLED:
         style=_PROMPT_STYLE,
         key_bindings=_PROMPT_KEY_BINDINGS,
     )
+
+
+# ------------------------------------------------------------------
+# 交互式问题选择器（箭头键导航）
+# ------------------------------------------------------------------
+
+class _InteractiveSelectResult:
+    """交互式选择器的返回结果。"""
+
+    def __init__(
+        self,
+        *,
+        selected_indices: list[int] | None = None,
+        other_text: str | None = None,
+        escaped: bool = False,
+    ) -> None:
+        self.selected_indices = selected_indices or []
+        self.other_text = other_text
+        self.escaped = escaped
+
+
+async def _interactive_question_select(
+    question: "PendingQuestion",
+) -> _InteractiveSelectResult | None:
+    """使用 prompt_toolkit 构建箭头键导航的交互式选择器。
+
+    单选：↑↓ 移动光标，Enter 确认。
+    多选：↑↓ 移动光标，Space 切换选中，Enter 提交。
+    Other 选项：选中后 Enter 进入文本输入。
+    Esc：退出选择器，回到普通输入框。
+
+    返回 None 表示不支持交互式选择（非交互终端或无 prompt_toolkit）。
+    返回 _InteractiveSelectResult.escaped=True 表示用户按了 Esc。
+    """
+    if not _PROMPT_TOOLKIT_ENABLED or not _is_interactive_terminal():
+        return None
+
+    options = question.options
+    if not options:
+        return None
+
+    multi = question.multi_select
+    cursor = [0]
+    checked: set[int] = set()  # 多选模式下已选中的索引
+    result_holder: list[_InteractiveSelectResult] = []
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _move_up(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] - 1) % len(options)
+
+    @kb.add("down")
+    def _move_down(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] + 1) % len(options)
+
+    @kb.add("space")
+    def _toggle(event) -> None:  # type: ignore[no-untyped-def]
+        if multi:
+            idx = cursor[0]
+            # Other 选项不参与 space 切换
+            if options[idx].is_other:
+                return
+            if idx in checked:
+                checked.discard(idx)
+            else:
+                checked.add(idx)
+
+    @kb.add("enter")
+    def _confirm(event) -> None:  # type: ignore[no-untyped-def]
+        idx = cursor[0]
+        opt = options[idx]
+        if opt.is_other:
+            # Other 选项：标记需要文本输入
+            result_holder.append(
+                _InteractiveSelectResult(selected_indices=[], other_text="__NEED_INPUT__")
+            )
+            event.app.exit()
+            return
+        if multi:
+            # 多选模式：Enter 提交当前已选（如果光标处未选中则也加入）
+            if idx not in checked:
+                checked.add(idx)
+            result_holder.append(
+                _InteractiveSelectResult(selected_indices=sorted(checked))
+            )
+        else:
+            # 单选模式：直接确认光标处选项
+            result_holder.append(
+                _InteractiveSelectResult(selected_indices=[idx])
+            )
+        event.app.exit()
+
+    @kb.add("escape")
+    def _escape(event) -> None:  # type: ignore[no-untyped-def]
+        result_holder.append(_InteractiveSelectResult(escaped=True))
+        event.app.exit()
+
+    # 构建动态文本控件
+    def _get_formatted_text() -> FormattedText:
+        """生成选择器的格式化文本。"""
+        fragments: list[tuple[str, str]] = []
+        # 标题行
+        header = question.header or "待确认"
+        fragments.append(("class:header", f"  ❓ {header}\n"))
+        if question.text:
+            fragments.append(("class:text", f"  {question.text}\n"))
+        fragments.append(("", "\n"))
+
+        for i, opt in enumerate(options):
+            is_cursor = i == cursor[0]
+            is_checked = i in checked
+
+            # 前缀指示器
+            if multi:
+                if is_checked:
+                    marker = "◉" if is_cursor else "●"
+                else:
+                    marker = "○" if is_cursor else "○"
+                prefix = f"  {'❯' if is_cursor else ' '} {marker} "
+            else:
+                prefix = f"  {'❯' if is_cursor else ' '} "
+
+            # 选项文本
+            label = opt.label
+            desc = f" — {opt.description}" if opt.description else ""
+            line = f"{prefix}{i + 1}. {label}{desc}\n"
+
+            if is_cursor:
+                style = "class:selected"
+            elif is_checked:
+                style = "class:checked"
+            else:
+                style = "class:option"
+            fragments.append((style, line))
+
+        # 底部提示
+        fragments.append(("", "\n"))
+        if multi:
+            fragments.append(
+                ("class:hint", "  ↑↓ 移动  Space 选中/取消  Enter 提交  Esc 退出\n")
+            )
+        else:
+            fragments.append(
+                ("class:hint", "  ↑↓ 移动  Enter 确认  Esc 退出\n")
+            )
+        return FormattedText(fragments)
+
+    control = FormattedTextControl(_get_formatted_text)
+    window = Window(content=control, always_hide_cursor=True)
+    layout = Layout(HSplit([window]))
+
+    style = Style.from_dict(
+        {
+            "header": "bold #f0c674",
+            "text": "",
+            "selected": "bold #b5bd68 reverse",
+            "checked": "bold #b5bd68",
+            "option": "",
+            "hint": "italic #888888",
+        }
+    )
+
+    app: Application[None] = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    await app.run_async()
+
+    if not result_holder:
+        return _InteractiveSelectResult(escaped=True)
+
+    result = result_holder[0]
+
+    # 处理 Other 选项：需要文本输入
+    if result.other_text == "__NEED_INPUT__":
+        console.print("  [dim white]请输入自定义内容：[/dim white]")
+        try:
+            other_input = (await _read_user_input()).strip()
+        except (KeyboardInterrupt, EOFError):
+            return _InteractiveSelectResult(escaped=True)
+        if not other_input:
+            return _InteractiveSelectResult(escaped=True)
+        return _InteractiveSelectResult(other_text=other_input)
+
+    return result
+
+
+def _build_answer_from_select(
+    question: "PendingQuestion",
+    result: _InteractiveSelectResult,
+) -> str:
+    """将交互式选择结果转换为引擎可识别的回答文本。"""
+    if result.other_text is not None:
+        return result.other_text
+
+    if not result.selected_indices:
+        return ""
+
+    # 用编号回答，引擎的 parse_answer 支持编号匹配
+    parts = [str(idx + 1) for idx in result.selected_indices]
+    if question.multi_select:
+        return "\n".join(parts)
+    return parts[0]
 
 
 async def _read_user_input() -> str:
@@ -481,7 +734,7 @@ async def _read_multiline_user_input() -> str:
 def _render_help(engine: AgentEngine | None = None) -> None:
     """渲染帮助信息。"""
     table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
-    table.add_column("命令", style="green", min_width=14)
+    table.add_column("命令", style="#b5bd68", min_width=14)
     table.add_column("说明")
 
     table.add_row("/help", "显示此帮助信息")
@@ -496,10 +749,17 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     table.add_row("/subagent [on|off|status|list]", "会话级 subagent 开关与列表")
     table.add_row("/subagent run -- <task>", "自动选择 subagent 执行任务")
     table.add_row("/subagent run <agent> -- <task>", "指定 subagent 执行任务")
+    table.add_row("/mcp", "查看 MCP Server 连接状态与工具列表")
     table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
     table.add_row("/accept <id>", "执行待确认高风险操作")
     table.add_row("/reject <id>", "拒绝待确认高风险操作")
     table.add_row("/undo <id>", "回滚已确认且可回滚的操作")
+    table.add_row("/plan [on|off|status]", "会话级 plan mode 开关与状态")
+    table.add_row("/plan approve [plan_id]", "批准待审批计划并自动继续执行")
+    table.add_row("/plan reject [plan_id]", "拒绝待审批计划")
+    table.add_row("/model", "查看当前模型")
+    table.add_row("/model list", "列出所有可用模型")
+    table.add_row("/model <name>", "切换模型（支持智能补全）")
     table.add_row("/<skill_name> [args...]", "手动调用指定 Skillpack（如 /data_basic）")
     table.add_row("多选回答", "待回答问题为多选时：每行一个选项，空行提交")
     skill_rows = _load_skill_command_rows(engine) if engine is not None else []
@@ -515,10 +775,10 @@ def _render_help(engine: AgentEngine | None = None) -> None:
             table,
             title="[bold]帮助[/bold]",
             title_align="left",
-            border_style="blue",
+            border_style="#5f87af",
             expand=False,
             padding=(1, 2),
-            subtitle="[dim]直接输入自然语言即可与代理对话[/dim]",
+            subtitle="[dim white]直接输入自然语言即可与代理对话[/dim white]",
             subtitle_align="left",
         )
     )
@@ -540,19 +800,19 @@ def _render_history(engine: AgentEngine) -> None:
             history_entries.append(f"  [bold green]▸[/bold green] {display}")
         elif role == "assistant" and content:
             display = content if len(content) <= 80 else content[:77] + "…"
-            history_entries.append(f"  [bold cyan]◂[/bold cyan] {display}")
+            history_entries.append(f"  [bold #81a2be]◂[/bold #81a2be] {display}")
 
     if not history_entries:
-        console.print("  [dim]暂无对话历史。[/dim]")
+        console.print("  [dim white]暂无对话历史。[/dim white]")
         return
 
     console.print()
     console.print(
         Panel(
             "\n".join(history_entries),
-            title=f"[bold]对话历史[/bold] [dim]({len(history_entries)} 条)[/dim]",
+            title=f"[bold]对话历史[/bold] [dim white]({len(history_entries)} 条)[/dim white]",
             title_align="left",
-            border_style="yellow",
+            border_style="#de935f",
             expand=False,
             padding=(1, 1),
         )
@@ -562,7 +822,7 @@ def _render_history(engine: AgentEngine) -> None:
 
 def _render_farewell() -> None:
     """渲染告别信息。"""
-    console.print("\n  [cyan]感谢使用 ExcelManus，再见！[/cyan] 👋\n")
+    console.print("\n  [#81a2be]感谢使用 ExcelManus，再见！[/#81a2be] 👋\n")
 
 
 def _render_skills(engine: AgentEngine) -> None:
@@ -571,19 +831,19 @@ def _render_skills(engine: AgentEngine) -> None:
     route = engine.last_route_result
 
     table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
-    table.add_column(style="dim", min_width=12)
+    table.add_column(style="dim white", min_width=12)
     table.add_column()
 
     table.add_row(
         "已加载",
-        ", ".join(f"[magenta]{s}[/magenta]" for s in loaded) if loaded else "[dim]无[/dim]",
+        ", ".join(f"[#b294bb]{s}[/#b294bb]" for s in loaded) if loaded else "[dim white]无[/dim white]",
     )
-    table.add_row("路由模式", f"[yellow]{route.route_mode}[/yellow]")
+    table.add_row("路由模式", f"[#f0c674]{route.route_mode}[/#f0c674]")
     table.add_row(
         "命中技能",
         ", ".join(f"[bold]{s}[/bold]" for s in route.skills_used)
         if route.skills_used
-        else "[dim]无[/dim]",
+        else "[dim white]无[/dim white]",
     )
     tool_count = len(route.tool_scope) if route.tool_scope else 0
     table.add_row("工具范围", f"{tool_count} 个工具")
@@ -593,6 +853,10 @@ def _render_skills(engine: AgentEngine) -> None:
         "子代理状态",
         "enabled" if engine.subagent_enabled else "disabled",
     )
+    table.add_row(
+        "计划模式",
+        "enabled" if engine.plan_mode_enabled else "disabled",
+    )
 
     console.print()
     console.print(
@@ -600,7 +864,52 @@ def _render_skills(engine: AgentEngine) -> None:
             table,
             title="[bold]🧩 Skillpacks[/bold]",
             title_align="left",
-            border_style="magenta",
+            border_style="#b294bb",
+            expand=False,
+            padding=(0, 2),
+        )
+    )
+    console.print()
+def _render_mcp(engine: AgentEngine) -> None:
+    """渲染 MCP Server 连接状态与工具列表。"""
+    servers = engine.mcp_server_info()
+
+    if not servers:
+        console.print()
+        console.print("  [dim white]未配置或未连接任何 MCP Server。[/dim white]")
+        console.print()
+        return
+
+    table = Table(
+        show_header=True, show_edge=False, pad_edge=False, expand=False
+    )
+    table.add_column("Server", style="#b294bb", min_width=16)
+    table.add_column("传输", style="#f0c674", min_width=8)
+    table.add_column("工具数", style="#b5bd68", min_width=6, justify="right")
+    table.add_column("工具列表", style="white")
+
+    for srv in servers:
+        tool_names = srv.get("tools", [])
+        # 工具名过多时截断显示
+        if len(tool_names) <= 6:
+            tools_display = ", ".join(tool_names) if tool_names else "-"
+        else:
+            shown = ", ".join(tool_names[:6])
+            tools_display = f"{shown} … (+{len(tool_names) - 6})"
+        table.add_row(
+            srv["name"],
+            srv.get("transport", "?"),
+            str(srv.get("tool_count", 0)),
+            tools_display,
+        )
+
+    console.print()
+    console.print(
+        Panel(
+            table,
+            title="[bold]🔌 MCP Servers[/bold]",
+            title_align="left",
+            border_style="#b294bb",
             expand=False,
             padding=(0, 2),
         )
@@ -614,6 +923,109 @@ def _is_interactive_terminal() -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
     except Exception:
         return False
+
+
+# ------------------------------------------------------------------
+# 交互式模型选择器（箭头键导航 + Enter 确认切换）
+# ------------------------------------------------------------------
+
+async def _interactive_model_select(engine: AgentEngine) -> str | None:
+    """使用 prompt_toolkit 构建交互式模型选择器。
+
+    ↑↓ 移动光标，Enter 确认切换，Esc 退出。
+    返回选中模型的 name（如 "default"、"libao-kimi"），
+    返回 None 表示用户按了 Esc 或不支持交互式选择。
+    """
+    if not _PROMPT_TOOLKIT_ENABLED or not _is_interactive_terminal():
+        return None
+
+    rows = engine.list_models()
+    if not rows:
+        return None
+
+    # 找到当前激活模型的索引作为初始光标位置
+    initial_cursor = 0
+    for i, row in enumerate(rows):
+        if row.get("active"):
+            initial_cursor = i
+            break
+
+    cursor = [initial_cursor]
+    result_holder: list[str | None] = []
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _move_up(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] - 1) % len(rows)
+
+    @kb.add("down")
+    def _move_down(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] + 1) % len(rows)
+
+    @kb.add("enter")
+    def _confirm(event) -> None:  # type: ignore[no-untyped-def]
+        result_holder.append(rows[cursor[0]]["name"])
+        event.app.exit()
+
+    @kb.add("escape")
+    def _escape(event) -> None:  # type: ignore[no-untyped-def]
+        result_holder.append(None)
+        event.app.exit()
+
+    def _get_formatted_text() -> FormattedText:
+        fragments: list[tuple[str, str]] = []
+        fragments.append(("class:header", "  🤖 选择模型\n\n"))
+
+        for i, row in enumerate(rows):
+            is_cursor = i == cursor[0]
+            is_active = bool(row.get("active"))
+
+            prefix = "  ❯ " if is_cursor else "    "
+            name = row["name"]
+            model = row["model"]
+            desc = f"  {row['description']}" if row.get("description") else ""
+            marker = " ✦" if is_active else ""
+            line = f"{prefix}{name} → {model}{desc}{marker}\n"
+
+            if is_cursor:
+                style = "class:selected"
+            elif is_active:
+                style = "class:active"
+            else:
+                style = "class:option"
+            fragments.append((style, line))
+
+        fragments.append(("", "\n"))
+        fragments.append(("class:hint", "  ↑↓ 移动  Enter 确认  Esc 退出\n"))
+        return FormattedText(fragments)
+
+    control = FormattedTextControl(_get_formatted_text)
+    window = Window(content=control, always_hide_cursor=True)
+    layout = Layout(HSplit([window]))
+
+    style = Style.from_dict(
+        {
+            "header": "bold #f0c674",
+            "selected": "bold #b5bd68 reverse",
+            "active": "bold #f0c674",
+            "option": "",
+            "hint": "italic #888888",
+        }
+    )
+
+    app: Application[None] = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    await app.run_async()
+
+    if not result_holder:
+        return None
+    return result_holder[0]
 
 
 class _LiveStatusTicker:
@@ -672,7 +1084,7 @@ class _LiveStatusTicker:
             line_width = cell_len(line)
             self._last_line_width = max(self._last_line_width, line_width)
             padding = " " * max(self._last_line_width - line_width, 0)
-            self._console.print(Text(f"{line}{padding}", style="dim"), end="\r")
+            self._console.print(Text(f"{line}{padding}", style="dim white"), end="\r")
             await asyncio.sleep(self._interval)
 
     def _update_state_from_event(self, event: ToolCallEvent) -> None:
@@ -724,6 +1136,7 @@ async def _chat_with_feedback(
 async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
     _sync_skill_command_suggestions(engine)
+    _sync_model_suggestions(engine)
     while True:
         has_pending_question = bool(
             getattr(engine, "has_pending_question", lambda: False)()
@@ -731,10 +1144,61 @@ async def _repl_loop(engine: AgentEngine) -> None:
         waiting_multiselect = bool(
             getattr(engine, "is_waiting_multiselect_answer", lambda: False)()
         )
+
+        # ----------------------------------------------------------
+        # 有待回答问题且有选项时，优先启动交互式选择器
+        # ----------------------------------------------------------
+        if has_pending_question:
+            current_q_getter = getattr(engine, "current_pending_question", None)
+            current_q: PendingQuestion | None = (
+                current_q_getter() if callable(current_q_getter) else None
+            )
+            if current_q and current_q.options:
+                try:
+                    select_result = await _interactive_question_select(current_q)
+                except (KeyboardInterrupt, EOFError):
+                    _render_farewell()
+                    return
+                except Exception as exc:
+                    logger.warning("交互式选择器异常，回退到普通输入：%s", exc)
+                    select_result = None
+
+                if select_result is not None and not select_result.escaped:
+                    # 用户通过选择器完成了选择
+                    user_input = _build_answer_from_select(current_q, select_result)
+                    if user_input:
+                        try:
+                            renderer = StreamRenderer(console)
+                            console.print()
+                            reply = await _chat_with_feedback(
+                                engine,
+                                user_input=user_input,
+                                renderer=renderer,
+                            )
+                            console.print()
+                            console.print(
+                                Panel(
+                                    Markdown(reply),
+                                    border_style="#5f875f",
+                                    padding=(1, 2),
+                                    expand=False,
+                                )
+                            )
+                        except KeyboardInterrupt:
+                            _render_farewell()
+                            return
+                        except Exception as exc:
+                            logger.error("处理待回答问题时发生错误: %s", exc, exc_info=True)
+                            console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
+                        continue
+                    # user_input 为空（不应发生），回退到普通输入
+                # select_result 为 None（不支持）或 escaped（用户按 Esc）
+                # 回退到下方普通输入流程
+
         try:
             if waiting_multiselect:
                 console.print(
-                    "  [dim]多选回答模式：每行输入一个选项，空行提交。[/dim]"
+                    "  [dim white]多选回答模式：每行输入一个选项，空行提交。[/dim white]"
                 )
                 user_input = (await _read_multiline_user_input()).strip()
             else:
@@ -766,7 +1230,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 console.print(
                     Panel(
                         Markdown(reply),
-                        border_style="dim cyan",
+                        border_style="#5f875f",
                         padding=(1, 2),
                         expand=False,
                     )
@@ -797,6 +1261,10 @@ async def _repl_loop(engine: AgentEngine) -> None:
             _render_skills(engine)
             continue
 
+        if user_input.lower() == "/mcp":
+            _render_mcp(engine)
+            continue
+
         if user_input.startswith("/skills "):
             try:
                 handled = _handle_skills_subcommand(engine, user_input)
@@ -807,12 +1275,33 @@ async def _repl_loop(engine: AgentEngine) -> None:
             if handled:
                 continue
 
-        # 会话控制命令统一走 engine.chat（与 API 行为一致）
+        # /model 和 /model list 在 CLI 层拦截，使用交互式选择器
         lowered_parts = user_input.lower().split()
         lowered_cmd = lowered_parts[0] if lowered_parts else ""
+        if lowered_cmd == "/model" and (
+            len(lowered_parts) == 1 or (len(lowered_parts) == 2 and lowered_parts[1] == "list")
+        ):
+            try:
+                selected_name = await _interactive_model_select(engine)
+            except (KeyboardInterrupt, EOFError):
+                _render_farewell()
+                return
+            except Exception as exc:
+                logger.warning("交互式模型选择器异常，回退到文本列表：%s", exc)
+                selected_name = None
+
+            if selected_name is not None:
+                result_msg = engine.switch_model(selected_name)
+                console.print(f"  [#81a2be]{result_msg}[/#81a2be]")
+                _sync_model_suggestions(engine)
+            else:
+                console.print("  [dim white]已取消选择。[/dim white]")
+            continue
+
+        # 会话控制命令统一走 engine.chat（与 API 行为一致）
         if lowered_cmd in _SESSION_CONTROL_COMMAND_ALIASES:
             reply = _reply_text(await engine.chat(user_input))
-            console.print(f"  [cyan]{reply}[/cyan]")
+            console.print(f"  [#81a2be]{reply}[/#81a2be]")
             continue
 
         # Skill 斜杠命令：如 /data_basic ...（走手动 Skill 路由）
@@ -830,7 +1319,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 else ""
             )
             if not raw_args and isinstance(argument_hint, str) and argument_hint.strip():
-                console.print(f"  [yellow]参数提示：{argument_hint.strip()}[/yellow]")
+                console.print(f"  [#de935f]参数提示：{argument_hint.strip()}[/#de935f]")
             try:
                 renderer = StreamRenderer(console)
                 console.print()
@@ -846,7 +1335,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 console.print(
                     Panel(
                         Markdown(reply),
-                        border_style="dim cyan",
+                        border_style="#5f875f",
                         padding=(1, 2),
                         expand=False,
                     )
@@ -864,7 +1353,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
             known_commands = _list_known_slash_commands()
             suggestion = ", ".join(known_commands[:8]) if known_commands else "/help"
             console.print(
-                f"  [yellow]未知命令：{user_input}。可用命令示例：{suggestion}[/yellow]"
+                f"  [#de935f]未知命令：{user_input}。可用命令示例：{suggestion}[/#de935f]"
             )
             continue
 
@@ -883,7 +1372,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
             console.print(
                 Panel(
                     Markdown(reply),
-                    border_style="dim cyan",
+                    border_style="#5f875f",
                     padding=(1, 2),
                     expand=False,
                 )
@@ -946,10 +1435,18 @@ async def _async_main() -> None:
         memory_extractor=memory_extractor,
     )
     _sync_skill_command_suggestions(engine)
+    _sync_model_suggestions(engine)
+
+    # 初始化 MCP 连接
+    try:
+        await engine.initialize_mcp()
+    except Exception:
+        logger.warning("MCP 初始化失败，已跳过", exc_info=True)
 
     # 渲染欢迎信息
     skill_count = len(engine.list_loaded_skillpacks())
-    _render_welcome(config, skill_count)
+    mcp_count = engine.mcp_connected_count
+    _render_welcome(config, skill_count, mcp_count)
 
     # 启动 REPL 循环
     try:
@@ -959,6 +1456,10 @@ async def _async_main() -> None:
             await engine.extract_and_save_memory()
         except Exception:
             logger.warning("CLI 退出时持久记忆提取失败，已跳过", exc_info=True)
+        try:
+            await engine.shutdown_mcp()
+        except Exception:
+            logger.warning("CLI 退出时 MCP 关闭失败，已跳过", exc_info=True)
 
 
 def main() -> None:

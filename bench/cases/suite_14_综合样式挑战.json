@@ -1,0 +1,18 @@
+{
+  "suite_name": "14_综合样式挑战",
+  "description": "realtest.md 综合样式挑战",
+  "cases": [
+    {
+      "id": "01",
+      "name": "封面工作表",
+      "message": "在 stress_test_comprehensive.xlsx 中创建一个全新的「封面」工作表放在最前面：公司 Logo 占位区（合并 A1:D6 深蓝背景）、报表名称（合并居中 28 号白色粗体）、副标题、生成信息、机密等级标记（红色边框红字「内部机密」），整体模拟正式报告封面",
+      "tags": ["format", "layout"]
+    },
+    {
+      "id": "02",
+      "name": "KPI仪表盘暗色风格",
+      "message": "把 stress_test_comprehensive.xlsx「KPI仪表盘」改造成真正的仪表盘风格：深色背景（#1B2631），所有文字改白色/浅灰，KPI 卡片用深灰卡片+亮色数字，图表区域用深色主题，模拟 BI 工具的暗色仪表盘效果",
+      "tags": ["format", "theme"]
+    }
+  ]
+}

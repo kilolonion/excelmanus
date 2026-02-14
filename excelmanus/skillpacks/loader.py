@@ -82,6 +82,31 @@ class SkillpackLoader:
         """返回技能包映射（副本）。"""
         return {skill.name: skill for skill in self.list_skillpacks()}
 
+    def inject_skillpacks(self, skillpacks: list[Skillpack]) -> int:
+        """注入外部生成的 Skillpack（如 MCP 自动生成）。
+
+        仅在同名 Skillpack 尚未被文件系统加载时注入，
+        避免覆盖用户或项目层的同名自定义 Skillpack。
+
+        Args:
+            skillpacks: 待注入的 Skillpack 列表。
+
+        Returns:
+            实际注入的数量。
+        """
+        injected = 0
+        for skill in skillpacks:
+            if skill.name in self._skillpacks:
+                logger.info(
+                    "跳过注入 Skillpack '%s'：同名技能包已由文件系统加载",
+                    skill.name,
+                )
+                continue
+            self._skillpacks[skill.name] = skill
+            injected += 1
+            logger.info("注入外部 Skillpack '%s'", skill.name)
+        return injected
+
     def load_all(self) -> dict[str, Skillpack]:
         """加载 system/user/project 三层 Skillpack。"""
         self._warnings.clear()
@@ -203,11 +228,30 @@ class SkillpackLoader:
 
     def _validate_allowed_tools_soft(self, name: str, allowed_tools: list[str]) -> None:
         known_tools = set(self._tool_registry.get_tool_names())
-        unknown_tools = sorted(tool for tool in allowed_tools if tool not in known_tools)
+        unknown_tools = sorted(
+            tool
+            for tool in allowed_tools
+            if tool not in known_tools and not self._is_allowed_tool_selector(tool)
+        )
         if unknown_tools:
             self._append_warning(
                 f"Skillpack '{name}' 引用了未注册工具（软校验告警）: {', '.join(unknown_tools)}"
             )
+
+    @staticmethod
+    def _is_allowed_tool_selector(tool: str) -> bool:
+        """判断是否为运行期可展开的工具选择器。"""
+        normalized = tool.strip()
+        if normalized == "mcp:*":
+            return True
+        if not normalized.startswith("mcp:"):
+            return False
+        parts = normalized.split(":", 2)
+        if len(parts) != 3:
+            return False
+        server_name = parts[1].strip()
+        tool_name = parts[2].strip()
+        return bool(server_name and tool_name)
 
     def _load_resources(
         self,

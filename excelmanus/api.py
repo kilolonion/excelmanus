@@ -268,6 +268,8 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
             "approval_id": item.approval_id,
             "pending_question": bool(item.pending_question),
             "question_id": item.question_id,
+            "pending_plan": bool(item.pending_plan),
+            "plan_id": item.plan_id,
         })
     return rows
 
@@ -333,6 +335,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _cleanup_task
         except asyncio.CancelledError:
             pass
+
+    # 关闭所有会话的 MCP 连接
+    if _session_manager is not None:
+        for sid, entry in list(_session_manager._sessions.items()):
+            try:
+                await entry.engine.shutdown_mcp()
+            except Exception:
+                logger.warning("API 关闭时会话 %s MCP 关闭失败", sid, exc_info=True)
 
     logger.info("API 服务已关闭")
 

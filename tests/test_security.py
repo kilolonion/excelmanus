@@ -126,7 +126,7 @@ class TestResolveAndValidate:
 
 import tempfile
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, strategies as st
 
 
 # 路径穿越 payload 策略：生成包含 .. 的越界路径
@@ -156,7 +156,6 @@ class TestProperty19FileAccessBoundary:
     **Validates: Requirements 8.1, 8.2, 6.8**
     """
 
-    @settings(max_examples=100)
     @given(path=path_traversal_st)
     def test_traversal_paths_rejected(self, path: str) -> None:
         """任意路径穿越或越界路径必须抛出 SecurityViolationError。"""
@@ -165,7 +164,6 @@ class TestProperty19FileAccessBoundary:
             with pytest.raises(SecurityViolationError):
                 guard.resolve_and_validate(path)
 
-    @settings(max_examples=100)
     @given(
         depth=st.integers(min_value=1, max_value=20),
     )
@@ -177,7 +175,6 @@ class TestProperty19FileAccessBoundary:
             with pytest.raises(SecurityViolationError):
                 guard.resolve_and_validate(evil_path)
 
-    @settings(max_examples=100)
     @given(
         filename=st.text(
             alphabet=st.characters(whitelist_categories=("Ll", "N"), whitelist_characters="_-."),

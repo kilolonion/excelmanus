@@ -1,4 +1,56 @@
-# local secrets
+# ==============================
+# 敏感文件 / Secrets
+# ==============================
 .env
 .env.*
 !.env.example
+mcp.json
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+*.cover
+
+# ==============================
+# Node.js / Frontend
+# ==============================
+node_modules/
+frontend/dist/
+
+# ==============================
+# IDE / 编辑器
+# ==============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==============================
+# 项目运行产物
+# ==============================
+.excelmanus/
+outputs/
+logs/
+
+# ==============================
+# 临时 / 生成文件
+# ==============================
+*.png
+*.csv
+scripts/temp/

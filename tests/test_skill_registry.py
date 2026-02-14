@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, strategies as st
 
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import (
@@ -54,7 +54,6 @@ class TestProperty8ToolRegistration:
     **Validates: Requirements 2.1, 2.2, 2.5**
     """
 
-    @settings(max_examples=100)
     @given(
         tool_count=st.integers(min_value=1, max_value=10),
     )
@@ -66,7 +65,6 @@ class TestProperty8ToolRegistration:
         schemas = registry.get_openai_schemas()
         assert len(schemas) == tool_count
 
-    @settings(max_examples=100)
     @given(
         tool_count=st.integers(min_value=1, max_value=8),
     )

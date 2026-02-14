@@ -22,6 +22,7 @@ SKILL_DESCRIPTION = "工作表管理工具集：列表、创建、复制、重�
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
 
 _guard: FileAccessGuard | None = None
+_MAX_LIST_PAGE_SIZE = 500
 
 
 def _get_guard() -> FileAccessGuard:
@@ -42,18 +43,35 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
+def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_PAGE_SIZE) -> str | None:
+    """校验分页参数，返回错误信息或 None。"""
+    if offset < 0:
+        return "offset 必须大于或等于 0"
+    if limit <= 0:
+        return "limit 必须为正整数"
+    if limit > max_limit:
+        return f"limit 不能超过 {max_limit}"
+    return None
+
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 
-def list_sheets(file_path: str) -> str:
+def list_sheets(file_path: str, offset: int = 0, limit: int = 100) -> str:
     """列出 Excel 文件中所有工作表的名称和基本信息。
 
     Args:
         file_path: Excel 文件路径。
+        offset: 分页起始偏移（从 0 开始），默认 0。
+        limit: 分页大小，默认 100，最大 500。
 
     Returns:
         JSON 格式的工作表列表，包含名称、行列数和是否为活动表。
     """
+    paging_error = _validate_pagination(offset, limit)
+    if paging_error is not None:
+        return json.dumps({"error": paging_error}, ensure_ascii=False)
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
@@ -71,11 +89,19 @@ def list_sheets(file_path: str) -> str:
     finally:
         wb.close()
 
+    total = len(sheets)
+    end = offset + limit
+    paged_sheets = sheets[offset:end]
+    has_more = end < total
     return json.dumps(
         {
             "file": safe_path.name,
-            "sheet_count": len(sheets),
-            "sheets": sheets,
+            "sheet_count": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(paged_sheets),
+            "has_more": has_more,
+            "sheets": paged_sheets,
         },
         ensure_ascii=False,
         indent=2,
@@ -451,11 +477,22 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "Excel 文件路径",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": "分页起始偏移（从 0 开始），默认 0",
+                        "default": 0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "分页大小，默认 100，最大 500",
+                        "default": 100,
+                    },
                 },
                 "required": ["file_path"],
                 "additionalProperties": False,
             },
             func=list_sheets,
+            max_result_chars=0,
         ),
         ToolDef(
             name="create_sheet",

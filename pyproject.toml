@@ -22,6 +22,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "prompt_toolkit>=3.0.0",
     "tiktoken>=0.7.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

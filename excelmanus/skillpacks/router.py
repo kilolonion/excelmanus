@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import re
+from typing import Any
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.logger import get_logger
@@ -20,6 +21,20 @@ _EXCEL_PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+
+# fallback 模式下始终可用的只读发现工具。
+# 让代理无需先 select_skill 即可快速探查工作区全貌。
+_FALLBACK_DISCOVERY_TOOLS = [
+    "scan_excel_files",  # 批量扫描 Excel：sheet 列表、行列数、列名、预览行
+    "list_directory",    # 查看目录结构
+    "search_files",      # 按模式搜索文件
+    "list_sheets",       # 查看单文件 sheet 列表
+    "get_file_info",     # 获取文件基本信息
+    "read_excel",        # 读取单文件数据（发现后深入查看）
+    "filter_data",       # 按条件过滤数据行（只读）
+    "analyze_data",      # 基本统计分析（只读）
+    "group_aggregate",   # 分组聚合统计（只读）
+]
 
 
 class SkillRouter:
@@ -183,10 +198,13 @@ class SkillRouter:
             route_mode=route_mode,
         )
 
-        # 将 list_skills 加入 tool_scope
+        # 将 list_skills 和只读发现工具加入 tool_scope
         tool_scope = list(result.tool_scope)
         if "list_skills" not in tool_scope:
             tool_scope.append("list_skills")
+        for tool_name in _FALLBACK_DISCOVERY_TOOLS:
+            if tool_name not in tool_scope:
+                tool_scope.append(tool_name)
         system_contexts = list(result.system_contexts)
         large_file_context = self._build_large_file_context(
             user_message=user_message,
@@ -194,6 +212,12 @@ class SkillRouter:
         )
         if large_file_context:
             system_contexts.append(large_file_context)
+
+        file_structure_context = self._build_file_structure_context(
+            candidate_file_paths=candidate_file_paths,
+        )
+        if file_structure_context:
+            system_contexts.append(file_structure_context)
 
         return SkillMatchResult(
             skills_used=result.skills_used,
@@ -280,6 +304,174 @@ class SkillRouter:
             deduped.append(normalized)
             seen.add(normalized)
         return deduped
+
+    def _build_file_structure_context(
+        self,
+        *,
+        candidate_file_paths: list[str] | None,
+        max_files: int = 3,
+        max_sheets: int = 5,
+        scan_rows: int = 12,
+    ) -> str:
+        """预读候选 Excel 文件的 sheet 结构，注入路由上下文。
+
+        用 openpyxl 只读模式仅读前几行，帮助 LLM 确定 header_row
+        和可用列名，避免盲猜导致的多轮重试。
+        """
+        if not candidate_file_paths:
+            return ""
+
+        file_sections: list[str] = []
+        processed = 0
+        seen: set[str] = set()
+
+        for raw_path in candidate_file_paths:
+            if processed >= max_files:
+                break
+            normalized = (raw_path or "").strip()
+            if not normalized:
+                continue
+            try:
+                path_obj = Path(normalized).expanduser()
+                if not path_obj.is_absolute():
+                    path_obj = Path.cwd() / path_obj
+                resolved = path_obj.resolve(strict=False)
+            except OSError:
+                continue
+
+            resolved_str = str(resolved)
+            if resolved_str in seen:
+                continue
+            seen.add(resolved_str)
+
+            if resolved.suffix.lower() not in _EXCEL_SUFFIXES:
+                continue
+            try:
+                if not resolved.is_file():
+                    continue
+            except OSError:
+                continue
+
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(resolved, read_only=True, data_only=True)
+            except Exception:
+                continue
+
+            sheet_lines: list[str] = []
+            try:
+                for idx, sn in enumerate(wb.sheetnames):
+                    ws = wb[sn]
+                    if idx >= max_sheets:
+                        # 超出详细预览数量的 sheet：仅输出摘要行（名称+行列数）
+                        summary_rows = ws.max_row or 0
+                        summary_cols = ws.max_column or 0
+                        sheet_lines.append(f"  [{sn}] {summary_rows}行×{summary_cols}列")
+                        continue
+
+                    rows_data: list[list[Any]] = []
+                    for i, row in enumerate(ws.iter_rows(values_only=True)):
+                        if i >= scan_rows:
+                            break
+                        normalized_row = []
+                        for c in row:
+                            if isinstance(c, str):
+                                text = c.strip()
+                                normalized_row.append(text if text else None)
+                            else:
+                                normalized_row.append(c)
+                        rows_data.append(normalized_row)
+
+                    total_rows = ws.max_row or 0
+                    total_cols = ws.max_column or 0
+                    sheet_lines.append(f"  [{sn}] {total_rows}行×{total_cols}列")
+
+                    for ri, row_vals in enumerate(rows_data):
+                        # 过滤尾部 None
+                        trimmed = row_vals
+                        while trimmed and trimmed[-1] is None:
+                            trimmed = trimmed[:-1]
+                        display = [str(v) if v is not None else None for v in trimmed]
+                        sheet_lines.append(f"    第{ri}行: {display}")
+
+                    # 启发式 header_row 建议
+                    header_hint = self._guess_header_row(rows_data)
+                    if header_hint is not None:
+                        sheet_lines.append(f"    → 建议 header_row={header_hint}")
+            finally:
+                wb.close()
+
+            if sheet_lines:
+                file_sections.append(f"文件: {normalized}\n" + "\n".join(sheet_lines))
+                processed += 1
+
+        if not file_sections:
+            return ""
+
+        header = "[文件结构预览] 以下是用户提及的 Excel 文件结构，请据此确定正确的 header_row 和列名。"
+        return header + "\n" + "\n".join(file_sections)
+
+    @staticmethod
+    def _guess_header_row(rows: list[list[Any]], max_scan: int = 12) -> int | None:
+        """启发式猜测 header 行号（0-indexed）。
+
+        支持多段结构：通过非空数量、文本占比、关键字命中和下一行数据特征综合评分。
+        """
+        if not rows:
+            return None
+
+        keywords = ("月份", "日期", "城市", "产品", "部门", "姓名", "工号", "金额", "数量", "状态", "营收", "利润")
+
+        def _trim(row: list[Any]) -> list[Any]:
+            trimmed = list(row)
+            while trimmed and trimmed[-1] is None:
+                trimmed.pop()
+            return trimmed
+
+        def _score(row: list[Any], row_idx: int, next_row: list[Any] | None) -> float:
+            row = _trim(row)
+            non_empty = [v for v in row if v is not None]
+            if len(non_empty) < 3:
+                return float("-inf")
+
+            text_values = [str(v).strip() for v in non_empty if isinstance(v, str) and str(v).strip()]
+            string_count = len(text_values)
+            numeric_count = sum(1 for v in non_empty if isinstance(v, (int, float)))
+            unique_ratio = len(set(map(str, non_empty))) / max(len(non_empty), 1)
+            keyword_hits = sum(1 for text in text_values if any(k in text for k in keywords))
+
+            score = 0.0
+            score += len(non_empty) * 2.0
+            score += string_count * 1.4
+            score -= numeric_count * 1.2
+            score += unique_ratio * 2.0
+            score += keyword_hits * 2.5
+            score -= row_idx * 0.03
+
+            first = non_empty[0]
+            if isinstance(first, str) and any(token in first for token in ("生成时间", "报表", "分析", "仪表盘", "──")):
+                score -= 5.0
+
+            if next_row:
+                nn = [v for v in _trim(next_row) if v is not None]
+                if nn:
+                    next_numeric_ratio = sum(1 for v in nn if isinstance(v, (int, float))) / len(nn)
+                    score += next_numeric_ratio * 1.5
+            return score
+
+        upper = min(max_scan, len(rows))
+        best_idx: int | None = None
+        best_score = float("-inf")
+        for idx in range(upper):
+            nxt = rows[idx + 1] if idx + 1 < upper else None
+            score = _score(rows[idx], idx, nxt)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_idx is None or best_score == float("-inf"):
+            return None
+        return best_idx
 
     def _build_large_file_context(
         self,
@@ -378,5 +570,3 @@ class SkillRouter:
             if candidate:
                 paths.append(candidate)
         return paths
-
-

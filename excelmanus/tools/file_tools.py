@@ -22,6 +22,7 @@ SKILL_DESCRIPTION = "文件系统工具集：查看、搜索、读取、复制�
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
 
 _guard: FileAccessGuard | None = None
+_MAX_LIST_PAGE_SIZE = 500
 
 
 def _get_guard() -> FileAccessGuard:
@@ -42,15 +43,33 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
+def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_PAGE_SIZE) -> str | None:
+    """校验分页参数，返回错误信息或 None。"""
+    if offset < 0:
+        return "offset 必须大于或等于 0"
+    if limit <= 0:
+        return "limit 必须为正整数"
+    if limit > max_limit:
+        return f"limit 不能超过 {max_limit}"
+    return None
+
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 
-def list_directory(directory: str = ".", show_hidden: bool = False) -> str:
+def list_directory(
+    directory: str = ".",
+    show_hidden: bool = False,
+    offset: int = 0,
+    limit: int = 100,
+) -> str:
     """列出指定目录下的文件和子目录。
 
     Args:
         directory: 目标目录路径（相对于工作目录），默认为当前工作目录。
         show_hidden: 是否显示隐藏文件（以 . 开头），默认不显示。
+        offset: 分页起始偏移（从 0 开始），默认 0。
+        limit: 分页大小，默认 100，最大 500。
 
     Returns:
         JSON 格式的目录内容列表。
@@ -63,6 +82,9 @@ def list_directory(directory: str = ".", show_hidden: bool = False) -> str:
             {"error": f"路径 '{directory}' 不是一个有效的目录"},
             ensure_ascii=False,
         )
+    paging_error = _validate_pagination(offset, limit)
+    if paging_error is not None:
+        return json.dumps({"error": paging_error}, ensure_ascii=False)
 
     entries: list[dict[str, str]] = []
     try:
@@ -89,10 +111,19 @@ def list_directory(directory: str = ".", show_hidden: bool = False) -> str:
             ensure_ascii=False,
         )
 
+    total = len(entries)
+    end = offset + limit
+    paged_entries = entries[offset:end]
+    has_more = end < total
     result = {
         "directory": directory,
-        "total": len(entries),
-        "entries": entries,
+        "absolute_path": str(safe_path),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(paged_entries),
+        "has_more": has_more,
+        "entries": paged_entries,
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -125,6 +156,7 @@ def get_file_info(file_path: str) -> str:
     info: dict[str, Any] = {
         "name": safe_path.name,
         "path": file_path,
+        "absolute_path": str(safe_path),
         "type": "directory" if safe_path.is_dir() else "file",
         "size": _format_size(stat.st_size),
         "size_bytes": stat.st_size,
@@ -179,6 +211,7 @@ def search_files(pattern: str = "*", directory: str = ".", max_results: int = 50
             entry: dict[str, str] = {
                 "name": item.name,
                 "path": str(item.relative_to(guard.workspace_root)),
+                "absolute_path": str(item),
                 "type": "directory" if item.is_dir() else "file",
             }
             if item.is_file():
@@ -410,11 +443,22 @@ def get_tools() -> list[ToolDef]:
                         "description": "是否显示隐藏文件（以 . 开头），默认不显示",
                         "default": False,
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": "分页起始偏移（从 0 开始），默认 0",
+                        "default": 0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "分页大小，默认 100，最大 500",
+                        "default": 100,
+                    },
                 },
                 "required": [],
                 "additionalProperties": False,
             },
             func=list_directory,
+            max_result_chars=0,
         ),
         ToolDef(
             name="get_file_info",

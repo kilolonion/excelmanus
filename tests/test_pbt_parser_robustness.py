@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 from excelmanus.skillpacks.loader import SkillpackLoader, SkillpackValidationError
@@ -82,7 +82,6 @@ _fm_dict = st.dictionaries(
 
 
 @given(s=_no_quote_chars)
-@settings(max_examples=100)
 def test_property_3_double_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（双引号）：对于任意不含引号字符的字符串 s，
     _parse_scalar('"' + s + '"') 应返回 s。
@@ -96,7 +95,6 @@ def test_property_3_double_quoted_string_parsed_correctly(s: str) -> None:
 
 
 @given(s=_no_quote_chars)
-@settings(max_examples=100)
 def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（单引号）：对于任意不含引号字符的字符串 s，
     _parse_scalar("'" + s + "'") 应返回 s。
@@ -134,7 +132,6 @@ _suffix_text = st.text(
     prefix=_unsupported_prefix,
     suffix=_suffix_text,
 )
-@settings(max_examples=100)
 def test_property_4_unsupported_syntax_raises_validation_error(
     key: str,
     prefix: str,
@@ -171,7 +168,6 @@ def _normalize_value(v):
 
 
 @given(data=_fm_dict)
-@settings(max_examples=100)
 def test_property_5_frontmatter_round_trip(data: dict) -> None:
     """Property 5：对于任意合法的 frontmatter 字典，
     _parse_frontmatter(_format_frontmatter(d)) 应产生与 d 等价的字典。

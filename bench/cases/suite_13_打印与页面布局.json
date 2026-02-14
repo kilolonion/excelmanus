@@ -1,0 +1,18 @@
+{
+  "suite_name": "13_打印与页面布局",
+  "description": "realtest.md 打印与页面布局",
+  "cases": [
+    {
+      "id": "01",
+      "name": "销售明细打印设置",
+      "message": "给 stress_test_comprehensive.xlsx「销售明细」设置打印区域（A1:L2004），横向打印，缩放到页面宽度，每页重复表头行",
+      "tags": ["format", "print"]
+    },
+    {
+      "id": "02",
+      "name": "考勤表打印设置",
+      "message": "给 stress_test_comprehensive.xlsx「考勤表」设置 A3 纸张横向打印，页眉显示「XX公司2025年1月考勤表」，页脚显示页码",
+      "tags": ["format", "print"]
+    }
+  ]
+}
