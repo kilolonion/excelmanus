@@ -326,6 +326,22 @@ def _gemini_response_to_openai(
 # ── 解析 base_url，提取 Gemini API 基础路径 ─────────────────────
 
 
+def _extract_model_from_url(base_url: str) -> str | None:
+    """从 Gemini 完整 URL 中提取模型名（如果有的话）。
+
+    例如：
+      https://right.codes/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse
+      → "gemini-2.5-flash"
+
+      https://right.codes/gemini/v1beta
+      → None
+    """
+    url = base_url.split("?")[0]
+    url = re.sub(r":(?:stream)?[Gg]enerate[Cc]ontent$", "", url)
+    match = re.search(r"/models/([^/:]+)$", url)
+    return match.group(1) if match else None
+
+
 def _normalize_gemini_base_url(base_url: str) -> str:
     """从用户提供的 base_url 中提取 Gemini API 基础路径。
 
@@ -400,6 +416,8 @@ class GeminiClient:
 
     def __init__(self, api_key: str, base_url: str) -> None:
         self._api_key = api_key
+        # 从原始 URL 中提取模型名（如果有），作为默认模型
+        self._default_model = _extract_model_from_url(base_url)
         self._base_url = _normalize_gemini_base_url(base_url)
         self._http = httpx.AsyncClient(timeout=300.0)
         self.chat = _GeminiChat(self)
@@ -411,6 +429,8 @@ class GeminiClient:
         tools: Any = None,
     ) -> _ChatCompletion:
         """执行 Gemini generateContent 请求。"""
+        # 如果 URL 中包含模型名，优先使用（允许用户只填完整 URL 不配 MODEL）
+        effective_model = self._default_model or model
         system_instruction, contents = _openai_messages_to_gemini(messages)
 
         # 构建请求体
@@ -425,7 +445,7 @@ class GeminiClient:
             body["tools"] = gemini_tools
 
         # 构建请求 URL
-        url = f"{self._base_url}/models/{model}:generateContent"
+        url = f"{self._base_url}/models/{effective_model}:generateContent"
 
         # 认证：Gemini API 支持 key 查询参数或 Authorization header
         headers = {"Content-Type": "application/json"}
@@ -439,7 +459,7 @@ class GeminiClient:
 
         logger.debug(
             "Gemini 请求: model=%s, contents=%d条, tools=%d个",
-            model,
+            effective_model,
             len(contents),
             len(gemini_tools[0]["functionDeclarations"]) if gemini_tools else 0,
         )
@@ -467,7 +487,7 @@ class GeminiClient:
             logger.error("Gemini 响应 JSON 解析失败: %s", exc)
             raise RuntimeError(f"Gemini 响应解析失败: {exc}") from exc
 
-        result = _gemini_response_to_openai(data, model)
+        result = _gemini_response_to_openai(data, effective_model)
         logger.debug(
             "Gemini 响应: tool_calls=%d, content_len=%d, tokens=%d",
             len(result.choices[0].message.tool_calls or []),

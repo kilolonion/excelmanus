@@ -93,6 +93,11 @@ class ExcelManusConfig:
     window_perception_background_after_idle: int = 1
     window_perception_suspend_after_idle: int = 3
     window_perception_terminate_after_idle: int = 5
+    window_perception_advisor_mode: str = "hybrid"
+    window_perception_advisor_timeout_ms: int = 800
+    window_perception_advisor_trigger_window_count: int = 3
+    window_perception_advisor_trigger_turn: int = 4
+    window_perception_advisor_plan_ttl_turns: int = 2
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -171,6 +176,20 @@ def _parse_system_message_mode(value: str | None) -> str:
         raise ConfigError(
             "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE 必须是 "
             "['auto', 'merge', 'replace'] 之一，当前值: "
+            f"{value!r}"
+        )
+    return normalized
+
+
+def _parse_window_perception_advisor_mode(value: str | None) -> str:
+    """解析窗口感知顾问模式。"""
+    if value is None:
+        return "hybrid"
+    normalized = value.strip().lower()
+    if normalized not in {"rules", "hybrid"}:
+        raise ConfigError(
+            "配置项 EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE 必须是 "
+            "['rules', 'hybrid'] 之一，当前值: "
             f"{value!r}"
         )
     return normalized
@@ -282,9 +301,16 @@ def load_config() -> ExcelManusConfig:
         )
     _validate_base_url(base_url)
     if not model:
+        # 尝试从 Gemini 完整 URL 中提取模型名
+        from excelmanus.providers.gemini import _extract_model_from_url
+        extracted = _extract_model_from_url(base_url)
+        if extracted:
+            model = extracted
+    if not model:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_MODEL。"
             "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
+            "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-2.5-flash:generateContent）"
         )
 
     max_iterations = _parse_int(
@@ -495,6 +521,29 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE",
         5,
     )
+    window_perception_advisor_mode = _parse_window_perception_advisor_mode(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE")
+    )
+    window_perception_advisor_timeout_ms = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS",
+        800,
+    )
+    window_perception_advisor_trigger_window_count = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT"),
+        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT",
+        3,
+    )
+    window_perception_advisor_trigger_turn = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN"),
+        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN",
+        4,
+    )
+    window_perception_advisor_plan_ttl_turns = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS"),
+        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS",
+        2,
+    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -556,5 +605,10 @@ def load_config() -> ExcelManusConfig:
         window_perception_background_after_idle=window_perception_background_after_idle,
         window_perception_suspend_after_idle=window_perception_suspend_after_idle,
         window_perception_terminate_after_idle=window_perception_terminate_after_idle,
+        window_perception_advisor_mode=window_perception_advisor_mode,
+        window_perception_advisor_timeout_ms=window_perception_advisor_timeout_ms,
+        window_perception_advisor_trigger_window_count=window_perception_advisor_trigger_window_count,
+        window_perception_advisor_trigger_turn=window_perception_advisor_trigger_turn,
+        window_perception_advisor_plan_ttl_turns=window_perception_advisor_plan_ttl_turns,
         models=models,
     )
