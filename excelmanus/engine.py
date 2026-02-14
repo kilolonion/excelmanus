@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import openai
 
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
+from excelmanus.providers import create_client
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.hooks import (
@@ -47,7 +48,14 @@ from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
-from excelmanus.window_perception import PerceptionBudget, WindowPerceptionManager
+from excelmanus.window_perception import (
+    AdvisorContext,
+    LifecyclePlan,
+    PerceptionBudget,
+    WindowPerceptionManager,
+    WindowState,
+)
+from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
     from excelmanus.persistent_memory import PersistentMemory
@@ -331,13 +339,13 @@ class AgentEngine:
         mcp_manager: MCPManager | None = None,
         own_mcp_manager: bool = True,
     ) -> None:
-        self._client = openai.AsyncOpenAI(
+        self._client = create_client(
             api_key=config.api_key,
             base_url=config.base_url,
         )
         # 路由子代理：优先使用独立的小模型，未配置时回退到主模型
         if config.router_model:
-            self._router_client = openai.AsyncOpenAI(
+            self._router_client = create_client(
                 api_key=config.router_api_key or config.api_key,
                 base_url=config.router_base_url or config.base_url,
             )
@@ -416,6 +424,17 @@ class AgentEngine:
                 suspend_after_idle=config.window_perception_suspend_after_idle,
                 terminate_after_idle=config.window_perception_terminate_after_idle,
             ),
+            advisor_mode=(
+                "rules"
+                if config.window_perception_advisor_mode == "rules"
+                else "hybrid"
+            ),
+            advisor_trigger_window_count=config.window_perception_advisor_trigger_window_count,
+            advisor_trigger_turn=config.window_perception_advisor_trigger_turn,
+            advisor_plan_ttl_turns=config.window_perception_advisor_plan_ttl_turns,
+        )
+        self._window_perception.bind_async_advisor_runner(
+            self._run_window_perception_advisor_async
         )
 
         # ── 持久记忆集成 ──────────────────────────────────
@@ -914,6 +933,10 @@ class AgentEngine:
             route_result.skills_used,
         )
 
+        self._set_window_perception_turn_hints(
+            user_message=user_message,
+            is_new_task=True,
+        )
         chat_result = await self._tool_calling_loop(route_result, on_event)
 
         # 发出执行摘要事件
@@ -2378,6 +2401,10 @@ class AgentEngine:
             return ChatResult(reply="已记录你的回答。")
         # 从上次中断的轮次之后继续执行
         resume_iteration = self._last_iteration_count + 1
+        self._set_window_perception_turn_hints(
+            user_message=user_message,
+            is_new_task=False,
+        )
         return await self._tool_calling_loop(
             route_to_resume, on_event, start_iteration=resume_iteration
         )
@@ -3332,7 +3359,7 @@ class AgentEngine:
             self._active_api_key = self._config.api_key
             self._active_base_url = self._config.base_url
             self._active_model_name = None
-            self._client = openai.AsyncOpenAI(
+            self._client = create_client(
                 api_key=self._active_api_key,
                 base_url=self._active_base_url,
             )
@@ -3367,7 +3394,7 @@ class AgentEngine:
         self._active_api_key = matched.api_key
         self._active_base_url = matched.base_url
         self._active_model_name = matched.name
-        self._client = openai.AsyncOpenAI(
+        self._client = create_client(
             api_key=self._active_api_key,
             base_url=self._active_base_url,
         )
@@ -3889,6 +3916,10 @@ class AgentEngine:
 
             self._suspend_task_create_plan_once = True
             try:
+                self._set_window_perception_turn_hints(
+                    user_message=draft.objective,
+                    is_new_task=False,
+                )
                 resumed = await self._tool_calling_loop(route_to_resume, on_event)
             finally:
                 self._suspend_task_create_plan_once = False
@@ -4192,6 +4223,74 @@ class AgentEngine:
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
         return self._window_perception.build_system_notice()
+
+    def _set_window_perception_turn_hints(self, *, user_message: str, is_new_task: bool) -> None:
+        """设置窗口感知层的当前轮提示。"""
+        self._window_perception.set_turn_hints(
+            is_new_task=is_new_task,
+            user_intent_summary=self._clip_window_hint(user_message),
+            agent_recent_output=self._clip_window_hint(self._latest_assistant_text()),
+        )
+
+    def _latest_assistant_text(self) -> str:
+        """提取最近一条 assistant 文本。"""
+        for item in reversed(self._memory.get_messages()):
+            if str(item.get("role", "")).strip() != "assistant":
+                continue
+            text = _message_content_to_text(item.get("content"))
+            if text.strip():
+                return text.strip()
+        return ""
+
+    @staticmethod
+    def _clip_window_hint(text: str, *, max_chars: int = 200) -> str:
+        normalized = " ".join(str(text or "").split())
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[:max_chars]
+
+    async def _run_window_perception_advisor_async(
+        self,
+        windows: list[WindowState],
+        active_window_id: str | None,
+        budget: PerceptionBudget,
+        context: AdvisorContext,
+    ) -> LifecyclePlan | None:
+        """异步调用小模型生成窗口生命周期建议。"""
+        messages = build_advisor_messages(
+            windows=windows,
+            active_window_id=active_window_id,
+            budget=budget,
+            context=context,
+        )
+        timeout_seconds = max(
+            0.1,
+            int(self._config.window_perception_advisor_timeout_ms) / 1000,
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._router_client.chat.completions.create(
+                    model=self._router_model,
+                    messages=messages,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.info("窗口感知小模型调用超时（%.2fs）", timeout_seconds)
+            return None
+        except Exception:
+            logger.warning("窗口感知小模型调用失败，已回退规则顾问", exc_info=True)
+            return None
+
+        message, _ = _extract_completion_message(response)
+        content = _message_content_to_text(getattr(message, "content", None)).strip()
+        if not content:
+            return None
+        plan = parse_small_model_plan(content)
+        if plan is None:
+            logger.info("窗口感知小模型输出解析失败，已回退规则顾问")
+            return None
+        return plan
 
     def _effective_system_mode(self) -> str:
         configured = self._config.system_message_mode
