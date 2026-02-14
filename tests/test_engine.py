@@ -894,7 +894,7 @@ class TestDelegateSubagent:
                 subagent_name="explorer",
                 permission_mode="readOnly",
                 conversation_id="conv_1",
-                observed_files=["./stress_test_comprehensive.xlsx"],
+                observed_files=["./examples/bench/stress_test_comprehensive.xlsx"],
             )
         )
 
@@ -906,12 +906,12 @@ class TestDelegateSubagent:
         assert result == "子代理摘要"
 
         notice = engine._build_recent_excel_context_notice()
-        assert "stress_test_comprehensive.xlsx" in notice
+        assert "examples/bench/stress_test_comprehensive.xlsx" in notice
         assert "explorer" in notice
 
         prompts = engine._build_system_prompts([])
         assert len(prompts) == 1
-        assert "stress_test_comprehensive.xlsx" in prompts[0]
+        assert "examples/bench/stress_test_comprehensive.xlsx" in prompts[0]
 
     @pytest.mark.asyncio
     async def test_delegate_pending_approval_asks_user_and_supports_fullaccess_retry(
@@ -956,7 +956,7 @@ class TestDelegateSubagent:
                     {
                         "task": "统计城市销售额",
                         "agent_name": "analyst",
-                        "file_paths": ["stress_test_comprehensive.xlsx"],
+                        "file_paths": ["examples/bench/stress_test_comprehensive.xlsx"],
                     },
                     ensure_ascii=False,
                 ),

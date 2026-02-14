@@ -1,23 +1,23 @@
 {
   "suite_name": "01_基础读取类",
-  "description": "realtest.md 基础读取类",
+  "description": "examples/bench/realtest.md 基础读取类",
   "cases": [
     {
       "id": "01",
       "name": "读取销售明细前10行及列名",
-      "message": "读取 stress_test_comprehensive.xlsx 中「销售明细」工作表的前 10 行数据，告诉我有哪些列",
+      "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中「销售明细」工作表的前 10 行数据，告诉我有哪些列",
       "tags": ["data_read", "header_detection"]
     },
     {
       "id": "02",
       "name": "统计工作表数量与行数",
-      "message": "stress_test_comprehensive.xlsx 有多少个工作表？每个工作表分别有多少行数据？",
+      "message": "examples/bench/stress_test_comprehensive.xlsx 有多少个工作表？每个工作表分别有多少行数据？",
       "tags": ["discovery", "multi_sheet"]
     },
     {
       "id": "03",
       "name": "筛选技术部员工姓名和职级",
-      "message": "读取 stress_test_comprehensive.xlsx 中「员工花名册」里所有部门为「技术部」的员工姓名和职级",
+      "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中「员工花名册」里所有部门为「技术部」的员工姓名和职级",
       "tags": ["data_read", "filter"]
     }
   ]

@@ -10,7 +10,7 @@
 数据，然后进行筛选。
 
 让我先读取员工花名册的数据。
-  📖 read_excel ← file_path="stress_test_comprehensive.xlsx", sheet_name="员工花名册", 
+  📖 read_excel ← file_path="examples/bench/stress_test_comprehensive.xlsx", sheet_name="员工花名册", 
 header_row=2
      ❌ 失败 (77ms) → 工具 'read_excel' 执行失败: Object of type datetime is not JSON 
 serializable
@@ -26,7 +26,7 @@ serializable
   💭 好的，已经激活了 data_basic 技能。现在我可以使用 filter_data 
 函数来筛选数据。但是首先需要确定员工花名册的列名，特别是"部门"列的名称。让我尝试读取前一
 部分数据来了解列结构。
-  🔍 filter_data ← file_path="stress_test_comprehensive.xlsx", column="部门", 
+  🔍 filter_data ← file_path="examples/bench/stress_test_comprehensive.xlsx", column="部门", 
 operator="eq", value="技术部", columns=['姓名', '职级'], sheet_name="员工花名册", 
 header_row=2
      ✅ 成功 (67ms) → {"error": "列 '部门' 不存在，可用列: ['EMP0001', '陶勇', '男', 
@@ -38,10 +38,10 @@ datetime.datetime(1990, 1, 4, 0, 0), datetime.datetime(2022, 9, 20, 0, 0), '技�
 行。从返回的错误信息可以看到列名有点混乱，像是数据内容而不是列标题。让我重新尝试读取，找
 到真正的列名行。从扫描结果来看，员工花名册的数据结构可能不同。让我使用 scan 
 来更好地了解这个工作表的结构。
-  📖 read_excel ← file_path="stress_test_comprehensive.xlsx", sheet_name="员工花名册", 
+  📖 read_excel ← file_path="examples/bench/stress_test_comprehensive.xlsx", sheet_name="员工花名册", 
 header_row=0, max_rows=10
      ✅ 成功 (32ms) → {
-  "file": "stress_test_comprehensive.xlsx",
+  "file": "examples/bench/stress_test_comprehensive.xlsx",
   "shape": {
     "rows": 10,
     "columns": 16
@@ -58,11 +58,11 @@ header_row=0, max_rows=10
 好的，我看到第0行是标题"员工花名册（机密）"，第1行才是真正的列名（工号、姓名、性别...）。
 所以正确的 header_row 应该是1。现在让我使用 header_row=1 
 来读取数据并筛选部门为"技术部"的员工。
-  🔍 filter_data ← file_path="stress_test_comprehensive.xlsx", column="部门", 
+  🔍 filter_data ← file_path="examples/bench/stress_test_comprehensive.xlsx", column="部门", 
 operator="eq", value="技术部", columns=['姓名', '职级'], sheet_name="员工花名册", 
 header_row=1
      ✅ 成功 (73ms) → {
-  "file": "stress_test_comprehensive.xlsx",
+  "file": "examples/bench/stress_test_comprehensive.xlsx",
   "filter": {
     "column": "部门",
     "operator": "eq",

@@ -1,23 +1,23 @@
 {
   "suite_name": "10_合并单元格与布局",
-  "description": "realtest.md 合并单元格与布局",
+  "description": "examples/bench/realtest.md 合并单元格与布局",
   "cases": [
     {
       "id": "01",
       "name": "城市分析报表头区域",
-      "message": "在 stress_test_comprehensive.xlsx「城市分析」表顶部插入一个 3 行的报表头区域：第 1 行公司名（合并全宽、居中、24号字），第 2 行报表标题（18号），第 3 行生成日期（右对齐、灰色斜体）",
+      "message": "在 examples/bench/stress_test_comprehensive.xlsx「城市分析」表顶部插入一个 3 行的报表头区域：第 1 行公司名（合并全宽、居中、24号字），第 2 行报表标题（18号），第 3 行生成日期（右对齐、灰色斜体）",
       "tags": ["format", "merge"]
     },
     {
       "id": "02",
       "name": "多维矩阵年份标题合并",
-      "message": "将 stress_test_comprehensive.xlsx「多维矩阵」的年份标题行改为跨全宽合并、渐变蓝色背景、白色 14 号字居中",
+      "message": "将 examples/bench/stress_test_comprehensive.xlsx「多维矩阵」的年份标题行改为跨全宽合并、渐变蓝色背景、白色 14 号字居中",
       "tags": ["format", "merge"]
     },
     {
       "id": "03",
       "name": "KPI仪表盘卡片圆角",
-      "message": "在 stress_test_comprehensive.xlsx「KPI仪表盘」的 6 个 KPI 卡片周围添加圆角效果（用粗边框+浅灰背景模拟卡片阴影）",
+      "message": "在 examples/bench/stress_test_comprehensive.xlsx「KPI仪表盘」的 6 个 KPI 卡片周围添加圆角效果（用粗边框+浅灰背景模拟卡片阴影）",
       "tags": ["format", "layout"]
     }
   ]
