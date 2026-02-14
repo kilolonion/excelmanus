@@ -1,7 +1,12 @@
-"""路由子代理基准测试：对比主模型 vs 小模型的路由确认耗时。
+"""[deprecated] 路由子代理基准测试脚本（已归档）。
+
+此脚本仅保留历史调研用途，不参与当前主流程。
+如需基准测试，请优先使用 `python -m excelmanus.bench` 与 `bench/cases/*.json`。
+
+路由子代理基准测试：对比主模型 vs 小模型的路由确认耗时。
 
 用法：
-    python scripts/bench_router.py
+    python scripts/archive/bench_router.py
 """
 
 from __future__ import annotations
@@ -10,9 +15,10 @@ import asyncio
 import os
 import sys
 import time
+from pathlib import Path
 
 # 确保项目根目录在 sys.path 中
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import openai
 from dotenv import load_dotenv

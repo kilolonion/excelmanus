@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 """
+[deprecated] 压力测试 Excel 生成脚本（已归档）。
+
+此脚本仅保留为历史样本生成工具，不参与默认开发流程。
+如需更新样本，建议在 `examples/bench/` 下维护并通过 `bench/cases/*.json` 验证。
+
 生成一个大型、多工作表、样式丰富的 Excel 压力测试文件。
 用于全面挑战 ExcelManus agent 的处理能力。
 
@@ -1305,7 +1310,7 @@ def main():
     create_hidden_sheet(wb)
 
     # 保存文件
-    output_path = Path("stress_test_comprehensive.xlsx")
+    output_path = Path("examples/bench/stress_test_comprehensive.xlsx")
     print(f"\n  💾 保存到 {output_path}...")
     wb.save(str(output_path))
 

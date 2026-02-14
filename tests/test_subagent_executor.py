@@ -367,7 +367,7 @@ async def test_collects_observed_files_from_tool_arguments(tmp_path: Path) -> No
                         _response_from_message(
                             _tool_call_message(
                                 "read_excel",
-                                {"file_path": "./stress_test_comprehensive.xlsx"},
+                                {"file_path": "./examples/bench/stress_test_comprehensive.xlsx"},
                             )
                         ),
                         _response_from_message(_text_message("完成")),
@@ -381,4 +381,4 @@ async def test_collects_observed_files_from_tool_arguments(tmp_path: Path) -> No
         result = await executor.run(config=sub_cfg, prompt="读取数据")
 
     assert result.success is True
-    assert "stress_test_comprehensive.xlsx" in result.observed_files
+    assert "examples/bench/stress_test_comprehensive.xlsx" in result.observed_files

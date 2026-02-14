@@ -333,18 +333,18 @@ class TestExcelMCPPathAdaptation:
             workspace_root=str(tmp_path),
         )
 
-        result = tool_def.func(fileAbsolutePath="demo_sales_data.xlsx")
+        result = tool_def.func(fileAbsolutePath="examples/demo/demo_sales_data.xlsx")
 
         assert result == "ok"
         called_args = captured["arguments"]
         assert isinstance(called_args, dict)
         assert called_args["fileAbsolutePath"] == str(
-            (tmp_path / "demo_sales_data.xlsx").resolve(),
+            (tmp_path / "examples/demo/demo_sales_data.xlsx").resolve(),
         )
 
     def test_excel_invalid_absolute_path_fallback_to_workspace_same_name(self, tmp_path):
         """Excel MCP 错误绝对路径应回退到工作区同名文件。"""
-        workbook = tmp_path / "demo_sales_data.xlsx"
+        workbook = tmp_path / "mcp_fallback_demo.xlsx"
         workbook.write_bytes(b"placeholder")
 
         captured: dict[str, object] = {}
@@ -357,7 +357,7 @@ class TestExcelMCPPathAdaptation:
         )
 
         result = tool_def.func(
-            fileAbsolutePath="/tmp/dataset/task_1749690261/demo_sales_data.xlsx",
+            fileAbsolutePath="/tmp/dataset/task_1749690261/examples/demo/mcp_fallback_demo.xlsx",
             sheetName="Sheet1",
         )
 
@@ -382,9 +382,9 @@ class TestExcelMCPPathAdaptation:
             workspace_root=str(tmp_path),
         )
 
-        result = tool_def.func(fileAbsolutePath="demo_sales_data.xlsx")
+        result = tool_def.func(fileAbsolutePath="examples/demo/demo_sales_data.xlsx")
 
         assert result == "ok"
         called_args = captured["arguments"]
         assert isinstance(called_args, dict)
-        assert called_args["fileAbsolutePath"] == "demo_sales_data.xlsx"
+        assert called_args["fileAbsolutePath"] == "examples/demo/demo_sales_data.xlsx"

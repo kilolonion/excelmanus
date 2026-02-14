@@ -16,7 +16,7 @@
   ↓ 轮次 2: search_files → 找到 6 个 .xlsx（关键信息已到手！）
   ↓ 轮次 3: read_excel("销售数据示例.xlsx") → 默认 sheet，没有"销售明细"
   ↓ 轮次 4: read_excel(..., sheet_name="销售明细") → 失败
-  ↓ 轮次 5: read_excel("demo_sales_data.xlsx") → 也没有
+  ↓ 轮次 5: read_excel("examples/demo/demo_sales_data.xlsx") → 也没有
   ↓ 轮次 6: read_excel("示例数据.xlsx") → 也没有
   ↓ 轮次 7: 猜测"销售数据示例.xlsx"就是用户想要的，强行输出结果
 ```
@@ -219,7 +219,7 @@ delegate_description = (
     text: "找到 6 个 Excel 文件，请选择要读取的文件：",
     options: [
       {label: "销售数据示例.xlsx", description: "44KB，含销售相关数据"},
-      {label: "demo_sales_data.xlsx", description: "12KB，销售演示数据"},
+      {label: "examples/demo/demo_sales_data.xlsx", description: "12KB，销售演示数据"},
       {label: "其他文件", description: "示例数据.xlsx 等其余 4 个文件"}
     ]
   })

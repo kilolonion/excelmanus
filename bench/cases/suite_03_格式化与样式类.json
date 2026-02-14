@@ -1,23 +1,23 @@
 {
   "suite_name": "03_格式化与样式类",
-  "description": "realtest.md 格式化与样式类",
+  "description": "examples/bench/realtest.md 格式化与样式类",
   "cases": [
     {
       "id": "01",
       "name": "已取消行标红加粗",
-      "message": "在 stress_test_comprehensive.xlsx「销售明细」中，将所有「已取消」状态的行整行标红加粗",
+      "message": "在 examples/bench/stress_test_comprehensive.xlsx「销售明细」中，将所有「已取消」状态的行整行标红加粗",
       "tags": ["format", "conditional"]
     },
     {
       "id": "02",
       "name": "财务报表净利润行样式",
-      "message": "给 stress_test_comprehensive.xlsx「财务报表」的净利润行添加双线下边框，字体改为 16 号红色",
+      "message": "给 examples/bench/stress_test_comprehensive.xlsx「财务报表」的净利润行添加双线下边框，字体改为 16 号红色",
       "tags": ["format", "border"]
     },
     {
       "id": "03",
       "name": "考勤表缺勤单元格样式",
-      "message": "将 stress_test_comprehensive.xlsx「考勤表」中所有缺勤（×）的单元格背景改为深红色、白色字体",
+      "message": "将 examples/bench/stress_test_comprehensive.xlsx「考勤表」中所有缺勤（×）的单元格背景改为深红色、白色字体",
       "tags": ["format", "conditional"]
     }
   ]
