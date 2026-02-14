@@ -1,4 +1,4 @@
-"""ExcelManus v3 Skillpacks 层导出。"""
+"""ExcelManus v4 Skillpacks 层导出。"""
 
 from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.frontmatter import (

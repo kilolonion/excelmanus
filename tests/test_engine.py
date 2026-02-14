@@ -526,6 +526,410 @@ class TestContextBudgetAndHardCap:
         assert "结果已全局截断" in result.result
         assert "上限: 80 字符" in result.result
 
+    @pytest.mark.asyncio
+    async def test_window_perception_enriches_json_tool_result(self) -> None:
+        def read_excel() -> str:
+            return json.dumps(
+                {
+                    "file": "sales.xlsx",
+                    "shape": {"rows": 20, "columns": 5},
+                    "preview": [{"产品": "A", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={"type": "object", "properties": {}},
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config()
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(name="read_excel", arguments="{}"),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert "───────────── 环境感知 ─────────────" in result.result
+        assert "📊 文件: sales.xlsx" in result.result
+        assert "_environment_perception" not in result.result
+        json_part, _sep, _tail = result.result.partition("\n\n───────────── 环境感知 ─────────────")
+        payload = json.loads(json_part)
+        assert payload["file"] == "sales.xlsx"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_block_contains_scroll_status_and_style_details(self) -> None:
+        def read_excel() -> str:
+            return json.dumps(
+                {
+                    "file": "sales.xlsx",
+                    "sheet": "Q1",
+                    "shape": {"rows": 5000, "columns": 30},
+                    "preview": [
+                        {"产品": "A", "销售额": 12500, "达成率": "106.6%"},
+                        {"产品": "B", "销售额": 8300, "达成率": "90.4%"},
+                    ],
+                    "styles": {
+                        "style_classes": {"s0": {"font": {"bold": True}}},
+                        "merged_ranges": ["F1:H1"],
+                    },
+                    "conditional_formatting": [
+                        {"range": "D2:D7", "type": "cellIs", "operator": "greaterThan"},
+                    ],
+                    "column_widths": {"A": 12.0, "B": 15.0},
+                    "row_heights": {"1": 24.0, "2": 18.0},
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={"type": "object", "properties": {}},
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        engine = AgentEngine(_make_config(), registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(name="read_excel", arguments="{}"),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert "滚动条位置:" in result.result
+        assert "状态栏: SUM=" in result.result
+        assert "列宽: A=12, B=15" in result.result
+        assert "行高: 1=24, 2=18" in result.result
+        assert "合并单元格: F1:H1" in result.result
+        assert "条件格式效果: D2:D7: 条件着色（cellIs/greaterThan）" in result.result
+
+    @pytest.mark.asyncio
+    async def test_window_perception_can_be_disabled(self) -> None:
+        def read_excel() -> str:
+            return json.dumps(
+                {"file": "sales.xlsx", "shape": {"rows": 20, "columns": 5}},
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={"type": "object", "properties": {}},
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(window_perception_enabled=False)
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(name="read_excel", arguments="{}"),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        payload = json.loads(result.result)
+        assert payload["file"] == "sales.xlsx"
+        assert "环境感知" not in result.result
+
+    @pytest.mark.asyncio
+    async def test_window_perception_notice_is_injected_into_system_prompts(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 200, "columns": 12},
+                    "preview": [{"产品": "A", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(system_message_mode="replace")
+        engine = AgentEngine(config, registry)
+
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps({"file_path": "sales.xlsx", "sheet_name": "Q1"}),
+            ),
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        prompts, error = engine._prepare_system_prompts_for_request([])
+        assert error is None
+        merged_prompt = "\n\n".join(prompts)
+        assert "## 窗口感知上下文" in merged_prompt
+        assert "sales.xlsx" in merged_prompt
+        assert "Q1" in merged_prompt
+
+    @pytest.mark.asyncio
+    async def test_window_perception_notice_respects_budget_and_window_limit(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            preview = [
+                {
+                    "产品": f"产品{i}",
+                    "备注": "超长内容" * 30,
+                    "说明": "X" * 240,
+                }
+                for i in range(25)
+            ]
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 5000, "columns": 30},
+                    "preview": preview,
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_system_budget_tokens=400,
+            window_perception_max_windows=2,
+            window_perception_minimized_tokens=40,
+        )
+        engine = AgentEngine(config, registry)
+
+        for idx, file_name in enumerate(("q1.xlsx", "q2.xlsx", "q3.xlsx"), start=1):
+            tc = SimpleNamespace(
+                id=f"call_read_{idx}",
+                function=SimpleNamespace(
+                    name="read_excel",
+                    arguments=json.dumps({"file_path": file_name, "sheet_name": "Q1"}),
+                ),
+            )
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=idx,
+                route_result=None,
+            )
+
+        notice = engine._build_window_perception_notice()
+        tokens = TokenCounter.count_message({"role": "system", "content": notice})
+        assert tokens <= config.window_perception_system_budget_tokens
+        assert "## 窗口感知上下文" in notice
+        assert "q3.xlsx" in notice
+        assert "q1.xlsx" not in notice
+
+    @pytest.mark.asyncio
+    async def test_window_perception_lifecycle_ages_to_background_and_suspended(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 2004, "columns": 12},
+                    "preview": [{"订单编号": "ORD-1", "日期": "2025-01-01", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_background_after_idle=1,
+            window_perception_suspend_after_idle=3,
+            window_perception_terminate_after_idle=5,
+        )
+        engine = AgentEngine(config, registry)
+
+        async def _read(file_path: str, iteration: int) -> None:
+            tc = SimpleNamespace(
+                id=f"call_read_{iteration}",
+                function=SimpleNamespace(
+                    name="read_excel",
+                    arguments=json.dumps({"file_path": file_path, "sheet_name": "Q1"}),
+                ),
+            )
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=iteration,
+                route_result=None,
+            )
+
+        await _read("sales.xlsx", 1)
+        notice1 = engine._build_window_perception_notice()
+        assert "【窗口 · sales.xlsx / Q1】" in notice1
+
+        await _read("catalog.xlsx", 2)
+        notice2 = engine._build_window_perception_notice()
+        assert "【窗口 · catalog.xlsx / Q1】" in notice2
+        assert "【后台 · sales.xlsx / Q1】" in notice2
+
+        notice3 = engine._build_window_perception_notice()
+        assert "【后台 · sales.xlsx / Q1】" in notice3
+        assert "【后台 · catalog.xlsx / Q1】" in notice3
+
+        notice4 = engine._build_window_perception_notice()
+        assert "【挂起 · sales.xlsx / Q1" in notice4
+        assert "【后台 · catalog.xlsx / Q1】" in notice4
+
+    @pytest.mark.asyncio
+    async def test_window_perception_terminated_window_can_reactivate(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 500, "columns": 8},
+                    "preview": [{"列A": 1, "列B": 2}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_background_after_idle=1,
+            window_perception_suspend_after_idle=2,
+            window_perception_terminate_after_idle=3,
+        )
+        engine = AgentEngine(config, registry)
+
+        tc = SimpleNamespace(
+            id="call_read_init",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps({"file_path": "reactivate.xlsx", "sheet_name": "Q1"}),
+            ),
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        notice1 = engine._build_window_perception_notice()
+        assert "reactivate.xlsx" in notice1
+
+        _ = engine._build_window_perception_notice()  # idle=1
+        _ = engine._build_window_perception_notice()  # idle=2
+        notice4 = engine._build_window_perception_notice()  # idle=3 -> terminated
+        assert "reactivate.xlsx" not in notice4
+
+        tc2 = SimpleNamespace(
+            id="call_read_reopen",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps({"file_path": "reactivate.xlsx", "sheet_name": "Q1"}),
+            ),
+        )
+        await engine._execute_tool_call(
+            tc=tc2,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=2,
+            route_result=None,
+        )
+        notice5 = engine._build_window_perception_notice()
+        assert "【窗口 · reactivate.xlsx / Q1】" in notice5
+
 
 class TestTaskUpdateFailureSemantics:
     """task_update 失败语义与事件一致性测试。"""
@@ -1063,7 +1467,7 @@ class TestDelegateSubagent:
         assert result.result == "子代理摘要"
 
     @pytest.mark.asyncio
-    async def test_delegate_updates_recent_excel_context_from_subagent(self) -> None:
+    async def test_delegate_updates_window_perception_context_from_subagent(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -1086,9 +1490,8 @@ class TestDelegateSubagent:
         )
         assert result == "子代理摘要"
 
-        notice = engine._build_recent_excel_context_notice()
+        notice = engine._build_window_perception_notice()
         assert "examples/bench/stress_test_comprehensive.xlsx" in notice
-        assert "explorer" in notice
 
         prompts = engine._build_system_prompts([])
         assert len(prompts) == 1

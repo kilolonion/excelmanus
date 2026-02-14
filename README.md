@@ -1,4 +1,4 @@
-# ExcelManus v3
+# ExcelManus v4
 
 基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
 
@@ -87,8 +87,8 @@ EXCELMANUS_MODEL=your-model-id
 # 可选：EXCELMANUS_MODELS=[{"name":"default","model":"your-model-id","api_key":"...","base_url":"..."}]
 ```
 
-v3 路由简化迁移说明：
-- 以下旧变量在 v3 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
+v4 路由简化迁移说明：
+- 以下旧变量在 v4 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
 - 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心，运行时工具权限由 `tool_scope` 严格约束。
 
 `EXCELMANUS_SYSTEM_MESSAGE_MODE` 语义：

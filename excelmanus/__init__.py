@@ -1,3 +1,3 @@
-"""ExcelManus v3 — Tools + Skillpacks 双层架构。"""
+"""ExcelManus v4 — 窗口感知层 + Tools + Skillpacks 架构。"""
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"

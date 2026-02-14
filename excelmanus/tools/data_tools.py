@@ -1484,7 +1484,7 @@ def _coerce_numeric(series: pd.Series) -> pd.Series:
 def group_aggregate(
     file_path: str,
     group_by: str | list[str],
-    aggregations: dict[str, str | list[str]],
+    aggregations: dict[str, str | list[str]] | None = None,
     sheet_name: str | None = None,
     header_row: int | None = None,
     sort_by: str | None = None,
@@ -1508,6 +1508,12 @@ def group_aggregate(
     Returns:
         JSON 格式的聚合结果。
     """
+    if aggregations is None:
+        return json.dumps(
+            {"error": "缺少必需参数 'aggregations'，请指定聚合配置，例如: {\"销售额\": \"sum\"} 或 {\"*\": \"count\"}"},
+            ensure_ascii=False,
+        )
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 

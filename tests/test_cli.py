@@ -61,6 +61,8 @@ def _make_engine() -> MagicMock:
     engine.plan_mode_enabled = False
     engine.has_pending_question = MagicMock(return_value=False)
     engine.is_waiting_multiselect_answer = MagicMock(return_value=False)
+    engine.has_pending_approval = MagicMock(return_value=False)
+    engine.current_pending_approval = MagicMock(return_value=None)
     engine.extract_and_save_memory = AsyncMock(return_value=None)
     return engine
 
@@ -100,7 +102,7 @@ class TestRenderWelcome:
         with patch("excelmanus.cli.console", real_console):
             _render_welcome(self._make_config(), 3)
         text_str = buf.getvalue()
-        assert "v3.0.0" in text_str
+        assert "v4.0.0" in text_str
 
 
 class TestRenderHelp:

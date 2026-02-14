@@ -43,11 +43,18 @@ _TOOL_RESULT_MAX_CHARS = 8000
 
 @dataclass
 class BenchCase:
-    """单个测试用例。"""
+    """单个测试用例。
+
+    支持单轮和多轮两种格式：
+    - 单轮：仅设置 ``message``（向后兼容）
+    - 多轮：设置 ``messages`` 列表，按顺序发送给同一个 engine 实例
+    加载时会统一归一化为 ``messages`` 列表。
+    """
 
     id: str
     name: str
-    message: str
+    message: str = ""
+    messages: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     expected: dict[str, Any] = field(default_factory=dict)
 
@@ -77,6 +84,60 @@ class ToolCallLog:
 
 
 @dataclass
+class TurnResult:
+    """多轮对话中单轮的执行结果。"""
+
+    turn_index: int
+    message: str
+    reply: str
+    duration_seconds: float
+    iterations: int
+    route_mode: str
+    skills_used: list[str]
+    tool_scope: list[str]
+    tool_calls: list[ToolCallLog]
+    thinking_log: list[str]
+    subagent_events: list[dict[str, Any]]
+    llm_calls: list[dict[str, Any]]
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    status: str = "ok"
+    error: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        tool_successes = sum(1 for tc in self.tool_calls if tc.success)
+        tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
+        return {
+            "turn_index": self.turn_index,
+            "message": self.message,
+            "reply": self.reply,
+            "duration_seconds": round(self.duration_seconds, 2),
+            "iterations": self.iterations,
+            "route_mode": self.route_mode,
+            "skills_used": self.skills_used,
+            "tool_scope": self.tool_scope,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+            "thinking_log": self.thinking_log,
+            "subagent_events": self.subagent_events,
+            "llm_calls": self.llm_calls,
+            "tokens": {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+            },
+            "status": self.status,
+            "error": self.error,
+            "stats": {
+                "tool_call_count": len(self.tool_calls),
+                "tool_successes": tool_successes,
+                "tool_failures": tool_failures,
+                "llm_call_count": len(self.llm_calls),
+            },
+        }
+
+
+@dataclass
 class BenchResult:
     """单个用例的执行结果。"""
 
@@ -101,6 +162,8 @@ class BenchResult:
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     # 最终对话记忆快照（system prompt + 所有消息）
     conversation_messages: list[dict[str, Any]] = field(default_factory=list)
+    # 多轮对话各轮次的独立结果
+    turns: list[TurnResult] = field(default_factory=list)
     # 执行状态
     status: str = "ok"
     # 结构化错误信息（status=error 时有值）
@@ -109,7 +172,7 @@ class BenchResult:
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
         tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
-        return {
+        result: dict[str, Any] = {
             "schema_version": 2,
             "kind": "case_result",
             "timestamp": self.timestamp,
@@ -117,6 +180,7 @@ class BenchResult:
                 "case_id": self.case_id,
                 "case_name": self.case_name,
                 "message": self.message,
+                "turn_count": len(self.turns) if self.turns else 1,
             },
             "execution": {
                 "duration_seconds": round(self.duration_seconds, 2),
@@ -147,6 +211,10 @@ class BenchResult:
                 "llm_call_count": len(self.llm_calls),
             },
         }
+        # 多轮对话时输出各轮次详情
+        if self.turns:
+            result["turns"] = [t.to_dict() for t in self.turns]
+        return result
 
 
 # ── 事件收集器 ────────────────────────────────────────────
@@ -226,6 +294,29 @@ class _EventCollector:
                 "iterations": event.subagent_iterations,
                 "tool_calls": event.subagent_tool_calls,
             })
+
+    def snapshot_and_reset(self) -> dict[str, Any]:
+        """快照当前收集的数据并重置，用于多轮对话分轮记录。
+
+        返回本轮收集到的所有数据副本，然后清空内部状态。
+        """
+        snapshot = {
+            "thinking_log": list(self.thinking_log),
+            "tool_calls": list(self.tool_calls),
+            "route_mode": self.route_mode,
+            "skills_used": list(self.skills_used),
+            "tool_scope": list(self.tool_scope),
+            "subagent_events": list(self.subagent_events),
+        }
+        # 重置
+        self.thinking_log = []
+        self.tool_calls = []
+        self.route_mode = ""
+        self.skills_used = []
+        self.tool_scope = []
+        self.subagent_events = []
+        self._pending_tool_starts.clear()
+        return snapshot
 
 
 # ── LLM 调用拦截器 ───────────────────────────────────────
@@ -391,82 +482,190 @@ async def run_case(
     *,
     render_enabled: bool = True,
 ) -> BenchResult:
-    """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。"""
+    """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。
+
+    支持多轮对话：当 case.messages 包含多条消息时，依次发送给同一个
+    engine 实例，ConversationMemory 自然保持上下文。
+    """
     engine = _create_engine(config)
     collector = _EventCollector(render_enabled=render_enabled)
     interceptor = _LLMCallInterceptor(engine)
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    logger.info("▶ 开始执行用例: %s (%s)", case.id, case.name)
-    start = time.monotonic()
+    # 归一化消息列表：兼容单轮 message 和多轮 messages
+    messages = case.messages if case.messages else [case.message]
+    is_multi_turn = len(messages) > 1
+
+    logger.info(
+        "▶ 开始执行用例: %s (%s) [%d 轮]",
+        case.id, case.name, len(messages),
+    )
+    case_start = time.monotonic()
+
+    # 累计统计
+    all_turns: list[TurnResult] = []
+    all_tool_calls: list[ToolCallLog] = []
+    all_thinking_log: list[str] = []
+    all_subagent_events: list[dict[str, Any]] = []
+    total_iterations = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_total_tokens = 0
+    last_reply = ""
+    last_route_mode = ""
+    last_skills_used: list[str] = []
+    last_tool_scope: list[str] = []
+    case_status = "ok"
+    case_error: dict[str, Any] | None = None
 
     try:
-        chat_result: ChatResult = await engine.chat(
-            case.message,
-            on_event=collector.on_event,
-        )
-    except Exception as exc:
-        logger.error("用例 %s 执行异常: %s", case.id, exc, exc_info=True)
-        elapsed = time.monotonic() - start
-        return BenchResult(
-            case_id=case.id,
-            case_name=case.name,
-            message=case.message,
-            timestamp=timestamp,
-            duration_seconds=elapsed,
-            iterations=0,
-            route_mode=collector.route_mode or "error",
-            skills_used=collector.skills_used,
-            tool_scope=collector.tool_scope,
-            tool_calls=collector.tool_calls,
-            thinking_log=collector.thinking_log,
-            reply=f"[ERROR] {exc}",
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            subagent_events=collector.subagent_events,
-            llm_calls=interceptor.calls,
-            conversation_messages=_dump_conversation_messages(engine),
-            status="error",
-            error={
-                "type": type(exc).__name__,
-                "message": str(exc),
-            },
-        )
+        for turn_idx, msg in enumerate(messages):
+            if is_multi_turn:
+                logger.info(
+                    "  ── 轮次 %d/%d ──", turn_idx + 1, len(messages),
+                )
+
+            # 每轮开始前记录 interceptor 的调用数，用于切分本轮的 llm_calls
+            llm_calls_before = len(interceptor.calls)
+            turn_start = time.monotonic()
+
+            try:
+                chat_result: ChatResult = await engine.chat(
+                    msg,
+                    on_event=collector.on_event,
+                )
+            except Exception as exc:
+                logger.error(
+                    "用例 %s 轮次 %d 执行异常: %s",
+                    case.id, turn_idx, exc, exc_info=True,
+                )
+                turn_elapsed = time.monotonic() - turn_start
+                # 快照本轮收集器数据
+                snap = collector.snapshot_and_reset()
+                turn_llm_calls = list(interceptor.calls[llm_calls_before:])
+
+                turn_result = TurnResult(
+                    turn_index=turn_idx,
+                    message=msg,
+                    reply=f"[ERROR] {exc}",
+                    duration_seconds=turn_elapsed,
+                    iterations=0,
+                    route_mode=snap["route_mode"] or "error",
+                    skills_used=snap["skills_used"],
+                    tool_scope=snap["tool_scope"],
+                    tool_calls=snap["tool_calls"],
+                    thinking_log=snap["thinking_log"],
+                    subagent_events=snap["subagent_events"],
+                    llm_calls=turn_llm_calls,
+                    status="error",
+                    error={
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+                all_turns.append(turn_result)
+                all_tool_calls.extend(snap["tool_calls"])
+                all_thinking_log.extend(snap["thinking_log"])
+                all_subagent_events.extend(snap["subagent_events"])
+                last_reply = f"[ERROR] {exc}"
+                case_status = "error"
+                case_error = {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                # 某轮异常后中止后续轮次
+                break
+
+            turn_elapsed = time.monotonic() - turn_start
+            # 快照本轮收集器数据
+            snap = collector.snapshot_and_reset()
+            turn_llm_calls = list(interceptor.calls[llm_calls_before:])
+
+            # 回退路由信息
+            last_route = getattr(engine, "last_route_result", None)
+            fallback_route_mode = getattr(last_route, "route_mode", "")
+            fallback_skills = list(getattr(last_route, "skills_used", []) or [])
+            fallback_scope = list(getattr(last_route, "tool_scope", []) or [])
+
+            turn_route_mode = snap["route_mode"] or fallback_route_mode or "unknown"
+            turn_skills = snap["skills_used"] or fallback_skills
+            turn_scope = snap["tool_scope"] or fallback_scope
+
+            turn_result = TurnResult(
+                turn_index=turn_idx,
+                message=msg,
+                reply=chat_result.reply,
+                duration_seconds=turn_elapsed,
+                iterations=chat_result.iterations,
+                route_mode=turn_route_mode,
+                skills_used=turn_skills,
+                tool_scope=turn_scope,
+                tool_calls=snap["tool_calls"],
+                thinking_log=snap["thinking_log"],
+                subagent_events=snap["subagent_events"],
+                llm_calls=turn_llm_calls,
+                prompt_tokens=chat_result.prompt_tokens,
+                completion_tokens=chat_result.completion_tokens,
+                total_tokens=chat_result.total_tokens,
+            )
+            all_turns.append(turn_result)
+
+            # 累计
+            all_tool_calls.extend(snap["tool_calls"])
+            all_thinking_log.extend(snap["thinking_log"])
+            all_subagent_events.extend(snap["subagent_events"])
+            total_iterations += chat_result.iterations
+            total_prompt_tokens += chat_result.prompt_tokens
+            total_completion_tokens += chat_result.completion_tokens
+            total_total_tokens += chat_result.total_tokens
+            last_reply = chat_result.reply
+            last_route_mode = turn_route_mode
+            last_skills_used = turn_skills
+            last_tool_scope = turn_scope
+
+            # 多轮时打印每轮回复
+            if render_enabled and is_multi_turn and chat_result.reply:
+                _console.print()
+                _console.print(
+                    Panel(
+                        Markdown(chat_result.reply),
+                        title=f"轮次 {turn_idx + 1}/{len(messages)}",
+                        border_style="#5f875f",
+                        padding=(1, 2),
+                        expand=False,
+                    )
+                )
     finally:
         interceptor.restore()
 
-    elapsed = time.monotonic() - start
-    last_route = getattr(engine, "last_route_result", None)
-    fallback_route_mode = getattr(last_route, "route_mode", "")
-    fallback_skills = list(getattr(last_route, "skills_used", []) or [])
-    fallback_scope = list(getattr(last_route, "tool_scope", []) or [])
+    case_elapsed = time.monotonic() - case_start
 
     result = BenchResult(
         case_id=case.id,
         case_name=case.name,
-        message=case.message,
+        message=case.message or (messages[0] if messages else ""),
         timestamp=timestamp,
-        duration_seconds=elapsed,
-        iterations=chat_result.iterations,
-        route_mode=collector.route_mode or fallback_route_mode or "unknown",
-        skills_used=collector.skills_used or fallback_skills,
-        tool_scope=collector.tool_scope or fallback_scope,
-        tool_calls=collector.tool_calls,
-        thinking_log=collector.thinking_log,
-        reply=chat_result.reply,
-        prompt_tokens=chat_result.prompt_tokens,
-        completion_tokens=chat_result.completion_tokens,
-        total_tokens=chat_result.total_tokens,
-        subagent_events=collector.subagent_events,
+        duration_seconds=case_elapsed,
+        iterations=total_iterations,
+        route_mode=last_route_mode or "unknown",
+        skills_used=last_skills_used,
+        tool_scope=last_tool_scope,
+        tool_calls=all_tool_calls,
+        thinking_log=all_thinking_log,
+        reply=last_reply,
+        prompt_tokens=total_prompt_tokens,
+        completion_tokens=total_completion_tokens,
+        total_tokens=total_total_tokens,
+        subagent_events=all_subagent_events,
         llm_calls=interceptor.calls,
         conversation_messages=_dump_conversation_messages(engine),
-        status="ok",
-        error=None,
+        turns=all_turns if is_multi_turn else [],
+        status=case_status,
+        error=case_error,
     )
 
-    # 打印最终回复（和 CLI 一样用 Panel 包裹）
-    if render_enabled and result.reply:
+    # 单轮时打印最终回复（多轮已在循环中逐轮打印）
+    if render_enabled and not is_multi_turn and result.reply:
         _console.print()
         _console.print(
             Panel(
@@ -478,11 +677,12 @@ async def run_case(
         )
 
     failures = sum(1 for tc in result.tool_calls if not tc.success)
+    turn_info = f" ({len(messages)} 轮)" if is_multi_turn else ""
     logger.info(
-        "✓ 用例 %s 完成: %d 轮 │ %d/%d 工具调用(失败%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用",
+        "✓ 用例 %s 完成%s: %d 迭代 │ %d 工具调用(失败%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用",
         case.id,
+        turn_info,
         result.iterations,
-        len(result.tool_calls),
         len(result.tool_calls),
         failures,
         result.total_tokens,
@@ -493,17 +693,34 @@ async def run_case(
 
 
 def _load_suite(path: str | Path) -> tuple[str, list[BenchCase]]:
-    """从 JSON 文件加载测试套件。"""
+    """从 JSON 文件加载测试套件。
+
+    兼容两种 case 格式：
+    - 单轮：``{"message": "..."}``
+    - 多轮：``{"messages": ["...", "..."]}``
+    加载时统一归一化为 messages 列表。
+    """
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     suite_name = data.get("suite_name", Path(path).stem)
     cases: list[BenchCase] = []
     for item in data.get("cases", []):
+        # 多轮格式优先
+        raw_messages = item.get("messages")
+        raw_message = item.get("message", "")
+        if raw_messages and isinstance(raw_messages, list):
+            messages = [str(m) for m in raw_messages if m]
+            message = messages[0] if messages else ""
+        else:
+            message = raw_message
+            messages = [message] if message else []
+
         cases.append(BenchCase(
             id=item["id"],
             name=item.get("name", item["id"]),
-            message=item["message"],
+            message=message,
+            messages=messages,
             tags=item.get("tags", []),
             expected=item.get("expected", {}),
         ))
@@ -758,6 +975,7 @@ async def run_single(message: str, config: ExcelManusConfig, output_dir: Path) -
         id="adhoc",
         name="临时用例",
         message=message,
+        messages=[message],
     )
     result = await run_case(case, config, render_enabled=True)
     filepath = _save_result(result, output_dir)

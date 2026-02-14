@@ -583,6 +583,84 @@ class TestMemoryConfig:
             load_config()
 
 
+class TestWindowPerceptionConfig:
+    """窗口感知层配置解析测试（v4）。"""
+
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_window_perception_defaults(self, monkeypatch) -> None:
+        """窗口感知层默认值应符合 v4 设定。"""
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.window_perception_enabled is True
+        assert cfg.window_perception_system_budget_tokens == 3000
+        assert cfg.window_perception_tool_append_tokens == 500
+        assert cfg.window_perception_max_windows == 6
+        assert cfg.window_perception_default_rows == 25
+        assert cfg.window_perception_default_cols == 10
+        assert cfg.window_perception_minimized_tokens == 80
+        assert cfg.window_perception_background_after_idle == 1
+        assert cfg.window_perception_suspend_after_idle == 3
+        assert cfg.window_perception_terminate_after_idle == 5
+
+    def test_window_perception_values_from_env(self, monkeypatch) -> None:
+        """支持通过环境变量覆盖全部窗口感知配置。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS", "4096")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS", "640")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS", "4")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS", "30")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS", "12")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS", "96")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE", "2")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE", "4")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "7")
+
+        cfg = load_config()
+        assert cfg.window_perception_enabled is False
+        assert cfg.window_perception_system_budget_tokens == 4096
+        assert cfg.window_perception_tool_append_tokens == 640
+        assert cfg.window_perception_max_windows == 4
+        assert cfg.window_perception_default_rows == 30
+        assert cfg.window_perception_default_cols == 12
+        assert cfg.window_perception_minimized_tokens == 96
+        assert cfg.window_perception_background_after_idle == 2
+        assert cfg.window_perception_suspend_after_idle == 4
+        assert cfg.window_perception_terminate_after_idle == 7
+
+    def test_window_perception_enabled_invalid_value_raises_error(self, monkeypatch) -> None:
+        """窗口感知开关非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ENABLED", "maybe")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_ENABLED"):
+            load_config()
+
+    def test_window_perception_integer_invalid_raises_error(self, monkeypatch) -> None:
+        """窗口感知整数配置非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS", "NaN")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS"):
+            load_config()
+
+    def test_window_perception_integer_zero_raises_error(self, monkeypatch) -> None:
+        """窗口感知正整数配置为 0 时应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS", "0")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS"):
+            load_config()
+
+    def test_window_perception_lifecycle_integer_invalid_raises_error(self, monkeypatch) -> None:
+        """生命周期阈值配置非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "NaN")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE"):
+            load_config()
+
+
 class TestLogLevelValidation:
     def _set_required_env(self, monkeypatch) -> None:
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
