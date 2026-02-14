@@ -11,6 +11,7 @@ from typing import Any
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
+from excelmanus.mcp.manager import MCPManager
 from excelmanus.skillpacks import SkillRouter
 
 logger = get_logger("session")
@@ -60,14 +61,89 @@ class SessionManager:
         config: ExcelManusConfig,
         registry: Any,
         skill_router: SkillRouter | None = None,
+        shared_mcp_manager: MCPManager | None = None,
     ) -> None:
         self._max_sessions = max_sessions
         self._ttl_seconds = ttl_seconds
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
+        self._shared_mcp_manager = shared_mcp_manager
+        self._mcp_initialized = False
+        self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
         self._lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_task_lock = asyncio.Lock()
+
+    @staticmethod
+    def cleanup_interval_from_ttl(ttl_seconds: int) -> int:
+        """根据 TTL 计算清理间隔，确保小 TTL 场景及时清理。"""
+        return max(1, min(60, ttl_seconds // 2 if ttl_seconds > 1 else 1))
+
+    async def _background_cleanup_loop(self, interval_seconds: int) -> None:
+        """后台协程：定期清理过期会话。"""
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                cleaned = await self.cleanup_expired()
+                if cleaned:
+                    logger.info("定期清理：已清理 %d 个过期会话", cleaned)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("定期清理异常", exc_info=True)
+
+    async def start_background_cleanup(
+        self, interval_seconds: int | None = None
+    ) -> None:
+        """启动后台 TTL 清理任务（幂等）。"""
+        interval = (
+            interval_seconds
+            if interval_seconds is not None
+            else self.cleanup_interval_from_ttl(self._ttl_seconds)
+        )
+        if interval <= 0:
+            raise ValueError("interval_seconds 必须为正整数。")
+
+        async with self._cleanup_task_lock:
+            task = self._cleanup_task
+            if task is not None and task.done():
+                try:
+                    task.exception()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.warning("上一轮定期清理任务异常退出", exc_info=True)
+                self._cleanup_task = None
+                task = None
+
+            if task is not None:
+                return
+
+            self._cleanup_task = asyncio.create_task(
+                self._background_cleanup_loop(interval)
+            )
+            logger.info("已启动会话定期清理任务（间隔: %d 秒）", interval)
+
+    async def stop_background_cleanup(self) -> None:
+        """停止后台 TTL 清理任务（幂等）。"""
+        task: asyncio.Task[None] | None = None
+        async with self._cleanup_task_lock:
+            task = self._cleanup_task
+            self._cleanup_task = None
+
+        if task is None:
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning("停止会话定期清理任务时发生异常", exc_info=True)
+
     def _create_memory_components(
         self,
     ) -> tuple["PersistentMemory | None", "MemoryExtractor | None"]:
@@ -98,6 +174,15 @@ class SessionManager:
         )
         return persistent_memory, memory_extractor
 
+    async def ensure_mcp_initialized(self) -> None:
+        """初始化共享 MCP 管理器（仅执行一次）。"""
+        if self._shared_mcp_manager is None or self._mcp_initialized:
+            return
+        async with self._mcp_init_lock:
+            if self._mcp_initialized:
+                return
+            await self._shared_mcp_manager.initialize(self._registry)
+            self._mcp_initialized = True
 
     async def acquire_for_chat(
         self, session_id: str | None
@@ -133,6 +218,8 @@ class SessionManager:
                 skill_router=self._skill_router,
                 persistent_memory=persistent_memory,
                 memory_extractor=memory_extractor,
+                mcp_manager=self._shared_mcp_manager,
+                own_mcp_manager=self._shared_mcp_manager is None,
             )
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
@@ -145,7 +232,11 @@ class SessionManager:
         # 初始化 MCP 连接（失败不影响会话创建）；放在锁外避免阻塞并发请求。
         if created:
             try:
-                await engine.initialize_mcp()
+                if self._shared_mcp_manager is None:
+                    await engine.initialize_mcp()
+                else:
+                    await self.ensure_mcp_initialized()
+                    engine.sync_mcp_auto_approve()
             except BaseException as exc:
                 # initialize_mcp 失败不应中断主请求；若内部抛出 CancelledError，
                 # 需要显式清除当前任务的取消状态，避免后续 await 被级联取消。
@@ -154,7 +245,11 @@ class SessionManager:
                     if task is not None:
                         while task.cancelling():
                             task.uncancel()
-                logger.warning("会话 %s MCP 初始化失败，已跳过", new_id, exc_info=True)
+                logger.warning(
+                    "会话 %s MCP 初始化失败，已跳过",
+                    new_id,
+                    exc_info=True,
+                )
         return new_id, engine
 
     async def release_for_chat(self, session_id: str) -> None:
@@ -196,10 +291,11 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("会话 %s 记忆提取失败", session_id, exc_info=True)
-            try:
-                await engine.shutdown_mcp()
-            except Exception:
-                logger.warning("会话 %s MCP 关闭失败", session_id, exc_info=True)
+            if self._shared_mcp_manager is None:
+                try:
+                    await engine.shutdown_mcp()
+                except Exception:
+                    logger.warning("会话 %s MCP 关闭失败", session_id, exc_info=True)
             return True
         return False
 
@@ -240,14 +336,46 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("过期会话 %s 记忆提取失败", sid, exc_info=True)
-            try:
-                await engine.shutdown_mcp()
-            except Exception:
-                logger.warning("过期会话 %s MCP 关闭失败", sid, exc_info=True)
+            if self._shared_mcp_manager is None:
+                try:
+                    await engine.shutdown_mcp()
+                except Exception:
+                    logger.warning("过期会话 %s MCP 关闭失败", sid, exc_info=True)
 
         return count
 
-    @property
-    def active_count(self) -> int:
-        """当前活跃会话数量（非线程安全，仅用于监控/日志）。"""
-        return len(self._sessions)
+    async def shutdown(self) -> None:
+        """关闭 SessionManager：清空会话并收尾 MCP 生命周期。"""
+        await self.stop_background_cleanup()
+
+        active_engines: list[tuple[str, AgentEngine]] = []
+        async with self._lock:
+            active_engines = [
+                (sid, entry.engine)
+                for sid, entry in self._sessions.items()
+            ]
+            self._sessions.clear()
+
+        for sid, engine in active_engines:
+            try:
+                await engine.extract_and_save_memory()
+            except Exception:
+                logger.warning("会话 %s 关闭时记忆提取失败", sid, exc_info=True)
+            if self._shared_mcp_manager is None:
+                try:
+                    await engine.shutdown_mcp()
+                except Exception:
+                    logger.warning("会话 %s 关闭时 MCP 关闭失败", sid, exc_info=True)
+
+        if self._shared_mcp_manager is not None and self._mcp_initialized:
+            try:
+                await self._shared_mcp_manager.shutdown()
+            except Exception:
+                logger.warning("共享 MCP 管理器关闭失败", exc_info=True)
+            finally:
+                self._mcp_initialized = False
+
+    async def get_active_count(self) -> int:
+        """获取当前活跃会话数量（锁保护）。"""
+        async with self._lock:
+            return len(self._sessions)

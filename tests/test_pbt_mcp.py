@@ -590,11 +590,15 @@ class TestToolResultConversion:
                 f"实际结果为 '{result_str}'"
             )
 
-        # 验证无 text 内容时返回空字符串
+        # 无 text 内容时，允许返回结构化/非文本降级摘要；
+        # 仅在 content 本身为空时要求空字符串。
         if not expected_texts:
-            assert result_str == "", (
-                f"无 text 内容时应返回空字符串，实际为 '{result_str}'"
-            )
+            if not content_items:
+                assert result_str == "", (
+                    f"空 content 时应返回空字符串，实际为 '{result_str}'"
+                )
+            else:
+                assert isinstance(result_str, str)
 
         # 验证结果字符串中不包含非 text 类型的 data
         # （format_tool_result 只提取 text 类型）

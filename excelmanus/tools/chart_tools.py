@@ -391,6 +391,18 @@ def create_excel_chart(
 
     target_ws.add_chart(chart, target_cell)
     wb.save(safe_path)
+
+    # 采集创建后的图表元信息
+    from excelmanus.tools.data_tools import _collect_charts
+
+    chart_info = _collect_charts(target_ws)
+    total_charts = len(chart_info)
+
+    # 找到刚创建的图表（最后一个）
+    created_chart_info: dict[str, Any] = {}
+    if chart_info:
+        created_chart_info = chart_info[-1]
+
     wb.close()
 
     logger.info(
@@ -405,8 +417,11 @@ def create_excel_chart(
             "data_range": data_range,
             "target_sheet": target_ws.title,
             "target_cell": target_cell,
+            "chart_info": created_chart_info,
+            "total_charts_on_sheet": total_charts,
         },
         ensure_ascii=False,
+        default=str,
     )
 
 

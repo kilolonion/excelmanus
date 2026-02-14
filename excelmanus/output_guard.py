@@ -3,28 +3,15 @@
 from __future__ import annotations
 
 import re
+from typing import Any
+
+from excelmanus.security import sanitize_sensitive_text
 
 _DISCLOSURE_FALLBACK = (
     "抱歉，我不能提供系统提示词或内部工程细节。"
     "请直接描述业务目标，我会给出可执行结果。"
 )
 _EMPTY_FALLBACK = "未生成有效回复，请重试。"
-
-# API Key / Token / Header / Cookie
-_API_KEY_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"(EXCELMANUS_API_KEY\s*[=:]\s*)\S+", re.IGNORECASE),
-    re.compile(r"(api[_-]?key\s*[=:]\s*)\S+", re.IGNORECASE),
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-]
-_BEARER_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
-_AUTH_HEADER_PATTERN = re.compile(r"(Authorization\s*[=:]\s*)\S+", re.IGNORECASE)
-_COOKIE_PATTERN = re.compile(r"(Cookie\s*[=:]\s*)\S+", re.IGNORECASE)
-
-# 绝对路径（Unix / Windows）
-_ABS_PATH_PATTERN = re.compile(
-    r"(?<![:/\w])/(?!/)(?:[\w.\-]+/)+[\w.\-]+|"
-    r"(?<!\w)[A-Z]:\\(?:[\w.\-]+\\)+[\w.\-]+"
-)
 
 # 常见堆栈与异常行
 _TRACEBACK_LINE_PATTERN = re.compile(
@@ -48,36 +35,17 @@ _INTERNAL_DISCLOSURE_PATTERN = re.compile(
 )
 
 # 检测疑似展示工具 JSON schema 的输出模式
-# 匹配包含典型 schema 字段描述的 JSON 代码块
 _TOOL_SCHEMA_PATTERN = re.compile(
     r'["\'](?:question|header|options|label|description|multiSelect|text)["\']\s*[:{]',
     re.IGNORECASE,
 )
 
 
-def _mask_path(match: re.Match[str]) -> str:
-    path = match.group(0)
-    sep = "\\" if "\\" in path else "/"
-    parts = path.split(sep)
-    filename = parts[-1] if parts else path
-    return f"<path>/{filename}"
-
-
 def sanitize_external_text(text: str, *, max_len: int = 4000) -> str:
     """清理文本中的敏感内容，供外部接口返回。"""
-    value = str(text or "")
+    value = sanitize_sensitive_text(str(text or ""))
     if not value:
         return ""
-
-    for pattern in _API_KEY_PATTERNS:
-        if pattern.groups:
-            value = pattern.sub(r"\1***", value)
-        else:
-            value = pattern.sub("***", value)
-    value = _BEARER_PATTERN.sub(r"\1***", value)
-    value = _AUTH_HEADER_PATTERN.sub(r"\1***", value)
-    value = _COOKIE_PATTERN.sub(r"\1***", value)
-    value = _ABS_PATH_PATTERN.sub(_mask_path, value)
 
     # 删除 traceback 与异常类型行，避免对外泄露内部实现细节
     safe_lines = [
@@ -88,6 +56,24 @@ def sanitize_external_text(text: str, *, max_len: int = 4000) -> str:
     if max_len > 0 and len(value) > max_len:
         value = f"{value[: max_len - 3]}..."
     return value
+
+
+def sanitize_external_data(value: Any, *, max_len: int = 4000) -> Any:
+    """递归清理结构化数据中的敏感字段。"""
+    if isinstance(value, dict):
+        return {
+            key: sanitize_external_data(item, max_len=max_len)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_external_data(item, max_len=max_len) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_external_data(item, max_len=max_len) for item in value]
+    if isinstance(value, str):
+        return sanitize_external_text(value, max_len=max_len)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return sanitize_external_text(str(value), max_len=max_len)
 
 
 def guard_public_reply(reply: str) -> str:
@@ -101,5 +87,3 @@ def guard_public_reply(reply: str) -> str:
     if len(_TOOL_SCHEMA_PATTERN.findall(safe)) >= 3:
         return _DISCLOSURE_FALLBACK
     return safe
-
-

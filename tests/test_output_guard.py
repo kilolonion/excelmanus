@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from excelmanus.output_guard import guard_public_reply, sanitize_external_text
+from excelmanus.output_guard import (
+    guard_public_reply,
+    sanitize_external_data,
+    sanitize_external_text,
+)
 
 
 def test_sanitize_external_text_masks_token_and_path() -> None:
@@ -36,3 +40,25 @@ def test_guard_public_reply_blocks_internal_disclosure() -> None:
     assert raw not in got
     assert "tool_scope" not in got
     assert "不能提供系统提示词或内部工程细节" in got
+
+
+def test_sanitize_external_text_masks_entire_cookie_line() -> None:
+    raw = "Cookie: session=abc; csrftoken=def\n"
+    got = sanitize_external_text(raw)
+    assert "session=abc" not in got
+    assert "csrftoken=def" not in got
+    assert got.strip() == "Cookie: ***"
+
+
+def test_sanitize_external_data_masks_nested_strings() -> None:
+    raw = {
+        "Authorization": "Bearer abc123456",
+        "nested": {
+            "path": "/Users/demo/project/a.txt",
+            "cookie": "Cookie: a=1; b=2",
+        },
+    }
+    got = sanitize_external_data(raw)
+    assert got["Authorization"] == "Bearer ***"
+    assert got["nested"]["path"] == "<path>/a.txt"
+    assert got["nested"]["cookie"] == "Cookie: ***"

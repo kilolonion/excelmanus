@@ -227,8 +227,8 @@ def test_pbt_property_5_task_create_produces_valid_task_list(
 
 
 # ---------------------------------------------------------------------------
-# Property 6: 越界索引返回错误
-# Feature: agent-task-list, Property 6: 越界索引返回错误
+# Property 6: 越界索引抛异常
+# Feature: agent-task-list, Property 6: 越界索引抛异常
 # **Validates: Requirements 2.4**
 # ---------------------------------------------------------------------------
 
@@ -243,7 +243,7 @@ _oob_positive_offset = st.integers(min_value=0, max_value=1000)
     negative_index=_oob_negative,
     positive_offset=_oob_positive_offset,
 )
-def test_pbt_property_6_out_of_bounds_index_returns_error(
+def test_pbt_property_6_out_of_bounds_index_raises(
     title: str,
     subtask_titles: list[str],
     negative_index: int,
@@ -251,7 +251,7 @@ def test_pbt_property_6_out_of_bounds_index_returns_error(
 ) -> None:
     """Property 6：对于任意包含 N 个子任务的 TaskList（N ≥ 1），
     调用 task_update() 时传入 index < 0 或 index ≥ N，
-    返回值应包含错误描述字符串（不抛出异常）。
+    应抛出 IndexError。
 
     **Validates: Requirements 2.4**
     """
@@ -263,18 +263,12 @@ def test_pbt_property_6_out_of_bounds_index_returns_error(
     oob_high = n + positive_offset  # >= N
 
     # 测试负数索引
-    result_neg = task_tools.task_update(negative_index, "in_progress")
-    assert isinstance(result_neg, str), "返回值应为字符串"
-    assert "超出范围" in result_neg or "索引" in result_neg, (
-        f"负数索引 {negative_index} 应返回错误描述，实际: {result_neg!r}"
-    )
+    with pytest.raises(IndexError):
+        task_tools.task_update(negative_index, "in_progress")
 
     # 测试越界正数索引
-    result_pos = task_tools.task_update(oob_high, "in_progress")
-    assert isinstance(result_pos, str), "返回值应为字符串"
-    assert "超出范围" in result_pos or "索引" in result_pos, (
-        f"越界索引 {oob_high} 应返回错误描述，实际: {result_pos!r}"
-    )
+    with pytest.raises(IndexError):
+        task_tools.task_update(oob_high, "in_progress")
 
 
 # ---------------------------------------------------------------------------

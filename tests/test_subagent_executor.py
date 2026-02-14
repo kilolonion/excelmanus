@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,7 @@ import pytest
 
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
+from excelmanus.memory_models import MemoryCategory, MemoryEntry
 from excelmanus.subagent import SubagentConfig, SubagentExecutor
 from excelmanus.tools import ToolDef, ToolRegistry
 
@@ -361,6 +363,78 @@ async def test_default_mode_audit_only_tool_executes_without_pending(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_audit_only_tool_failure_still_writes_audit_manifest(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = ToolRegistry()
+
+    def create_chart(output_path: str) -> str:
+        path = Path(tmp_path) / output_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("chart", encoding="utf-8")
+        raise RuntimeError("chart_fail")
+
+    registry.register_tools(
+        [
+            ToolDef(
+                name="create_chart",
+                description="生成图表",
+                input_schema={
+                    "type": "object",
+                    "properties": {"output_path": {"type": "string"}},
+                    "required": ["output_path"],
+                    "additionalProperties": False,
+                },
+                func=create_chart,
+            )
+        ]
+    )
+
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="analyst",
+        description="审计失败回归",
+        allowed_tools=["create_chart"],
+        permission_mode="default",
+        max_iterations=2,
+        max_consecutive_failures=1,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _tool_call_message(
+                                "create_chart",
+                                {"output_path": "charts/failed.png"},
+                            )
+                        ),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(config=sub_cfg, prompt="生成失败图表")
+
+    assert result.success is False
+    assert result.pending_approval_id is None
+    manifests = list((tmp_path / "outputs" / "approvals").rglob("manifest.json"))
+    assert manifests, "失败执行也必须落盘审计 manifest"
+    latest = max(manifests, key=lambda p: p.stat().st_mtime)
+    data = json.loads(latest.read_text(encoding="utf-8"))
+    assert data["execution"]["status"] == "failed"
+    assert data["execution"]["error_type"] == "ToolExecutionError"
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_on_consecutive_failures(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = ToolRegistry()
@@ -623,3 +697,171 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
 
     assert result.success is True
     assert "examples/huge/report_29.xlsx" in result.observed_files
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_project_loads_and_persists_memory(tmp_path: Path) -> None:
+    config = _make_config(tmp_path, memory_enabled=True, memory_auto_load_lines=200)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="explorer",
+        description="项目级记忆测试",
+        allowed_tools=["read_excel"],
+        permission_mode="readOnly",
+        memory_scope="project",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    project_memory_dir = tmp_path / ".excelmanus" / "agent-memory" / "explorer"
+    project_memory_dir.mkdir(parents=True, exist_ok=True)
+    (project_memory_dir / "MEMORY.md").write_text(
+        "### [2025-01-15 10:00] general\n\n历史记忆\n\n---",
+        encoding="utf-8",
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(_tool_call_message("read_excel", {})),
+                        _response_from_message(_text_message("完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client), \
+         patch(
+             "excelmanus.memory_extractor.MemoryExtractor.extract",
+             new=AsyncMock(
+                 return_value=[
+                     MemoryEntry(
+                         content="新增记忆",
+                         category=MemoryCategory.GENERAL,
+                         timestamp=datetime(2025, 1, 15, 12, 0),
+                     )
+                 ]
+             ),
+         ):
+        result = await executor.run(config=sub_cfg, prompt="读取并总结")
+
+    assert result.success is True
+    first_prompt = fake_client.chat.completions.create.call_args_list[0].kwargs["messages"][0]["content"]
+    assert "历史记忆" in first_prompt
+    assert (project_memory_dir / "general.md").exists()
+    assert "新增记忆" in (project_memory_dir / "general.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_user_writes_to_home_agent_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home_dir = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home_dir))
+
+    config = _make_config(tmp_path, memory_enabled=True, memory_auto_load_lines=200)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="analyst",
+        description="用户级记忆测试",
+        allowed_tools=["read_excel"],
+        permission_mode="readOnly",
+        memory_scope="user",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(_tool_call_message("read_excel", {})),
+                        _response_from_message(_text_message("完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client), \
+         patch(
+             "excelmanus.memory_extractor.MemoryExtractor.extract",
+             new=AsyncMock(
+                 return_value=[
+                     MemoryEntry(
+                         content="用户域记忆",
+                         category=MemoryCategory.GENERAL,
+                         timestamp=datetime(2025, 1, 15, 12, 0),
+                     )
+                 ]
+             ),
+         ):
+        result = await executor.run(config=sub_cfg, prompt="读取并总结")
+
+    assert result.success is True
+    user_memory_dir = home_dir / ".excelmanus" / "agent-memory" / "analyst"
+    assert (user_memory_dir / "general.md").exists()
+    assert "用户域记忆" in (user_memory_dir / "general.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_degrades_when_global_memory_disabled(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = _make_config(tmp_path, memory_enabled=False)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="explorer",
+        description="记忆降级测试",
+        allowed_tools=["read_excel"],
+        permission_mode="readOnly",
+        memory_scope="project",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(_tool_call_message("read_excel", {})),
+                        _response_from_message(_text_message("完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        with caplog.at_level("INFO", logger="excelmanus.subagent.executor"):
+            result = await executor.run(config=sub_cfg, prompt="读取")
+
+    assert result.success is True
+    assert "全局记忆已禁用" in caplog.text
+    project_memory_dir = tmp_path / ".excelmanus" / "agent-memory" / "explorer"
+    assert not project_memory_dir.exists()

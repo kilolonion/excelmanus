@@ -13,6 +13,7 @@ from excelmanus.tools import ToolDef, ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README_PATH = REPO_ROOT / "README.md"
+SKILLPACK_PROTOCOL_PATH = REPO_ROOT / "docs" / "skillpack_protocol.md"
 TASKS_ROOT = REPO_ROOT / "tasks"
 SYSTEM_SKILLPACK_ROOT = REPO_ROOT / "excelmanus" / "skillpacks" / "system"
 HISTORY_NOTICE_MARKER = "历史文档声明（Skillpack 协议）"
@@ -56,6 +57,20 @@ def _extract_readme_skillpack_list(text: str) -> set[str]:
 
 
 class TestSkillpackDocsContract:
+    def test_protocol_has_hook_section_and_compat_matrix(self) -> None:
+        text = SKILLPACK_PROTOCOL_PATH.read_text(encoding="utf-8")
+        assert "## 7. Hook 协议" in text
+        assert "PreToolUse` / `preToolUse` / `pre_tool_use" in text
+        assert "DENY > ASK > ALLOW > CONTINUE" in text
+        assert "EXCELMANUS_HOOKS_COMMAND_ENABLED=false" in text
+
+    def test_readme_hook_semantics_match_runtime_contract(self) -> None:
+        text = README_PATH.read_text(encoding="utf-8")
+        assert "PreToolUse` / `preToolUse` / `pre_tool_use" in text
+        assert "`ASK` 仅对 `PreToolUse` 生效" in text
+        assert "`EXCELMANUS_HOOKS_COMMAND_ENABLED=true`" in text
+        assert "链式命令" in text
+
     def test_readme_openclaw_row_matches_new_protocol(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
 

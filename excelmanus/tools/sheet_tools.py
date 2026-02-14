@@ -57,13 +57,42 @@ def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_
 # ── 工具函数 ──────────────────────────────────────────────
 
 
-def list_sheets(file_path: str, offset: int = 0, limit: int = 100) -> str:
-    """列出 Excel 文件中所有工作表的名称和基本信息。
+# list_sheets 可用的 include 维度
+_LIST_SHEETS_DIMENSIONS = (
+    "columns",
+    "dtypes",
+    "freeze_panes",
+    "preview",
+    "charts",
+    "images",
+    "conditional_formatting",
+    "column_widths",
+)
+
+
+def list_sheets(
+    file_path: str,
+    offset: int = 0,
+    limit: int = 100,
+    include: list[str] | None = None,
+    max_preview_rows: int = 5,
+) -> str:
+    """列出 Excel 文件中所有工作表的名称和基本信息，可按需附加额外维度。
 
     Args:
         file_path: Excel 文件路径。
         offset: 分页起始偏移（从 0 开始），默认 0。
         limit: 分页大小，默认 100，最大 500。
+        include: 按需请求的额外维度列表。可选值：
+            columns — 列名列表
+            dtypes — 列数据类型（需用 pandas 读取）
+            freeze_panes — 冻结窗格位置
+            preview — 前 N 行数据预览
+            charts — 嵌入图表元信息
+            images — 嵌入图片元信息
+            conditional_formatting — 条件格式规则
+            column_widths — 非默认列宽
+        max_preview_rows: preview 维度的预览行数，默认 5。
 
     Returns:
         JSON 格式的工作表列表，包含名称、行列数和是否为活动表。
@@ -75,17 +104,70 @@ def list_sheets(file_path: str, offset: int = 0, limit: int = 100) -> str:
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    wb = load_workbook(safe_path, read_only=True, data_only=True)
+    include_set: set[str] = set(include) if include else set()
+    invalid_dims = include_set - set(_LIST_SHEETS_DIMENSIONS)
+    include_set -= invalid_dims
+
+    # 是否需要非 read_only 模式（charts/images/freeze_panes 等需要）
+    needs_full = bool(include_set - {"columns", "dtypes", "preview"})
+
+    wb = load_workbook(safe_path, read_only=not needs_full, data_only=True)
     try:
         active_name = wb.active.title if wb.active else None
         sheets: list[dict[str, Any]] = []
         for ws in wb.worksheets:
-            sheets.append({
+            info: dict[str, Any] = {
                 "name": ws.title,
                 "rows": ws.max_row or 0,
                 "columns": ws.max_column or 0,
                 "is_active": ws.title == active_name,
-            })
+            }
+
+            # columns 维度：读取第一行作为列名
+            if "columns" in include_set:
+                header_row = list(ws.iter_rows(
+                    min_row=1, max_row=1, values_only=True,
+                ))
+                if header_row and header_row[0]:
+                    info["column_names"] = [
+                        str(c) if c is not None else None
+                        for c in header_row[0]
+                        if c is not None
+                    ]
+
+            # preview 维度：前 N 行数据
+            if "preview" in include_set:
+                preview_rows: list[list[Any]] = []
+                for row in ws.iter_rows(
+                    min_row=2, max_row=1 + max_preview_rows, values_only=True,
+                ):
+                    preview_rows.append([
+                        str(c) if c is not None else None for c in row
+                    ])
+                info["preview"] = preview_rows
+
+            # 以下维度通过 data_tools 的采集函数实现
+            if needs_full and include_set:
+                from excelmanus.tools.data_tools import (
+                    _collect_charts,
+                    _collect_column_widths,
+                    _collect_conditional_formatting,
+                    _collect_freeze_panes,
+                    _collect_images,
+                )
+
+                if "freeze_panes" in include_set:
+                    info["freeze_panes"] = _collect_freeze_panes(ws)
+                if "charts" in include_set:
+                    info["charts"] = _collect_charts(ws)
+                if "images" in include_set:
+                    info["images"] = _collect_images(ws)
+                if "conditional_formatting" in include_set:
+                    info["conditional_formatting"] = _collect_conditional_formatting(ws)
+                if "column_widths" in include_set:
+                    info["column_widths"] = _collect_column_widths(ws)
+
+            sheets.append(info)
     finally:
         wb.close()
 
@@ -93,19 +175,20 @@ def list_sheets(file_path: str, offset: int = 0, limit: int = 100) -> str:
     end = offset + limit
     paged_sheets = sheets[offset:end]
     has_more = end < total
-    return json.dumps(
-        {
-            "file": safe_path.name,
-            "sheet_count": total,
-            "offset": offset,
-            "limit": limit,
-            "returned": len(paged_sheets),
-            "has_more": has_more,
-            "sheets": paged_sheets,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+
+    result: dict[str, Any] = {
+        "file": safe_path.name,
+        "sheet_count": total,
+        "offset": offset,
+        "limit": limit,
+        "returned": len(paged_sheets),
+        "has_more": has_more,
+        "sheets": paged_sheets,
+    }
+    if invalid_dims:
+        result["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
+
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
 def create_sheet(
@@ -469,7 +552,12 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_sheets",
-            description="列出 Excel 文件中所有工作表的名称、行列数和是否为活动表",
+            description=(
+                "列出 Excel 文件中所有工作表的名称、行列数和是否为活动表。"
+                "通过 include 参数可按需附加：columns（列名）、preview（前N行）、"
+                "freeze_panes（冻结窗格）、charts（图表）、images（图片）、"
+                "conditional_formatting（条件格式）、column_widths（列宽）"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -486,6 +574,27 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "分页大小，默认 100，最大 500",
                         "default": 100,
+                    },
+                    "include": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "columns",
+                                "freeze_panes",
+                                "preview",
+                                "charts",
+                                "images",
+                                "conditional_formatting",
+                                "column_widths",
+                            ],
+                        },
+                        "description": "按需请求的额外维度列表，每个 sheet 均返回对应信息",
+                    },
+                    "max_preview_rows": {
+                        "type": "integer",
+                        "description": "preview 维度的预览行数，默认 5",
+                        "default": 5,
                     },
                 },
                 "required": ["file_path"],

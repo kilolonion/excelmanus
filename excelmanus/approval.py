@@ -7,16 +7,22 @@ from datetime import datetime, timezone
 from difflib import unified_diff
 import hashlib
 import json
+import os
 from pathlib import Path
 import secrets
 import subprocess
 from typing import Any, Callable, Sequence
 
 from excelmanus.tools.policy import (
+    AUDIT_TARGET_ARG_RULES_ALL,
+    AUDIT_TARGET_ARG_RULES_FIRST,
     MUTATING_ALL_TOOLS,
     MUTATING_AUDIT_ONLY_TOOLS,
     MUTATING_CONFIRM_TOOLS,
     READ_ONLY_SAFE_TOOLS,
+    WORKSPACE_SCAN_EXCLUDE_PREFIXES,
+    WORKSPACE_SCAN_MAX_FILES,
+    WORKSPACE_SCAN_MAX_HASH_BYTES,
 )
 
 
@@ -63,6 +69,11 @@ class AppliedApprovalRecord:
     manifest_file: str
     audit_dir: str
     result_preview: str
+    execution_status: str = "success"
+    error_type: str | None = None
+    error_message: str | None = None
+    partial_scan: bool = False
+    patch_file: str | None = None
     changes: list[FileChangeRecord] = field(default_factory=list)
     binary_snapshots: list[BinarySnapshotRecord] = field(default_factory=list)
     repo_diff_before_file: str | None = None
@@ -83,22 +94,20 @@ class _FileSnapshot:
 
     @property
     def sha256(self) -> str | None:
-        return hashlib.sha256(self.content).hexdigest() if self.content else None
+        if self.content is None:
+            return None
+        return hashlib.sha256(self.content).hexdigest()
 
 
 class ApprovalManager:
     """审批状态与审计管理器。"""
 
-    # 显式只读白名单
-    READ_ONLY_SAFE_TOOLS: set[str] = set(READ_ONLY_SAFE_TOOLS)
-    # Tier A：需 /accept 确认后执行
-    CONFIRM_TOOLS: set[str] = set(MUTATING_CONFIRM_TOOLS)
-    # Tier B：不拦截确认，但必须进入审计
-    AUDIT_ONLY_TOOLS: set[str] = set(MUTATING_AUDIT_ONLY_TOOLS)
-    # 兼容历史字段：保留高风险集合别名（等价于 Tier A）。
-    HIGH_RISK_TOOLS: set[str] = set(MUTATING_CONFIRM_TOOLS)
-    # 所有会修改工作区文件的工具（Tier A + Tier B）
-    MUTATING_TOOLS: set[str] = set(MUTATING_ALL_TOOLS)
+    # 默认策略（不可变常量）
+    READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(READ_ONLY_SAFE_TOOLS)
+    CONFIRM_TOOLS: frozenset[str] = frozenset(MUTATING_CONFIRM_TOOLS)
+    AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(MUTATING_AUDIT_ONLY_TOOLS)
+    HIGH_RISK_TOOLS: frozenset[str] = frozenset(MUTATING_CONFIRM_TOOLS)
+    MUTATING_TOOLS: frozenset[str] = frozenset(MUTATING_ALL_TOOLS)
 
     def __init__(self, workspace_root: str, audit_root: str = "outputs/approvals") -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
@@ -106,16 +115,23 @@ class ApprovalManager:
         self.audit_root.mkdir(parents=True, exist_ok=True)
         self._pending: PendingApproval | None = None
         self._applied: dict[str, AppliedApprovalRecord] = {}
-        # MCP 工具白名单：prefixed_name → True 表示自动批准
         self._mcp_auto_approved: set[str] = set()
+
+        # 会话实例级副本，避免类级可变状态污染。
+        self._read_only_safe_tools: set[str] = set(self.READ_ONLY_SAFE_TOOLS)
+        self._confirm_tools: set[str] = set(self.CONFIRM_TOOLS)
+        self._audit_only_tools: set[str] = set(self.AUDIT_ONLY_TOOLS)
+        self._mutating_tools: set[str] = set(self.MUTATING_TOOLS)
 
     def register_mcp_auto_approve(self, prefixed_names: Sequence[str]) -> None:
         """注册 MCP 工具白名单（自动批准，无需用户确认）。"""
         self._mcp_auto_approved.update(prefixed_names)
 
     def register_read_only_safe_tools(self, tool_names: Sequence[str]) -> None:
-        """注册额外只读安全工具（用于扩展白名单）。"""
-        self.READ_ONLY_SAFE_TOOLS.update(str(name).strip() for name in tool_names if str(name).strip())
+        """注册额外只读安全工具（仅影响当前实例）。"""
+        self._read_only_safe_tools.update(
+            str(name).strip() for name in tool_names if str(name).strip()
+        )
 
     @property
     def pending(self) -> PendingApproval | None:
@@ -125,13 +141,13 @@ class ApprovalManager:
         return self._pending is not None
 
     def is_read_only_safe_tool(self, tool_name: str) -> bool:
-        return tool_name in self.READ_ONLY_SAFE_TOOLS
+        return tool_name in self._read_only_safe_tools
 
     def is_audit_only_tool(self, tool_name: str) -> bool:
-        return tool_name in self.AUDIT_ONLY_TOOLS
+        return tool_name in self._audit_only_tools
 
     def is_mutating_tool(self, tool_name: str) -> bool:
-        return tool_name in self.MUTATING_TOOLS
+        return tool_name in self._mutating_tools
 
     def is_confirm_required_tool(self, tool_name: str) -> bool:
         if self.is_read_only_safe_tool(tool_name):
@@ -140,9 +156,7 @@ class ApprovalManager:
             return not self.is_mcp_auto_approved(tool_name)
         if self.is_audit_only_tool(tool_name):
             return False
-        if tool_name in self.CONFIRM_TOOLS:
-            return True
-        return False
+        return tool_name in self._confirm_tools
 
     def is_high_risk_tool(self, tool_name: str) -> bool:
         return self.is_confirm_required_tool(tool_name)
@@ -192,7 +206,15 @@ class ApprovalManager:
         self._pending = None
 
     def get_applied(self, approval_id: str) -> AppliedApprovalRecord | None:
-        return self._applied.get(approval_id)
+        cached = self._applied.get(approval_id)
+        if cached is not None:
+            return cached
+
+        loaded = self._load_applied_from_manifest(approval_id)
+        if loaded is None:
+            return None
+        self._applied[approval_id] = loaded
+        return loaded
 
     def pending_block_message(self) -> str:
         if self._pending is None:
@@ -221,18 +243,48 @@ class ApprovalManager:
         snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         targets = self._resolve_target_paths(tool_name, arguments)
-        before = self._collect_file_snapshots(targets)
+        use_workspace_scan = (not targets) and self.is_mutating_tool(tool_name)
+
+        before_partial = False
+        after_partial = False
+        if use_workspace_scan:
+            before, before_partial, _, _ = self._collect_workspace_snapshots()
+        else:
+            before = self._collect_file_snapshots(targets)
+
         repo_diff_before = self._git_diff_text()
-        result_text = str(execute(tool_name, arguments, tool_scope))
-        after = self._collect_file_snapshots(targets)
+
+        result_text = ""
+        execute_error: Exception | None = None
+        error_type: str | None = None
+        error_message: str | None = None
+        try:
+            result_text = str(execute(tool_name, arguments, tool_scope))
+        except Exception as exc:  # noqa: BLE001
+            execute_error = exc
+            error_type = type(exc).__name__
+            error_message = str(exc)
+
+        if use_workspace_scan:
+            after, after_partial, _, _ = self._collect_workspace_snapshots()
+        else:
+            after = self._collect_file_snapshots(targets)
         repo_diff_after = self._git_diff_text()
 
-        changes, patch_text, binary_snapshots = self._build_change_records(
-            target_paths=targets,
-            before=before,
-            after=after,
-            snapshots_dir=snapshots_dir,
-        )
+        if use_workspace_scan:
+            changes, patch_text, binary_snapshots = self._build_change_records_from_snapshot_maps(
+                before=before,
+                after=after,
+                snapshots_dir=snapshots_dir,
+            )
+        else:
+            changes, patch_text, binary_snapshots = self._build_change_records(
+                target_paths=targets,
+                before=before,
+                after=after,
+                snapshots_dir=snapshots_dir,
+            )
+
         patch_rel = None
         if patch_text:
             patch_file = audit_dir / "changes.patch"
@@ -247,6 +299,11 @@ class ApprovalManager:
         repo_before_file.write_text(repo_diff_before, encoding="utf-8")
         repo_after_file.write_text(repo_diff_after, encoding="utf-8")
 
+        execution_status = "failed" if execute_error is not None else "success"
+        preview_src = result_text
+        if execute_error is not None:
+            preview_src = f"{error_type}: {error_message}" if error_type else (error_message or "")
+
         record = AppliedApprovalRecord(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -257,32 +314,28 @@ class ApprovalManager:
             undoable=undoable,
             manifest_file=str((audit_dir / "manifest.json").relative_to(self.workspace_root)),
             audit_dir=str(audit_dir.relative_to(self.workspace_root)),
-            result_preview=self._shorten(result_text, 300),
+            result_preview=self._shorten(preview_src, 300),
+            execution_status=execution_status,
+            error_type=error_type,
+            error_message=error_message,
+            partial_scan=(before_partial or after_partial),
+            patch_file=patch_rel,
             changes=changes,
             binary_snapshots=binary_snapshots,
             repo_diff_before_file=str(repo_before_file.relative_to(self.workspace_root)),
             repo_diff_after_file=str(repo_after_file.relative_to(self.workspace_root)),
         )
-        manifest = {
-            "approval_id": record.approval_id,
-            "tool_name": record.tool_name,
-            "arguments": record.arguments,
-            "tool_scope": record.tool_scope,
-            "created_at_utc": record.created_at_utc,
-            "applied_at_utc": record.applied_at_utc,
-            "undoable": record.undoable,
-            "result_preview": record.result_preview,
-            "audit_dir": record.audit_dir,
-            "repo_diff_before_file": record.repo_diff_before_file,
-            "repo_diff_after_file": record.repo_diff_after_file,
-            "changes": [asdict(c) for c in record.changes],
-            "binary_snapshots": [asdict(s) for s in record.binary_snapshots],
-        }
+
+        manifest = self._build_manifest_v2(record)
         (audit_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
         self._applied[approval_id] = record
+
+        if execute_error is not None:
+            raise execute_error
         return result_text, record
 
     def undo(self, approval_id: str) -> str:
@@ -341,49 +394,23 @@ class ApprovalManager:
 
     def _resolve_target_paths(self, tool_name: str, arguments: dict[str, Any]) -> list[Path]:
         path_args: list[str] = []
-        if tool_name == "write_text_file":
-            path_args = [str(arguments.get("file_path", ""))]
-        elif tool_name == "copy_file":
-            path_args = [str(arguments.get("destination", ""))]
-        elif tool_name == "rename_file":
-            path_args = [str(arguments.get("source", "")), str(arguments.get("destination", ""))]
-        elif tool_name == "delete_file":
-            path_args = [str(arguments.get("file_path", ""))]
-        elif tool_name == "write_excel":
-            path_args = [str(arguments.get("file_path", ""))]
-        elif tool_name == "transform_data":
-            out = arguments.get("output_path")
-            path_args = [str(out)] if out else [str(arguments.get("file_path", ""))]
-        elif tool_name in {
-            "format_cells",
-            "adjust_column_width",
-            "adjust_row_height",
-            "merge_cells",
-            "unmerge_cells",
-            "create_sheet",
-            "copy_sheet",
-            "rename_sheet",
-            "delete_sheet",
-            "create_excel_chart",
-            "write_cells",
-            "insert_rows",
-            "insert_columns",
-            "apply_threshold_icon_format",
-            "style_card_blocks",
-            "scale_range_unit",
-            "apply_dashboard_dark_theme",
-            "add_color_scale",
-            "add_data_bar",
-            "add_conditional_rule",
-            "set_print_layout",
-            "set_page_header_footer",
-        }:
-            path_args = [str(arguments.get("file_path", ""))]
-        elif tool_name == "copy_range_between_sheets":
-            target = arguments.get("target_file")
-            path_args = [str(target)] if target else [str(arguments.get("source_file", ""))]
-        elif tool_name == "create_chart":
-            path_args = [str(arguments.get("output_path", ""))]
+
+        all_fields = AUDIT_TARGET_ARG_RULES_ALL.get(tool_name)
+        if all_fields is not None:
+            for field_name in all_fields:
+                raw = arguments.get(field_name)
+                text = str(raw).strip() if raw is not None else ""
+                if text:
+                    path_args.append(text)
+        else:
+            first_fields = AUDIT_TARGET_ARG_RULES_FIRST.get(tool_name)
+            if first_fields is not None:
+                for field_name in first_fields:
+                    raw = arguments.get(field_name)
+                    text = str(raw).strip() if raw is not None else ""
+                    if text:
+                        path_args = [text]
+                        break
 
         resolved: list[Path] = []
         seen: set[str] = set()
@@ -420,6 +447,82 @@ class ApprovalManager:
                 snapshots[rel] = _FileSnapshot(exists=False, content=None)
         return snapshots
 
+    def _collect_workspace_snapshots(self) -> tuple[dict[str, _FileSnapshot], bool, int, int]:
+        snapshots: dict[str, _FileSnapshot] = {}
+        partial_scan = False
+        scanned_files = 0
+        hashed_bytes = 0
+
+        exclude_prefixes = tuple(
+            self._normalize_rel_prefix(prefix)
+            for prefix in WORKSPACE_SCAN_EXCLUDE_PREFIXES
+            if self._normalize_rel_prefix(prefix)
+        )
+
+        for root, dirs, files in os.walk(self.workspace_root):
+            root_path = Path(root)
+            root_rel = root_path.relative_to(self.workspace_root)
+
+            # 原地裁剪目录，降低遍历开销。
+            kept_dirs: list[str] = []
+            for name in dirs:
+                rel_path = (
+                    (root_rel / name).as_posix() if str(root_rel) != "." else Path(name).as_posix()
+                )
+                if self._is_excluded_rel(rel_path, exclude_prefixes):
+                    continue
+                kept_dirs.append(name)
+            dirs[:] = kept_dirs
+
+            for name in files:
+                rel_path = (
+                    (root_rel / name).as_posix() if str(root_rel) != "." else Path(name).as_posix()
+                )
+                if self._is_excluded_rel(rel_path, exclude_prefixes):
+                    continue
+
+                path = root_path / name
+                if path.is_symlink() or not path.is_file():
+                    continue
+
+                scanned_files += 1
+                if scanned_files > WORKSPACE_SCAN_MAX_FILES:
+                    partial_scan = True
+                    return snapshots, partial_scan, scanned_files - 1, hashed_bytes
+
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+
+                if (hashed_bytes + size) > WORKSPACE_SCAN_MAX_HASH_BYTES:
+                    partial_scan = True
+                    return snapshots, partial_scan, scanned_files - 1, hashed_bytes
+
+                try:
+                    content = path.read_bytes()
+                except OSError:
+                    continue
+
+                hashed_bytes += size
+                snapshots[rel_path] = _FileSnapshot(exists=True, content=content)
+
+        return snapshots, partial_scan, scanned_files, hashed_bytes
+
+    @staticmethod
+    def _normalize_rel_prefix(prefix: str) -> str:
+        return prefix.replace("\\", "/").strip("/")
+
+    @staticmethod
+    def _is_excluded_rel(rel_path: str, prefixes: Sequence[str]) -> bool:
+        normalized = rel_path.replace("\\", "/").strip("/")
+        if not normalized:
+            return False
+        for prefix in prefixes:
+            if normalized == prefix or normalized.startswith(f"{prefix}/"):
+                return True
+        return False
+
     def _build_change_records(
         self,
         *,
@@ -428,19 +531,44 @@ class ApprovalManager:
         after: dict[str, _FileSnapshot],
         snapshots_dir: Path,
     ) -> tuple[list[FileChangeRecord], str, list[BinarySnapshotRecord]]:
+        before_subset: dict[str, _FileSnapshot] = {}
+        after_subset: dict[str, _FileSnapshot] = {}
+        for abs_path in target_paths:
+            rel = str(abs_path.relative_to(self.workspace_root))
+            before_subset[rel] = before.get(rel, _FileSnapshot(exists=False, content=None))
+            after_subset[rel] = after.get(rel, _FileSnapshot(exists=False, content=None))
+        return self._build_change_records_from_snapshot_maps(
+            before=before_subset,
+            after=after_subset,
+            snapshots_dir=snapshots_dir,
+        )
+
+    def _build_change_records_from_snapshot_maps(
+        self,
+        *,
+        before: dict[str, _FileSnapshot],
+        after: dict[str, _FileSnapshot],
+        snapshots_dir: Path,
+    ) -> tuple[list[FileChangeRecord], str, list[BinarySnapshotRecord]]:
         changes: list[FileChangeRecord] = []
         binary_snapshots: list[BinarySnapshotRecord] = []
         patches: list[str] = []
-        for abs_path in target_paths:
-            rel = str(abs_path.relative_to(self.workspace_root))
+
+        for rel in sorted(set(before) | set(after)):
             before_snap = before.get(rel, _FileSnapshot(exists=False, content=None))
             after_snap = after.get(rel, _FileSnapshot(exists=False, content=None))
-            if before_snap.exists == after_snap.exists and before_snap.content == after_snap.content:
+            if (
+                before_snap.exists == after_snap.exists
+                and before_snap.content == after_snap.content
+            ):
                 continue
 
-            base_content = before_snap.content if before_snap.content is not None else after_snap.content
+            base_content = (
+                before_snap.content if before_snap.content is not None else after_snap.content
+            )
             is_binary = self._is_binary_content(base_content)
             before_snapshot_file: str | None = None
+
             if before_snap.exists and before_snap.content is not None:
                 snapshot_path = snapshots_dir / rel
                 snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,6 +583,7 @@ class ApprovalManager:
                             size_bytes=before_snap.size or 0,
                         )
                     )
+
             if not is_binary:
                 patch = self._build_unified_diff(
                     rel_path=rel,
@@ -463,6 +592,7 @@ class ApprovalManager:
                 )
                 if patch:
                     patches.append(patch)
+
             changes.append(
                 FileChangeRecord(
                     path=rel,
@@ -476,10 +606,175 @@ class ApprovalManager:
                     before_snapshot_file=before_snapshot_file,
                 )
             )
+
         patch_text = "\n".join(patches).strip()
         if patch_text:
             patch_text += "\n"
         return changes, patch_text, binary_snapshots
+
+    def _build_manifest_v2(self, record: AppliedApprovalRecord) -> dict[str, Any]:
+        return {
+            "version": 2,
+            "approval": {
+                "approval_id": record.approval_id,
+                "tool_name": record.tool_name,
+                "arguments": record.arguments,
+                "tool_scope": record.tool_scope,
+                "created_at_utc": record.created_at_utc,
+                "applied_at_utc": record.applied_at_utc,
+                "undoable": record.undoable,
+            },
+            "execution": {
+                "status": record.execution_status,
+                "result_preview": record.result_preview,
+                "error_type": record.error_type,
+                "error_message": record.error_message,
+                "partial_scan": record.partial_scan,
+            },
+            "artifacts": {
+                "audit_dir": record.audit_dir,
+                "manifest_file": record.manifest_file,
+                "repo_diff_before_file": record.repo_diff_before_file,
+                "repo_diff_after_file": record.repo_diff_after_file,
+                "patch_file": record.patch_file,
+            },
+            "changes": {
+                "files": [asdict(change) for change in record.changes],
+                "binary_snapshots": [asdict(item) for item in record.binary_snapshots],
+            },
+        }
+
+    def _load_applied_from_manifest(self, approval_id: str) -> AppliedApprovalRecord | None:
+        manifest_path = self.audit_root / approval_id / "manifest.json"
+        if not manifest_path.exists():
+            return None
+
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        if raw.get("version") != 2:
+            return None
+
+        approval = raw.get("approval") if isinstance(raw.get("approval"), dict) else {}
+        execution = raw.get("execution") if isinstance(raw.get("execution"), dict) else {}
+        artifacts = raw.get("artifacts") if isinstance(raw.get("artifacts"), dict) else {}
+        changes_block = raw.get("changes") if isinstance(raw.get("changes"), dict) else {}
+
+        changes_raw = changes_block.get("files")
+        binary_raw = changes_block.get("binary_snapshots")
+
+        changes: list[FileChangeRecord] = []
+        if isinstance(changes_raw, list):
+            for item in changes_raw:
+                if not isinstance(item, dict):
+                    continue
+                changes.append(
+                    FileChangeRecord(
+                        path=str(item.get("path", "")),
+                        before_exists=bool(item.get("before_exists", False)),
+                        after_exists=bool(item.get("after_exists", False)),
+                        before_hash=(
+                            str(item.get("before_hash"))
+                            if item.get("before_hash") is not None
+                            else None
+                        ),
+                        after_hash=(
+                            str(item.get("after_hash"))
+                            if item.get("after_hash") is not None
+                            else None
+                        ),
+                        before_size=(
+                            int(item.get("before_size"))
+                            if item.get("before_size") is not None
+                            else None
+                        ),
+                        after_size=(
+                            int(item.get("after_size"))
+                            if item.get("after_size") is not None
+                            else None
+                        ),
+                        is_binary=bool(item.get("is_binary", False)),
+                        text_diff_file=(
+                            str(item.get("text_diff_file"))
+                            if item.get("text_diff_file") is not None
+                            else None
+                        ),
+                        before_snapshot_file=(
+                            str(item.get("before_snapshot_file"))
+                            if item.get("before_snapshot_file") is not None
+                            else None
+                        ),
+                    )
+                )
+
+        binary_snapshots: list[BinarySnapshotRecord] = []
+        if isinstance(binary_raw, list):
+            for item in binary_raw:
+                if not isinstance(item, dict):
+                    continue
+                binary_snapshots.append(
+                    BinarySnapshotRecord(
+                        path=str(item.get("path", "")),
+                        snapshot_file=str(item.get("snapshot_file", "")),
+                        hash_sha256=str(item.get("hash_sha256", "")),
+                        size_bytes=int(item.get("size_bytes", 0)),
+                    )
+                )
+
+        applied_id = str(approval.get("approval_id") or approval_id)
+        audit_dir = self.audit_root / applied_id
+
+        return AppliedApprovalRecord(
+            approval_id=applied_id,
+            tool_name=str(approval.get("tool_name", "")),
+            arguments=(
+                dict(approval.get("arguments"))
+                if isinstance(approval.get("arguments"), dict)
+                else {}
+            ),
+            tool_scope=(
+                [str(value) for value in approval.get("tool_scope", [])]
+                if isinstance(approval.get("tool_scope"), list)
+                else []
+            ),
+            created_at_utc=str(approval.get("created_at_utc", "")),
+            applied_at_utc=str(approval.get("applied_at_utc", "")),
+            undoable=bool(approval.get("undoable", False)),
+            manifest_file=str(manifest_path.relative_to(self.workspace_root)),
+            audit_dir=str(audit_dir.relative_to(self.workspace_root)),
+            result_preview=str(execution.get("result_preview", "")),
+            execution_status=str(execution.get("status", "success")),
+            error_type=(
+                str(execution.get("error_type"))
+                if execution.get("error_type") is not None
+                else None
+            ),
+            error_message=(
+                str(execution.get("error_message"))
+                if execution.get("error_message") is not None
+                else None
+            ),
+            partial_scan=bool(execution.get("partial_scan", False)),
+            patch_file=(
+                str(artifacts.get("patch_file"))
+                if artifacts.get("patch_file") is not None
+                else None
+            ),
+            changes=changes,
+            binary_snapshots=binary_snapshots,
+            repo_diff_before_file=(
+                str(artifacts.get("repo_diff_before_file"))
+                if artifacts.get("repo_diff_before_file") is not None
+                else None
+            ),
+            repo_diff_after_file=(
+                str(artifacts.get("repo_diff_after_file"))
+                if artifacts.get("repo_diff_after_file") is not None
+                else None
+            ),
+        )
 
     @staticmethod
     def _sha256(content: bytes) -> str:
@@ -504,8 +799,8 @@ class ApprovalManager:
         before_content: bytes | None,
         after_content: bytes | None,
     ) -> str:
-        before_text = before_content.decode("utf-8", errors="replace") if before_content else ""
-        after_text = after_content.decode("utf-8", errors="replace") if after_content else ""
+        before_text = before_content.decode("utf-8", errors="replace") if before_content is not None else ""
+        after_text = after_content.decode("utf-8", errors="replace") if after_content is not None else ""
         from_file = f"a/{rel_path}" if before_content is not None else "/dev/null"
         to_file = f"b/{rel_path}" if after_content is not None else "/dev/null"
         diff = unified_diff(

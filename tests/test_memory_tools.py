@@ -10,7 +10,12 @@ import pytest
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 from excelmanus.persistent_memory import PersistentMemory
 from excelmanus.tools import memory_tools
-from excelmanus.tools.memory_tools import get_tools, init_memory, memory_read_topic
+from excelmanus.tools.memory_tools import (
+    bind_memory_context,
+    get_tools,
+    init_memory,
+    memory_read_topic,
+)
 
 
 class TestInitMemory:
@@ -84,6 +89,59 @@ class TestMemoryReadTopic:
         result = memory_read_topic(topic="user_prefs")
         assert "柱状图" in result
 
+    def test_reads_error_solutions(self, tmp_path: Path) -> None:
+        """正确读取 error_solutions.md 内容。"""
+        pm = PersistentMemory(str(tmp_path))
+        topic_file = tmp_path / "error_solutions.md"
+        topic_file.write_text("openpyxl 版本冲突时固定到 3.1.x", encoding="utf-8")
+        init_memory(pm)
+
+        result = memory_read_topic(topic="error_solutions")
+        assert "openpyxl" in result
+
+    def test_reads_general_topic(self, tmp_path: Path) -> None:
+        """正确读取 general.md 内容。"""
+        pm = PersistentMemory(str(tmp_path))
+        topic_file = tmp_path / "general.md"
+        topic_file.write_text("项目默认使用中文回复", encoding="utf-8")
+        init_memory(pm)
+
+        result = memory_read_topic(topic="general")
+        assert "中文回复" in result
+
+    def test_alias_topic_is_compatible(self, tmp_path: Path) -> None:
+        """旧别名 error_solution 仍可读取新主题文件。"""
+        pm = PersistentMemory(str(tmp_path))
+        topic_file = tmp_path / "error_solutions.md"
+        topic_file.write_text("别名兼容测试", encoding="utf-8")
+        init_memory(pm)
+
+        result = memory_read_topic(topic="error_solution")
+        assert "别名兼容测试" in result
+
+    def test_bind_memory_context_overrides_global(self, tmp_path: Path) -> None:
+        """上下文绑定应覆盖全局引用，退出后恢复。"""
+        pm_global = PersistentMemory(str(tmp_path / "global"))
+        (pm_global.memory_dir / "user_prefs.md").write_text("全局", encoding="utf-8")
+        pm_local = PersistentMemory(str(tmp_path / "local"))
+        (pm_local.memory_dir / "user_prefs.md").write_text("局部", encoding="utf-8")
+        init_memory(pm_global)
+
+        with bind_memory_context(pm_local):
+            assert "局部" in memory_read_topic(topic="user_prefs")
+
+        assert "全局" in memory_read_topic(topic="user_prefs")
+
+    def test_bind_memory_context_none_blocks_global_fallback(self, tmp_path: Path) -> None:
+        """上下文显式绑定 None 时应禁用全局回退。"""
+        pm_global = PersistentMemory(str(tmp_path / "global"))
+        (pm_global.memory_dir / "user_prefs.md").write_text("全局", encoding="utf-8")
+        init_memory(pm_global)
+
+        with bind_memory_context(None):
+            result = memory_read_topic(topic="user_prefs")
+            assert "持久记忆功能未启用" in result
+
     def test_reads_content_written_by_save_entries(self, tmp_path: Path) -> None:
         """验证通过 save_entries 写入的内容可以被 memory_read_topic 读取。"""
         pm = PersistentMemory(str(tmp_path))
@@ -109,7 +167,7 @@ class TestGetTools:
         """返回工具定义列表。"""
         tools = get_tools()
         assert isinstance(tools, list)
-        assert len(tools) == 1
+        assert len(tools) == 2
 
     def test_tool_name(self) -> None:
         """工具名称正确。"""
@@ -123,6 +181,8 @@ class TestGetTools:
         assert "enum" in topic_prop
         assert "file_patterns" in topic_prop["enum"]
         assert "user_prefs" in topic_prop["enum"]
+        assert "error_solutions" in topic_prop["enum"]
+        assert "general" in topic_prop["enum"]
 
     def test_tool_func_is_callable(self) -> None:
         """工具函数可调用。"""

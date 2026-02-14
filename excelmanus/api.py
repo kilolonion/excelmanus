@@ -35,7 +35,12 @@ from excelmanus.config import (
 from excelmanus.engine import ChatResult, ToolCallResult
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger, setup_logging
-from excelmanus.output_guard import guard_public_reply, sanitize_external_text
+from excelmanus.mcp.manager import MCPManager
+from excelmanus.output_guard import (
+    guard_public_reply,
+    sanitize_external_data,
+    sanitize_external_text,
+)
 from excelmanus.session import (
     SessionBusyError,
     SessionLimitExceededError,
@@ -52,6 +57,7 @@ from excelmanus.skillpacks import (
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("api")
+_APP_CORS_ALLOW_ORIGINS = tuple(load_cors_allow_origins())
 
 # ── 请求 / 响应模型 ──────────────────────────────────────
 
@@ -205,27 +211,6 @@ _tool_registry: ToolRegistry | None = None
 _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _config: ExcelManusConfig | None = None
-_cleanup_task: asyncio.Task[None] | None = None
-
-
-# ── 定期清理后台任务 ──────────────────────────────────────
-
-
-async def _periodic_cleanup(manager: SessionManager, interval: int) -> None:
-    """后台协程：定期清理过期会话。"""
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            cleaned = await manager.cleanup_expired()
-            if cleaned:
-                logger.info("定期清理：已清理 %d 个过期会话", cleaned)
-        except Exception:
-            logger.warning("定期清理异常", exc_info=True)
-
-
-def _cleanup_interval_from_ttl(ttl_seconds: int) -> int:
-    """根据 TTL 计算清理间隔，确保小 TTL 场景及时清理。"""
-    return max(1, min(60, ttl_seconds // 2 if ttl_seconds > 1 else 1))
 
 
 def _is_external_safe_mode() -> bool:
@@ -365,7 +350,10 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
     for item in tool_calls:
         rows.append({
             "tool_name": item.tool_name,
-            "arguments": item.arguments if isinstance(item.arguments, dict) else {},
+            "arguments": sanitize_external_data(
+                item.arguments if isinstance(item.arguments, dict) else {},
+                max_len=1000,
+            ),
             "result": sanitize_external_text(item.result or "", max_len=3000),
             "success": bool(item.success),
             "error": (
@@ -389,7 +377,7 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config, _cleanup_task
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config
 
     # 加载配置
     _config = load_config()
@@ -405,19 +393,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _skill_router = SkillRouter(_config, _skillpack_loader)
 
     # 初始化会话管理器
+    shared_mcp_manager: MCPManager | None = None
+    if _config.mcp_shared_manager:
+        shared_mcp_manager = MCPManager(_config.workspace_root)
+
+    # 启动时校验 CORS 配置入口一致性，避免“配置已加载但中间件未消费”
+    if _APP_CORS_ALLOW_ORIGINS != _config.cors_allow_origins:
+        logger.warning(
+            "CORS 配置来源不一致：middleware=%s config=%s",
+            list(_APP_CORS_ALLOW_ORIGINS),
+            list(_config.cors_allow_origins),
+        )
+
     _session_manager = SessionManager(
         max_sessions=_config.max_sessions,
         ttl_seconds=_config.session_ttl_seconds,
         config=_config,
         registry=_tool_registry,
         skill_router=_skill_router,
+        shared_mcp_manager=shared_mcp_manager,
     )
-
-    # 启动定期清理后台任务
-    cleanup_interval = _cleanup_interval_from_ttl(_config.session_ttl_seconds)
-    _cleanup_task = asyncio.create_task(
-        _periodic_cleanup(_session_manager, interval=cleanup_interval)
-    )
+    await _session_manager.start_background_cleanup()
 
     loaded_skillpacks = (
         sorted(_skillpack_loader.get_skillpacks().keys())
@@ -437,21 +433,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # 关闭清理任务
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-        try:
-            await _cleanup_task
-        except asyncio.CancelledError:
-            pass
-
-    # 关闭所有会话的 MCP 连接
+    # 关闭所有会话与 MCP 连接
     if _session_manager is not None:
-        for sid, entry in list(_session_manager._sessions.items()):
-            try:
-                await entry.engine.shutdown_mcp()
-            except Exception:
-                logger.warning("API 关闭时会话 %s MCP 关闭失败", sid, exc_info=True)
+        await _session_manager.shutdown()
 
     logger.info("API 服务已关闭")
 
@@ -467,7 +451,7 @@ app = FastAPI(
 # CORS 中间件必须在应用启动前注册，避免 Starlette 运行时报错
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(load_cors_allow_origins()),
+    allow_origins=list(_APP_CORS_ALLOW_ORIGINS),
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
@@ -736,7 +720,10 @@ def _sse_event_to_sse(
     elif event.event_type == EventType.TOOL_CALL_START:
         data = {
             "tool_name": event.tool_name,
-            "arguments": event.arguments,
+            "arguments": sanitize_external_data(
+                event.arguments if isinstance(event.arguments, dict) else {},
+                max_len=1000,
+            ),
             "iteration": event.iteration,
         }
     elif event.event_type == EventType.TOOL_CALL_END:
@@ -998,6 +985,7 @@ async def delete_skill(
 
 
 @app.delete("/api/v1/sessions/{session_id}", responses={
+    409: _error_responses[409],
     404: _error_responses[404],
     500: _error_responses[500],
 })
@@ -1032,7 +1020,7 @@ async def health() -> dict:
 
     active_sessions = 0
     if _session_manager is not None:
-        active_sessions = _session_manager.active_count
+        active_sessions = await _session_manager.get_active_count()
 
     return {
         "status": "ok",

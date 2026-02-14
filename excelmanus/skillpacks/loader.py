@@ -467,19 +467,9 @@ class SkillpackLoader:
             raise SkillpackValidationError(str(exc))
 
     @staticmethod
-    def _parse_frontmatter(raw: str) -> dict[str, Any]:
-        """兼容旧测试/调用方。"""
-        return SkillpackLoader.parse_frontmatter(raw)
-
-    @staticmethod
     def parse_scalar(value: str) -> Any:
         """公开标量解析入口。"""
         return parse_frontmatter_scalar(value)
-
-    @staticmethod
-    def _parse_scalar(value: str) -> Any:
-        """兼容旧测试/调用方。"""
-        return SkillpackLoader.parse_scalar(value)
 
     @staticmethod
     def format_frontmatter(data: dict[str, Any]) -> str:
@@ -488,11 +478,6 @@ class SkillpackLoader:
             return serialize_frontmatter_text(data)
         except FrontmatterError as exc:
             raise SkillpackValidationError(str(exc))
-
-    @staticmethod
-    def _format_frontmatter(data: dict[str, Any]) -> str:
-        """兼容旧测试/调用方。"""
-        return SkillpackLoader.format_frontmatter(data)
 
     @staticmethod
     def _get_required_str(payload: dict[str, Any], key: str) -> str:

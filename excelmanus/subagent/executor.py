@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -70,6 +71,11 @@ class SubagentExecutor:
         )
         tool_scope = filtered_registry.get_tool_names()
         system_prompt = self._build_system_prompt(config=config, parent_context=parent_context)
+        persistent_memory, memory_extractor = self._create_memory_components(config=config)
+        if persistent_memory is not None:
+            core_memory = persistent_memory.load_core()
+            if core_memory:
+                system_prompt = f"{system_prompt}\n\n## 子代理持久记忆\n{core_memory}"
         memory = ConversationMemory(self._parent_config)
         memory.add_user_message(prompt)
 
@@ -154,6 +160,7 @@ class SubagentExecutor:
                         arguments=args,
                         tool_scope=tool_scope,
                         full_access_enabled=full_access_enabled,
+                        persistent_memory=persistent_memory,
                     )
                     content = result.result[:_SUMMARY_MAX_CHARS]
                     memory.add_tool_result(call_id, content)
@@ -202,6 +209,13 @@ class SubagentExecutor:
             last_summary = f"子代理执行失败：{exc}"
 
         last_summary = self._truncate(last_summary)
+        await self._persist_subagent_memory(
+            subagent_name=config.name,
+            memory=memory,
+            system_prompt=system_prompt,
+            persistent_memory=persistent_memory,
+            memory_extractor=memory_extractor,
+        )
         self._emit_safe(
             on_event,
             ToolCallEvent(
@@ -280,6 +294,7 @@ class SubagentExecutor:
         arguments: dict[str, Any],
         tool_scope: list[str],
         full_access_enabled: bool,
+        persistent_memory: "PersistentMemory | None",
     ) -> _ExecResult:
         """执行子代理内单次工具调用（含审批桥接）。"""
         if not registry.is_tool_available(tool_name):
@@ -334,10 +349,11 @@ class SubagentExecutor:
             # MCP 工具不做本地文件快照审计（由远端系统自行审计）。
             if self._approval.is_mcp_tool(tool_name):
                 try:
-                    raw_result = await asyncio.to_thread(
-                        registry.call_tool,
-                        tool_name,
-                        arguments,
+                    raw_result = await self._call_tool_with_memory_context(
+                        registry=registry,
+                        persistent_memory=persistent_memory,
+                        tool_name=tool_name,
+                        arguments=arguments,
                         tool_scope=tool_scope,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -355,7 +371,10 @@ class SubagentExecutor:
                 )
 
             def _execute(name: str, args: dict[str, Any], scope: list[str]) -> Any:
-                return registry.call_tool(name, args, tool_scope=scope)
+                from excelmanus.tools import memory_tools
+
+                with memory_tools.bind_memory_context(persistent_memory):
+                    return registry.call_tool(name, args, tool_scope=scope)
 
             try:
                 result_text, record = await asyncio.to_thread(
@@ -385,10 +404,11 @@ class SubagentExecutor:
             )
 
         try:
-            raw_result = await asyncio.to_thread(
-                registry.call_tool,
-                tool_name,
-                arguments,
+            raw_result = await self._call_tool_with_memory_context(
+                registry=registry,
+                persistent_memory=persistent_memory,
+                tool_name=tool_name,
+                arguments=arguments,
                 tool_scope=tool_scope,
             )
             raw_text = str(raw_result)
@@ -401,6 +421,91 @@ class SubagentExecutor:
         except Exception as exc:  # noqa: BLE001
             error = f"工具执行错误: {exc}"
             return _ExecResult(success=False, result=error, error=str(exc))
+
+    async def _call_tool_with_memory_context(
+        self,
+        *,
+        registry: FilteredToolRegistry,
+        persistent_memory: "PersistentMemory | None",
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: list[str],
+    ) -> Any:
+        """在线程池执行工具时绑定记忆上下文，避免会话间串扰。"""
+        from excelmanus.tools import memory_tools
+
+        def _call() -> Any:
+            with memory_tools.bind_memory_context(persistent_memory):
+                return registry.call_tool(tool_name, arguments, tool_scope=tool_scope)
+
+        return await asyncio.to_thread(_call)
+
+    def _create_memory_components(
+        self,
+        *,
+        config: SubagentConfig,
+    ) -> tuple["PersistentMemory | None", "MemoryExtractor | None"]:
+        """根据 memory_scope 创建子代理持久记忆组件。"""
+        if config.memory_scope is None:
+            return None, None
+        if not self._parent_config.memory_enabled:
+            logger.info(
+                "子代理 %s 配置 memory_scope=%s，但全局记忆已禁用，已降级跳过。",
+                config.name,
+                config.memory_scope,
+            )
+            return None, None
+
+        from excelmanus.memory_extractor import MemoryExtractor
+        from excelmanus.persistent_memory import PersistentMemory
+
+        if config.memory_scope == "user":
+            memory_dir = (
+                Path("~/.excelmanus/agent-memory").expanduser() / config.name
+            )
+        else:
+            memory_dir = (
+                Path(self._parent_config.workspace_root).expanduser()
+                / ".excelmanus"
+                / "agent-memory"
+                / config.name
+            )
+
+        persistent_memory = PersistentMemory(
+            memory_dir=str(memory_dir),
+            auto_load_lines=self._parent_config.memory_auto_load_lines,
+        )
+        model = config.model or self._parent_config.subagent_model or self._parent_config.model
+        client = openai.AsyncOpenAI(
+            api_key=config.api_key or self._parent_config.api_key,
+            base_url=config.base_url or self._parent_config.base_url,
+        )
+        memory_extractor = MemoryExtractor(client=client, model=model)
+        return persistent_memory, memory_extractor
+
+    async def _persist_subagent_memory(
+        self,
+        *,
+        subagent_name: str,
+        memory: ConversationMemory,
+        system_prompt: str,
+        persistent_memory: "PersistentMemory | None",
+        memory_extractor: "MemoryExtractor | None",
+    ) -> None:
+        if persistent_memory is None or memory_extractor is None:
+            return
+        try:
+            messages = memory.get_messages(system_prompts=[system_prompt])
+            entries = await memory_extractor.extract(messages)
+            if entries:
+                persistent_memory.save_entries(entries)
+                logger.info(
+                    "子代理 %s 持久记忆提取完成，保存了 %d 条记忆条目。",
+                    subagent_name,
+                    len(entries),
+                )
+        except Exception:
+            logger.warning("子代理 %s 持久记忆提取失败", subagent_name, exc_info=True)
 
     @staticmethod
     def _assistant_message_to_dict(message: Any) -> dict[str, Any]:

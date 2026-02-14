@@ -37,13 +37,21 @@ class SkillHookRunner:
         if not hooks_root:
             return HookResult()
 
-        event_key = context.event.value
-        event_rules = hooks_root.get(event_key)
-        if event_rules is None:
-            # 兼容 snake_case/camelCase
-            event_rules = hooks_root.get(event_key[0].lower() + event_key[1:])
+        event_rules: Any | None = None
+        matched_event_key: str | None = None
+        for event_key in self._event_lookup_keys(context.event):
+            if event_key in hooks_root:
+                event_rules = hooks_root.get(event_key)
+                matched_event_key = event_key
+                break
         if event_rules is None:
             return HookResult()
+        logger.debug(
+            "命中 hook 事件：skill=%s event=%s key=%s",
+            skill.name,
+            context.event.value,
+            matched_event_key,
+        )
 
         rules = self._normalize_rules(event_rules)
         final = HookResult()
@@ -52,6 +60,13 @@ class SkillHookRunner:
             matcher = rule.get("matcher")
             if context.tool_name and isinstance(matcher, str):
                 if not match_tool(matcher, context.tool_name):
+                    logger.debug(
+                        "hook matcher 未命中：skill=%s event=%s matcher=%s tool=%s",
+                        skill.name,
+                        context.event.value,
+                        matcher,
+                        context.tool_name,
+                    )
                     continue
 
             for handler in self._extract_handlers(rule):
@@ -60,9 +75,43 @@ class SkillHookRunner:
                     payload=context.payload,
                     full_access_enabled=context.full_access_enabled,
                 )
+                logger.debug(
+                    "hook handler 已执行：skill=%s event=%s type=%s decision=%s",
+                    skill.name,
+                    context.event.value,
+                    str(handler.get("type", "")),
+                    result.decision.value,
+                )
                 final = self._merge_result(final, result)
 
         return final
+
+    @staticmethod
+    def _event_lookup_keys(event: HookEvent) -> list[str]:
+        """支持 PascalCase / lowerCamelCase / snake_case 三种事件键。"""
+        pascal = event.value
+        lower_camel = pascal[0].lower() + pascal[1:] if pascal else pascal
+        snake = SkillHookRunner._to_snake_case(pascal)
+        ordered = [pascal, lower_camel, snake]
+        deduped: list[str] = []
+        for item in ordered:
+            if item and item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def _to_snake_case(name: str) -> str:
+        if not name:
+            return name
+        chars: list[str] = []
+        for idx, ch in enumerate(name):
+            if ch.isupper() and idx > 0:
+                prev = name[idx - 1]
+                next_char = name[idx + 1] if idx + 1 < len(name) else ""
+                if prev.islower() or (next_char and next_char.islower()):
+                    chars.append("_")
+            chars.append(ch.lower())
+        return "".join(chars)
 
     @staticmethod
     def _normalize_rules(raw: Any) -> list[dict[str, Any]]:
@@ -136,6 +185,7 @@ class SkillHookRunner:
             )
 
         updated_input = incoming.updated_input if incoming.updated_input is not None else current.updated_input
+        agent_action = incoming.agent_action if incoming.agent_action is not None else current.agent_action
         raw_output = dict(current.raw_output)
         if incoming.raw_output:
             raw_output.update(incoming.raw_output)
@@ -145,5 +195,6 @@ class SkillHookRunner:
             reason=reason,
             updated_input=updated_input,
             additional_context=additional,
+            agent_action=agent_action,
             raw_output=raw_output,
         )

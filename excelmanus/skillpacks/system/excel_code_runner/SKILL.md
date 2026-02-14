@@ -44,7 +44,7 @@ version: "1.0.0"
 - 大量数据处理结果落盘到 `outputs/`，不要把全量数据直接回传。
 
 3. 执行阶段
-- 使用 `run_python_script` 执行脚本，默认 `python_command=auto`。
+- 使用 `run_code` 执行脚本，默认 `python_command=auto`。
 - 失败时优先查看 `stderr_tail`，修复后再次写入并执行。
 
 4. 验证阶段

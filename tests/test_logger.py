@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+from io import StringIO
 
 import pytest
 
@@ -82,6 +83,12 @@ class TestSanitizeCookie:
         assert "abc123xyz789" not in result
         assert "***" in result
 
+    def test_cookie_line_with_spaces_is_fully_masked(self) -> None:
+        """Cookie 行中包含空格时应整行脱敏。"""
+        text = "Cookie: session=abc; csrftoken=def"
+        result = _sanitize(text)
+        assert result == "Cookie: ***"
+
 
 class TestSanitizeAbsolutePath:
     """绝对路径脱敏测试。"""
@@ -98,6 +105,13 @@ class TestSanitizeAbsolutePath:
         text = r"读取文件 C:\Users\admin\Desktop\data.xlsx"
         result = _sanitize(text)
         assert "Users" not in result
+        assert "data.xlsx" in result
+
+    def test_windows_absolute_path_with_lower_drive(self) -> None:
+        """Windows 小写盘符路径也应被脱敏。"""
+        text = r"读取文件 c:\Users\admin\Desktop\data.xlsx"
+        result = _sanitize(text)
+        assert r"c:\Users\admin\Desktop\\" not in result
         assert "data.xlsx" in result
 
     def test_relative_path_not_sanitized(self) -> None:
@@ -158,6 +172,31 @@ class TestSetupLogging:
         handler_count = len(logger.handlers)
         setup_logging("DEBUG")
         assert len(logger.handlers) == handler_count
+
+    def test_record_filter_sanitizes_message_before_root_handler(self) -> None:
+        """即使启用 propagate，也不能向 root 泄漏明文。"""
+        root = logging.getLogger()
+        old_handlers = list(root.handlers)
+        old_level = root.level
+        stream = StringIO()
+        root_handler = logging.StreamHandler(stream)
+        root_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.handlers = [root_handler]
+        root.setLevel(logging.INFO)
+
+        logger = setup_logging("INFO")
+        logger.propagate = True
+        try:
+            logger.info("Authorization: Bearer abc.def api_key=secret")
+        finally:
+            logger.propagate = False
+            root.handlers = old_handlers
+            root.setLevel(old_level)
+
+        output = stream.getvalue()
+        assert "abc.def" not in output
+        assert "secret" not in output
+        assert "***" in output
 
 
 class TestGetLogger:

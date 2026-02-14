@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -31,6 +28,7 @@ class ModelProfile:
 
 # Base URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
+_ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +59,7 @@ class ExcelManusConfig:
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
     cors_allow_origins: tuple[str, ...] = ("http://localhost:5173",)
+    mcp_shared_manager: bool = False
     # 路由子代理配置（可选，默认回退到主模型）
     router_api_key: str | None = None
     router_base_url: str | None = None
@@ -85,6 +84,12 @@ class ExcelManusConfig:
     hooks_output_max_chars: int = 32000
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
+
+
+def load_runtime_env() -> None:
+    """加载当前工作目录 .env（不覆盖已存在环境变量）。"""
+    dotenv_path = Path.cwd() / ".env"
+    load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -133,30 +138,24 @@ def _parse_bool(value: str | None, name: str, default: bool) -> bool:
     raise ConfigError(f"配置项 {name} 必须为布尔值，当前值: {value!r}")
 
 
-def _parse_choice(
-    value: str | None, name: str, default: str, choices: set[str]
-) -> str:
-    """将字符串解析为枚举值。"""
+def _parse_log_level(value: str | None) -> str:
+    """解析日志级别。"""
     if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized not in choices:
+        return "INFO"
+    normalized = value.strip().upper()
+    if normalized not in _ALLOWED_LOG_LEVELS:
         raise ConfigError(
-            f"配置项 {name} 必须是 {sorted(choices)} 之一，当前值: {value!r}"
+            "配置项 EXCELMANUS_LOG_LEVEL 必须是 "
+            f"{sorted(_ALLOWED_LOG_LEVELS)} 之一，当前值: {value!r}"
         )
     return normalized
 
 
 def _parse_system_message_mode(value: str | None) -> str:
-    """解析 system_message_mode，兼容旧值 multi。"""
+    """解析 system_message_mode。"""
     if value is None:
         return "auto"
     normalized = value.strip().lower()
-    if normalized == "multi":
-        logger.warning(
-            "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE=multi 已废弃，将按 replace 处理。"
-        )
-        return "replace"
     if normalized not in {"auto", "merge", "replace"}:
         raise ConfigError(
             "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE 必须是 "
@@ -227,6 +226,7 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
 
 def load_cors_allow_origins() -> tuple[str, ...]:
     """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。"""
+    load_runtime_env()
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
     if cors_raw is not None:
         return tuple(o.strip() for o in cors_raw.split(",") if o.strip())
@@ -244,9 +244,7 @@ def load_config() -> ExcelManusConfig:
 
     API Key 为必填项，缺失时抛出 ConfigError。
     """
-    # 先加载 .env 文件（不覆盖已有环境变量）
-    dotenv_path = Path.cwd() / ".env"
-    load_dotenv(dotenv_path=dotenv_path, override=False)
+    load_runtime_env()
 
     # 读取各配置项（允许从 EXCELMANUS_MODELS 的第一个模型继承）
     api_key = os.environ.get("EXCELMANUS_API_KEY") or ""
@@ -296,7 +294,7 @@ def load_config() -> ExcelManusConfig:
     )
 
     workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
-    log_level = os.environ.get("EXCELMANUS_LOG_LEVEL", "INFO").upper()
+    log_level = _parse_log_level(os.environ.get("EXCELMANUS_LOG_LEVEL"))
     default_system_skill_dir = (
         Path(__file__).resolve().parent / "skillpacks" / "system"
     )
@@ -361,8 +359,12 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_EXTERNAL_SAFE_MODE",
         True,
     )
-
     cors_allow_origins = load_cors_allow_origins()
+    mcp_shared_manager = _parse_bool(
+        os.environ.get("EXCELMANUS_MCP_SHARED_MANAGER"),
+        "EXCELMANUS_MCP_SHARED_MANAGER",
+        False,
+    )
 
     # 路由子代理配置（可选）
     router_api_key = os.environ.get("EXCELMANUS_ROUTER_API_KEY") or None
@@ -465,6 +467,7 @@ def load_config() -> ExcelManusConfig:
         large_excel_threshold_bytes=large_excel_threshold_bytes,
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
+        mcp_shared_manager=mcp_shared_manager,
         router_api_key=router_api_key,
         router_base_url=router_base_url,
         router_model=router_model,

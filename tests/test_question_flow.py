@@ -99,6 +99,19 @@ class TestSingleSelectParsing:
         parsed = manager.parse_answer("方案A", question=pending)
         assert parsed.selected_options == [{"index": 1, "label": "方案A"}]
 
+    def test_fuzzy_match_by_containment(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        parsed = manager.parse_answer("我选方案A", question=pending)
+        assert parsed.selected_options == [{"index": 1, "label": "方案A"}]
+
+    def test_fuzzy_ambiguous_falls_back_to_other(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        parsed = manager.parse_answer("方案", question=pending)
+        assert parsed.selected_options == [{"index": 3, "label": "Other"}]
+        assert parsed.other_text == "方案"
+
     def test_unmatched_text_falls_back_to_other(self) -> None:
         manager = QuestionFlowManager()
         pending = manager.enqueue(_payload(), tool_call_id="call_1")

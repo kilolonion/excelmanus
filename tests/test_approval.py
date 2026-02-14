@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+import pytest
 
 from excelmanus.approval import ApprovalManager
 
@@ -33,7 +36,10 @@ def test_text_file_audit_and_undo(tmp_path: Path) -> None:
     manifest_path = tmp_path / record.manifest_file
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["approval_id"] == approval_id
+    assert manifest["version"] == 2
+    assert manifest["approval"]["approval_id"] == approval_id
+    assert manifest["execution"]["status"] == "success"
+
     applied = manager.get_applied(approval_id)
     assert applied is not None
     assert applied.approval_id == approval_id
@@ -76,6 +82,98 @@ def test_binary_snapshot_and_undo(tmp_path: Path) -> None:
     assert target.read_bytes() == b"\x00OLD_BINARY"
 
 
+def test_empty_file_hash_recorded_and_undo(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    target = tmp_path / "empty.txt"
+    target.write_text("before", encoding="utf-8")
+    approval_id = manager.new_approval_id()
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+        assert tool_name == "write_text_file"
+        target.write_text("", encoding="utf-8")
+        return "ok"
+
+    _, record = manager.execute_and_audit(
+        approval_id=approval_id,
+        tool_name="write_text_file",
+        arguments={"file_path": "empty.txt", "content": ""},
+        tool_scope=["write_text_file"],
+        execute=execute,
+        undoable=True,
+        created_at_utc=manager.utc_now(),
+    )
+
+    assert record.changes
+    expected_empty_hash = hashlib.sha256(b"").hexdigest()
+    assert record.changes[0].after_hash == expected_empty_hash
+
+    undo_msg = manager.undo(approval_id)
+    assert "已回滚" in undo_msg
+    assert target.read_text(encoding="utf-8") == "before"
+
+
+def test_failed_execution_still_writes_manifest_and_supports_undo(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    target = tmp_path / "failed.txt"
+    target.write_text("before", encoding="utf-8")
+    approval_id = manager.new_approval_id()
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+        assert tool_name == "write_text_file"
+        target.write_text("after", encoding="utf-8")
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        manager.execute_and_audit(
+            approval_id=approval_id,
+            tool_name="write_text_file",
+            arguments={"file_path": "failed.txt", "content": "after"},
+            tool_scope=["write_text_file"],
+            execute=execute,
+            undoable=True,
+            created_at_utc=manager.utc_now(),
+        )
+
+    manifest_path = tmp_path / "outputs" / "approvals" / approval_id / "manifest.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["execution"]["status"] == "failed"
+    assert manifest["execution"]["error_type"] == "RuntimeError"
+    assert target.read_text(encoding="utf-8") == "after"
+
+    undo_msg = manager.undo(approval_id)
+    assert "已回滚" in undo_msg
+    assert target.read_text(encoding="utf-8") == "before"
+
+
+def test_undo_can_load_record_from_manifest_after_restart(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    target = tmp_path / "restart.txt"
+    approval_id = manager.new_approval_id()
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+        assert tool_name == "write_text_file"
+        target.write_text("content", encoding="utf-8")
+        return "ok"
+
+    manager.execute_and_audit(
+        approval_id=approval_id,
+        tool_name="write_text_file",
+        arguments={"file_path": "restart.txt", "content": "content"},
+        tool_scope=["write_text_file"],
+        execute=execute,
+        undoable=True,
+        created_at_utc=manager.utc_now(),
+    )
+    assert target.exists()
+
+    # 模拟重启：使用全新 manager，从 manifest 重建记录。
+    manager2 = ApprovalManager(str(tmp_path))
+    msg = manager2.undo(approval_id)
+    assert "已回滚" in msg
+    assert not target.exists()
+
+
 def test_non_undoable_record_returns_message(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     approval_id = manager.new_approval_id()
@@ -108,15 +206,12 @@ def test_pending_queue_single_item(tmp_path: Path) -> None:
     assert manager.pending is not None
     assert manager.pending.approval_id == first.approval_id
 
-    try:
+    with pytest.raises(ValueError, match="存在待确认操作"):
         manager.create_pending(
             tool_name="write_excel",
             arguments={"file_path": "a.xlsx", "data": []},
             tool_scope=["write_excel"],
         )
-        raise AssertionError("应当抛出 ValueError")
-    except ValueError as exc:
-        assert "存在待确认操作" in str(exc)
 
 
 def test_reject_pending_clears_queue(tmp_path: Path) -> None:
@@ -157,7 +252,7 @@ def test_non_whitelisted_mcp_high_risk_until_auto_approve(tmp_path: Path) -> Non
     assert manager.is_high_risk_tool(tool_name) is False
 
 
-def test_resolve_target_paths_covers_new_mutating_tools(tmp_path: Path) -> None:
+def test_resolve_target_paths_covers_mutating_tools_with_path_rules(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     cases = [
         ("create_excel_chart", {"file_path": "book.xlsx"}, ["book.xlsx"]),
@@ -184,6 +279,8 @@ def test_resolve_target_paths_covers_new_mutating_tools(tmp_path: Path) -> None:
             {"file_path": "src.xlsx", "output_path": "out.xlsx"},
             ["out.xlsx"],
         ),
+        ("run_code", {"code": "print('hi')"}, []),
+        ("run_shell", {"command": "ls"}, []),
     ]
 
     for tool_name, arguments, expected in cases:

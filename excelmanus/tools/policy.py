@@ -3,7 +3,8 @@
 集中维护：
 1. 写入类工具的审批/审计分层；
 2. 子代理默认工具域；
-3. fallback 路由下的只读发现工具。
+3. 审计目标路径映射与工作区扫描预算；
+4. fallback 路由下的只读发现工具。
 """
 
 from __future__ import annotations
@@ -88,6 +89,68 @@ if MUTATING_CONFIRM_TOOLS & MUTATING_AUDIT_ONLY_TOOLS:
     raise AssertionError("MUTATING_CONFIRM_TOOLS 与 MUTATING_AUDIT_ONLY_TOOLS 不允许交集")
 if READ_ONLY_SAFE_TOOLS & MUTATING_ALL_TOOLS:
     raise AssertionError("READ_ONLY_SAFE_TOOLS 不允许包含写入工具")
+
+
+# ── 审计目标路径映射（SSOT） ───────────────────────────────
+
+# mode=all：提取所有非空字段作为目标文件
+AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
+    "write_text_file": ("file_path",),
+    "copy_file": ("destination",),
+    "rename_file": ("source", "destination"),
+    "delete_file": ("file_path",),
+    "write_excel": ("file_path",),
+    "format_cells": ("file_path",),
+    "adjust_column_width": ("file_path",),
+    "adjust_row_height": ("file_path",),
+    "merge_cells": ("file_path",),
+    "unmerge_cells": ("file_path",),
+    "create_sheet": ("file_path",),
+    "copy_sheet": ("file_path",),
+    "rename_sheet": ("file_path",),
+    "delete_sheet": ("file_path",),
+    "create_excel_chart": ("file_path",),
+    "write_cells": ("file_path",),
+    "insert_rows": ("file_path",),
+    "insert_columns": ("file_path",),
+    "apply_threshold_icon_format": ("file_path",),
+    "style_card_blocks": ("file_path",),
+    "scale_range_unit": ("file_path",),
+    "apply_dashboard_dark_theme": ("file_path",),
+    "add_color_scale": ("file_path",),
+    "add_data_bar": ("file_path",),
+    "add_conditional_rule": ("file_path",),
+    "set_print_layout": ("file_path",),
+    "set_page_header_footer": ("file_path",),
+    "create_chart": ("output_path",),
+}
+
+# mode=first：按字段优先级提取第一个非空路径
+AUDIT_TARGET_ARG_RULES_FIRST: dict[str, tuple[str, ...]] = {
+    "transform_data": ("output_path", "file_path"),
+    "copy_range_between_sheets": ("target_file", "source_file"),
+}
+
+_PATH_RULED_TOOLS = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
+_EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}
+if _PATH_RULED_TOOLS != _EXPECTED_PATH_RULED_TOOLS:
+    missing = sorted(_EXPECTED_PATH_RULED_TOOLS - _PATH_RULED_TOOLS)
+    extra = sorted(_PATH_RULED_TOOLS - _EXPECTED_PATH_RULED_TOOLS)
+    raise AssertionError(
+        f"审计路径映射不完整或存在冗余：missing={missing}, extra={extra}"
+    )
+
+
+# ── 工作区补偿审计预算（run_code/run_shell） ───────────────
+
+WORKSPACE_SCAN_MAX_FILES: int = 20000
+WORKSPACE_SCAN_MAX_HASH_BYTES: int = 256 * 1024 * 1024
+WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    ".git",
+    ".venv",
+    "__pycache__",
+    "outputs/approvals",
+)
 
 
 # ── Subagent 工具域 ───────────────────────────────────────

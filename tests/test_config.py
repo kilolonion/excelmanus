@@ -12,7 +12,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from excelmanus.config import ConfigError, load_config
+from excelmanus.config import ConfigError, load_config, load_cors_allow_origins
 
 
 # ── 辅助策略 ──────────────────────────────────────────────
@@ -338,14 +338,14 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.system_message_mode == "replace"
 
-    def test_system_message_mode_legacy_multi_maps_to_replace(self, monkeypatch) -> None:
-        """兼容旧值 multi，加载后映射为 replace。"""
+    def test_system_message_mode_legacy_multi_rejected(self, monkeypatch) -> None:
+        """旧值 multi 已移除，应直接报错。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_SYSTEM_MESSAGE_MODE", "multi")
-        cfg = load_config()
-        assert cfg.system_message_mode == "replace"
+        with pytest.raises(ConfigError, match="EXCELMANUS_SYSTEM_MESSAGE_MODE"):
+            load_config()
 
     def test_system_message_mode_rejects_invalid_value(self, monkeypatch) -> None:
         """非法 system_message_mode 应报错。"""
@@ -580,4 +580,103 @@ class TestMemoryConfig:
         self._set_required_env(monkeypatch)
         monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_LOAD_LINES", "0")
         with pytest.raises(ConfigError, match="正整数"):
+            load_config()
+
+
+class TestLogLevelValidation:
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_log_level_accepts_valid_enum(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_LOG_LEVEL", "debug")
+        cfg = load_config()
+        assert cfg.log_level == "DEBUG"
+
+    def test_log_level_rejects_invalid_enum(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_LOG_LEVEL", "verbose")
+        with pytest.raises(ConfigError, match="EXCELMANUS_LOG_LEVEL"):
+            load_config()
+
+
+class TestCorsConfig:
+    def test_load_cors_allow_origins_from_dotenv(self, monkeypatch, tmp_path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "EXCELMANUS_CORS_ALLOW_ORIGINS=http://a.com,http://b.com\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        assert load_cors_allow_origins() == ("http://a.com", "http://b.com")
+
+    def test_env_overrides_dotenv_for_cors(self, monkeypatch, tmp_path) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "EXCELMANUS_CORS_ALLOW_ORIGINS=http://dotenv.com\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EXCELMANUS_CORS_ALLOW_ORIGINS", "http://env.com")
+        assert load_cors_allow_origins() == ("http://env.com",)
+
+    def test_cors_allow_origins_loaded_into_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_CORS_ALLOW_ORIGINS", "http://a.com,http://b.com")
+        cfg = load_config()
+        assert cfg.cors_allow_origins == ("http://a.com", "http://b.com")
+
+
+class TestModelsRouterHooksAndMcpConfig:
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_models_parsed_and_inherit_defaults(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "EXCELMANUS_MODELS",
+            '[{"name":"alt","model":"gpt-4o-mini","description":"备用"}]',
+        )
+        cfg = load_config()
+        assert len(cfg.models) == 1
+        assert cfg.models[0].name == "alt"
+        assert cfg.models[0].api_key == "test-key"
+        assert cfg.models[0].base_url == "https://example.com/v1"
+
+    def test_router_base_url_invalid_raises_error(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_ROUTER_BASE_URL", "ftp://invalid")
+        with pytest.raises(ConfigError, match="EXCELMANUS_BASE_URL"):
+            load_config()
+
+    def test_hooks_and_max_context_tokens_loaded(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_HOOKS_COMMAND_ENABLED", "true")
+        monkeypatch.setenv("EXCELMANUS_HOOKS_COMMAND_ALLOWLIST", "git status,pytest")
+        monkeypatch.setenv("EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS", "30")
+        monkeypatch.setenv("EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS", "4096")
+        monkeypatch.setenv("EXCELMANUS_MAX_CONTEXT_TOKENS", "32768")
+        cfg = load_config()
+        assert cfg.hooks_command_enabled is True
+        assert cfg.hooks_command_allowlist == ("git status", "pytest")
+        assert cfg.hooks_command_timeout_seconds == 30
+        assert cfg.hooks_output_max_chars == 4096
+        assert cfg.max_context_tokens == 32768
+
+    def test_mcp_shared_manager_flag_loaded(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "true")
+        cfg = load_config()
+        assert cfg.mcp_shared_manager is True
+
+    def test_mcp_shared_manager_invalid_raises_error(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "maybe")
+        with pytest.raises(ConfigError, match="EXCELMANUS_MCP_SHARED_MANAGER"):
             load_config()

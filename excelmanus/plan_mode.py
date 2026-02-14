@@ -72,7 +72,7 @@ def save_plan_markdown(
 ) -> str:
     """保存计划 Markdown，返回相对工作区路径。"""
     root = Path(workspace_root).expanduser().resolve()
-    output_dir = root / "outputs" / "plans"
+    output_dir = root / ".excelmanus" / "plans"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     path = output_dir / filename
@@ -182,4 +182,3 @@ def _safe_str(value: object) -> str:
         return ""
     text = str(value).strip()
     return text
-

@@ -110,6 +110,7 @@ class TestEventTypeEnum:
             "TASK_LIST_CREATED",
             "TASK_ITEM_UPDATED",
             "USER_QUESTION",
+            "PENDING_APPROVAL",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -140,6 +141,7 @@ class TestEventTypeEnum:
             ("TASK_LIST_CREATED", "task_list_created"),
             ("TASK_ITEM_UPDATED", "task_item_updated"),
             ("USER_QUESTION", "user_question"),
+            ("PENDING_APPROVAL", "pending_approval"),
         ]
 
 
@@ -251,5 +253,8 @@ class TestToolCallEventFields:
             "question_options",
             "question_multi_select",
             "question_queue_size",
+            "approval_id",
+            "approval_tool_name",
+            "approval_arguments",
         }
         assert set(annotations.keys()) == expected_fields

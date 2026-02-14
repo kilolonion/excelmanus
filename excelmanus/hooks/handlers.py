@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from typing import Any
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.hooks.models import HookDecision, HookResult
+from excelmanus.hooks.models import HookAgentAction, HookDecision, HookResult
+
+_SHELL_CONTROL_SPLIT_PATTERN = re.compile(r"(?:&&|\|\||;|\||\n)")
 
 
 def _parse_decision(value: Any) -> HookDecision:
@@ -52,6 +55,36 @@ def _build_result_from_mapping(data: dict[str, Any]) -> HookResult:
     )
 
 
+def _first_command_segment(command: str) -> str:
+    """提取 shell 命令首段，避免 allowlist 被命令分隔符绕过。"""
+    segment = _SHELL_CONTROL_SPLIT_PATTERN.split(command, maxsplit=1)[0]
+    return segment.strip()
+
+
+def _matches_prefix_with_boundary(text: str, prefix: str) -> bool:
+    if not text.startswith(prefix):
+        return False
+    if len(text) == len(prefix):
+        return True
+    return text[len(prefix)].isspace()
+
+
+def _allowlist_matches_command(*, command: str, allowlist: tuple[str, ...]) -> bool:
+    normalized = command.strip()
+    segment = _first_command_segment(normalized)
+    if not segment:
+        return False
+    if segment != normalized:
+        return False
+    for raw_prefix in allowlist:
+        prefix = str(raw_prefix).strip()
+        if not prefix:
+            continue
+        if _matches_prefix_with_boundary(segment, prefix):
+            return True
+    return False
+
+
 def _command_allowed(
     *,
     command: str,
@@ -61,7 +94,7 @@ def _command_allowed(
     if full_access_enabled:
         return True
     allowlist = tuple(config.hooks_command_allowlist)
-    if allowlist and any(command.startswith(prefix) for prefix in allowlist):
+    if allowlist and _allowlist_matches_command(command=command, allowlist=allowlist):
         return True
     return False
 
@@ -78,6 +111,11 @@ def run_command_handler(
         return HookResult(
             decision=HookDecision.CONTINUE,
             reason="command hook 未配置命令，已跳过",
+        )
+    if not config.hooks_command_enabled:
+        return HookResult(
+            decision=HookDecision.CONTINUE,
+            reason="command hook 已禁用（hooks_command_enabled=false）",
         )
     if not _command_allowed(
         command=command,
@@ -141,6 +179,67 @@ def run_prompt_handler(*, config_map: dict[str, Any]) -> HookResult:
     return _build_result_from_mapping(config_map)
 
 
+def _parse_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    return default
+
+
+def _build_agent_action(config_map: dict[str, Any]) -> HookAgentAction | None:
+    merged = dict(config_map)
+    hook_specific = _to_dict(config_map.get("hookSpecificOutput"))
+    agent_action = _to_dict(hook_specific.get("agentAction"))
+    if agent_action:
+        merged.update(agent_action)
+    elif hook_specific:
+        merged.update(hook_specific)
+
+    task = _parse_optional_str(
+        merged.get("task")
+        or merged.get("agent_task")
+        or merged.get("prompt")
+    )
+    if task is None:
+        return None
+    agent_name = _parse_optional_str(
+        merged.get("agent_name") or merged.get("agent-name")
+    )
+    on_failure = (
+        _parse_optional_str(merged.get("on_failure") or merged.get("on-failure"))
+        or "continue"
+    ).lower()
+    if on_failure not in {"continue", "deny"}:
+        on_failure = "continue"
+    inject_summary_as_context = _parse_bool(
+        merged.get("inject_summary_as_context")
+        if "inject_summary_as_context" in merged
+        else merged.get("inject-summary-as-context"),
+        default=True,
+    )
+    return HookAgentAction(
+        task=task,
+        agent_name=agent_name,
+        on_failure=on_failure,  # type: ignore[arg-type]
+        inject_summary_as_context=inject_summary_as_context,
+    )
+
+
 def run_agent_handler(*, config_map: dict[str, Any]) -> HookResult:
-    # 当前阶段先支持静态决策语义，后续可接入真实子代理执行。
-    return _build_result_from_mapping(config_map)
+    result = _build_result_from_mapping(config_map)
+    result.agent_action = _build_agent_action(config_map)
+    return result

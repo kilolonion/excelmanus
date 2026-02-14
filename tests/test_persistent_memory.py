@@ -45,6 +45,11 @@ class TestInit:
 class TestLoadCore:
     """load_core 方法测试。"""
 
+    @pytest.fixture(autouse=True)
+    def _mark_layout_v2(self, tmp_path: Path) -> None:
+        """本组仅验证读取行为，显式标记布局版本避免触发迁移改写。"""
+        (tmp_path / ".layout_version").write_text("2\n", encoding="utf-8")
+
     def test_file_not_exists_returns_empty(self, tmp_path: Path) -> None:
         """MEMORY.md 不存在时返回空字符串。"""
         pm = PersistentMemory(str(tmp_path))
@@ -64,12 +69,12 @@ class TestLoadCore:
         assert pm.load_core() == content
 
     def test_loads_exact_n_lines(self, tmp_path: Path) -> None:
-        """文件行数超过 auto_load_lines 时只加载前 N 行。"""
+        """文件行数超过 auto_load_lines 时只加载最近 N 行。"""
         lines = [f"第 {i} 行" for i in range(10)]
         (tmp_path / CORE_MEMORY_FILE).write_text("\n".join(lines), encoding="utf-8")
         pm = PersistentMemory(str(tmp_path), auto_load_lines=3)
         result = pm.load_core()
-        expected_lines = lines[:3]
+        expected_lines = lines[-3:]
         assert result == "\n".join(expected_lines)
 
     def test_single_line_file(self, tmp_path: Path) -> None:
@@ -85,9 +90,28 @@ class TestLoadCore:
         pm = PersistentMemory(str(tmp_path))
         assert pm.load_core() == content
 
+    def test_load_core_aligns_to_entry_header_when_reading_recent_lines(
+        self, tmp_path: Path
+    ) -> None:
+        """最近行截取时应优先对齐到条目头，避免半条目。"""
+        content = (
+            "### [2025-01-15 10:00] general\n\n第一条内容\n\n---\n\n"
+            "### [2025-01-15 11:00] general\n\n第二条内容\n\n---\n\n"
+            "### [2025-01-15 12:00] general\n\n第三条内容\n\n---\n"
+        )
+        (tmp_path / CORE_MEMORY_FILE).write_text(content, encoding="utf-8")
+        pm = PersistentMemory(str(tmp_path), auto_load_lines=6)
+        loaded = pm.load_core()
+        assert loaded.startswith("### [2025-01-15 12:00] general")
+
 
 class TestLoadTopic:
     """load_topic 方法测试。"""
+
+    @pytest.fixture(autouse=True)
+    def _mark_layout_v2(self, tmp_path: Path) -> None:
+        """本组仅验证读取行为，显式标记布局版本避免触发迁移改写。"""
+        (tmp_path / ".layout_version").write_text("2\n", encoding="utf-8")
 
     def test_file_not_exists_returns_empty(self, tmp_path: Path) -> None:
         """主题文件不存在时返回空字符串。"""
@@ -306,7 +330,7 @@ class TestSaveEntries:
         assert not (tmp_path / CORE_MEMORY_FILE).exists()
 
     def test_general_entries_write_to_memory_md(self, tmp_path: Path) -> None:
-        """GENERAL 类别条目写入 MEMORY.md。"""
+        """GENERAL 类别条目同时写入 MEMORY.md 与 general.md。"""
         pm = PersistentMemory(str(tmp_path))
         entries = [
             MemoryEntry(
@@ -319,9 +343,11 @@ class TestSaveEntries:
         content = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
         assert "通用记忆" in content
         assert "general" in content
+        general_content = (tmp_path / "general.md").read_text(encoding="utf-8")
+        assert "通用记忆" in general_content
 
     def test_error_solution_writes_to_memory_md(self, tmp_path: Path) -> None:
-        """ERROR_SOLUTION 类别条目写入 MEMORY.md。"""
+        """ERROR_SOLUTION 类别条目同时写入 MEMORY.md 与 error_solutions.md。"""
         pm = PersistentMemory(str(tmp_path))
         entries = [
             MemoryEntry(
@@ -333,6 +359,8 @@ class TestSaveEntries:
         pm.save_entries(entries)
         content = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
         assert "错误解决方案" in content
+        topic = (tmp_path / "error_solutions.md").read_text(encoding="utf-8")
+        assert "错误解决方案" in topic
 
     def test_file_pattern_writes_to_topic_file(self, tmp_path: Path) -> None:
         """FILE_PATTERN 类别条目写入 file_patterns.md。"""
@@ -348,8 +376,9 @@ class TestSaveEntries:
         assert (tmp_path / "file_patterns.md").exists()
         content = (tmp_path / "file_patterns.md").read_text(encoding="utf-8")
         assert "列名: 日期, 产品, 数量" in content
-        # MEMORY.md 不应被创建
-        assert not (tmp_path / CORE_MEMORY_FILE).exists()
+        # MEMORY.md 应包含同样条目（核心记忆双写）
+        core = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
+        assert "列名: 日期, 产品, 数量" in core
 
     def test_user_pref_writes_to_topic_file(self, tmp_path: Path) -> None:
         """USER_PREF 类别条目写入 user_prefs.md。"""
@@ -393,12 +422,12 @@ class TestSaveEntries:
         ]
         pm.save_entries(entries)
 
-        # MEMORY.md 包含 general 和 error_solution
+        # MEMORY.md 包含全部类别（核心记忆双写）
         memory_content = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
         assert "通用信息" in memory_content
         assert "错误方案" in memory_content
-        assert "文件结构" not in memory_content
-        assert "用户偏好" not in memory_content
+        assert "文件结构" in memory_content
+        assert "用户偏好" in memory_content
 
         # file_patterns.md 只包含 file_pattern
         fp_content = (tmp_path / "file_patterns.md").read_text(encoding="utf-8")
@@ -407,6 +436,12 @@ class TestSaveEntries:
         # user_prefs.md 只包含 user_pref
         up_content = (tmp_path / "user_prefs.md").read_text(encoding="utf-8")
         assert "用户偏好" in up_content
+
+        # 新增主题文件
+        general_content = (tmp_path / "general.md").read_text(encoding="utf-8")
+        assert "通用信息" in general_content
+        error_content = (tmp_path / "error_solutions.md").read_text(encoding="utf-8")
+        assert "错误方案" in error_content
 
     def test_appends_to_existing_file(self, tmp_path: Path) -> None:
         """追加写入不覆盖已有内容。"""
@@ -684,3 +719,80 @@ class TestEnforceCapacity:
 
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0
+
+
+class TestLayoutMigration:
+    """布局迁移测试。"""
+
+    def test_auto_migration_creates_topic_files_and_backup(self, tmp_path: Path) -> None:
+        legacy_core = (
+            "### [2025-01-15 10:00] general\n\n通用旧内容\n\n---\n\n"
+            "### [2025-01-15 11:00] error_solution\n\n错误旧内容\n\n---"
+        )
+        legacy_fp = (
+            "### [2025-01-15 12:00] file_pattern\n\n文件结构旧内容\n\n---"
+        )
+        (tmp_path / CORE_MEMORY_FILE).write_text(legacy_core, encoding="utf-8")
+        (tmp_path / "file_patterns.md").write_text(legacy_fp, encoding="utf-8")
+
+        pm = PersistentMemory(str(tmp_path))
+
+        # 迁移后应存在布局版本标记与备份目录
+        assert (pm.memory_dir / ".layout_version").exists()
+        backup_root = pm.memory_dir / "migration_backups"
+        assert backup_root.exists()
+        backup_dirs = [p for p in backup_root.iterdir() if p.is_dir()]
+        assert backup_dirs
+
+        # 四分类文件与核心文件均可读取
+        assert "通用旧内容" in (tmp_path / "general.md").read_text(encoding="utf-8")
+        assert "错误旧内容" in (tmp_path / "error_solutions.md").read_text(encoding="utf-8")
+        assert "文件结构旧内容" in (tmp_path / "file_patterns.md").read_text(encoding="utf-8")
+        assert "通用旧内容" in (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
+
+    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        legacy_core = (
+            "### [2025-01-15 10:00] general\n\n条目A\n\n---\n\n"
+            "### [2025-01-15 11:00] general\n\n条目A\n\n---"
+        )
+        (tmp_path / CORE_MEMORY_FILE).write_text(legacy_core, encoding="utf-8")
+
+        pm = PersistentMemory(str(tmp_path))
+        first = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
+
+        # 再次初始化不应重复写入
+        _ = PersistentMemory(str(tmp_path))
+        second = (tmp_path / CORE_MEMORY_FILE).read_text(encoding="utf-8")
+        assert first == second
+        parsed = pm.parse_entries(second)
+        assert len(parsed) == 1
+
+    def test_migration_failure_keeps_original_data(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        legacy_core = "### [2025-01-15 10:00] general\n\n原始数据\n\n---"
+        core_path = tmp_path / CORE_MEMORY_FILE
+        core_path.write_text(legacy_core, encoding="utf-8")
+
+        def _raise(*_args, **_kwargs):
+            raise RuntimeError("mock migration failure")
+
+        monkeypatch.setattr(PersistentMemory, "_rewrite_layout_files", _raise)
+
+        # 不应抛异常，且原文件内容保留，并降级只读模式
+        pm = PersistentMemory(str(tmp_path))
+        assert core_path.read_text(encoding="utf-8") == legacy_core
+        assert pm.read_only_mode is True
+
+        pm.save_entries(
+            [
+                MemoryEntry(
+                    content="不会写入",
+                    category=MemoryCategory.GENERAL,
+                    timestamp=datetime(2025, 1, 15, 12, 0),
+                )
+            ]
+        )
+        assert core_path.read_text(encoding="utf-8") == legacy_core

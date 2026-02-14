@@ -1,7 +1,7 @@
 """MCP 客户端封装模块。
 
 封装与单个 MCP Server 的连接、工具发现和工具调用逻辑。
-支持 stdio 和 SSE 两种传输方式。
+支持 stdio、SSE 和 Streamable HTTP 三种传输方式。
 
 使用 ``contextlib.AsyncExitStack`` 管理 MCP SDK 异步上下文管理器的生命周期，
 确保 ``connect()`` 返回后传输层和 session 仍保持活跃，直到显式调用 ``close()``。
@@ -14,10 +14,16 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult
+
+try:
+    from mcp.client.streamable_http import streamable_http_client
+except Exception:  # pragma: no cover - 兼容旧版 MCP SDK
+    streamable_http_client = None  # type: ignore[assignment]
 
 from excelmanus.mcp.config import MCPServerConfig
 
@@ -51,6 +57,7 @@ class MCPClientWrapper:
         根据 ``config.transport`` 选择传输方式：
         - ``stdio``：启动子进程，通过 stdin/stdout 通信
         - ``sse``：连接到 HTTP SSE 端点
+        - ``streamable_http``：连接到 MCP Streamable HTTP 端点
 
         使用 ``AsyncExitStack`` 保持上下文管理器的生命周期，
         直到调用 ``close()`` 时统一释放。
@@ -63,8 +70,10 @@ class MCPClientWrapper:
         try:
             if self._config.transport == "stdio":
                 read_stream, write_stream = await self._connect_stdio()
-            else:
+            elif self._config.transport == "sse":
                 read_stream, write_stream = await self._connect_sse()
+            else:
+                read_stream, write_stream = await self._connect_streamable_http()
 
             # 创建并进入 ClientSession 上下文
             session = await self._exit_stack.enter_async_context(
@@ -98,8 +107,26 @@ class MCPClientWrapper:
 
     async def _connect_sse(self) -> tuple[Any, Any]:
         """建立 SSE 传输连接，返回 (read_stream, write_stream)。"""
+        headers = self._config.headers or None
         read_stream, write_stream = await self._exit_stack.enter_async_context(
-            sse_client(self._config.url)
+            sse_client(self._config.url, headers=headers)
+        )
+        return read_stream, write_stream
+
+    async def _connect_streamable_http(self) -> tuple[Any, Any]:
+        """建立 Streamable HTTP 传输连接，返回 (read_stream, write_stream)。"""
+        if streamable_http_client is None:
+            raise RuntimeError("当前 mcp SDK 不支持 streamable_http 传输")
+
+        client_headers = self._config.headers or None
+        http_client = await self._exit_stack.enter_async_context(
+            httpx.AsyncClient(
+                headers=client_headers,
+                timeout=self._config.timeout,
+            )
+        )
+        read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+            streamable_http_client(self._config.url, http_client=http_client)
         )
         return read_stream, write_stream
 
