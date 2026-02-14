@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 
 from excelmanus.config import ExcelManusConfig, load_config
 from excelmanus.engine import AgentEngine, ChatResult
@@ -1034,7 +1036,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--concurrency",
         type=_positive_int,
         default=1,
-        help="suite 执行并发度（默认 1）",
+        help="单个 suite 内用例并发度（默认 1）",
+    )
+    parser.add_argument(
+        "--suite-concurrency",
+        type=_positive_int,
+        default=1,
+        help="suite 间并发度（默认 1，仅多 suite 时生效）",
     )
     parser.add_argument(
         "--output-dir",
@@ -1084,6 +1092,180 @@ def _resolve_run_mode(args: argparse.Namespace) -> _RunPlan:
     return _RunPlan(mode="message", message=" ".join(targets))
 
 
+async def _run_suites(
+    suite_paths: list[Path],
+    config: ExcelManusConfig,
+    output_dir: Path,
+    *,
+    concurrency: int = 1,
+    suite_concurrency: int = 1,
+) -> int:
+    """并发运行多个 suite，带 Rich Live 进度面板和全局汇总。
+
+    返回 shell 退出码（0 = 全部成功，1 = 存在失败）。
+    """
+    total_suites = len(suite_paths)
+
+    # 每个 suite 的状态追踪
+    suite_states: dict[str, str] = {}  # suite_name -> 状态文本
+    suite_results: list[tuple[str, list[BenchResult]]] = []
+    results_lock = asyncio.Lock()
+
+    # 用 suite 文件名做简短标识
+    def _short_name(p: Path) -> str:
+        return p.stem
+
+    for p in suite_paths:
+        suite_states[_short_name(p)] = "⏳ 等待中"
+
+    def _build_progress_table() -> Table:
+        """构建实时进度表格。"""
+        table = Table(
+            title="Bench 并发执行面板",
+            show_lines=True,
+            expand=False,
+        )
+        table.add_column("Suite", style="cyan", min_width=25)
+        table.add_column("状态", min_width=20)
+
+        for name, status in suite_states.items():
+            table.add_row(name, status)
+        return table
+
+    async def _suite_worker(
+        suite_path: Path,
+        sem: asyncio.Semaphore,
+    ) -> None:
+        name = _short_name(suite_path)
+        async with sem:
+            suite_states[name] = "🔄 执行中..."
+            try:
+                results = await run_suite(
+                    suite_path,
+                    config,
+                    output_dir,
+                    concurrency=concurrency,
+                )
+                ok_count = sum(1 for r in results if r.status == "ok")
+                fail_count = len(results) - ok_count
+                if fail_count:
+                    suite_states[name] = f"⚠️  完成 ({ok_count}✅ {fail_count}❌)"
+                else:
+                    suite_states[name] = f"✅ 完成 ({ok_count} 用例)"
+                async with results_lock:
+                    suite_results.append((name, results))
+            except Exception as exc:
+                suite_states[name] = f"💥 崩溃: {exc}"
+                async with results_lock:
+                    suite_results.append((name, []))
+
+    sem = asyncio.Semaphore(suite_concurrency)
+    is_parallel = suite_concurrency > 1 and total_suites > 1
+
+    if is_parallel:
+        # 并发模式：启动 Live 进度面板
+        logger.info(
+            "启动并发模式：%d 个 suite，suite 并发=%d，case 并发=%d",
+            total_suites,
+            suite_concurrency,
+            concurrency,
+        )
+        tasks = [
+            asyncio.create_task(_suite_worker(p, sem))
+            for p in suite_paths
+        ]
+
+        console = Console()
+        with Live(
+            _build_progress_table(),
+            console=console,
+            refresh_per_second=2,
+        ) as live:
+            # 定期刷新进度表
+            while not all(t.done() for t in tasks):
+                live.update(_build_progress_table())
+                await asyncio.sleep(0.5)
+            # 最终刷新一次
+            live.update(_build_progress_table())
+
+        # 收集异常（不应发生，_suite_worker 内部已兜底）
+        for t in tasks:
+            if t.exception():  # pragma: no cover
+                logger.error("suite 任务异常: %s", t.exception())
+    else:
+        # 串行模式：逐个执行，保持原有日志输出
+        for suite_path in suite_paths:
+            await _suite_worker(suite_path, sem)
+
+    # ── 全局汇总报告 ──
+    all_results = [r for _, results in suite_results for r in results]
+    if all_results:
+        total_cases = len(all_results)
+        total_ok = sum(1 for r in all_results if r.status == "ok")
+        total_fail = total_cases - total_ok
+        total_tokens = sum(r.total_tokens for r in all_results)
+        total_duration = sum(r.duration_seconds for r in all_results)
+        total_tool_failures = sum(
+            sum(1 for tc in r.tool_calls if not tc.success) for r in all_results
+        )
+
+        # 保存全局汇总 JSON
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        short_id = uuid.uuid4().hex[:6]
+        global_summary = {
+            "schema_version": 2,
+            "kind": "global_summary",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution": {
+                "suite_count": total_suites,
+                "suite_concurrency": suite_concurrency,
+                "case_concurrency": concurrency,
+            },
+            "stats": {
+                "total_cases": total_cases,
+                "passed": total_ok,
+                "failed": total_fail,
+                "total_tokens": total_tokens,
+                "total_duration_seconds": round(total_duration, 2),
+                "tool_failures": total_tool_failures,
+            },
+            "suites": [
+                {
+                    "name": name,
+                    "case_count": len(results),
+                    "passed": sum(1 for r in results if r.status == "ok"),
+                    "failed": sum(1 for r in results if r.status != "ok"),
+                }
+                for name, results in suite_results
+            ],
+        }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        global_path = output_dir / f"global_{ts}_{short_id}.json"
+        with open(global_path, "w", encoding="utf-8") as f:
+            json.dump(global_summary, f, ensure_ascii=False, indent=2)
+
+        logger.info("═" * 60)
+        logger.info("全局汇总")
+        logger.info("═" * 60)
+        logger.info(
+            "  %d 个 suite │ %d 用例 │ %d 通过 │ %d 失败",
+            total_suites,
+            total_cases,
+            total_ok,
+            total_fail,
+        )
+        logger.info(
+            "  总 %d tokens │ 总 %.1fs │ 工具失败 %d 次",
+            total_tokens,
+            total_duration,
+            total_tool_failures,
+        )
+        logger.info("  全局汇总: %s", global_path)
+        logger.info("═" * 60)
+
+    return 0 if all(r.status == "ok" for r in all_results) else 1
+
+
 async def _main(argv: list[str] | None = None) -> int:
     """脚本入口，返回 shell 退出码。"""
     parser = _build_parser()
@@ -1115,14 +1297,13 @@ async def _main(argv: list[str] | None = None) -> int:
         config = load_config()
         setup_logging(config.log_level)
         output_dir = Path(args.output_dir)
-        for suite_path in plan.suite_paths:
-            await run_suite(
-                suite_path,
-                config,
-                output_dir,
-                concurrency=args.concurrency,
-            )
-        return 0
+        return await _run_suites(
+            plan.suite_paths,
+            config,
+            output_dir,
+            concurrency=args.concurrency,
+            suite_concurrency=args.suite_concurrency,
+        )
 
     # all 模式
     cases_dir = Path("bench/cases")
@@ -1138,14 +1319,13 @@ async def _main(argv: list[str] | None = None) -> int:
     config = load_config()
     setup_logging(config.log_level)
     output_dir = Path(args.output_dir)
-    for suite_path in suite_paths:
-        await run_suite(
-            suite_path,
-            config,
-            output_dir,
-            concurrency=args.concurrency,
-        )
-    return 0
+    return await _run_suites(
+        suite_paths,
+        config,
+        output_dir,
+        concurrency=args.concurrency,
+        suite_concurrency=args.suite_concurrency,
+    )
 
 
 if __name__ == "__main__":

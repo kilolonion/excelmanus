@@ -369,3 +369,158 @@ def test_run_single_still_saves_log_file(tmp_path: Path) -> None:
     payload = json.loads(saved_files[0].read_text(encoding="utf-8"))
     assert payload["schema_version"] == 2
     assert payload["kind"] == "case_result"
+
+
+# ── _run_suites 测试 ──────────────────────────────────────
+
+
+def test_run_suites_serial_calls_run_suite_in_order(tmp_path: Path) -> None:
+    """串行模式下 _run_suites 按顺序调用 run_suite。"""
+    suite_a = tmp_path / "suite_a.json"
+    suite_b = tmp_path / "suite_b.json"
+    suite_a.write_text("{}", encoding="utf-8")
+    suite_b.write_text("{}", encoding="utf-8")
+
+    call_order: list[str] = []
+
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+        call_order.append(Path(path).stem)
+        return [_make_result(f"{Path(path).stem}_c1")]
+
+    with patch("excelmanus.bench.run_suite", side_effect=_fake_run_suite):
+        code = _run(bench._run_suites(
+            [suite_a, suite_b],
+            _make_config(),
+            tmp_path / "out",
+            concurrency=1,
+            suite_concurrency=1,
+        ))
+
+    assert code == 0
+    assert call_order == ["suite_a", "suite_b"]
+    # 全局汇总文件应存在
+    global_files = list((tmp_path / "out").glob("global_*.json"))
+    assert len(global_files) == 1
+    payload = json.loads(global_files[0].read_text(encoding="utf-8"))
+    assert payload["kind"] == "global_summary"
+    assert payload["stats"]["total_cases"] == 2
+    assert payload["stats"]["passed"] == 2
+
+
+def test_run_suites_parallel_runs_concurrently(tmp_path: Path) -> None:
+    """suite_concurrency > 1 时多个 suite 并发执行。"""
+    suites = []
+    for i in range(3):
+        p = tmp_path / f"suite_{i}.json"
+        p.write_text("{}", encoding="utf-8")
+        suites.append(p)
+
+    timestamps: list[float] = []
+
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+        import time as _time
+        timestamps.append(_time.monotonic())
+        await asyncio.sleep(0.05)
+        return [_make_result(f"{Path(path).stem}_c1")]
+
+    with patch("excelmanus.bench.run_suite", side_effect=_fake_run_suite):
+        code = _run(bench._run_suites(
+            suites,
+            _make_config(),
+            tmp_path / "out",
+            concurrency=1,
+            suite_concurrency=3,
+        ))
+
+    assert code == 0
+    # 并发执行时，三个 suite 的启动时间差应很小（< 0.1s）
+    assert max(timestamps) - min(timestamps) < 0.1
+
+
+def test_run_suites_returns_one_on_failure(tmp_path: Path) -> None:
+    """存在失败用例时返回退出码 1。"""
+    suite_path = tmp_path / "suite_fail.json"
+    suite_path.write_text("{}", encoding="utf-8")
+
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+        return [
+            _make_result("ok_case"),
+            _make_result("fail_case", status="error", error={"type": "E", "message": "x"}),
+        ]
+
+    with patch("excelmanus.bench.run_suite", side_effect=_fake_run_suite):
+        code = _run(bench._run_suites(
+            [suite_path],
+            _make_config(),
+            tmp_path / "out",
+            concurrency=1,
+            suite_concurrency=1,
+        ))
+
+    assert code == 1
+    global_files = list((tmp_path / "out").glob("global_*.json"))
+    payload = json.loads(global_files[0].read_text(encoding="utf-8"))
+    assert payload["stats"]["failed"] == 1
+
+
+def test_run_suites_global_summary_has_suite_details(tmp_path: Path) -> None:
+    """全局汇总包含每个 suite 的统计明细。"""
+    suite_a = tmp_path / "suite_a.json"
+    suite_b = tmp_path / "suite_b.json"
+    suite_a.write_text("{}", encoding="utf-8")
+    suite_b.write_text("{}", encoding="utf-8")
+
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+        stem = Path(path).stem
+        if stem == "suite_a":
+            return [_make_result("a1"), _make_result("a2")]
+        return [_make_result("b1")]
+
+    with patch("excelmanus.bench.run_suite", side_effect=_fake_run_suite):
+        _run(bench._run_suites(
+            [suite_a, suite_b],
+            _make_config(),
+            tmp_path / "out",
+            concurrency=2,
+            suite_concurrency=2,
+        ))
+
+    global_files = list((tmp_path / "out").glob("global_*.json"))
+    payload = json.loads(global_files[0].read_text(encoding="utf-8"))
+    assert payload["execution"]["suite_concurrency"] == 2
+    assert payload["execution"]["case_concurrency"] == 2
+    assert payload["stats"]["total_cases"] == 3
+    assert len(payload["suites"]) == 2
+
+
+def test_main_suite_concurrency_flag_passed_through(tmp_path: Path, monkeypatch) -> None:
+    """--suite-concurrency 参数正确传递到 _run_suites。"""
+    suite_path = tmp_path / "suite.json"
+    suite_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "python -m excelmanus.bench",
+            "--suite", str(suite_path),
+            "--suite-concurrency", "4",
+            "--concurrency", "2",
+        ],
+    )
+
+    captured_kwargs: dict = {}
+
+    async def _fake_run_suites(paths, config, output_dir, **kwargs):
+        captured_kwargs.update(kwargs)
+        return 0
+
+    with (
+        patch("excelmanus.bench.load_config", return_value=_make_config()),
+        patch("excelmanus.bench.setup_logging"),
+        patch("excelmanus.bench._run_suites", side_effect=_fake_run_suites) as mock,
+    ):
+        code = _run(bench._main())
+
+    assert code == 0
+    assert captured_kwargs["suite_concurrency"] == 4
+    assert captured_kwargs["concurrency"] == 2
