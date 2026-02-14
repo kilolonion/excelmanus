@@ -1899,13 +1899,13 @@ async def _async_main() -> None:
         from excelmanus.persistent_memory import PersistentMemory
         from excelmanus.memory_extractor import MemoryExtractor
 
-        import openai as _openai
+        from excelmanus.providers import create_client as _create_client
 
         persistent_memory = PersistentMemory(
             memory_dir=config.memory_dir,
             auto_load_lines=config.memory_auto_load_lines,
         )
-        _client = _openai.AsyncOpenAI(
+        _client = _create_client(
             api_key=config.api_key,
             base_url=config.base_url,
         )

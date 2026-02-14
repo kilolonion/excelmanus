@@ -13,6 +13,7 @@ import openai
 
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
+from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.memory import ConversationMemory
@@ -102,7 +103,7 @@ class SubagentExecutor:
         success = True
         error: str | None = None
 
-        client = openai.AsyncOpenAI(
+        client = create_client(
             api_key=config.api_key or self._parent_config.api_key,
             base_url=config.base_url or self._parent_config.base_url,
         )
@@ -476,7 +477,7 @@ class SubagentExecutor:
             auto_load_lines=self._parent_config.memory_auto_load_lines,
         )
         model = config.model or self._parent_config.subagent_model or self._parent_config.model
-        client = openai.AsyncOpenAI(
+        client = create_client(
             api_key=config.api_key or self._parent_config.api_key,
             base_url=config.base_url or self._parent_config.base_url,
         )

@@ -158,13 +158,13 @@ class SessionManager:
         from excelmanus.persistent_memory import PersistentMemory
         from excelmanus.memory_extractor import MemoryExtractor
 
-        import openai
+        from excelmanus.providers import create_client
 
         persistent_memory = PersistentMemory(
             memory_dir=self._config.memory_dir,
             auto_load_lines=self._config.memory_auto_load_lines,
         )
-        client = openai.AsyncOpenAI(
+        client = create_client(
             api_key=self._config.api_key,
             base_url=self._config.base_url,
         )
