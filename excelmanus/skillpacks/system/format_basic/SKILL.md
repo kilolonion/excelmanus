@@ -8,6 +8,10 @@ allowed_tools:
   - read_cell_styles
   - merge_cells
   - unmerge_cells
+  - apply_threshold_icon_format
+  - style_card_blocks
+  - scale_range_unit
+  - apply_dashboard_dark_theme
   - read_excel
 triggers:
   - 格式
@@ -33,6 +37,11 @@ triggers:
   - 绿色
   - 高亮
   - 标记
+  - 条件格式
+  - 图标集
+  - 仪表盘
+  - 暗色
+  - 打印
 file_patterns:
   - "*.xlsx"
 resources:

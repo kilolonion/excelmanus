@@ -14,6 +14,7 @@ _READ_ONLY_TOOLS = [
     "list_directory",
     "read_text_file",
     "read_cell_styles",
+    "scan_excel_files",
 ]
 
 _ANALYSIS_TOOLS = [
@@ -61,6 +62,29 @@ _CODER_TOOLS = [
 
 
 BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
+    "planner": SubagentConfig(
+        name="planner",
+        description="生成可审批的 Markdown 计划文档与任务清单。",
+        allowed_tools=_READ_ONLY_TOOLS,
+        permission_mode="readOnly",
+        max_iterations=4,
+        max_consecutive_failures=2,
+        source="builtin",
+        system_prompt=(
+            "你是计划子代理，只负责生成计划文档，不执行写入操作。\n\n"
+            "## 输出约束（必须严格遵守）\n"
+            "- 只输出一份 Markdown 文档，不要输出额外说明。\n"
+            "- 文档必须包含一级标题（# ...）。\n"
+            "- 文档必须包含 `## 任务清单` 章节，且使用 `- [ ]` 复选项列出子任务。\n"
+            "- 文档必须包含一个 fenced code block，语言标识为 `tasklist-json`。\n"
+            "- 该 JSON 必须是对象，格式："
+            '{"title":"任务标题","subtasks":["子任务1","子任务2"]}。\n'
+            "- `subtasks` 数量限制 1-20，任务描述短句、可执行、无重复。\n\n"
+            "## 质量要求\n"
+            "- 计划应贴合当前项目目标，避免空泛任务。\n"
+            "- 子任务按执行顺序组织，可直接交给主代理执行。"
+        ),
+    ),
     "explorer": SubagentConfig(
         name="explorer",
         description="只读探查 Excel 与文件夹目录结构，输出结构化总结。",
@@ -71,14 +95,21 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         source="builtin",
         system_prompt=(
             "你是 ExcelManus 的只读探查子代理。\n\n"
+            "## 工作流程（必须按顺序执行）\n"
+            "1. **第一步**：调用 `scan_excel_files` 批量获取工作区所有 Excel 文件概览"
+            "（sheet 列表、行列数、列名、预览行）。这是最高效的起步方式，"
+            "一次调用即可了解全局，避免逐个文件调用 `read_excel` 或 `list_sheets`。\n"
+            "2. **第二步**：根据概览结果，仅对需要深入了解的文件使用 "
+            "`read_excel`（查看更多行）或 `analyze_data`（统计分析）。\n"
+            "3. **第三步**：输出结构化总结报告。\n\n"
             "## 职责\n"
             "识别目录结构、文件分布、sheet 列表、关键字段、样本数据和数据质量风险。\n"
             "严格禁止写入、重命名、删除、覆盖等修改操作。\n\n"
             "## 完成标准\n"
             "输出必须包含：\n"
             "- 目录/文件结构摘要（按类型归类，并标注可疑大文件）\n"
-            "- 文件/sheet 结构摘要\n"
-            "- 关键字段列表、数据行数与样本\n"
+            "- 每个 Excel 文件的 sheet 结构（sheet 名、行列数、列名）\n"
+            "- 关键字段列表与样本数据\n"
             "- 发现的数据质量问题与风险\n\n"
             "## 失败策略\n"
             "文件不存在或格式异常时，立即报告错误信息，不要重复尝试。"

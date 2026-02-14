@@ -223,6 +223,56 @@ async def test_accept_edits_auto_executes_and_audits(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_default_mode_with_fullaccess_auto_executes(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="analyst",
+        description="默认权限 + fullAccess",
+        allowed_tools=["write_text_file"],
+        permission_mode="default",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _tool_call_message(
+                                "write_text_file",
+                                {"file_path": "out/from_fullaccess.txt", "content": "ok"},
+                            )
+                        ),
+                        _response_from_message(_text_message("执行完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(
+            config=sub_cfg,
+            prompt="请写文件",
+            full_access_enabled=True,
+        )
+
+    assert result.success is True
+    assert result.pending_approval_id is None
+    assert approval.pending is None
+    assert (tmp_path / "out" / "from_fullaccess.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_circuit_breaker_on_consecutive_failures(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = ToolRegistry()
@@ -271,3 +321,64 @@ async def test_circuit_breaker_on_consecutive_failures(tmp_path: Path) -> None:
 
     assert result.success is False
     assert "连续 2 次工具调用失败" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_collects_observed_files_from_tool_arguments(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = ToolRegistry()
+
+    def read_excel(file_path: str) -> str:
+        return json.dumps({"file": file_path}, ensure_ascii=False)
+
+    registry.register_tool(
+        ToolDef(
+            name="read_excel",
+            description="读取",
+            input_schema={
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=read_excel,
+        )
+    )
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="explorer",
+        description="文件上下文收集测试",
+        allowed_tools=["read_excel"],
+        permission_mode="readOnly",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _tool_call_message(
+                                "read_excel",
+                                {"file_path": "./stress_test_comprehensive.xlsx"},
+                            )
+                        ),
+                        _response_from_message(_text_message("完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(config=sub_cfg, prompt="读取数据")
+
+    assert result.success is True
+    assert "stress_test_comprehensive.xlsx" in result.observed_files

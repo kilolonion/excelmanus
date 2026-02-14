@@ -57,7 +57,7 @@ class TestRenderContextTruncated:
         out = skill.render_context_truncated(500)
         assert "[Skillpack] test" in out
         assert "描述：" in out
-        assert "授权工具：" in out
+        assert "授权工具" not in out
         assert "执行指引：" in out
 
     def test_falls_back_to_minimal_when_budget_tiny(self) -> None:

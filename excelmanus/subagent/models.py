@@ -44,3 +44,4 @@ class SubagentResult:
     error: str | None = None
     pending_approval_id: str | None = None
     file_changes: list[str] = field(default_factory=list)
+    observed_files: list[str] = field(default_factory=list)

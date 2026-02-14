@@ -33,7 +33,6 @@ class Skillpack:
         lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
-            f"授权工具：{', '.join(self.allowed_tools) if self.allowed_tools else '(空)'}",
             "执行指引：",
             self.instructions.strip() or "(无)",
         ]
@@ -54,7 +53,6 @@ class Skillpack:
         header_lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
-            f"授权工具：{', '.join(self.allowed_tools) if self.allowed_tools else '(空)'}",
             "执行指引：",
         ]
         header = "\n".join(header_lines) + "\n"

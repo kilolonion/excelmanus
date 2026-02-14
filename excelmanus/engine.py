@@ -7,15 +7,25 @@ import time
 from collections.abc import Sequence
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Literal
 
 import openai
 
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
-from excelmanus.config import ExcelManusConfig
+from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory
+from excelmanus.plan_mode import (
+    PendingPlanState,
+    PlanDraft,
+    new_plan_id,
+    parse_plan_markdown,
+    plan_filename,
+    save_plan_markdown,
+    utc_now_iso,
+)
 from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
 from excelmanus.skillpacks import (
     SkillMatchResult,
@@ -27,6 +37,7 @@ from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
+from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
 
 if TYPE_CHECKING:
@@ -36,6 +47,13 @@ if TYPE_CHECKING:
 logger = get_logger("engine")
 _META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_to_subagent")
+_PLAN_CONTEXT_MAX_CHARS = 6000
+_RECENT_EXCEL_FILE_MAX = 5
+_RECENT_SUBAGENT_TASK_MAX_CHARS = 160
+_SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
+_SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
+_SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
+_SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
 
 
 def _to_plain(value: Any) -> Any:
@@ -74,6 +92,137 @@ def _assistant_message_to_dict(message: Any) -> dict[str, Any]:
     return payload
 
 
+def _message_content_to_text(content: Any) -> str:
+    """将供应商差异化 content 统一为文本。"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            else:
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
+    return str(content)
+
+
+def _normalize_tool_calls(raw_tool_calls: Any) -> list[Any]:
+    """兼容 dict/object 两种 tool_call 结构。"""
+    if raw_tool_calls is None:
+        return []
+    if isinstance(raw_tool_calls, tuple):
+        raw_tool_calls = list(raw_tool_calls)
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    normalized: list[Any] = []
+    for item in raw_tool_calls:
+        if isinstance(item, dict):
+            raw_function = item.get("function")
+            if isinstance(raw_function, dict):
+                function_obj = SimpleNamespace(
+                    name=str(raw_function.get("name", "") or ""),
+                    arguments=raw_function.get("arguments"),
+                )
+            else:
+                function_obj = SimpleNamespace(
+                    name=str(getattr(raw_function, "name", "") or ""),
+                    arguments=getattr(raw_function, "arguments", None),
+                )
+            normalized.append(
+                SimpleNamespace(
+                    id=str(item.get("id", "") or ""),
+                    function=function_obj,
+                )
+            )
+        else:
+            normalized.append(item)
+    return normalized
+
+
+def _coerce_completion_message(message: Any) -> Any:
+    """将消息对象标准化为包含 content/tool_calls 的结构。"""
+    if message is None:
+        return SimpleNamespace(content="", tool_calls=[])
+    if isinstance(message, str):
+        return SimpleNamespace(content=message, tool_calls=[])
+    if isinstance(message, dict):
+        return SimpleNamespace(
+            content=message.get("content"),
+            tool_calls=_normalize_tool_calls(message.get("tool_calls")),
+            thinking=message.get("thinking"),
+            reasoning=message.get("reasoning"),
+            reasoning_content=message.get("reasoning_content"),
+        )
+    return message
+
+
+def _extract_completion_message(response: Any) -> tuple[Any, Any]:
+    """从 provider 响应中提取首个 message，并兼容字符串响应。"""
+    usage = getattr(response, "usage", None)
+
+    if isinstance(response, str):
+        return SimpleNamespace(content=response, tool_calls=[]), usage
+
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        message = getattr(choices[0], "message", None)
+        if message is not None:
+            return _coerce_completion_message(message), usage
+
+    payload = _to_plain(response)
+    if isinstance(payload, dict):
+        if usage is None:
+            usage = payload.get("usage")
+        choices_payload = payload.get("choices")
+        if isinstance(choices_payload, list) and choices_payload:
+            first = choices_payload[0]
+            if isinstance(first, dict):
+                message_payload = first.get("message")
+            else:
+                message_payload = getattr(first, "message", None)
+            if message_payload is not None:
+                return _coerce_completion_message(message_payload), usage
+        for key in ("output_text", "content", "text"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return SimpleNamespace(content=candidate, tool_calls=[]), usage
+
+    return SimpleNamespace(content=str(response), tool_calls=[]), usage
+
+
+def _usage_token(usage: Any, key: str) -> int:
+    """读取 usage 中 token 计数，兼容 dict/object。"""
+    if usage is None:
+        return 0
+    value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _looks_like_html_document(text: str) -> bool:
+    """判断文本是否像整页 HTML 文档（常见于 base_url 配置错误）。"""
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
+        return True
+    return "<html" in lowered and "</html>" in lowered and "<head" in lowered
+
+
 def _summarize_text(text: str, max_len: int = 120) -> str:
     """将文本压缩为单行摘要，避免日志过长。"""
     compact = " ".join(text.split())
@@ -98,6 +247,8 @@ class ToolCallResult:
     audit_record: AppliedApprovalRecord | None = None
     pending_question: bool = False
     question_id: str | None = None
+    pending_plan: bool = False
+    plan_id: str | None = None
     defer_tool_result: bool = False
 
 
@@ -138,6 +289,18 @@ class ChatResult:
     def __getattr__(self, name: str) -> Any:
         """兼容 result.strip()/startswith() 等字符串方法。"""
         return getattr(self.reply, name)
+
+
+@dataclass
+class DelegateSubagentOutcome:
+    """委派子代理的结构化返回。"""
+
+    reply: str
+    success: bool
+    picked_agent: str | None = None
+    task_text: str = ""
+    normalized_paths: list[str] = field(default_factory=list)
+    subagent_result: SubagentResult | None = None
 
 
 class AgentEngine:
@@ -211,7 +374,15 @@ class AgentEngine:
             approval_manager=self._approval,
         )
         self._question_flow = QuestionFlowManager(max_queue_size=8)
+        self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
+        self._plan_mode_enabled: bool = False
+        self._pending_plan: PendingPlanState | None = None
+        self._approved_plan_context: str | None = None
+        self._suspend_task_create_plan_once: bool = False
+        self._recent_excel_files: list[str] = []
+        self._last_subagent_name: str | None = None
+        self._last_subagent_task: str | None = None
 
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
@@ -227,6 +398,15 @@ class AgentEngine:
                 self._memory.system_prompt = (
                     f"{original}\n\n## 持久记忆\n{core_memory}"
                 )
+
+        # ── MCP Client 集成 ──────────────────────────────────
+        self._mcp_manager = MCPManager(config.workspace_root)
+
+        # ── 多模型切换 ──────────────────────────────────
+        self._active_model: str = config.model
+        self._active_api_key: str = config.api_key
+        self._active_base_url: str = config.base_url
+        self._active_model_name: str | None = None  # 当前激活的 profile name
 
     async def extract_and_save_memory(self) -> None:
         """会话结束时调用：从对话历史中提取记忆并持久化。
@@ -245,6 +425,64 @@ class AgentEngine:
         except Exception:
             logger.exception("持久记忆提取或保存失败，已跳过")
 
+    async def initialize_mcp(self) -> None:
+        """异步初始化 MCP 连接（需在 event loop 中调用）。
+
+        由 CLI 或 API 入口在启动时显式调用。
+
+        流程：
+        1. MCPManager 完成配置加载、连接建立和工具注册
+        2. 检查本地 Skillpack 缓存：
+           - 缓存命中且工具指纹匹配 → 加载缓存 + 异步后台刷新
+           - 缓存未命中或指纹变化 → 同步调 LLM 生成
+           - LLM 失败 → 回退到程序化生成
+        3. 将生成的 MCP Skillpack 注入 loader
+        """
+        await self._mcp_manager.initialize(self._registry)
+
+        if self._skill_router is None or not self._mcp_manager.connected_servers:
+            return
+
+        loader = self._skill_router._loader
+        # 确保文件系统 skillpack 已加载
+        if not loader.get_skillpacks():
+            loader.load_all()
+
+        # 使用 LLM 增强的 Skillpack 生成器
+        from excelmanus.mcp.skillpack_generator import MCPSkillpackGenerator
+
+        generator = MCPSkillpackGenerator(
+            mcp_manager=self._mcp_manager,
+            llm_client=self._client,
+            model=self._config.model,
+        )
+        self._mcp_skillpack_generator = generator
+
+        try:
+            mcp_skillpacks = await generator.generate()
+        except Exception:
+            logger.warning("MCP Skillpack 生成异常，回退到程序化生成", exc_info=True)
+            mcp_skillpacks = self._mcp_manager.generate_skillpacks()
+
+        if mcp_skillpacks:
+            injected = loader.inject_skillpacks(mcp_skillpacks)
+            if injected:
+                logger.info("已注入 %d 个 MCP Skillpack", injected)
+
+        # 后台异步刷新：提升已缓存 Skillpack 的内容质量
+        generator.schedule_background_refresh()
+
+    async def shutdown_mcp(self) -> None:
+        """关闭所有 MCP Server 连接，释放资源。"""
+        await self._mcp_manager.shutdown()
+    def mcp_server_info(self) -> list[dict[str, Any]]:
+        """返回 MCP Server 连接状态摘要，供 CLI 展示。"""
+        return self._mcp_manager.get_server_info()
+
+    @property
+    def mcp_connected_count(self) -> int:
+        """已连接的 MCP Server 数量。"""
+        return len(self._mcp_manager.connected_servers)
 
     @property
     def memory(self) -> ConversationMemory:
@@ -265,6 +503,11 @@ class AgentEngine:
     def subagent_enabled(self) -> bool:
         """当前会话是否启用 subagent。"""
         return self._subagent_enabled
+
+    @property
+    def plan_mode_enabled(self) -> bool:
+        """当前会话是否启用 plan mode。"""
+        return self._plan_mode_enabled
 
     def has_pending_question(self) -> bool:
         """当前会话是否存在待回答问题。"""
@@ -428,7 +671,7 @@ class AgentEngine:
                 )
             return pending_result
 
-        control_reply = await self._handle_control_command(user_message)
+        control_reply = await self._handle_control_command(user_message, on_event=on_event)
         if control_reply is not None:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
             return ChatResult(reply=control_reply)
@@ -443,6 +686,18 @@ class AgentEngine:
             block_msg = self._approval.pending_block_message()
             logger.info("存在待确认项，已阻塞普通请求")
             return ChatResult(reply=block_msg)
+
+        if self._pending_plan is not None:
+            block_msg = self._format_pending_plan_prompt()
+            logger.info("存在待审批计划，已阻塞普通请求")
+            return ChatResult(reply=block_msg)
+
+        if self._plan_mode_enabled and not user_message.strip().startswith("/"):
+            logger.info("plan mode 命中，进入仅规划路径")
+            return await self._run_plan_mode_only(
+                user_message=user_message,
+                on_event=on_event,
+            )
 
         chat_start = time.monotonic()
 
@@ -623,9 +878,11 @@ class AgentEngine:
                         skill_catalog = "\n".join(lines)
 
         select_skill_description = (
-            "激活一个技能包来完成当前任务。"
-            "当用户提出明确的数据处理、图表制作、格式整理等执行任务时应优先调用本工具。\n"
-            "如果用户只是闲聊、问候、询问能力或不需要执行工具，请不要调用本工具，直接回复。\n\n"
+            "激活一个技能包来获取执行任务所需的工具。"
+            "仅在当前工具列表不足以完成用户请求时调用。\n"
+            "如果用户只是闲聊、问候、询问能力或不需要执行工具，请不要调用本工具，直接回复。\n"
+            "⚠️ 信息隔离：不要向用户提及技能名称、工具名称、技能包等内部概念，"
+            "只需自然地执行任务并呈现结果。\n\n"
             "Skill_Catalog:\n"
             f"{skill_catalog}"
         )
@@ -807,14 +1064,7 @@ class AgentEngine:
         self._loaded_skill_names.add(selected.name)
 
         context_text = selected.render_context()
-        reason_text = reason.strip()
-        if reason_text:
-            return (
-                f"已激活技能: {selected.name}\n"
-                f"选择原因: {reason_text}\n\n"
-                f"{context_text}"
-            )
-        return context_text
+        return f"OK\n{context_text}"
 
     def _get_current_tool_scope(
         self,
@@ -822,7 +1072,7 @@ class AgentEngine:
     ) -> list[str]:
         """根据当前状态返回主代理可用工具范围。"""
         if self._active_skill is not None:
-            scope = list(self._active_skill.allowed_tools)
+            scope = self._expand_tool_scope_patterns(self._active_skill.allowed_tools)
             if "select_skill" not in scope:
                 scope.append("select_skill")
             return self._ensure_always_available(scope)
@@ -833,7 +1083,7 @@ class AgentEngine:
             and route_result.route_mode == "slash_direct"
             and route_result.tool_scope
         ):
-            scope = list(route_result.tool_scope)
+            scope = self._expand_tool_scope_patterns(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
             return self._ensure_always_available(scope)
@@ -841,7 +1091,7 @@ class AgentEngine:
         # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
         # 仅使用路由授权工具，并追加必要元工具。
         if route_result is not None and route_result.tool_scope:
-            scope = list(route_result.tool_scope)
+            scope = self._expand_tool_scope_patterns(route_result.tool_scope)
             for tool_name in _META_TOOL_NAMES:
                 if tool_name not in scope:
                     scope.append(tool_name)
@@ -860,6 +1110,61 @@ class AgentEngine:
             if tool_name not in scope:
                 scope.append(tool_name)
         return scope
+
+    def _expand_tool_scope_patterns(self, scope: Sequence[str]) -> list[str]:
+        """展开工具授权中的 MCP 选择器。
+
+        支持三种写法：
+        - `mcp:*`：允许所有已注册 MCP 工具
+        - `mcp:{server}:*`：允许指定 server 的全部 MCP 工具
+        - `mcp:{server}:{tool}`：允许指定 server 的指定工具
+        """
+        all_tools = self._all_tool_names()
+        if not all_tools:
+            return list(scope)
+
+        mcp_tools = [name for name in all_tools if name.startswith("mcp_")]
+        expanded: list[str] = []
+        seen: set[str] = set()
+
+        def _append(name: str) -> None:
+            if name not in seen:
+                seen.add(name)
+                expanded.append(name)
+
+        for token in scope:
+            if not isinstance(token, str):
+                continue
+            selector = token.strip()
+            if not selector:
+                continue
+            if selector == "mcp:*":
+                for tool_name in mcp_tools:
+                    _append(tool_name)
+                continue
+            if selector.startswith("mcp:"):
+                parts = selector.split(":", 2)
+                if len(parts) != 3:
+                    continue
+                server_name = parts[1].strip().replace("-", "_")
+                tool_name = parts[2].strip()
+                if not server_name or not tool_name:
+                    continue
+
+                for mcp_name in mcp_tools:
+                    try:
+                        normalized_server, original_tool = parse_tool_prefix(mcp_name)
+                    except ValueError:
+                        continue
+                    if normalized_server != server_name:
+                        continue
+                    if tool_name == "*" or original_tool == tool_name:
+                        _append(mcp_name)
+                continue
+
+            _append(selector)
+
+        return expanded
 
     def _build_tools_for_scope(self, tool_scope: Sequence[str]) -> list[dict[str, Any]]:
         """按当前 scope 组合常规工具和元工具定义。"""
@@ -937,7 +1242,8 @@ class AgentEngine:
                 model=self._router_model,
                 messages=messages,
             )
-            content = str(response.choices[0].message.content or "").strip()
+            message, _ = _extract_completion_message(response)
+            content = _message_content_to_text(getattr(message, "content", None)).strip()
             parsed = json.loads(content) if content else {}
             picked = str(parsed.get("agent_name", "")).strip()
             if picked in set(candidates):
@@ -969,23 +1275,30 @@ class AgentEngine:
             prompt=prompt,
             parent_context=self._build_parent_context_summary(),
             on_event=on_event,
+            full_access_enabled=self._full_access_enabled,
         )
 
-    async def _handle_delegate_to_subagent(
+    async def _delegate_to_subagent(
         self,
         *,
         task: str,
         agent_name: str | None = None,
         file_paths: list[Any] | None = None,
         on_event: EventCallback | None = None,
-    ) -> str:
-        """处理 delegate_to_subagent 元工具。"""
+    ) -> DelegateSubagentOutcome:
+        """执行 delegate_to_subagent 并返回结构化结果。"""
         if not self._subagent_enabled:
-            return "subagent 当前处于关闭状态，请先执行 `/subagent on`。"
+            return DelegateSubagentOutcome(
+                reply="subagent 当前处于关闭状态，请先执行 `/subagent on`。",
+                success=False,
+            )
 
         task_text = task.strip()
         if not task_text:
-            return "工具参数错误: task 必须为非空字符串。"
+            return DelegateSubagentOutcome(
+                reply="工具参数错误: task 必须为非空字符串。",
+                success=False,
+            )
         normalized_paths = self._normalize_subagent_file_paths(file_paths)
 
         picked_agent = (agent_name or "").strip()
@@ -1005,8 +1318,44 @@ class AgentEngine:
             on_event=on_event,
         )
         if result.success:
-            return result.summary
-        return f"子代理执行失败（{picked_agent}）：{result.summary}"
+            self._update_recent_excel_context(
+                candidate_paths=[*normalized_paths, *result.observed_files],
+                subagent_name=picked_agent,
+                task=task_text,
+            )
+            return DelegateSubagentOutcome(
+                reply=result.summary,
+                success=True,
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+                subagent_result=result,
+            )
+        return DelegateSubagentOutcome(
+            reply=f"子代理执行失败（{picked_agent}）：{result.summary}",
+            success=False,
+            picked_agent=picked_agent,
+            task_text=task_text,
+            normalized_paths=normalized_paths,
+            subagent_result=result,
+        )
+
+    async def _handle_delegate_to_subagent(
+        self,
+        *,
+        task: str,
+        agent_name: str | None = None,
+        file_paths: list[Any] | None = None,
+        on_event: EventCallback | None = None,
+    ) -> str:
+        """处理 delegate_to_subagent 元工具。"""
+        outcome = await self._delegate_to_subagent(
+            task=task,
+            agent_name=agent_name,
+            file_paths=file_paths,
+            on_event=on_event,
+        )
+        return outcome.reply
 
     def _handle_list_subagents(self) -> str:
         """列出可用子代理。"""
@@ -1017,6 +1366,161 @@ class AgentEngine:
         for agent in agents:
             lines.append(f"- {agent.name} ({agent.permission_mode})：{agent.description}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _task_create_objective(arguments: dict[str, Any]) -> str:
+        """将 task_create 参数转为规划目标文本。"""
+        title = str(arguments.get("title", "") or "").strip()
+        raw_subtasks = arguments.get("subtasks")
+        subtasks: list[str] = []
+        if isinstance(raw_subtasks, list):
+            for item in raw_subtasks:
+                text = str(item).strip()
+                if text:
+                    subtasks.append(text)
+
+        lines = ["请基于以下任务草稿生成可审批执行计划："]
+        if title:
+            lines.append(f"任务标题：{title}")
+        if subtasks:
+            lines.append("候选子任务：")
+            lines.extend(f"- {item}" for item in subtasks)
+        else:
+            lines.append("候选子任务：暂无，需你根据目标拆解。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_planner_prompt(*, objective: str, source: str) -> str:
+        """构造 planner 子代理提示。"""
+        source_label = "plan mode" if source == "plan_mode" else "task_create_hook"
+        return (
+            f"任务来源：{source_label}\n"
+            "你需要产出一份可审批的执行计划文档。\n\n"
+            "用户目标如下：\n"
+            f"{objective.strip()}\n\n"
+            "请严格按系统约束输出 Markdown（含 `## 任务清单` 与 `tasklist-json` 代码块）。"
+        )
+
+    async def _create_pending_plan_draft(
+        self,
+        *,
+        objective: str,
+        source: Literal["plan_mode", "task_create_hook"],
+        route_to_resume: SkillMatchResult | None,
+        tool_call_id: str | None,
+        on_event: EventCallback | None,
+    ) -> tuple[PlanDraft | None, str | None]:
+        """调用 planner 生成待审批计划草案。"""
+        if self._pending_plan is not None:
+            return None, "当前已有待审批计划，请先批准或拒绝。"
+
+        plan_result = await self.run_subagent(
+            agent_name="planner",
+            prompt=self._build_planner_prompt(objective=objective, source=source),
+            on_event=on_event,
+        )
+        if not plan_result.success:
+            detail = (plan_result.error or plan_result.summary or "未知错误").strip()
+            return None, f"planner 执行失败：{detail}"
+
+        markdown = str(plan_result.summary or "").strip()
+        if not markdown:
+            return None, "planner 未返回计划文档。"
+
+        try:
+            title, subtasks = parse_plan_markdown(markdown)
+        except ValueError as exc:
+            return None, str(exc)
+
+        plan_id = new_plan_id()
+        file_name = plan_filename(plan_id)
+        try:
+            file_path = save_plan_markdown(
+                markdown=markdown,
+                workspace_root=self._config.workspace_root,
+                filename=file_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return None, f"计划文档落盘失败：{exc}"
+
+        draft = PlanDraft(
+            plan_id=plan_id,
+            markdown=markdown,
+            title=title,
+            subtasks=subtasks,
+            file_path=file_path,
+            source=source,
+            objective=objective.strip(),
+            created_at_utc=utc_now_iso(),
+        )
+        self._pending_plan = PendingPlanState(
+            draft=draft,
+            tool_call_id=tool_call_id,
+            route_to_resume=route_to_resume,
+        )
+        return draft, None
+
+    def _format_pending_plan_prompt(self) -> str:
+        """构造待审批计划提示。"""
+        pending = self._pending_plan
+        if pending is None:
+            return "当前没有待审批计划。"
+        draft = pending.draft
+        return (
+            "已生成计划草案，待你审批后继续执行。\n"
+            f"- ID: `{draft.plan_id}`\n"
+            f"- 文件: `{draft.file_path}`\n"
+            f"- 标题: {draft.title}\n"
+            f"- 子任务数: {len(draft.subtasks)}\n"
+            "请执行以下命令之一：\n"
+            f"- `/plan approve {draft.plan_id}` 批准并继续执行\n"
+            f"- `/plan reject {draft.plan_id}` 拒绝该计划"
+        )
+
+    async def _intercept_task_create_with_plan(
+        self,
+        *,
+        arguments: dict[str, Any],
+        route_result: SkillMatchResult | None,
+        tool_call_id: str,
+        on_event: EventCallback | None,
+    ) -> tuple[str, str | None, str | None]:
+        """拦截 task_create，改为 planner 生成待审批计划。"""
+        objective = self._task_create_objective(arguments)
+        draft, error = await self._create_pending_plan_draft(
+            objective=objective,
+            source="task_create_hook",
+            route_to_resume=route_result,
+            tool_call_id=tool_call_id,
+            on_event=on_event,
+        )
+        if error is not None:
+            return f"计划生成失败：{error}", None, f"计划生成失败：{error}"
+        assert draft is not None
+        return self._format_pending_plan_prompt(), draft.plan_id, None
+
+    async def _run_plan_mode_only(
+        self,
+        *,
+        user_message: str,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        """plan mode 下仅生成计划，不进入常规执行循环。"""
+        objective = user_message.strip()
+        if not objective:
+            return ChatResult(reply="plan mode 需要非空目标描述。")
+
+        draft, error = await self._create_pending_plan_draft(
+            objective=objective,
+            source="plan_mode",
+            route_to_resume=None,
+            tool_call_id=None,
+            on_event=on_event,
+        )
+        if error is not None:
+            return ChatResult(reply=f"计划生成失败：{error}")
+        assert draft is not None
+        return ChatResult(reply=self._format_pending_plan_prompt())
 
     @staticmethod
     def _question_options_payload(question: PendingQuestion) -> list[dict[str, str]]:
@@ -1072,6 +1576,129 @@ class AgentEngine:
         )
         return f"已创建待回答问题 `{pending.question_id}`。", pending.question_id
 
+    def _enqueue_subagent_approval_question(
+        self,
+        *,
+        approval_id: str,
+        tool_name: str,
+        picked_agent: str,
+        task_text: str,
+        normalized_paths: list[str],
+        tool_call_id: str,
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> PendingQuestion:
+        """创建“子代理高风险审批”系统问题并入队。"""
+        question_payload = {
+            "header": "高风险确认",
+            "text": (
+                f"子代理 `{picked_agent}` 请求执行高风险工具 `{tool_name}`"
+                f"（审批 ID: {approval_id}）。请选择后续动作。"
+            ),
+            "options": [
+                {
+                    "label": _SUBAGENT_APPROVAL_OPTION_ACCEPT,
+                    "description": f"立即执行 `/accept {approval_id}`。",
+                },
+                {
+                    "label": _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
+                    "description": "先开启 fullAccess，再重试子代理任务。",
+                },
+                {
+                    "label": _SUBAGENT_APPROVAL_OPTION_REJECT,
+                    "description": f"执行 `/reject {approval_id}` 并停止本次高风险步骤。",
+                },
+            ],
+            "multiSelect": False,
+        }
+        pending = self._question_flow.enqueue(
+            question_payload=question_payload,
+            tool_call_id=tool_call_id,
+        )
+        self._system_question_actions[pending.question_id] = {
+            "type": _SYSTEM_Q_SUBAGENT_APPROVAL,
+            "approval_id": approval_id,
+            "picked_agent": picked_agent,
+            "task_text": task_text,
+            "normalized_paths": list(normalized_paths),
+        }
+        self._emit_user_question_event(
+            question=pending,
+            on_event=on_event,
+            iteration=iteration,
+        )
+        return pending
+
+    async def _handle_subagent_approval_answer(
+        self,
+        *,
+        action: dict[str, Any],
+        parsed: Any,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        """处理“子代理高风险审批”系统问题的回答。"""
+        selected_options = parsed.selected_options if hasattr(parsed, "selected_options") else []
+        selected_label = (
+            str(selected_options[0].get("label", "")).strip()
+            if selected_options
+            else ""
+        )
+        approval_id = str(action.get("approval_id", "")).strip()
+        picked_agent = str(action.get("picked_agent", "")).strip()
+        task_text = str(action.get("task_text", "")).strip()
+        normalized_paths = action.get("normalized_paths")
+        file_paths = normalized_paths if isinstance(normalized_paths, list) else []
+
+        if not approval_id:
+            return ChatResult(reply="系统问题上下文缺失：approval_id 为空。")
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_ACCEPT:
+            accept_reply = await self._handle_accept_command(["/accept", approval_id])
+            reply = (
+                f"{accept_reply}\n"
+                "若需要子代理自动继续执行，建议选择“开启 fullAccess 后重试（推荐）”。"
+            )
+            return ChatResult(reply=reply)
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY:
+            lines: list[str] = []
+            if not self._full_access_enabled:
+                self._full_access_enabled = True
+                lines.append("已开启 fullAccess。当前代码技能权限：full_access。")
+            else:
+                lines.append("fullAccess 已开启。")
+
+            reject_reply = self._handle_reject_command(["/reject", approval_id])
+            lines.append(reject_reply)
+
+            rerun_reply = await self._handle_delegate_to_subagent(
+                task=task_text,
+                agent_name=picked_agent or None,
+                file_paths=file_paths,
+                on_event=on_event,
+            )
+            lines.append("已按当前权限重新执行子代理任务：")
+            lines.append(rerun_reply)
+            return ChatResult(reply="\n".join(lines))
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_REJECT:
+            reject_reply = self._handle_reject_command(["/reject", approval_id])
+            reply = (
+                f"{reject_reply}\n"
+                "如需自动执行高风险步骤，可先使用 `/fullAccess on` 后重新发起任务。"
+            )
+            return ChatResult(reply=reply)
+
+        manual = (
+            "已记录你的回答。\n"
+            f"当前审批 ID: `{approval_id}`\n"
+            "你可以手动执行以下命令：\n"
+            f"- `/accept {approval_id}`\n"
+            "- `/fullAccess on`（可选）\n"
+            f"- `/reject {approval_id}`"
+        )
+        return ChatResult(reply=manual)
+
     async def _handle_pending_question_answer(
         self,
         *,
@@ -1108,6 +1735,34 @@ class AgentEngine:
         self._memory.add_tool_result(popped.tool_call_id, tool_result)
         logger.info("已接收问题回答: %s", parsed.question_id)
 
+        system_action = self._system_question_actions.pop(parsed.question_id, None)
+        if system_action is not None:
+            self._pending_question_route_result = None
+            action_type = str(system_action.get("type", "")).strip()
+            if action_type == _SYSTEM_Q_SUBAGENT_APPROVAL:
+                action_result = await self._handle_subagent_approval_answer(
+                    action=system_action,
+                    parsed=parsed,
+                    on_event=on_event,
+                )
+            else:
+                action_result = ChatResult(reply="已记录你的回答。")
+
+            if self._question_flow.has_pending():
+                next_question = self._question_flow.current()
+                assert next_question is not None
+                self._emit_user_question_event(
+                    question=next_question,
+                    on_event=on_event,
+                    iteration=0,
+                )
+                merged = (
+                    f"{action_result.reply}\n\n"
+                    f"{self._question_flow.format_prompt(next_question)}"
+                )
+                return ChatResult(reply=merged)
+            return action_result
+
         # 队列仍有待答问题，继续前台追问（不触发路由，不恢复执行）。
         if self._question_flow.has_pending():
             next_question = self._question_flow.current()
@@ -1123,28 +1778,35 @@ class AgentEngine:
         self._pending_question_route_result = None
         if route_to_resume is None:
             return ChatResult(reply="已记录你的回答。")
-        return await self._tool_calling_loop(route_to_resume, on_event)
+        # 从上次中断的轮次之后继续执行
+        resume_iteration = self._last_iteration_count + 1
+        return await self._tool_calling_loop(
+            route_to_resume, on_event, start_iteration=resume_iteration
+        )
 
     async def _tool_calling_loop(
         self,
         route_result: SkillMatchResult,
         on_event: EventCallback | None,
+        *,
+        start_iteration: int = 1,
     ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
         all_tool_results: list[ToolCallResult] = []
-        # 重置统计
-        self._last_iteration_count = 0
-        self._last_tool_call_count = 0
-        self._last_success_count = 0
-        self._last_failure_count = 0
+        # 恢复执行时保留之前的统计，仅首次调用时重置
+        if start_iteration <= 1:
+            self._last_iteration_count = 0
+            self._last_tool_call_count = 0
+            self._last_success_count = 0
+            self._last_failure_count = 0
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        for iteration in range(1, max_iter + 1):
+        for iteration in range(start_iteration, max_iter + 1):
             self._emit(
                 on_event,
                 ToolCallEvent(
@@ -1161,21 +1823,20 @@ class AgentEngine:
             tools = self._build_tools_for_scope(tool_scope=tool_scope)
 
             kwargs: dict[str, Any] = {
-                "model": self._config.model,
+                "model": self._active_model,
                 "messages": messages,
             }
             if tools:
                 kwargs["tools"] = tools
 
             response = await self._create_chat_completion_with_system_fallback(kwargs)
+            message, usage = _extract_completion_message(response)
+            tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
 
             # 累计 token 使用量
-            usage = getattr(response, "usage", None)
             if usage is not None:
-                total_prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
-                total_completion_tokens += getattr(usage, "completion_tokens", 0) or 0
-            choice = response.choices[0]
-            message = choice.message
+                total_prompt_tokens += _usage_token(usage, "prompt_tokens")
+                total_completion_tokens += _usage_token(usage, "completion_tokens")
 
             # 提取 thinking / reasoning 内容
             thinking_content = ""
@@ -1196,8 +1857,26 @@ class AgentEngine:
                 )
 
             # 无工具调用 → 返回文本回复
-            if not message.tool_calls:
-                reply_text = message.content or ""
+            if not tool_calls:
+                reply_text = _message_content_to_text(getattr(message, "content", None))
+                if _looks_like_html_document(reply_text):
+                    error_reply = self._format_html_endpoint_error(reply_text)
+                    self._memory.add_assistant_message(error_reply)
+                    self._last_iteration_count = iteration
+                    logger.error(
+                        "检测到疑似 HTML 页面响应，base_url=%s，已返回配置提示",
+                        self._config.base_url,
+                    )
+                    logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                    return ChatResult(
+                        reply=error_reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
                 self._memory.add_assistant_message(reply_text)
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
@@ -1212,6 +1891,8 @@ class AgentEngine:
                 )
 
             assistant_msg = _assistant_message_to_dict(message)
+            if tool_calls:
+                assistant_msg["tool_calls"] = [_to_plain(tc) for tc in tool_calls]
             self._memory.add_assistant_tool_message(assistant_msg)
 
             # 遍历工具调用
@@ -1222,7 +1903,7 @@ class AgentEngine:
             )
             question_started = False
 
-            for tc in message.tool_calls:
+            for tc in tool_calls:
                 function = getattr(tc, "function", None)
                 tool_name = getattr(function, "name", "")
                 tool_call_id = getattr(tc, "id", "")
@@ -1258,7 +1939,11 @@ class AgentEngine:
                     continue
 
                 tc_result = await self._execute_tool_call(
-                    tc, tool_scope, on_event, iteration
+                    tc,
+                    tool_scope,
+                    on_event,
+                    iteration,
+                    route_result=route_result,
                 )
 
                 all_tool_results.append(tc_result)
@@ -1270,6 +1955,22 @@ class AgentEngine:
                     self._memory.add_assistant_message(reply)
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
+                    logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    return ChatResult(
+                        reply=reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
+
+                if tc_result.pending_plan:
+                    reply = tc_result.result
+                    self._memory.add_assistant_message(reply)
+                    self._last_iteration_count = iteration
+                    logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
                     return ChatResult(
                         reply=reply,
@@ -1362,6 +2063,7 @@ class AgentEngine:
         tool_scope: Sequence[str],
         on_event: EventCallback | None,
         iteration: int,
+        route_result: SkillMatchResult | None = None,
     ) -> ToolCallResult:
         """单个工具调用：参数解析 → 执行 → 事件发射 → 返回结果。"""
         function = getattr(tc, "function", None)
@@ -1406,6 +2108,8 @@ class AgentEngine:
         audit_record: AppliedApprovalRecord | None = None
         pending_question = False
         question_id: str | None = None
+        pending_plan = False
+        plan_id: str | None = None
         defer_tool_result = False
 
         # 执行工具调用
@@ -1423,6 +2127,11 @@ class AgentEngine:
             try:
                 if tool_scope is not None and tool_name not in set(tool_scope):
                     raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+
+                skip_plan_once_for_task_create = False
+                if tool_name == "task_create" and self._suspend_task_create_plan_once:
+                    skip_plan_once_for_task_create = True
+                    self._suspend_task_create_plan_once = False
 
                 if tool_name == "select_skill":
                     selected_name = arguments.get("skill_name")
@@ -1469,17 +2178,45 @@ class AgentEngine:
                                 success = False
                                 error = result_str
                             else:
-                                result_str = await self._handle_delegate_to_subagent(
+                                delegate_outcome = await self._delegate_to_subagent(
                                     task=task_value.strip(),
                                     agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
                                     file_paths=raw_file_paths,
                                     on_event=on_event,
                                 )
-                                success = not (
-                                    result_str.startswith("子代理执行失败")
-                                    or result_str.startswith("subagent 当前处于关闭状态")
-                                )
+                                result_str = delegate_outcome.reply
+                                success = delegate_outcome.success
                                 error = None if success else result_str
+
+                                sub_result = delegate_outcome.subagent_result
+                                if (
+                                    not success
+                                    and sub_result is not None
+                                    and sub_result.pending_approval_id is not None
+                                ):
+                                    pending = self._approval.pending
+                                    approval_id_value = sub_result.pending_approval_id
+                                    high_risk_tool = (
+                                        pending.tool_name
+                                        if pending is not None and pending.approval_id == approval_id_value
+                                        else "高风险工具"
+                                    )
+                                    question = self._enqueue_subagent_approval_question(
+                                        approval_id=approval_id_value,
+                                        tool_name=high_risk_tool,
+                                        picked_agent=delegate_outcome.picked_agent or "subagent",
+                                        task_text=delegate_outcome.task_text,
+                                        normalized_paths=delegate_outcome.normalized_paths,
+                                        tool_call_id=tool_call_id,
+                                        on_event=on_event,
+                                        iteration=iteration,
+                                    )
+                                    result_str = f"已创建待回答问题 `{question.question_id}`。"
+                                    question_id = question.question_id
+                                    pending_question = True
+                                    defer_tool_result = True
+                                    success = True
+                                    error = None
                     log_tool_call(
                         logger,
                         tool_name,
@@ -1513,6 +2250,24 @@ class AgentEngine:
                         tool_name,
                         arguments,
                         result=result_str,
+                    )
+                elif tool_name == "task_create" and not skip_plan_once_for_task_create:
+                    result_str, plan_id, plan_error = await self._intercept_task_create_with_plan(
+                        arguments=arguments,
+                        route_result=route_result,
+                        tool_call_id=tool_call_id,
+                        on_event=on_event,
+                    )
+                    success = plan_error is None
+                    error = plan_error
+                    pending_plan = success
+                    defer_tool_result = success
+                    log_tool_call(
+                        logger,
+                        tool_name,
+                        arguments,
+                        result=result_str if success else None,
+                        error=error if not success else None,
                     )
                 elif self._approval.is_high_risk_tool(tool_name):
                     if not self._full_access_enabled:
@@ -1596,7 +2351,7 @@ class AgentEngine:
         )
 
         # 任务清单事件：成功执行 task_create/task_update 后发射对应事件
-        if success and tool_name == "task_create":
+        if success and tool_name == "task_create" and not pending_plan:
             task_list = self._task_store.current
             if task_list is not None:
                 self._emit(
@@ -1631,6 +2386,8 @@ class AgentEngine:
             audit_record=audit_record,
             pending_question=pending_question,
             question_id=question_id,
+            pending_plan=pending_plan,
+            plan_id=plan_id,
             defer_tool_result=defer_tool_result,
         )
 
@@ -1700,7 +2457,109 @@ class AgentEngine:
         self._loaded_skill_names.clear()
         self._active_skill = None
         self._question_flow.clear()
+        self._system_question_actions.clear()
         self._pending_question_route_result = None
+        self._pending_plan = None
+        self._approved_plan_context = None
+        self._recent_excel_files.clear()
+        self._last_subagent_name = None
+        self._last_subagent_task = None
+
+    # ── 多模型切换 ──────────────────────────────────
+
+    @property
+    def current_model(self) -> str:
+        """当前使用的模型标识符。"""
+        return self._active_model
+
+    @property
+    def current_model_name(self) -> str | None:
+        """当前激活的模型 profile 短名称，None 表示使用默认配置。"""
+        return self._active_model_name
+
+    def list_models(self) -> list[dict[str, str]]:
+        """列出所有可用模型档案，含当前激活标记。"""
+        result: list[dict[str, str]] = []
+        # 默认模型（来自主配置）
+        is_default_active = self._active_model_name is None
+        result.append({
+            "name": "default",
+            "model": self._config.model,
+            "base_url": self._config.base_url,
+            "description": "默认模型（主配置）",
+            "active": "yes" if is_default_active else "",
+        })
+        for profile in self._config.models:
+            result.append({
+                "name": profile.name,
+                "model": profile.model,
+                "base_url": profile.base_url,
+                "description": profile.description,
+                "active": "yes" if self._active_model_name == profile.name else "",
+            })
+        return result
+
+    def model_names(self) -> list[str]:
+        """返回所有可用模型短名称列表（含 default）。"""
+        names = ["default"]
+        names.extend(p.name for p in self._config.models)
+        return names
+
+    def switch_model(self, name: str) -> str:
+        """切换到指定模型档案。返回切换结果描述。
+
+        支持智能匹配：精确匹配 > 前缀匹配 > 包含匹配。
+        """
+        name = name.strip()
+        if not name:
+            return "请指定模型名称。用法：/model <名称>，/model list 查看可用模型。"
+
+        # 切换回默认
+        if name.lower() == "default":
+            self._active_model = self._config.model
+            self._active_api_key = self._config.api_key
+            self._active_base_url = self._config.base_url
+            self._active_model_name = None
+            self._client = openai.AsyncOpenAI(
+                api_key=self._active_api_key,
+                base_url=self._active_base_url,
+            )
+            return f"已切换到默认模型：{self._config.model}"
+
+        # 在 profiles 中查找：精确匹配 > 前缀匹配 > 包含匹配
+        profiles = self._config.models
+        lowered = name.lower()
+
+        # 精确匹配
+        matched = next((p for p in profiles if p.name.lower() == lowered), None)
+        # 前缀匹配
+        if matched is None:
+            prefix_matches = [p for p in profiles if p.name.lower().startswith(lowered)]
+            if len(prefix_matches) == 1:
+                matched = prefix_matches[0]
+        # 包含匹配（模型标识符中包含输入）
+        if matched is None:
+            contain_matches = [
+                p for p in profiles
+                if lowered in p.name.lower() or lowered in p.model.lower()
+            ]
+            if len(contain_matches) == 1:
+                matched = contain_matches[0]
+
+        if matched is None:
+            available = ", ".join(p.name for p in profiles) if profiles else "无"
+            return f"未找到模型 {name!r}。可用模型：default, {available}"
+
+        self._active_model = matched.model
+        self._active_api_key = matched.api_key
+        self._active_base_url = matched.base_url
+        self._active_model_name = matched.name
+        self._client = openai.AsyncOpenAI(
+            api_key=self._active_api_key,
+            base_url=self._active_base_url,
+        )
+        desc = f"（{matched.description}）" if matched.description else ""
+        return f"已切换到模型：{matched.name} → {matched.model}{desc}"
 
     def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
         """将本轮路由结果与会话内历史已加载的 skill 合并。"""
@@ -1809,7 +2668,12 @@ class AgentEngine:
             blocked_skillpacks=blocked_skillpacks,
         )
 
-    async def _handle_control_command(self, user_message: str) -> str | None:
+    async def _handle_control_command(
+        self,
+        user_message: str,
+        *,
+        on_event: EventCallback | None = None,
+    ) -> str | None:
         """处理会话级控制命令。命中时返回回复文本，否则返回 None。"""
         text = user_message.strip()
         if not text or not text.startswith("/"):
@@ -1817,7 +2681,7 @@ class AgentEngine:
 
         parts = text.split()
         command = parts[0].strip().lower().replace("_", "")
-        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo"}:
+        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/planmode", "/model"}:
             return None
 
         self._last_route_result = SkillMatchResult(
@@ -1860,16 +2724,62 @@ class AgentEngine:
                 if parse_error is not None:
                     return parse_error
                 assert task is not None
-                return await self._handle_delegate_to_subagent(
+                outcome = await self._delegate_to_subagent(
                     task=task,
                     agent_name=agent_name,
-                    on_event=None,
+                    on_event=on_event,
                 )
+                if (
+                    not outcome.success
+                    and outcome.subagent_result is not None
+                    and outcome.subagent_result.pending_approval_id is not None
+                ):
+                    pending = self._approval.pending
+                    approval_id_value = outcome.subagent_result.pending_approval_id
+                    high_risk_tool = (
+                        pending.tool_name
+                        if pending is not None and pending.approval_id == approval_id_value
+                        else "高风险工具"
+                    )
+                    question = self._enqueue_subagent_approval_question(
+                        approval_id=approval_id_value,
+                        tool_name=high_risk_tool,
+                        picked_agent=outcome.picked_agent or "subagent",
+                        task_text=outcome.task_text or task,
+                        normalized_paths=outcome.normalized_paths,
+                        tool_call_id=f"subagent_run_{int(time.time() * 1000)}",
+                        on_event=on_event,
+                        iteration=0,
+                    )
+                    return self._question_flow.format_prompt(question)
+                return outcome.reply
             return (
                 "无效参数。用法：/subagent [on|off|status|list]，"
                 "或 /subagent run -- <task>，"
                 "或 /subagent run <agent_name> -- <task>。"
             )
+
+        if command in {"/plan", "/planmode"}:
+            return await self._handle_plan_command(parts, on_event=on_event)
+
+        if command == "/model":
+            # /model → 显示当前模型
+            # /model list → 列出所有可用模型
+            # /model <name> → 切换模型
+            if not action:
+                name_display = self._active_model_name or "default"
+                return f"当前模型：{name_display}（{self._active_model}）"
+            if action == "list":
+                rows = self.list_models()
+                lines = ["可用模型："]
+                for row in rows:
+                    marker = " ✦" if row["active"] else ""
+                    desc = f"  {row['description']}" if row["description"] else ""
+                    lines.append(f"  {row['name']} → {row['model']}{desc}{marker}")
+                return "\n".join(lines)
+            # 其余视为模型名称，尝试切换
+            model_arg = " ".join(parts[1:])
+            return self.switch_model(model_arg)
 
         if command == "/accept":
             return await self._handle_accept_command(parts)
@@ -1935,6 +2845,141 @@ class AgentEngine:
         approval_id = parts[1].strip()
         return self._approval.undo(approval_id)
 
+    async def _handle_plan_command(
+        self,
+        parts: list[str],
+        *,
+        on_event: EventCallback | None,
+    ) -> str:
+        """处理 /plan 命令。"""
+        action = parts[1].strip().lower() if len(parts) >= 2 else "status"
+
+        if action in {"status", ""} and len(parts) <= 2:
+            mode = "enabled" if self._plan_mode_enabled else "disabled"
+            lines = [f"当前 plan mode 状态：{mode}。"]
+            if self._pending_plan is not None:
+                draft = self._pending_plan.draft
+                lines.append(f"- 待审批计划 ID: `{draft.plan_id}`")
+                lines.append(f"- 计划文件: `{draft.file_path}`")
+                lines.append(f"- 子任务数: {len(draft.subtasks)}")
+            return "\n".join(lines)
+
+        if action == "on" and len(parts) == 2:
+            self._plan_mode_enabled = True
+            return "已开启 plan mode。后续普通对话将仅生成计划草案。"
+
+        if action == "off" and len(parts) == 2:
+            self._plan_mode_enabled = False
+            return "已关闭 plan mode。"
+
+        if action == "approve":
+            return await self._handle_plan_approve(parts=parts, on_event=on_event)
+
+        if action == "reject":
+            return self._handle_plan_reject(parts=parts)
+
+        return (
+            "无效参数。用法：/plan [on|off|status]，"
+            "或 /plan approve [plan_id]，"
+            "或 /plan reject [plan_id]。"
+        )
+
+    async def _handle_plan_approve(
+        self,
+        *,
+        parts: list[str],
+        on_event: EventCallback | None,
+    ) -> str:
+        """批准待审批计划并自动继续执行。"""
+        if len(parts) > 3:
+            return "无效参数。用法：/plan approve [plan_id]。"
+
+        if self._approval.has_pending():
+            return (
+                "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
+                "再处理计划审批。"
+            )
+
+        pending = self._pending_plan
+        if pending is None:
+            return "当前没有待审批计划。"
+
+        expected_id = pending.draft.plan_id
+        provided_id = parts[2].strip() if len(parts) == 3 else ""
+        if provided_id and provided_id != expected_id:
+            return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
+
+        draft = pending.draft
+        task_list = self._task_store.create(draft.title, draft.subtasks)
+        self._approved_plan_context = (
+            f"来源: {draft.file_path}\n"
+            f"{draft.markdown.strip()}"
+        )
+        self._pending_plan = None
+        self._plan_mode_enabled = False
+
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.TASK_LIST_CREATED,
+                task_list_data=task_list.to_dict(),
+            ),
+        )
+
+        resume_prefix = (
+            f"已批准计划 `{draft.plan_id}` 并创建任务清单「{draft.title}」，已切回执行模式。"
+        )
+
+        if draft.source == "task_create_hook":
+            if pending.tool_call_id:
+                self._memory.add_tool_result(
+                    pending.tool_call_id,
+                    (
+                        f"计划 `{draft.plan_id}` 已批准并创建任务清单「{draft.title}」，"
+                        f"共 {len(draft.subtasks)} 个子任务。"
+                    ),
+                )
+            route_to_resume = pending.route_to_resume
+            if route_to_resume is None:
+                return resume_prefix
+
+            self._suspend_task_create_plan_once = True
+            try:
+                resumed = await self._tool_calling_loop(route_to_resume, on_event)
+            finally:
+                self._suspend_task_create_plan_once = False
+            return f"{resume_prefix}\n\n{resumed.reply}"
+
+        self._suspend_task_create_plan_once = True
+        try:
+            resumed = await self.chat(draft.objective, on_event=on_event)
+        finally:
+            self._suspend_task_create_plan_once = False
+        return f"{resume_prefix}\n\n{resumed.reply}"
+
+    def _handle_plan_reject(self, *, parts: list[str]) -> str:
+        """拒绝待审批计划。"""
+        if len(parts) > 3:
+            return "无效参数。用法：/plan reject [plan_id]。"
+
+        if self._approval.has_pending():
+            return (
+                "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
+                "再处理计划审批。"
+            )
+
+        pending = self._pending_plan
+        if pending is None:
+            return "当前没有待审批计划。"
+
+        expected_id = pending.draft.plan_id
+        provided_id = parts[2].strip() if len(parts) == 3 else ""
+        if provided_id and provided_id != expected_id:
+            return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
+
+        self._pending_plan = None
+        return f"已拒绝计划 `{expected_id}`。"
+
     @staticmethod
     def _parse_subagent_run_command(
         text: str,
@@ -1999,6 +3044,19 @@ class AgentEngine:
         if access_notice:
             base_prompt = base_prompt + "\n\n" + access_notice
 
+        approved_plan_context = self._build_approved_plan_context_notice()
+        if approved_plan_context:
+            base_prompt = base_prompt + "\n\n" + approved_plan_context
+
+        recent_excel_context = self._build_recent_excel_context_notice()
+        if recent_excel_context:
+            base_prompt = base_prompt + "\n\n" + recent_excel_context
+
+        # 注入 MCP 服务器概要，让 LLM 感知已连接的外部能力
+        mcp_context = self._build_mcp_context_notice()
+        if mcp_context:
+            base_prompt = base_prompt + "\n\n" + mcp_context
+
         if not skill_contexts:
             return [base_prompt]
 
@@ -2008,6 +3066,19 @@ class AgentEngine:
             return [merged]
 
         return [base_prompt, *skill_contexts]
+
+    def _build_approved_plan_context_notice(self) -> str:
+        """注入已批准计划上下文。"""
+        context = (self._approved_plan_context or "").strip()
+        if not context:
+            return ""
+        if len(context) > _PLAN_CONTEXT_MAX_CHARS:
+            truncated = context[:_PLAN_CONTEXT_MAX_CHARS]
+            context = (
+                f"{truncated}\n"
+                f"[计划上下文已截断，原始长度: {len(self._approved_plan_context or '')} 字符]"
+            )
+        return f"## 已批准计划上下文\n{context}"
 
     def _build_access_notice(self) -> str:
         """当 fullAccess 关闭时，生成权限限制说明注入 system prompt。"""
@@ -2026,6 +3097,84 @@ class AgentEngine:
             f"需要先使用 /fullAccess on 命令开启权限。"
         )
 
+    def _build_mcp_context_notice(self) -> str:
+        """生成已连接 MCP Server 的概要信息，注入 system prompt。"""
+        servers = self._mcp_manager.get_server_info()
+        if not servers:
+            return ""
+        lines = ["## MCP 扩展能力"]
+        for srv in servers:
+            name = srv["name"]
+            tool_count = srv.get("tool_count", 0)
+            tool_names = srv.get("tools", [])
+            tools_str = "、".join(tool_names) if tool_names else "无"
+            lines.append(f"- **{name}**（{tool_count} 个工具）：{tools_str}")
+        lines.append(
+            "以上 MCP 工具已注册，工具名带 `mcp_{server}_` 前缀，可直接调用。"
+            "当用户询问你有哪些 MCP 或外部能力时，据此如实回答。"
+        )
+        return "\n".join(lines)
+
+    def _build_recent_excel_context_notice(self) -> str:
+        """注入近期 Excel 上下文，减少“这个文件”类追问的二次探查。"""
+        if not self._recent_excel_files and not self._last_subagent_name:
+            return ""
+
+        lines = ["## 会话文件上下文（最近）"]
+        if self._recent_excel_files:
+            lines.append(
+                "最近确认的 Excel 文件（按新到旧）："
+                + "，".join(self._recent_excel_files)
+            )
+        if self._last_subagent_name:
+            task = (self._last_subagent_task or "").strip()
+            if task:
+                lines.append(f"最近子代理任务：{self._last_subagent_name} / {task}")
+            else:
+                lines.append(f"最近子代理任务：{self._last_subagent_name}")
+        lines.append(
+            "当用户提到“这个文件/该文件”且无冲突时，优先指代上述最近文件；"
+            "存在歧义时先澄清。"
+        )
+        return "\n".join(lines)
+
+    def _update_recent_excel_context(
+        self,
+        *,
+        candidate_paths: Sequence[str],
+        subagent_name: str,
+        task: str,
+    ) -> None:
+        """更新会话内最近 Excel 文件上下文。"""
+        merged = list(self._recent_excel_files)
+        seen = set(merged)
+        for raw in candidate_paths:
+            normalized = self._normalize_excel_path(raw)
+            if not normalized or not self._is_excel_path(normalized):
+                continue
+            if normalized in seen:
+                merged.remove(normalized)
+            merged.insert(0, normalized)
+            seen.add(normalized)
+        self._recent_excel_files = merged[:_RECENT_EXCEL_FILE_MAX]
+        self._last_subagent_name = subagent_name
+        compact_task = " ".join(task.strip().split())
+        if len(compact_task) > _RECENT_SUBAGENT_TASK_MAX_CHARS:
+            compact_task = compact_task[:_RECENT_SUBAGENT_TASK_MAX_CHARS] + "..."
+        self._last_subagent_task = compact_task or None
+
+    @staticmethod
+    def _normalize_excel_path(path: str) -> str:
+        normalized = str(path).strip().replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    @staticmethod
+    def _is_excel_path(path: str) -> bool:
+        lower = path.lower()
+        return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")
+
     def _effective_system_mode(self) -> str:
         configured = self._config.system_message_mode
         if configured != "auto":
@@ -2033,6 +3182,18 @@ class AgentEngine:
         if self._system_mode_fallback == "merge":
             return "merge"
         return "multi"
+
+    def _format_html_endpoint_error(self, raw_text: str) -> str:
+        """将 HTML 错配响应转换为可操作的配置提示。"""
+        first_line = raw_text.strip().splitlines()[0] if raw_text.strip() else "(空)"
+        preview = first_line[:120].replace("<", "[").replace(">", "]")
+        return (
+            "LLM 接口返回了 HTML 页面而不是模型 JSON 响应。\n"
+            "这通常是 EXCELMANUS_BASE_URL 指向了网站首页，而不是 OpenAI 兼容 API 地址。\n"
+            f"当前 EXCELMANUS_BASE_URL: {self._config.base_url}\n"
+            "请改为可用的 API 端点（通常以 `/v1` 结尾），然后重试。\n"
+            f"响应片段: {preview}"
+        )
 
     async def _create_chat_completion_with_system_fallback(
         self,

@@ -322,7 +322,7 @@ class TestConcurrencySafety:
 
 # ── Property 18：会话 TTL 清理（属性测试） ────────────────
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, strategies as st
 
 
 class TestProperty18SessionTTLCleanup:
@@ -331,7 +331,6 @@ class TestProperty18SessionTTLCleanup:
     **Validates: Requirements 5.8, 5.10, 6.7**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(
         ttl=st.integers(min_value=1, max_value=7200),
         idle_extra=st.integers(min_value=1, max_value=3600),
@@ -368,7 +367,6 @@ class TestProperty18SessionTTLCleanup:
         assert removed == n_sessions
         assert mgr.active_count == 0
 
-    @settings(max_examples=100, deadline=None)
     @given(
         ttl=st.integers(min_value=2, max_value=7200),
         n_sessions=st.integers(min_value=1, max_value=20),

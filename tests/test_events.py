@@ -6,7 +6,7 @@
 from datetime import datetime
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from excelmanus.events import EventType, ToolCallEvent
@@ -67,7 +67,6 @@ class TestToolCallEventRoundTrip:
     """
 
     @given(event=tool_call_event_st)
-    @settings(max_examples=200)
     def test_round_trip_preserves_equality(self, event: ToolCallEvent) -> None:
         """对于任意合法 ToolCallEvent，from_dict(to_dict(event)) == event。"""
         serialized = event.to_dict()

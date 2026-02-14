@@ -56,6 +56,7 @@ def _make_engine() -> MagicMock:
     engine.list_skillpack_commands = MagicMock(return_value=[])
     engine.get_skillpack_argument_hint = MagicMock(return_value="")
     engine.subagent_enabled = False
+    engine.plan_mode_enabled = False
     engine.has_pending_question = MagicMock(return_value=False)
     engine.is_waiting_multiselect_answer = MagicMock(return_value=False)
     engine.extract_and_save_memory = AsyncMock(return_value=None)
@@ -133,6 +134,7 @@ class TestRenderHelp:
         assert "/accept" in text_str
         assert "/reject" in text_str
         assert "/undo" in text_str
+        assert "/plan" in text_str
         assert "exit" in text_str
         assert "quit" in text_str
         assert "Ctrl+C" in text_str
@@ -306,6 +308,14 @@ class TestInlineSuggestion:
     def test_subagent_list_argument_suggestion(self) -> None:
         """输入 /subagent l 应补全 list。"""
         assert _compute_inline_suggestion("/subagent l") == "ist"
+
+    def test_plan_argument_suggestion(self) -> None:
+        """输入 /plan a 应补全 approve。"""
+        assert _compute_inline_suggestion("/plan a") == "pprove"
+
+    def test_planmode_argument_suggestion(self) -> None:
+        """输入 /planmode r 应补全 reject。"""
+        assert _compute_inline_suggestion("/planmode r") == "eject"
 
     def test_non_slash_input_returns_none(self) -> None:
         """普通自然语言输入不应触发斜杠补全。"""
@@ -665,6 +675,30 @@ class TestReplSlashCommands:
             mock_console.input.side_effect = ["/undo apv_1", "exit"]
             _run(_repl_loop(engine))
             engine.chat.assert_called_once_with("/undo apv_1")
+
+    def test_plan_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="当前 plan mode 状态：disabled。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/plan status", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/plan status")
+
+    def test_plan_approve_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已批准计划。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/plan approve pln_1", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/plan approve pln_1")
+
+    def test_plan_reject_command_routes_to_engine_chat(self) -> None:
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="已拒绝计划。")
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/plan reject pln_1", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_called_once_with("/plan reject pln_1")
 
     def test_unknown_slash_command(self) -> None:
         """未知斜杠命令应显示警告。"""

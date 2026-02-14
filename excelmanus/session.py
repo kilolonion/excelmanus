@@ -133,6 +133,11 @@ class SessionManager:
                 persistent_memory=persistent_memory,
                 memory_extractor=memory_extractor,
             )
+            # 初始化 MCP 连接（失败不影响会话创建）
+            try:
+                await engine.initialize_mcp()
+            except Exception:
+                logger.warning("会话 %s MCP 初始化失败，已跳过", new_id, exc_info=True)
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
                 last_access=now,
@@ -180,6 +185,10 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("会话 %s 记忆提取失败", session_id, exc_info=True)
+            try:
+                await engine.shutdown_mcp()
+            except Exception:
+                logger.warning("会话 %s MCP 关闭失败", session_id, exc_info=True)
             return True
         return False
 
@@ -214,12 +223,16 @@ class SessionManager:
                 logger.info("已清理 %d 个过期会话", len(expired_ids))
             count = len(expired_ids)
 
-        # 在锁外逐个提取记忆，避免长时间持有锁
+        # 在锁外逐个提取记忆并关闭 MCP，避免长时间持有锁
         for sid, engine in expired_engines:
             try:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("过期会话 %s 记忆提取失败", sid, exc_info=True)
+            try:
+                await engine.shutdown_mcp()
+            except Exception:
+                logger.warning("过期会话 %s MCP 关闭失败", sid, exc_info=True)
 
         return count
 

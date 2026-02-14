@@ -1,0 +1,24 @@
+{
+  "suite_name": "12_数字格式",
+  "description": "realtest.md 数字格式",
+  "cases": [
+    {
+      "id": "01",
+      "name": "金额列万元显示",
+      "message": "将 stress_test_comprehensive.xlsx「销售明细」的金额列统一改为「万元」显示，保留两位小数，如 12.35万",
+      "tags": ["format", "number"]
+    },
+    {
+      "id": "02",
+      "name": "手机号隐藏格式",
+      "message": "给 stress_test_comprehensive.xlsx「员工花名册」的手机号列设置格式为 ***-****-1234（隐藏前 7 位）",
+      "tags": ["format", "number"]
+    },
+    {
+      "id": "03",
+      "name": "环比增长列正负色格式",
+      "message": "将 stress_test_comprehensive.xlsx「月度汇总」中的环比增长列格式改为：正数显示绿色 +12.3%↑，负数显示红色 -5.6%↓",
+      "tags": ["format", "number", "conditional"]
+    }
+  ]
+}

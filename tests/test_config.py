@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from excelmanus.config import ConfigError, load_config
@@ -50,7 +50,6 @@ _pos_int_st = st.integers(min_value=1, max_value=100000)
 # ══════════════════════════════════════════════════════════
 
 
-@settings(max_examples=120)
 @given(
     api_key=_api_key_st,
     base_url=_valid_url_st,
@@ -124,7 +123,6 @@ _invalid_url_st = st.sampled_from([
 ])
 
 
-@settings(max_examples=120)
 @given(invalid_url=_invalid_url_st)
 def test_property17_invalid_base_url_rejected(
     invalid_url: str,
@@ -157,7 +155,6 @@ def test_property17_invalid_base_url_rejected(
             os.environ["EXCELMANUS_MODEL"] = old_model
 
 
-@settings(max_examples=120)
 @given(valid_url=_valid_url_st)
 def test_property17_valid_base_url_accepted(
     valid_url: str,

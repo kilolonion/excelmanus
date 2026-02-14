@@ -1,0 +1,24 @@
+{
+  "suite_name": "05_公式与计算类",
+  "description": "realtest.md 公式与计算类",
+  "cases": [
+    {
+      "id": "01",
+      "name": "新增利润估算列",
+      "message": "在 stress_test_comprehensive.xlsx「销售明细」末尾新增一列「利润估算」，公式为：实付金额 × 30%",
+      "tags": ["formula", "write"]
+    },
+    {
+      "id": "02",
+      "name": "新增工龄列",
+      "message": "在 stress_test_comprehensive.xlsx「员工花名册」新增一列「工龄」，用当前日期减去入职日期，以年为单位",
+      "tags": ["formula", "write"]
+    },
+    {
+      "id": "03",
+      "name": "月度汇总年度小计行",
+      "message": "在 stress_test_comprehensive.xlsx「月度汇总」底部添加年度小计行，分别汇总 2022/2023/2024/2025 四年的数据",
+      "tags": ["formula", "aggregate"]
+    }
+  ]
+}

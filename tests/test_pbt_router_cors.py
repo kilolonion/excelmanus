@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 
@@ -36,7 +36,6 @@ _cors_origin_list = st.lists(_cors_origin, min_size=1, max_size=5)
 
 
 @given(origins=_cors_origin_list)
-@settings(max_examples=100)
 def test_property_9_cors_comma_separated_parsing(origins: list[str]) -> None:
     """Property 9：对于任意由非空非逗号字符串组成的列表 origins，
     将其用逗号连接后通过 CORS 解析逻辑处理，结果应等于原始列表

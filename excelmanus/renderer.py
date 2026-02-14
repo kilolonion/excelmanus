@@ -29,6 +29,14 @@ _THINKING_SUMMARY_LEN = 80
 _NARROW_TERMINAL_WIDTH = 60
 _SUBAGENT_SUMMARY_PREVIEW = 300
 
+# 元工具：对用户隐藏内部细节，使用友好名称和描述
+_META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
+    "select_skill": ("⚙️", "准备工具"),
+    "delegate_to_subagent": ("🧵", "委派子任务"),
+    "list_subagents": ("📋", "查询可用助手"),
+    "list_skills": ("📋", "查询可用能力"),
+}
+
 # 工具名称到图标的映射
 # 任务状态到图标的映射
 _STATUS_ICONS: dict[str, str] = {
@@ -140,22 +148,22 @@ class StreamRenderer:
 
     def _render_route_start(self, event: ToolCallEvent) -> None:
         """渲染路由开始状态。"""
-        self._console.print("  🔀 [dim]正在匹配技能包…[/dim]")
+        self._console.print("  🔀 [dim white]正在匹配技能包…[/dim white]")
 
     def _render_route_end(self, event: ToolCallEvent) -> None:
         """渲染路由结果。"""
         if not event.skills_used:
             self._console.print(
-                "  🔀 [dim]路由完成[/dim] · [yellow]通用模式[/yellow]"
+                "  🔀 [dim white]路由完成[/dim white] · [#f0c674]通用模式[/#f0c674]"
             )
             return
 
         skills_str = " ".join(
-            f"[bold magenta]{s}[/bold magenta]" for s in event.skills_used
+            f"[bold #b294bb]{s}[/bold #b294bb]" for s in event.skills_used
         )
         mode_label = event.route_mode.replace("_", " ")
         self._console.print(
-            f"  🔀 [dim]路由完成[/dim] · {skills_str} [dim]({mode_label})[/dim]"
+            f"  🔀 [dim white]路由完成[/dim white] · {skills_str} [dim white]({mode_label})[/dim white]"
         )
 
     # ------------------------------------------------------------------
@@ -169,8 +177,8 @@ class StreamRenderer:
         else:
             self._console.print()
             self._console.rule(
-                f"[bold cyan]轮次 {event.iteration}[/bold cyan]",
-                style="dim cyan",
+                f"[bold #81a2be]轮次 {event.iteration}[/bold #81a2be]",
+                style="dim #5f87af",
             )
 
     def _render_thinking(self, event: ToolCallEvent) -> None:
@@ -198,15 +206,32 @@ class StreamRenderer:
         # 记录开始时间
         self._tool_start_times[event.tool_name] = time.monotonic()
 
+        # 元工具使用友好名称，隐藏内部细节
+        meta = _META_TOOL_DISPLAY.get(event.tool_name)
+        if meta is not None:
+            icon, display_name = meta
+            # 从参数中提取用户可理解的描述
+            hint = self._meta_tool_hint(event.tool_name, event.arguments)
+            if self._is_narrow():
+                self._console.print(f"  {icon} {display_name}")
+                if hint:
+                    self._console.print(f"     {rich_escape(hint)}", style="dim white")
+            else:
+                line = f"  {icon} [bold]{display_name}[/bold]"
+                if hint:
+                    line += f" [dim white]← {rich_escape(hint)}[/dim white]"
+                self._console.print(line)
+            return
+
         icon = _tool_icon(event.tool_name)
         args_text = rich_escape(_format_arguments(event.arguments))
 
         if self._is_narrow():
             self._console.print(f"  {icon} {rich_escape(event.tool_name)}")
-            self._console.print(f"     {args_text}", style="dim")
+            self._console.print(f"     {args_text}", style="dim white")
         else:
             self._console.print(
-                f"  {icon} [bold]{rich_escape(event.tool_name)}[/bold] [dim]← {args_text}[/dim]"
+                f"  {icon} [bold]{rich_escape(event.tool_name)}[/bold] [dim white]← {args_text}[/dim white]"
             )
 
     def _render_tool_end(self, event: ToolCallEvent) -> None:
@@ -216,22 +241,32 @@ class StreamRenderer:
         elapsed_str = ""
         if start is not None:
             elapsed = time.monotonic() - start
-            elapsed_str = f" [dim]({_format_elapsed(elapsed)})[/dim]"
+            elapsed_str = f" [dim white]({_format_elapsed(elapsed)})[/dim white]"
+
+        # 元工具：简化结果展示，不暴露内部上下文
+        is_meta = event.tool_name in _META_TOOL_DISPLAY
 
         if event.success:
-            detail = rich_escape(_truncate(event.result, _RESULT_MAX_LEN)) if event.result else ""
-            if self._is_narrow():
-                self._console.print(f"     ✅ 成功{elapsed_str}")
-                if detail:
-                    self._console.print(f"     {detail}", style="dim")
+            if is_meta:
+                # 元工具只显示简洁的成功状态
+                self._console.print(f"     [green]✅[/green]{elapsed_str}")
             else:
-                line = f"     [green]✅ 成功[/green]{elapsed_str}"
-                if detail:
-                    line += f" [dim]→ {detail}[/dim]"
-                self._console.print(line)
+                detail = rich_escape(_truncate(event.result, _RESULT_MAX_LEN)) if event.result else ""
+                if self._is_narrow():
+                    self._console.print(f"     ✅ 成功{elapsed_str}")
+                    if detail:
+                        self._console.print(f"     {detail}", style="dim white")
+                else:
+                    line = f"     [green]✅ 成功[/green]{elapsed_str}"
+                    if detail:
+                        line += f" [dim white]→ {detail}[/dim white]"
+                    self._console.print(line)
         else:
             error_msg = rich_escape(event.error or "未知错误")
-            if self._is_narrow():
+            if is_meta:
+                # 元工具失败也使用简洁提示
+                self._console.print(f"     [red]❌[/red]{elapsed_str} [red]{error_msg}[/red]")
+            elif self._is_narrow():
                 self._console.print(f"     ❌ 失败{elapsed_str}")
                 self._console.print(f"     {error_msg}", style="red")
             else:
@@ -325,9 +360,9 @@ class StreamRenderer:
         self._console.print(
             Panel(
                 rich_escape(content),
-                title=f"[bold yellow]❓ {rich_escape(header)}[/bold yellow]",
+                title=f"[bold #f0c674]❓ {rich_escape(header)}[/bold #f0c674]",
                 title_align="left",
-                border_style="yellow",
+                border_style="#de935f",
                 expand=False,
                 padding=(1, 2),
             )
@@ -343,12 +378,12 @@ class StreamRenderer:
         tools = ", ".join(event.subagent_tools) if event.subagent_tools else "(无)"
         if self._is_narrow():
             self._console.print("  🧵 subagent 启动")
-            self._console.print(f"     原因: {reason}", style="dim")
-            self._console.print(f"     工具: {rich_escape(tools)}", style="dim")
+            self._console.print(f"     原因: {reason}", style="dim white")
+            self._console.print(f"     工具: {rich_escape(tools)}", style="dim white")
         else:
             self._console.print(
-                f"  🧵 [bold cyan]subagent 启动[/bold cyan] "
-                f"[dim]原因: {reason} | 工具: {rich_escape(tools)}[/dim]"
+                f"  🧵 [bold #81a2be]subagent 启动[/bold #81a2be] "
+                f"[dim white]原因: {reason} | 工具: {rich_escape(tools)}[/dim white]"
             )
 
     def _render_subagent_summary(self, event: ToolCallEvent) -> None:
@@ -359,16 +394,16 @@ class StreamRenderer:
         preview = _truncate(summary, _SUBAGENT_SUMMARY_PREVIEW)
 
         if self._is_narrow():
-            self._console.print("  🧾 subagent 摘要", style="cyan")
-            self._console.print(f"     {rich_escape(preview)}", style="dim")
+            self._console.print("  🧾 subagent 摘要", style="#81a2be")
+            self._console.print(f"     {rich_escape(preview)}", style="dim white")
             return
 
         self._console.print(
             Panel(
                 rich_escape(preview),
-                title="[bold cyan]🧾 subagent 摘要[/bold cyan]",
+                title="[bold #81a2be]🧾 subagent 摘要[/bold #81a2be]",
                 title_align="left",
-                border_style="dim cyan",
+                border_style="dim #5f87af",
                 expand=False,
                 padding=(0, 1),
             )
@@ -393,7 +428,7 @@ class StreamRenderer:
             token_str = self._format_token_usage(event)
             if token_str:
                 self._console.print()
-                self._console.print(f"  tokens：{token_str}", style="dim")
+                self._console.print(f"  tokens：{token_str}", style="dim white")
             return
 
         elapsed_str = _format_elapsed(event.elapsed_seconds)
@@ -408,12 +443,12 @@ class StreamRenderer:
             ]
             if token_str:
                 parts.append(f"tokens：{token_str}")
-            self._console.print(" · ".join(parts), style="dim")
+            self._console.print(" · ".join(parts), style="dim white")
             return
 
         # 构建摘要表格
         table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
-        table.add_column(style="dim")
+        table.add_column(style="dim white")
         table.add_column()
 
         table.add_row("工具调用", f"[bold]{event.total_tool_calls}[/bold] 次")
@@ -433,7 +468,7 @@ class StreamRenderer:
                 table,
                 title="[bold]📋 执行摘要[/bold]",
                 title_align="left",
-                border_style="dim green" if event.failure_count == 0 else "dim yellow",
+                border_style="dim #5f875f" if event.failure_count == 0 else "dim #de935f",
                 expand=False,
                 padding=(0, 2),
             )
@@ -446,11 +481,26 @@ class StreamRenderer:
         prompt = f"{event.prompt_tokens:,}"
         completion = f"{event.completion_tokens:,}"
         total = f"{event.total_tokens:,}"
-        return f"[dim cyan]{prompt}[/dim cyan] tokens 输入 + [dim cyan]{completion}[/dim cyan] tokens 输出 = [bold cyan]{total}[/bold cyan] tokens"
+        return f"[dim #81a2be]{prompt}[/dim #81a2be] tokens 输入 + [dim #81a2be]{completion}[/dim #81a2be] tokens 输出 = [bold #81a2be]{total}[/bold #81a2be] tokens"
 
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _meta_tool_hint(tool_name: str, arguments: Dict[str, Any]) -> str:
+        """从元工具参数中提取用户可理解的简短描述，隐藏内部名称。"""
+        if tool_name == "select_skill":
+            reason = arguments.get("reason", "")
+            if isinstance(reason, str) and reason.strip():
+                return reason.strip()
+            return ""
+        if tool_name == "delegate_to_subagent":
+            task = arguments.get("task", "")
+            if isinstance(task, str) and task.strip():
+                return _truncate(task.strip(), 60)
+            return ""
+        return ""
 
     def _is_narrow(self) -> bool:
         """判断终端是否为窄终端（宽度 < 60）。"""

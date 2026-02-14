@@ -7,6 +7,7 @@ allowed_tools:
   - analyze_data
   - filter_data
   - transform_data
+  - group_aggregate
   - create_chart
   - format_cells
   - adjust_column_width
@@ -14,6 +15,10 @@ allowed_tools:
   - read_cell_styles
   - merge_cells
   - unmerge_cells
+  - apply_threshold_icon_format
+  - style_card_blocks
+  - scale_range_unit
+  - apply_dashboard_dark_theme
   - list_directory
   - get_file_info
   - search_files

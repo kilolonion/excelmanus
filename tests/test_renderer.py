@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from io import StringIO
 
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 from rich.console import Console
 
@@ -113,7 +113,6 @@ class TestProperty5ToolCardContainsNameAndArgs:
     """
 
     @given(name=tool_name_st, args=nonempty_arguments_st)
-    @settings(max_examples=100)
     def test_output_contains_tool_name_and_arg_keys(
         self, name: str, args: dict
     ) -> None:
@@ -137,7 +136,6 @@ class TestProperty5ToolCardContainsNameAndArgs:
             assert key in output, f"参数键 '{key}' 未出现在输出中: {output!r}"
 
     @given(name=tool_name_st)
-    @settings(max_examples=50)
     def test_output_contains_tool_name_with_empty_args(self, name: str) -> None:
         """即使参数为空，输出也应包含工具名称。"""
         console = _make_console(width=120)
@@ -169,7 +167,6 @@ class TestProperty6ToolEndCardStatus:
     """
 
     @given(name=tool_name_st, result=thinking_text_st)
-    @settings(max_examples=100)
     def test_success_event_contains_checkmark_and_result(
         self, name: str, result: str
     ) -> None:
@@ -194,7 +191,6 @@ class TestProperty6ToolEndCardStatus:
         )
 
     @given(name=tool_name_st, error=error_text_st)
-    @settings(max_examples=100)
     def test_failure_event_contains_cross_and_error(
         self, name: str, error: str
     ) -> None:
@@ -230,7 +226,6 @@ class TestProperty7LongResultTruncation:
     """
 
     @given(long_text=long_result_st)
-    @settings(max_examples=100)
     def test_truncate_function_respects_max_length(self, long_text: str) -> None:
         """_truncate 函数对超长文本应截断到 max_len + 3（省略标记）。"""
         truncated = _truncate(long_text, _RESULT_MAX_LEN)
@@ -243,7 +238,6 @@ class TestProperty7LongResultTruncation:
         )
 
     @given(long_text=long_result_st, name=tool_name_st)
-    @settings(max_examples=100)
     def test_rendered_result_is_truncated(self, long_text: str, name: str) -> None:
         """渲染超长结果时，截断后的前缀应出现在输出中，完整文本不应出现。"""
         console = _make_console(width=120)
@@ -293,7 +287,6 @@ class TestProperty8MultiToolCallOrder:
             unique=True,
         )
     )
-    @settings(max_examples=100)
     def test_tool_names_appear_in_order(self, names: list[str]) -> None:
         """多个 tool_call_start 事件按序渲染，工具名称在输出中按序出现。"""
         console = _make_console(width=120)
@@ -337,7 +330,6 @@ class TestProperty9ThinkingBlockRendering:
     """
 
     @given(text=thinking_text_st)
-    @settings(max_examples=100)
     def test_short_thinking_rendered_with_content(self, text: str) -> None:
         """短思考文本（<= 500 字符）应完整出现在输出中。"""
         console = _make_console(width=120)
@@ -356,7 +348,6 @@ class TestProperty9ThinkingBlockRendering:
         assert text in output, f"短思考文本 '{text}' 应完整出现在输出中"
 
     @given(text=long_thinking_st)
-    @settings(max_examples=100)
     def test_long_thinking_truncated(self, text: str) -> None:
         """长思考文本（> 500 字符）应被截断，摘要不超过 80 + 3 字符。"""
         console = _make_console(width=120)
@@ -377,7 +368,6 @@ class TestProperty9ThinkingBlockRendering:
         assert "…" in output or "..." in output, "输出中应包含省略标记"
 
     @given(text=long_thinking_st)
-    @settings(max_examples=100)
     def test_long_thinking_summary_length(self, text: str) -> None:
         """长思考文本截断后的摘要长度验证。"""
         # 直接验证 _truncate 函数的行为
@@ -420,7 +410,6 @@ class TestProperty10NarrowTerminalAdaptive:
     """
 
     @given(width=terminal_width_st, name=tool_name_st, args=arguments_st)
-    @settings(max_examples=100)
     def test_render_without_error_any_width(
         self, width: int, name: str, args: dict
     ) -> None:
@@ -445,7 +434,6 @@ class TestProperty10NarrowTerminalAdaptive:
         name=tool_name_st,
         args=arguments_st,
     )
-    @settings(max_examples=100)
     def test_narrow_terminal_no_panel_borders(
         self, width: int, name: str, args: dict
     ) -> None:
@@ -470,7 +458,6 @@ class TestProperty10NarrowTerminalAdaptive:
         )
 
     @given(width=terminal_width_st, name=tool_name_st)
-    @settings(max_examples=100)
     def test_tool_end_render_any_width(self, width: int, name: str) -> None:
         """任意终端宽度下渲染 tool_call_end 事件不应抛出异常。"""
         console = _make_console(width=width)

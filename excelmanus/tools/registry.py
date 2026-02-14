@@ -144,6 +144,7 @@ class ToolRegistry:
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。"""
         from excelmanus.tools import (
+            advanced_format_tools,
             chart_tools,
             code_tools,
             data_tools,
@@ -156,6 +157,7 @@ class ToolRegistry:
         data_tools.init_guard(workspace_root)
         chart_tools.init_guard(workspace_root)
         format_tools.init_guard(workspace_root)
+        advanced_format_tools.init_guard(workspace_root)
         file_tools.init_guard(workspace_root)
         code_tools.init_guard(workspace_root)
         shell_tools.init_guard(workspace_root)
@@ -164,6 +166,7 @@ class ToolRegistry:
         self.register_tools(data_tools.get_tools())
         self.register_tools(chart_tools.get_tools())
         self.register_tools(format_tools.get_tools())
+        self.register_tools(advanced_format_tools.get_tools())
         self.register_tools(file_tools.get_tools())
         self.register_tools(code_tools.get_tools())
         self.register_tools(shell_tools.get_tools())

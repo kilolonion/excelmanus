@@ -462,6 +462,21 @@ class TestExternalSafeMode:
             assert data["tool_scope"] == []
 
     @pytest.mark.asyncio
+    async def test_plan_command_keep_safe_mode_hidden(
+        self, client: AsyncClient
+    ) -> None:
+        """默认安全模式下，/plan 命令可执行且路由元信息仍隐藏。"""
+        resp = await client.post(
+            "/api/v1/chat", json={"message": "/plan status"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "plan mode" in data["reply"]
+        assert data["route_mode"] == "hidden"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
     async def test_chat_exposes_route_metadata_when_safe_mode_disabled(
         self,
     ) -> None:
@@ -537,6 +552,26 @@ class TestExternalSafeMode:
             ) as c:
                 resp = await c.post(
                     "/api/v1/chat", json={"message": "/subagent status"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["route_mode"] == "control_command"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
+    async def test_plan_route_mode_control_command_when_safe_mode_disabled(
+        self,
+    ) -> None:
+        """关闭安全模式后，/plan 请求应返回 control_command 路由模式。"""
+        config = _test_config(external_safe_mode=False)
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as c:
+                resp = await c.post(
+                    "/api/v1/chat", json={"message": "/plan status"},
                 )
         assert resp.status_code == 200
         data = resp.json()
@@ -1153,7 +1188,7 @@ class TestProperty20AsyncNonBlockingAPI:
 
 # ── 属性测试（Property-Based Tests）────────────────────────
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, strategies as st
 
 # 生成合法的消息文本（去除空白后仍非空）
 message_st = st.text(
@@ -1178,7 +1213,6 @@ class TestPBTProperty12ChatResponseFormat:
     **Validates: Requirements 5.2**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(message=message_st)
     @pytest.mark.asyncio
     async def test_any_valid_message_returns_200_with_fields(
@@ -1220,7 +1254,6 @@ class TestPBTProperty13SessionReuse:
     **Validates: Requirements 5.3**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(
         n_requests=st.integers(min_value=2, max_value=5),
         messages=st.lists(message_st, min_size=5, max_size=5),
@@ -1273,7 +1306,6 @@ class TestPBTProperty14SessionDeletion:
     **Validates: Requirements 5.4**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(session_id=session_id_st)
     @pytest.mark.asyncio
     async def test_delete_then_new_session_created(
@@ -1345,7 +1377,6 @@ class TestPBTProperty15ErrorNoLeak:
     **Validates: Requirements 5.6**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(error_msg=sensitive_error_st)
     @pytest.mark.asyncio
     async def test_500_never_leaks_internal_details(
@@ -1391,7 +1422,6 @@ class TestPBTProperty18TTLCleanupAPI:
     **Validates: Requirements 5.8, 5.10, 6.7**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(
         ttl=st.integers(min_value=1, max_value=3600),
         idle_extra=st.integers(min_value=1, max_value=3600),
@@ -1440,7 +1470,6 @@ class TestPBTProperty20AsyncNonBlockingAPI:
     **Validates: Requirements 1.10, 5.7**
     """
 
-    @settings(max_examples=100, deadline=None)
     @given(n_concurrent=st.integers(min_value=2, max_value=4))
     @pytest.mark.asyncio
     async def test_concurrent_requests_complete_without_blocking(

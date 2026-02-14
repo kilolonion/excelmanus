@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 from excelmanus.config import ExcelManusConfig
@@ -154,7 +154,6 @@ class EventCollector:
 @given(
     arguments=arguments_st,
 )
-@settings(max_examples=100, deadline=None)
 @pytest.mark.asyncio
 async def test_property_2_tool_call_start_event_data(
     arguments: dict,
@@ -216,7 +215,6 @@ async def test_property_2_tool_call_start_event_data(
     should_succeed=st.booleans(),
     arguments=arguments_st,
 )
-@settings(max_examples=100, deadline=None)
 @pytest.mark.asyncio
 async def test_property_3_tool_call_end_event_status(
     should_succeed: bool,
@@ -294,7 +292,6 @@ async def test_property_3_tool_call_end_event_status(
 @given(
     n_iterations=st.integers(min_value=1, max_value=8),
 )
-@settings(max_examples=100, deadline=None)
 @pytest.mark.asyncio
 async def test_property_4_iteration_numbers_strictly_increasing(
     n_iterations: int,

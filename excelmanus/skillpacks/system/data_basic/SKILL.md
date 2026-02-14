@@ -7,7 +7,9 @@ allowed_tools:
   - analyze_data
   - filter_data
   - transform_data
+  - group_aggregate
   - list_sheets
+  - scan_excel_files
 triggers:
   - 读取
   - 分析
@@ -16,6 +18,10 @@ triggers:
   - 排序
   - 打开
   - 查看
+  - 统计
+  - 分组
+  - 汇总
+  - 聚合
 file_patterns:
   - "*.xlsx"
 priority: 5

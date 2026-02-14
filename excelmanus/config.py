@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,6 +13,17 @@ from dotenv import load_dotenv
 
 class ConfigError(Exception):
     """配置缺失或校验失败时抛出的异常。"""
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    """单个模型配置档案。"""
+
+    name: str  # 用户可见的短名称，如 "gpt4", "qwen", "kimi"
+    model: str  # 实际模型标识符
+    api_key: str
+    base_url: str
+    description: str = ""  # 可选描述
 
 
 # Base URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
@@ -56,6 +68,8 @@ class ExcelManusConfig:
     memory_auto_load_lines: int = 200
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
+    # 多模型配置档案（可选，通过 /model 命令切换）
+    models: tuple[ModelProfile, ...] = ()
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -118,6 +132,65 @@ def _parse_choice(
     return normalized
 
 
+def _extract_first_model(raw: str | None) -> dict | None:
+    """从 EXCELMANUS_MODELS JSON 数组中提取第一个模型配置（用于继承默认值）。
+
+    解析失败或为空时返回 None，不抛异常。
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        items = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
+        return items[0]
+    return None
+
+
+def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) -> tuple[ModelProfile, ...]:
+    """解析 EXCELMANUS_MODELS 环境变量（JSON 数组）。
+
+    每个元素必须包含 name 和 model，api_key/base_url 可省略（回退到主配置）。
+    """
+    if not raw or not raw.strip():
+        return ()
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"EXCELMANUS_MODELS JSON 解析失败：{exc}")
+    if not isinstance(items, list):
+        raise ConfigError("EXCELMANUS_MODELS 必须为 JSON 数组。")
+
+    profiles: list[ModelProfile] = []
+    seen_names: set[str] = set()
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 必须为 JSON 对象。")
+        name = item.get("name")
+        model = item.get("model")
+        if not name or not isinstance(name, str):
+            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 缺少 name 字段。")
+        if not model or not isinstance(model, str):
+            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 缺少 model 字段。")
+        name = name.strip()
+        if name in seen_names:
+            raise ConfigError(f"EXCELMANUS_MODELS 中 name 重复：{name!r}。")
+        seen_names.add(name)
+        api_key = item.get("api_key", "").strip() or default_api_key
+        base_url = item.get("base_url", "").strip() or default_base_url
+        _validate_base_url(base_url)
+        description = item.get("description", "").strip()
+        profiles.append(ModelProfile(
+            name=name,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            description=description,
+        ))
+    return tuple(profiles)
+
+
 def load_cors_allow_origins() -> tuple[str, ...]:
     """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。"""
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
@@ -135,27 +208,34 @@ def load_config() -> ExcelManusConfig:
     dotenv_path = Path.cwd() / ".env"
     load_dotenv(dotenv_path=dotenv_path, override=False)
 
-    # 读取各配置项
-    api_key = os.environ.get("EXCELMANUS_API_KEY")
+    # 读取各配置项（允许从 EXCELMANUS_MODELS 的第一个模型继承）
+    api_key = os.environ.get("EXCELMANUS_API_KEY") or ""
+    base_url = os.environ.get("EXCELMANUS_BASE_URL") or ""
+    model = os.environ.get("EXCELMANUS_MODEL") or ""
+
+    # 当必填项缺失时，尝试从 EXCELMANUS_MODELS 的第一个模型继承
+    if not api_key or not base_url or not model:
+        first_model = _extract_first_model(os.environ.get("EXCELMANUS_MODELS"))
+        if first_model is not None:
+            api_key = api_key or first_model.get("api_key", "")
+            base_url = base_url or first_model.get("base_url", "")
+            model = model or first_model.get("model", "")
+
     if not api_key:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_API_KEY。"
-            "请通过环境变量或 .env 文件设置该值。"
+            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
         )
-
-    base_url = os.environ.get("EXCELMANUS_BASE_URL")
     if not base_url:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_BASE_URL。"
-            "请通过环境变量或 .env 文件设置该值。"
+            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
         )
     _validate_base_url(base_url)
-
-    model = os.environ.get("EXCELMANUS_MODEL")
     if not model:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_MODEL。"
-            "请通过环境变量或 .env 文件设置该值。"
+            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
         )
 
     max_iterations = _parse_int(
@@ -265,6 +345,13 @@ def load_config() -> ExcelManusConfig:
         128_000,
     )
 
+    # 多模型配置档案
+    models = _parse_models(
+        os.environ.get("EXCELMANUS_MODELS"),
+        default_api_key=api_key,
+        default_base_url=base_url,
+    )
+
     return ExcelManusConfig(
         api_key=api_key,
         base_url=base_url,
@@ -296,4 +383,5 @@ def load_config() -> ExcelManusConfig:
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
         max_context_tokens=max_context_tokens,
+        models=models,
     )

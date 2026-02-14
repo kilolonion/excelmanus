@@ -25,8 +25,11 @@ def _get_loader() -> SkillpackLoader:
     return _loader
 
 
-def list_skills() -> str:
-    """列出所有已加载的 Skillpack 名称、描述和触发词。"""
+def list_skills(verbose: bool = False) -> str:
+    """列出所有已加载的 Skillpack。
+
+    默认返回 name + description，verbose=True 时补充触发词和可用工具。
+    """
     loader = _get_loader()
     skillpacks = loader.get_skillpacks()
     if not skillpacks:
@@ -36,9 +39,9 @@ def list_skills() -> str:
     for name, skill in sorted(skillpacks.items()):
         lines.append(f"【{name}】")
         lines.append(f"  描述：{skill.description}")
-        if skill.triggers:
+        if verbose and skill.triggers:
             lines.append(f"  触发词：{', '.join(skill.triggers)}")
-        if skill.allowed_tools:
+        if verbose and skill.allowed_tools:
             lines.append(f"  可用工具：{', '.join(skill.allowed_tools)}")
         lines.append("")
     return "\n".join(lines).strip()
@@ -49,10 +52,15 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_skills",
-            description="列出所有可用的技能包（Skillpack），包括名称、描述和触发词。当你不确定应该使用哪个技能来完成用户任务时，可以调用此工具查看完整的技能目录。",
+            description="列出所有可用技能包。默认返回技能名称和描述；当需要查看触发词与可用工具时，将 verbose 设为 true。",
             input_schema={
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "是否返回详细信息（触发词、可用工具）。默认 false，仅返回名称与描述。",
+                    },
+                },
                 "required": [],
                 "additionalProperties": False,
             },

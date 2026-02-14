@@ -39,7 +39,18 @@ _INTERNAL_DISCLOSURE_PATTERN = re.compile(
     r"(系统提示词|提示词模板|开发者指令|内部指令|"
     r"system prompt|developer message|hidden prompt|"
     r"chain[- ]?of[- ]?thought|reasoning_content|"
-    r"内部路由策略|route_mode|tool_scope|skillpack)",
+    r"内部路由策略|route_mode|tool_scope|skillpack|"
+    r"工具参数[：:]|参数结构|工具定义|tool.?schema|"
+    r"multiSelect|permission_mode|allowed_tools|"
+    r"subagent.?config|system_prompt\s*[=:(]|"
+    r"max_iterations|tool_calls_count)",
+    re.IGNORECASE,
+)
+
+# 检测疑似展示工具 JSON schema 的输出模式
+# 匹配包含典型 schema 字段描述的 JSON 代码块
+_TOOL_SCHEMA_PATTERN = re.compile(
+    r'["\'](?:question|header|options|label|description|multiSelect|text)["\']\s*[:{]',
     re.IGNORECASE,
 )
 
@@ -85,6 +96,9 @@ def guard_public_reply(reply: str) -> str:
     if not safe:
         return _EMPTY_FALLBACK
     if _INTERNAL_DISCLOSURE_PATTERN.search(safe):
+        return _DISCLOSURE_FALLBACK
+    # 拦截疑似展示工具 JSON schema 的输出（>=3 个字段匹配视为泄露）
+    if len(_TOOL_SCHEMA_PATTERN.findall(safe)) >= 3:
         return _DISCLOSURE_FALLBACK
     return safe
 

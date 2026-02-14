@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 from excelmanus.config import ExcelManusConfig
@@ -261,7 +261,6 @@ message_content = st.text(min_size=1, max_size=500)
     ),
     threshold=st.integers(min_value=1500, max_value=5000),
 )
-@settings(max_examples=100)
 def test_property_truncation_preserves_system_and_recent(
     messages: list[tuple[str, str]],
     threshold: int,
@@ -324,7 +323,6 @@ def test_property_truncation_preserves_system_and_recent(
     n_rounds=st.integers(min_value=1, max_value=10),
     content_size=st.integers(min_value=10, max_value=200),
 )
-@settings(max_examples=100)
 def test_property_truncation_no_orphan_tool_results(
     n_rounds: int,
     content_size: int,

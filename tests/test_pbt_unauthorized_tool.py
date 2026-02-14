@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, assume
 from hypothesis import strategies as st
 
 from excelmanus.tools.registry import (
@@ -90,7 +90,6 @@ def _make_tool_call_object(tool_name: str, arguments: str = "{}") -> SimpleNames
     tool_name=tool_name_st,
     tool_scope=tool_scope_st,
 )
-@settings(max_examples=100)
 def test_property_1_unauthorized_tool_raises_not_allowed_error(
     tool_name: str,
     tool_scope: list[str],
@@ -126,7 +125,6 @@ def test_property_1_unauthorized_tool_raises_not_allowed_error(
     tool_name=tool_name_st,
     tool_scope=tool_scope_st,
 )
-@settings(max_examples=100)
 @pytest.mark.asyncio
 async def test_property_2_unauthorized_tool_error_response_format(
     tool_name: str,

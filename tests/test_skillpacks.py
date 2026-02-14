@@ -142,6 +142,31 @@ class TestSkillpackLoader:
         loader.load_all()
         assert any("unknown_tool" in warning for warning in loader.warnings)
 
+    def test_soft_validate_accepts_mcp_selectors(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="test",
+            allowed_tools=[
+                "read_excel",
+                "mcp:*",
+                "mcp:context7:*",
+                "mcp:context7:query_docs",
+            ],
+            triggers=["excel"],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        assert not any("mcp:" in warning for warning in loader.warnings)
+
     def test_user_invocable_default_true(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
@@ -470,6 +495,9 @@ class TestSkillRouter:
         result = await router.route("请分析这个文件")
         assert result.route_mode == "fallback"
         assert "list_skills" in result.tool_scope
+        # 只读数据工具应在 fallback 模式下直接可用，无需 select_skill
+        assert "filter_data" in result.tool_scope
+        assert "analyze_data" in result.tool_scope
         # 技能目录通过 select_skill 元工具 description 传递，不再注入 system_contexts
         assert not any("可用技能" in ctx for ctx in result.system_contexts)
 
