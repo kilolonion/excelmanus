@@ -28,7 +28,7 @@
 - `tests/test_code_tools.py`
 
 ## 验证记录
-- `python .../profile_excel.py 销售数据示例.xlsx --sample-rows 5`：成功生成结构摘要
+- `python .../profile_excel.py examples/demo/销售数据示例.xlsx --sample-rows 5`：成功生成结构摘要
 - `python .../run_excel_task.py --script scripts/temp/demo_excel_job.py`：成功执行并返回 JSON 结果
 - `python .../run_excel_task.py --python auto --script scripts/temp/demo_auto_job.py`：自动探测解释器成功
 - `EXCEL_SKILL_PYTHON=python3 python .../run_excel_task.py --python auto ...`：候选解释器缺依赖时自动回退成功

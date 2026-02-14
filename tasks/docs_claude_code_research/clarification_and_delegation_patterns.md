@@ -1,24 +1,24 @@
 # Agent 内联澄清与上下文委派模式研究
 
 > **日期**：2026-02-13
-> **触发场景**：true_example.md — Agent 花 7 轮盲猜文件，浪费 25K token
+> **触发场景**：examples/bench/true_example.md — Agent 花 7 轮盲猜文件，浪费 25K token
 > **研究目标**：如何借鉴成熟 Agent 的 ask_user 和 subagent 委派模式
 
 ---
 
 ## 一、问题诊断
 
-### 1.1 true_example.md 回放
+### 1.1 examples/bench/true_example.md 回放
 
 ```
 用户：读取"销售明细"工作表的前 10 行数据
   ↓ 轮次 1: select_skill → file_ops
   ↓ 轮次 2: search_files → 找到 6 个 .xlsx（关键信息已到手！）
-  ↓ 轮次 3: read_excel("销售数据示例.xlsx") → 默认 sheet，没有"销售明细"
+  ↓ 轮次 3: read_excel("examples/demo/销售数据示例.xlsx") → 默认 sheet，没有"销售明细"
   ↓ 轮次 4: read_excel(..., sheet_name="销售明细") → 失败
   ↓ 轮次 5: read_excel("examples/demo/demo_sales_data.xlsx") → 也没有
-  ↓ 轮次 6: read_excel("示例数据.xlsx") → 也没有
-  ↓ 轮次 7: 猜测"销售数据示例.xlsx"就是用户想要的，强行输出结果
+  ↓ 轮次 6: read_excel("examples/demo/示例数据.xlsx") → 也没有
+  ↓ 轮次 7: 猜测"examples/demo/销售数据示例.xlsx"就是用户想要的，强行输出结果
 ```
 
 **问题**：轮次 2 后已掌握 6 个候选文件，但 Agent 没有：
@@ -218,9 +218,9 @@ delegate_description = (
     header: "选择文件",
     text: "找到 6 个 Excel 文件，请选择要读取的文件：",
     options: [
-      {label: "销售数据示例.xlsx", description: "44KB，含销售相关数据"},
+      {label: "examples/demo/销售数据示例.xlsx", description: "44KB，含销售相关数据"},
       {label: "examples/demo/demo_sales_data.xlsx", description: "12KB，销售演示数据"},
-      {label: "其他文件", description: "示例数据.xlsx 等其余 4 个文件"}
+      {label: "其他文件", description: "examples/demo/示例数据.xlsx 等其余 4 个文件"}
     ]
   })
   → 用户选择后，直接读取对应文件
