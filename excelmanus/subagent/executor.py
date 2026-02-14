@@ -336,6 +336,37 @@ class SubagentExecutor:
                 file_changes=changes,
             )
 
+        # MCP 工具审批：非白名单的 MCP 工具需要用户确认
+        mcp_needs_approval = (
+            self._approval.is_mcp_tool(tool_name)
+            and not self._approval.is_mcp_auto_approved(tool_name)
+        )
+        if mcp_needs_approval and mode == "readOnly":
+            msg = f"只读模式禁止 MCP 工具：{tool_name}"
+            return _ExecResult(success=False, result=msg, error=msg)
+
+        if mcp_needs_approval and mode == "default" and not full_access_enabled:
+            try:
+                pending = self._approval.create_pending(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    tool_scope=tool_scope,
+                )
+            except ValueError:
+                block = self._approval.pending_block_message()
+                return _ExecResult(success=False, result=block, error=block)
+            pending_text = (
+                "子代理命中 MCP 工具审批，已创建待确认项：\n"
+                f"- ID: `{pending.approval_id}`\n"
+                f"- 工具: `{tool_name}`\n"
+                "请先执行 `/accept <id>` 或 `/reject <id>`。"
+            )
+            return _ExecResult(
+                success=False,
+                result=pending_text,
+                pending_approval_id=pending.approval_id,
+            )
+
         try:
             raw_result = await asyncio.to_thread(
                 registry.call_tool,

@@ -110,6 +110,12 @@ class ApprovalManager:
         self.audit_root.mkdir(parents=True, exist_ok=True)
         self._pending: PendingApproval | None = None
         self._applied: dict[str, AppliedApprovalRecord] = {}
+        # MCP 工具白名单：prefixed_name → True 表示自动批准
+        self._mcp_auto_approved: set[str] = set()
+
+    def register_mcp_auto_approve(self, prefixed_names: Sequence[str]) -> None:
+        """注册 MCP 工具白名单（自动批准，无需用户确认）。"""
+        self._mcp_auto_approved.update(prefixed_names)
 
     @property
     def pending(self) -> PendingApproval | None:
@@ -120,6 +126,14 @@ class ApprovalManager:
 
     def is_high_risk_tool(self, tool_name: str) -> bool:
         return tool_name in self.HIGH_RISK_TOOLS
+
+    def is_mcp_tool(self, tool_name: str) -> bool:
+        """判断工具名是否为 MCP 远程工具（以 mcp_ 前缀开头）。"""
+        return tool_name.startswith("mcp_")
+
+    def is_mcp_auto_approved(self, tool_name: str) -> bool:
+        """判断 MCP 工具是否在白名单中（自动批准）。"""
+        return tool_name in self._mcp_auto_approved
 
     def create_pending(
         self,

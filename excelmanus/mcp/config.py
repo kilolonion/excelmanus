@@ -33,6 +33,7 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)  # stdio: 环境变量
     url: str | None = None                      # sse: 端点 URL
     timeout: int = 30                           # 工具调用超时（秒）
+    auto_approve: list[str] = field(default_factory=list)  # 自动批准的工具名列表（白名单）
 
 
 class MCPConfigLoader:
@@ -182,6 +183,8 @@ class MCPConfigLoader:
             if timeout is None:
                 return None
 
+            auto_approve = MCPConfigLoader._parse_auto_approve(name, entry)
+
             return MCPServerConfig(
                 name=name,
                 transport="stdio",
@@ -189,6 +192,7 @@ class MCPConfigLoader:
                 args=args,
                 env=env,
                 timeout=timeout,
+                auto_approve=auto_approve,
             )
 
         # sse 类型校验
@@ -205,11 +209,14 @@ class MCPConfigLoader:
             if timeout is None:
                 return None
 
+            auto_approve = MCPConfigLoader._parse_auto_approve(name, entry)
+
             return MCPServerConfig(
                 name=name,
                 transport="sse",
                 url=url,
                 timeout=timeout,
+                auto_approve=auto_approve,
             )
 
         return None  # pragma: no cover
@@ -234,3 +241,21 @@ class MCPConfigLoader:
             )
             return None
         return timeout
+
+    @staticmethod
+    def _parse_auto_approve(name: str, entry: dict) -> list[str]:
+        """解析 autoApprove 字段（白名单工具列表）。
+
+        支持特殊值 ``["*"]`` 表示该 Server 的所有工具自动批准。
+        无效格式时记录警告并返回空列表（即全部需要审批）。
+        """
+        raw = entry.get("autoApprove")
+        if raw is None:
+            return []
+        if not isinstance(raw, list) or not all(isinstance(a, str) for a in raw):
+            logger.warning(
+                "MCP Server '%s' 的 autoApprove 必须为字符串列表，已忽略",
+                name,
+            )
+            return []
+        return list(raw)
