@@ -47,6 +47,18 @@ def _sse_config(**overrides) -> MCPServerConfig:
     return MCPServerConfig(**defaults)
 
 
+def _streamable_config(**overrides) -> MCPServerConfig:
+    """创建 Streamable HTTP 类型的测试配置。"""
+    defaults = dict(
+        name="streamable-server",
+        transport="streamable_http",
+        url="http://localhost:8080/mcp",
+        timeout=5,
+    )
+    defaults.update(overrides)
+    return MCPServerConfig(**defaults)
+
+
 # ── Mock 辅助 ─────────────────────────────────────────────────────
 
 
@@ -68,6 +80,19 @@ class _FakeAsyncCM:
 
     async def __aenter__(self):
         return (self.read_stream, self.write_stream)
+
+    async def __aexit__(self, *args):
+        pass
+
+
+class _ReturnAsyncCM:
+    """通用异步上下文管理器，直接返回传入值。"""
+
+    def __init__(self, value):
+        self._value = value
+
+    async def __aenter__(self):
+        return self._value
 
     async def __aexit__(self, *args):
         pass
@@ -468,10 +493,61 @@ class TestSSEConnect:
             ),
         ):
             await client.connect()
-            mock_sse.assert_called_once_with(config.url)
+            mock_sse.assert_called_once_with(config.url, headers=None)
 
         assert client.is_connected is True
         await client.close()
+
+
+class TestStreamableHTTPConnect:
+    """测试 Streamable HTTP 传输方式的连接。"""
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_connect_uses_streamable_client(self):
+        """Streamable 配置应使用 streamable_http_client 建立连接。"""
+        config = _streamable_config(
+            headers={"Authorization": "Bearer token"},
+            timeout=9,
+        )
+        client = MCPClientWrapper(config)
+        mock_session = _make_mock_session()
+        fake_http_client = MagicMock()
+
+        with (
+            patch(
+                "excelmanus.mcp.client.httpx.AsyncClient",
+                return_value=_ReturnAsyncCM(fake_http_client),
+            ) as mock_async_client,
+            patch(
+                "excelmanus.mcp.client.streamable_http_client",
+                return_value=_ReturnAsyncCM((MagicMock(), MagicMock(), MagicMock())),
+            ) as mock_streamable,
+            patch(
+                "excelmanus.mcp.client.ClientSession",
+                return_value=_FakeSessionCM(mock_session),
+            ),
+        ):
+            await client.connect()
+            mock_async_client.assert_called_once_with(
+                headers=config.headers,
+                timeout=config.timeout,
+            )
+            mock_streamable.assert_called_once_with(
+                config.url,
+                http_client=fake_http_client,
+            )
+
+        assert client.is_connected is True
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_unsupported_raises_runtime_error(self):
+        """SDK 不支持 streamable_http 时应抛出可读错误。"""
+        config = _streamable_config()
+        client = MCPClientWrapper(config)
+        with patch("excelmanus.mcp.client.streamable_http_client", None):
+            with pytest.raises(RuntimeError, match="不支持 streamable_http"):
+                await client.connect()
 
 
 # ── _extract_error_text 辅助函数测试 ─────────────────────────────

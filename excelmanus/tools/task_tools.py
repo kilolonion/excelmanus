@@ -35,12 +35,9 @@ def task_update(task_index: int, status: str, result: str | None = None) -> str:
         new_status = TaskStatus(status)
     except ValueError:
         valid = ", ".join(s.value for s in TaskStatus)
-        return f"无效状态 '{status}'，合法值: {valid}"
-    try:
-        item = store.update_item(task_index, new_status, result)
-        return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
-    except (ValueError, IndexError) as exc:
-        return str(exc)
+        raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
+    item = store.update_item(task_index, new_status, result)
+    return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
 
 
 def get_tools() -> list[ToolDef]:

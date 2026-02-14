@@ -1,13 +1,17 @@
-"""Bench 测试运行器：加载用例 JSON → 逐条调用 engine.chat() → 收集完整事件轨迹 → 输出 JSON 日志。
+"""Bench 测试运行器：加载用例 JSON → 调用 engine.chat() → 收集事件轨迹 → 输出 JSON 日志。
 
 运行方式：
-    python -m excelmanus.bench                            # 运行 bench/cases/ 下所有套件
-    python -m excelmanus.bench bench/cases/suite_basic.json  # 指定套件文件
+    python -m excelmanus.bench --all
+    python -m excelmanus.bench --suite bench/cases/suite_basic.json
+    python -m excelmanus.bench bench/cases/suite_basic.json
+    python -m excelmanus.bench --message "读取销售明细前10行"
+    python -m excelmanus.bench "读取销售明细前10行"
 """
 
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import sys
 import time
@@ -97,31 +101,50 @@ class BenchResult:
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     # 最终对话记忆快照（system prompt + 所有消息）
     conversation_messages: list[dict[str, Any]] = field(default_factory=list)
+    # 执行状态
+    status: str = "ok"
+    # 结构化错误信息（status=error 时有值）
+    error: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        tool_successes = sum(1 for tc in self.tool_calls if tc.success)
+        tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
         return {
-            "case_id": self.case_id,
-            "case_name": self.case_name,
-            "message": self.message,
+            "schema_version": 2,
+            "kind": "case_result",
             "timestamp": self.timestamp,
-            "duration_seconds": round(self.duration_seconds, 2),
-            "iterations": self.iterations,
-            "route_mode": self.route_mode,
-            "skills_used": self.skills_used,
-            "tool_scope": self.tool_scope,
-            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
-            "thinking_log": self.thinking_log,
-            "reply": self.reply,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "subagent_events": self.subagent_events,
-            "llm_calls": self.llm_calls,
-            "conversation_messages": self.conversation_messages,
-            "summary": {
+            "meta": {
+                "case_id": self.case_id,
+                "case_name": self.case_name,
+                "message": self.message,
+            },
+            "execution": {
+                "duration_seconds": round(self.duration_seconds, 2),
+                "iterations": self.iterations,
+                "route_mode": self.route_mode,
+                "skills_used": self.skills_used,
+                "tool_scope": self.tool_scope,
+                "status": self.status,
+                "error": self.error,
+            },
+            "artifacts": {
+                "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+                "thinking_log": self.thinking_log,
+                "subagent_events": self.subagent_events,
+                "llm_calls": self.llm_calls,
+                "conversation_messages": self.conversation_messages,
+            },
+            "result": {
+                "reply": self.reply,
+            },
+            "stats": {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
                 "tool_call_count": len(self.tool_calls),
-                "tool_failures": sum(1 for tc in self.tool_calls if not tc.success),
-                "tool_successes": sum(1 for tc in self.tool_calls if tc.success),
+                "tool_successes": tool_successes,
+                "tool_failures": tool_failures,
+                "llm_call_count": len(self.llm_calls),
             },
         }
 
@@ -136,8 +159,9 @@ _console = Console()
 class _EventCollector:
     """通过 on_event 回调收集引擎事件，同时实时渲染到终端。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, render_enabled: bool = True) -> None:
         self._renderer = StreamRenderer(_console)
+        self._render_enabled = render_enabled
         self.thinking_log: list[str] = []
         self.tool_calls: list[ToolCallLog] = []
         self.route_mode: str = ""
@@ -150,7 +174,8 @@ class _EventCollector:
     def on_event(self, event: ToolCallEvent) -> None:
         """引擎事件回调：实时渲染 + 收集日志。"""
         # 实时渲染到终端（和 CLI 一样的效果）
-        self._renderer.handle_event(event)
+        if self._render_enabled:
+            self._renderer.handle_event(event)
 
         # 同时收集到日志
         if event.event_type == EventType.THINKING:
@@ -360,10 +385,15 @@ def _dump_conversation_messages(engine: AgentEngine) -> list[dict[str, Any]]:
         return []
 
 
-async def run_case(case: BenchCase, config: ExcelManusConfig) -> BenchResult:
+async def run_case(
+    case: BenchCase,
+    config: ExcelManusConfig,
+    *,
+    render_enabled: bool = True,
+) -> BenchResult:
     """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。"""
     engine = _create_engine(config)
-    collector = _EventCollector()
+    collector = _EventCollector(render_enabled=render_enabled)
     interceptor = _LLMCallInterceptor(engine)
     timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -397,11 +427,20 @@ async def run_case(case: BenchCase, config: ExcelManusConfig) -> BenchResult:
             subagent_events=collector.subagent_events,
             llm_calls=interceptor.calls,
             conversation_messages=_dump_conversation_messages(engine),
+            status="error",
+            error={
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
         )
     finally:
         interceptor.restore()
 
     elapsed = time.monotonic() - start
+    last_route = getattr(engine, "last_route_result", None)
+    fallback_route_mode = getattr(last_route, "route_mode", "")
+    fallback_skills = list(getattr(last_route, "skills_used", []) or [])
+    fallback_scope = list(getattr(last_route, "tool_scope", []) or [])
 
     result = BenchResult(
         case_id=case.id,
@@ -410,9 +449,9 @@ async def run_case(case: BenchCase, config: ExcelManusConfig) -> BenchResult:
         timestamp=timestamp,
         duration_seconds=elapsed,
         iterations=chat_result.iterations,
-        route_mode=collector.route_mode or engine.last_route_result.route_mode,
-        skills_used=collector.skills_used or list(engine.last_route_result.skills_used),
-        tool_scope=collector.tool_scope or list(engine.last_route_result.tool_scope),
+        route_mode=collector.route_mode or fallback_route_mode or "unknown",
+        skills_used=collector.skills_used or fallback_skills,
+        tool_scope=collector.tool_scope or fallback_scope,
         tool_calls=collector.tool_calls,
         thinking_log=collector.thinking_log,
         reply=chat_result.reply,
@@ -422,10 +461,12 @@ async def run_case(case: BenchCase, config: ExcelManusConfig) -> BenchResult:
         subagent_events=collector.subagent_events,
         llm_calls=interceptor.calls,
         conversation_messages=_dump_conversation_messages(engine),
+        status="ok",
+        error=None,
     )
 
     # 打印最终回复（和 CLI 一样用 Panel 包裹）
-    if result.reply:
+    if render_enabled and result.reply:
         _console.print()
         _console.print(
             Panel(
@@ -483,8 +524,12 @@ def _save_result(result: BenchResult, output_dir: Path) -> Path:
 
 def _save_suite_summary(
     suite_name: str,
+    suite_path: str | Path,
     results: list[BenchResult],
     output_dir: Path,
+    *,
+    concurrency: int,
+    case_log_files: list[Path],
 ) -> Path:
     """保存套件汇总结果。"""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -498,15 +543,44 @@ def _save_suite_summary(
     avg_iterations = (
         sum(r.iterations for r in results) / len(results) if results else 0
     )
+    total_prompt_tokens = sum(r.prompt_tokens for r in results)
+    total_completion_tokens = sum(r.completion_tokens for r in results)
+    total_tool_calls = sum(len(r.tool_calls) for r in results)
+    total_tool_failures = sum(
+        sum(1 for tc in r.tool_calls if not tc.success) for r in results
+    )
+    failed_case_ids = [r.case_id for r in results if r.status != "ok"]
+    suite_status = "ok" if not failed_case_ids else "completed_with_errors"
 
     summary = {
-        "suite_name": suite_name,
+        "schema_version": 2,
+        "kind": "suite_summary",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "case_count": len(results),
-        "total_tokens": total_tokens,
-        "total_duration_seconds": round(total_duration, 2),
-        "average_iterations": round(avg_iterations, 2),
-        "cases": [r.to_dict() for r in results],
+        "meta": {
+            "suite_name": suite_name,
+            "suite_path": str(suite_path),
+            "case_count": len(results),
+        },
+        "execution": {
+            "concurrency": concurrency,
+            "status": suite_status,
+        },
+        "artifacts": {
+            "case_log_files": [str(p) for p in case_log_files],
+            "cases": [r.to_dict() for r in results],
+        },
+        "result": {
+            "failed_case_ids": failed_case_ids,
+        },
+        "stats": {
+            "total_tokens": total_tokens,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_duration_seconds": round(total_duration, 2),
+            "average_iterations": round(avg_iterations, 2),
+            "tool_call_count": total_tool_calls,
+            "tool_failures": total_tool_failures,
+        },
     }
 
     with open(filepath, "w", encoding="utf-8") as f:
@@ -518,43 +592,161 @@ async def run_suite(
     suite_path: str | Path,
     config: ExcelManusConfig,
     output_dir: Path,
+    *,
+    concurrency: int = 1,
 ) -> list[BenchResult]:
     """运行整个测试套件。"""
+    if concurrency < 1:
+        raise ValueError("concurrency 必须 >= 1")
+
     suite_name, cases = _load_suite(suite_path)
     logger.info("═" * 50)
-    logger.info("开始执行套件: %s (%d 个用例)", suite_name, len(cases))
+    logger.info(
+        "开始执行套件: %s (%d 个用例, 并发=%d)",
+        suite_name,
+        len(cases),
+        concurrency,
+    )
     logger.info("═" * 50)
 
-    results: list[BenchResult] = []
-    for i, case in enumerate(cases, 1):
-        logger.info("── 用例 %d/%d ──", i, len(cases))
-        result = await run_case(case, config)
-        # 保存单个用例结果
-        filepath = _save_result(result, output_dir)
-        logger.info("  日志已保存: %s", filepath)
-        results.append(result)
+    async def _execute_case(
+        index: int,
+        case: BenchCase,
+        *,
+        render_enabled: bool,
+    ) -> tuple[int, BenchResult, Path]:
+        try:
+            result = await run_case(case, config, render_enabled=render_enabled)
+        except Exception as exc:  # pragma: no cover - 兜底保护
+            logger.error("用例 %s 执行崩溃: %s", case.id, exc, exc_info=True)
+            result = BenchResult(
+                case_id=case.id,
+                case_name=case.name,
+                message=case.message,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                duration_seconds=0.0,
+                iterations=0,
+                route_mode="error",
+                skills_used=[],
+                tool_scope=[],
+                tool_calls=[],
+                thinking_log=[],
+                reply=f"[CRASH] {exc}",
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                status="error",
+                error={
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+        try:
+            filepath = _save_result(result, output_dir)
+            logger.info("  日志已保存: %s", filepath)
+        except Exception as exc:  # pragma: no cover - 文件系统异常兜底
+            logger.error("用例 %s 日志保存失败: %s", case.id, exc, exc_info=True)
+            filepath = output_dir / f"run_save_error_{case.id}.json"
+        return index, result, filepath
+
+    results: list[BenchResult | None] = [None] * len(cases)
+    case_log_files: list[Path | None] = [None] * len(cases)
+
+    if concurrency == 1:
+        for i, case in enumerate(cases, 1):
+            logger.info("── 用例 %d/%d ──", i, len(cases))
+            index, result, filepath = await _execute_case(
+                i - 1,
+                case,
+                render_enabled=True,
+            )
+            results[index] = result
+            case_log_files[index] = filepath
+    else:
+        logger.info("并发模式已启用：关闭逐事件终端渲染，避免输出交错。")
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _worker(index: int, case: BenchCase) -> tuple[int, BenchResult, Path]:
+            async with semaphore:
+                logger.info("── 用例 %d/%d (并发) ──", index + 1, len(cases))
+                return await _execute_case(
+                    index,
+                    case,
+                    render_enabled=False,
+                )
+
+        tasks = [
+            asyncio.create_task(_worker(index, case))
+            for index, case in enumerate(cases)
+        ]
+        for index, result, filepath in await asyncio.gather(*tasks):
+            results[index] = result
+            case_log_files[index] = filepath
+
+    # 理论上 results 不会为 None，此处加兜底保证类型稳定
+    normalized_results: list[BenchResult] = []
+    normalized_case_files: list[Path] = []
+    for index, case in enumerate(cases):
+        current = results[index]
+        if current is None:  # pragma: no cover - 防御性逻辑
+            current = BenchResult(
+                case_id=case.id,
+                case_name=case.name,
+                message=case.message,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                duration_seconds=0.0,
+                iterations=0,
+                route_mode="error",
+                skills_used=[],
+                tool_scope=[],
+                tool_calls=[],
+                thinking_log=[],
+                reply="[CRASH] case result missing",
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                status="error",
+                error={
+                    "type": "InternalError",
+                    "message": "missing case result",
+                },
+            )
+        normalized_results.append(current)
+        if case_log_files[index] is not None:
+            normalized_case_files.append(case_log_files[index])
 
     # 保存套件汇总
-    summary_path = _save_suite_summary(suite_name, results, output_dir)
+    summary_path = _save_suite_summary(
+        suite_name,
+        suite_path,
+        normalized_results,
+        output_dir,
+        concurrency=concurrency,
+        case_log_files=normalized_case_files,
+    )
     logger.info("═" * 50)
     logger.info("套件执行完毕: %s", suite_name)
     logger.info("  汇总日志: %s", summary_path)
 
     # 打印简要统计
-    total_tokens = sum(r.total_tokens for r in results)
-    total_duration = sum(r.duration_seconds for r in results)
+    total_tokens = sum(r.total_tokens for r in normalized_results)
+    total_duration = sum(r.duration_seconds for r in normalized_results)
     total_failures = sum(
-        sum(1 for tc in r.tool_calls if not tc.success) for r in results
+        sum(1 for tc in r.tool_calls if not tc.success) for r in normalized_results
+    )
+    case_errors = sum(
+        1 for r in normalized_results if r.status != "ok"
     )
     logger.info(
-        "  统计: %d 用例 │ 总 %d tokens │ 总 %.1fs │ 工具失败 %d 次",
-        len(results),
+        "  统计: %d 用例 │ 总 %d tokens │ 总 %.1fs │ 工具失败 %d 次 │ 用例失败 %d",
+        len(normalized_results),
         total_tokens,
         total_duration,
         total_failures,
+        case_errors,
     )
     logger.info("═" * 50)
-    return results
+    return normalized_results
 
 
 # ── 入口 ──────────────────────────────────────────────────
@@ -567,58 +759,176 @@ async def run_single(message: str, config: ExcelManusConfig, output_dir: Path) -
         name="临时用例",
         message=message,
     )
-    result = await run_case(case, config)
+    result = await run_case(case, config, render_enabled=True)
     filepath = _save_result(result, output_dir)
     logger.info("日志已保存: %s", filepath)
     return result
 
 
-async def _main() -> None:
-    """脚本入口。
+@dataclass
+class _RunPlan:
+    """bench CLI 解析后的执行计划。"""
 
-    用法：
-        python -m excelmanus.bench "你的测试消息"
-        python -m excelmanus.bench --suite bench/cases/suite_basic.json
-    """
+    mode: str
+    suite_paths: list[Path] = field(default_factory=list)
+    message: str = ""
+
+
+def _positive_int(raw: str) -> int:
+    """argparse 使用的正整数解析器。"""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是整数") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("必须是 >= 1 的整数")
+    return value
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """构建 bench CLI 参数解析器。"""
+    parser = argparse.ArgumentParser(
+        prog="python -m excelmanus.bench",
+        description="Bench 测试运行器",
+    )
+    parser.add_argument(
+        "targets",
+        nargs="*",
+        help="位置参数：智能识别为 suite 路径（*.json）或 message 文本",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--suite",
+        nargs="+",
+        metavar="PATH",
+        help="显式指定一个或多个 suite JSON 文件",
+    )
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="运行 bench/cases/ 下所有 suite",
+    )
+    group.add_argument(
+        "--message",
+        help="显式指定单条消息作为用例",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=_positive_int,
+        default=1,
+        help="suite 执行并发度（默认 1）",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/bench",
+        help="日志输出目录（默认 outputs/bench）",
+    )
+    return parser
+
+
+def _is_json_like_path(raw: str) -> bool:
+    """判断参数是否满足 suite 文件路径语义。"""
+    return raw.lower().endswith(".json")
+
+
+def _resolve_run_mode(args: argparse.Namespace) -> _RunPlan:
+    """将 argparse 结果映射为执行计划。"""
+    targets = list(args.targets or [])
+
+    if args.suite is not None:
+        if targets:
+            raise ValueError("使用 --suite 时不应再传入位置参数。")
+        return _RunPlan(
+            mode="suite",
+            suite_paths=[Path(p) for p in args.suite],
+        )
+
+    if args.all:
+        if targets:
+            raise ValueError("使用 --all 时不应再传入位置参数。")
+        return _RunPlan(mode="all")
+
+    if args.message is not None:
+        if targets:
+            raise ValueError("使用 --message 时不应再传入位置参数。")
+        return _RunPlan(mode="message", message=args.message)
+
+    if not targets:
+        return _RunPlan(mode="help")
+
+    # 智能识别：全部看起来像 *.json 时，视为 suite 模式；否则按 message 模式。
+    if all(_is_json_like_path(item) for item in targets):
+        return _RunPlan(
+            mode="suite",
+            suite_paths=[Path(item) for item in targets],
+        )
+
+    return _RunPlan(mode="message", message=" ".join(targets))
+
+
+async def _main(argv: list[str] | None = None) -> int:
+    """脚本入口，返回 shell 退出码。"""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        plan = _resolve_run_mode(args)
+    except ValueError as exc:
+        print(f"参数错误：{exc}", file=sys.stderr)
+        return 1
+
+    if plan.mode == "help":
+        parser.print_help()
+        return 0
+
+    if plan.mode == "message":
+        config = load_config()
+        setup_logging(config.log_level)
+        output_dir = Path(args.output_dir)
+        await run_single(plan.message, config, output_dir)
+        return 0
+
+    if plan.mode == "suite":
+        missing_paths = [p for p in plan.suite_paths if not p.is_file()]
+        if missing_paths:
+            for p in missing_paths:
+                logger.error("未找到 suite 文件: %s", p)
+            return 1
+        config = load_config()
+        setup_logging(config.log_level)
+        output_dir = Path(args.output_dir)
+        for suite_path in plan.suite_paths:
+            await run_suite(
+                suite_path,
+                config,
+                output_dir,
+                concurrency=args.concurrency,
+            )
+        return 0
+
+    # all 模式
+    cases_dir = Path("bench/cases")
+    if not cases_dir.is_dir():
+        logger.error("未找到测试用例目录: %s", cases_dir)
+        return 1
+
+    suite_paths = sorted(cases_dir.glob("*.json"))
+    if not suite_paths:
+        logger.error("目录 %s 下无 JSON 用例文件", cases_dir)
+        return 1
+
     config = load_config()
     setup_logging(config.log_level)
-
-    output_dir = Path("outputs/bench")
-
-    args = sys.argv[1:]
-
-    if not args:
-        print("用法：")
-        print('  python -m excelmanus.bench "读取销售明细前10行"')
-        print("  python -m excelmanus.bench --suite bench/cases/suite_basic.json")
-        print("  python -m excelmanus.bench --all")
-        sys.exit(0)
-
-    if args[0] == "--suite":
-        # 运行指定套件文件
-        for path in args[1:]:
-            p = Path(path)
-            if not p.is_file():
-                logger.warning("跳过不存在的文件: %s", p)
-                continue
-            await run_suite(p, config, output_dir)
-    elif args[0] == "--all":
-        # 运行 bench/cases/ 下所有套件
-        cases_dir = Path("bench/cases")
-        if not cases_dir.is_dir():
-            logger.error("未找到测试用例目录: %s", cases_dir)
-            sys.exit(1)
-        suite_paths = sorted(cases_dir.glob("*.json"))
-        if not suite_paths:
-            logger.error("目录 %s 下无 JSON 用例文件", cases_dir)
-            sys.exit(1)
-        for suite_path in suite_paths:
-            await run_suite(suite_path, config, output_dir)
-    else:
-        # 直接传入消息作为用例
-        message = " ".join(args)
-        await run_single(message, config, output_dir)
+    output_dir = Path(args.output_dir)
+    for suite_path in suite_paths:
+        await run_suite(
+            suite_path,
+            config,
+            output_dir,
+            concurrency=args.concurrency,
+        )
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(_main())
+    raise SystemExit(asyncio.run(_main()))

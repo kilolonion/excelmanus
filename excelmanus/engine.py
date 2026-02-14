@@ -16,9 +16,11 @@ from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingA
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.hooks import (
+    HookAgentAction,
     HookCallContext,
     HookDecision,
     HookEvent,
+    HookResult,
     SkillHookRunner,
 )
 from excelmanus.logger import get_logger, log_tool_call
@@ -327,6 +329,8 @@ class AgentEngine:
         skill_router: SkillRouter | None = None,
         persistent_memory: PersistentMemory | None = None,
         memory_extractor: MemoryExtractor | None = None,
+        mcp_manager: MCPManager | None = None,
+        own_mcp_manager: bool = True,
     ) -> None:
         self._client = openai.AsyncOpenAI(
             api_key=config.api_key,
@@ -392,6 +396,7 @@ class AgentEngine:
         self._hook_runner = SkillHookRunner(config)
         self._transient_hook_contexts: list[str] = []
         self._hook_started_skills: set[str] = set()
+        self._hook_agent_action_depth: int = 0
         self._question_flow = QuestionFlowManager(max_queue_size=8)
         self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
@@ -406,9 +411,6 @@ class AgentEngine:
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
         self._memory_extractor = memory_extractor
-        # 初始化 memory_tools 模块的 PersistentMemory 引用
-        from excelmanus.tools import memory_tools
-        memory_tools.init_memory(persistent_memory)
         # 会话启动时加载核心记忆到 system prompt
         if persistent_memory is not None:
             core_memory = persistent_memory.load_core()
@@ -419,7 +421,8 @@ class AgentEngine:
                 )
 
         # ── MCP Client 集成 ──────────────────────────────────
-        self._mcp_manager = MCPManager(config.workspace_root)
+        self._mcp_manager = mcp_manager or MCPManager(config.workspace_root)
+        self._own_mcp_manager = own_mcp_manager
 
         # ── 多模型切换 ──────────────────────────────────
         self._active_model: str = config.model
@@ -454,8 +457,10 @@ class AgentEngine:
         MCP 仅负责工具注册；Skill 仅负责策略与授权。
         """
         await self._mcp_manager.initialize(self._registry)
+        self.sync_mcp_auto_approve()
 
-        # 将 MCP 白名单注册到审批管理器
+    def sync_mcp_auto_approve(self) -> None:
+        """将当前 MCP 白名单同步到审批管理器。"""
         auto_approved = self._mcp_manager.auto_approved_tools
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
@@ -489,7 +494,8 @@ class AgentEngine:
                     payload={"reason": "shutdown_mcp"},
                 )
         self._hook_started_skills.clear()
-        await self._mcp_manager.shutdown()
+        if self._own_mcp_manager:
+            await self._mcp_manager.shutdown()
     def mcp_server_info(self) -> list[dict[str, Any]]:
         """返回 MCP Server 连接状态摘要，供 CLI 展示。"""
         return self._mcp_manager.get_server_info()
@@ -536,6 +542,14 @@ class AgentEngine:
         """是否正在等待多选题回答。"""
         current = self._question_flow.current()
         return bool(current and current.multi_select)
+
+    def has_pending_approval(self) -> bool:
+        """当前会话是否存在待确认的高风险操作。"""
+        return self._approval.has_pending()
+
+    def current_pending_approval(self) -> "PendingApproval | None":
+        """返回当前待确认操作。"""
+        return self._approval.pending
 
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
@@ -796,7 +810,7 @@ class AgentEngine:
 
         selected_skill = self._pick_route_skill(route_result)
         if selected_skill is not None:
-            user_prompt_hook = self._run_skill_hook(
+            user_prompt_hook_raw = self._run_skill_hook(
                 skill=selected_skill,
                 event=HookEvent.USER_PROMPT_SUBMIT,
                 payload={
@@ -806,6 +820,11 @@ class AgentEngine:
                     "route_mode": route_result.route_mode,
                     "skills_used": list(route_result.skills_used),
                 },
+            )
+            user_prompt_hook = await self._resolve_hook_result(
+                event=HookEvent.USER_PROMPT_SUBMIT,
+                hook_result=user_prompt_hook_raw,
+                on_event=on_event,
             )
             if (
                 user_prompt_hook is not None
@@ -1031,6 +1050,165 @@ class AgentEngine:
             return
         self._transient_hook_contexts.append(normalized)
 
+    @staticmethod
+    def _merge_hook_reasons(current: str, extra: str) -> str:
+        parts = [part.strip() for part in (current, extra) if str(part).strip()]
+        return " | ".join(parts)
+
+    def _normalize_hook_decision_scope(
+        self,
+        *,
+        event: HookEvent,
+        hook_result: HookResult,
+    ) -> HookResult:
+        if hook_result.decision != HookDecision.ASK or event == HookEvent.PRE_TOOL_USE:
+            return hook_result
+        reason = self._merge_hook_reasons(
+            hook_result.reason,
+            f"事件 {event.value} 不支持 ASK，已降级为 CONTINUE",
+        )
+        logger.warning("Hook ASK 降级：event=%s reason=%s", event.value, reason)
+        return HookResult(
+            decision=HookDecision.CONTINUE,
+            reason=reason,
+            updated_input=hook_result.updated_input,
+            additional_context=hook_result.additional_context,
+            agent_action=hook_result.agent_action,
+            raw_output=dict(hook_result.raw_output),
+        )
+
+    def _apply_hook_agent_failure(
+        self,
+        *,
+        hook_result: HookResult,
+        action: HookAgentAction,
+        message: str,
+    ) -> HookResult:
+        decision = hook_result.decision
+        if action.on_failure == "deny":
+            decision = HookDecision.DENY
+        reason = self._merge_hook_reasons(hook_result.reason, message)
+        return HookResult(
+            decision=decision,
+            reason=reason,
+            updated_input=hook_result.updated_input,
+            additional_context=hook_result.additional_context,
+            agent_action=hook_result.agent_action,
+            raw_output=dict(hook_result.raw_output),
+        )
+
+    async def _apply_hook_agent_action(
+        self,
+        *,
+        event: HookEvent,
+        hook_result: HookResult,
+        on_event: EventCallback | None,
+    ) -> HookResult:
+        action = hook_result.agent_action
+        if action is None:
+            return hook_result
+
+        task_text = action.task.strip()
+        if not task_text:
+            return hook_result
+
+        if self._hook_agent_action_depth > 0:
+            message = "agent hook 递归触发已被跳过"
+            logger.warning("Hook agent action 递归保护触发：event=%s", event.value)
+            return self._apply_hook_agent_failure(
+                hook_result=hook_result,
+                action=action,
+                message=message,
+            )
+
+        picked_agent = self._normalize_skill_agent_name(action.agent_name)
+        if not picked_agent:
+            picked_agent = await self._auto_select_subagent(
+                task=task_text,
+                file_paths=[],
+            )
+        picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
+
+        logger.info(
+            "执行 hook agent action：event=%s agent=%s",
+            event.value,
+            picked_agent,
+        )
+        self._hook_agent_action_depth += 1
+        try:
+            sub_result = await self.run_subagent(
+                agent_name=picked_agent,
+                prompt=task_text,
+                on_event=on_event,
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = f"agent hook 执行异常（{picked_agent}）：{exc}"
+            logger.warning(message)
+            return self._apply_hook_agent_failure(
+                hook_result=hook_result,
+                action=action,
+                message=message,
+            )
+        finally:
+            self._hook_agent_action_depth -= 1
+
+        if not sub_result.success:
+            message = f"agent hook 执行失败（{picked_agent}）：{sub_result.summary}"
+            logger.warning(message)
+            return self._apply_hook_agent_failure(
+                hook_result=hook_result,
+                action=action,
+                message=message,
+            )
+
+        summary = (sub_result.summary or "").strip()
+        additional_context = hook_result.additional_context
+        if action.inject_summary_as_context and summary:
+            injected = f"[Hook Agent:{picked_agent}] {summary}"
+            additional_context = (
+                f"{additional_context}\n{injected}"
+                if additional_context
+                else injected
+            )
+        return HookResult(
+            decision=hook_result.decision,
+            reason=hook_result.reason,
+            updated_input=hook_result.updated_input,
+            additional_context=additional_context,
+            agent_action=hook_result.agent_action,
+            raw_output=dict(hook_result.raw_output),
+        )
+
+    async def _resolve_hook_result(
+        self,
+        *,
+        event: HookEvent,
+        hook_result: HookResult | None,
+        on_event: EventCallback | None,
+    ) -> HookResult | None:
+        if hook_result is None:
+            return None
+        normalized = self._normalize_hook_decision_scope(
+            event=event,
+            hook_result=hook_result,
+        )
+        resolved = await self._apply_hook_agent_action(
+            event=event,
+            hook_result=normalized,
+            on_event=on_event,
+        )
+
+        before = (normalized.additional_context or "").strip()
+        after = (resolved.additional_context or "").strip()
+        if after:
+            if before and after.startswith(before):
+                delta = after[len(before) :].strip()
+                if delta:
+                    self._push_hook_context(delta)
+            elif after != before:
+                self._push_hook_context(after)
+        return resolved
+
     def _run_skill_hook(
         self,
         *,
@@ -1053,7 +1231,10 @@ class AgentEngine:
             hook_result = self._hook_runner.run(skill=skill, context=context)
             if hook_result.additional_context:
                 self._push_hook_context(hook_result.additional_context)
-            return hook_result
+            return self._normalize_hook_decision_scope(
+                event=target_event,
+                hook_result=hook_result,
+            )
 
         if event == HookEvent.SESSION_START:
             self._hook_started_skills.add(skill.name)
@@ -1647,7 +1828,7 @@ class AgentEngine:
         picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
 
         hook_skill = self._active_skill
-        pre_subagent_hook = self._run_skill_hook(
+        pre_subagent_hook_raw = self._run_skill_hook(
             skill=hook_skill,
             event=HookEvent.SUBAGENT_START,
             payload={
@@ -1655,6 +1836,11 @@ class AgentEngine:
                 "agent_name": picked_agent,
                 "file_paths": normalized_paths,
             },
+        )
+        pre_subagent_hook = await self._resolve_hook_result(
+            event=HookEvent.SUBAGENT_START,
+            hook_result=pre_subagent_hook_raw,
+            on_event=on_event,
         )
         if pre_subagent_hook is not None and pre_subagent_hook.decision == HookDecision.DENY:
             reason = pre_subagent_hook.reason or "Hook 拒绝了子代理执行。"
@@ -1675,7 +1861,7 @@ class AgentEngine:
             prompt=prompt,
             on_event=on_event,
         )
-        self._run_skill_hook(
+        post_subagent_hook_raw = self._run_skill_hook(
             skill=hook_skill,
             event=HookEvent.SUBAGENT_STOP,
             payload={
@@ -1685,6 +1871,21 @@ class AgentEngine:
                 "summary": result.summary,
             },
         )
+        post_subagent_hook = await self._resolve_hook_result(
+            event=HookEvent.SUBAGENT_STOP,
+            hook_result=post_subagent_hook_raw,
+            on_event=on_event,
+        )
+        if post_subagent_hook is not None and post_subagent_hook.decision == HookDecision.DENY:
+            reason = post_subagent_hook.reason or "Hook 拒绝了子代理结果。"
+            return DelegateSubagentOutcome(
+                reply=f"子代理执行结果已被 Hook 拦截：{reason}",
+                success=False,
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+                subagent_result=result,
+            )
         if result.success:
             self._update_recent_excel_context(
                 candidate_paths=[*normalized_paths, *result.observed_files],
@@ -1917,6 +2118,25 @@ class AgentEngine:
                 question_options=self._question_options_payload(question),
                 question_multi_select=question.multi_select,
                 question_queue_size=self._question_flow.queue_size(),
+                iteration=iteration,
+            ),
+        )
+
+    def _emit_pending_approval_event(
+        self,
+        *,
+        pending: "PendingApproval",
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> None:
+        """发射待确认审批事件，供 CLI 渲染审批卡片。"""
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.PENDING_APPROVAL,
+                approval_id=pending.approval_id,
+                approval_tool_name=pending.tool_name,
+                approval_arguments=dict(pending.arguments),
                 iteration=iteration,
             ),
         )
@@ -2512,7 +2732,7 @@ class AgentEngine:
             )
         else:
             hook_skill = self._pick_route_skill(route_result)
-            pre_hook = self._run_skill_hook(
+            pre_hook_raw = self._run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.PRE_TOOL_USE,
                 payload={
@@ -2522,8 +2742,22 @@ class AgentEngine:
                 },
                 tool_name=tool_name,
             )
+            pre_hook = await self._resolve_hook_result(
+                event=HookEvent.PRE_TOOL_USE,
+                hook_result=pre_hook_raw,
+                on_event=on_event,
+            )
             if pre_hook is not None and isinstance(pre_hook.updated_input, dict):
                 arguments = dict(pre_hook.updated_input)
+            skip_high_risk_approval_by_hook = (
+                pre_hook is not None and pre_hook.decision == HookDecision.ALLOW
+            )
+            if skip_high_risk_approval_by_hook:
+                logger.info(
+                    "Hook ALLOW 已生效，跳过确认门禁：tool=%s iteration=%s",
+                    tool_name,
+                    iteration,
+                )
 
             if pre_hook is not None and pre_hook.decision == HookDecision.DENY:
                 reason = pre_hook.reason or "Hook 拒绝执行该工具。"
@@ -2543,6 +2777,9 @@ class AgentEngine:
                     result_str = self._format_pending_prompt(pending)
                     success = True
                     error = None
+                    self._emit_pending_approval_event(
+                        pending=pending, on_event=on_event, iteration=iteration,
+                    )
                     log_tool_call(logger, tool_name, arguments, result=result_str)
                 except ValueError:
                     result_str = self._approval.pending_block_message()
@@ -2712,7 +2949,7 @@ class AgentEngine:
                         error = None
                         log_tool_call(logger, tool_name, arguments, result=result_str)
                     elif self._approval.is_high_risk_tool(tool_name):
-                        if not self._full_access_enabled:
+                        if not self._full_access_enabled and not skip_high_risk_approval_by_hook:
                             pending = self._approval.create_pending(
                                 tool_name=tool_name,
                                 arguments=arguments,
@@ -2723,13 +2960,15 @@ class AgentEngine:
                             result_str = self._format_pending_prompt(pending)
                             success = True
                             error = None
+                            self._emit_pending_approval_event(
+                                pending=pending, on_event=on_event, iteration=iteration,
+                            )
                             log_tool_call(logger, tool_name, arguments, result=result_str)
                         elif self._approval.is_mcp_tool(tool_name):
                             # 非白名单 MCP 工具在 fullAccess 下可直接执行（不做文件审计）。
-                            result_value = await asyncio.to_thread(
-                                self._registry.call_tool,
-                                tool_name,
-                                arguments,
+                            result_value = await self._call_registry_tool(
+                                tool_name=tool_name,
+                                arguments=arguments,
                                 tool_scope=tool_scope,
                             )
                             result_str = str(result_value)
@@ -2756,10 +2995,9 @@ class AgentEngine:
                             error = None
                             log_tool_call(logger, tool_name, arguments, result=result_str)
                     else:
-                        result_value = await asyncio.to_thread(
-                            self._registry.call_tool,
-                            tool_name,
-                            arguments,
+                        result_value = await self._call_registry_tool(
+                            tool_name=tool_name,
+                            arguments=arguments,
                             tool_scope=tool_scope,
                         )
                         result_str = str(result_value)
@@ -2794,7 +3032,7 @@ class AgentEngine:
                     log_tool_call(logger, tool_name, arguments, error=error)
 
             post_hook_event = HookEvent.POST_TOOL_USE if success else HookEvent.POST_TOOL_USE_FAILURE
-            post_hook = self._run_skill_hook(
+            post_hook_raw = self._run_skill_hook(
                 skill=hook_skill,
                 event=post_hook_event,
                 payload={
@@ -2806,6 +3044,11 @@ class AgentEngine:
                     "iteration": iteration,
                 },
                 tool_name=tool_name,
+            )
+            post_hook = await self._resolve_hook_result(
+                event=post_hook_event,
+                hook_result=post_hook_raw,
+                on_event=on_event,
             )
             if post_hook is not None:
                 if post_hook.additional_context:
@@ -2911,6 +3154,26 @@ class AgentEngine:
             copied["confirm"] = True
         return copied
 
+    async def _call_registry_tool(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str],
+    ) -> Any:
+        """在线程池中调用工具，并绑定当前会话的记忆上下文。"""
+        from excelmanus.tools import memory_tools
+
+        def _call() -> Any:
+            with memory_tools.bind_memory_context(self._persistent_memory):
+                return self._registry.call_tool(
+                    tool_name,
+                    arguments,
+                    tool_scope=tool_scope,
+                )
+
+        return await asyncio.to_thread(_call)
+
     async def _execute_tool_with_audit(
         self,
         *,
@@ -2934,7 +3197,10 @@ class AgentEngine:
             args: dict[str, Any],
             scope: Sequence[str],
         ) -> Any:
-            return self._registry.call_tool(name, args, tool_scope=scope)
+            from excelmanus.tools import memory_tools
+
+            with memory_tools.bind_memory_context(self._persistent_memory):
+                return self._registry.call_tool(name, args, tool_scope=scope)
 
         return await asyncio.to_thread(
             self._approval.execute_and_audit,
@@ -3316,8 +3582,12 @@ class AgentEngine:
             return None
 
         parts = text.split()
-        command = parts[0].strip().lower().replace("_", "")
-        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/planmode", "/model"}:
+        raw_command = parts[0].strip().lower()
+        if raw_command in {"/planmode", "/plan_mode"}:
+            return "命令已移除，请使用 /plan ..."
+
+        command = raw_command.replace("_", "")
+        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model"}:
             return None
 
         self._last_route_result = SkillMatchResult(
@@ -3395,7 +3665,7 @@ class AgentEngine:
                 "或 /subagent run <agent_name> -- <task>。"
             )
 
-        if command in {"/plan", "/planmode"}:
+        if command == "/plan":
             return await self._handle_plan_command(parts, on_event=on_event)
 
         if command == "/model":

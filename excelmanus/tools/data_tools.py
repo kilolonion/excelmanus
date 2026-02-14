@@ -414,16 +414,29 @@ def read_excel(
     max_rows: int | None = None,
     include_style_summary: bool = False,
     header_row: int | None = None,
+    include: list[str] | None = None,
+    max_style_scan_rows: int = 200,
 ) -> str:
-    """读取 Excel 文件并返回数据摘要。
+    """读取 Excel 文件并返回数据摘要，可通过 include 按需附加额外维度。
 
     Args:
         file_path: Excel 文件路径（相对或绝对）。
         sheet_name: 工作表名称，默认读取第一个。
         max_rows: 最大读取行数，默认全部读取。
-        include_style_summary: 是否附带样式概览（使用的颜色、合并单元格等）。
+        include_style_summary: 是否附带样式概览（已废弃，请用 include=["styles"]）。
         header_row: 列头所在行号（从0开始），默认0。
             当工作表有合并标题行时，需指定真正的列头行号。
+        include: 按需请求的额外维度列表。可选值：
+            styles — 压缩样式类（Style Classes + cell_style_map + merged_ranges）
+            charts — 嵌入图表元信息
+            images — 嵌入图片元信息
+            freeze_panes — 冻结窗格位置
+            conditional_formatting — 条件格式规则
+            data_validation — 数据验证规则
+            print_settings — 打印设置
+            column_widths — 非默认列宽
+            formulas — 含公式的单元格
+        max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
 
     Returns:
         JSON 格式的数据摘要字符串。
@@ -450,8 +463,37 @@ def read_excel(
     if header_row is None and effective_header != 0:
         summary["detected_header_row"] = effective_header
 
-    if include_style_summary:
-        summary["style_summary"] = _collect_style_summary(safe_path, sheet_name)
+    # 向后兼容：include_style_summary=True 映射为 include=["styles"]
+    include_set: set[str] = set()
+    if include:
+        include_set.update(include)
+    if include_style_summary and "styles" not in include_set:
+        include_set.add("styles")
+
+    # 校验 include 维度
+    invalid_dims = include_set - set(INCLUDE_DIMENSIONS)
+    if invalid_dims:
+        summary["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
+        include_set -= invalid_dims
+
+    # 分发 include 维度采集（需要用 openpyxl 打开，非 data_only 以获取公式）
+    if include_set:
+        from openpyxl import load_workbook
+
+        # styles/charts/images/freeze_panes 等需要非 data_only 模式
+        # formulas 也需要非 data_only 模式以读取公式文本
+        needs_formulas = "formulas" in include_set
+        wb_include = load_workbook(safe_path, data_only=not needs_formulas)
+        try:
+            ws_include = (
+                wb_include[sheet_name]
+                if sheet_name and sheet_name in wb_include.sheetnames
+                else wb_include.active
+            )
+            extra = _dispatch_include_dimensions(ws_include, include_set, max_style_scan_rows)
+            summary.update(extra)
+        finally:
+            wb_include.close()
 
     return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
 
@@ -740,13 +782,24 @@ def transform_data(
 
 
 
+# scan_excel_files 可用的 include 维度
+_SCAN_FILES_DIMENSIONS = (
+    "freeze_panes",
+    "charts",
+    "images",
+    "conditional_formatting",
+    "column_widths",
+)
+
+
 def scan_excel_files(
     directory: str = ".",
     max_files: int = 20,
     preview_rows: int = 3,
     max_columns: int = 15,
+    include: list[str] | None = None,
 ) -> str:
-    """批量扫描目录下所有 Excel 文件，返回轻量级概览。
+    """批量扫描目录下所有 Excel 文件，返回轻量级概览，可按需附加额外维度。
 
     使用 openpyxl 只读模式，仅读取 sheet 元信息和少量预览行，
     避免加载完整 DataFrame，适合快速了解工作区全貌。
@@ -756,6 +809,8 @@ def scan_excel_files(
         max_files: 最多扫描文件数，默认 20。
         preview_rows: 每个 sheet 预览行数，默认 3。
         max_columns: header/preview 最多展示列数，默认 15。
+        include: 按需请求的额外维度列表。可选值：
+            freeze_panes, charts, images, conditional_formatting, column_widths。
 
     Returns:
         JSON 格式的批量概览结果。
@@ -764,6 +819,11 @@ def scan_excel_files(
     from pathlib import Path
 
     from openpyxl import load_workbook
+
+    include_set: set[str] = set(include) if include else set()
+    invalid_dims = include_set - set(_SCAN_FILES_DIMENSIONS)
+    include_set -= invalid_dims
+    needs_full = bool(include_set)
 
     guard = _get_guard()
     safe_dir = guard.resolve_and_validate(directory)
@@ -801,7 +861,7 @@ def scan_excel_files(
 
         sheets_info: list[dict[str, Any]] = []
         try:
-            wb = load_workbook(fp, read_only=True, data_only=True)
+            wb = load_workbook(fp, read_only=not needs_full, data_only=True)
             for sn in wb.sheetnames:
                 ws = wb[sn]
                 total_cols = ws.max_column or 0
@@ -845,6 +905,19 @@ def scan_excel_files(
                     sheet_data["header"] = header
                     sheet_data["preview"] = preview
 
+                # 按需采集额外维度
+                if needs_full and include_set:
+                    if "freeze_panes" in include_set:
+                        sheet_data["freeze_panes"] = _collect_freeze_panes(ws)
+                    if "charts" in include_set:
+                        sheet_data["charts"] = _collect_charts(ws)
+                    if "images" in include_set:
+                        sheet_data["images"] = _collect_images(ws)
+                    if "conditional_formatting" in include_set:
+                        sheet_data["conditional_formatting"] = _collect_conditional_formatting(ws)
+                    if "column_widths" in include_set:
+                        sheet_data["column_widths"] = _collect_column_widths(ws)
+
                 sheets_info.append(sheet_data)
             wb.close()
         except Exception as exc:  # noqa: BLE001
@@ -853,13 +926,15 @@ def scan_excel_files(
         file_info["sheets"] = sheets_info
         files_summary.append(file_info)
 
-    result = {
+    result: dict[str, Any] = {
         "directory": directory,
         "excel_files_found": len(excel_paths),
         "truncated": len(excel_paths) >= max_files,
         "files": files_summary,
     }
-    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
+    if invalid_dims:
+        result["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 def _cell_to_str(value: Any) -> str | None:
@@ -942,6 +1017,437 @@ def _collect_style_summary(file_path: Any, sheet_name: str | None) -> dict[str, 
         "has_conditional_formatting": has_conditional,
         "rows_scanned": max_scan_rows,
     }
+
+
+# ── include 维度采集函数 ──────────────────────────────────
+
+# include 参数所有合法维度
+INCLUDE_DIMENSIONS = (
+    "data_preview",
+    "styles",
+    "charts",
+    "images",
+    "freeze_panes",
+    "conditional_formatting",
+    "data_validation",
+    "print_settings",
+    "column_widths",
+    "formulas",
+)
+
+
+def _color_to_hex_short(color: Any) -> str | None:
+    """将 openpyxl Color 对象转为 6 位十六进制字符串，无效或默认色返回 None。"""
+    if color is None:
+        return None
+    if hasattr(color, "rgb") and color.rgb:
+        rgb = str(color.rgb)
+        if rgb in ("00000000", "FFFFFFFF"):
+            return None
+        return rgb[2:] if len(rgb) == 8 else rgb
+    if hasattr(color, "theme") and color.theme is not None:
+        return f"theme:{color.theme}"
+    return None
+
+
+def _extract_style_tuple(cell: Any) -> tuple | None:
+    """从单元格提取样式关键属性元组，全默认样式返回 None。"""
+    parts: list[Any] = []
+    has_custom = False
+
+    # 字体
+    f = cell.font
+    if f:
+        font_info: dict[str, Any] = {}
+        if f.name and f.name != "Calibri":
+            font_info["name"] = f.name
+        if f.size and f.size != 11:
+            font_info["size"] = f.size
+        if f.bold:
+            font_info["bold"] = True
+        if f.italic:
+            font_info["italic"] = True
+        if f.underline and f.underline != "none":
+            font_info["underline"] = f.underline
+        if f.strike:
+            font_info["strike"] = True
+        c = _color_to_hex_short(f.color)
+        if c and c != "000000":
+            font_info["color"] = c
+        if font_info:
+            has_custom = True
+        parts.append(tuple(sorted(font_info.items())) if font_info else ())
+    else:
+        parts.append(())
+
+    # 填充
+    fl = cell.fill
+    if fl:
+        fill_type = fl.fill_type or fl.patternType
+        if fill_type and fill_type != "none":
+            fg = _color_to_hex_short(fl.fgColor)
+            parts.append(("fill", fill_type, fg))
+            has_custom = True
+        else:
+            parts.append(())
+    else:
+        parts.append(())
+
+    # 边框
+    b = cell.border
+    if b:
+        border_parts: list[tuple[str, str]] = []
+        for side_name in ("left", "right", "top", "bottom"):
+            side = getattr(b, side_name, None)
+            if side and side.style and side.style != "none":
+                border_parts.append((side_name, side.style))
+        if border_parts:
+            has_custom = True
+        parts.append(tuple(border_parts))
+    else:
+        parts.append(())
+
+    # 对齐
+    a = cell.alignment
+    if a:
+        align_info: dict[str, Any] = {}
+        if a.horizontal and a.horizontal != "general":
+            align_info["horizontal"] = a.horizontal
+        if a.vertical and a.vertical != "bottom":
+            align_info["vertical"] = a.vertical
+        if a.wrap_text:
+            align_info["wrap_text"] = True
+        if align_info:
+            has_custom = True
+        parts.append(tuple(sorted(align_info.items())) if align_info else ())
+    else:
+        parts.append(())
+
+    # 数字格式
+    nf = cell.number_format
+    if nf and nf != "General":
+        parts.append(nf)
+        has_custom = True
+    else:
+        parts.append("")
+
+    if not has_custom:
+        return None
+    return tuple(parts)
+
+
+def _style_tuple_to_dict(st: tuple) -> dict[str, Any]:
+    """将样式元组还原为可读字典。"""
+    result: dict[str, Any] = {}
+    font_parts, fill_parts, border_parts, align_parts, num_fmt = st
+
+    if font_parts:
+        result["font"] = dict(font_parts)
+    if fill_parts:
+        _, fill_type, fg = fill_parts
+        info: dict[str, Any] = {"type": fill_type}
+        if fg:
+            info["color"] = fg
+        result["fill"] = info
+    if border_parts:
+        result["border"] = {side: style for side, style in border_parts}
+    if align_parts:
+        result["alignment"] = dict(align_parts)
+    if num_fmt:
+        result["number_format"] = num_fmt
+    return result
+
+
+def _collect_styles_compressed(
+    ws: Any,
+    max_rows: int = 200,
+) -> dict[str, Any]:
+    """扫描工作表，以 Style Classes 压缩方式返回样式信息。
+
+    算法：
+    1. 逐单元格提取样式元组
+    2. 为唯一组合分配 sN ID
+    3. 按列扫描合并连续相同样式的单元格为范围
+
+    Returns:
+        包含 style_classes, cell_style_map, merged_ranges 的字典。
+    """
+    from openpyxl.utils import get_column_letter
+
+    scan_rows = min(ws.max_row or 0, max_rows)
+    scan_cols = ws.max_column or 0
+    if scan_rows == 0 or scan_cols == 0:
+        return {
+            "style_classes": {},
+            "cell_style_map": {},
+            "merged_ranges": [str(mr) for mr in ws.merged_cells.ranges],
+            "rows_scanned": scan_rows,
+        }
+
+    # 第一遍：收集所有样式元组，分配 ID
+    style_to_id: dict[tuple, str] = {}
+    # cell_map[col_idx][row_idx] = style_id
+    cell_map: dict[int, dict[int, str]] = {}
+    id_counter = 0
+
+    for row in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=1, max_col=scan_cols):
+        for cell in row:
+            st = _extract_style_tuple(cell)
+            if st is None:
+                continue
+            if st not in style_to_id:
+                style_to_id[st] = f"s{id_counter}"
+                id_counter += 1
+            sid = style_to_id[st]
+            col_idx = cell.column
+            row_idx = cell.row
+            if col_idx not in cell_map:
+                cell_map[col_idx] = {}
+            cell_map[col_idx][row_idx] = sid
+
+    # 构建 style_classes 字典
+    style_classes = {sid: _style_tuple_to_dict(st) for st, sid in style_to_id.items()}
+
+    # 第二遍：按列合并连续相同 style_id 为范围
+    range_map: dict[str, str] = {}  # "A1:A10" -> "s0"
+
+    for col_idx in sorted(cell_map.keys()):
+        col_letter = get_column_letter(col_idx)
+        rows_dict = cell_map[col_idx]
+        sorted_rows = sorted(rows_dict.keys())
+        if not sorted_rows:
+            continue
+
+        # 合并连续行
+        start_row = sorted_rows[0]
+        current_sid = rows_dict[start_row]
+        prev_row = start_row
+
+        for r in sorted_rows[1:]:
+            sid = rows_dict[r]
+            if sid == current_sid and r == prev_row + 1:
+                # 连续且相同
+                prev_row = r
+            else:
+                # 输出前一段
+                if start_row == prev_row:
+                    range_map[f"{col_letter}{start_row}"] = current_sid
+                else:
+                    range_map[f"{col_letter}{start_row}:{col_letter}{prev_row}"] = current_sid
+                start_row = r
+                current_sid = sid
+                prev_row = r
+
+        # 输出最后一段
+        if start_row == prev_row:
+            range_map[f"{col_letter}{start_row}"] = current_sid
+        else:
+            range_map[f"{col_letter}{start_row}:{col_letter}{prev_row}"] = current_sid
+
+    merged_ranges = [str(mr) for mr in ws.merged_cells.ranges]
+
+    return {
+        "style_classes": style_classes,
+        "cell_style_map": range_map,
+        "merged_ranges": merged_ranges,
+        "rows_scanned": scan_rows,
+    }
+
+
+def _collect_charts(ws: Any) -> list[dict[str, Any]]:
+    """检测工作表中嵌入的图表，返回元信息列表。"""
+    charts_info: list[dict[str, Any]] = []
+    chart_list = getattr(ws, "_charts", [])
+    for chart in chart_list:
+        info: dict[str, Any] = {}
+        # 图表类型
+        type_name = type(chart).__name__.replace("Chart", "").lower()
+        info["type"] = type_name
+        if hasattr(chart, "title") and chart.title:
+            title = chart.title
+            if hasattr(title, "text"):
+                info["title"] = title.text
+            elif isinstance(title, str):
+                info["title"] = title
+        info["series_count"] = len(chart.series) if hasattr(chart, "series") else 0
+        # 锚点位置
+        if hasattr(chart, "anchor") and chart.anchor:
+            anchor = chart.anchor
+            if hasattr(anchor, "_from") and anchor._from:
+                f = anchor._from
+                from openpyxl.utils import get_column_letter as gcl
+                info["anchor_cell"] = f"{gcl(f.col + 1)}{f.row + 1}"
+        charts_info.append(info)
+    return charts_info
+
+
+def _collect_images(ws: Any) -> list[dict[str, Any]]:
+    """检测工作表中嵌入的图片，返回元信息列表。"""
+    images_info: list[dict[str, Any]] = []
+    image_list = getattr(ws, "_images", [])
+    for img in image_list:
+        info: dict[str, Any] = {}
+        if hasattr(img, "width") and img.width:
+            info["width_px"] = img.width
+        if hasattr(img, "height") and img.height:
+            info["height_px"] = img.height
+        # 图片格式
+        if hasattr(img, "format"):
+            info["format"] = img.format
+        elif hasattr(img, "path") and img.path:
+            ext = str(img.path).rsplit(".", 1)[-1] if "." in str(img.path) else "unknown"
+            info["format"] = ext
+        # 锚点位置
+        if hasattr(img, "anchor") and img.anchor:
+            anchor = img.anchor
+            if isinstance(anchor, str):
+                info["anchor_cell"] = anchor
+            elif hasattr(anchor, "_from") and anchor._from:
+                f = anchor._from
+                from openpyxl.utils import get_column_letter as gcl
+                info["anchor_cell"] = f"{gcl(f.col + 1)}{f.row + 1}"
+        images_info.append(info)
+    return images_info
+
+
+def _collect_freeze_panes(ws: Any) -> str | None:
+    """返回冻结窗格位置（如 'A4'），未冻结返回 None。"""
+    fp = ws.freeze_panes
+    return str(fp) if fp else None
+
+
+def _collect_conditional_formatting(ws: Any) -> list[dict[str, Any]]:
+    """收集条件格式规则列表。"""
+    rules_info: list[dict[str, Any]] = []
+    for cf in ws.conditional_formatting:
+        ranges_str = str(cf)
+        for rule in cf.rules:
+            info: dict[str, Any] = {"range": ranges_str}
+            if hasattr(rule, "type") and rule.type:
+                info["type"] = rule.type
+            if hasattr(rule, "priority") and rule.priority is not None:
+                info["priority"] = rule.priority
+            if hasattr(rule, "formula") and rule.formula:
+                info["formula"] = list(rule.formula) if not isinstance(rule.formula, str) else [rule.formula]
+            if hasattr(rule, "operator") and rule.operator:
+                info["operator"] = rule.operator
+            rules_info.append(info)
+    return rules_info
+
+
+def _collect_data_validation(ws: Any) -> list[dict[str, Any]]:
+    """收集数据验证规则列表。"""
+    validations: list[dict[str, Any]] = []
+    dv_list = getattr(ws, "data_validations", None)
+    if dv_list is None:
+        return validations
+    dv_items = getattr(dv_list, "dataValidation", [])
+    for dv in dv_items:
+        info: dict[str, Any] = {}
+        if hasattr(dv, "sqref") and dv.sqref:
+            info["range"] = str(dv.sqref)
+        if hasattr(dv, "type") and dv.type:
+            info["type"] = dv.type
+        if hasattr(dv, "formula1") and dv.formula1:
+            info["formula1"] = str(dv.formula1)
+        if hasattr(dv, "formula2") and dv.formula2:
+            info["formula2"] = str(dv.formula2)
+        if hasattr(dv, "allow_blank") and dv.allow_blank is not None:
+            info["allow_blank"] = bool(dv.allow_blank)
+        if hasattr(dv, "showDropDown") and dv.showDropDown is not None:
+            info["show_dropdown"] = bool(dv.showDropDown)
+        validations.append(info)
+    return validations
+
+
+def _collect_print_settings(ws: Any) -> dict[str, Any]:
+    """收集打印设置信息。"""
+    info: dict[str, Any] = {}
+    if ws.print_area:
+        info["print_area"] = ws.print_area
+    ps = ws.page_setup
+    if ps:
+        if ps.orientation:
+            info["orientation"] = ps.orientation
+        if ps.paperSize is not None:
+            info["paper_size"] = ps.paperSize
+        if ps.fitToWidth is not None:
+            info["fit_to_width"] = ps.fitToWidth
+        if ps.fitToHeight is not None:
+            info["fit_to_height"] = ps.fitToHeight
+        if ps.scale is not None:
+            info["scale"] = ps.scale
+    if ws.print_title_rows:
+        info["repeat_rows"] = ws.print_title_rows
+    if ws.print_title_cols:
+        info["repeat_columns"] = ws.print_title_cols
+    return info
+
+
+def _collect_column_widths(ws: Any) -> dict[str, float]:
+    """收集非默认列宽映射。"""
+    widths: dict[str, float] = {}
+    for col_letter, dim in ws.column_dimensions.items():
+        if dim.width is not None and dim.width != 8.0:
+            widths[col_letter] = round(dim.width, 2)
+    return widths
+
+
+def _collect_formulas(ws: Any, max_rows: int = 200) -> list[dict[str, str]]:
+    """收集含公式的单元格位置和公式内容。"""
+    from openpyxl.utils import get_column_letter
+
+    formulas: list[dict[str, str]] = []
+    scan_rows = min(ws.max_row or 0, max_rows)
+    scan_cols = ws.max_column or 0
+    if scan_rows == 0 or scan_cols == 0:
+        return formulas
+
+    for row in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=1, max_col=scan_cols):
+        for cell in row:
+            val = cell.value
+            if isinstance(val, str) and val.startswith("="):
+                coord = f"{get_column_letter(cell.column)}{cell.row}"
+                formulas.append({"cell": coord, "formula": val})
+    return formulas
+
+
+def _dispatch_include_dimensions(
+    ws_for_include: Any,
+    include_set: set[str],
+    max_style_scan_rows: int,
+) -> dict[str, Any]:
+    """根据 include 集合分发各维度采集，返回合并字典。"""
+    extra: dict[str, Any] = {}
+
+    if "styles" in include_set:
+        extra["styles"] = _collect_styles_compressed(ws_for_include, max_rows=max_style_scan_rows)
+
+    if "charts" in include_set:
+        extra["charts"] = _collect_charts(ws_for_include)
+
+    if "images" in include_set:
+        extra["images"] = _collect_images(ws_for_include)
+
+    if "freeze_panes" in include_set:
+        extra["freeze_panes"] = _collect_freeze_panes(ws_for_include)
+
+    if "conditional_formatting" in include_set:
+        extra["conditional_formatting"] = _collect_conditional_formatting(ws_for_include)
+
+    if "data_validation" in include_set:
+        extra["data_validation"] = _collect_data_validation(ws_for_include)
+
+    if "print_settings" in include_set:
+        extra["print_settings"] = _collect_print_settings(ws_for_include)
+
+    if "column_widths" in include_set:
+        extra["column_widths"] = _collect_column_widths(ws_for_include)
+
+    if "formulas" in include_set:
+        extra["formulas"] = _collect_formulas(ws_for_include, max_rows=max_style_scan_rows)
+
+    return extra
 
 
 # ── 数值强制转换辅助 ──────────────────────────────────────
@@ -1260,7 +1766,13 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_excel",
-            description="读取 Excel 文件并返回数据摘要（形状、列名、类型、前10行预览），可选附带样式概览",
+            description=(
+                "读取 Excel 文件并返回数据摘要（形状、列名、类型、前10行预览）。"
+                "通过 include 参数可按需附加额外维度：styles（压缩样式类）、"
+                "charts（图表检测）、images（图片检测）、freeze_panes（冻结窗格）、"
+                "conditional_formatting（条件格式）、data_validation（数据验证）、"
+                "print_settings（打印设置）、column_widths（列宽）、formulas（公式）"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1278,18 +1790,52 @@ def get_tools() -> list[ToolDef]:
                     },
                     "include_style_summary": {
                         "type": "boolean",
-                        "description": "是否附带样式概览（填充色、字体色、合并单元格等），默认关闭",
+                        "description": "（已废弃，请用 include=[\"styles\"]）是否附带样式概览",
                         "default": False,
                     },
                     "header_row": {
                         "type": "integer",
                         "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时，需指定真正的列头行号（例如标题占1行则传1）",
                     },
+                    "include": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "styles",
+                                "charts",
+                                "images",
+                                "freeze_panes",
+                                "conditional_formatting",
+                                "data_validation",
+                                "print_settings",
+                                "column_widths",
+                                "formulas",
+                            ],
+                        },
+                        "description": (
+                            "按需请求的额外维度列表。"
+                            "styles: 压缩样式类（Style Classes + 单元格映射 + 合并范围）；"
+                            "charts: 嵌入图表元信息；images: 嵌入图片元信息；"
+                            "freeze_panes: 冻结窗格位置；"
+                            "conditional_formatting: 条件格式规则；"
+                            "data_validation: 数据验证规则；"
+                            "print_settings: 打印设置；"
+                            "column_widths: 非默认列宽；"
+                            "formulas: 含公式的单元格"
+                        ),
+                    },
+                    "max_style_scan_rows": {
+                        "type": "integer",
+                        "description": "styles/formulas 维度扫描的最大行数，默认 200",
+                        "default": 200,
+                    },
                 },
                 "required": ["file_path"],
                 "additionalProperties": False,
             },
             func=read_excel,
+            max_result_chars=0,
         ),
         ToolDef(
             name="write_excel",
@@ -1384,7 +1930,10 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="scan_excel_files",
-            description="批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。适合快速了解工作区全貌",
+            description=(
+                "批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
+                "通过 include 可按需附加：freeze_panes、charts、images、conditional_formatting、column_widths"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1407,6 +1956,20 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "header/preview 最多展示列数，默认 15",
                         "default": 15,
+                    },
+                    "include": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "freeze_panes",
+                                "charts",
+                                "images",
+                                "conditional_formatting",
+                                "column_widths",
+                            ],
+                        },
+                        "description": "按需请求的额外维度，每个文件的每个 sheet 均返回对应信息",
                     },
                 },
                 "required": [],

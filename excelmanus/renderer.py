@@ -132,6 +132,7 @@ class StreamRenderer:
             EventType.TASK_LIST_CREATED: self._render_task_list_created,
             EventType.TASK_ITEM_UPDATED: self._render_task_item_updated,
             EventType.USER_QUESTION: self._render_user_question,
+            EventType.PENDING_APPROVAL: self._render_pending_approval,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -361,6 +362,49 @@ class StreamRenderer:
             Panel(
                 rich_escape(content),
                 title=f"[bold #f0c674]❓ {rich_escape(header)}[/bold #f0c674]",
+                title_align="left",
+                border_style="#de935f",
+                expand=False,
+                padding=(1, 2),
+            )
+        )
+
+    def _render_pending_approval(self, event: ToolCallEvent) -> None:
+        """渲染待确认审批卡片（与 ask_user 风格一致）。"""
+        tool_name = event.approval_tool_name or "未知工具"
+        approval_id = event.approval_id or ""
+        args = event.approval_arguments or {}
+
+        # 构建参数摘要（截取关键信息）
+        args_summary_parts: list[str] = []
+        for key in ("file_path", "sheet_name", "script", "command"):
+            val = args.get(key)
+            if val is not None:
+                display = str(val)
+                if len(display) > 60:
+                    display = display[:57] + "..."
+                args_summary_parts.append(f"{key}={display}")
+        args_summary = ", ".join(args_summary_parts) if args_summary_parts else ""
+
+        lines: list[str] = [
+            f"工具: {tool_name}",
+            f"ID: {approval_id}",
+        ]
+        if args_summary:
+            lines.append(f"参数: {args_summary}")
+        lines.append("")
+        lines.append("1. ✅ 执行 - 确认并执行此操作")
+        lines.append("2. ❌ 拒绝 - 取消此操作")
+        lines.append("3. 🔓 全部授权 - 开启 fullAccess 后自动执行")
+        lines.append("")
+        lines.append("单选：输入编号或使用方向键选择。")
+
+        content = "\n".join(lines)
+        self._console.print()
+        self._console.print(
+            Panel(
+                rich_escape(content),
+                title="[bold #f0c674]⚠️ 检测到高风险操作[/bold #f0c674]",
                 title_align="left",
                 border_style="#de935f",
                 expand=False,

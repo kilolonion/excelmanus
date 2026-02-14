@@ -19,8 +19,10 @@ from rich.console import Console as RealConsole
 
 from excelmanus.config import ConfigError
 from excelmanus.cli import (
+    _InteractiveSelectResult,
     _LiveStatusTicker,
     _async_main,
+    _build_answer_from_select,
     _chat_with_feedback,
     _compute_inline_suggestion,
     _read_multiline_user_input,
@@ -313,9 +315,9 @@ class TestInlineSuggestion:
         """输入 /plan a 应补全 approve。"""
         assert _compute_inline_suggestion("/plan a") == "pprove"
 
-    def test_planmode_argument_suggestion(self) -> None:
-        """输入 /planmode r 应补全 reject。"""
-        assert _compute_inline_suggestion("/planmode r") == "eject"
+    def test_planmode_argument_suggestion_removed(self) -> None:
+        """输入 /planmode r 不应再提供补全。"""
+        assert _compute_inline_suggestion("/planmode r") is None
 
     def test_non_slash_input_returns_none(self) -> None:
         """普通自然语言输入不应触发斜杠补全。"""
@@ -381,6 +383,25 @@ class TestMultilineInput:
         ):
             text = _run(_read_multiline_user_input())
         assert text == "1\n方案A"
+
+
+class TestInteractiveSelectAnswerBuild:
+    """交互式选择结果组装测试。"""
+
+    def test_multi_select_can_keep_selected_indices_and_other_text(self) -> None:
+        question = SimpleNamespace(multi_select=True)
+        result = _InteractiveSelectResult(
+            selected_indices=[0, 1],
+            other_text="自定义约束",
+        )
+        answer = _build_answer_from_select(question, result)
+        assert answer == "1\n2\n自定义约束"
+
+    def test_single_select_other_keeps_original_behavior(self) -> None:
+        question = SimpleNamespace(multi_select=False)
+        result = _InteractiveSelectResult(other_text="只要文本")
+        answer = _build_answer_from_select(question, result)
+        assert answer == "只要文本"
 
 
 class TestLiveStatusTicker:
@@ -699,6 +720,18 @@ class TestReplSlashCommands:
             mock_console.input.side_effect = ["/plan reject pln_1", "exit"]
             _run(_repl_loop(engine))
             engine.chat.assert_called_once_with("/plan reject pln_1")
+
+    def test_planmode_command_is_reported_as_unknown(self) -> None:
+        engine = _make_engine()
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/planmode status", "exit"]
+            _run(_repl_loop(engine))
+            engine.chat.assert_not_called()
+            warning_printed = any(
+                "未知命令" in str(call) and "/planmode status" in str(call)
+                for call in mock_console.print.call_args_list
+            )
+            assert warning_printed
 
     def test_unknown_slash_command(self) -> None:
         """未知斜杠命令应显示警告。"""

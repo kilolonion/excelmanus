@@ -7,6 +7,8 @@ from pathlib import Path
 from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.policy import (
+    AUDIT_TARGET_ARG_RULES_ALL,
+    AUDIT_TARGET_ARG_RULES_FIRST,
     FALLBACK_DISCOVERY_TOOLS,
     MUTATING_ALL_TOOLS,
     MUTATING_AUDIT_ONLY_TOOLS,
@@ -14,6 +16,9 @@ from excelmanus.tools.policy import (
     SUBAGENT_ANALYSIS_EXTRA_TOOLS,
     SUBAGENT_READ_ONLY_TOOLS,
     SUBAGENT_WRITE_EXTRA_TOOLS,
+    WORKSPACE_SCAN_EXCLUDE_PREFIXES,
+    WORKSPACE_SCAN_MAX_FILES,
+    WORKSPACE_SCAN_MAX_HASH_BYTES,
 )
 
 
@@ -98,6 +103,23 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
     assert mutating_like == set(MUTATING_ALL_TOOLS), (
         "存在未分层的写入类工具或误分层工具，"
         f"diff={sorted(mutating_like ^ set(MUTATING_ALL_TOOLS))}"
+    )
+
+
+def test_audit_path_rules_cover_all_mutating_tools_except_workspace_scan_tools() -> None:
+    path_ruled = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
+    expected = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}
+    assert path_ruled == expected
+
+
+def test_workspace_scan_budget_constants_contract() -> None:
+    assert WORKSPACE_SCAN_MAX_FILES == 20000
+    assert WORKSPACE_SCAN_MAX_HASH_BYTES == 256 * 1024 * 1024
+    assert tuple(WORKSPACE_SCAN_EXCLUDE_PREFIXES) == (
+        ".git",
+        ".venv",
+        "__pycache__",
+        "outputs/approvals",
     )
 
 

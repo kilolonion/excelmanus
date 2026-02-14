@@ -1,6 +1,7 @@
 """MCP 进程管理辅助工具。
 
-仅识别并处理当前工作区缓存目录 ``<workspace>/.excelmanus/mcp/`` 下的进程。
+仅识别并处理当前工作区 MCP 状态目录下的进程。
+默认目录为 ``<workspace>/.excelmanus/mcp/``，可通过配置或环境变量覆盖。
 用于 shutdown 异常时兜底回收，避免误伤 IDE/系统其它来源的 MCP 进程。
 """
 
@@ -14,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+_ENV_MCP_STATE_DIR = "EXCELMANUS_MCP_STATE_DIR"
+
 
 @dataclass(frozen=True)
 class ProcessInfo:
@@ -24,23 +27,45 @@ class ProcessInfo:
     command: str
 
 
-def _workspace_mcp_marker(workspace_root: str) -> str:
-    """返回工作区 MCP 缓存目录标记串（以 `/` 结尾）。"""
+def _resolve_state_dir(workspace_root: str, state_dir: str | None = None) -> Path:
+    """解析 MCP 状态目录。
+
+    优先级：
+    1. 显式参数 ``state_dir``
+    2. 环境变量 ``EXCELMANUS_MCP_STATE_DIR``
+    3. 默认 ``<workspace>/.excelmanus/mcp``
+    """
     root = Path(workspace_root).expanduser()
     if not root.is_absolute():
         root = (Path.cwd() / root).resolve(strict=False)
     else:
         root = root.resolve(strict=False)
 
-    marker = str(root / ".excelmanus" / "mcp")
+    raw = (state_dir or os.environ.get(_ENV_MCP_STATE_DIR) or "").strip()
+    if raw:
+        resolved = Path(raw).expanduser()
+        if not resolved.is_absolute():
+            resolved = (root / resolved).resolve(strict=False)
+        else:
+            resolved = resolved.resolve(strict=False)
+        return resolved
+    return (root / ".excelmanus" / "mcp").resolve(strict=False)
+
+
+def _workspace_mcp_marker(workspace_root: str, state_dir: str | None = None) -> str:
+    """返回工作区 MCP 状态目录标记串（以 `/` 结尾）。"""
+    marker = str(_resolve_state_dir(workspace_root, state_dir=state_dir))
     if not marker.endswith("/"):
         marker += "/"
     return marker
 
 
-def list_workspace_mcp_processes(workspace_root: str) -> list[ProcessInfo]:
+def list_workspace_mcp_processes(
+    workspace_root: str,
+    state_dir: str | None = None,
+) -> list[ProcessInfo]:
     """列出当前工作区 MCP 缓存目录下的所有进程。"""
-    marker = _workspace_mcp_marker(workspace_root)
+    marker = _workspace_mcp_marker(workspace_root, state_dir=state_dir)
     try:
         output = subprocess.check_output(
             ["ps", "-A", "-o", "pid=,ppid=,command="],
@@ -68,9 +93,18 @@ def list_workspace_mcp_processes(workspace_root: str) -> list[ProcessInfo]:
     return result
 
 
-def snapshot_workspace_mcp_pids(workspace_root: str) -> set[int]:
+def snapshot_workspace_mcp_pids(
+    workspace_root: str,
+    state_dir: str | None = None,
+) -> set[int]:
     """获取当前工作区 MCP 进程 PID 快照。"""
-    return {proc.pid for proc in list_workspace_mcp_processes(workspace_root)}
+    return {
+        proc.pid
+        for proc in list_workspace_mcp_processes(
+            workspace_root,
+            state_dir=state_dir,
+        )
+    }
 
 
 def _expand_descendants(
@@ -128,6 +162,7 @@ def _wait_for_exit(pids: set[int], timeout_seconds: float) -> set[int]:
 def terminate_workspace_mcp_processes(
     workspace_root: str,
     candidate_pids: Iterable[int] | None = None,
+    state_dir: str | None = None,
     grace_seconds: float = 1.5,
 ) -> set[int]:
     """终止当前工作区 MCP 缓存进程。
@@ -136,6 +171,7 @@ def terminate_workspace_mcp_processes(
         workspace_root: 工作区根目录。
         candidate_pids: 待清理根 PID（只会在当前工作区 MCP 进程集中生效）。
             为空时不执行全量清理，直接返回空集合。
+        state_dir: MCP 状态目录（可选）。
         grace_seconds: SIGTERM 后等待秒数。
 
     Returns:
@@ -144,7 +180,10 @@ def terminate_workspace_mcp_processes(
     if candidate_pids is None:
         return set()
 
-    processes = list_workspace_mcp_processes(workspace_root)
+    processes = list_workspace_mcp_processes(
+        workspace_root,
+        state_dir=state_dir,
+    )
     if not processes:
         return set()
 

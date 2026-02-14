@@ -306,6 +306,23 @@ class QuestionFlowManager:
             if normalized == _normalize_text(opt.value):
                 return i
 
+        # 受控模糊匹配：精确匹配未命中后，尝试包含匹配。
+        # 若出现多个候选，视为歧义，不自动命中。
+        fuzzy_candidates: list[int] = []
+        for i, opt in enumerate(options):
+            if opt.is_other:
+                continue
+            label = _normalize_text(opt.label)
+            value = _normalize_text(opt.value)
+            if normalized and (normalized in label or label in normalized):
+                fuzzy_candidates.append(i)
+                continue
+            if normalized and (normalized in value or value in normalized):
+                fuzzy_candidates.append(i)
+        deduped_candidates = list(dict.fromkeys(fuzzy_candidates))
+        if len(deduped_candidates) == 1:
+            return deduped_candidates[0]
+
         if normalized in {_normalize_text("other"), _normalize_text("其他")}:
             for i, opt in enumerate(options):
                 if opt.is_other:

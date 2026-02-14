@@ -24,6 +24,7 @@ class EventType(Enum):
     TASK_LIST_CREATED = "task_list_created"
     TASK_ITEM_UPDATED = "task_item_updated"
     USER_QUESTION = "user_question"
+    PENDING_APPROVAL = "pending_approval"
 
 
 @dataclass
@@ -79,6 +80,10 @@ class ToolCallEvent:
     question_options: List[Dict[str, Any]] = field(default_factory=list)
     question_multi_select: bool = False
     question_queue_size: int = 0
+    # 待确认审批事件字段
+    approval_id: str = ""
+    approval_tool_name: str = ""
+    approval_arguments: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

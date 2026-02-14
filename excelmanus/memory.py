@@ -55,6 +55,29 @@ _DEFAULT_SYSTEM_PROMPT = (
     "- 数据分析、筛选与转换\n"
     "- 生成图表（柱状图、折线图、饼图、散点图、雷达图）\n"
     "- 单元格格式化与列宽调整\n\n"
+    "## 记忆管理\n"
+    "你拥有跨会话持久记忆能力。在对话中发现对未来会话有复用价值的信息时，"
+    "立即调用 memory_save 保存，不要等到对话结束。\n\n"
+    "### 应该记住的（发现后立即保存）\n"
+    "- **file_pattern**: 用户常用 Excel 文件的结构特征 — sheet 名称、列名与数据类型、"
+    "header 行位置、数据量级、编码格式、特殊布局（合并单元格、多级表头）。\n"
+    "- **user_pref**: 用户明确表达或通过行为体现的偏好 — 图表配色与样式、"
+    "输出格式（保留小数位数、日期格式）、命名习惯、常用的分析维度。\n"
+    "- **error_solution**: 本次会话中解决的具体错误 — 错误现象、根因、解决步骤，"
+    "尤其是与文件编码、openpyxl 兼容性、数据类型转换相关的问题。\n"
+    "- **general**: 用户的业务背景（行业、部门、汇报对象）、"
+    "常用的多步工作流模式、跨文件关联关系。\n\n"
+    "### 不应该记住的\n"
+    "- 一次性的数据查询结果或临时计算值\n"
+    "- 当前会话的临时文件路径\n"
+    "- 已经存在于持久记忆中的重复信息（保存前先回忆）\n"
+    "- 用户未确认的推测性信息\n\n"
+    "### 保存原则\n"
+    "- 内容要简洁、结构化，方便未来快速理解\n"
+    "- 一条记忆只记一件事，不要把多个无关信息合并\n"
+    "- 优先在完成工具调用、确认结果正确后再保存\n"
+    "- 首次接触用户文件并完成探查后，保存文件结构\n"
+    "- 用户纠正你的行为时，保存为偏好或解决方案\n\n"
     "## 输出要求\n"
     "- 完成后输出结果摘要与关键证据（数字、路径、sheet 名）。\n"
     "- 需要多步操作时逐步执行，每步完成后简要汇报。\n"
@@ -251,6 +274,9 @@ class ConversationMemory:
             # 仅剩最后一条时做内容收缩，避免单条超长消息长期越阈值。
             if len(self._messages) == 1:
                 if not self._shrink_last_message_for_threshold(threshold, system_msgs):
+                    # 无法收缩（例如 content 为 None 的 tool_call 壳消息）时，
+                    # 直接丢弃最后一条，保证请求不会持续超预算。
+                    self._messages.pop(0)
                     break
                 continue
 
@@ -286,26 +312,60 @@ class ConversationMemory:
         system_msgs: list[dict] | None,
     ) -> bool:
         """尽量收缩最后一条消息内容，返回是否完成收缩。"""
-        msg = self._messages[0]
+        msg = self._messages[-1]
         content = msg.get("content")
         if not isinstance(content, str) or not content:
             return False
 
-        total = self._total_tokens_with_system_messages(system_msgs)
-        overflow_tokens = total - threshold
-        if overflow_tokens <= 0:
-            return True
-
-        # 估算每 token 约 3 字符，保留消息尾部（最近内容更有价值）。
-        overflow_chars = max(1, overflow_tokens * 3)
-        keep_chars = len(content) - overflow_chars - 8
-        if keep_chars <= 0:
+        message_tokens = self._token_counter.count_message(msg)
+        content_tokens = self._token_counter.count(content)
+        base_tokens = message_tokens - content_tokens
+        budget_for_content = threshold - (
+            self._total_tokens_with_system_messages(system_msgs) - message_tokens
+        ) - base_tokens
+        if budget_for_content <= 0:
             msg["content"] = ""
             return True
 
-        new_content = f"[截断]{content[-keep_chars:]}"
-        # 保证每次收缩都确实缩短，避免在极低阈值下死循环。
-        if len(new_content) >= len(content):
-            new_content = content[-max(1, len(content) // 2):]
-        msg["content"] = new_content
+        if content_tokens <= budget_for_content:
+            return True
+
+        marker = "[截断]"
+
+        def _fits(candidate: str) -> bool:
+            return self._token_counter.count(candidate) <= budget_for_content
+
+        # 二分查找可保留的最大尾部长度，避免字符近似导致过度裁切。
+        left = 1
+        right = len(content)
+        best = ""
+        while left <= right:
+            mid = (left + right) // 2
+            candidate = f"{marker}{content[-mid:]}"
+            if _fits(candidate):
+                best = candidate
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        if not best:
+            # 如果加标记放不下，退化为纯尾部文本，尽量保留一点近期上下文。
+            left = 1
+            right = len(content)
+            while left <= right:
+                mid = (left + right) // 2
+                candidate = content[-mid:]
+                if _fits(candidate):
+                    best = candidate
+                    left = mid + 1
+                else:
+                    right = mid - 1
+
+        if not best:
+            msg["content"] = ""
+            return True
+
+        if len(best) >= len(content):
+            best = content[-max(1, len(content) // 2):]
+        msg["content"] = best
         return True

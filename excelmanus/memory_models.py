@@ -17,10 +17,12 @@ class MemoryCategory(str, Enum):
 
 
 # 类别到主题文件的映射
-# 未在此映射中的类别（ERROR_SOLUTION、GENERAL）写入 MEMORY.md
+# 所有类别均有独立主题文件；核心 MEMORY.md 由持久化层统一维护。
 CATEGORY_TOPIC_MAP: dict[MemoryCategory, str] = {
     MemoryCategory.FILE_PATTERN: "file_patterns.md",
     MemoryCategory.USER_PREF: "user_prefs.md",
+    MemoryCategory.ERROR_SOLUTION: "error_solutions.md",
+    MemoryCategory.GENERAL: "general.md",
 }
 
 

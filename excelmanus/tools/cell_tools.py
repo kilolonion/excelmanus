@@ -91,6 +91,7 @@ def write_cells(
     value: Any = None,
     cell_range: str | None = None,
     values: list[list[Any]] | None = None,
+    return_preview: bool = False,
 ) -> str:
     """向指定单元格或范围写入值/公式，不影响工作表其他区域的数据。
 
@@ -188,8 +189,35 @@ def write_cells(
     finally:
         wb.close()
 
+    # 写入后返回受影响区域的预览
+    if return_preview:
+        from openpyxl import load_workbook as _lw
+
+        wb2 = _lw(safe_path, data_only=True)
+        try:
+            ws2 = wb2[sheet_name] if sheet_name and sheet_name in wb2.sheetnames else wb2.active
+            if single_mode:
+                r, c = _parse_single_cell(cell)  # type: ignore[arg-type]
+                val = ws2.cell(row=r, column=c).value
+                result["preview_after"] = [[str(val) if val is not None else None]]
+            else:
+                preview_rows: list[list[Any]] = []
+                for row_cells in ws2.iter_rows(
+                    min_row=start_row,
+                    max_row=end_row,
+                    min_col=start_col,
+                    max_col=end_col,
+                    values_only=True,
+                ):
+                    preview_rows.append([
+                        str(c) if c is not None else None for c in row_cells
+                    ])
+                result["preview_after"] = preview_rows
+        finally:
+            wb2.close()
+
     logger.info("write_cells: %s", result)
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
 def insert_rows(
@@ -326,7 +354,8 @@ def get_tools() -> list[ToolDef]:
                 "向 Excel 指定单元格或范围写入值/公式，不影响其他区域数据。"
                 "两种模式：(1) cell+value 写单个单元格；"
                 "(2) cell_range+values 批量写入二维数据。"
-                "支持数字、字符串和公式（以 = 开头）"
+                "支持数字、字符串和公式（以 = 开头）。"
+                "设置 return_preview=true 可直接返回写入后的值预览，省去额外 read 验证"
             ),
             input_schema={
                 "type": "object",
@@ -357,6 +386,11 @@ def get_tools() -> list[ToolDef]:
                             "items": {},
                         },
                         "description": "二维数组数据，每个内层列表代表一行，范围模式",
+                    },
+                    "return_preview": {
+                        "type": "boolean",
+                        "description": "写入后返回受影响区域的值预览（含公式求值结果）",
+                        "default": False,
                     },
                 },
                 "required": ["file_path"],

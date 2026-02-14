@@ -44,3 +44,30 @@
   - `excelmanus/skillpacks/system/*`
   - README 内置清单
   - 契约测试 `tests/test_skillpack_docs_contract.py`
+
+## 7. Hook 协议
+- Hook 事件键支持三种写法：`PascalCase`、`lowerCamelCase`、`snake_case`。
+  - 示例：`PreToolUse` / `preToolUse` / `pre_tool_use`
+- `matcher` 使用 glob 语法匹配工具名（`fnmatch`）。
+- 多 handler 合并决策优先级：`DENY > ASK > ALLOW > CONTINUE`。
+- `ASK` 仅在 `PreToolUse` 事件生效，其它事件自动降级为 `CONTINUE`。
+- `ALLOW` 在 `PreToolUse` 语义为“跳过确认门禁”，但不绕过 `tool_scope` 与审计约束。
+
+### 7.1 command handler
+- `EXCELMANUS_HOOKS_COMMAND_ENABLED=false` 时，无条件跳过 command hook。
+- 当开关为 true 时，仍需满足：
+  - `fullAccess` 已开启，或
+  - 命令命中 `EXCELMANUS_HOOKS_COMMAND_ALLOWLIST`。
+- allowlist 仅允许单段命令；包含 `;`、`&&`、`||`、`|` 等多段链式命令不放行。
+
+### 7.2 prompt handler
+- 支持读取 `hookSpecificOutput`（`permissionDecision`、`permissionDecisionReason`、`updatedInput`、`additionalContext`）。
+- 兼容顶层字段：`decision`、`reason`、`updated_input`、`additional_context`。
+
+### 7.3 agent handler
+- 最小动作字段：
+  - `agent_name`
+  - `task`
+  - `on_failure`（`continue` / `deny`）
+  - `inject_summary_as_context`（bool）
+- 支持 `hookSpecificOutput.agentAction` 输入格式。

@@ -50,15 +50,15 @@ def test_frontmatter_supports_multiline_and_nested_yaml() -> None:
     assert "PreToolUse" in parsed["hooks"]
 
 
-def test_loader_private_frontmatter_helpers_delegate_public_api() -> None:
+def test_loader_public_frontmatter_helpers_round_trip() -> None:
     payload = {
         "name": "demo",
         "description": "测试",
         "allowed_tools": ["read_excel"],
         "triggers": ["分析"],
     }
-    text = SkillpackLoader._format_frontmatter(payload)
-    assert SkillpackLoader._parse_frontmatter(text) == payload
+    text = SkillpackLoader.format_frontmatter(payload)
+    assert SkillpackLoader.parse_frontmatter(text) == payload
 
 
 def test_loader_public_frontmatter_api_keeps_validation_error_type() -> None:

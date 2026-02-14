@@ -122,7 +122,7 @@ class TestGetToolsSchema:
 
 
 class TestTaskUpdateInvalidStatus:
-    """测试 task_update 传入无效状态字符串返回错误。"""
+    """测试 task_update 传入无效状态字符串抛错。"""
 
     def setup_method(self) -> None:
         """每个测试前注入新的 TaskStore 并创建一个任务清单。"""
@@ -130,16 +130,18 @@ class TestTaskUpdateInvalidStatus:
         task_tools.init_store(self.store)
         task_tools.task_create("测试清单", ["子任务1"])
 
-    def test_invalid_status_returns_error(self) -> None:
-        """传入无效状态字符串应返回包含 '无效状态' 的错误描述。"""
-        result = task_tools.task_update(0, "invalid_status")
-        assert "无效状态" in result
+    def test_invalid_status_raises(self) -> None:
+        """传入无效状态字符串应抛出 ValueError。"""
+        with pytest.raises(ValueError, match="无效状态"):
+            task_tools.task_update(0, "invalid_status")
 
-    def test_invalid_status_lists_valid_values(self) -> None:
+    def test_invalid_status_error_lists_valid_values(self) -> None:
         """错误描述应列出合法状态值。"""
-        result = task_tools.task_update(0, "bad")
+        with pytest.raises(ValueError) as exc_info:
+            task_tools.task_update(0, "bad")
+        message = str(exc_info.value)
         for status in TaskStatus:
-            assert status.value in result
+            assert status.value in message
 
 
 class TestTaskCreateEmptySubtasks:

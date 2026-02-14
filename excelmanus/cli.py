@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import sys
 from contextlib import suppress
+from pathlib import Path
 from typing import Callable
 
 from rich.console import Console
@@ -42,6 +44,7 @@ from excelmanus.config import ConfigError, load_config
 from excelmanus.engine import AgentEngine, ChatResult
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.question_flow import PendingQuestion
+from excelmanus.approval import PendingApproval
 from excelmanus.logger import get_logger, setup_logging
 from excelmanus.renderer import StreamRenderer
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
@@ -69,16 +72,16 @@ _SLASH_COMMANDS = {
     "/reject",
     "/undo",
     "/plan",
-    "/planmode",
-    "/plan_mode",
     "/model",
+    "/config",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
 _SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
 _APPROVAL_COMMAND_ALIASES = {"/accept", "/reject", "/undo"}
-_PLAN_COMMAND_ALIASES = {"/plan", "/planmode", "/plan_mode"}
+_PLAN_COMMAND_ALIASES = {"/plan"}
 _MODEL_COMMAND_ALIASES = {"/model"}
+_CONFIG_COMMAND_ALIASES = {"/config"}
 _SESSION_CONTROL_COMMAND_ALIASES = (
     _FULL_ACCESS_COMMAND_ALIASES
     | _SUBAGENT_COMMAND_ALIASES
@@ -95,6 +98,7 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/subagent",
     "/sub_agent",
     "/mcp",
+    "/config",
     "/fullAccess",
     "/full_access",
     "/fullaccess",
@@ -102,10 +106,9 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/reject",
     "/undo",
     "/plan",
-    "/planmode",
-    "/plan_mode",
     "/model",
 )
+_CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
 _SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
 _PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
@@ -412,6 +415,9 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
     command_arguments.update(
         {alias: _MODEL_ARGUMENTS for alias in _MODEL_COMMAND_ALIASES}
     )
+    command_arguments.update(
+        {alias: _CONFIG_ARGUMENTS for alias in _CONFIG_COMMAND_ALIASES}
+    )
     available_arguments = command_arguments.get(lowered_command)
     if available_arguments is None:
         return None
@@ -496,6 +502,7 @@ def _render_welcome(
     info.append("  /skills", style="#b5bd68")
     info.append("  /subagent", style="#b5bd68")
     info.append("  /mcp", style="#b5bd68")
+    info.append("  /config", style="#b5bd68")
     info.append("  /fullAccess", style="#b5bd68")
     info.append("  /accept <id>", style="#b5bd68")
     info.append("  /reject <id>", style="#b5bd68")
@@ -597,7 +604,10 @@ async def _interactive_question_select(
         if opt.is_other:
             # Other 选项：标记需要文本输入
             result_holder.append(
-                _InteractiveSelectResult(selected_indices=[], other_text="__NEED_INPUT__")
+                _InteractiveSelectResult(
+                    selected_indices=sorted(checked) if multi else [],
+                    other_text="__NEED_INPUT__",
+                )
             )
             event.app.exit()
             return
@@ -708,7 +718,10 @@ async def _interactive_question_select(
             return _InteractiveSelectResult(escaped=True)
         if not other_input:
             return _InteractiveSelectResult(escaped=True)
-        return _InteractiveSelectResult(other_text=other_input)
+        return _InteractiveSelectResult(
+            selected_indices=result.selected_indices,
+            other_text=other_input,
+        )
 
     return result
 
@@ -719,6 +732,12 @@ def _build_answer_from_select(
 ) -> str:
     """将交互式选择结果转换为引擎可识别的回答文本。"""
     if result.other_text is not None:
+        if question.multi_select:
+            parts = [str(idx + 1) for idx in result.selected_indices]
+            other_text = result.other_text.strip()
+            if other_text:
+                parts.append(other_text)
+            return "\n".join(parts)
         return result.other_text
 
     if not result.selected_indices:
@@ -729,6 +748,120 @@ def _build_answer_from_select(
     if question.multi_select:
         return "\n".join(parts)
     return parts[0]
+
+
+# ------------------------------------------------------------------
+# 审批交互式选择器
+# ------------------------------------------------------------------
+
+# 审批选项常量
+_APPROVAL_OPTION_ACCEPT = "执行"
+_APPROVAL_OPTION_REJECT = "拒绝"
+_APPROVAL_OPTION_FULLACCESS = "全部授权"
+
+_APPROVAL_OPTIONS: list[tuple[str, str, str]] = [
+    ("✅ 执行", "确认并执行此操作", _APPROVAL_OPTION_ACCEPT),
+    ("❌ 拒绝", "取消此操作", _APPROVAL_OPTION_REJECT),
+    ("🔓 全部授权", "开启 fullAccess 后自动执行", _APPROVAL_OPTION_FULLACCESS),
+]
+
+
+async def _interactive_approval_select(
+    pending: "PendingApproval",
+) -> str | None:
+    """使用 prompt_toolkit 构建审批交互式选择器（与 ask_user 风格一致）。
+
+    ↑↓ 移动光标，Enter 确认。
+    Esc：退出选择器，回到普通输入框。
+
+    返回 None 表示不支持交互式选择或用户按了 Esc。
+    返回 _APPROVAL_OPTION_ACCEPT / _APPROVAL_OPTION_REJECT / _APPROVAL_OPTION_FULLACCESS。
+    """
+    if not _PROMPT_TOOLKIT_ENABLED or not _is_interactive_terminal():
+        return None
+
+    cursor = [0]
+    result_holder: list[str | None] = []
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _move_up(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] - 1) % len(_APPROVAL_OPTIONS)
+
+    @kb.add("down")
+    def _move_down(event) -> None:  # type: ignore[no-untyped-def]
+        cursor[0] = (cursor[0] + 1) % len(_APPROVAL_OPTIONS)
+
+    @kb.add("enter")
+    def _confirm(event) -> None:  # type: ignore[no-untyped-def]
+        result_holder.append(_APPROVAL_OPTIONS[cursor[0]][2])
+        event.app.exit()
+
+    @kb.add("escape")
+    def _escape(event) -> None:  # type: ignore[no-untyped-def]
+        result_holder.append(None)
+        event.app.exit()
+
+    # 构建参数摘要
+    args = pending.arguments or {}
+    args_parts: list[str] = []
+    for key in ("file_path", "sheet_name", "script", "command"):
+        val = args.get(key)
+        if val is not None:
+            display = str(val)
+            if len(display) > 60:
+                display = display[:57] + "..."
+            args_parts.append(f"{key}={display}")
+    args_summary = ", ".join(args_parts) if args_parts else ""
+
+    def _get_formatted_text() -> FormattedText:
+        """生成审批选择器的格式化文本。"""
+        fragments: list[tuple[str, str]] = []
+        fragments.append(("class:header", "  ⚠️ 检测到高风险操作\n"))
+        fragments.append(("class:text", f"  工具: {pending.tool_name}\n"))
+        fragments.append(("class:text", f"  ID: {pending.approval_id}\n"))
+        if args_summary:
+            fragments.append(("class:text", f"  参数: {args_summary}\n"))
+        fragments.append(("", "\n"))
+
+        for i, (label, desc, _value) in enumerate(_APPROVAL_OPTIONS):
+            is_cursor = i == cursor[0]
+            prefix = f"  {'❯' if is_cursor else ' '} "
+            line = f"{prefix}{i + 1}. {label} — {desc}\n"
+            style = "class:selected" if is_cursor else "class:option"
+            fragments.append((style, line))
+
+        fragments.append(("", "\n"))
+        fragments.append(("class:hint", "  ↑↓ 移动  Enter 确认  Esc 退出\n"))
+        return FormattedText(fragments)
+
+    control = FormattedTextControl(_get_formatted_text)
+    window = Window(content=control, always_hide_cursor=True)
+    layout = Layout(HSplit([window]))
+
+    style = Style.from_dict(
+        {
+            "header": "bold #f0c674",
+            "text": "",
+            "selected": "bold #b5bd68 reverse",
+            "option": "",
+            "hint": "italic #888888",
+        }
+    )
+
+    app: Application[None] = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    await app.run_async()
+
+    if not result_holder:
+        return None
+    return result_holder[0]
 
 
 async def _read_user_input() -> str:
@@ -779,6 +912,10 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     table.add_row("/subagent run -- <task>", "自动选择 subagent 执行任务")
     table.add_row("/subagent run <agent> -- <task>", "指定 subagent 执行任务")
     table.add_row("/mcp", "查看 MCP Server 连接状态与工具列表")
+    table.add_row("/config", "列出 MCP 引用的环境变量配置（脱敏）")
+    table.add_row("/config set <KEY> <VALUE>", "设置环境变量到 .env 文件")
+    table.add_row("/config get <KEY>", "查看某个环境变量的值（脱敏）")
+    table.add_row("/config delete <KEY>", "从 .env 文件删除某个环境变量")
     table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
     table.add_row("/accept <id>", "执行待确认高风险操作")
     table.add_row("/reject <id>", "拒绝待确认高风险操作")
@@ -913,12 +1050,16 @@ def _render_mcp(engine: AgentEngine) -> None:
         show_header=True, show_edge=False, pad_edge=False, expand=False
     )
     table.add_column("Server", style="#b294bb", min_width=16)
+    table.add_column("状态", style="#81a2be", min_width=10)
     table.add_column("传输", style="#f0c674", min_width=8)
     table.add_column("工具数", style="#b5bd68", min_width=6, justify="right")
+    table.add_column("错误", style="#cc6666", min_width=12)
     table.add_column("工具列表", style="white")
 
     for srv in servers:
         tool_names = srv.get("tools", [])
+        status = str(srv.get("status", "unknown"))
+        last_error = str(srv.get("last_error", "") or "-")
         # 工具名过多时截断显示
         if len(tool_names) <= 6:
             tools_display = ", ".join(tool_names) if tool_names else "-"
@@ -927,8 +1068,10 @@ def _render_mcp(engine: AgentEngine) -> None:
             tools_display = f"{shown} … (+{len(tool_names) - 6})"
         table.add_row(
             srv["name"],
+            status,
             srv.get("transport", "?"),
             str(srv.get("tool_count", 0)),
+            last_error,
             tools_display,
         )
 
@@ -944,6 +1087,237 @@ def _render_mcp(engine: AgentEngine) -> None:
         )
     )
     console.print()
+
+
+# ------------------------------------------------------------------
+# /config 命令：MCP 工具环境变量配置管理
+# ------------------------------------------------------------------
+
+# 匹配 $VAR 或 ${VAR} 引用
+_CONFIG_ENV_REF_PATTERN = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def _scan_mcp_env_vars(workspace_root: str = ".") -> list[str]:
+    """扫描 mcp.json 中引用的所有 $VAR 环境变量名（去重保序）。"""
+    from excelmanus.mcp.config import MCPConfigLoader  # 避免循环导入
+
+    # 按 MCPConfigLoader 的搜索优先级查找配置文件
+    candidates: list[Path] = []
+    env_path = os.environ.get("EXCELMANUS_MCP_CONFIG")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path(workspace_root) / "mcp.json")
+    candidates.append(Path("~/.excelmanus/mcp.json").expanduser())
+
+    data: dict | None = None
+    for path in candidates:
+        resolved = path.expanduser().resolve()
+        if resolved.is_file():
+            try:
+                with open(resolved, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    if not data or not isinstance(data.get("mcpServers"), dict):
+        return []
+
+    # 递归扫描所有字符串值中的环境变量引用
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _scan(value: object) -> None:
+        if isinstance(value, str):
+            for match in _CONFIG_ENV_REF_PATTERN.finditer(value):
+                name = match.group(1)
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+        elif isinstance(value, dict):
+            for v in value.values():
+                _scan(v)
+        elif isinstance(value, list):
+            for item in value:
+                _scan(item)
+
+    _scan(data["mcpServers"])
+    return ordered
+
+
+def _mask_secret(value: str) -> str:
+    """对敏感值脱敏：保留前4位和后4位，中间用 **** 替代。"""
+    if len(value) <= 12:
+        return value[:3] + "****" + value[-2:] if len(value) > 5 else "****"
+    return value[:4] + "****" + value[-4:]
+
+
+def _dotenv_path(workspace_root: str = ".") -> Path:
+    """返回工作区 .env 文件路径。"""
+    return Path(workspace_root).resolve() / ".env"
+
+
+def _read_dotenv_lines(dotenv_file: Path) -> list[str]:
+    """读取 .env 文件的所有行（文件不存在返回空列表）。"""
+    if not dotenv_file.is_file():
+        return []
+    return dotenv_file.read_text(encoding="utf-8").splitlines()
+
+
+def _write_dotenv_lines(dotenv_file: Path, lines: list[str]) -> None:
+    """将行列表写回 .env 文件。"""
+    dotenv_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _dotenv_set(dotenv_file: Path, key: str, value: str) -> None:
+    """在 .env 文件中设置或更新一个键值对。"""
+    lines = _read_dotenv_lines(dotenv_file)
+    pattern = re.compile(rf"^{re.escape(key)}\s*=")
+    new_line = f"{key}={value}"
+    replaced = False
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        # 在文件末尾追加（如果最后一行非空则加空行）
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(new_line)
+    _write_dotenv_lines(dotenv_file, lines)
+    # 同步到当前进程环境变量
+    os.environ[key] = value
+
+
+def _dotenv_delete(dotenv_file: Path, key: str) -> bool:
+    """从 .env 文件中删除一个键。返回是否找到并删除。"""
+    lines = _read_dotenv_lines(dotenv_file)
+    pattern = re.compile(rf"^{re.escape(key)}\s*=")
+    new_lines = [line for line in lines if not pattern.match(line)]
+    if len(new_lines) == len(lines):
+        return False
+    _write_dotenv_lines(dotenv_file, new_lines)
+    os.environ.pop(key, None)
+    return True
+
+
+def _handle_config_command(user_input: str, workspace_root: str = ".") -> bool:
+    """处理 /config 命令。返回 True 表示已处理。"""
+    stripped = user_input.strip()
+    lowered = stripped.lower()
+
+    # /config 或 /config list — 列出 MCP 引用的环境变量及其状态
+    if lowered in ("/config", "/config list"):
+        env_vars = _scan_mcp_env_vars(workspace_root)
+        if not env_vars:
+            console.print()
+            console.print("  [dim white]mcp.json 中未发现环境变量引用。[/dim white]")
+            console.print()
+            return True
+
+        table = Table(
+            show_header=True, show_edge=False, pad_edge=False, expand=False
+        )
+        table.add_column("变量名", style="#b294bb", min_width=20)
+        table.add_column("状态", style="#81a2be", min_width=8)
+        table.add_column("值（脱敏）", style="white")
+
+        for var_name in env_vars:
+            value = os.environ.get(var_name)
+            if value:
+                table.add_row(var_name, "[green]已设置[/green]", _mask_secret(value))
+            else:
+                table.add_row(var_name, "[#cc6666]未设置[/#cc6666]", "-")
+
+        console.print()
+        console.print(
+            Panel(
+                table,
+                title="[bold]🔑 MCP 环境变量配置[/bold]",
+                title_align="left",
+                border_style="#f0c674",
+                expand=False,
+                padding=(0, 2),
+            )
+        )
+        console.print(
+            "  [dim white]使用 /config set <KEY> <VALUE> 设置，"
+            "/config delete <KEY> 删除[/dim white]"
+        )
+        console.print()
+        return True
+
+    # /config set <KEY> <VALUE>
+    if lowered.startswith("/config set "):
+        parts = stripped.split(None, 3)  # ["/config", "set", KEY, VALUE]
+        if len(parts) < 4:
+            console.print(
+                "  [#de935f]用法：/config set <KEY> <VALUE>[/#de935f]"
+            )
+            return True
+        key = parts[2]
+        value = parts[3]
+        dotenv_file = _dotenv_path(workspace_root)
+        try:
+            _dotenv_set(dotenv_file, key, value)
+            console.print(
+                f"  [green]✓[/green] 已设置 [#b294bb]{key}[/#b294bb] = "
+                f"{_mask_secret(value)}"
+            )
+            console.print(
+                "  [dim white]已写入 .env 并同步到当前进程。"
+                "MCP Server 需重启后生效。[/dim white]"
+            )
+        except OSError as exc:
+            console.print(f"  [red]✗ 写入 .env 失败：{exc}[/red]")
+        return True
+
+    # /config get <KEY>
+    if lowered.startswith("/config get "):
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            console.print("  [#de935f]用法：/config get <KEY>[/#de935f]")
+            return True
+        key = parts[2]
+        value = os.environ.get(key)
+        if value:
+            console.print(
+                f"  [#b294bb]{key}[/#b294bb] = {_mask_secret(value)}"
+            )
+        else:
+            console.print(
+                f"  [#b294bb]{key}[/#b294bb] [#cc6666]未设置[/#cc6666]"
+            )
+        return True
+
+    # /config delete <KEY>
+    if lowered.startswith("/config delete "):
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            console.print("  [#de935f]用法：/config delete <KEY>[/#de935f]")
+            return True
+        key = parts[2]
+        dotenv_file = _dotenv_path(workspace_root)
+        try:
+            deleted = _dotenv_delete(dotenv_file, key)
+            if deleted:
+                console.print(
+                    f"  [green]✓[/green] 已从 .env 删除 [#b294bb]{key}[/#b294bb]"
+                )
+            else:
+                console.print(
+                    f"  [dim white]{key} 在 .env 中不存在。[/dim white]"
+                )
+        except OSError as exc:
+            console.print(f"  [red]✗ 写入 .env 失败：{exc}[/red]")
+        return True
+
+    # 未知子命令
+    console.print(
+        "  [#de935f]未知 /config 子命令。可用：list / set / get / delete[/#de935f]"
+    )
+    return True
 
 
 def _is_interactive_terminal() -> bool:
@@ -1224,6 +1598,84 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 # select_result 为 None（不支持）或 escaped（用户按 Esc）
                 # 回退到下方普通输入流程
 
+        # ----------------------------------------------------------
+        # 有待确认审批时，启动审批交互式选择器
+        # ----------------------------------------------------------
+        has_pending_approval = bool(
+            getattr(engine, "has_pending_approval", lambda: False)()
+        )
+        if has_pending_approval and not has_pending_question:
+            pending_approval_getter = getattr(engine, "current_pending_approval", None)
+            pending_apv: PendingApproval | None = (
+                pending_approval_getter() if callable(pending_approval_getter) else None
+            )
+            if pending_apv is not None:
+                try:
+                    approval_choice = await _interactive_approval_select(pending_apv)
+                except (KeyboardInterrupt, EOFError):
+                    _render_farewell()
+                    return
+                except Exception as exc:
+                    logger.warning("审批交互式选择器异常，回退到普通输入：%s", exc)
+                    approval_choice = None
+
+                if approval_choice is not None:
+                    # 将选择结果转换为对应的引擎命令
+                    if approval_choice == _APPROVAL_OPTION_ACCEPT:
+                        user_input = f"/accept {pending_apv.approval_id}"
+                    elif approval_choice == _APPROVAL_OPTION_REJECT:
+                        user_input = f"/reject {pending_apv.approval_id}"
+                    elif approval_choice == _APPROVAL_OPTION_FULLACCESS:
+                        # 先开启 fullAccess，再 accept
+                        user_input = f"/fullAccess on"
+                    else:
+                        user_input = f"/reject {pending_apv.approval_id}"
+
+                    try:
+                        renderer = StreamRenderer(console)
+                        console.print()
+                        reply = await _chat_with_feedback(
+                            engine,
+                            user_input=user_input,
+                            renderer=renderer,
+                        )
+                        console.print()
+                        console.print(
+                            Panel(
+                                Markdown(reply),
+                                border_style="#5f875f",
+                                padding=(1, 2),
+                                expand=False,
+                            )
+                        )
+                        # 全部授权模式：开启 fullAccess 后自动 accept
+                        if approval_choice == _APPROVAL_OPTION_FULLACCESS:
+                            accept_input = f"/accept {pending_apv.approval_id}"
+                            renderer2 = StreamRenderer(console)
+                            console.print()
+                            reply2 = await _chat_with_feedback(
+                                engine,
+                                user_input=accept_input,
+                                renderer=renderer2,
+                            )
+                            console.print()
+                            console.print(
+                                Panel(
+                                    Markdown(reply2),
+                                    border_style="#5f875f",
+                                    padding=(1, 2),
+                                    expand=False,
+                                )
+                            )
+                    except KeyboardInterrupt:
+                        _render_farewell()
+                        return
+                    except Exception as exc:
+                        logger.error("处理审批操作时发生错误: %s", exc, exc_info=True)
+                        console.print(f"  [red]✗ 处理审批操作时发生错误：{exc}[/red]")
+                    continue
+                # approval_choice 为 None（不支持或 Esc），回退到普通输入
+
         try:
             if waiting_multiselect:
                 console.print(
@@ -1292,6 +1744,10 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         if user_input.lower() == "/mcp":
             _render_mcp(engine)
+            continue
+
+        if user_input.lower().startswith("/config"):
+            _handle_config_command(user_input, engine.config.workspace_root)
             continue
 
         if user_input.startswith("/skills "):

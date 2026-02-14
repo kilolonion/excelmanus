@@ -117,7 +117,7 @@ class TestRunCodeInline:
 
 
 class TestRunCodeFile:
-    """文件模式测试（兼容旧 run_python_script 行为）。"""
+    """文件模式测试（兼容旧脚本执行行为）。"""
 
     def test_file_success(self, workspace: Path) -> None:
         script = workspace / "scripts" / "temp" / "ok.py"

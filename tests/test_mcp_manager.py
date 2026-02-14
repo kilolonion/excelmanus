@@ -8,6 +8,7 @@ from excelmanus.mcp.manager import (
     _normalize_server_name,
     _prefix_registry,
     add_tool_prefix,
+    format_tool_result,
     parse_tool_prefix,
 )
 
@@ -337,6 +338,80 @@ class TestMCPManagerLogging:
         error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert len(error_records) >= 1
         assert any("bad-server" in r.message for r in error_records)
+
+
+class TestMCPManagerStateSemantics:
+    """测试 MCP 连接状态语义。"""
+
+    @pytest.mark.asyncio
+    async def test_discover_failure_not_in_connected_servers(self):
+        registry = ToolRegistry()
+        cfg = _make_config(name="discover-bad")
+        mock_client = _make_mock_client(config=cfg)
+        mock_client.discover_tools.side_effect = RuntimeError("list failed")
+
+        manager = MCPManager()
+        with (
+            patch("excelmanus.mcp.config.MCPConfigLoader") as mock_loader_cls,
+            patch("excelmanus.mcp.manager.MCPClientWrapper", return_value=mock_client),
+        ):
+            mock_loader_cls.load.return_value = [cfg]
+            await manager.initialize(registry)
+
+        assert manager.connected_servers == []
+        info = manager.get_server_info()
+        assert len(info) == 1
+        assert info[0]["status"] == "discover_failed"
+        assert "list failed" in str(info[0]["last_error"])
+        mock_client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_marked_as_connect_failed(self):
+        registry = ToolRegistry()
+        cfg = _make_config(name="connect-bad")
+        mock_client = _make_mock_client(
+            config=cfg,
+            connect_error=RuntimeError("connect failed"),
+        )
+
+        manager = MCPManager()
+        with (
+            patch("excelmanus.mcp.config.MCPConfigLoader") as mock_loader_cls,
+            patch("excelmanus.mcp.manager.MCPClientWrapper", return_value=mock_client),
+        ):
+            mock_loader_cls.load.return_value = [cfg]
+            await manager.initialize(registry)
+
+        assert manager.connected_servers == []
+        info = manager.get_server_info()
+        assert len(info) == 1
+        assert info[0]["status"] == "connect_failed"
+        assert "connect failed" in str(info[0]["last_error"])
+
+
+class TestFormatToolResult:
+    """测试 MCP 工具结果格式化。"""
+
+    def test_prefers_text_content(self):
+        result = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hello")],
+            structuredContent={"ok": True},
+        )
+        assert format_tool_result(result) == "hello"
+
+    def test_falls_back_to_structured_content(self):
+        result = SimpleNamespace(content=[], structuredContent={"ok": True, "n": 1})
+        text = format_tool_result(result)
+        assert '"ok": true' in text
+        assert '"n": 1' in text
+
+    def test_formats_resource_content(self):
+        resource = SimpleNamespace(uri="file:///tmp/a.txt", mimeType="text/plain")
+        result = SimpleNamespace(
+            content=[SimpleNamespace(type="resource", resource=resource)],
+            structuredContent=None,
+        )
+        assert "resource uri=file:///tmp/a.txt" in format_tool_result(result)
 
 
 # ── 资源清理（Requirement 2.5）───────────────────────────────────

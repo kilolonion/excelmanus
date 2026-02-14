@@ -43,13 +43,11 @@ class TestCategoryTopicMap:
     def test_user_pref_maps_to_file(self) -> None:
         assert CATEGORY_TOPIC_MAP[MemoryCategory.USER_PREF] == "user_prefs.md"
 
-    def test_error_solution_not_in_map(self) -> None:
-        """ERROR_SOLUTION 不在映射中，应写入 MEMORY.md。"""
-        assert MemoryCategory.ERROR_SOLUTION not in CATEGORY_TOPIC_MAP
+    def test_error_solution_maps_to_file(self) -> None:
+        assert CATEGORY_TOPIC_MAP[MemoryCategory.ERROR_SOLUTION] == "error_solutions.md"
 
-    def test_general_not_in_map(self) -> None:
-        """GENERAL 不在映射中，应写入 MEMORY.md。"""
-        assert MemoryCategory.GENERAL not in CATEGORY_TOPIC_MAP
+    def test_general_maps_to_file(self) -> None:
+        assert CATEGORY_TOPIC_MAP[MemoryCategory.GENERAL] == "general.md"
 
 
 class TestMemoryEntry:

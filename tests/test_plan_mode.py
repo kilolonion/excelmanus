@@ -49,15 +49,31 @@ def test_parse_plan_markdown_invalid_raises() -> None:
         parse_plan_markdown(markdown)
 
 
-def test_save_plan_markdown_under_outputs_plans(tmp_path: Path) -> None:
+def test_save_plan_markdown_under_excelmanus_plans(tmp_path: Path) -> None:
     relative = save_plan_markdown(
         markdown="# 计划\n\n## 任务清单\n- [ ] 子任务",
         workspace_root=str(tmp_path),
         filename="plan_20260213T120000Z_demo.md",
     )
-    assert relative == "outputs/plans/plan_20260213T120000Z_demo.md"
+    assert relative == ".excelmanus/plans/plan_20260213T120000Z_demo.md"
     path = tmp_path / relative
     assert path.exists()
+
+
+def test_save_plan_markdown_does_not_migrate_legacy_plans(tmp_path: Path) -> None:
+    legacy_dir = tmp_path / "outputs" / "plans"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "legacy_plan.md"
+    legacy_file.write_text("# 旧计划\n\n## 任务清单\n- [ ] 旧任务", encoding="utf-8")
+
+    save_plan_markdown(
+        markdown="# 新计划\n\n## 任务清单\n- [ ] 新任务",
+        workspace_root=str(tmp_path),
+        filename="plan_20260213T120001Z_new.md",
+    )
+
+    assert legacy_file.exists()
+    assert legacy_dir.exists()
 
 
 def test_builtin_planner_exists() -> None:
@@ -65,4 +81,3 @@ def test_builtin_planner_exists() -> None:
     assert planner is not None
     assert planner.permission_mode == "readOnly"
     assert "tasklist-json" in planner.system_prompt
-

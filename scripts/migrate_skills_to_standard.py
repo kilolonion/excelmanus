@@ -70,10 +70,6 @@ def _build_frontmatter(skill, *, inject_defaults: bool) -> dict[str, Any]:
         frontmatter["user-invocable"] = bool(skill.user_invocable)
     if inject_defaults or skill.argument_hint:
         frontmatter["argument-hint"] = skill.argument_hint
-    if inject_defaults or skill.context != "normal":
-        frontmatter["context"] = skill.context
-    if skill.agent:
-        frontmatter["agent"] = skill.agent
     if inject_defaults or skill.hooks:
         frontmatter["hooks"] = dict(skill.hooks)
     if skill.model:

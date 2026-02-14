@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import tempfile
 from collections import defaultdict
 from datetime import datetime
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 # 核心记忆文件名
 CORE_MEMORY_FILE = "MEMORY.md"
+_LAYOUT_VERSION_FILE = ".layout_version"
+_LAYOUT_VERSION = "2"
+_MIGRATION_BACKUP_DIR = "migration_backups"
+_RECENT_DEDUPE_WINDOW = 200
 
 
 class PersistentMemory:
@@ -25,16 +30,14 @@ class PersistentMemory:
     """
 
     def __init__(self, memory_dir: str, auto_load_lines: int = 200) -> None:
-        """初始化，确保目录存在。
-
-        Args:
-            memory_dir: 记忆存储目录路径，支持 ~ 展开。
-            auto_load_lines: 自动加载核心记忆的最大行数，默认 200。
-        """
+        """初始化，确保目录存在。"""
         self._memory_dir = Path(memory_dir).expanduser()
         self._auto_load_lines = auto_load_lines
+        self._read_only_mode = False
+        self._migration_error: str | None = None
         # 自动创建目录及所有父目录
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_layout_if_needed()
 
     @property
     def memory_dir(self) -> Path:
@@ -46,27 +49,10 @@ class PersistentMemory:
         """返回自动加载行数上限。"""
         return self._auto_load_lines
 
-    def load_core(self) -> str:
-        """读取 MEMORY.md 前 auto_load_lines 行，返回文本内容。
-
-        文件不存在或为空时返回空字符串。
-        """
-        filepath = self._memory_dir / CORE_MEMORY_FILE
-        if not filepath.exists():
-            return ""
-        try:
-            with filepath.open("r", encoding="utf-8") as f:
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= self._auto_load_lines:
-                        break
-                    lines.append(line)
-            content = "".join(lines)
-            # 去除末尾多余换行，但保留内容本身的格式
-            return content.rstrip("\n")
-        except OSError:
-            logger.warning("读取核心记忆文件失败: %s", filepath, exc_info=True)
-            return ""
+    @property
+    def read_only_mode(self) -> bool:
+        """迁移失败时会进入只读降级模式。"""
+        return self._read_only_mode
 
     # --- 条目头部正则：### [YYYY-MM-DD HH:MM] category ---
     _ENTRY_HEADER_RE = re.compile(
@@ -74,16 +60,40 @@ class PersistentMemory:
     )
     _TIMESTAMP_FMT = "%Y-%m-%d %H:%M"
 
-    def format_entries(self, entries: list[MemoryEntry]) -> str:
-        """将 MemoryEntry 列表序列化为 Markdown 文本。
+    def load_core(self) -> str:
+        """读取 MEMORY.md 最近 auto_load_lines 行，返回文本内容。
 
-        每条条目格式：
-            ### [YYYY-MM-DD HH:MM] category
-
-            content
-
-            ---
+        文件不存在或为空时返回空字符串。
+        为避免从条目中间开始，优先对齐到最近窗口内的条目头。
         """
+        filepath = self._memory_dir / CORE_MEMORY_FILE
+        if not filepath.exists():
+            return ""
+        try:
+            with filepath.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            logger.warning("读取核心记忆文件失败: %s", filepath, exc_info=True)
+            return ""
+
+        if not lines:
+            return ""
+        if len(lines) <= self._auto_load_lines:
+            return "".join(lines).rstrip("\n")
+
+        selected = lines[-self._auto_load_lines:]
+        start_idx: int | None = None
+        for idx, line in enumerate(selected):
+            if self._ENTRY_HEADER_RE.match(line.rstrip("\n")):
+                start_idx = idx
+                break
+        if start_idx is not None:
+            selected = selected[start_idx:]
+
+        return "".join(selected).rstrip("\n")
+
+    def format_entries(self, entries: list[MemoryEntry]) -> str:
+        """将 MemoryEntry 列表序列化为 Markdown 文本。"""
         if not entries:
             return ""
         parts: list[str] = []
@@ -94,13 +104,7 @@ class PersistentMemory:
         return "\n\n".join(parts)
 
     def _parse_entries(self, content: str) -> list[MemoryEntry]:
-        """将 Markdown 文本解析为 MemoryEntry 列表（内部实现）。
-
-        解析规则：
-        - 以 ``### [时间戳] 类别`` 开头的行标记一条新条目
-        - 条目正文为该标记行之后、下一个 ``---`` 分隔线之前的所有非空行
-        - 格式不合规的条目会被跳过并记录 WARNING 日志
-        """
+        """将 Markdown 文本解析为 MemoryEntry 列表（内部实现）。"""
         if not content or not content.strip():
             return []
 
@@ -160,23 +164,11 @@ class PersistentMemory:
         return entries
 
     def parse_entries(self, content: str) -> list[MemoryEntry]:
-        """兼容入口：解析 Markdown 为结构化条目。
-
-        当前运行时主流程仅做写入和按行加载原始文本，不依赖结构化解析。
-        本方法主要用于测试 round-trip 验证，以及未来可能的记忆管理能力
-        （例如检索、过滤、去重合并）。
-        """
+        """兼容入口：解析 Markdown 为结构化条目。"""
         return self._parse_entries(content)
 
     def load_topic(self, topic_name: str) -> str:
-        """按需读取指定主题文件的全部内容。
-
-        Args:
-            topic_name: 主题文件名，如 "file_patterns.md"、"user_prefs.md"。
-
-        Returns:
-            文件内容字符串，文件不存在时返回空字符串。
-        """
+        """按需读取指定主题文件的全部内容。"""
         filepath = self._memory_dir / topic_name
         if not filepath.exists():
             return ""
@@ -188,73 +180,99 @@ class PersistentMemory:
             return ""
 
     def save_entries(self, entries: list[MemoryEntry]) -> None:
-        """将记忆条目按类别分发写入对应文件。
-
-        分发逻辑：
-        - FILE_PATTERN → file_patterns.md
-        - USER_PREF → user_prefs.md
-        - ERROR_SOLUTION / GENERAL（及其他未映射类别）→ MEMORY.md
-
-        使用临时文件 + 原子重命名确保写入完整性。
-        写入失败时捕获 OSError，记录 WARNING 日志，不中断。
-        """
+        """将记忆条目按类别分发写入对应文件，并同步写入核心 MEMORY.md。"""
         if not entries:
             return
+        if self._read_only_mode:
+            logger.warning(
+                "持久记忆处于只读降级模式，跳过写入 %d 条记忆条目",
+                len(entries),
+            )
+            return
 
-        # 按目标文件名分组
         grouped: dict[str, list[MemoryEntry]] = defaultdict(list)
         for entry in entries:
-            filename = CATEGORY_TOPIC_MAP.get(entry.category, CORE_MEMORY_FILE)
-            grouped[filename].append(entry)
+            filename = CATEGORY_TOPIC_MAP.get(entry.category)
+            if filename is not None:
+                grouped[filename].append(entry)
 
-        # 逐文件追加写入
+        # 核心记忆文件保留所有类别，便于自动加载
+        grouped[CORE_MEMORY_FILE].extend(entries)
+
         for filename, file_entries in grouped.items():
             filepath = self._memory_dir / filename
             try:
-                # 读取现有内容
-                existing = ""
-                if filepath.exists():
-                    existing = filepath.read_text(encoding="utf-8")
-
-                # 序列化新条目
-                new_content = self.format_entries(file_entries)
-
-                # 拼接：现有内容 + 分隔 + 新条目
-                if existing.strip():
-                    combined = existing.rstrip("\n") + "\n\n" + new_content
-                else:
-                    combined = new_content
-
-                # 临时文件 + 原子重命名
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=str(self._memory_dir), suffix=".tmp"
-                )
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
-                        tmp_f.write(combined)
-                    os.replace(tmp_path, str(filepath))
-                except BaseException:
-                    # 清理临时文件
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
+                self._append_entries(filepath, file_entries)
             except OSError:
-                logger.warning(
-                    "写入记忆文件失败: %s", filepath, exc_info=True
-                )
+                logger.warning("写入记忆文件失败: %s", filepath, exc_info=True)
                 continue
 
-            # 写入成功后检查容量
-            self._enforce_capacity(filepath)
+            try:
+                self._enforce_capacity(filepath)
+            except OSError:
+                logger.warning("容量管理写回失败: %s", filepath, exc_info=True)
+
+    def _append_entries(self, filepath: Path, new_entries: list[MemoryEntry]) -> None:
+        existing = ""
+        if filepath.exists():
+            existing = filepath.read_text(encoding="utf-8")
+
+        existing_entries = self._parse_entries(existing)
+        filtered_entries = self._dedupe_new_entries(existing_entries, new_entries)
+        if not filtered_entries:
+            return
+
+        new_content = self.format_entries(filtered_entries)
+        if existing.strip():
+            combined = existing.rstrip("\n") + "\n\n" + new_content
+        else:
+            combined = new_content
+
+        self._atomic_write(filepath, combined)
+
+    @staticmethod
+    def _normalize_content_key(text: str) -> str:
+        return " ".join((text or "").split())
+
+    def _dedupe_new_entries(
+        self,
+        existing_entries: list[MemoryEntry],
+        new_entries: list[MemoryEntry],
+    ) -> list[MemoryEntry]:
+        existing_keys = {
+            (entry.category.value, self._normalize_content_key(entry.content))
+            for entry in existing_entries[-_RECENT_DEDUPE_WINDOW:]
+            if self._normalize_content_key(entry.content)
+        }
+
+        batch_keys: set[tuple[str, str]] = set()
+        result: list[MemoryEntry] = []
+        for entry in new_entries:
+            normalized = self._normalize_content_key(entry.content)
+            if not normalized:
+                continue
+            key = (entry.category.value, normalized)
+            if key in existing_keys or key in batch_keys:
+                continue
+            batch_keys.add(key)
+            result.append(entry)
+        return result
+
+    def _atomic_write(self, filepath: Path, content: str) -> None:
+        fd, tmp_path = tempfile.mkstemp(dir=str(self._memory_dir), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(content)
+            os.replace(tmp_path, str(filepath))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _enforce_capacity(self, filepath: Path) -> None:
-        """容量管理：当文件超过 500 行时，保留最近条目使其降至 400 行以内。
-
-        从文件末尾向前保留完整条目（以 ``### [时间戳] 类别`` 开头的条目块），
-        使总行数不超过 400 行。使用临时文件 + 原子重命名写回。
-        """
+        """容量管理：当文件超过 500 行时，保留最近条目使其降至 400 行以内。"""
         if not filepath.exists():
             return
 
@@ -268,14 +286,12 @@ class PersistentMemory:
             return
 
         # 从末尾向前扫描，按条目边界保留，使总行数 ≤ 400
-        # 找到所有条目起始行的索引
         entry_starts: list[int] = []
         for i, line in enumerate(all_lines):
             if self._ENTRY_HEADER_RE.match(line):
                 entry_starts.append(i)
 
         if not entry_starts:
-            # 没有有效条目头，无法按条目边界截断，保留最后 400 行
             kept_lines = all_lines[-400:]
             removed_count = len(all_lines) - len(kept_lines)
             logger.info(
@@ -283,10 +299,8 @@ class PersistentMemory:
                 filepath.name, len(all_lines), removed_count,
             )
         else:
-            # 从最后一个条目开始，向前逐个添加条目，直到超过 400 行
             kept_start = entry_starts[-1]
             for idx in reversed(entry_starts):
-                # 如果包含从 idx 开始的所有行，总行数是否 ≤ 400
                 line_count = len(all_lines) - idx
                 if line_count <= 400:
                     kept_start = idx
@@ -302,17 +316,163 @@ class PersistentMemory:
                 filepath.name, len(all_lines), kept_entries, len(kept_lines), removed_entries,
             )
 
-        # 使用临时文件 + 原子重命名写回
-        new_content = "\n".join(kept_lines)
-        fd, tmp_path = tempfile.mkstemp(dir=str(self._memory_dir), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
-                tmp_f.write(new_content)
-            os.replace(tmp_path, str(filepath))
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        self._atomic_write(filepath, "\n".join(kept_lines))
 
+    def _migrate_layout_if_needed(self) -> None:
+        """迁移旧布局到当前版本，并保留备份。"""
+        version_path = self._memory_dir / _LAYOUT_VERSION_FILE
+        if version_path.exists():
+            try:
+                if version_path.read_text(encoding="utf-8").strip() == _LAYOUT_VERSION:
+                    return
+            except OSError:
+                logger.warning("读取布局版本文件失败: %s", version_path, exc_info=True)
+
+        candidate_files = {
+            CORE_MEMORY_FILE,
+            "file_patterns.md",
+            "user_prefs.md",
+            "error_solutions.md",
+            "general.md",
+        }
+        candidate_files.update(CATEGORY_TOPIC_MAP.values())
+        existing_files = [
+            filename for filename in sorted(candidate_files)
+            if (self._memory_dir / filename).exists()
+        ]
+
+        if not existing_files:
+            self._write_layout_version()
+            return
+
+        backup_dir: Path | None = None
+        try:
+            backup_dir = self._create_migration_backup(existing_files)
+            entries = self._collect_entries_for_migration(existing_files)
+            deduped = self._dedupe_entries_for_migration(entries)
+            self._rewrite_layout_files(deduped)
+            self._write_layout_version()
+            self._read_only_mode = False
+            self._migration_error = None
+            logger.info(
+                "记忆布局迁移完成: version=%s, entries_before=%d, entries_after=%d, backup=%s",
+                _LAYOUT_VERSION,
+                len(entries),
+                len(deduped),
+                backup_dir,
+            )
+        except Exception as exc:
+            self._read_only_mode = True
+            self._migration_error = str(exc)
+            logger.warning(
+                "记忆布局迁移失败，已降级为只读模式，错误=%s",
+                self._migration_error,
+                exc_info=True,
+            )
+            if backup_dir is not None:
+                try:
+                    self._restore_from_backup(backup_dir)
+                except Exception:
+                    logger.warning("回滚记忆备份失败: %s", backup_dir, exc_info=True)
+
+    def _create_migration_backup(self, filenames: list[str]) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = self._memory_dir / _MIGRATION_BACKUP_DIR / timestamp
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for filename in filenames:
+            src = self._memory_dir / filename
+            dst = backup_dir / filename
+            shutil.copy2(src, dst)
+        return backup_dir
+
+    def _restore_from_backup(self, backup_dir: Path) -> None:
+        for item in backup_dir.iterdir():
+            if not item.is_file():
+                continue
+            shutil.copy2(item, self._memory_dir / item.name)
+
+    def _collect_entries_for_migration(self, filenames: list[str]) -> list[MemoryEntry]:
+        entries: list[MemoryEntry] = []
+        for filename in filenames:
+            filepath = self._memory_dir / filename
+            try:
+                raw = filepath.read_text(encoding="utf-8")
+            except OSError:
+                logger.warning("迁移读取失败: %s", filepath, exc_info=True)
+                continue
+            parsed = self._parse_entries(raw)
+            if parsed:
+                entries.extend(parsed)
+                continue
+            # 兼容历史“非条目化纯文本”文件：按文件名回填为单条记忆，避免迁移丢失。
+            normalized = raw.strip()
+            if not normalized:
+                continue
+            inferred = self._infer_category_by_filename(filename)
+            if inferred is None:
+                logger.warning("迁移跳过无法识别类别的文件: %s", filename)
+                continue
+            entries.append(
+                MemoryEntry(
+                    content=normalized,
+                    category=inferred,
+                    timestamp=datetime.now(),
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _infer_category_by_filename(filename: str) -> MemoryCategory | None:
+        name = filename.strip().lower()
+        if name == "file_patterns.md":
+            return MemoryCategory.FILE_PATTERN
+        if name == "user_prefs.md":
+            return MemoryCategory.USER_PREF
+        if name == "error_solutions.md":
+            return MemoryCategory.ERROR_SOLUTION
+        if name in {"general.md", CORE_MEMORY_FILE.lower()}:
+            return MemoryCategory.GENERAL
+        return None
+
+    def _dedupe_entries_for_migration(
+        self,
+        entries: list[MemoryEntry],
+    ) -> list[MemoryEntry]:
+        latest_by_key: dict[tuple[str, str], MemoryEntry] = {}
+        for entry in sorted(entries, key=lambda item: item.timestamp):
+            normalized = self._normalize_content_key(entry.content)
+            if not normalized:
+                continue
+            key = (entry.category.value, normalized)
+            prev = latest_by_key.get(key)
+            if prev is None or entry.timestamp >= prev.timestamp:
+                latest_by_key[key] = entry
+        return sorted(latest_by_key.values(), key=lambda item: item.timestamp)
+
+    def _rewrite_layout_files(self, entries: list[MemoryEntry]) -> None:
+        grouped: dict[str, list[MemoryEntry]] = defaultdict(list)
+        for entry in entries:
+            filename = CATEGORY_TOPIC_MAP.get(entry.category)
+            if filename:
+                grouped[filename].append(entry)
+
+        grouped[CORE_MEMORY_FILE] = list(entries)
+
+        target_files = set(grouped)
+        target_files.update(CATEGORY_TOPIC_MAP.values())
+        target_files.add(CORE_MEMORY_FILE)
+
+        for filename in sorted(target_files):
+            filepath = self._memory_dir / filename
+            file_entries = grouped.get(filename, [])
+            if not file_entries:
+                if filepath.exists():
+                    filepath.unlink()
+                continue
+            content = self.format_entries(file_entries)
+            self._atomic_write(filepath, content)
+            self._enforce_capacity(filepath)
+
+    def _write_layout_version(self) -> None:
+        version_path = self._memory_dir / _LAYOUT_VERSION_FILE
+        self._atomic_write(version_path, _LAYOUT_VERSION + "\n")

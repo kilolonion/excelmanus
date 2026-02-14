@@ -93,6 +93,7 @@ def format_cells(
     border: dict[str, Any] | None = None,
     alignment: dict[str, Any] | None = None,
     number_format: str | None = None,
+    return_styles: bool = False,
 ) -> str:
     """对指定单元格范围应用格式化样式。
 
@@ -150,19 +151,31 @@ def format_cells(
             applied_count += 1
 
     wb.save(safe_path)
+
+    result_data: dict[str, Any] = {
+        "status": "success",
+        "file": safe_path.name,
+        "range": cell_range,
+        "cells_formatted": applied_count,
+    }
+
+    # 格式化后返回样式快照
+    if return_styles:
+        from excelmanus.tools.data_tools import _collect_styles_compressed
+
+        # 需要重新打开文件读取写入后的样式
+        wb2 = load_workbook(safe_path)
+        try:
+            ws2 = wb2[sheet_name] if sheet_name and sheet_name in wb2.sheetnames else wb2.active
+            result_data["after_styles"] = _collect_styles_compressed(ws2, max_rows=200)
+        finally:
+            wb2.close()
+    
     wb.close()
 
     logger.info("已格式化 %s 范围 %s（%d 个单元格）", safe_path.name, cell_range, applied_count)
 
-    return json.dumps(
-        {
-            "status": "success",
-            "file": safe_path.name,
-            "range": cell_range,
-            "cells_formatted": applied_count,
-        },
-        ensure_ascii=False,
-    )
+    return json.dumps(result_data, ensure_ascii=False, indent=2)
 
 
 def adjust_column_width(
@@ -660,7 +673,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="format_cells",
-            description="对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名（如 '红色'）或十六进制码（如 'FF0000'）",
+            description="对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名（如 '红色'）或十六进制码（如 'FF0000'）。设置 return_styles=true 可在格式化后直接返回样式快照，省去额外 read_cell_styles 验证",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -721,6 +734,11 @@ def get_tools() -> list[ToolDef]:
                     "number_format": {
                         "type": "string",
                         "description": "数字格式字符串，如 '#,##0.00'",
+                    },
+                    "return_styles": {
+                        "type": "boolean",
+                        "description": "格式化后返回压缩样式快照（省去额外 read_cell_styles 验证）",
+                        "default": False,
                     },
                 },
                 "required": ["file_path", "cell_range"],

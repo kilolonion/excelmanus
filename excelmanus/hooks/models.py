@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 
 class HookEvent(str, Enum):
@@ -27,11 +27,22 @@ class HookDecision(str, Enum):
 
 
 @dataclass
+class HookAgentAction:
+    """agent hook 的执行动作定义。"""
+
+    task: str
+    agent_name: str | None = None
+    on_failure: Literal["continue", "deny"] = "continue"
+    inject_summary_as_context: bool = True
+
+
+@dataclass
 class HookResult:
     decision: HookDecision = HookDecision.CONTINUE
     reason: str = ""
     updated_input: dict[str, Any] | None = None
     additional_context: str = ""
+    agent_action: HookAgentAction | None = None
     raw_output: dict[str, Any] = field(default_factory=dict)
 
 

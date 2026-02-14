@@ -10,19 +10,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine, ChatResult, DelegateSubagentOutcome, ToolCallResult
 from excelmanus.events import EventType
+from excelmanus.hooks import HookAgentAction, HookDecision, HookEvent, HookResult
 from excelmanus.mcp.manager import add_tool_prefix
 from excelmanus.memory import TokenCounter
 from excelmanus.plan_mode import PendingPlanState, PlanDraft
 from excelmanus.skillpacks import SkillMatchResult, Skillpack
 from excelmanus.subagent import SubagentConfig, SubagentResult
-from excelmanus.tools import ToolRegistry
+from excelmanus.task_list import TaskStatus
+from excelmanus.tools import ToolRegistry, task_tools
 from excelmanus.tools.registry import ToolDef
-
-ApprovalManager.READ_ONLY_SAFE_TOOLS.update({"add_numbers", "fail_tool", "long_tool"})
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -528,6 +527,44 @@ class TestContextBudgetAndHardCap:
         assert "上限: 80 字符" in result.result
 
 
+class TestTaskUpdateFailureSemantics:
+    """task_update 失败语义与事件一致性测试。"""
+
+    @pytest.mark.asyncio
+    async def test_invalid_transition_returns_failure_and_no_task_item_updated_event(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        registry.register_tools(task_tools.get_tools())
+        engine = AgentEngine(config, registry)
+        engine._task_store.create("测试任务", ["子任务A"])
+
+        tc = SimpleNamespace(
+            id="call_task_update_1",
+            function=SimpleNamespace(
+                name="task_update",
+                arguments=json.dumps({"task_index": 0, "status": "completed"}),
+            ),
+        )
+
+        events: list = []
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["task_update"],
+            on_event=events.append,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert result.success is False
+        assert "非法状态转换" in result.result
+        assert all(
+            event.event_type != EventType.TASK_ITEM_UPDATED
+            for event in events
+        )
+        assert engine._task_store.current is not None
+        assert engine._task_store.current.items[0].status == TaskStatus.PENDING
+
+
 class TestPlanModeControl:
     """plan mode 控制命令与执行流测试。"""
 
@@ -549,6 +586,26 @@ class TestPlanModeControl:
         assert engine.plan_mode_enabled is False
 
     @pytest.mark.asyncio
+    async def test_planmode_alias_returns_tombstone_message(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/planmode on")
+        assert "命令已移除，请使用 /plan ..." in result.reply
+        assert engine.plan_mode_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_alias_returns_tombstone_message(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        result = await engine.chat("/plan_mode status")
+        assert "命令已移除，请使用 /plan ..." in result.reply
+        assert engine.plan_mode_enabled is False
+
+    @pytest.mark.asyncio
     async def test_plan_mode_message_generates_pending_plan_only(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
@@ -561,7 +618,7 @@ class TestPlanModeControl:
             markdown="# 计划\n\n## 任务清单\n- [ ] A",
             title="测试计划",
             subtasks=["A"],
-            file_path="outputs/plans/plan_test.md",
+            file_path=".excelmanus/plans/plan_test.md",
             source="plan_mode",
             objective="请规划测试任务",
             created_at_utc="2026-02-13T00:00:00Z",
@@ -589,7 +646,7 @@ class TestPlanModeControl:
             markdown="# 自动化计划\n\n## 任务清单\n- [ ] 第一步\n- [ ] 第二步",
             title="自动化计划",
             subtasks=["第一步", "第二步"],
-            file_path="outputs/plans/plan_test.md",
+            file_path=".excelmanus/plans/plan_test.md",
             source="plan_mode",
             objective="执行自动化任务",
             created_at_utc="2026-02-13T00:00:00Z",
@@ -612,7 +669,7 @@ class TestPlanModeControl:
         assert engine.plan_mode_enabled is False
         assert engine._task_store.current is not None
         assert engine._task_store.current.title == "自动化计划"
-        assert "来源: outputs/plans/plan_test.md" in (engine._approved_plan_context or "")
+        assert "来源: .excelmanus/plans/plan_test.md" in (engine._approved_plan_context or "")
 
     @pytest.mark.asyncio
     async def test_task_create_hook_enters_pending_plan(self) -> None:
@@ -625,7 +682,7 @@ class TestPlanModeControl:
             markdown="# 计划\n\n## 任务清单\n- [ ] A",
             title="任务清单",
             subtasks=["A"],
-            file_path="outputs/plans/plan_hook.md",
+            file_path=".excelmanus/plans/plan_hook.md",
             source="task_create_hook",
             objective="草稿任务",
             created_at_utc="2026-02-13T00:00:00Z",
@@ -675,7 +732,7 @@ class TestPlanModeControl:
             markdown="# 计划\n\n## 任务清单\n- [ ] A",
             title="阻塞计划",
             subtasks=["A"],
-            file_path="outputs/plans/plan_block.md",
+            file_path=".excelmanus/plans/plan_block.md",
             source="plan_mode",
             objective="阻塞目标",
             created_at_utc="2026-02-13T00:00:00Z",
@@ -693,7 +750,7 @@ class TestPlanModeControl:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._approved_plan_context = "来源: outputs/plans/plan_x.md\n# 计划"
+        engine._approved_plan_context = "来源: .excelmanus/plans/plan_x.md\n# 计划"
 
         prompts = engine._build_system_prompts([])
         assert len(prompts) == 1
@@ -2155,6 +2212,176 @@ class TestCommandDispatchAndHooks:
         assert result.success is True
         assert result.result == "11"
 
+    @pytest.mark.asyncio
+    async def test_pre_tool_hook_allow_skips_pending_approval_for_high_risk(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = _make_registry_with_tools()
+
+        def write_text_file(file_path: str, content: str) -> str:
+            Path(file_path).write_text(content, encoding="utf-8")
+            return "ok"
+
+        registry.register_tool(
+            ToolDef(
+                name="write_text_file",
+                description="写入文本",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["file_path", "content"],
+                },
+                func=write_text_file,
+            )
+        )
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="hook/allow",
+            description="allow hook",
+            allowed_tools=["write_text_file"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PreToolUse": [
+                    {
+                        "matcher": "write_text_file",
+                        "hooks": [{"type": "prompt", "decision": "allow"}],
+                    }
+                ]
+            },
+        )
+
+        output = tmp_path / "hook_allow.txt"
+        tc = SimpleNamespace(
+            id="call_hook_allow",
+            function=SimpleNamespace(
+                name="write_text_file",
+                arguments=json.dumps({"file_path": str(output), "content": "ok"}),
+            ),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["write_text_file"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.pending_approval is False
+        assert output.exists()
+
+    def test_non_pre_tool_ask_downgrades_to_continue(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        skill = Skillpack(
+            name="hook/ask_scope",
+            description="ask scope",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "UserPromptSubmit": {
+                    "type": "prompt",
+                    "decision": "ask",
+                    "reason": "需要确认",
+                }
+            },
+        )
+
+        result = engine._run_skill_hook(
+            skill=skill,
+            event=HookEvent.USER_PROMPT_SUBMIT,
+            payload={"user_message": "测试"},
+        )
+        assert result is not None
+        assert result.decision == HookDecision.CONTINUE
+        assert "不支持 ASK" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_agent_hook_runs_subagent_and_injects_context(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine.run_subagent = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="子代理摘要",
+                subagent_name="explorer",
+                permission_mode="default",
+                conversation_id="sub_1",
+            )
+        )
+        engine._active_skill = Skillpack(
+            name="hook/agent",
+            description="agent hook",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PreToolUse": [
+                    {
+                        "matcher": "add_numbers",
+                        "hooks": [
+                            {
+                                "type": "agent",
+                                "agent_name": "explorer",
+                                "task": "请检查调用参数",
+                                "inject_summary_as_context": True,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        tc = SimpleNamespace(
+            id="call_hook_agent",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 1, "b": 2}),
+            ),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.result == "3"
+        engine.run_subagent.assert_awaited_once()
+        assert any("子代理摘要" in item for item in engine._transient_hook_contexts)
+
+    @pytest.mark.asyncio
+    async def test_agent_hook_recursion_guard_respects_on_failure_deny(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._hook_agent_action_depth = 1
+
+        resolved = await engine._resolve_hook_result(
+            event=HookEvent.PRE_TOOL_USE,
+            hook_result=HookResult(
+                decision=HookDecision.CONTINUE,
+                agent_action=HookAgentAction(task="递归测试", on_failure="deny"),
+            ),
+            on_event=None,
+        )
+        assert resolved is not None
+        assert resolved.decision == HookDecision.DENY
+        assert "递归触发" in resolved.reason
+
 
 class TestChatPureText:
     """纯文本回复场景（Requirement 1.3）。"""
@@ -2534,8 +2761,10 @@ class TestAsyncToolExecution:
             # 验证 to_thread 被调用
             mock_to_thread.assert_called_once()
             call_args = mock_to_thread.call_args
-            # 第一个参数是 registry.call_tool
-            assert call_args[0][1] == "add_numbers"
+            # 当前实现使用闭包封装 registry.call_tool，再提交给 to_thread。
+            assert len(call_args.args) == 1
+            assert callable(call_args.args[0])
+            assert result == "结果是 15"
 
 
 class TestClearMemory:
@@ -3009,13 +3238,13 @@ async def test_property_20_async_non_blocking(n_calls: int) -> None:
         # 不变量 1：asyncio.to_thread 被调用了 n_calls 次
         assert mock_to_thread.call_count == n_calls
 
-        # 不变量 2：每次调用的第一个参数是 registry.call_tool
+        # 不变量 2：每次调用都传入了可在线程池执行的可调用对象
         for call in mock_to_thread.call_args_list:
-            assert call[0][0] == registry.call_tool
+            assert len(call.args) == 1
+            assert callable(call.args[0])
 
-        # 不变量 3：每次调用传入了正确的工具名称
-        called_tool_names = [call[0][1] for call in mock_to_thread.call_args_list]
-        assert all(name == "add_numbers" for name in called_tool_names)
+        # 不变量 3：流程可正常收敛到最终文本结果
+        assert result == "完成"
 
 
 class TestApprovalFlow:
@@ -3077,6 +3306,32 @@ class TestApprovalFlow:
                     "required": ["output_path"],
                 },
                 func=create_chart,
+            ),
+        ])
+        return registry
+
+    def _make_registry_with_failing_write_tool(self, workspace: Path) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def write_text_file(file_path: str, content: str) -> str:
+            target = workspace / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            raise RuntimeError("intentional_write_failure")
+
+        registry.register_tools([
+            ToolDef(
+                name="write_text_file",
+                description="写文件后抛错",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["file_path", "content"],
+                },
+                func=write_text_file,
             ),
         ])
         return registry
@@ -3161,6 +3416,49 @@ class TestApprovalFlow:
         undo_reply = await engine.chat(f"/undo {approval_id}")
         assert "已回滚" in undo_reply
         assert not (tmp_path / "c.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_failed_accept_still_writes_failed_manifest(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_failing_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "err.txt", "content": "x"}))
+        ])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        await engine.chat("写文件")
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+
+        accept_reply = await engine.chat(f"/accept {approval_id}")
+        assert "accept 执行失败" in accept_reply
+        manifest_path = tmp_path / "outputs" / "approvals" / approval_id / "manifest.json"
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["execution"]["status"] == "failed"
+        assert manifest["execution"]["error_type"] == "ToolExecutionError"
+
+    @pytest.mark.asyncio
+    async def test_undo_after_restart_loads_manifest(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine1 = AgentEngine(config, registry)
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "restart.txt", "content": "v"}))
+        ])
+        engine1._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        await engine1.chat("写文件")
+        assert engine1._approval.pending is not None
+        approval_id = engine1._approval.pending.approval_id
+        await engine1.chat(f"/accept {approval_id}")
+        assert (tmp_path / "restart.txt").exists()
+
+        engine2 = AgentEngine(config, registry)
+        undo_reply = await engine2.chat(f"/undo {approval_id}")
+        assert "已回滚" in undo_reply
+        assert not (tmp_path / "restart.txt").exists()
 
     @pytest.mark.asyncio
     async def test_fullaccess_bypass_accept(self, tmp_path: Path) -> None:

@@ -17,9 +17,10 @@ from httpx import ASGITransport, AsyncClient
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.persistent_memory import PersistentMemory
 from excelmanus.session import SessionManager
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
-from excelmanus.tools import ToolRegistry
+from excelmanus.tools import ToolRegistry, memory_tools
 
 import excelmanus.api as api_module
 from excelmanus.api import app
@@ -37,6 +38,7 @@ def _test_config(**overrides) -> ExcelManusConfig:
         model="test-model",
         session_ttl_seconds=60,
         max_sessions=5,
+        workspace_root="/tmp/excelmanus-test-api",
     )
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -220,6 +222,27 @@ class TestRequestValidation:
         assert resp.status_code == 422
 
 
+class TestMemoryIsolation:
+    """验证 API 临时 skill 引擎不会污染记忆工具上下文。"""
+
+    @pytest.mark.asyncio
+    async def test_skill_api_does_not_reset_memory_tool_global(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        pm = PersistentMemory(str(tmp_path / "memory"))
+        (pm.memory_dir / "user_prefs.md").write_text("保持不变", encoding="utf-8")
+        memory_tools.init_memory(pm)
+        try:
+            resp = await client.get("/api/v1/skills")
+            assert resp.status_code == 200
+            assert memory_tools._persistent_memory is pm
+            assert "保持不变" in memory_tools.memory_read_topic("user_prefs")
+        finally:
+            memory_tools.init_memory(None)
+
+
 # ── 单元测试：Property 13 - API 会话复用 ─────────────────
 
 
@@ -254,7 +277,7 @@ class TestProperty13SessionReuse:
         assert resp2.status_code == 200
         assert resp2.json()["session_id"] == sid
         manager: SessionManager = setup_api_state["manager"]
-        assert manager.active_count == 1
+        assert await manager.get_active_count() == 1
 
     @pytest.mark.asyncio
     async def test_same_session_concurrent_request_returns_409(
@@ -282,6 +305,40 @@ class TestProperty13SessionReuse:
             second = await client.post(
                 "/api/v1/chat",
                 json={"message": "第二条", "session_id": "busy-sid"},
+            )
+            gate.set()
+            first_resp = await first
+
+        assert first_resp.status_code == 200
+        assert second.status_code == 409
+        assert "error" in second.json()
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_holds_session_and_chat_returns_409(
+        self, client: AsyncClient
+    ) -> None:
+        """stream 占用会话时，同 session_id 的 chat 请求应返回 409。"""
+        gate = asyncio.Event()
+
+        async def slow_reply(_: str, **kwargs) -> str:
+            await gate.wait()
+            return "慢速流式回复"
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            side_effect=slow_reply,
+        ):
+            first = asyncio.create_task(
+                client.post(
+                    "/api/v1/chat/stream",
+                    json={"message": "流式请求", "session_id": "stream-busy"},
+                )
+            )
+            await asyncio.sleep(0.02)
+            second = await client.post(
+                "/api/v1/chat",
+                json={"message": "并发请求", "session_id": "stream-busy"},
             )
             gate.set()
             first_resp = await first
@@ -320,7 +377,7 @@ class TestProperty14SessionDeletion:
 
         del_resp = await client.delete(f"/api/v1/sessions/{sid}")
         assert del_resp.status_code == 200
-        assert manager.active_count == 0
+        assert await manager.get_active_count() == 0
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
@@ -343,6 +400,35 @@ class TestProperty14SessionDeletion:
         """删除不存在的会话返回 404。"""
         resp = await client.delete("/api/v1/sessions/nonexistent-id")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_busy_session_returns_409(self, client: AsyncClient) -> None:
+        """会话处理中时，删除接口应返回 409。"""
+        gate = asyncio.Event()
+
+        async def slow_reply(_: str, **kwargs) -> str:
+            await gate.wait()
+            return "慢速回复"
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            side_effect=slow_reply,
+        ):
+            first = asyncio.create_task(
+                client.post(
+                    "/api/v1/chat",
+                    json={"message": "第一条", "session_id": "delete-busy"},
+                )
+            )
+            await asyncio.sleep(0.02)
+            delete_resp = await client.delete("/api/v1/sessions/delete-busy")
+            gate.set()
+            first_resp = await first
+
+        assert first_resp.status_code == 200
+        assert delete_resp.status_code == 409
+        assert "error" in delete_resp.json()
 
 
 # ── 单元测试：Property 15 - API 异常不泄露 ───────────────
@@ -502,7 +588,10 @@ class TestExternalSafeMode:
                         tool_calls=[
                             ToolCallResult(
                                 tool_name="read_excel",
-                                arguments={"file_path": "sales.xlsx"},
+                                arguments={
+                                    "file_path": "/Users/demo/private/sales.xlsx",
+                                    "Authorization": "Bearer abcdef123456",
+                                },
                                 result="ok",
                                 success=True,
                             )
@@ -523,6 +612,8 @@ class TestExternalSafeMode:
         assert isinstance(data["tool_calls"], list)
         assert len(data["tool_calls"]) == 1
         assert data["tool_calls"][0]["tool_name"] == "read_excel"
+        assert data["tool_calls"][0]["arguments"]["file_path"] == "<path>/sales.xlsx"
+        assert data["tool_calls"][0]["arguments"]["Authorization"] == "Bearer ***"
         assert data["tool_calls"][0]["pending_question"] is False
         assert data["tool_calls"][0]["question_id"] is None
 
@@ -698,6 +789,23 @@ class TestExternalSafeMode:
         assert "event: task_update" in sse
         assert '"task_index": 1' in sse
         assert '"task_status": "completed"' in sse
+
+    def test_sse_tool_call_start_masks_arguments_when_safe_mode_disabled(self) -> None:
+        event = ToolCallEvent(
+            event_type=EventType.TOOL_CALL_START,
+            tool_name="read_excel",
+            arguments={
+                "file_path": "/Users/demo/private.xlsx",
+                "Authorization": "Bearer abcdef123456",
+            },
+            iteration=1,
+        )
+        sse = api_module._sse_event_to_sse(event, safe_mode=False)
+        assert sse is not None
+        assert "/Users/demo/private.xlsx" not in sse
+        assert "<path>/private.xlsx" in sse
+        assert "abcdef123456" not in sse
+        assert "Bearer ***" in sse
 
     def test_sse_task_update_contract_stable_in_safe_mode_on_off(self) -> None:
         """TASK_LIST_CREATED 在 safe_mode 开关下都应映射为 task_update。"""
@@ -1263,10 +1371,20 @@ class TestCleanupIntervalStrategy:
     """TTL 清理间隔策略测试。"""
 
     def test_cleanup_interval_scales_with_ttl(self) -> None:
-        assert api_module._cleanup_interval_from_ttl(1) == 1
-        assert api_module._cleanup_interval_from_ttl(2) == 1
-        assert api_module._cleanup_interval_from_ttl(10) == 5
-        assert api_module._cleanup_interval_from_ttl(120) == 60
+        assert SessionManager.cleanup_interval_from_ttl(1) == 1
+        assert SessionManager.cleanup_interval_from_ttl(2) == 1
+        assert SessionManager.cleanup_interval_from_ttl(10) == 5
+        assert SessionManager.cleanup_interval_from_ttl(120) == 60
+
+
+class TestOpenAPIContract:
+    """OpenAPI 契约一致性测试。"""
+
+    def test_delete_session_openapi_declares_409(self) -> None:
+        app.openapi_schema = None
+        schema = app.openapi()
+        responses = schema["paths"]["/api/v1/sessions/{session_id}"]["delete"]["responses"]
+        assert "409" in responses
 
 
 # ── 单元测试：Property 18 - 会话 TTL 清理（API 层） ──────
@@ -1292,12 +1410,12 @@ class TestProperty18TTLCleanupAPI:
                 "/api/v1/chat", json={"message": "创建"},
             )
         sid = resp.json()["session_id"]
-        assert manager.active_count == 1
+        assert await manager.get_active_count() == 1
 
         manager._sessions[sid].last_access = 0.0
         removed = await manager.cleanup_expired(now=61.0)
         assert removed == 1
-        assert manager.active_count == 0
+        assert await manager.get_active_count() == 0
 
 
 # ── 单元测试：Property 20 - 异步不阻塞（API 层） ────────
@@ -1448,7 +1566,7 @@ class TestPBTProperty13SessionReuse:
                     assert resp.json()["session_id"] == sid
 
             # 不变量 2：SessionManager 中只有一个会话
-            assert manager.active_count == 1
+            assert await manager.get_active_count() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1493,7 +1611,7 @@ class TestPBTProperty14SessionDeletion:
                 del_resp = await c.delete(f"/api/v1/sessions/{session_id}")
                 assert del_resp.status_code == 200
                 # 不变量 1：删除后会话数为 0
-                assert manager.active_count == 0
+                assert await manager.get_active_count() == 0
 
                 # 用同一 ID 再次请求
                 with patch(
@@ -1612,7 +1730,7 @@ class TestPBTProperty18TTLCleanupAPI:
 
         # 不变量：所有会话都被清理
         assert removed == n_sessions
-        assert manager.active_count == 0
+        assert await manager.get_active_count() == 0
 
 
 # ---------------------------------------------------------------------------

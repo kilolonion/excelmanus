@@ -35,7 +35,7 @@ _no_quote_chars = st.text(
 _fm_key = st.from_regex(r"[a-z][a-z0-9_]{0,15}", fullmatch=True)
 
 # 合法的标量值策略（str / int / bool）
-# 字符串值需要避免被 _parse_scalar 误解析为 bool/int/引号字符串/列表
+# 字符串值需要避免被 parse_scalar 误解析为 bool/int/引号字符串/列表
 _safe_str_value = st.text(
     alphabet=st.characters(
         whitelist_categories=("L", "N", "P", "S"),
@@ -56,7 +56,7 @@ _safe_str_value = st.text(
 _int_value = st.integers(min_value=-9999, max_value=9999)
 _bool_value = st.booleans()
 
-# 标量值：str / int / bool（不含 float，因为 _parse_scalar 不解析 float）
+# 标量值：str / int / bool（不含 float，因为 parse_scalar 不解析 float）
 _scalar_value = st.one_of(_safe_str_value, _int_value, _bool_value)
 
 # 列表值：列表中的元素也是标量
@@ -84,11 +84,11 @@ _fm_dict = st.dictionaries(
 @given(s=_no_quote_chars)
 def test_property_3_double_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（双引号）：对于任意不含引号字符的字符串 s，
-    _parse_scalar('"' + s + '"') 应返回 s。
+    parse_scalar('"' + s + '"') 应返回 s。
 
     **Validates: Requirements 5.1**
     """
-    result = SkillpackLoader._parse_scalar(f'"{s}"')
+    result = SkillpackLoader.parse_scalar(f'"{s}"')
     assert result == s, (
         f"双引号解析失败：输入 '\"{ s }\"'，期望 {s!r}，实际 {result!r}"
     )
@@ -97,11 +97,11 @@ def test_property_3_double_quoted_string_parsed_correctly(s: str) -> None:
 @given(s=_no_quote_chars)
 def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（单引号）：对于任意不含引号字符的字符串 s，
-    _parse_scalar("'" + s + "'") 应返回 s。
+    parse_scalar("'" + s + "'") 应返回 s。
 
     **Validates: Requirements 5.1**
     """
-    result = SkillpackLoader._parse_scalar(f"'{s}'")
+    result = SkillpackLoader.parse_scalar(f"'{s}'")
     assert result == s, (
         f"单引号解析失败：输入 \"'{ s }'\"，期望 {s!r}，实际 {result!r}"
     )
@@ -135,7 +135,7 @@ def test_property_4_invalid_yaml_raises_validation_error(
     suffix: str,
 ) -> None:
     """Property 4：对于非法 YAML frontmatter 文本，
-    _parse_frontmatter() 应抛出 SkillpackValidationError。
+    parse_frontmatter() 应抛出 SkillpackValidationError。
 
     **Validates: Requirements 5.3**
     """
@@ -149,7 +149,7 @@ def test_property_4_invalid_yaml_raises_validation_error(
         frontmatter_text = f"{key}: '{suffix}"
 
     with pytest.raises(SkillpackValidationError):
-        SkillpackLoader._parse_frontmatter(frontmatter_text)
+        SkillpackLoader.parse_frontmatter(frontmatter_text)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ def test_property_4_invalid_yaml_raises_validation_error(
 def _normalize_value(v):
     """将值规范化以便比较 round-trip 结果。
 
-    _format_frontmatter 输出的字符串经 _parse_scalar 解析后，
+    format_frontmatter 输出的字符串经 parse_scalar 解析后，
     某些类型会发生预期的转换（如 float → str，因为解析器不支持 float）。
     """
     if isinstance(v, list):
@@ -173,15 +173,15 @@ def _normalize_value(v):
 @given(data=_fm_dict)
 def test_property_5_frontmatter_round_trip(data: dict) -> None:
     """Property 5：对于任意合法的 frontmatter 字典，
-    _parse_frontmatter(_format_frontmatter(d)) 应产生与 d 等价的字典。
+    parse_frontmatter(format_frontmatter(d)) 应产生与 d 等价的字典。
 
     **Validates: Requirements 5.5**
     """
     # 格式化为 frontmatter 文本
-    formatted = SkillpackLoader._format_frontmatter(data)
+    formatted = SkillpackLoader.format_frontmatter(data)
 
     # 解析回字典
-    parsed = SkillpackLoader._parse_frontmatter(formatted)
+    parsed = SkillpackLoader.parse_frontmatter(formatted)
 
     # 规范化后比较
     expected = {k: _normalize_value(v) for k, v in data.items()}
