@@ -5,8 +5,8 @@ import AppHeader from './AppHeader.vue'
 describe('AppHeader', () => {
   it('渲染应用标题和说明', () => {
     const wrapper = mount(AppHeader)
-    expect(wrapper.find('.app-title').text()).toBe('ExcelManus v3')
-    expect(wrapper.find('.app-desc').text()).toBe('智能 Excel 代理 — 用自然语言处理 Excel 任务')
+    expect(wrapper.find('.app-title').text()).toBe('ExcelManus')
+    expect(wrapper.find('.app-desc').text()).toBe('智能 Excel 代理 · 自然语言驱动')
   })
 
   it('包含新建会话按钮', () => {

@@ -22,7 +22,8 @@ describe('ChatPanel', () => {
       props: { messages: [], loading: false },
     })
     expect(wrapper.find('.empty-state').exists()).toBe(true)
-    expect(wrapper.find('.welcome-text').text()).toContain('👋 你好！请在下方输入框中描述你的 Excel 任务。')
+    expect(wrapper.find('.welcome-title').text()).toContain('你好，欢迎使用 ExcelManus')
+    expect(wrapper.find('.welcome-desc').text()).toContain('用自然语言描述你的 Excel 任务')
   })
 
   it('消息为空但 loading 时不显示欢迎提示（有流式消息占位）', () => {
