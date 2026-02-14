@@ -29,8 +29,6 @@ _SUPPORTED_FIELDS = {
     "disable_model_invocation",
     "user_invocable",
     "argument_hint",
-    "context",
-    "agent",
     "hooks",
     "model",
     "metadata",
@@ -62,8 +60,6 @@ _DEFAULTS: dict[str, Any] = {
     "disable_model_invocation": False,
     "user_invocable": True,
     "argument_hint": "",
-    "context": "normal",
-    "agent": None,
     "hooks": {},
     "model": None,
     "metadata": {},
@@ -277,9 +273,6 @@ class SkillpackManager:
         if not instructions:
             instructions = "测试说明"
 
-        if merged.get("context") == "fork" and not merged.get("agent"):
-            merged["agent"] = "explorer"
-
         if merged.get("command_dispatch") == "tool" and not merged.get("command_tool"):
             raise SkillpackInputError("`command_dispatch=tool` 时必须提供 `command_tool`。")
 
@@ -306,8 +299,6 @@ class SkillpackManager:
             "disable_model_invocation": base.disable_model_invocation,
             "user_invocable": base.user_invocable,
             "argument_hint": base.argument_hint,
-            "context": base.context,
-            "agent": base.agent,
             "hooks": dict(base.hooks),
             "model": base.model,
             "metadata": dict(base.metadata),
@@ -348,14 +339,6 @@ class SkillpackManager:
         argument_hint = str(payload.get("argument_hint", "") or "").strip()
         if argument_hint:
             frontmatter["argument-hint"] = argument_hint
-
-        context = str(payload.get("context", "normal") or "normal").strip().lower()
-        if context != "normal":
-            frontmatter["context"] = context
-
-        agent = payload.get("agent")
-        if isinstance(agent, str) and agent.strip():
-            frontmatter["agent"] = agent.strip()
 
         hooks = payload.get("hooks")
         if isinstance(hooks, dict) and hooks:
@@ -399,6 +382,20 @@ class SkillpackManager:
                 raise SkillpackInputError(f"字段冲突：`{key}` 与同义字段值不一致。")
             canonical[mapped] = value
 
+        if "context" in canonical:
+            context_raw = str(canonical.get("context", "")).strip().lower()
+            if context_raw == "fork":
+                raise SkillpackInputError(
+                    "`context: fork` 已移除。请改为常规技能，并在运行时显式调用 "
+                    "`delegate_to_subagent(agent_name=...)`。"
+                )
+            raise SkillpackInputError("`context` 字段已移除，不再支持传入。")
+        if "agent" in canonical:
+            raise SkillpackInputError(
+                "`agent` 字段已移除。请在运行时显式调用 "
+                "`delegate_to_subagent(agent_name=...)`。"
+            )
+
         keys = set(canonical.keys())
         unknown = sorted(keys - _SUPPORTED_FIELDS)
         if unknown:
@@ -419,7 +416,7 @@ class SkillpackManager:
                     value,
                     allow_empty=(key in {"argument_hint", "instructions"}),
                 )
-            elif key in {"agent", "model", "command_tool"}:
+            elif key in {"model", "command_tool"}:
                 normalized[key] = self._normalize_optional_str(key, value)
             elif key in {
                 "allowed_tools",
@@ -437,11 +434,6 @@ class SkillpackManager:
                 normalized[key] = self._normalize_bool(key, value)
             elif key == "priority":
                 normalized[key] = self._normalize_int(key, value)
-            elif key == "context":
-                context = self._normalize_str(key, value, allow_empty=False).lower()
-                if context not in {"normal", "fork"}:
-                    raise SkillpackInputError("`context` 只能是 normal 或 fork。")
-                normalized[key] = context
             elif key == "command_dispatch":
                 mode = self._normalize_str(key, value, allow_empty=False).lower()
                 if mode not in {"none", "tool"}:
@@ -565,8 +557,6 @@ class SkillpackManager:
             "disable_model_invocation": skill.disable_model_invocation,
             "user_invocable": skill.user_invocable,
             "argument_hint": skill.argument_hint,
-            "context": skill.context,
-            "agent": skill.agent,
             "hooks": dict(skill.hooks),
             "model": skill.model,
             "metadata": dict(skill.metadata),

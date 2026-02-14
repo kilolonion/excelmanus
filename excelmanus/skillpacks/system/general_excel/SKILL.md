@@ -8,6 +8,7 @@ allowed_tools:
   - filter_data
   - transform_data
   - group_aggregate
+  - analyze_sheet_mapping
   - create_chart
   - create_excel_chart
   - format_cells
@@ -41,6 +42,7 @@ allowed_tools:
   - rename_sheet
   - delete_sheet
   - copy_range_between_sheets
+  - memory_read_topic
 triggers: []
 file_patterns:
   - "*.xlsx"

@@ -10,15 +10,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from excelmanus.config import ExcelManusConfig
+from excelmanus.approval import ApprovalManager
+from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine, ChatResult, DelegateSubagentOutcome, ToolCallResult
 from excelmanus.events import EventType
 from excelmanus.mcp.manager import add_tool_prefix
+from excelmanus.memory import TokenCounter
 from excelmanus.plan_mode import PendingPlanState, PlanDraft
 from excelmanus.skillpacks import SkillMatchResult, Skillpack
 from excelmanus.subagent import SubagentConfig, SubagentResult
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
+
+ApprovalManager.READ_ONLY_SAFE_TOOLS.update({"add_numbers", "fail_tool", "long_tool"})
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -324,6 +328,204 @@ class TestControlCommandSubagent:
             agent_name=None,
             on_event=None,
         )
+
+
+class TestModelSwitchConsistency:
+    """模型切换与路由模型一致性测试。"""
+
+    def test_switch_model_syncs_router_when_router_model_not_configured(self) -> None:
+        config = _make_config(
+            model="main-a",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        assert engine._router_follow_active_model is True
+        assert engine._router_model == "main-a"
+        assert engine._router_client is engine._client
+
+        msg = engine.switch_model("alt")
+        assert "已切换到模型" in msg
+        assert engine._active_model == "main-b"
+        assert engine._router_model == "main-b"
+        assert engine._router_client is engine._client
+
+    def test_switch_model_keeps_router_when_router_model_configured(self) -> None:
+        config = _make_config(
+            model="main-a",
+            router_model="router-fixed",
+            router_api_key="router-key",
+            router_base_url="https://router.example.com/v1",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        old_router_client = engine._router_client
+
+        assert engine._router_follow_active_model is False
+        assert engine._router_model == "router-fixed"
+
+        engine.switch_model("alt")
+        assert engine._active_model == "main-b"
+        assert engine._router_model == "router-fixed"
+        assert engine._router_client is old_router_client
+        assert engine._router_client is not engine._client
+
+
+class TestSystemMessageMode:
+    """system_message_mode 行为测试。"""
+
+    def test_auto_mode_defaults_to_replace(self) -> None:
+        config = _make_config(system_message_mode="auto")
+        engine = AgentEngine(config, _make_registry_with_tools())
+        assert engine._effective_system_mode() == "replace"
+
+    def test_build_system_prompts_replace_mode_splits_system_messages(self) -> None:
+        config = _make_config(system_message_mode="replace")
+        engine = AgentEngine(config, _make_registry_with_tools())
+        prompts = engine._build_system_prompts(["[Skillpack] data_basic\n描述：测试"])
+        assert len(prompts) == 2
+        assert "[Skillpack] data_basic" in prompts[1]
+
+    def test_build_system_prompts_merge_mode_merges_into_single_message(self) -> None:
+        config = _make_config(system_message_mode="merge")
+        engine = AgentEngine(config, _make_registry_with_tools())
+        prompts = engine._build_system_prompts(["[Skillpack] data_basic\n描述：测试"])
+        assert len(prompts) == 1
+        assert "[Skillpack] data_basic" in prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_fallback_merges_messages_after_provider_compat_error(self) -> None:
+        config = _make_config(system_message_mode="auto")
+        engine = AgentEngine(config, _make_registry_with_tools())
+        mocked_create = AsyncMock(
+            side_effect=[
+                RuntimeError("at most one system message is supported"),
+                _make_text_response("ok"),
+            ]
+        )
+        engine._client.chat.completions.create = mocked_create
+
+        response = await engine._create_chat_completion_with_system_fallback(
+            {
+                "model": config.model,
+                "messages": [
+                    {"role": "system", "content": "S1"},
+                    {"role": "system", "content": "S2"},
+                    {"role": "user", "content": "hello"},
+                ],
+            }
+        )
+
+        assert response.choices[0].message.content == "ok"
+        assert mocked_create.call_count == 2
+        retry_messages = mocked_create.call_args_list[1].kwargs["messages"]
+        assert retry_messages[0]["role"] == "system"
+        assert "S1" in retry_messages[0]["content"]
+        assert "S2" in retry_messages[0]["content"]
+        assert sum(1 for msg in retry_messages if msg.get("role") == "system") == 1
+        assert engine._system_mode_fallback == "merge"
+
+
+class TestContextBudgetAndHardCap:
+    """上下文预算与工具结果全局硬截断测试。"""
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_messages_fit_max_context_budget(self) -> None:
+        config = _make_config(max_context_tokens=3000)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine.memory.add_user_message("测试上下文预算")
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["add_numbers"],
+            route_mode="fallback",
+            system_contexts=["X" * 6000],
+        )
+        mocked_create = AsyncMock(return_value=_make_text_response("ok"))
+        engine._client.chat.completions.create = mocked_create
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+        assert result.reply == "ok"
+        assert mocked_create.call_count == 1
+
+        _, kwargs = mocked_create.call_args
+        sent_messages = kwargs["messages"]
+        total_tokens = sum(TokenCounter.count_message(m) for m in sent_messages)
+        assert total_tokens <= int(config.max_context_tokens * 0.9)
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_returns_actionable_error_when_system_prompt_itself_over_budget(self) -> None:
+        config = _make_config(max_context_tokens=20)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine.memory.add_user_message("测试极小上下文")
+        mocked_create = AsyncMock(return_value=_make_text_response("不应调用"))
+        engine._client.chat.completions.create = mocked_create
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert "系统上下文过长" in result.reply
+        mocked_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_applies_global_hard_cap(self) -> None:
+        def long_tool() -> str:
+            return "A" * 500
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="long_tool",
+                description="长文本工具",
+                input_schema={"type": "object", "properties": {}},
+                func=long_tool,
+                max_result_chars=0,
+            ),
+        ])
+
+        config = _make_config(tool_result_hard_cap_chars=80)
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_long",
+            function=SimpleNamespace(name="long_tool", arguments="{}"),
+        )
+
+        result = await engine._execute_tool_call(
+            tc,
+            tool_scope=["long_tool"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert result.success is True
+        assert "结果已全局截断" in result.result
+        assert "上限: 80 字符" in result.result
 
 
 class TestPlanModeControl:
@@ -672,11 +874,11 @@ class TestManualSkillSlashCommand:
         assert "不允许手动调用" in result.reply
 
 
-class TestForkSubagentExecution:
-    """fork 子代理执行流程测试（fork_plan 已移除，子代理不再自动触发）。"""
+class TestForkPathRemoved:
+    """fork 链路已硬移除，仅保留显式 delegate_to_subagent。"""
 
     @pytest.mark.asyncio
-    async def test_chat_delegates_when_active_skill_context_is_fork(self) -> None:
+    async def test_chat_with_active_skill_no_longer_auto_delegates(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -689,141 +891,62 @@ class TestForkSubagentExecution:
             instructions="",
             source="project",
             root_dir="/tmp/skill",
-            context="fork",
-            agent="Explore",
         )
         route_result = SkillMatchResult(
-            skills_used=[],
-            tool_scope=[],
+            skills_used=["excel_code_runner"],
+            tool_scope=["add_numbers"],
             route_mode="fallback",
-            system_contexts=[],
+            system_contexts=["[Skillpack] excel_code_runner"],
         )
         engine._route_skills = AsyncMock(return_value=route_result)
         engine._delegate_to_subagent = AsyncMock(
             return_value=DelegateSubagentOutcome(
-                reply="子代理执行完成。",
+                reply="不应被调用",
                 success=True,
-                picked_agent="explorer",
-                task_text="请处理这个大文件",
-                normalized_paths=[],
-                subagent_result=None,
             )
         )
         engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response("主代理不应执行")
+            return_value=_make_text_response("主代理执行完成。")
         )
 
         result = await engine.chat("请处理这个大文件")
-        assert isinstance(result, ChatResult)
-        assert result.reply == "子代理执行完成。"
-        engine._delegate_to_subagent.assert_awaited_once()
-        kwargs = engine._delegate_to_subagent.await_args.kwargs
-        assert kwargs["agent_name"] == "explorer"
-        assert kwargs["task"] == "请处理这个大文件"
-        engine._client.chat.completions.create.assert_not_called()
+        assert result.reply == "主代理执行完成。"
+        engine._delegate_to_subagent.assert_not_awaited()
+        engine._client.chat.completions.create.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_chat_skips_fork_after_fork_plan_removed(self) -> None:
-        """fork_plan 已从 SkillMatchResult 移除，子代理不再自动触发。"""
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        route_result = SkillMatchResult(
-            skills_used=["excel_code_runner"],
-            tool_scope=["add_numbers"],
-            route_mode="hint_direct+fork",
-            system_contexts=["[Skillpack] excel_code_runner"],
-        )
-        engine._route_skills = AsyncMock(return_value=route_result)
-
-        main_reply = _make_text_response("主代理执行完成。")
-        engine._client.chat.completions.create = AsyncMock(return_value=main_reply)
-
-        events = []
-
-        def _on_event(event) -> None:
-            events.append(event)
-
-        result = await engine.chat("请处理这个大文件", on_event=_on_event)
-        assert result == "主代理执行完成。"
-        # 只调用一次 LLM（主代理），不再触发 fork 子代理
-        assert engine._client.chat.completions.create.call_count == 1
-        assert "+fork_executed" not in engine.last_route_result.route_mode
-        event_types = [e.event_type for e in events]
-        assert EventType.SUBAGENT_START not in event_types
-
-    @pytest.mark.asyncio
-    async def test_chat_skips_fork_when_subagent_disabled(self) -> None:
-        config = _make_config(subagent_enabled=False)
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        route_result = SkillMatchResult(
-            skills_used=["excel_code_runner"],
-            tool_scope=["add_numbers"],
-            route_mode="hint_direct+fork",
-            system_contexts=["[Skillpack] excel_code_runner"],
-        )
-        engine._route_skills = AsyncMock(return_value=route_result)
-
-        main_reply = _make_text_response("主代理执行完成。")
-        engine._client.chat.completions.create = AsyncMock(return_value=main_reply)
-
-        result = await engine.chat("请处理这个大文件")
-        assert result == "主代理执行完成。"
-        assert engine._client.chat.completions.create.call_count == 1
-        assert "+fork_executed" not in engine.last_route_result.route_mode
-
-    @pytest.mark.asyncio
-    async def test_tool_loop_select_skill_fork_delegates_immediately(self) -> None:
+    async def test_select_skill_success_no_longer_triggers_auto_delegate(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._memory.add_user_message("请分析销售趋势")
-
-        fork_skill = Skillpack(
-            name="team/fork-analyst",
-            description="fork skill",
-            allowed_tools=["delegate_to_subagent"],
-            triggers=[],
-            instructions="",
-            source="project",
-            root_dir="/tmp/skill",
-            context="fork",
-            agent="Plan",
-        )
+        engine._delegate_to_subagent = AsyncMock()
 
         async def _fake_execute_tool_call(*args, **kwargs) -> ToolCallResult:
-            engine._active_skill = fork_skill
+            engine._active_skill = Skillpack(
+                name="team/analyst",
+                description="普通技能",
+                allowed_tools=["add_numbers"],
+                triggers=[],
+                instructions="",
+                source="project",
+                root_dir="/tmp/skill",
+            )
             return ToolCallResult(
                 tool_name="select_skill",
-                arguments={"skill_name": "team/fork-analyst"},
+                arguments={"skill_name": "team/analyst"},
                 result="OK",
                 success=True,
             )
 
         engine._execute_tool_call = AsyncMock(side_effect=_fake_execute_tool_call)
-        engine._delegate_to_subagent = AsyncMock(
-            return_value=DelegateSubagentOutcome(
-                reply="已自动委派 planner 子代理。",
-                success=True,
-                picked_agent="planner",
-                task_text="请分析销售趋势",
-                normalized_paths=[],
-                subagent_result=None,
-            )
-        )
         engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_tool_call_response(
-                [
-                    (
-                        "call_1",
-                        "select_skill",
-                        json.dumps({"skill_name": "team/fork-analyst"}),
-                    )
-                ]
-            )
+            side_effect=[
+                _make_tool_call_response(
+                    [("call_1", "select_skill", json.dumps({"skill_name": "team/analyst"}))]
+                ),
+                _make_text_response("主代理继续执行。"),
+            ]
         )
 
         route_result = SkillMatchResult(
@@ -834,12 +957,13 @@ class TestForkSubagentExecution:
         )
         result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        assert result.reply == "已自动委派 planner 子代理。"
-        engine._delegate_to_subagent.assert_awaited_once()
-        kwargs = engine._delegate_to_subagent.await_args.kwargs
-        assert kwargs["agent_name"] == "planner"
-        assert kwargs["task"] == "请分析销售趋势"
-        assert engine._client.chat.completions.create.call_count == 1
+        assert result.reply == "主代理继续执行。"
+        engine._delegate_to_subagent.assert_not_awaited()
+        assert engine._client.chat.completions.create.call_count == 2
+
+    def test_engine_has_no_run_fork_skill_entrypoint(self) -> None:
+        engine = AgentEngine(_make_config(), _make_registry_with_tools())
+        assert not hasattr(engine, "_run_fork_skill")
 
 
 class TestDelegateSubagent:
@@ -1887,6 +2011,7 @@ class TestCommandDispatchAndHooks:
             )
         )
         engine = AgentEngine(config, registry)
+        engine._full_access_enabled = True
         skill = Skillpack(
             name="echo",
             description="命令分发",
@@ -2761,6 +2886,7 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
 
     config = _make_config(max_consecutive_failures=10)  # 高阈值避免熔断
     engine = AgentEngine(config, registry)
+    engine._full_access_enabled = True
 
     # 第一轮：调用会失败的工具
     tool_response = _make_tool_call_response([("call_err", "custom_fail", "{}")])
@@ -2819,6 +2945,7 @@ async def test_property_6_consecutive_failure_circuit_breaker(
         max_iterations=max_failures + 5,  # 确保不会先触发迭代上限
     )
     engine = AgentEngine(config, registry)
+    engine._full_access_enabled = True
 
     # 构造足够多的失败 tool_call 响应
     fail_responses = [
@@ -2929,6 +3056,47 @@ class TestApprovalFlow:
         ])
         return registry
 
+    def _make_registry_with_audit_tool(self, workspace: Path) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def create_chart(output_path: str) -> str:
+            target = workspace / output_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("chart", encoding="utf-8")
+            return json.dumps({"status": "success", "output_path": output_path}, ensure_ascii=False)
+
+        registry.register_tools([
+            ToolDef(
+                name="create_chart",
+                description="生成图表文件",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "output_path": {"type": "string"},
+                    },
+                    "required": ["output_path"],
+                },
+                func=create_chart,
+            ),
+        ])
+        return registry
+
+    def _make_registry_with_custom_tool(self) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def custom_tool() -> str:
+            return "custom-ok"
+
+        registry.register_tools([
+            ToolDef(
+                name="custom_tool",
+                description="自定义工具",
+                input_schema={"type": "object", "properties": {}},
+                func=custom_tool,
+            ),
+        ])
+        return registry
+
     @pytest.mark.asyncio
     async def test_high_risk_tool_requires_accept(self, tmp_path: Path) -> None:
         config = _make_config(workspace_root=str(tmp_path))
@@ -3015,3 +3183,68 @@ class TestApprovalFlow:
         assert reply == "完成"
         assert engine._approval.pending is None
         assert (tmp_path / "d.txt").read_text(encoding="utf-8") == "full"
+
+    @pytest.mark.asyncio
+    async def test_default_mode_non_whitelist_tool_executes_directly(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_custom_tool()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = None
+
+        tool_response = _make_tool_call_response([("call_1", "custom_tool", "{}")])
+        text_response = _make_text_response("完成")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+
+        reply = await engine.chat("执行自定义工具")
+        assert reply == "完成"
+        assert engine._approval.pending is None
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_executes_non_whitelist_tool(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_custom_tool()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="test/custom",
+            description="test",
+            allowed_tools=["custom_tool"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir=str(tmp_path),
+        )
+
+        on_reply = await engine.chat("/fullAccess on")
+        assert "已开启" in on_reply
+
+        tool_response = _make_tool_call_response([("call_1", "custom_tool", "{}")])
+        text_response = _make_text_response("完成")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+
+        reply = await engine.chat("执行自定义工具")
+        assert reply == "完成"
+        assert engine._approval.pending is None
+
+    @pytest.mark.asyncio
+    async def test_default_mode_audit_only_tool_executes_without_accept(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_audit_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+        engine._execute_tool_with_audit = AsyncMock(return_value=('{"status":"success"}', None))
+
+        tool_response = _make_tool_call_response([
+            ("call_1", "create_chart", json.dumps({"output_path": "charts/a.png"}))
+        ])
+        text_response = _make_text_response("完成")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+
+        reply = await engine.chat("生成图表")
+        assert reply == "完成"
+        assert engine._approval.pending is None
+        engine._execute_tool_with_audit.assert_awaited_once()

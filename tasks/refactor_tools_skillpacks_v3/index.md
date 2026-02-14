@@ -1,5 +1,7 @@
 # 任务：ExcelManus v3 Tools + Skillpacks 重构
 
+> **历史文档声明（Skillpack 协议）**：本文为历史设计/执行记录，可能包含已过时术语（如 `hint_direct`、`confident_direct`、`llm_confirm`、`fork_plan`、`Skillpack.context`）。现行规则请以 [`../../docs/skillpack_protocol.md`](../../docs/skillpack_protocol.md) 为准。
+
 > **类型**：refactor
 > **优先级**：P1
 > **负责人**：AreaSongWcc

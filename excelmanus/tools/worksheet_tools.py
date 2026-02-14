@@ -1,4 +1,4 @@
-"""工作表级设置工具：打印布局、页眉页脚、冻结窗格等工作表属性操作。
+"""工作表级设置工具：打印布局、页眉页脚等工作表属性操作。
 
 与 sheet_tools（工作表 CRUD）和 format_tools（单元格样式）不同，
 本模块处理工作表级别的全局属性设置。
@@ -22,7 +22,7 @@ logger = get_logger("tools.worksheet")
 # ── Skill 元数据 ──────────────────────────────────────────
 
 SKILL_NAME = "worksheet"
-SKILL_DESCRIPTION = "工作表级设置工具集：打印布局、页眉页脚、冻结窗格"
+SKILL_DESCRIPTION = "工作表级设置工具集：打印布局、页眉页脚"
 
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import date, datetime
 from typing import Any
 
@@ -677,17 +678,61 @@ def transform_data(
         else:
             applied.append(f"unknown_op: {op_type}")
 
+    def _resolve_target_sheet(default_path: Any, desired_sheet: str | None) -> str:
+        if desired_sheet:
+            return desired_sheet
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(default_path, read_only=True, data_only=True)
+            try:
+                if wb.sheetnames:
+                    return wb.sheetnames[0]
+            finally:
+                wb.close()
+        except Exception:
+            pass
+        return "Sheet1"
+
     # 写入输出文件
     if output_path is not None:
         out_safe = guard.resolve_and_validate(output_path)
     else:
         out_safe = safe_path
 
-    df.to_excel(out_safe, index=False, sheet_name=sheet_name or "Sheet1")
+    target_sheet = _resolve_target_sheet(safe_path, sheet_name)
+
+    source_ext = safe_path.suffix.lower()
+    output_ext = out_safe.suffix.lower()
+    can_preserve_other_sheets = (
+        source_ext in {".xlsx", ".xlsm"}
+        and output_ext in {".xlsx", ".xlsm"}
+    )
+
+    if can_preserve_other_sheets:
+        # 输出文件不存在时，先复制源工作簿，再仅替换目标 sheet。
+        if output_path is not None and not out_safe.exists():
+            out_safe.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(safe_path, out_safe)
+
+        writer_kwargs: dict[str, Any] = {
+            "engine": "openpyxl",
+            "mode": "a" if out_safe.exists() else "w",
+        }
+        if writer_kwargs["mode"] == "a":
+            writer_kwargs["if_sheet_exists"] = "replace"
+        if output_ext == ".xlsm":
+            writer_kwargs["engine_kwargs"] = {"keep_vba": True}
+
+        with pd.ExcelWriter(out_safe, **writer_kwargs) as writer:
+            df.to_excel(writer, index=False, sheet_name=target_sheet)
+    else:
+        df.to_excel(out_safe, index=False, sheet_name=target_sheet)
 
     result = {
         "status": "success",
         "file": str(out_safe.name),
+        "sheet": target_sheet,
         "operations_applied": applied,
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
     }

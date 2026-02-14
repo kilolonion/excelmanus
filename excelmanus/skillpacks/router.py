@@ -13,6 +13,7 @@ from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import SkillMatchResult, Skillpack
+from excelmanus.tools.policy import FALLBACK_DISCOVERY_TOOLS
 
 logger = get_logger("skillpacks.router")
 
@@ -21,21 +22,6 @@ _EXCEL_PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
-
-# fallback 模式下始终可用的只读发现工具。
-# 让代理无需先 select_skill 即可快速探查工作区全貌。
-_FALLBACK_DISCOVERY_TOOLS = [
-    "scan_excel_files",  # 批量扫描 Excel：sheet 列表、行列数、列名、预览行
-    "list_directory",    # 查看目录结构
-    "search_files",      # 按模式搜索文件
-    "list_sheets",       # 查看单文件 sheet 列表
-    "get_file_info",     # 获取文件基本信息
-    "read_excel",        # 读取单文件数据（发现后深入查看）
-    "filter_data",       # 按条件过滤数据行（只读）
-    "analyze_data",      # 基本统计分析（只读）
-    "group_aggregate",   # 分组聚合统计（只读）
-]
-
 
 class SkillRouter:
     """简化后的技能路由器：仅负责斜杠直连路由和技能目录生成。"""
@@ -218,7 +204,7 @@ class SkillRouter:
         tool_scope = list(result.tool_scope)
         if "list_skills" not in tool_scope:
             tool_scope.append("list_skills")
-        for tool_name in _FALLBACK_DISCOVERY_TOOLS:
+        for tool_name in FALLBACK_DISCOVERY_TOOLS:
             if tool_name not in tool_scope:
                 tool_scope.append(tool_name)
         system_contexts = list(result.system_contexts)

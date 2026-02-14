@@ -167,13 +167,8 @@ class ConversationMemory:
         })
         self._truncate_if_needed()
 
-    def get_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
-        """获取完整消息列表（system prompt + 对话历史）。
-
-        Args:
-            system_prompts:
-                可选的 system 消息列表；为空时使用默认 system prompt。
-        """
+    def _build_system_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
+        """构建 system 消息列表。"""
         prompts = system_prompts or [self._system_prompt]
         system_msgs = [
             {"role": "system", "content": prompt}
@@ -182,6 +177,35 @@ class ConversationMemory:
         ]
         if not system_msgs:
             system_msgs = [{"role": "system", "content": self._system_prompt}]
+        return system_msgs
+
+    def get_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
+        """获取完整消息列表（system prompt + 对话历史）。
+
+        Args:
+            system_prompts:
+                可选的 system 消息列表；为空时使用默认 system prompt。
+        """
+        system_msgs = self._build_system_messages(system_prompts)
+        return system_msgs + list(self._messages)
+
+    def trim_for_request(
+        self,
+        system_prompts: list[str],
+        max_context_tokens: int,
+        reserve_ratio: float = 0.1,
+    ) -> list[dict]:
+        """按最终请求消息预算裁剪历史，返回可直接发送的消息列表。"""
+        if max_context_tokens <= 0:
+            return self.get_messages(system_prompts=system_prompts)
+        ratio = reserve_ratio
+        if ratio < 0:
+            ratio = 0
+        elif ratio >= 1:
+            ratio = 0.99
+        threshold = max(1, int(max_context_tokens * (1 - ratio)))
+        system_msgs = self._build_system_messages(system_prompts)
+        self._truncate_history_to_threshold(threshold, system_msgs=system_msgs)
         return system_msgs + list(self._messages)
 
     def clear(self) -> None:
@@ -204,10 +228,29 @@ class ConversationMemory:
         2. 从 _messages 头部逐条移除最早的消息
         3. 跳过孤立的 tool 结果消息（确保 tool_call 和 tool_result 成对移除）
         """
-        while self._messages and self._total_tokens() > self._truncation_threshold:
+        self._truncate_history_to_threshold(self._truncation_threshold, system_msgs=None)
+
+    def _total_tokens_with_system_messages(self, system_msgs: list[dict] | None) -> int:
+        total = 0
+        if system_msgs is None:
+            system_msg = {"role": "system", "content": self._system_prompt}
+            total += self._token_counter.count_message(system_msg)
+        else:
+            for msg in system_msgs:
+                total += self._token_counter.count_message(msg)
+        for msg in self._messages:
+            total += self._token_counter.count_message(msg)
+        return total
+
+    def _truncate_history_to_threshold(
+        self,
+        threshold: int,
+        system_msgs: list[dict] | None,
+    ) -> None:
+        while self._messages and self._total_tokens_with_system_messages(system_msgs) > threshold:
             # 仅剩最后一条时做内容收缩，避免单条超长消息长期越阈值。
             if len(self._messages) == 1:
-                if not self._shrink_last_message():
+                if not self._shrink_last_message_for_threshold(threshold, system_msgs):
                     break
                 continue
 
@@ -237,15 +280,19 @@ class ConversationMemory:
             ):
                 self._messages.pop(0)
 
-    def _shrink_last_message(self) -> bool:
+    def _shrink_last_message_for_threshold(
+        self,
+        threshold: int,
+        system_msgs: list[dict] | None,
+    ) -> bool:
         """尽量收缩最后一条消息内容，返回是否完成收缩。"""
         msg = self._messages[0]
         content = msg.get("content")
         if not isinstance(content, str) or not content:
             return False
 
-        total = self._total_tokens()
-        overflow_tokens = total - self._truncation_threshold
+        total = self._total_tokens_with_system_messages(system_msgs)
+        overflow_tokens = total - threshold
         if overflow_tokens <= 0:
             return True
 

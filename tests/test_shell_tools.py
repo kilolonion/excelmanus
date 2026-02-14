@@ -64,11 +64,20 @@ class TestRunShellAllowed:
         assert result["status"] == "success"
         assert result["return_code"] == 0
 
-    def test_pipe_allowed(self, workspace: Path) -> None:
-        """管道命令：白名单内命令之间的管道应该通过校验。"""
-        # 注意：shell=False 不支持管道，所以这里测试校验逻辑
-        valid, reason = shell_tools._validate_command("cat hello.txt | grep hello")
-        assert valid is True
+    def test_pipe_blocked(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("echo a | wc -c"))
+        assert result["status"] == "blocked"
+        assert "不支持管道/逻辑运算" in result["reason"]
+
+    def test_and_blocked(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("echo a && echo b"))
+        assert result["status"] == "blocked"
+        assert "不支持管道/逻辑运算" in result["reason"]
+
+    def test_or_blocked(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("echo a || echo b"))
+        assert result["status"] == "blocked"
+        assert "不支持管道/逻辑运算" in result["reason"]
 
 
 class TestRunShellBlocked:

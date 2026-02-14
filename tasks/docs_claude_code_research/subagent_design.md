@@ -1,5 +1,7 @@
 # ExcelManus Subagent 系统设计方案
 
+> **历史文档声明（Skillpack 协议）**：本文为历史设计调研记录，可能包含已过时术语（如 `hint_direct`、`confident_direct`、`llm_confirm`、`fork_plan`、`Skillpack.context`）。现行规则请以 [`../../docs/skillpack_protocol.md`](../../docs/skillpack_protocol.md) 为准。
+
 > **来源**：Claude Code 调研借鉴
 > **创建日期**：2025-07-14
 > **优先级**：P0（核心能力）

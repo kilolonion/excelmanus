@@ -37,6 +37,8 @@ def _write_agent(
     tools: list[str] | None = None,
     max_iterations: int | None = None,
     max_consecutive_failures: int | None = None,
+    memory_scope: str | None = None,
+    extra_frontmatter_lines: list[str] | None = None,
     body: str = "你是测试子代理。",
 ) -> None:
     tools = tools or ["read_excel"]
@@ -52,6 +54,10 @@ def _write_agent(
         lines.append(f"max_iterations: {max_iterations}")
     if max_consecutive_failures is not None:
         lines.append(f"max_consecutive_failures: {max_consecutive_failures}")
+    if memory_scope is not None:
+        lines.append(f"memory_scope: {memory_scope}")
+    if extra_frontmatter_lines:
+        lines.extend(extra_frontmatter_lines)
     lines.extend(["---", body])
     content = "\n".join(lines)
     (root_dir / filename).write_text(content, encoding="utf-8")
@@ -234,3 +240,79 @@ def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
     loaded = registry.load_all()
     assert loaded["explorer"].max_iterations == 4
     assert loaded["explorer"].max_consecutive_failures == 2
+
+
+def test_memory_scope_field_is_loaded_from_memory_scope_key(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "scope.md",
+        name="scope_checker",
+        description="scope 测试",
+        memory_scope="project",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert loaded["scope_checker"].memory_scope == "project"
+
+
+def test_memory_scope_legacy_memory_key_is_compatible(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "legacy_scope.md",
+        name="legacy_scope_checker",
+        description="legacy scope 测试",
+        extra_frontmatter_lines=["memory: user"],
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert loaded["legacy_scope_checker"].memory_scope == "user"
+
+
+def test_memory_scope_conflict_is_rejected(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "bad_scope.md",
+        name="bad_scope_checker",
+        description="冲突 scope 测试",
+        extra_frontmatter_lines=["memory_scope: user", "memory: project"],
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert "bad_scope_checker" not in loaded
+
+
+def test_memory_scope_invalid_value_is_rejected(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "invalid_scope.md",
+        name="invalid_scope_checker",
+        description="非法 scope 测试",
+        memory_scope="global",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert "invalid_scope_checker" not in loaded

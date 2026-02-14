@@ -19,6 +19,7 @@ logger = get_logger("subagent.registry")
 
 _VALID_PERMISSION_MODES: set[str] = {"default", "acceptEdits", "readOnly", "dontAsk"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
+_MEMORY_SCOPE_KEYS: tuple[str, ...] = ("memory_scope", "memory-scope", "memory")
 _SUBAGENT_NAME_ALIASES: dict[str, str] = {
     "explore": "explorer",
     "plan": "planner",
@@ -118,12 +119,12 @@ class SubagentRegistry:
             )
         permission_mode: SubagentPermissionMode = permission_mode_raw  # type: ignore[assignment]
 
-        memory_scope_raw = SubagentRegistry._as_optional_str(frontmatter.get("memory"))
+        memory_scope_raw = SubagentRegistry._extract_memory_scope(frontmatter)
         memory_scope: SubagentMemoryScope | None = None
         if memory_scope_raw:
             if memory_scope_raw not in _VALID_MEMORY_SCOPES:
                 raise SkillpackValidationError(
-                    f"memory 非法: {memory_scope_raw!r}，必须是 {_VALID_MEMORY_SCOPES}"
+                    f"memory_scope 非法: {memory_scope_raw!r}，必须是 {_VALID_MEMORY_SCOPES}"
                 )
             memory_scope = memory_scope_raw  # type: ignore[assignment]
 
@@ -168,6 +169,25 @@ class SubagentRegistry:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _extract_memory_scope(frontmatter: dict[str, Any]) -> str | None:
+        values: list[tuple[str, str]] = []
+        for key in _MEMORY_SCOPE_KEYS:
+            value = SubagentRegistry._as_optional_str(frontmatter.get(key))
+            if value:
+                values.append((key, value))
+
+        if not values:
+            return None
+
+        normalized = {value for _, value in values}
+        if len(normalized) > 1:
+            conflict = ", ".join(f"{key}={value}" for key, value in values)
+            raise SkillpackValidationError(
+                f"memory_scope 配置冲突: {conflict}"
+            )
+        return values[0][1]
 
     @staticmethod
     def _as_int(value: Any, *, default: int) -> int:
