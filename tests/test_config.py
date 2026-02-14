@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 import pytest
 from hypothesis import given
@@ -134,13 +135,17 @@ def test_property17_invalid_base_url_rejected(
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")
     old_model = os.environ.get("EXCELMANUS_MODEL")
+    old_cwd = os.getcwd()
     try:
-        os.environ["EXCELMANUS_API_KEY"] = "test-key"
-        os.environ["EXCELMANUS_BASE_URL"] = invalid_url
-        os.environ["EXCELMANUS_MODEL"] = "test-model"
-        with pytest.raises(ConfigError):
-            load_config()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            os.environ["EXCELMANUS_API_KEY"] = "test-key"
+            os.environ["EXCELMANUS_BASE_URL"] = invalid_url
+            os.environ["EXCELMANUS_MODEL"] = "test-model"
+            with pytest.raises(ConfigError):
+                load_config()
     finally:
+        os.chdir(old_cwd)
         if old_key is None:
             os.environ.pop("EXCELMANUS_API_KEY", None)
         else:
@@ -166,13 +171,17 @@ def test_property17_valid_base_url_accepted(
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")
     old_model = os.environ.get("EXCELMANUS_MODEL")
+    old_cwd = os.getcwd()
     try:
-        os.environ["EXCELMANUS_API_KEY"] = "test-key"
-        os.environ["EXCELMANUS_BASE_URL"] = valid_url
-        os.environ["EXCELMANUS_MODEL"] = "test-model"
-        cfg = load_config()
-        assert cfg.base_url == valid_url
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            os.environ["EXCELMANUS_API_KEY"] = "test-key"
+            os.environ["EXCELMANUS_BASE_URL"] = valid_url
+            os.environ["EXCELMANUS_MODEL"] = "test-model"
+            cfg = load_config()
+            assert cfg.base_url == valid_url
     finally:
+        os.chdir(old_cwd)
         if old_key is None:
             os.environ.pop("EXCELMANUS_API_KEY", None)
         else:

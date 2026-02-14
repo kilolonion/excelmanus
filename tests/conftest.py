@@ -30,6 +30,7 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "EXCELMANUS_API_KEY",
         "EXCELMANUS_BASE_URL",
         "EXCELMANUS_MODEL",
+        "EXCELMANUS_MODELS",
         "EXCELMANUS_LOG_LEVEL",
         "EXCELMANUS_MAX_ITERATIONS",
         "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",

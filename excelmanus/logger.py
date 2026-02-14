@@ -122,8 +122,8 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
         for h in logger.handlers:
             h.setLevel(numeric_level)
 
-    # 阻止日志向上传播到 root logger
-    logger.propagate = False
+    # 允许向 root 传播，便于 pytest caplog 等统一捕获日志记录。
+    logger.propagate = True
 
     return logger
 
