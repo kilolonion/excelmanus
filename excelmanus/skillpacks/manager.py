@@ -15,8 +15,8 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import Skillpack
 
-_SKILL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_REQUIRED_CREATE_FIELDS = {"description", "allowed_tools", "triggers"}
+_SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_REQUIRED_CREATE_FIELDS = {"description"}
 _SUPPORTED_FIELDS = {
     "description",
     "allowed_tools",
@@ -29,8 +29,32 @@ _SUPPORTED_FIELDS = {
     "disable_model_invocation",
     "user_invocable",
     "argument_hint",
+    "context",
+    "agent",
+    "hooks",
+    "model",
+    "metadata",
+    "command_dispatch",
+    "command_tool",
+    "required_mcp_servers",
+    "required_mcp_tools",
 }
+
+_FIELD_ALIASES = {
+    "allowed-tools": "allowed_tools",
+    "file-patterns": "file_patterns",
+    "disable-model-invocation": "disable_model_invocation",
+    "user-invocable": "user_invocable",
+    "argument-hint": "argument_hint",
+    "command-dispatch": "command_dispatch",
+    "command-tool": "command_tool",
+    "required-mcp-servers": "required_mcp_servers",
+    "required-mcp-tools": "required_mcp_tools",
+}
+
 _DEFAULTS: dict[str, Any] = {
+    "allowed_tools": [],
+    "triggers": [],
     "file_patterns": [],
     "resources": [],
     "priority": 0,
@@ -38,6 +62,15 @@ _DEFAULTS: dict[str, Any] = {
     "disable_model_invocation": False,
     "user_invocable": True,
     "argument_hint": "",
+    "context": "normal",
+    "agent": None,
+    "hooks": {},
+    "model": None,
+    "metadata": {},
+    "command_dispatch": "none",
+    "command_tool": None,
+    "required_mcp_servers": [],
+    "required_mcp_tools": [],
 }
 
 
@@ -244,6 +277,12 @@ class SkillpackManager:
         if not instructions:
             instructions = "测试说明"
 
+        if merged.get("context") == "fork" and not merged.get("agent"):
+            merged["agent"] = "explorer"
+
+        if merged.get("command_dispatch") == "tool" and not merged.get("command_tool"):
+            raise SkillpackInputError("`command_dispatch=tool` 时必须提供 `command_tool`。")
+
         frontmatter = self._to_frontmatter_dict(name=name, payload=merged)
         frontmatter_text = SkillpackLoader.format_frontmatter(frontmatter)
         return f"---\n{frontmatter_text}\n---\n{instructions}\n"
@@ -252,8 +291,6 @@ class SkillpackManager:
         if base is None:
             return {
                 "description": "",
-                "allowed_tools": [],
-                "triggers": [],
                 "instructions": "",
                 **_DEFAULTS,
             }
@@ -269,46 +306,104 @@ class SkillpackManager:
             "disable_model_invocation": base.disable_model_invocation,
             "user_invocable": base.user_invocable,
             "argument_hint": base.argument_hint,
+            "context": base.context,
+            "agent": base.agent,
+            "hooks": dict(base.hooks),
+            "model": base.model,
+            "metadata": dict(base.metadata),
+            "command_dispatch": base.command_dispatch,
+            "command_tool": base.command_tool,
+            "required_mcp_servers": list(base.required_mcp_servers),
+            "required_mcp_tools": list(base.required_mcp_tools),
         }
 
     def _to_frontmatter_dict(self, *, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         frontmatter: dict[str, Any] = {
             "name": name,
             "description": payload["description"],
-            "allowed_tools": payload["allowed_tools"],
-            "triggers": payload["triggers"],
         }
+        allowed_tools = list(payload.get("allowed_tools", []) or [])
+        triggers = list(payload.get("triggers", []) or [])
+        if allowed_tools:
+            frontmatter["allowed-tools"] = allowed_tools
+        if triggers:
+            frontmatter["triggers"] = triggers
+
         if payload.get("file_patterns"):
-            frontmatter["file_patterns"] = payload["file_patterns"]
+            frontmatter["file-patterns"] = payload["file_patterns"]
         if payload.get("resources"):
             frontmatter["resources"] = payload["resources"]
         if int(payload.get("priority", 0)) != 0:
             frontmatter["priority"] = int(payload["priority"])
-        version = str(payload.get("version", "1.0.0")).strip()
+
+        version = str(payload.get("version", "1.0.0") or "").strip()
         if version and version != "1.0.0":
             frontmatter["version"] = version
+
         if bool(payload.get("disable_model_invocation", False)):
-            frontmatter["disable_model_invocation"] = True
+            frontmatter["disable-model-invocation"] = True
         if not bool(payload.get("user_invocable", True)):
-            frontmatter["user_invocable"] = False
-        argument_hint = str(payload.get("argument_hint", "")).strip()
+            frontmatter["user-invocable"] = False
+
+        argument_hint = str(payload.get("argument_hint", "") or "").strip()
         if argument_hint:
-            frontmatter["argument_hint"] = argument_hint
+            frontmatter["argument-hint"] = argument_hint
+
+        context = str(payload.get("context", "normal") or "normal").strip().lower()
+        if context != "normal":
+            frontmatter["context"] = context
+
+        agent = payload.get("agent")
+        if isinstance(agent, str) and agent.strip():
+            frontmatter["agent"] = agent.strip()
+
+        hooks = payload.get("hooks")
+        if isinstance(hooks, dict) and hooks:
+            frontmatter["hooks"] = hooks
+
+        model = payload.get("model")
+        if isinstance(model, str) and model.strip():
+            frontmatter["model"] = model.strip()
+
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            frontmatter["metadata"] = metadata
+
+        command_dispatch = str(payload.get("command_dispatch", "none") or "none").strip().lower()
+        if command_dispatch != "none":
+            frontmatter["command-dispatch"] = command_dispatch
+            command_tool = payload.get("command_tool")
+            if isinstance(command_tool, str) and command_tool.strip():
+                frontmatter["command-tool"] = command_tool.strip()
+        required_mcp_servers = list(payload.get("required_mcp_servers", []) or [])
+        required_mcp_tools = list(payload.get("required_mcp_tools", []) or [])
+        if required_mcp_servers:
+            frontmatter["required-mcp-servers"] = required_mcp_servers
+        if required_mcp_tools:
+            frontmatter["required-mcp-tools"] = required_mcp_tools
+
         return frontmatter
 
     def _normalize_payload(self, payload: dict[str, Any], *, for_create: bool) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise SkillpackInputError("payload 必须为对象。")
 
-        if "context" in payload:
-            raise SkillpackInputError("`context` 字段已废弃，不允许写入。")
         if "name" in payload:
             raise SkillpackInputError("不允许在 payload 中传入 `name` 字段。")
 
-        keys = set(payload.keys())
+        # 别名归一
+        canonical: dict[str, Any] = {}
+        for key, value in payload.items():
+            mapped = _FIELD_ALIASES.get(key, key)
+            if mapped in canonical and canonical[mapped] != value:
+                raise SkillpackInputError(f"字段冲突：`{key}` 与同义字段值不一致。")
+            canonical[mapped] = value
+
+        keys = set(canonical.keys())
         unknown = sorted(keys - _SUPPORTED_FIELDS)
         if unknown:
             raise SkillpackInputError(f"存在不支持字段: {', '.join(unknown)}")
+
         if for_create:
             missing = sorted(_REQUIRED_CREATE_FIELDS - keys)
             if missing:
@@ -317,45 +412,74 @@ class SkillpackManager:
             raise SkillpackInputError("patch 至少需要一个字段。")
 
         normalized: dict[str, Any] = {}
-        for key, value in payload.items():
+        for key, value in canonical.items():
             if key in {"description", "version", "argument_hint", "instructions"}:
                 normalized[key] = self._normalize_str(
                     key,
                     value,
                     allow_empty=(key in {"argument_hint", "instructions"}),
                 )
-            elif key == "allowed_tools":
-                normalized[key] = self._normalize_str_list(
-                    key,
-                    value,
-                    allow_empty=False,
-                )
-            elif key == "triggers":
-                normalized[key] = self._normalize_str_list(
-                    key,
-                    value,
-                    allow_empty=True,
-                )
-            elif key in {"file_patterns", "resources"}:
-                values = self._normalize_str_list(
-                    key,
-                    value,
-                    allow_empty=True,
-                )
+            elif key in {"agent", "model", "command_tool"}:
+                normalized[key] = self._normalize_optional_str(key, value)
+            elif key in {
+                "allowed_tools",
+                "triggers",
+                "file_patterns",
+                "resources",
+                "required_mcp_servers",
+                "required_mcp_tools",
+            }:
+                values = self._normalize_str_list(key, value)
                 if key == "resources":
                     self._validate_resource_paths(values)
                 normalized[key] = values
             elif key in {"disable_model_invocation", "user_invocable"}:
-                if not isinstance(value, bool):
-                    raise SkillpackInputError(f"`{key}` 必须为布尔值。")
-                normalized[key] = value
+                normalized[key] = self._normalize_bool(key, value)
             elif key == "priority":
-                if isinstance(value, bool) or not isinstance(value, int):
-                    raise SkillpackInputError("`priority` 必须为整数。")
-                normalized[key] = value
+                normalized[key] = self._normalize_int(key, value)
+            elif key == "context":
+                context = self._normalize_str(key, value, allow_empty=False).lower()
+                if context not in {"normal", "fork"}:
+                    raise SkillpackInputError("`context` 只能是 normal 或 fork。")
+                normalized[key] = context
+            elif key == "command_dispatch":
+                mode = self._normalize_str(key, value, allow_empty=False).lower()
+                if mode not in {"none", "tool"}:
+                    raise SkillpackInputError("`command_dispatch` 只能是 none 或 tool。")
+                normalized[key] = mode
+            elif key in {"hooks", "metadata"}:
+                if value is None:
+                    normalized[key] = {}
+                elif isinstance(value, dict):
+                    normalized[key] = value
+                else:
+                    raise SkillpackInputError(f"`{key}` 必须为对象。")
             else:
                 raise SkillpackInputError(f"不支持字段 `{key}`。")
+
         return normalized
+
+    @staticmethod
+    def _normalize_bool(key: str, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        raise SkillpackInputError(f"`{key}` 必须为布尔值。")
+
+    @staticmethod
+    def _normalize_int(key: str, value: Any) -> int:
+        if isinstance(value, bool):
+            raise SkillpackInputError(f"`{key}` 必须为整数。")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value.strip())
+        raise SkillpackInputError(f"`{key}` 必须为整数。")
 
     @staticmethod
     def _normalize_str(key: str, value: Any, *, allow_empty: bool) -> str:
@@ -367,19 +491,32 @@ class SkillpackManager:
         return text
 
     @staticmethod
-    def _normalize_str_list(key: str, value: Any, *, allow_empty: bool) -> list[str]:
+    def _normalize_optional_str(key: str, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise SkillpackInputError(f"`{key}` 必须为字符串。")
+        text = value.strip()
+        return text or None
+
+    @staticmethod
+    def _normalize_str_list(key: str, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
         if not isinstance(value, list):
             raise SkillpackInputError(f"`{key}` 必须为字符串数组。")
         normalized: list[str] = []
         for item in value:
+            if item is None:
+                continue
             if not isinstance(item, str):
-                raise SkillpackInputError(f"`{key}` 仅支持字符串元素。")
+                item = str(item)
             text = item.strip()
-            if not text:
-                raise SkillpackInputError(f"`{key}` 存在空字符串元素。")
-            normalized.append(text)
-        if not normalized and not allow_empty:
-            raise SkillpackInputError(f"`{key}` 不能为空。")
+            if text:
+                normalized.append(text)
         return normalized
 
     @staticmethod
@@ -400,14 +537,20 @@ class SkillpackManager:
     @staticmethod
     def _validate_skill_name(name: str) -> str:
         normalized = (name or "").strip()
-        if not _SKILL_NAME_PATTERN.fullmatch(normalized):
-            raise SkillpackInputError(
-                "技能名不合法，需匹配 `^[a-z][a-z0-9_]{0,63}$`。"
-            )
+        if not normalized:
+            raise SkillpackInputError("技能名不能为空。")
+        if len(normalized) > 255:
+            raise SkillpackInputError("技能名长度不能超过 255。")
+        for segment in normalized.split("/"):
+            if not _SEGMENT_PATTERN.fullmatch(segment):
+                raise SkillpackInputError(
+                    "技能名不合法，段模式需匹配 "
+                    "`[a-z0-9][a-z0-9._-]{0,63}`，支持命名空间 `/`。"
+                )
         return normalized
 
     def _skill_to_detail(self, skill: Skillpack) -> dict[str, Any]:
-        return {
+        detail = {
             "name": skill.name,
             "description": skill.description,
             "allowed_tools": list(skill.allowed_tools),
@@ -422,8 +565,29 @@ class SkillpackManager:
             "disable_model_invocation": skill.disable_model_invocation,
             "user_invocable": skill.user_invocable,
             "argument_hint": skill.argument_hint,
+            "context": skill.context,
+            "agent": skill.agent,
+            "hooks": dict(skill.hooks),
+            "model": skill.model,
+            "metadata": dict(skill.metadata),
+            "command_dispatch": skill.command_dispatch,
+            "command_tool": skill.command_tool,
+            "required_mcp_servers": list(skill.required_mcp_servers),
+            "required_mcp_tools": list(skill.required_mcp_tools),
+            "extensions": dict(skill.extensions),
             "resource_contents": dict(skill.resource_contents),
         }
+        # 对外补充标准别名键
+        detail["allowed-tools"] = detail["allowed_tools"]
+        detail["file-patterns"] = detail["file_patterns"]
+        detail["disable-model-invocation"] = detail["disable_model_invocation"]
+        detail["user-invocable"] = detail["user_invocable"]
+        detail["argument-hint"] = detail["argument_hint"]
+        detail["command-dispatch"] = detail["command_dispatch"]
+        detail["command-tool"] = detail["command_tool"]
+        detail["required-mcp-servers"] = detail["required_mcp_servers"]
+        detail["required-mcp-tools"] = detail["required_mcp_tools"]
+        return detail
 
     def _resolve_path(self, path_str: str) -> Path:
         raw = Path(path_str).expanduser()

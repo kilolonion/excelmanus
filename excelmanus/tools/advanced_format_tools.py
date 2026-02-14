@@ -399,6 +399,306 @@ def apply_dashboard_dark_theme(
     )
 
 
+def add_color_scale(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+    min_color: str = "63BE7B",
+    mid_color: str | None = "FFEB84",
+    max_color: str = "F8696B",
+    min_type: str = "min",
+    mid_type: str | None = "percentile",
+    max_type: str = "max",
+    min_value: float | None = None,
+    mid_value: float | None = 50,
+    max_value: float | None = None,
+) -> str:
+    """为指定范围添加二色或三色色阶条件格式。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 应用范围（如 "D2:D2004"）。
+        sheet_name: 工作表名称，默认活动工作表。
+        min_color: 最小值颜色（十六进制或颜色名），默认绿色。
+        mid_color: 中间值颜色，传 None 则使用二色色阶。默认黄色。
+        max_color: 最大值颜色，默认红色。
+        min_type: 最小值类型（min/num/percent/percentile/formula）。
+        mid_type: 中间值类型（num/percent/percentile/formula），仅三色色阶。
+        max_type: 最大值类型（max/num/percent/percentile/formula）。
+        min_value: 最小值阈值，min_type 为 min 时可不填。
+        mid_value: 中间值阈值，默认 50。
+        max_value: 最大值阈值，max_type 为 max 时可不填。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    from openpyxl.formatting.rule import ColorScaleRule
+
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+    wb = load_workbook(safe_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    min_hex = _normalize_hex_color(min_color, "63BE7B")
+    max_hex = _normalize_hex_color(max_color, "F8696B")
+
+    kwargs: dict[str, Any] = {
+        "start_type": min_type,
+        "start_value": min_value,
+        "start_color": min_hex,
+        "end_type": max_type,
+        "end_value": max_value,
+        "end_color": max_hex,
+    }
+
+    scale_type = "two_color"
+    if mid_color is not None:
+        mid_hex = _normalize_hex_color(mid_color, "FFEB84")
+        kwargs["mid_type"] = mid_type or "percentile"
+        kwargs["mid_value"] = mid_value
+        kwargs["mid_color"] = mid_hex
+        scale_type = "three_color"
+
+    rule = ColorScaleRule(**kwargs)
+    ws.conditional_formatting.add(cell_range, rule)
+
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("add_color_scale: %s[%s] %s (%s)", safe_path.name, sheet_name, cell_range, scale_type)
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "range": cell_range,
+            "scale_type": scale_type,
+            "colors": {"min": min_hex, "mid": mid_color and _normalize_hex_color(mid_color, "FFEB84"), "max": max_hex},
+        },
+        ensure_ascii=False,
+    )
+
+
+def add_data_bar(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+    color: str = "638EC6",
+    min_type: str = "min",
+    max_type: str = "max",
+    min_value: float | None = None,
+    max_value: float | None = None,
+    show_value: bool = True,
+) -> str:
+    """为指定范围添加数据条条件格式。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 应用范围（如 "E2:E100"）。
+        sheet_name: 工作表名称，默认活动工作表。
+        color: 数据条颜色（十六进制或颜色名），默认蓝色。
+        min_type: 最小值类型（min/num/percent/percentile）。
+        max_type: 最大值类型（max/num/percent/percentile）。
+        min_value: 最小值阈值。
+        max_value: 最大值阈值。
+        show_value: 是否同时显示单元格数值，默认 True。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    from openpyxl.formatting.rule import DataBarRule
+
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+    wb = load_workbook(safe_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    color_hex = _normalize_hex_color(color, "638EC6")
+
+    rule = DataBarRule(
+        start_type=min_type,
+        start_value=min_value,
+        end_type=max_type,
+        end_value=max_value,
+        color=color_hex,
+        showValue=show_value,
+    )
+    ws.conditional_formatting.add(cell_range, rule)
+
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("add_data_bar: %s[%s] %s", safe_path.name, sheet_name, cell_range)
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "range": cell_range,
+            "color": color_hex,
+            "show_value": show_value,
+        },
+        ensure_ascii=False,
+    )
+
+
+def add_conditional_rule(
+    file_path: str,
+    cell_range: str,
+    rule_type: str,
+    sheet_name: str | None = None,
+    operator: str | None = None,
+    formula: str | list[str] | None = None,
+    values: list[float] | None = None,
+    font_color: str | None = None,
+    fill_color: str | None = None,
+    font_bold: bool | None = None,
+    icon_style: str | None = None,
+    reverse_icons: bool = False,
+) -> str:
+    """添加通用条件格式规则（CellIs、Formula、IconSet）。
+
+    rule_type 说明：
+    - "cell_is": 基于单元格值的条件（需 operator + formula/values）。
+      operator 支持：greaterThan, lessThan, greaterThanOrEqual, lessThanOrEqual,
+      equal, notEqual, between, notBetween, containsText。
+    - "formula": 基于公式的条件（需 formula 参数）。
+      公式为真时应用样式，如 '=$C2="FATAL"' 表示当 C 列为 FATAL 时整行变色。
+    - "icon_set": 图标集（需 icon_style 参数）。
+      icon_style 支持：3Arrows, 3ArrowsGray, 3Flags, 3TrafficLights1,
+      3TrafficLights2, 3Signs, 3Symbols, 3Symbols2, 4Arrows, 4ArrowsGray,
+      4RedToBlack, 4Rating, 4TrafficLights, 5Arrows, 5ArrowsGray,
+      5Rating, 5Quarters。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 应用范围（如 "A2:L2004"）。
+        rule_type: 规则类型（cell_is / formula / icon_set）。
+        sheet_name: 工作表名称，默认活动工作表。
+        operator: cell_is 模式的比较运算符。
+        formula: 公式字符串或列表。cell_is 模式下是比较值/公式，formula 模式下是条件公式。
+        values: cell_is between/notBetween 模式下的两个边界值。
+        font_color: 条件满足时的字体颜色。
+        fill_color: 条件满足时的填充颜色。
+        font_bold: 条件满足时是否加粗。
+        icon_style: icon_set 模式的图标样式名称。
+        reverse_icons: icon_set 模式是否反转图标顺序。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    from openpyxl.formatting.rule import CellIsRule, FormulaRule, IconSetRule
+
+    valid_rule_types = ("cell_is", "formula", "icon_set")
+    if rule_type not in valid_rule_types:
+        return json.dumps(
+            {"error": f"rule_type 必须为 {valid_rule_types} 之一，收到: '{rule_type}'"},
+            ensure_ascii=False,
+        )
+
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+    wb = load_workbook(safe_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    # 构建样式参数
+    style_font = None
+    style_fill = None
+    if font_color is not None or font_bold is not None:
+        font_kwargs: dict[str, Any] = {}
+        if font_color is not None:
+            font_kwargs["color"] = _normalize_hex_color(font_color, "000000")
+        if font_bold is not None:
+            font_kwargs["bold"] = font_bold
+        style_font = Font(**font_kwargs)
+    if fill_color is not None:
+        hex_color = _normalize_hex_color(fill_color, "FFFFFF")
+        style_fill = PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+
+    rule_detail = rule_type
+
+    if rule_type == "cell_is":
+        if operator is None:
+            wb.close()
+            return json.dumps(
+                {"error": "cell_is 规则需要 operator 参数"},
+                ensure_ascii=False,
+            )
+        rule_kwargs: dict[str, Any] = {"operator": operator}
+        if operator in ("between", "notBetween"):
+            if values is None or len(values) != 2:
+                wb.close()
+                return json.dumps(
+                    {"error": f"operator='{operator}' 需要 values 参数包含恰好 2 个值"},
+                    ensure_ascii=False,
+                )
+            rule_kwargs["formula"] = [str(values[0]), str(values[1])]
+        else:
+            if formula is not None:
+                rule_kwargs["formula"] = [formula] if isinstance(formula, str) else formula
+            elif values is not None and len(values) >= 1:
+                rule_kwargs["formula"] = [str(values[0])]
+            else:
+                wb.close()
+                return json.dumps(
+                    {"error": "cell_is 规则需要 formula 或 values 参数指定比较值"},
+                    ensure_ascii=False,
+                )
+        if style_font:
+            rule_kwargs["font"] = style_font
+        if style_fill:
+            rule_kwargs["fill"] = style_fill
+        rule = CellIsRule(**rule_kwargs)
+        rule_detail = f"cell_is({operator})"
+
+    elif rule_type == "formula":
+        if formula is None:
+            wb.close()
+            return json.dumps(
+                {"error": "formula 规则需要 formula 参数"},
+                ensure_ascii=False,
+            )
+        formula_list = [formula] if isinstance(formula, str) else formula
+        rule_kwargs = {"formula": formula_list}
+        if style_font:
+            rule_kwargs["font"] = style_font
+        if style_fill:
+            rule_kwargs["fill"] = style_fill
+        rule = FormulaRule(**rule_kwargs)
+        rule_detail = f"formula({formula_list[0][:60]})"
+
+    elif rule_type == "icon_set":
+        if icon_style is None:
+            wb.close()
+            return json.dumps(
+                {"error": "icon_set 规则需要 icon_style 参数"},
+                ensure_ascii=False,
+            )
+        rule = IconSetRule(
+            icon_style=icon_style,
+            type="percent",
+            values=[0, 33, 67],
+            showValue=True,
+            reverse=reverse_icons,
+        )
+        rule_detail = f"icon_set({icon_style})"
+
+    ws.conditional_formatting.add(cell_range, rule)
+
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("add_conditional_rule: %s[%s] %s %s", safe_path.name, sheet_name, cell_range, rule_detail)
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "range": cell_range,
+            "rule_type": rule_type,
+            "rule_detail": rule_detail,
+        },
+        ensure_ascii=False,
+    )
+
+
 def get_tools() -> list[ToolDef]:
     """返回高级格式工具定义。"""
     border_style_enum = ["thin", "medium", "thick", "double", "dotted", "dashed"]
@@ -495,5 +795,99 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=apply_dashboard_dark_theme,
+        ),
+        ToolDef(
+            name="add_color_scale",
+            description="为 Excel 范围添加二色或三色色阶条件格式（低值→高值渐变色）。颜色支持十六进制或中文名",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Excel 文件路径"},
+                    "cell_range": {"type": "string", "description": "应用范围（如 'D2:D2004'）"},
+                    "sheet_name": {"type": "string", "description": "工作表名称，默认活动工作表"},
+                    "min_color": {"type": "string", "default": "63BE7B", "description": "最小值颜色，默认绿色"},
+                    "mid_color": {"type": "string", "default": "FFEB84", "description": "中间值颜色，不传则使用二色色阶"},
+                    "max_color": {"type": "string", "default": "F8696B", "description": "最大值颜色，默认红色"},
+                    "min_type": {"type": "string", "enum": ["min", "num", "percent", "percentile", "formula"], "default": "min"},
+                    "mid_type": {"type": "string", "enum": ["num", "percent", "percentile", "formula"], "default": "percentile"},
+                    "max_type": {"type": "string", "enum": ["max", "num", "percent", "percentile", "formula"], "default": "max"},
+                    "min_value": {"type": "number", "description": "最小值阈值"},
+                    "mid_value": {"type": "number", "default": 50, "description": "中间值阈值"},
+                    "max_value": {"type": "number", "description": "最大值阈值"},
+                },
+                "required": ["file_path", "cell_range"],
+                "additionalProperties": False,
+            },
+            func=add_color_scale,
+        ),
+        ToolDef(
+            name="add_data_bar",
+            description="为 Excel 范围添加数据条条件格式（单元格内按比例显示彩色条）",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Excel 文件路径"},
+                    "cell_range": {"type": "string", "description": "应用范围（如 'E2:E100'）"},
+                    "sheet_name": {"type": "string", "description": "工作表名称，默认活动工作表"},
+                    "color": {"type": "string", "default": "638EC6", "description": "数据条颜色，默认蓝色"},
+                    "min_type": {"type": "string", "enum": ["min", "num", "percent", "percentile"], "default": "min"},
+                    "max_type": {"type": "string", "enum": ["max", "num", "percent", "percentile"], "default": "max"},
+                    "min_value": {"type": "number", "description": "最小值阈值"},
+                    "max_value": {"type": "number", "description": "最大值阈值"},
+                    "show_value": {"type": "boolean", "default": True, "description": "是否同时显示数值"},
+                },
+                "required": ["file_path", "cell_range"],
+                "additionalProperties": False,
+            },
+            func=add_data_bar,
+        ),
+        ToolDef(
+            name="add_conditional_rule",
+            description=(
+                "添加通用条件格式规则。rule_type 支持三种："
+                "(1) cell_is — 基于值比较（如 >1000 高亮），需 operator + formula/values；"
+                "(2) formula — 基于公式条件（如 FATAL 行整行变色），需 formula；"
+                "(3) icon_set — 图标集（如 3Arrows 三箭头），需 icon_style"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Excel 文件路径"},
+                    "cell_range": {"type": "string", "description": "应用范围（如 'A2:L2004'）"},
+                    "rule_type": {
+                        "type": "string",
+                        "enum": ["cell_is", "formula", "icon_set"],
+                        "description": "规则类型",
+                    },
+                    "sheet_name": {"type": "string", "description": "工作表名称，默认活动工作表"},
+                    "operator": {
+                        "type": "string",
+                        "enum": [
+                            "greaterThan", "lessThan", "greaterThanOrEqual", "lessThanOrEqual",
+                            "equal", "notEqual", "between", "notBetween", "containsText",
+                        ],
+                        "description": "cell_is 模式的比较运算符",
+                    },
+                    "formula": {
+                        "description": "公式字符串。cell_is 模式下是比较值，formula 模式下是条件公式（如 '=$C2=\"FATAL\"'）",
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "between/notBetween 的两个边界值，或单值比较的数值",
+                    },
+                    "font_color": {"type": "string", "description": "条件满足时的字体颜色"},
+                    "fill_color": {"type": "string", "description": "条件满足时的填充颜色"},
+                    "font_bold": {"type": "boolean", "description": "条件满足时是否加粗"},
+                    "icon_style": {
+                        "type": "string",
+                        "description": "icon_set 图标样式（如 '3Arrows', '3TrafficLights1', '4Rating', '5Quarters'）",
+                    },
+                    "reverse_icons": {"type": "boolean", "default": False, "description": "是否反转图标顺序"},
+                },
+                "required": ["file_path", "cell_range", "rule_type"],
+                "additionalProperties": False,
+            },
+            func=add_conditional_rule,
         ),
     ]

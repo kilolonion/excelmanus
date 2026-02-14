@@ -825,11 +825,22 @@ class TestSkillsSubcommands:
         engine.get_skillpack_detail.return_value = {
             "name": "data_basic",
             "description": "分析",
+            "allowed_tools": ["read_excel"],
+            "required_mcp_servers": ["context7"],
+            "required_mcp_tools": ["context7:query_docs"],
         }
         with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/skills get data_basic", "exit"]
             _run(_repl_loop(engine))
             engine.get_skillpack_detail.assert_called_once_with("data_basic")
+            rendered = "\n".join(
+                str(call.args[0])
+                for call in mock_console.print.call_args_list
+                if call.args
+            )
+            assert "allowed-tools" in rendered
+            assert "required-mcp-servers" in rendered
+            assert "required-mcp-tools" in rendered
 
     def test_skills_create_subcommand_uses_json_payload(self) -> None:
         engine = _make_engine()

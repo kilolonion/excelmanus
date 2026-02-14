@@ -336,3 +336,76 @@ class TestMissingMcpServersField:
         result = MCPConfigLoader.load(workspace_root=str(ws_dir))
 
         assert result == []
+
+
+class TestPlaintextSecretWarning:
+    """测试 mcp.json 明文敏感信息告警（仅 warning，不阻断）。"""
+
+    def test_plaintext_secret_logs_warning_but_still_loads(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        ws_dir = tmp_path / "workspace"
+        _write_mcp_json(
+            ws_dir / "mcp.json",
+            {
+                "mcpServers": {
+                    "context7": {
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server", "--api-key=plain-key"],
+                        "api-key": "plain-secret",
+                    }
+                }
+            },
+        )
+
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        with caplog.at_level(logging.WARNING, logger="excelmanus.mcp.config"):
+            result = MCPConfigLoader.load(workspace_root=str(ws_dir))
+
+        assert len(result) == 1
+        assert isinstance(result[0], MCPServerConfig)
+        warning_text = "\n".join(caplog.messages)
+        assert "context7" in warning_text
+        assert "疑似明文敏感配置" in warning_text
+        assert "api-key" in warning_text
+
+    def test_env_var_secret_reference_does_not_warn(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        ws_dir = tmp_path / "workspace"
+        _write_mcp_json(
+            ws_dir / "mcp.json",
+            {
+                "mcpServers": {
+                    "context7": {
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["--token", "${CTX7_TOKEN}"],
+                        "api-key": "$CTX7_API_KEY",
+                    }
+                }
+            },
+        )
+
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        with caplog.at_level(logging.WARNING, logger="excelmanus.mcp.config"):
+            result = MCPConfigLoader.load(workspace_root=str(ws_dir))
+
+        assert len(result) == 1
+        warning_text = "\n".join(caplog.messages)
+        assert "疑似明文敏感配置" not in warning_text

@@ -106,6 +106,7 @@ class SessionManager:
 
         同一会话在同一时刻仅允许一个请求执行。
         """
+        created = False
         async with self._lock:
             now = time.monotonic()
             if session_id is not None and session_id in self._sessions:
@@ -133,18 +134,21 @@ class SessionManager:
                 persistent_memory=persistent_memory,
                 memory_extractor=memory_extractor,
             )
-            # 初始化 MCP 连接（失败不影响会话创建）
-            try:
-                await engine.initialize_mcp()
-            except Exception:
-                logger.warning("会话 %s MCP 初始化失败，已跳过", new_id, exc_info=True)
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
                 last_access=now,
                 in_flight=True,
             )
+            created = True
             logger.info("创建新会话并加锁 %s（当前总数: %d）", new_id, len(self._sessions))
-            return new_id, engine
+
+        # 初始化 MCP 连接（失败不影响会话创建）；放在锁外避免阻塞并发请求。
+        if created:
+            try:
+                await engine.initialize_mcp()
+            except BaseException:
+                logger.warning("会话 %s MCP 初始化失败，已跳过", new_id, exc_info=True)
+        return new_id, engine
 
     async def release_for_chat(self, session_id: str) -> None:
         """释放会话处理中标记。

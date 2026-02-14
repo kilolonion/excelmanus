@@ -24,7 +24,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
 
 import excelmanus
 from excelmanus.config import (
@@ -96,26 +96,83 @@ class ErrorResponse(BaseModel):
 class SkillpackSummaryResponse(BaseModel):
     """Skillpack 摘要响应。"""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     description: str
     source: str
     writable: bool
-    argument_hint: str
+    argument_hint: str = Field(
+        default="",
+        validation_alias=AliasChoices("argument_hint", "argument-hint"),
+        serialization_alias="argument-hint",
+    )
 
 
 class SkillpackDetailResponse(SkillpackSummaryResponse):
     """Skillpack 详情响应。"""
 
-    allowed_tools: list[str]
+    allowed_tools: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("allowed_tools", "allowed-tools"),
+        serialization_alias="allowed-tools",
+    )
     triggers: list[str]
-    file_patterns: list[str]
+    file_patterns: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("file_patterns", "file-patterns"),
+        serialization_alias="file-patterns",
+    )
     resources: list[str]
     priority: int
     version: str
-    disable_model_invocation: bool
-    user_invocable: bool
+    disable_model_invocation: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "disable_model_invocation",
+            "disable-model-invocation",
+        ),
+        serialization_alias="disable-model-invocation",
+    )
+    user_invocable: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("user_invocable", "user-invocable"),
+        serialization_alias="user-invocable",
+    )
     instructions: str
     resource_contents: dict[str, str]
+    context: str = "normal"
+    agent: str | None = None
+    hooks: dict[str, Any] = Field(default_factory=dict)
+    model: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    command_dispatch: str = Field(
+        default="none",
+        validation_alias=AliasChoices("command_dispatch", "command-dispatch"),
+        serialization_alias="command-dispatch",
+    )
+    command_tool: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("command_tool", "command-tool"),
+        serialization_alias="command-tool",
+    )
+    required_mcp_servers: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "required_mcp_servers",
+            "required-mcp-servers",
+        ),
+        serialization_alias="required-mcp-servers",
+    )
+    required_mcp_tools: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "required_mcp_tools",
+            "required-mcp-tools",
+        ),
+        serialization_alias="required-mcp-tools",
+    )
+    extensions: dict[str, Any] = Field(default_factory=dict)
 
 
 class SkillpackCreateRequest(BaseModel):
@@ -123,7 +180,7 @@ class SkillpackCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     name: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
     ]
     payload: dict[str, Any]
 
@@ -215,7 +272,9 @@ def _to_skill_summary(detail: dict[str, Any]) -> SkillpackSummaryResponse:
         description=str(detail.get("description", "")),
         source=str(detail.get("source", "")),
         writable=bool(detail.get("writable", False)),
-        argument_hint=str(detail.get("argument_hint", "") or ""),
+        argument_hint=str(
+            detail.get("argument-hint", detail.get("argument_hint", "")) or ""
+        ),
     )
 
 
@@ -226,18 +285,76 @@ def _to_skill_detail(detail: dict[str, Any]) -> SkillpackDetailResponse:
         description=str(detail.get("description", "")),
         source=str(detail.get("source", "")),
         writable=bool(detail.get("writable", False)),
-        argument_hint=str(detail.get("argument_hint", "") or ""),
-        allowed_tools=list(detail.get("allowed_tools", []) or []),
+        argument_hint=str(
+            detail.get("argument-hint", detail.get("argument_hint", "")) or ""
+        ),
+        allowed_tools=list(
+            detail.get("allowed-tools", detail.get("allowed_tools", [])) or []
+        ),
         triggers=list(detail.get("triggers", []) or []),
-        file_patterns=list(detail.get("file_patterns", []) or []),
+        file_patterns=list(
+            detail.get("file-patterns", detail.get("file_patterns", [])) or []
+        ),
         resources=list(detail.get("resources", []) or []),
         priority=int(detail.get("priority", 0)),
         version=str(detail.get("version", "1.0.0")),
-        disable_model_invocation=bool(detail.get("disable_model_invocation", False)),
-        user_invocable=bool(detail.get("user_invocable", True)),
+        disable_model_invocation=bool(
+            detail.get(
+                "disable-model-invocation",
+                detail.get("disable_model_invocation", False),
+            )
+        ),
+        user_invocable=bool(
+            detail.get("user-invocable", detail.get("user_invocable", True))
+        ),
         instructions=str(detail.get("instructions", "") or ""),
         resource_contents=dict(detail.get("resource_contents", {}) or {}),
+        context=str(detail.get("context", "normal") or "normal"),
+        agent=(
+            str(detail.get("agent")).strip()
+            if detail.get("agent") is not None and str(detail.get("agent")).strip()
+            else None
+        ),
+        hooks=dict(detail.get("hooks", {}) or {}),
+        model=(
+            str(detail.get("model")).strip()
+            if detail.get("model") is not None and str(detail.get("model")).strip()
+            else None
+        ),
+        metadata=dict(detail.get("metadata", {}) or {}),
+        command_dispatch=str(
+            detail.get("command-dispatch", detail.get("command_dispatch", "none"))
+            or "none"
+        ),
+        command_tool=(
+            str(
+                detail.get("command-tool", detail.get("command_tool"))
+            ).strip()
+            if detail.get("command-tool", detail.get("command_tool")) is not None
+            and str(detail.get("command-tool", detail.get("command_tool"))).strip()
+            else None
+        ),
+        required_mcp_servers=list(
+            detail.get(
+                "required-mcp-servers",
+                detail.get("required_mcp_servers", []),
+            )
+            or []
+        ),
+        required_mcp_tools=list(
+            detail.get(
+                "required-mcp-tools",
+                detail.get("required_mcp_tools", []),
+            )
+            or []
+        ),
+        extensions=dict(detail.get("extensions", {}) or {}),
     )
+
+
+def _to_standard_skill_detail_dict(detail: dict[str, Any]) -> dict[str, Any]:
+    """将技能详情标准化为 API 输出字段。"""
+    return _to_skill_detail(detail).model_dump(by_alias=True, exclude_none=False)
 
 
 def _normalize_chat_result(value: ChatResult | str | None) -> ChatResult:
@@ -804,7 +921,7 @@ async def create_skill(
     return SkillpackMutationResponse(
         status="created",
         name=str(detail.get("name", request.name)),
-        detail=detail,
+        detail=_to_standard_skill_detail_dict(detail),
     )
 
 
@@ -844,7 +961,7 @@ async def patch_skill(
     return SkillpackMutationResponse(
         status="updated",
         name=str(detail.get("name", name)),
-        detail=detail,
+        detail=_to_standard_skill_detail_dict(detail),
     )
 
 

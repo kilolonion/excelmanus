@@ -122,6 +122,134 @@ class TestSkillpackLoader:
         loaded = loader.load_all()
         assert loaded["data_basic"].description == "project"
 
+    def test_discovery_workspace_claude_overrides_user_claude(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        home_dir = tmp_path / "home"
+        system_dir = workspace / "system"
+        user_dir = home_dir / ".excelmanus" / "skillpacks"
+        project_dir = workspace / "project"
+        for d in (workspace, home_dir, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HOME", str(home_dir))
+        monkeypatch.chdir(workspace)
+
+        _write_skillpack(
+            home_dir / ".claude" / "skills",
+            "data_basic",
+            description="user-claude",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+        _write_skillpack(
+            workspace / ".claude" / "skills",
+            "data_basic",
+            description="workspace-claude",
+            allowed_tools=["read_excel"],
+            triggers=["分析"],
+        )
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            workspace_root=str(workspace),
+            skills_discovery_include_agents=False,
+            skills_discovery_include_openclaw=False,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert loaded["data_basic"].description == "workspace-claude"
+
+    def test_discovery_agents_ancestor_nearer_wins(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        nested = workspace / "src" / "module"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, nested, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.chdir(nested)
+
+        _write_skillpack(
+            workspace / ".agents" / "skills",
+            "team/data-cleaner",
+            description="ancestor-far",
+            allowed_tools=["read_excel"],
+            triggers=["清洗"],
+        )
+        _write_skillpack(
+            workspace / "src" / ".agents" / "skills",
+            "team/data-cleaner",
+            description="ancestor-near",
+            allowed_tools=["read_excel"],
+            triggers=["清洗"],
+        )
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            workspace_root=str(workspace),
+            skills_discovery_include_claude=False,
+            skills_discovery_include_openclaw=False,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert loaded["team/data-cleaner"].description == "ancestor-near"
+
+    def test_discovery_workspace_openclaw_overrides_user_openclaw(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        home_dir = tmp_path / "home"
+        system_dir = workspace / "system"
+        user_dir = home_dir / ".excelmanus" / "skillpacks"
+        project_dir = workspace / "project"
+        for d in (workspace, home_dir, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HOME", str(home_dir))
+        monkeypatch.chdir(workspace)
+
+        _write_skillpack(
+            home_dir / ".openclaw" / "skills",
+            "mcp/dispatcher",
+            description="user-openclaw",
+            allowed_tools=["read_excel"],
+            triggers=["调度"],
+        )
+        _write_skillpack(
+            workspace / "skills",
+            "mcp/dispatcher",
+            description="workspace-openclaw",
+            allowed_tools=["read_excel"],
+            triggers=["调度"],
+        )
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            workspace_root=str(workspace),
+            skills_discovery_include_agents=False,
+            skills_discovery_include_claude=False,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert loaded["mcp/dispatcher"].description == "workspace-openclaw"
+
     def test_soft_validate_unknown_allowed_tools(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
@@ -166,6 +294,75 @@ class TestSkillpackLoader:
         loader = SkillpackLoader(config, _tool_registry())
         loader.load_all()
         assert not any("mcp:" in warning for warning in loader.warnings)
+
+    def test_parse_required_mcp_fields(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        skill_dir = system_dir / "mcp_skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: mcp_skill",
+                    "description: mcp skill",
+                    "allowed-tools:",
+                    "  - mcp:context7:*",
+                    "required-mcp-servers:",
+                    "  - context7",
+                    "required-mcp-tools:",
+                    "  - context7:query_docs",
+                    "---",
+                    "执行说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+
+        skill = loaded["mcp_skill"]
+        assert skill.required_mcp_servers == ["context7"]
+        assert skill.required_mcp_tools == ["context7:query_docs"]
+
+    def test_invalid_required_mcp_tools_reports_warning(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        skill_dir = system_dir / "bad_mcp_skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: bad_mcp_skill",
+                    "description: bad mcp skill",
+                    "allowed-tools:",
+                    "  - read_excel",
+                    "required-mcp-tools:",
+                    "  - context7",  # 非法：缺少 :tool
+                    "---",
+                    "执行说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+
+        assert "bad_mcp_skill" not in loaded
+        assert any("required_mcp_tools" in warning for warning in loader.warnings)
 
     def test_user_invocable_default_true(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
@@ -322,8 +519,8 @@ class TestSkillpackLoader:
         assert "general_excel" in loaded
         assert loaded["general_excel"].triggers == []
 
-    def test_allowed_tools_empty_list_raises_validation_error(self, tmp_path: Path) -> None:
-        """allowed_tools 仍必须非空。"""
+    def test_allowed_tools_empty_list_is_allowed(self, tmp_path: Path) -> None:
+        """allowed_tools 允许为空列表（仅注入上下文，不自动追加工具权限）。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -350,14 +547,14 @@ class TestSkillpackLoader:
 
         config = _make_config(system_dir, user_dir, project_dir)
         loader = SkillpackLoader(config, _tool_registry())
-        with pytest.raises(SkillpackValidationError):
-            loader._parse_skillpack_file(
-                source="system",
-                skill_dir=skill_dir,
-                skill_file=skill_file,
-            )
+        parsed = loader._parse_skillpack_file(
+            source="system",
+            skill_dir=skill_dir,
+            skill_file=skill_file,
+        )
+        assert parsed.allowed_tools == []
 
-    def test_context_field_is_deprecated(self, tmp_path: Path) -> None:
+    def test_context_fork_is_supported_and_defaults_agent(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -372,7 +569,7 @@ class TestSkillpackLoader:
             triggers=["大文件"],
             instructions="测试",
         )
-        # 手动插入已废弃字段
+        # 注入 fork 上下文配置
         skill_file = system_dir / "excel_code_runner" / "SKILL.md"
         content = skill_file.read_text(encoding="utf-8")
         content = content.replace("---\n测试", "context: fork\n---\n测试")
@@ -381,8 +578,52 @@ class TestSkillpackLoader:
         config = _make_config(system_dir, user_dir, project_dir)
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
-        assert "excel_code_runner" not in loaded
-        assert any("context" in warning for warning in loader.warnings)
+        assert "excel_code_runner" in loaded
+        assert loaded["excel_code_runner"].context == "fork"
+        assert loaded["excel_code_runner"].agent == "explorer"
+
+    def test_kebab_case_fields_are_loaded(self, tmp_path: Path) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        skill_dir = system_dir / "team" / "data-cleaner"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: team/data-cleaner",
+                    "description: 清洗技能",
+                    "allowed-tools:",
+                    "  - read_excel",
+                    "file-patterns:",
+                    "  - '*.xlsx'",
+                    "disable-model-invocation: true",
+                    "user-invocable: false",
+                    "argument-hint: '<file>'",
+                    "command-dispatch: tool",
+                    "command-tool: read_excel",
+                    "---",
+                    "说明",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert "team/data-cleaner" in loaded
+        skill = loaded["team/data-cleaner"]
+        assert skill.file_patterns == ["*.xlsx"]
+        assert skill.disable_model_invocation is True
+        assert skill.user_invocable is False
+        assert skill.argument_hint == "<file>"
+        assert skill.command_dispatch == "tool"
+        assert skill.command_tool == "read_excel"
 
 
 class TestSkillRouter:

@@ -9,6 +9,7 @@ allowed_tools:
   - transform_data
   - group_aggregate
   - create_chart
+  - create_excel_chart
   - format_cells
   - adjust_column_width
   - adjust_row_height
@@ -19,6 +20,14 @@ allowed_tools:
   - style_card_blocks
   - scale_range_unit
   - apply_dashboard_dark_theme
+  - add_color_scale
+  - add_data_bar
+  - add_conditional_rule
+  - write_cells
+  - insert_rows
+  - insert_columns
+  - set_print_layout
+  - set_page_header_footer
   - list_directory
   - get_file_info
   - search_files

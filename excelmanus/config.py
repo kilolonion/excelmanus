@@ -47,6 +47,12 @@ class ExcelManusConfig:
     skills_user_dir: str = "~/.excelmanus/skillpacks"
     skills_project_dir: str = ".excelmanus/skillpacks"
     skills_context_char_budget: int = 12000  # 技能正文字符预算，0 表示不限制
+    skills_discovery_enabled: bool = True
+    skills_discovery_scan_workspace_ancestors: bool = True
+    skills_discovery_include_agents: bool = True
+    skills_discovery_include_claude: bool = True
+    skills_discovery_include_openclaw: bool = True
+    skills_discovery_extra_dirs: tuple[str, ...] = ()
     system_message_mode: str = "auto"
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
@@ -68,6 +74,11 @@ class ExcelManusConfig:
     memory_auto_load_lines: int = 200
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
+    # hooks 配置
+    hooks_command_enabled: bool = False
+    hooks_command_allowlist: tuple[str, ...] = ()
+    hooks_command_timeout_seconds: int = 10
+    hooks_output_max_chars: int = 32000
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -199,6 +210,12 @@ def load_cors_allow_origins() -> tuple[str, ...]:
     return ("http://localhost:5173",)
 
 
+def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 def load_config() -> ExcelManusConfig:
     """加载配置。优先级：环境变量 > .env 文件 > 默认值。
 
@@ -275,6 +292,34 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
         12000,
     )
+    skills_discovery_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_ENABLED"),
+        "EXCELMANUS_SKILLS_DISCOVERY_ENABLED",
+        True,
+    )
+    skills_discovery_scan_workspace_ancestors = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS"),
+        "EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS",
+        True,
+    )
+    skills_discovery_include_agents = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS"),
+        "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
+        True,
+    )
+    skills_discovery_include_claude = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE"),
+        "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE",
+        True,
+    )
+    skills_discovery_include_openclaw = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW"),
+        "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW",
+        True,
+    )
+    skills_discovery_extra_dirs = _parse_csv_tuple(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS")
+    )
     system_message_mode = _parse_choice(
         os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE"),
         "EXCELMANUS_SYSTEM_MESSAGE_MODE",
@@ -344,6 +389,24 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MAX_CONTEXT_TOKENS",
         128_000,
     )
+    hooks_command_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
+        "EXCELMANUS_HOOKS_COMMAND_ENABLED",
+        False,
+    )
+    hooks_command_allowlist = _parse_csv_tuple(
+        os.environ.get("EXCELMANUS_HOOKS_COMMAND_ALLOWLIST")
+    )
+    hooks_command_timeout_seconds = _parse_int(
+        os.environ.get("EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS"),
+        "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
+        10,
+    )
+    hooks_output_max_chars = _parse_int(
+        os.environ.get("EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS"),
+        "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
+        32000,
+    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -366,6 +429,12 @@ def load_config() -> ExcelManusConfig:
         skills_user_dir=skills_user_dir,
         skills_project_dir=skills_project_dir,
         skills_context_char_budget=skills_context_char_budget,
+        skills_discovery_enabled=skills_discovery_enabled,
+        skills_discovery_scan_workspace_ancestors=skills_discovery_scan_workspace_ancestors,
+        skills_discovery_include_agents=skills_discovery_include_agents,
+        skills_discovery_include_claude=skills_discovery_include_claude,
+        skills_discovery_include_openclaw=skills_discovery_include_openclaw,
+        skills_discovery_extra_dirs=skills_discovery_extra_dirs,
         system_message_mode=system_message_mode,
         large_excel_threshold_bytes=large_excel_threshold_bytes,
         external_safe_mode=external_safe_mode,
@@ -383,5 +452,9 @@ def load_config() -> ExcelManusConfig:
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
         max_context_tokens=max_context_tokens,
+        hooks_command_enabled=hooks_command_enabled,
+        hooks_command_allowlist=hooks_command_allowlist,
+        hooks_command_timeout_seconds=hooks_command_timeout_seconds,
+        hooks_output_max_chars=hooks_output_max_chars,
         models=models,
     )

@@ -3,6 +3,7 @@ name: chart_basic
 description: 图表生成技能包
 allowed_tools:
   - create_chart
+  - create_excel_chart
   - read_excel
 triggers:
   - 图表

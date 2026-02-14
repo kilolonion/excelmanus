@@ -172,6 +172,32 @@ def _parse_skills_payload_options(tokens: list[str], start_idx: int) -> dict:
     return payload
 
 
+def _to_standard_skill_detail(detail: dict) -> dict:
+    """统一 /skills 输出字段为标准别名键。"""
+    if not isinstance(detail, dict):
+        return {}
+
+    normalized = dict(detail)
+    alias_pairs = (
+        ("allowed_tools", "allowed-tools"),
+        ("file_patterns", "file-patterns"),
+        ("disable_model_invocation", "disable-model-invocation"),
+        ("user_invocable", "user-invocable"),
+        ("argument_hint", "argument-hint"),
+        ("command_dispatch", "command-dispatch"),
+        ("command_tool", "command-tool"),
+        ("required_mcp_servers", "required-mcp-servers"),
+        ("required_mcp_tools", "required-mcp-tools"),
+    )
+    for snake_key, kebab_key in alias_pairs:
+        if kebab_key in detail:
+            normalized[kebab_key] = detail[kebab_key]
+        elif snake_key in detail:
+            normalized[kebab_key] = detail[snake_key]
+        normalized.pop(snake_key, None)
+    return normalized
+
+
 def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
     """处理 `/skills ...` 子命令。返回是否已处理。"""
     if not user_input.startswith("/skills "):
@@ -213,6 +239,7 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
             return True
         name = tokens[2]
         detail = engine.get_skillpack_detail(name)
+        detail = _to_standard_skill_detail(detail)
         console.print(
             json.dumps(detail, ensure_ascii=False, indent=2)
         )
@@ -228,6 +255,7 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
         name = tokens[2]
         payload = _parse_skills_payload_options(tokens, 3)
         detail = engine.create_skillpack(name, payload, actor="cli")
+        detail = _to_standard_skill_detail(detail)
         _sync_skill_command_suggestions(engine)
         console.print(
             json.dumps(
@@ -248,6 +276,7 @@ def _handle_skills_subcommand(engine: AgentEngine, user_input: str) -> bool:
         name = tokens[2]
         payload = _parse_skills_payload_options(tokens, 3)
         detail = engine.patch_skillpack(name, payload, actor="cli")
+        detail = _to_standard_skill_detail(detail)
         _sync_skill_command_suggestions(engine)
         console.print(
             json.dumps(

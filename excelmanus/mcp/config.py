@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,24 @@ _ENV_MCP_CONFIG = "EXCELMANUS_MCP_CONFIG"
 
 # 合法的传输方式
 _VALID_TRANSPORTS = {"stdio", "sse"}
+
+# 疑似敏感字段关键字（统一按小写匹配）
+_SENSITIVE_KEYWORDS = (
+    "api-key",
+    "apikey",
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "access-key",
+    "access_key",
+    "client-secret",
+    "client_secret",
+)
+
+# 环境变量引用（$VAR 或 ${VAR}）
+_ENV_VAR_REF_PATTERN = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$")
 
 
 @dataclass
@@ -184,6 +203,7 @@ class MCPConfigLoader:
                 return None
 
             auto_approve = MCPConfigLoader._parse_auto_approve(name, entry)
+            MCPConfigLoader._warn_plaintext_secrets(name, entry)
 
             return MCPServerConfig(
                 name=name,
@@ -210,6 +230,7 @@ class MCPConfigLoader:
                 return None
 
             auto_approve = MCPConfigLoader._parse_auto_approve(name, entry)
+            MCPConfigLoader._warn_plaintext_secrets(name, entry)
 
             return MCPServerConfig(
                 name=name,
@@ -259,3 +280,80 @@ class MCPConfigLoader:
             )
             return []
         return list(raw)
+
+    @staticmethod
+    def _warn_plaintext_secrets(name: str, entry: dict) -> None:
+        """检测并告警疑似明文密钥（不阻断配置加载）。"""
+        warning_paths = MCPConfigLoader._collect_plaintext_secret_paths(entry)
+        for field_path in warning_paths:
+            logger.warning(
+                "MCP Server '%s' 检测到疑似明文敏感配置：%s。"
+                "建议改为环境变量引用（$VAR 或 ${VAR}）。",
+                name,
+                field_path,
+            )
+
+    @staticmethod
+    def _collect_plaintext_secret_paths(entry: dict) -> list[str]:
+        found: list[str] = []
+
+        def _append(path: str) -> None:
+            if path not in found:
+                found.append(path)
+
+        def _is_env_ref(value: str) -> bool:
+            return bool(_ENV_VAR_REF_PATTERN.match(value.strip()))
+
+        def _is_sensitive_key(key: str) -> bool:
+            normalized = key.strip().lower()
+            return any(token in normalized for token in _SENSITIVE_KEYWORDS)
+
+        def _scan_args(path: str, args: list[object]) -> None:
+            for idx, arg in enumerate(args):
+                if not isinstance(arg, str):
+                    continue
+                current = arg.strip()
+                if not current.startswith("--"):
+                    continue
+
+                flag, sep, value = current.partition("=")
+                flag_name = flag[2:].strip().lower()
+
+                if sep:
+                    if _is_sensitive_key(flag_name) and value.strip() and not _is_env_ref(value):
+                        _append(f"{path}[{idx}]")
+                    continue
+
+                if not _is_sensitive_key(flag_name):
+                    continue
+
+                if idx + 1 >= len(args):
+                    continue
+                next_arg = args[idx + 1]
+                if not isinstance(next_arg, str):
+                    continue
+                next_value = next_arg.strip()
+                if not next_value or next_value.startswith("--"):
+                    continue
+                if not _is_env_ref(next_value):
+                    _append(f"{path}[{idx + 1}]")
+
+        def _walk(value: object, path: str) -> None:
+            if isinstance(value, dict):
+                for key, sub_value in value.items():
+                    if not isinstance(key, str):
+                        continue
+                    next_path = f"{path}.{key}" if path else key
+                    if _is_sensitive_key(key) and isinstance(sub_value, str):
+                        if sub_value.strip() and not _is_env_ref(sub_value):
+                            _append(next_path)
+                    _walk(sub_value, next_path)
+                return
+            if isinstance(value, list):
+                if path.endswith("args"):
+                    _scan_args(path, value)
+                for idx, item in enumerate(value):
+                    _walk(item, f"{path}[{idx}]")
+
+        _walk(entry, "")
+        return found

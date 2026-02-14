@@ -156,20 +156,20 @@ def test_patch_skillpack_allows_empty_triggers(tmp_path: Path) -> None:
     assert updated["triggers"] == []
 
 
-def test_create_skillpack_rejects_empty_allowed_tools(tmp_path: Path) -> None:
+def test_create_skillpack_allows_empty_allowed_tools(tmp_path: Path) -> None:
     _, manager, _ = _setup(tmp_path)
 
-    with pytest.raises(SkillpackInputError):
-        manager.create_skillpack(
-            name="invalid_tools",
-            payload={
-                "description": "非法",
-                "allowed_tools": [],
-                "triggers": [],
-                "instructions": "说明",
-            },
-            actor="api",
-        )
+    created = manager.create_skillpack(
+        name="invalid_tools",
+        payload={
+            "description": "允许空工具",
+            "allowed_tools": [],
+            "triggers": [],
+            "instructions": "说明",
+        },
+        actor="api",
+    )
+    assert created["allowed_tools"] == []
 
 
 def test_create_can_override_system_by_project(tmp_path: Path) -> None:
@@ -216,6 +216,26 @@ def test_patch_project_skillpack_success(tmp_path: Path) -> None:
     )
     assert updated["description"] == "图表分析"
     assert updated["argument_hint"] == "<file> <type>"
+
+
+def test_create_skillpack_with_mcp_requirements(tmp_path: Path) -> None:
+    _, manager, _ = _setup(tmp_path)
+
+    created = manager.create_skillpack(
+        name="mcp_reader",
+        payload={
+            "description": "MCP 读取",
+            "allowed_tools": ["mcp:context7:*"],
+            "triggers": ["外部查询"],
+            "required-mcp-servers": ["context7"],
+            "required-mcp-tools": ["context7:query_docs"],
+            "instructions": "先检索，再整理。",
+        },
+        actor="api",
+    )
+
+    assert created["required_mcp_servers"] == ["context7"]
+    assert created["required_mcp_tools"] == ["context7:query_docs"]
 
 
 def test_patch_non_project_skillpack_rejected(tmp_path: Path) -> None:

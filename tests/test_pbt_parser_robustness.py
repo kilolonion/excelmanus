@@ -108,13 +108,14 @@ def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Property 4：不支持的 frontmatter 语法抛出异常
-# Feature: v3-post-refactor-cleanup, Property 4: 不支持的 frontmatter 语法抛出异常
+# Property 4：非法 YAML frontmatter 抛出异常
+# Feature: v3-post-refactor-cleanup, Property 4: 非法 YAML frontmatter 抛出异常
 # **Validates: Requirements 5.3**
 # ---------------------------------------------------------------------------
 
-# 生成不支持的语法标记前缀
-_unsupported_prefix = st.sampled_from(["|", ">", "{"])
+_invalid_yaml_kind = st.sampled_from(
+    ["unclosed_list", "unclosed_map", "unclosed_dquote", "unclosed_squote"]
+)
 
 # 生成后缀内容（非空）
 _suffix_text = st.text(
@@ -127,23 +128,25 @@ _suffix_text = st.text(
 )
 
 
-@given(
-    key=_fm_key,
-    prefix=_unsupported_prefix,
-    suffix=_suffix_text,
-)
-def test_property_4_unsupported_syntax_raises_validation_error(
+@given(key=_fm_key, kind=_invalid_yaml_kind, suffix=_suffix_text)
+def test_property_4_invalid_yaml_raises_validation_error(
     key: str,
-    prefix: str,
+    kind: str,
     suffix: str,
 ) -> None:
-    """Property 4：对于包含不支持语法标记（|、>、{）的 frontmatter 文本，
+    """Property 4：对于非法 YAML frontmatter 文本，
     _parse_frontmatter() 应抛出 SkillpackValidationError。
 
     **Validates: Requirements 5.3**
     """
-    # 构造包含不支持语法的 frontmatter 文本
-    frontmatter_text = f"{key}: {prefix}{suffix}"
+    if kind == "unclosed_list":
+        frontmatter_text = f"{key}: [{suffix}"
+    elif kind == "unclosed_map":
+        frontmatter_text = f"{key}: {{x: {suffix}"
+    elif kind == "unclosed_dquote":
+        frontmatter_text = f'{key}: "{suffix}'
+    else:
+        frontmatter_text = f"{key}: '{suffix}"
 
     with pytest.raises(SkillpackValidationError):
         SkillpackLoader._parse_frontmatter(frontmatter_text)

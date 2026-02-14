@@ -606,9 +606,121 @@ class TestManualSkillSlashCommand:
         assert engine.resolve_skill_command("/Users/test/file.xlsx") is None
         assert engine.resolve_skill_command("/tmp/data.xlsx") is None
 
+    def test_resolve_skill_command_supports_namespace(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {
+            "team/data-cleaner": MagicMock(),
+        }
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        engine._skill_router = mock_router
+
+        assert (
+            engine.resolve_skill_command("/team/data-cleaner --mode fast")
+            == "team/data-cleaner"
+        )
+        assert engine.resolve_skill_command("/team/data-cleaner.xlsx") is None
+
+    def test_resolve_skill_command_respects_user_invocable(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {
+            "private_skill": Skillpack(
+                name="private_skill",
+                description="private",
+                allowed_tools=["add_numbers"],
+                triggers=[],
+                instructions="",
+                source="project",
+                root_dir="/tmp/private",
+                user_invocable=False,
+            )
+        }
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        engine._skill_router = mock_router
+
+        assert engine.resolve_skill_command("/private_skill run") is None
+
+    @pytest.mark.asyncio
+    async def test_chat_rejects_slash_for_not_user_invocable_skill(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine._route_skills = AsyncMock(
+            return_value=SkillMatchResult(
+                skills_used=[],
+                tool_scope=[],
+                route_mode="slash_not_user_invocable",
+                system_contexts=[],
+            )
+        )
+        result = await engine.chat(
+            "/private_skill do",
+            slash_command="private_skill",
+            raw_args="do",
+        )
+        assert isinstance(result, ChatResult)
+        assert "不允许手动调用" in result.reply
+
 
 class TestForkSubagentExecution:
     """fork 子代理执行流程测试（fork_plan 已移除，子代理不再自动触发）。"""
+
+    @pytest.mark.asyncio
+    async def test_chat_delegates_when_active_skill_context_is_fork(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine._active_skill = Skillpack(
+            name="excel_code_runner",
+            description="代码处理",
+            allowed_tools=[],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/skill",
+            context="fork",
+            agent="Explore",
+        )
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+        engine._delegate_to_subagent = AsyncMock(
+            return_value=DelegateSubagentOutcome(
+                reply="子代理执行完成。",
+                success=True,
+                picked_agent="explorer",
+                task_text="请处理这个大文件",
+                normalized_paths=[],
+                subagent_result=None,
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("主代理不应执行")
+        )
+
+        result = await engine.chat("请处理这个大文件")
+        assert isinstance(result, ChatResult)
+        assert result.reply == "子代理执行完成。"
+        engine._delegate_to_subagent.assert_awaited_once()
+        kwargs = engine._delegate_to_subagent.await_args.kwargs
+        assert kwargs["agent_name"] == "explorer"
+        assert kwargs["task"] == "请处理这个大文件"
+        engine._client.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_chat_skips_fork_after_fork_plan_removed(self) -> None:
@@ -662,6 +774,72 @@ class TestForkSubagentExecution:
         assert result == "主代理执行完成。"
         assert engine._client.chat.completions.create.call_count == 1
         assert "+fork_executed" not in engine.last_route_result.route_mode
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_select_skill_fork_delegates_immediately(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._memory.add_user_message("请分析销售趋势")
+
+        fork_skill = Skillpack(
+            name="team/fork-analyst",
+            description="fork skill",
+            allowed_tools=["delegate_to_subagent"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/skill",
+            context="fork",
+            agent="Plan",
+        )
+
+        async def _fake_execute_tool_call(*args, **kwargs) -> ToolCallResult:
+            engine._active_skill = fork_skill
+            return ToolCallResult(
+                tool_name="select_skill",
+                arguments={"skill_name": "team/fork-analyst"},
+                result="OK",
+                success=True,
+            )
+
+        engine._execute_tool_call = AsyncMock(side_effect=_fake_execute_tool_call)
+        engine._delegate_to_subagent = AsyncMock(
+            return_value=DelegateSubagentOutcome(
+                reply="已自动委派 planner 子代理。",
+                success=True,
+                picked_agent="planner",
+                task_text="请分析销售趋势",
+                normalized_paths=[],
+                subagent_result=None,
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_tool_call_response(
+                [
+                    (
+                        "call_1",
+                        "select_skill",
+                        json.dumps({"skill_name": "team/fork-analyst"}),
+                    )
+                ]
+            )
+        )
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["select_skill"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == "已自动委派 planner 子代理。"
+        engine._delegate_to_subagent.assert_awaited_once()
+        kwargs = engine._delegate_to_subagent.await_args.kwargs
+        assert kwargs["agent_name"] == "planner"
+        assert kwargs["task"] == "请分析销售趋势"
+        assert engine._client.chat.completions.create.call_count == 1
 
 
 class TestDelegateSubagent:
@@ -1369,6 +1547,79 @@ class TestFallbackScopeGuard:
 class TestMCPScopeSelector:
     """MCP 工具授权选择器展开。"""
 
+    @staticmethod
+    def _register_mcp_test_tool(
+        registry: ToolRegistry,
+        *,
+        server: str = "context7",
+        tool: str = "query_docs",
+        result: str = "mcp-ok",
+    ) -> str:
+        mcp_tool = add_tool_prefix(server, tool)
+        registry.register_tool(
+            ToolDef(
+                name=mcp_tool,
+                description="mcp-test-tool",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda: result,
+            )
+        )
+        return mcp_tool
+
+    @pytest.mark.parametrize(
+        ("route_mode", "tool_scope"),
+        [
+            ("fallback", ["list_skills"]),
+            ("slash_not_found", ["list_skills"]),
+            ("no_skillpack", ["list_skills"]),
+            ("slash_direct", ["add_numbers"]),
+        ],
+    )
+    def test_get_current_tool_scope_includes_mcp_for_all_route_modes(
+        self,
+        route_mode: str,
+        tool_scope: list[str],
+    ) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool = self._register_mcp_test_tool(registry)
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=tool_scope,
+            route_mode=route_mode,
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        assert mcp_tool in scope
+
+    def test_get_current_tool_scope_includes_mcp_when_active_skill(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool = self._register_mcp_test_tool(registry)
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="data_basic",
+            description="active skill",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="test",
+            source="project",
+            root_dir="/tmp/active_skill",
+        )
+
+        scope = engine._get_current_tool_scope(
+            route_result=SkillMatchResult(
+                skills_used=["data_basic"],
+                tool_scope=["add_numbers"],
+                route_mode="fallback",
+                system_contexts=[],
+            )
+        )
+        assert "add_numbers" in scope
+        assert mcp_tool in scope
+
     def test_scope_expands_mcp_all_selector(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
@@ -1391,6 +1642,7 @@ class TestMCPScopeSelector:
             ]
         )
         engine = AgentEngine(config, registry)
+        engine._full_access_enabled = True
 
         route_result = SkillMatchResult(
             skills_used=["mcp_skill"],
@@ -1442,7 +1694,8 @@ class TestMCPScopeSelector:
         scope = engine._get_current_tool_scope(route_result=route_result)
         assert context_tool_a in scope
         assert context_tool_b in scope
-        assert fs_tool not in scope
+        # 破坏性重构后，MCP 工具全场景全量注入 scope。
+        assert fs_tool in scope
 
     @pytest.mark.asyncio
     async def test_execute_tool_call_accepts_expanded_mcp_selector(self) -> None:
@@ -1458,6 +1711,7 @@ class TestMCPScopeSelector:
             )
         )
         engine = AgentEngine(config, registry)
+        engine._full_access_enabled = True
 
         route_result = SkillMatchResult(
             skills_used=["mcp_skill"],
@@ -1479,6 +1733,302 @@ class TestMCPScopeSelector:
         )
         assert result.success is True
         assert result.result == "mcp-ok"
+
+    @pytest.mark.asyncio
+    async def test_non_whitelist_mcp_still_requires_pending_approval(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool = self._register_mcp_test_tool(registry)
+        engine = AgentEngine(config, registry)
+
+        scope = engine._get_current_tool_scope(
+            route_result=SkillMatchResult(
+                skills_used=[],
+                tool_scope=["list_skills"],
+                route_mode="fallback",
+                system_contexts=[],
+            )
+        )
+        call = SimpleNamespace(
+            id="call_mcp_pending",
+            function=SimpleNamespace(name=mcp_tool, arguments=json.dumps({})),
+        )
+        result = await engine._execute_tool_call(
+            tc=call,
+            tool_scope=scope,
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.pending_approval is True
+        assert engine._approval.pending is not None
+
+    @pytest.mark.asyncio
+    async def test_whitelist_mcp_executes_without_fullaccess(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool = self._register_mcp_test_tool(registry)
+        engine = AgentEngine(config, registry)
+        engine._approval.register_mcp_auto_approve([mcp_tool])
+
+        scope = engine._get_current_tool_scope(
+            route_result=SkillMatchResult(
+                skills_used=[],
+                tool_scope=["list_skills"],
+                route_mode="fallback",
+                system_contexts=[],
+            )
+        )
+        call = SimpleNamespace(
+            id="call_mcp_auto",
+            function=SimpleNamespace(name=mcp_tool, arguments=json.dumps({})),
+        )
+        result = await engine._execute_tool_call(
+            tc=call,
+            tool_scope=scope,
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.pending_approval is False
+        assert result.result == "mcp-ok"
+        assert engine._approval.pending is None
+
+
+class TestSkillMCPRequirements:
+    """Skill 的 MCP 依赖校验。"""
+
+    @pytest.mark.asyncio
+    async def test_select_skill_rejects_when_required_mcp_server_missing(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        skill = Skillpack(
+            name="need_mcp",
+            description="依赖外部 MCP",
+            allowed_tools=["mcp:context7:*"],
+            triggers=[],
+            instructions="调用 context7",
+            source="project",
+            root_dir="/tmp/need_mcp",
+            required_mcp_servers=["context7"],
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"need_mcp": skill}
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(return_value=skill)
+        engine._skill_router = mock_router
+
+        result = await engine._handle_select_skill("need_mcp")
+
+        assert "MCP 依赖未满足" in result
+        assert engine._active_skill is None
+
+    @pytest.mark.asyncio
+    async def test_select_skill_accepts_when_required_mcp_server_and_tool_ready(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        mcp_tool = add_tool_prefix("context7", "query_docs")
+        registry.register_tool(
+            ToolDef(
+                name=mcp_tool,
+                description="文档查询",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda: "ok",
+            )
+        )
+        engine = AgentEngine(config, registry)
+        engine._mcp_manager._clients["context7"] = MagicMock()
+
+        skill = Skillpack(
+            name="need_mcp",
+            description="依赖外部 MCP",
+            allowed_tools=["mcp:context7:*"],
+            triggers=[],
+            instructions="调用 context7",
+            source="project",
+            root_dir="/tmp/need_mcp",
+            required_mcp_servers=["context7"],
+            required_mcp_tools=["context7:query_docs"],
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"need_mcp": skill}
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(return_value=skill)
+        engine._skill_router = mock_router
+
+        result = await engine._handle_select_skill("need_mcp")
+
+        assert result.startswith("OK")
+        assert engine._active_skill is not None
+        assert engine._active_skill.name == "need_mcp"
+
+
+class TestCommandDispatchAndHooks:
+    @pytest.mark.asyncio
+    async def test_command_dispatch_maps_plain_args(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        registry.register_tool(
+            ToolDef(
+                name="echo_tool",
+                description="回显",
+                input_schema={
+                    "type": "object",
+                    "properties": {"input": {"type": "string"}},
+                    "required": ["input"],
+                },
+                func=lambda input: input,
+            )
+        )
+        engine = AgentEngine(config, registry)
+        skill = Skillpack(
+            name="echo",
+            description="命令分发",
+            allowed_tools=["echo_tool"],
+            triggers=[],
+            instructions="回显输入",
+            source="project",
+            root_dir="/tmp/echo",
+            command_dispatch="tool",
+            command_tool="echo_tool",
+        )
+        route_result = SkillMatchResult(
+            skills_used=["echo"],
+            tool_scope=["echo_tool"],
+            route_mode="slash_direct",
+            system_contexts=[],
+        )
+
+        result = await engine._run_command_dispatch_skill(
+            skill=skill,
+            raw_args="hello-dispatch",
+            route_result=route_result,
+            on_event=None,
+        )
+        assert result.reply == "hello-dispatch"
+        assert result.tool_calls
+        assert result.tool_calls[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_hook_deny_blocks_tool(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="hook/deny",
+            description="deny hook",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PreToolUse": [
+                    {
+                        "matcher": "add_numbers",
+                        "hooks": [{"type": "prompt", "decision": "deny", "reason": "blocked"}],
+                    }
+                ]
+            },
+        )
+
+        tc = SimpleNamespace(
+            id="call_hook_deny",
+            function=SimpleNamespace(name="add_numbers", arguments=json.dumps({"a": 1, "b": 2})),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is False
+        assert "blocked" in result.result
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_hook_ask_creates_pending_approval(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="hook/ask",
+            description="ask hook",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PreToolUse": [
+                    {
+                        "matcher": "add_numbers",
+                        "hooks": [{"type": "prompt", "decision": "ask"}],
+                    }
+                ]
+            },
+        )
+
+        tc = SimpleNamespace(
+            id="call_hook_ask",
+            function=SimpleNamespace(name="add_numbers", arguments=json.dumps({"a": 1, "b": 2})),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.pending_approval is True
+        assert isinstance(result.approval_id, str) and result.approval_id
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_hook_updated_input_is_applied(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="hook/update",
+            description="update input hook",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PreToolUse": [
+                    {
+                        "matcher": "add_numbers",
+                        "hooks": [
+                            {
+                                "type": "prompt",
+                                "decision": "allow",
+                                "updated_input": {"a": 7, "b": 4},
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        tc = SimpleNamespace(
+            id="call_hook_update",
+            function=SimpleNamespace(name="add_numbers", arguments=json.dumps({"a": 1, "b": 2})),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.result == "11"
 
 
 class TestChatPureText:

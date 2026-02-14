@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 SkillpackSource = Literal["system", "user", "project"]
+SkillContextMode = Literal["normal", "fork"]
+SkillCommandDispatchMode = Literal["none", "tool"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,16 @@ class Skillpack:
     disable_model_invocation: bool = False
     user_invocable: bool = True
     argument_hint: str = ""
+    context: SkillContextMode = "normal"
+    agent: str | None = None
+    hooks: dict[str, Any] = field(default_factory=dict)
+    model: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    command_dispatch: SkillCommandDispatchMode = "none"
+    command_tool: str | None = None
+    required_mcp_servers: list[str] = field(default_factory=list)
+    required_mcp_tools: list[str] = field(default_factory=list)
+    extensions: dict[str, Any] = field(default_factory=dict)
     resource_contents: dict[str, str] = field(default_factory=dict)
 
     def render_context(self) -> str:
@@ -36,6 +48,12 @@ class Skillpack:
             "执行指引：",
             self.instructions.strip() or "(无)",
         ]
+        if self.required_mcp_servers or self.required_mcp_tools:
+            lines.append("MCP 依赖：")
+            if self.required_mcp_servers:
+                lines.append(f"- servers: {', '.join(self.required_mcp_servers)}")
+            if self.required_mcp_tools:
+                lines.append(f"- tools: {', '.join(self.required_mcp_tools)}")
         if self.resource_contents:
             lines.append("补充资源：")
             for path, content in self.resource_contents.items():
