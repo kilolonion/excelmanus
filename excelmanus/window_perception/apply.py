@@ -7,6 +7,8 @@ from typing import Any
 
 from .delta import (
     ExplorerDelta,
+    FieldAppendDelta,
+    FieldSetDelta,
     IntentDelta,
     LifecycleDelta,
     SheetFilterDelta,
@@ -94,6 +96,18 @@ def apply_delta(window: Window, delta: WindowDelta) -> Window:
             window.intent_updated_turn = delta.updated_turn
         if delta.lock_until_turn is not None:
             window.intent_lock_until_turn = delta.lock_until_turn
+
+    if isinstance(delta, FieldSetDelta):
+        setattr(window, str(delta.field), delta.value)
+
+    if isinstance(delta, FieldAppendDelta):
+        target = getattr(window, str(delta.field), None)
+        if target is None:
+            raise DeltaReject(f"append target missing: {delta.field}")
+        append = getattr(target, "append", None)
+        if not callable(append):
+            raise DeltaReject(f"append target not list-like: {delta.field}")
+        append(delta.value)
     return window
 
 
