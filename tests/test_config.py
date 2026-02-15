@@ -610,6 +610,10 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_MAX_ROWS", "25")
         monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS", "500")
         monkeypatch.setenv("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS", "200")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_ENABLED", "true")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_STICKY_TURNS", "3")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD", "2")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD", "3")
 
     def test_window_perception_defaults(self, monkeypatch) -> None:
         """窗口感知层默认值应符合 v4 设定。"""
@@ -634,6 +638,10 @@ class TestWindowPerceptionConfig:
         assert cfg.window_full_max_rows == 25
         assert cfg.window_full_total_budget_tokens == 500
         assert cfg.window_data_buffer_max_rows == 200
+        assert cfg.window_intent_enabled is True
+        assert cfg.window_intent_sticky_turns == 3
+        assert cfg.window_intent_repeat_warn_threshold == 2
+        assert cfg.window_intent_repeat_trip_threshold == 3
 
     def test_window_perception_values_from_env(self, monkeypatch) -> None:
         """支持通过环境变量覆盖全部窗口感知配置。"""
@@ -657,6 +665,10 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_MAX_ROWS", "40")
         monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS", "700")
         monkeypatch.setenv("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS", "300")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_STICKY_TURNS", "5")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD", "4")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD", "6")
 
         cfg = load_config()
         assert cfg.window_perception_enabled is False
@@ -678,6 +690,10 @@ class TestWindowPerceptionConfig:
         assert cfg.window_full_max_rows == 40
         assert cfg.window_full_total_budget_tokens == 700
         assert cfg.window_data_buffer_max_rows == 300
+        assert cfg.window_intent_enabled is False
+        assert cfg.window_intent_sticky_turns == 5
+        assert cfg.window_intent_repeat_warn_threshold == 4
+        assert cfg.window_intent_repeat_trip_threshold == 6
 
     def test_window_perception_enabled_invalid_value_raises_error(self, monkeypatch) -> None:
         """窗口感知开关非法值应抛出 ConfigError。"""
@@ -714,12 +730,88 @@ class TestWindowPerceptionConfig:
         with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE"):
             load_config()
 
+    def test_window_intent_enabled_invalid_value_raises_error(self, monkeypatch) -> None:
+        """window_intent_enabled 非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_ENABLED", "maybe")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_INTENT_ENABLED"):
+            load_config()
+
+    def test_window_intent_integer_invalid_raises_error(self, monkeypatch) -> None:
+        """window_intent 整数配置非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_INTENT_STICKY_TURNS", "NaN")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_INTENT_STICKY_TURNS"):
+            load_config()
+
     def test_window_return_mode_invalid_fallback_to_enriched(self, monkeypatch) -> None:
         """window_return_mode 非法值应回退 enriched，而非抛错。"""
         self._set_required_env(monkeypatch)
         monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "invalid-mode")
         cfg = load_config()
         assert cfg.window_return_mode == "enriched"
+
+    def test_window_return_mode_unified_is_accepted(self, monkeypatch) -> None:
+        """window_return_mode=unified 应被正确解析。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "unified")
+        cfg = load_config()
+        assert cfg.window_return_mode == "unified"
+
+    def test_window_return_mode_default_is_adaptive(self, monkeypatch, tmp_path) -> None:
+        """未设置 window_return_mode 时默认应为 adaptive。"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.delenv("EXCELMANUS_WINDOW_RETURN_MODE", raising=False)
+        cfg = load_config()
+        assert cfg.window_return_mode == "adaptive"
+
+    def test_adaptive_model_mode_overrides_parsed(self, monkeypatch) -> None:
+        """adaptive override JSON 应被解析并归一化。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES",
+            '{"gpt-5":"unified"," moonshotai/kimi ":"anchored","deepseek":"enriched"}',
+        )
+        cfg = load_config()
+        assert cfg.adaptive_model_mode_overrides == {
+            "gpt-5": "unified",
+            "moonshotai/kimi": "anchored",
+            "deepseek": "enriched",
+        }
+
+    def test_adaptive_model_mode_overrides_invalid_json_ignored(self, monkeypatch) -> None:
+        """adaptive override 非法 JSON 时应忽略且不抛错。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES", "{not-json")
+        cfg = load_config()
+        assert cfg.adaptive_model_mode_overrides == {}
+
+    def test_adaptive_model_mode_overrides_invalid_values_ignored(self, monkeypatch) -> None:
+        """adaptive override 非法项应被忽略，合法项保留。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv(
+            "EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES",
+            '{"gpt-5":"unified","kimi":"invalid","x":123}',
+        )
+        cfg = load_config()
+        assert cfg.adaptive_model_mode_overrides == {"gpt-5": "unified"}
+
+    def test_window_rule_engine_version_accepts_v2(self, monkeypatch) -> None:
+        """window_rule_engine_version=v2 应被正确解析。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION", "v2")
+        cfg = load_config()
+        assert cfg.window_rule_engine_version == "v2"
+
+    def test_window_rule_engine_version_invalid_fallback_v1(self, monkeypatch) -> None:
+        """window_rule_engine_version 非法值应回退 v1。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION", "v9")
+        cfg = load_config()
+        assert cfg.window_rule_engine_version == "v1"
 
 
 class TestLogLevelValidation:

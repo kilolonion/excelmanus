@@ -14,6 +14,7 @@ allowed_tools:
   - write_cells
   - insert_rows
   - insert_columns
+  - focus_window
 triggers:
   - 读取
   - 分析

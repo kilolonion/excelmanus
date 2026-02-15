@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import DetailLevel, WindowSnapshot, WindowState, WindowType
+from .models import DetailLevel, IntentTag, WindowSnapshot, WindowState, WindowType
 
 
 def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enriched") -> str:
@@ -14,7 +14,7 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
     body = "\n\n".join(item.rendered_text for item in snapshots if item.rendered_text.strip())
     if not body:
         return ""
-    if mode == "anchored":
+    if mode in {"anchored", "unified"}:
         return (
             "## 数据窗口\n"
             "以下窗口包含你通过工具操作获取的所有数据。\n"
@@ -24,7 +24,7 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
     return (
         "## 窗口感知上下文\n"
         "以下是你当前已打开的窗口实时状态，数据与工具返回完全一致。\n"
-        "如果所需信息已在下方窗口中（列名、行数、预览数据等），直接引用回答，无需重复调用工具获取。\n\n"
+        "如果所需信息已在下方窗口中，直接引用回答或基于窗口数据调用工具执行，无需重复读取。\n\n"
         + body
     )
 
@@ -35,15 +35,16 @@ def render_window_keep(
     mode: str = "enriched",
     max_rows: int = 25,
     current_iteration: int = 0,
+    intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 ACTIVE 窗口。"""
     if window.type == WindowType.EXPLORER:
         return _render_explorer(window)
-    if mode == "anchored":
+    if mode in {"anchored", "unified"}:
         if window.detail_level == DetailLevel.ICON:
-            return render_window_minimized(window)
+            return render_window_minimized(window, intent_profile=intent_profile)
         if window.detail_level == DetailLevel.SUMMARY:
-            return render_window_background(window)
+            return render_window_background(window, intent_profile=intent_profile)
         if window.detail_level == DetailLevel.NONE:
             return ""
         if window.data_buffer:
@@ -51,12 +52,18 @@ def render_window_keep(
                 window,
                 max_rows=max_rows,
                 current_iteration=current_iteration,
+                intent_profile=intent_profile,
             )
     return _render_sheet(window)
 
 
-def render_window_background(window: WindowState) -> str:
+def render_window_background(
+    window: WindowState,
+    *,
+    intent_profile: dict[str, Any] | None = None,
+) -> str:
     """渲染 BACKGROUND 窗口（结构缩略图）。"""
+    profile = _normalize_intent_profile(window, intent_profile=intent_profile)
     if window.type == WindowType.EXPLORER:
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
@@ -73,6 +80,17 @@ def render_window_background(window: WindowState) -> str:
     columns = _extract_columns_from_preview(window.preview_rows)
     if columns:
         lines.append("列: " + ", ".join(columns))
+    lines.append(f"意图: {profile['intent']}（{profile['focus_text']}）")
+
+    if profile.get("show_style"):
+        lines.extend(_render_style_summary_lines(window))
+    if profile.get("show_quality"):
+        lines.append("质量: " + _build_quality_summary(window.data_buffer))
+    if profile.get("show_formula"):
+        lines.append("公式线索: " + _build_formula_summary(window))
+    if profile.get("show_change") and window.change_log:
+        latest = window.change_log[-1]
+        lines.append(f"最近变更: {latest.tool_summary}")
 
     parts: list[str] = []
     if viewport is not None:
@@ -88,8 +106,13 @@ def render_window_background(window: WindowState) -> str:
     return "\n".join(lines)
 
 
-def render_window_minimized(window: WindowState) -> str:
+def render_window_minimized(
+    window: WindowState,
+    *,
+    intent_profile: dict[str, Any] | None = None,
+) -> str:
     """渲染 SUSPENDED 窗口（一行摘要）。"""
+    profile = _normalize_intent_profile(window, intent_profile=intent_profile)
     if window.type == WindowType.EXPLORER:
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
@@ -99,10 +122,13 @@ def render_window_minimized(window: WindowState) -> str:
     sheet_name = window.sheet_name or "未知Sheet"
     viewport = window.viewport
     if viewport is not None and viewport.total_rows > 0 and viewport.total_cols > 0:
-        return f"【挂起 · {file_name} / {sheet_name} | {viewport.total_rows}×{viewport.total_cols}】"
+        return (
+            f"【挂起 · {file_name} / {sheet_name} | {viewport.total_rows}×{viewport.total_cols}】"
+            f" 意图={profile['intent']}"
+        )
 
     summary = window.summary or "上次视图已压缩"
-    return f"【挂起 · {file_name} / {sheet_name}】{summary}"
+    return f"【挂起 · {file_name} / {sheet_name}】{summary} | 意图={profile['intent']}"
 
 
 def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] | None:
@@ -129,6 +155,7 @@ def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] 
         "window_type": "sheet",
         "file": window.file_path,
         "sheet": window.sheet_name,
+        "intent": window.intent_tag.value,
         "sheet_tabs": window.sheet_tabs,
         "viewport": {
             "range": viewport.range_ref if viewport else "",
@@ -181,6 +208,7 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
     lines = [
         "───────────── 环境感知 ─────────────",
         f"📊 文件: {payload.get('file') or '未知'}",
+        f"🧠 意图: {payload.get('intent') or 'general'}",
         (
             f"📑 当前Sheet: {current_sheet} | 其他: {' '.join(other_tabs)}"
             if other_tabs
@@ -335,11 +363,14 @@ def render_window_wurm_full(
     *,
     max_rows: int,
     current_iteration: int,
+    intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 WURM FULL 模式窗口。"""
+    profile = _normalize_intent_profile(window, intent_profile=intent_profile)
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
     lines = [f"[{window.id} · {file_name} / {sheet_name}]"]
+    lines.append(f"🎯 意图: {profile['intent']}（{profile['focus_text']}）")
 
     if window.stale_hint:
         lines.append(f"⚠ stale: {window.stale_hint}")
@@ -356,35 +387,53 @@ def render_window_wurm_full(
         lines.append("Tabs: " + " ".join(tabs))
 
     total_rows = window.total_rows or len(window.data_buffer)
-    total_cols = window.total_cols or len(window.columns)
+    columns = window.columns or window.schema
+    total_cols = window.total_cols or len(columns)
     lines.append(f"范围: {total_rows}行×{total_cols}列 | 视口: {window.viewport_range or '-'}")
 
-    column_names = [col.name for col in window.columns]
+    column_names = [col.name for col in columns]
     if not column_names and window.data_buffer:
         column_names = [str(key) for key in window.data_buffer[0].keys()]
     if column_names:
         lines.append("列: [" + ", ".join(column_names) + "]")
 
+    if profile.get("show_style"):
+        lines.extend(_render_style_summary_lines(window))
+    if profile.get("show_quality"):
+        lines.append("质量: " + _build_quality_summary(window.data_buffer))
+    if profile.get("show_formula"):
+        lines.append("公式线索: " + _build_formula_summary(window))
+    if profile.get("show_change") and window.change_log:
+        latest = window.change_log[-1]
+        lines.append(f"变更聚焦: {latest.tool_summary} @ {latest.affected_range}")
+
     # 多范围优先，按当前视口块置后展示以提升注意力。
+    render_max_rows = max(1, min(max_rows, int(profile.get("max_rows", max_rows))))
     ranges = list(window.cached_ranges)
     if ranges:
         ranges.sort(key=lambda item: (0 if not item.is_current_viewport else 1, item.added_at_iteration))
         for cached in ranges:
             marker = " [当前视口]" if cached.is_current_viewport else ""
+            rows_to_render = cached.rows
+            if profile.get("show_quality"):
+                rows_to_render = _pick_anomaly_rows(cached.rows, limit=render_max_rows) or cached.rows
             lines.append(f"── 缓存范围 {cached.range_ref} ({len(cached.rows)}行){marker} ──")
             lines.extend(_render_pipe_rows(
-                rows=cached.rows,
+                rows=rows_to_render,
                 columns=column_names,
-                max_rows=max_rows,
+                max_rows=render_max_rows,
                 current_iteration=current_iteration,
                 changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
             ))
     else:
+        rows_to_render = window.data_buffer
+        if profile.get("show_quality"):
+            rows_to_render = _pick_anomaly_rows(window.data_buffer, limit=render_max_rows) or window.data_buffer
         lines.append("数据:")
         lines.extend(_render_pipe_rows(
-            rows=window.data_buffer,
+            rows=rows_to_render,
             columns=column_names,
-            max_rows=max_rows,
+            max_rows=render_max_rows,
             current_iteration=current_iteration,
             changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
         ))
@@ -398,6 +447,121 @@ def render_window_wurm_full(
             f"AVG={_format_number(status_bar.get('average'))}"
         )
     return "\n".join(lines)
+
+
+def _normalize_intent_profile(
+    window: WindowState,
+    *,
+    intent_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = dict(intent_profile or {})
+    intent_value = str(profile.get("intent") or window.intent_tag.value).strip().lower()
+    try:
+        intent = IntentTag(intent_value)
+    except ValueError:
+        intent = IntentTag.GENERAL
+
+    focus_map = {
+        IntentTag.AGGREGATE: "统计优先",
+        IntentTag.FORMAT: "样式优先",
+        IntentTag.VALIDATE: "质量校验优先",
+        IntentTag.FORMULA: "公式排查优先",
+        IntentTag.ENTRY: "写入变更优先",
+        IntentTag.GENERAL: "通用浏览",
+    }
+    profile["intent"] = intent.value
+    profile.setdefault("focus_text", focus_map[intent])
+    profile.setdefault("show_style", intent == IntentTag.FORMAT)
+    profile.setdefault("show_quality", intent == IntentTag.VALIDATE)
+    profile.setdefault("show_formula", intent == IntentTag.FORMULA)
+    profile.setdefault("show_change", intent in {IntentTag.ENTRY, IntentTag.FORMAT, IntentTag.FORMULA})
+    default_rows = 25 if intent in {IntentTag.AGGREGATE, IntentTag.GENERAL} else 5
+    if intent == IntentTag.FORMAT:
+        default_rows = 3
+    profile.setdefault("max_rows", default_rows)
+    return profile
+
+
+def _render_style_summary_lines(window: WindowState) -> list[str]:
+    lines: list[str] = []
+    if window.style_summary:
+        lines.append(f"样式摘要: {window.style_summary}")
+    column_widths = window.metadata.get("column_widths")
+    if isinstance(column_widths, dict) and column_widths:
+        lines.append(f"列宽: {_format_map_preview(column_widths, max_items=6)}")
+    row_heights = window.metadata.get("row_heights")
+    if isinstance(row_heights, dict) and row_heights:
+        lines.append(f"行高: {_format_map_preview(row_heights, max_items=6)}")
+    merged_ranges = window.metadata.get("merged_ranges")
+    if isinstance(merged_ranges, list) and merged_ranges:
+        merged_preview = ", ".join(str(item) for item in merged_ranges[:4])
+        lines.append(f"合并: {merged_preview}")
+    conditional_effects = window.metadata.get("conditional_effects")
+    if isinstance(conditional_effects, list) and conditional_effects:
+        lines.append(f"条件格式: {len(conditional_effects)}条")
+    return lines
+
+
+def _build_quality_summary(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "无数据可校验"
+    empty_cells = 0
+    signature_counter: dict[str, int] = {}
+    duplicate_rows = 0
+    for row in rows:
+        empty_cells += sum(1 for value in row.values() if value is None or value == "")
+        signature = "|".join(str(value) for value in row.values())
+        signature_counter[signature] = signature_counter.get(signature, 0) + 1
+        if signature_counter[signature] == 2:
+            duplicate_rows += 1
+    return f"空值单元格={empty_cells}，疑似重复行={duplicate_rows}"
+
+
+def _build_formula_summary(window: WindowState) -> str:
+    hints: list[str] = []
+    for row in window.data_buffer[:30]:
+        for key, value in row.items():
+            text = str(value or "")
+            if "=" in text or _looks_like_formula_call(text):
+                hints.append(f"{key}:{text[:24]}")
+                if len(hints) >= 3:
+                    break
+        if len(hints) >= 3:
+            break
+    if hints:
+        return " | ".join(hints)
+    if window.change_log:
+        latest = window.change_log[-1]
+        return f"最近公式相关变更区域: {latest.affected_range}"
+    return "未检测到明显公式线索"
+
+
+def _looks_like_formula_call(text: str) -> bool:
+    upper = text.upper()
+    return any(token in upper for token in ("SUMIFS(", "VLOOKUP(", "XLOOKUP(", "INDEX(", "MATCH(", "IF("))
+
+
+def _pick_anomaly_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if not rows or limit <= 0:
+        return []
+    anomalies: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for row in rows:
+        signature = "|".join(str(value) for value in row.values())
+        if signature in seen:
+            duplicates.add(signature)
+        else:
+            seen.add(signature)
+
+    for row in rows:
+        has_empty = any(value is None or value == "" for value in row.values())
+        signature = "|".join(str(value) for value in row.values())
+        if has_empty or signature in duplicates:
+            anomalies.append(row)
+        if len(anomalies) >= limit:
+            break
+    return anomalies
 
 
 def _render_preview(rows: list[Any], *, max_rows: int) -> list[str]:

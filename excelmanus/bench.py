@@ -456,17 +456,23 @@ class _LLMCallInterceptor:
 
 
 def _create_engine(config: ExcelManusConfig) -> AgentEngine:
-    """创建独立的 AgentEngine 实例（不复用 session）。"""
+    """创建独立的 AgentEngine 实例（不复用 session）。
+
+    自动启用 bench sandbox 模式，解除所有交互式阻塞
+    （fullAccess / plan 拦截 / 确认门禁）。
+    """
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
     loader = SkillpackLoader(config, registry)
     loader.load_all()
     router = SkillRouter(config, loader)
-    return AgentEngine(
+    engine = AgentEngine(
         config=config,
         registry=registry,
         skill_router=router,
     )
+    engine.enable_bench_sandbox()
+    return engine
 
 
 def _dump_conversation_messages(engine: AgentEngine) -> list[dict[str, Any]]:

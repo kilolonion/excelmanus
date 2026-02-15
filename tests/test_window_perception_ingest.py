@@ -57,7 +57,8 @@ def test_deduplicated_merge() -> None:
         [{"A": 1}, {"A": 2}],
         [{"A": 2}, {"A": 3}],
     )
-    assert merged == [{"A": 1}, {"A": 2}, {"A": 3}]
+    # v2 语义：无几何/主键信息时不按“整行内容签名”去重。
+    assert merged == [{"A": 1}, {"A": 2}, {"A": 2}, {"A": 3}]
 
 
 def test_ingest_read_result_merges_and_limits_by_cached_range() -> None:
@@ -74,7 +75,7 @@ def test_ingest_read_result_merges_and_limits_by_cached_range() -> None:
     assert affected
 
 
-def test_ingest_write_result_sets_stale_hint() -> None:
+def test_ingest_write_result_clears_stale_when_patchable() -> None:
     window = _build_window()
     affected = ingest_write_result(
         window,
@@ -83,8 +84,8 @@ def test_ingest_write_result_sets_stale_hint() -> None:
         iteration=3,
     )
     assert affected
-    assert window.stale_hint is not None
-    assert "A1:A1" in window.stale_hint
+    assert window.stale_hint is None
+    assert window.data_buffer[0]["A"] == 999
 
 
 def test_ingest_filter_result_snapshots_unfiltered_buffer() -> None:

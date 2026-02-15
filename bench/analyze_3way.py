@@ -34,6 +34,8 @@ class CaseMetrics:
     llm_calls: int = 0
     duration_seconds: float = 0.0
     status: str = "ok"
+    turn_count: int = 1
+    invalid_for_perf: bool = False
 
 
 @dataclass
@@ -63,6 +65,10 @@ class SuiteMetrics:
     def total_duration(self) -> float:
         return sum(c.duration_seconds for c in self.cases.values())
 
+    @property
+    def invalid_for_perf_count(self) -> int:
+        return sum(1 for c in self.cases.values() if c.invalid_for_perf)
+
 
 # ── 解析 ──────────────────────────────────────────────────
 
@@ -82,6 +88,8 @@ def _load_mode_results(mode_dir: Path) -> dict[str, SuiteMetrics]:
             meta = case_data.get("meta", {})
             stats = case_data.get("stats", {})
             execution = case_data.get("execution", {})
+            turn_count = int(meta.get("turn_count", 1) or 1)
+            iterations = int(execution.get("iterations", 0) or 0)
 
             case_id = meta.get("case_id", "unknown")
             suite.cases[case_id] = CaseMetrics(
@@ -90,12 +98,14 @@ def _load_mode_results(mode_dir: Path) -> dict[str, SuiteMetrics]:
                 total_tokens=stats.get("total_tokens", 0),
                 prompt_tokens=stats.get("total_prompt_tokens", stats.get("prompt_tokens", 0)),
                 completion_tokens=stats.get("total_completion_tokens", stats.get("completion_tokens", 0)),
-                iterations=execution.get("iterations", 0),
+                iterations=iterations,
                 tool_calls=stats.get("tool_call_count", 0),
                 tool_failures=stats.get("tool_failures", 0),
                 llm_calls=stats.get("llm_call_count", 0),
                 duration_seconds=execution.get("duration_seconds", 0.0),
                 status=execution.get("status", "ok"),
+                turn_count=turn_count,
+                invalid_for_perf=iterations < turn_count,
             )
 
         suites[suite_name] = suite
@@ -153,6 +163,12 @@ def _print_case_comparison(
             status_parts.append(f"{label}={m.status}")
     if status_parts:
         print(f"     ⚠️  状态异常: {', '.join(status_parts)}")
+    invalid_labels = []
+    for label, m in [("OFF", off), (mode_a_label, mode_a), (mode_b_label, mode_b)]:
+        if m and m.invalid_for_perf:
+            invalid_labels.append(f"{label}(iterations={m.iterations}<turns={m.turn_count})")
+    if invalid_labels:
+        print(f"     🚫 invalid_for_perf: {', '.join(invalid_labels)}")
 
     # 表头
     print(
@@ -224,6 +240,13 @@ def _print_suite_summary(
             f"{b_vs_a:>10}"
         )
 
+    off_invalid = off.invalid_for_perf_count if off else 0
+    mode_a_invalid = mode_a.invalid_for_perf_count if mode_a else 0
+    mode_b_invalid = mode_b.invalid_for_perf_count if mode_b else 0
+    print(
+        f"     invalid_for_perf  OFF={off_invalid}  {mode_a_label}={mode_a_invalid}  {mode_b_label}={mode_b_invalid}"
+    )
+
 
 def _export_csv(
     output_path: Path,
@@ -263,8 +286,11 @@ def _export_csv(
                 f"{mode_a_label.lower()}_tokens": str(mode_a_c.total_tokens if mode_a_c else ""),
                 f"{mode_b_label.lower()}_tokens": str(mode_b_c.total_tokens if mode_b_c else ""),
                 "off_iterations": str(off_c.iterations if off_c else ""),
+                "off_turn_count": str(off_c.turn_count if off_c else ""),
                 f"{mode_a_label.lower()}_iterations": str(mode_a_c.iterations if mode_a_c else ""),
+                f"{mode_a_label.lower()}_turn_count": str(mode_a_c.turn_count if mode_a_c else ""),
                 f"{mode_b_label.lower()}_iterations": str(mode_b_c.iterations if mode_b_c else ""),
+                f"{mode_b_label.lower()}_turn_count": str(mode_b_c.turn_count if mode_b_c else ""),
                 "off_tool_calls": str(off_c.tool_calls if off_c else ""),
                 f"{mode_a_label.lower()}_tool_calls": str(mode_a_c.tool_calls if mode_a_c else ""),
                 f"{mode_b_label.lower()}_tool_calls": str(mode_b_c.tool_calls if mode_b_c else ""),
@@ -275,8 +301,11 @@ def _export_csv(
                 f"{mode_a_label.lower()}_duration": f"{mode_a_c.duration_seconds:.1f}" if mode_a_c else "",
                 f"{mode_b_label.lower()}_duration": f"{mode_b_c.duration_seconds:.1f}" if mode_b_c else "",
                 "off_status": off_c.status if off_c else "",
+                "off_invalid_for_perf": str(bool(off_c.invalid_for_perf) if off_c else ""),
                 f"{mode_a_label.lower()}_status": mode_a_c.status if mode_a_c else "",
+                f"{mode_a_label.lower()}_invalid_for_perf": str(bool(mode_a_c.invalid_for_perf) if mode_a_c else ""),
                 f"{mode_b_label.lower()}_status": mode_b_c.status if mode_b_c else "",
+                f"{mode_b_label.lower()}_invalid_for_perf": str(bool(mode_b_c.invalid_for_perf) if mode_b_c else ""),
                 f"{mode_a_label.lower()}_vs_off_tokens": _pct_change(
                     off_c.total_tokens if off_c else 0,
                     mode_a_c.total_tokens if mode_a_c else 0,
@@ -374,12 +403,18 @@ def _print_global_summary(
         sum(1 for c in s.cases.values() if c.status != "ok")
         for s in mode_b_data.values()
     )
+    off_invalid = sum(s.invalid_for_perf_count for s in off_data.values())
+    mode_a_invalid = sum(s.invalid_for_perf_count for s in mode_a_data.values())
+    mode_b_invalid = sum(s.invalid_for_perf_count for s in mode_b_data.values())
 
     print(
         f"\n     用例总数:  OFF={off_cases}  {mode_a_label}={mode_a_cases}  {mode_b_label}={mode_b_cases}"
     )
     print(
         f"     异常用例:  OFF={off_errors}  {mode_a_label}={mode_a_errors}  {mode_b_label}={mode_b_errors}"
+    )
+    print(
+        f"     invalid_for_perf:  OFF={off_invalid}  {mode_a_label}={mode_a_invalid}  {mode_b_label}={mode_b_invalid}"
     )
 
 

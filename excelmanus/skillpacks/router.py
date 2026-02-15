@@ -410,7 +410,10 @@ class SkillRouter:
         if not file_sections:
             return ""
 
-        header = "[文件结构预览] 以下是用户提及的 Excel 文件结构，请据此确定正确的 header_row 和列名。"
+        header = (
+            "[文件结构预览] 以下是用户提及的 Excel 文件结构，请据此确定正确的 header_row 和列名。\n"
+            "请基于以上预览直接调用工具执行用户请求，不要重复描述文件结构。"
+        )
         return header + "\n" + "\n".join(file_sections)
 
     @staticmethod
@@ -495,7 +498,8 @@ class SkillRouter:
             user_summary = "(空)"
 
         lines = [
-            "[路由提示] 检测到大文件 Excel，优先采用代码方式分步处理。",
+            "[路由提示] 检测到大文件 Excel，优先采用代码方式分步处理。"
+            "请直接调用推荐的工具开始处理，不要先输出处理计划。",
             f"- 用户请求：{user_summary}",
             f"- 大文件阈值：{self._format_bytes(threshold)}（{threshold} bytes）",
             "- 命中文件：",

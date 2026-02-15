@@ -817,6 +817,7 @@ class TestContextBudgetAndHardCap:
         payload = json.loads(result.result)
         assert payload["file"] == "sales.xlsx"
         assert "环境感知" not in result.result
+        assert engine._effective_window_return_mode() == "enriched"
 
     @pytest.mark.asyncio
     async def test_window_perception_notice_is_injected_into_system_prompts(self) -> None:
@@ -911,9 +912,508 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert "数据已写入窗口" in result.result
-        assert "首行预览" in result.result
+        assert result.result.startswith("✅ [")
+        assert "read_excel: A1:J25" in result.result
+        assert "意图: aggregate" in result.result
+        assert "数据已融入窗口，请优先引用窗口内容。" in result.result
         assert "环境感知" not in result.result
+
+    @pytest.mark.asyncio
+    async def test_window_perception_unified_returns_compact_confirmation(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(window_return_mode="unified")
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert result.result.startswith("✅ [")
+        assert "read_excel: A1:E10" in result.result
+        assert "| 意图=aggregate" in result.result
+        assert "首行预览" not in result.result
+        assert "环境感知" not in result.result
+
+    @pytest.mark.asyncio
+    async def test_window_perception_adaptive_gpt_defaults_to_unified(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            model="gpt-5.3",
+            window_return_mode="adaptive",
+        )
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert result.result.startswith("✅ [")
+        assert "read_excel: A1:E10" in result.result
+        assert "| 意图=aggregate" in result.result
+        assert "首行预览" not in result.result
+        assert "环境感知" not in result.result
+        assert engine._effective_window_return_mode() == "unified"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_adaptive_repeat_tripwire_downgrades_to_anchored(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            model="gpt-5.3",
+            window_return_mode="adaptive",
+        )
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        first = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        second = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=2,
+            route_result=None,
+        )
+        third = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=3,
+            route_result=None,
+        )
+
+        assert "首行预览" not in first.result
+        assert "提示=当前意图[aggregate]下此数据已在窗口" in second.result
+        assert "意图: aggregate" in third.result
+        assert "提示: 当前意图[aggregate]下此数据已在窗口" in third.result
+        assert "───────────── 环境感知 ─────────────" not in third.result
+        assert engine._effective_window_return_mode() == "anchored"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_adaptive_model_switch_keeps_downgraded_state(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            model="gpt-5.3",
+            window_return_mode="adaptive",
+            models=(
+                ModelProfile(
+                    name="deepseek",
+                    model="deepseek-chat",
+                    api_key="test-key-2",
+                    base_url="https://deepseek.example.com/v1",
+                    description="切换模型",
+                ),
+            ),
+        )
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=2,
+            route_result=None,
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=3,
+            route_result=None,
+        )
+        assert engine._effective_window_return_mode() == "anchored"
+
+        switch_message = engine.switch_model("deepseek")
+        assert "已切换到模型" in switch_message
+        assert engine._effective_window_return_mode() == "anchored"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_adaptive_ingest_failures_trigger_downgrade(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(model="gpt-5.3", window_return_mode="adaptive")
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        original_apply = engine._window_perception._apply_ingest
+
+        def _raise_ingest(*_args, **_kwargs):
+            raise RuntimeError("ingest boom")
+
+        engine._window_perception._apply_ingest = _raise_ingest  # type: ignore[assignment]
+        try:
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=1,
+                route_result=None,
+            )
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=2,
+                route_result=None,
+            )
+        finally:
+            engine._window_perception._apply_ingest = original_apply  # type: ignore[assignment]
+
+        assert engine._effective_window_return_mode() == "anchored"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_unified_repeat_and_fallback_to_enriched(self) -> None:
+        def read_excel(file_path: str, sheet_name: str, range: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        def write_cells() -> str:
+            return json.dumps({"status": "success"}, ensure_ascii=False)
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                        "range": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name", "range"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+            ToolDef(
+                name="write_cells",
+                description="写入",
+                input_schema={"type": "object", "properties": {}},
+                func=write_cells,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(window_return_mode="unified")
+        engine = AgentEngine(config, registry)
+
+        read_tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps(
+                    {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        first = await engine._execute_tool_call(
+            tc=read_tc,
+            tool_scope=["read_excel", "write_cells"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        second = await engine._execute_tool_call(
+            tc=read_tc,
+            tool_scope=["read_excel", "write_cells"],
+            on_event=None,
+            iteration=2,
+            route_result=None,
+        )
+        third = await engine._execute_tool_call(
+            tc=read_tc,
+            tool_scope=["read_excel", "write_cells"],
+            on_event=None,
+            iteration=3,
+            route_result=None,
+        )
+
+        assert "⚠️ 此数据已在窗口" not in first.result
+        assert "提示=当前意图[aggregate]下此数据已在窗口" in second.result
+        assert "───────────── 环境感知 ─────────────" in third.result
+
+        write_tc = SimpleNamespace(
+            id="call_write",
+            function=SimpleNamespace(name="write_cells", arguments="{}"),
+        )
+        _ = await engine._execute_tool_call(
+            tc=write_tc,
+            tool_scope=["read_excel", "write_cells"],
+            on_event=None,
+            iteration=4,
+            route_result=None,
+        )
+        after_write = await engine._execute_tool_call(
+            tc=read_tc,
+            tool_scope=["read_excel", "write_cells"],
+            on_event=None,
+            iteration=5,
+            route_result=None,
+        )
+        assert "⚠️ 此数据已在窗口" not in after_write.result
+        assert "───────────── 环境感知 ─────────────" not in after_write.result
+
+    @pytest.mark.asyncio
+    async def test_enriched_mode_hides_focus_window_tool(self) -> None:
+        config = _make_config(window_return_mode="enriched")
+        registry = _make_registry_with_tools()
+        registry.register_tool(
+            ToolDef(
+                name="focus_window",
+                description="窗口聚焦",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda: "ok",
+            )
+        )
+        engine = AgentEngine(config, registry)
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["focus_window", "add_numbers"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        assert "focus_window" not in scope
+
+        anchored_engine = AgentEngine(_make_config(window_return_mode="anchored"), registry)
+        anchored_scope = anchored_engine._get_current_tool_scope(route_result=route_result)
+        assert "focus_window" in anchored_scope
+
+        adaptive_enriched_engine = AgentEngine(
+            _make_config(window_return_mode="adaptive", model="deepseek-chat"),
+            registry,
+        )
+        adaptive_enriched_scope = adaptive_enriched_engine._get_current_tool_scope(
+            route_result=route_result
+        )
+        assert "focus_window" not in adaptive_enriched_scope
+
+        adaptive_unified_engine = AgentEngine(
+            _make_config(window_return_mode="adaptive", model="gpt-5.2"),
+            registry,
+        )
+        adaptive_unified_scope = adaptive_unified_engine._get_current_tool_scope(
+            route_result=route_result
+        )
+        assert "focus_window" in adaptive_unified_scope
 
     @pytest.mark.asyncio
     async def test_window_perception_anchored_notice_is_data_window_and_tail(self) -> None:

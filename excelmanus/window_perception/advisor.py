@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from .advisor_context import AdvisorContext
-from .models import PerceptionBudget, WindowState
+from .models import IntentTag, PerceptionBudget, WindowState
 
 WindowTier = Literal["active", "background", "suspended", "terminated"]
 _VALID_TASK_TYPES = {
@@ -27,6 +27,7 @@ class WindowAdvice:
     window_id: str
     tier: WindowTier
     reason: str = ""
+    reason_code: str = ""
     custom_summary: str | None = None
 
 
@@ -75,20 +76,37 @@ class RuleBasedAdvisor:
         advices: list[WindowAdvice] = []
 
         for window in windows:
-            if window.id == active_window_id or window.idle_turns < bg_after:
+            reason_code = ""
+            if window.id == active_window_id:
+                tier = "active"
+                reason_code = "active_window"
+            elif window.idle_turns < bg_after:
                 tier: WindowTier = "active"
+                reason_code = "idle_active"
             elif window.idle_turns < suspend_after:
                 tier = "background"
+                reason_code = "idle_background"
             elif window.idle_turns < terminate_after:
                 tier = "suspended"
+                reason_code = "idle_suspended"
             else:
                 tier = "terminated"
+                reason_code = "idle_terminated"
+
+            promoted_tier = self._promote_tier_for_intent(
+                tier=tier,
+                intent_tag=window.intent_tag,
+            )
+            if promoted_tier != tier:
+                tier = promoted_tier
+                reason_code = f"priority_promote_{window.intent_tag.value}"
 
             advices.append(
                 WindowAdvice(
                     window_id=window.id,
                     tier=tier,
                     reason=f"idle={window.idle_turns}",
+                    reason_code=reason_code,
                 )
             )
 
@@ -105,6 +123,19 @@ class RuleBasedAdvisor:
         suspend_after = max(background_after + 1, int(budget.suspend_after_idle))
         terminate_after = max(suspend_after + 1, int(budget.terminate_after_idle))
         return background_after, suspend_after, terminate_after
+
+    @staticmethod
+    def _promote_tier_for_intent(*, tier: WindowTier, intent_tag: IntentTag) -> WindowTier:
+        """高优先意图在生命周期上前移一档，减少过早回收。"""
+        if intent_tag not in {IntentTag.VALIDATE, IntentTag.FORMULA}:
+            return tier
+        promote_map: dict[WindowTier, WindowTier] = {
+            "terminated": "suspended",
+            "suspended": "background",
+            "background": "active",
+            "active": "active",
+        }
+        return promote_map.get(tier, tier)
 
 
 class HybridAdvisor:
@@ -148,6 +179,7 @@ class HybridAdvisor:
                 window_id=advice.window_id,
                 tier=advice.tier,
                 reason=advice.reason,
+                reason_code=advice.reason_code,
                 custom_summary=advice.custom_summary,
             )
             for advice in base_plan.advices
@@ -163,6 +195,7 @@ class HybridAdvisor:
                 window_id=advice.window_id,
                 tier=advice.tier,
                 reason=advice.reason,
+                reason_code=advice.reason_code or "small_model_override",
                 custom_summary=advice.custom_summary,
             )
             applied += 1
@@ -176,13 +209,19 @@ class HybridAdvisor:
                 window_id=active_window_id,
                 tier="active",
                 reason=active_advice.reason or "active_window_forced",
+                reason_code=active_advice.reason_code or "active_window_forced",
                 custom_summary=active_advice.custom_summary,
             )
 
         ordered_advices = [
             merged.get(
                 advice.window_id,
-                WindowAdvice(window_id=advice.window_id, tier=advice.tier, reason=advice.reason),
+                WindowAdvice(
+                    window_id=advice.window_id,
+                    tier=advice.tier,
+                    reason=advice.reason,
+                    reason_code=advice.reason_code,
+                ),
             )
             for advice in base_plan.advices
         ]

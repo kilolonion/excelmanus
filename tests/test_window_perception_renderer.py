@@ -1,6 +1,15 @@
 """窗口感知渲染测试。"""
 
-from excelmanus.window_perception.models import ColumnDef, DetailLevel, Viewport, WindowRenderAction, WindowSnapshot, WindowState, WindowType
+from excelmanus.window_perception.models import (
+    ColumnDef,
+    DetailLevel,
+    IntentTag,
+    Viewport,
+    WindowRenderAction,
+    WindowSnapshot,
+    WindowState,
+    WindowType,
+)
 from excelmanus.window_perception.renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -150,3 +159,56 @@ class TestWindowRenderer:
         assert "行高: 1=24, 2=18" in block
         assert "合并单元格: F1:H1" in block
         assert "条件格式效果: D2:D7: 条件着色（cellIs/greaterThan）" in block
+
+    def test_render_wurm_full_format_intent_prefers_style(self) -> None:
+        window = WindowState(
+            id="W4",
+            type=WindowType.SHEET,
+            title="sheet",
+            file_path="sales.xlsx",
+            sheet_name="Style",
+            viewport=Viewport(range_ref="A1:C10", total_rows=100, total_cols=3),
+            viewport_range="A1:C10",
+            detail_level=DetailLevel.FULL,
+            intent_tag=IntentTag.FORMAT,
+            style_summary="字体+填充",
+            columns=[ColumnDef(name="A"), ColumnDef(name="B"), ColumnDef(name="C")],
+            data_buffer=[{"A": 1, "B": 2, "C": 3}],
+        )
+        text = render_window_keep(
+            window,
+            mode="anchored",
+            max_rows=10,
+            current_iteration=1,
+            intent_profile={"intent": "format", "show_style": True, "max_rows": 2, "focus_text": "样式优先"},
+        )
+        assert "意图: format" in text
+        assert "样式摘要: 字体+填充" in text
+
+    def test_render_wurm_full_validate_intent_prefers_quality(self) -> None:
+        window = WindowState(
+            id="W5",
+            type=WindowType.SHEET,
+            title="sheet",
+            file_path="sales.xlsx",
+            sheet_name="Check",
+            viewport=Viewport(range_ref="A1:C10", total_rows=100, total_cols=3),
+            viewport_range="A1:C10",
+            detail_level=DetailLevel.FULL,
+            intent_tag=IntentTag.VALIDATE,
+            columns=[ColumnDef(name="A"), ColumnDef(name="B"), ColumnDef(name="C")],
+            data_buffer=[
+                {"A": 1, "B": "", "C": 3},
+                {"A": 1, "B": "", "C": 3},
+                {"A": 4, "B": 5, "C": 6},
+            ],
+        )
+        text = render_window_keep(
+            window,
+            mode="anchored",
+            max_rows=10,
+            current_iteration=1,
+            intent_profile={"intent": "validate", "show_quality": True, "max_rows": 3, "focus_text": "质量校验优先"},
+        )
+        assert "意图: validate" in text
+        assert "质量: 空值单元格" in text

@@ -58,17 +58,15 @@ echo "  输出目录: ${BASE_OUTPUT}"
 echo "  套件数量: ${#SUITES[@]}"
 echo "═══════════════════════════════════════════════════"
 
-# 构建 --suite 参数
-SUITE_ARGS=()
-for s in "${SUITES[@]}"; do
-    SUITE_ARGS+=("--suite" "$s")
-done
+# 构建 --suite 参数（一次传入多个 suite，避免 argparse 覆盖）
+SUITE_ARGS=(--suite "${SUITES[@]}")
 
 # ── 模式 1: OFF ──
 echo ""
 echo "▶ [1/3] 模式 OFF — 窗口感知关闭"
 echo "─────────────────────────────────"
 EXCELMANUS_WINDOW_PERCEPTION_ENABLED=0 \
+EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/off" \
@@ -85,6 +83,7 @@ echo "▶ [2/3] 模式 ENRICHED — 现有增强返回路径"
 echo "──────────────────────────────────────────────"
 EXCELMANUS_WINDOW_PERCEPTION_ENABLED=1 \
 EXCELMANUS_WINDOW_RETURN_MODE=enriched \
+EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/enriched" \
@@ -100,6 +99,7 @@ echo "▶ [3/3] 模式 ANCHORED — WURM Phase1 轻量确认"
 echo "──────────────────────────────────────────────"
 EXCELMANUS_WINDOW_PERCEPTION_ENABLED=1 \
 EXCELMANUS_WINDOW_RETURN_MODE=anchored \
+EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/anchored" \

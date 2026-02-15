@@ -200,6 +200,7 @@ class ToolRegistry:
             code_tools,
             data_tools,
             file_tools,
+            focus_tools,
             format_tools,
             shell_tools,
             sheet_tools,
@@ -227,6 +228,7 @@ class ToolRegistry:
         self.register_tools(sheet_tools.get_tools())
         self.register_tools(cell_tools.get_tools())
         self.register_tools(worksheet_tools.get_tools())
+        self.register_tools(focus_tools.get_tools())
 
         from excelmanus.tools import memory_tools, skill_tools, task_tools
 

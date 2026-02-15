@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,6 +31,7 @@ class ModelProfile:
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
+_ALLOWED_WINDOW_RULE_ENGINE_VERSIONS = {"v1", "v2"}
 logger = logging.getLogger(__name__)
 
 
@@ -101,10 +102,16 @@ class ExcelManusConfig:
     window_perception_advisor_trigger_window_count: int = 3
     window_perception_advisor_trigger_turn: int = 4
     window_perception_advisor_plan_ttl_turns: int = 2
-    window_return_mode: str = "enriched"
+    window_return_mode: str = "adaptive"
+    adaptive_model_mode_overrides: dict[str, str] = field(default_factory=dict)
     window_full_max_rows: int = 25
     window_full_total_budget_tokens: int = 500
     window_data_buffer_max_rows: int = 200
+    window_intent_enabled: bool = True
+    window_intent_sticky_turns: int = 3
+    window_intent_repeat_warn_threshold: int = 2
+    window_intent_repeat_trip_threshold: int = 3
+    window_rule_engine_version: str = "v1"
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -205,7 +212,7 @@ def _parse_window_perception_advisor_mode(value: str | None) -> str:
 def _parse_window_return_mode(value: str | None) -> str:
     """解析工具返回模式，非法值自动回退 enriched。"""
     if value is None:
-        return "enriched"
+        return "adaptive"
     normalized = value.strip().lower()
     if normalized in _ALLOWED_WINDOW_RETURN_MODES:
         return normalized
@@ -214,6 +221,71 @@ def _parse_window_return_mode(value: str | None) -> str:
         value,
     )
     return "enriched"
+
+
+def _parse_window_rule_engine_version(value: str | None) -> str:
+    """解析窗口规则引擎版本。"""
+    if value is None:
+        return "v1"
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_WINDOW_RULE_ENGINE_VERSIONS:
+        return normalized
+    logger.warning(
+        "配置项 EXCELMANUS_WINDOW_RULE_ENGINE_VERSION 非法(%r)，已回退为 v1",
+        value,
+    )
+    return "v1"
+
+
+def _parse_adaptive_model_mode_overrides(value: str | None) -> dict[str, str]:
+    """解析 adaptive 模型模式覆盖配置。"""
+    if value is None or not value.strip():
+        return {}
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        logger.warning(
+            "配置项 EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES 非法 JSON，已忽略"
+        )
+        return {}
+
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "配置项 EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES 必须为 JSON object，已忽略"
+        )
+        return {}
+
+    normalized: dict[str, str] = {}
+    for raw_key, raw_mode in parsed.items():
+        if not isinstance(raw_key, str):
+            logger.warning(
+                "adaptive override key 非字符串(%r)，已忽略",
+                raw_key,
+            )
+            continue
+        if not isinstance(raw_mode, str):
+            logger.warning(
+                "adaptive override 模式非字符串(%r:%r)，已忽略",
+                raw_key,
+                raw_mode,
+            )
+            continue
+
+        key = raw_key.strip().lower()
+        mode = raw_mode.strip().lower()
+        if not key:
+            logger.warning("adaptive override key 为空，已忽略")
+            continue
+        if mode not in {"unified", "anchored", "enriched"}:
+            logger.warning(
+                "adaptive override 模式非法(%s=%s)，已忽略",
+                raw_key,
+                raw_mode,
+            )
+            continue
+        normalized[key] = mode
+    return normalized
 
 
 def _extract_first_model(raw: str | None) -> dict | None:
@@ -568,6 +640,9 @@ def load_config() -> ExcelManusConfig:
     window_return_mode = _parse_window_return_mode(
         os.environ.get("EXCELMANUS_WINDOW_RETURN_MODE")
     )
+    adaptive_model_mode_overrides = _parse_adaptive_model_mode_overrides(
+        os.environ.get("EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES")
+    )
     window_full_max_rows = _parse_int(
         os.environ.get("EXCELMANUS_WINDOW_FULL_MAX_ROWS"),
         "EXCELMANUS_WINDOW_FULL_MAX_ROWS",
@@ -582,6 +657,29 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS"),
         "EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS",
         200,
+    )
+    window_intent_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_WINDOW_INTENT_ENABLED"),
+        "EXCELMANUS_WINDOW_INTENT_ENABLED",
+        True,
+    )
+    window_intent_sticky_turns = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_INTENT_STICKY_TURNS"),
+        "EXCELMANUS_WINDOW_INTENT_STICKY_TURNS",
+        3,
+    )
+    window_intent_repeat_warn_threshold = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD"),
+        "EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD",
+        2,
+    )
+    window_intent_repeat_trip_threshold = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD"),
+        "EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD",
+        3,
+    )
+    window_rule_engine_version = _parse_window_rule_engine_version(
+        os.environ.get("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION")
     )
 
     # 多模型配置档案
@@ -650,8 +748,14 @@ def load_config() -> ExcelManusConfig:
         window_perception_advisor_trigger_turn=window_perception_advisor_trigger_turn,
         window_perception_advisor_plan_ttl_turns=window_perception_advisor_plan_ttl_turns,
         window_return_mode=window_return_mode,
+        adaptive_model_mode_overrides=adaptive_model_mode_overrides,
         window_full_max_rows=window_full_max_rows,
         window_full_total_budget_tokens=window_full_total_budget_tokens,
         window_data_buffer_max_rows=window_data_buffer_max_rows,
+        window_intent_enabled=window_intent_enabled,
+        window_intent_sticky_turns=window_intent_sticky_turns,
+        window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
+        window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
+        window_rule_engine_version=window_rule_engine_version,
         models=models,
     )
