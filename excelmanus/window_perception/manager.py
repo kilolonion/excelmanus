@@ -14,10 +14,13 @@ from excelmanus.logger import get_logger
 from excelmanus.memory import TokenCounter
 
 from .adaptive import AdaptiveModeSelector
+from .apply import apply_delta
 from .advisor import HybridAdvisor, LifecyclePlan, RuleBasedAdvisor, WindowLifecycleAdvisor
 from .advisor_context import AdvisorContext
 from .budget import WindowBudgetAllocator
 from .confirmation import build_confirmation_record, serialize_confirmation
+from .delta import ExplorerDelta, SheetReadDelta
+from .domain import ExplorerWindow, SheetWindow
 from .extractor import (
     compute_scroll_position,
     extract_column_widths,
@@ -48,7 +51,10 @@ from .ingest import (
     ingest_read_result,
     ingest_write_result,
     make_change_record,
+    summarize_shape,
 )
+from .identity import ExplorerIdentity, SheetIdentity
+from .locator import WindowLocator
 from .models import (
     CachedRange,
     DetailLevel,
@@ -179,6 +185,7 @@ class WindowPerceptionManager:
         self._windows: dict[str, WindowState] = {}
         self._explorer_index: dict[str, str] = {}
         self._sheet_index: dict[tuple[str, str], str] = {}
+        self._locator = WindowLocator()
         self._active_window_id: str | None = None
         self._seq: int = 0
         self._operation_seq: int = 0
@@ -242,6 +249,7 @@ class WindowPerceptionManager:
         self._windows.clear()
         self._explorer_index.clear()
         self._sheet_index.clear()
+        self._locator = WindowLocator()
         self._active_window_id = None
         self._seq = 0
         self._operation_seq = 0
@@ -464,7 +472,11 @@ class WindowPerceptionManager:
             if payload is None:
                 return result_text
 
-            window = self._resolve_target_window(classification.window_type, arguments, result_json)
+            window = self._locate_window_by_identity(
+                window_type=classification.window_type,
+                arguments=arguments,
+                result_json=result_json,
+            )
             if window is None:
                 return self._enriched_fallback(
                     tool_name=tool_name,
@@ -515,7 +527,7 @@ class WindowPerceptionManager:
                 elif repeat_count >= warn_threshold:
                     repeat_warning = True
 
-            self._apply_ingest(
+            self._apply_delta_pipeline(
                 window=window,
                 canonical_tool_name=canonical_name,
                 arguments=arguments,
@@ -645,6 +657,42 @@ class WindowPerceptionManager:
             return result_text
         return f"{result_text}\n\n{block}" if result_text.strip() else block
 
+    def _locate_window_by_identity(
+        self,
+        *,
+        window_type: WindowType,
+        arguments: dict[str, Any],
+        result_json: dict[str, Any] | None,
+    ) -> WindowState | None:
+        """Locate window using identity index first, then legacy indexes."""
+
+        if window_type == WindowType.EXPLORER:
+            directory = normalize_path(extract_directory(arguments, result_json)) or "."
+            identity = ExplorerIdentity(directory_norm=directory)
+            window_id = self._locator.find(identity)
+            if window_id:
+                return self._windows.get(window_id)
+            return self._resolve_target_window(window_type, arguments, result_json)
+
+        file_path = normalize_path(extract_file_path(arguments, result_json))
+        sheet_name = str(extract_sheet_name(arguments, result_json) or "").strip()
+        if not file_path and self._active_window_id:
+            active = self._windows.get(self._active_window_id)
+            if active is not None and active.type == WindowType.SHEET:
+                file_path = active.file_path or ""
+                if not sheet_name:
+                    sheet_name = active.sheet_name or ""
+
+        if file_path and sheet_name:
+            identity = SheetIdentity(
+                file_path_norm=file_path,
+                sheet_name_norm=sheet_name.lower(),
+            )
+            window_id = self._locator.find(identity)
+            if window_id:
+                return self._windows.get(window_id)
+        return self._resolve_target_window(window_type, arguments, result_json)
+
     def _resolve_target_window(
         self,
         window_type: WindowType,
@@ -678,6 +726,100 @@ class WindowPerceptionManager:
             if active is not None and active.type == WindowType.SHEET:
                 return active
         return self._windows.get(window_id) if window_id else None
+
+    def _apply_delta_pipeline(
+        self,
+        *,
+        window: WindowState,
+        canonical_tool_name: str,
+        arguments: dict[str, Any],
+        result_json: dict[str, Any] | None,
+    ) -> None:
+        """Apply kind-guarded delta contract then ingest mutable state."""
+
+        delta = self._build_window_delta(
+            window=window,
+            canonical_tool_name=canonical_tool_name,
+            arguments=arguments,
+            result_json=result_json,
+        )
+        domain_window = self._to_domain_window(window)
+        apply_delta(domain_window, delta)
+        self._append_delta_audit(window, delta)
+        self._apply_ingest(
+            window=window,
+            canonical_tool_name=canonical_tool_name,
+            arguments=arguments,
+            result_json=result_json,
+        )
+
+    def _build_window_delta(
+        self,
+        *,
+        window: WindowState,
+        canonical_tool_name: str,
+        arguments: dict[str, Any],
+        result_json: dict[str, Any] | None,
+    ) -> ExplorerDelta | SheetReadDelta:
+        if window.type == WindowType.EXPLORER:
+            directory = normalize_path(extract_directory(arguments, result_json)) or (window.directory or ".")
+            return ExplorerDelta(directory=directory)
+
+        rows = extract_data_rows(result_json, canonical_tool_name)
+        columns = extract_columns(result_json, rows)
+        explicit_rows, explicit_cols = extract_shape(result_json)
+        row_count, col_count = summarize_shape(
+            rows,
+            columns,
+            explicit_rows=explicit_rows,
+            explicit_cols=explicit_cols,
+        )
+        return SheetReadDelta(
+            range_ref=extract_range_ref(
+                arguments,
+                default_rows=self._budget.default_rows,
+                default_cols=self._budget.default_cols,
+            ),
+            rows=row_count,
+            cols=col_count,
+            change_summary=canonical_tool_name,
+        )
+
+    @staticmethod
+    def _to_domain_window(window: WindowState) -> ExplorerWindow | SheetWindow:
+        if window.type == WindowType.EXPLORER:
+            return ExplorerWindow.new(
+                id=window.id,
+                title=window.title or "资源管理器",
+                directory=window.directory or ".",
+            )
+        return SheetWindow.new(
+            id=window.id,
+            title=window.title or "表格窗口",
+            file_path=window.file_path or "",
+            sheet_name=window.sheet_name or "",
+        )
+
+    @staticmethod
+    def _append_delta_audit(window: WindowState, delta: ExplorerDelta | SheetReadDelta) -> None:
+        audit = window.metadata.get("delta_audit")
+        if not isinstance(audit, list):
+            audit = []
+            window.metadata["delta_audit"] = audit
+        audit.append({"kind": delta.kind})
+
+    def _register_window_identity(self, window: WindowState) -> None:
+        if window.type == WindowType.EXPLORER:
+            directory = normalize_path(window.directory or "") or "."
+            self._locator.register(window.id, ExplorerIdentity(directory_norm=directory))
+            return
+        file_path = normalize_path(window.file_path or "")
+        sheet_name = str(window.sheet_name or "").strip().lower()
+        if file_path and sheet_name:
+            self._locator.register(
+                window.id,
+                SheetIdentity(file_path_norm=file_path, sheet_name_norm=sheet_name),
+            )
 
     def _apply_ingest(
         self,
@@ -865,6 +1007,7 @@ class WindowPerceptionManager:
         window.directory = directory
         window.metadata["entries"] = entries
         window.summary = f"{len(entries)} 个可见项" if entries else "目录视图"
+        self._register_window_identity(window)
         self._touch(window)
         self._active_window_id = window.id
         return window
@@ -1014,6 +1157,7 @@ class WindowPerceptionManager:
         elif canonical_tool_name in {"copy_sheet", "rename_sheet", "delete_sheet", "create_sheet", "list_sheets", "describe_sheets"}:
             window.summary = "工作表元信息已更新"
 
+        self._register_window_identity(window)
         self._touch(window)
         self._active_window_id = window.id
         return window
@@ -1055,7 +1199,12 @@ class WindowPerceptionManager:
         if normalized_action == "restore":
             window.detail_level = DetailLevel.FULL
             self._append_operation(window, "focus_window", {"action": normalized_action}, True)
-            return {"status": "ok", "action": normalized_action, "window_id": window.id}
+            return {
+                "status": "ok",
+                "action": normalized_action,
+                "window_id": window.id,
+                "active_window_id": self._active_window_id,
+            }
 
         if normalized_action == "clear_filter":
             restored = bool(window.unfiltered_buffer is not None)
@@ -1098,6 +1247,7 @@ class WindowPerceptionManager:
                 "status": "ok",
                 "action": normalized_action,
                 "window_id": window.id,
+                "active_window_id": self._active_window_id,
                 "restored": restored,
                 "rows": len(window.data_buffer),
             }
@@ -1138,6 +1288,7 @@ class WindowPerceptionManager:
                 "status": "ok" if cache_hit else "needs_refill",
                 "action": normalized_action,
                 "window_id": window.id,
+                "active_window_id": self._active_window_id,
                 "range": target_range,
                 "cache_hit": cache_hit,
                 "file_path": window.file_path,

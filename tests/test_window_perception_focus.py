@@ -154,3 +154,61 @@ def test_focus_restore_wakes_dormant_window() -> None:
     assert result["status"] == "ok"
     assert window.dormant is False
     assert window.detail_level == DetailLevel.FULL
+
+
+def test_manager_routes_tool_result_via_classify_locate_apply(monkeypatch) -> None:
+    manager = WindowPerceptionManager(
+        enabled=True,
+        budget=PerceptionBudget(),
+    )
+    payload = json.dumps(
+        {
+            "file": "sales.xlsx",
+            "sheet": "Q1",
+            "shape": {"rows": 20, "columns": 5},
+            "columns": ["日期", "产品", "数量", "单价", "金额"],
+            "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+        },
+        ensure_ascii=False,
+    )
+    arguments = {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"}
+    calls: list[str] = []
+
+    original_classify = manager._classify_tool
+    original_locate = manager._locate_window_by_identity
+    original_apply = manager._apply_delta_pipeline
+
+    def _spy_classify(tool_name: str):
+        calls.append("classify")
+        return original_classify(tool_name)
+
+    def _spy_locate(*, window_type, arguments, result_json):
+        calls.append("locate")
+        return original_locate(window_type=window_type, arguments=arguments, result_json=result_json)
+
+    def _spy_apply(*, window, canonical_tool_name, arguments, result_json):
+        calls.append("apply")
+        return original_apply(
+            window=window,
+            canonical_tool_name=canonical_tool_name,
+            arguments=arguments,
+            result_json=result_json,
+        )
+
+    monkeypatch.setattr(manager, "_classify_tool", _spy_classify)
+    monkeypatch.setattr(manager, "_locate_window_by_identity", _spy_locate)
+    monkeypatch.setattr(manager, "_apply_delta_pipeline", _spy_apply)
+
+    _ = manager.enrich_tool_result(
+        tool_name="read_excel",
+        arguments=arguments,
+        result_text=payload,
+        success=True,
+        mode="anchored",
+        model_id="gpt-5.3",
+    )
+
+    assert "classify" in calls
+    assert "locate" in calls
+    assert "apply" in calls
+    assert calls.index("classify") < calls.index("locate") < calls.index("apply")
