@@ -81,6 +81,19 @@ def _make_registry_with_tools() -> ToolRegistry:
     return registry
 
 
+def _activate_test_tools(engine: AgentEngine, tools: list[str] | None = None) -> None:
+    """为测试激活一个包含指定工具的 Skillpack，使工具进入 scope。"""
+    engine._active_skill = Skillpack(
+        name="_test_scope",
+        description="test scope",
+        allowed_tools=tools or ["add_numbers", "fail_tool"],
+        triggers=[],
+        instructions="test",
+        source="system",
+        root_dir="/tmp/_test_scope",
+    )
+
+
 def _make_text_response(content: str) -> MagicMock:
     """构造一个纯文本 LLM 响应（无 tool_calls）。"""
     message = SimpleNamespace(content=content, tool_calls=None)
@@ -2024,6 +2037,39 @@ class TestPlanModeControl:
         assert "来源: .excelmanus/plans/plan_test.md" in (engine._approved_plan_context or "")
 
     @pytest.mark.asyncio
+    async def test_plan_mode_question_answer_does_not_write_virtual_tool_result(self) -> None:
+        """plan_mode 审批问答不应写入孤立的 plan_approval_* tool result。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._plan_mode_enabled = True
+
+        draft = PlanDraft(
+            plan_id="pln_virtual_tool_result_guard",
+            markdown="# 计划\n\n## 任务清单\n- [ ] A",
+            title="计划审批",
+            subtasks=["A"],
+            file_path=".excelmanus/plans/plan_virtual.md",
+            source="plan_mode",
+            objective="执行计划任务",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+        engine._pending_plan = PendingPlanState(draft=draft)
+        engine._enqueue_plan_approval_question(draft=draft, on_event=None)
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("执行完成")
+        )
+
+        result = await engine.chat("1")
+        assert "执行完成" in result.reply
+
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        assert all(
+            not str(msg.get("tool_call_id", "")).startswith("plan_approval_")
+            for msg in tool_msgs
+        )
+
+    @pytest.mark.asyncio
     async def test_task_create_hook_enters_pending_plan(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
@@ -2073,6 +2119,36 @@ class TestPlanModeControl:
         assert result.pending_plan is True
         assert result.defer_tool_result is True
         assert engine._task_store.current is None
+
+    def test_task_create_hook_plan_reject_writes_tool_result(self) -> None:
+        """task_create_hook 拒绝计划时应回填原 task_create 调用结果。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        draft = PlanDraft(
+            plan_id="pln_task_create_reject",
+            markdown="# 计划\n\n## 任务清单\n- [ ] A",
+            title="任务清单",
+            subtasks=["A"],
+            file_path=".excelmanus/plans/plan_reject.md",
+            source="task_create_hook",
+            objective="草稿任务",
+            created_at_utc="2026-02-13T00:00:00Z",
+        )
+        engine._pending_plan = PendingPlanState(
+            draft=draft,
+            tool_call_id="call_task_create_1",
+            route_to_resume=None,
+        )
+
+        reply = engine._handle_plan_reject(parts=["/plan", "reject"])
+        assert "已拒绝计划" in reply
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        reject_msg = next(
+            m for m in tool_msgs if m.get("tool_call_id") == "call_task_create_1"
+        )
+        assert "已拒绝" in str(reject_msg.get("content", ""))
 
     @pytest.mark.asyncio
     async def test_pending_plan_blocks_and_reject_unblocks(self) -> None:
@@ -2986,12 +3062,13 @@ class TestMetaToolDefinitions:
         )
 
         meta_tools = engine._build_meta_tools()
-        assert len(meta_tools) == 4
+        assert len(meta_tools) == 5
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "select_skill" in by_name
         assert "delegate_to_subagent" in by_name
         assert "list_subagents" in by_name
         assert "ask_user" in by_name
+        assert "discover_tools" in by_name
 
         select_tool = by_name["select_skill"]["function"]
         select_params = select_tool["parameters"]
@@ -3975,75 +4052,6 @@ class TestChatPureText:
         assert "/v1" in result.reply
         assert "<!doctype html>" not in result.reply.lower()
 
-    @pytest.mark.asyncio
-    async def test_text_question_triggers_forced_ask_user_repair(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        ask_payload = {
-            "question": {
-                "text": "请选择比较范围",
-                "options": [{"label": "仅比较 .xlsx"}],
-            }
-        }
-        first_text = _make_text_response(
-            "当前扫描结果为空，请确认两点后继续：1) 文件夹是否为当前目录；2) 是否只比较 .xlsx。"
-        )
-        ask_response = _make_tool_call_response(
-            [("call_q1", "ask_user", json.dumps(ask_payload, ensure_ascii=False))]
-        )
-        engine._client.chat.completions.create = AsyncMock(
-            side_effect=[first_text, ask_response]
-        )
-
-        result = await engine.chat("查看哪个表格最大")
-        assert "请先回答这个问题后再继续" in result.reply
-        assert "[需要确认]" in result.reply
-        assert "按此选项继续执行" in result.reply
-        assert engine.has_pending_question() is True
-        assert engine._client.chat.completions.create.call_count == 2
-        second_call_kwargs = engine._client.chat.completions.create.call_args_list[1].kwargs
-        assert second_call_kwargs["tool_choice"] == {
-            "type": "function",
-            "name": "ask_user",
-        }
-
-    @pytest.mark.asyncio
-    async def test_forced_ask_user_repair_returns_structured_error_when_still_no_tool_calls(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        first_text = _make_text_response("请确认两点后我再继续。")
-        second_text = _make_text_response("仍需你先确认。")
-        engine._client.chat.completions.create = AsyncMock(
-            side_effect=[first_text, second_text]
-        )
-
-        result = await engine.chat("继续")
-        payload = json.loads(result.reply)
-        assert payload["error_code"] == "ASK_USER_REQUIRED_BUT_MISSING"
-        assert "未调用 ask_user" in payload["message"]
-        assert engine._client.chat.completions.create.call_count == 2
-        assert engine.has_pending_question() is False
-
-    @pytest.mark.asyncio
-    async def test_text_question_not_forced_when_ask_user_not_in_scope(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._get_current_tool_scope = MagicMock(return_value=["add_numbers"])  # type: ignore[method-assign]
-
-        engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response("请确认是否继续。")
-        )
-
-        result = await engine.chat("继续")
-        assert result.reply == "请确认是否继续。"
-        assert engine._client.chat.completions.create.call_count == 1
-
-
 class TestChatToolCalling:
     """Tool Calling 循环场景（Requirements 1.1, 1.2, 1.9）。"""
 
@@ -4053,6 +4061,7 @@ class TestChatToolCalling:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         # 第一轮：LLM 返回 tool_call
         tool_response = _make_tool_call_response(
@@ -4081,6 +4090,7 @@ class TestChatToolCalling:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         # 第一轮：LLM 返回两个 tool_calls
         tool_response = _make_tool_call_response([
@@ -4103,6 +4113,7 @@ class TestChatToolCalling:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         tool_response = _make_tool_call_response(
             [("call_1", "add_numbers", json.dumps({"a": 10, "b": 20}))]
@@ -4127,6 +4138,7 @@ class TestChatToolCalling:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         message = SimpleNamespace(
             content=None,
@@ -4166,6 +4178,7 @@ class TestChatToolError:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         # 第一轮：调用会失败的工具
         tool_response = _make_tool_call_response(
@@ -4248,6 +4261,7 @@ class TestConsecutiveFailureCircuitBreaker:
         config = _make_config(max_consecutive_failures=3)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         # 第一轮：失败
         fail_resp_1 = _make_tool_call_response([("c1", "fail_tool", "{}")])
@@ -4303,6 +4317,7 @@ class TestIterationLimit:
         config = _make_config(max_iterations=3)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         # 每轮都返回 tool_call，永不返回纯文本
         tool_responses = [
@@ -4331,6 +4346,7 @@ class TestAsyncToolExecution:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine)
 
         tool_response = _make_tool_call_response(
             [("call_1", "add_numbers", json.dumps({"a": 5, "b": 10}))]
@@ -4548,6 +4564,7 @@ async def test_property_2_tool_call_parsing_and_invocation(
     config = _make_config()
     registry = _make_registry_with_tools()
     engine = AgentEngine(config, registry)
+    _activate_test_tools(engine)
 
     # 构造 n_calls 个 tool_calls
     tc_list = []
@@ -4644,6 +4661,7 @@ async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
     config = _make_config(max_iterations=max_iter)
     registry = _make_registry_with_tools()
     engine = AgentEngine(config, registry)
+    _activate_test_tools(engine)
 
     # 构造无限 tool_call 响应（每轮都返回 tool_call，永不返回纯文本）
     infinite_tool_responses = [
@@ -4802,6 +4820,7 @@ async def test_property_20_async_non_blocking(n_calls: int) -> None:
     config = _make_config()
     registry = _make_registry_with_tools()
     engine = AgentEngine(config, registry)
+    _activate_test_tools(engine)
 
     # 构造 n_calls 个 tool_calls 在单轮响应中
     tc_list = [
@@ -4945,6 +4964,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "a.txt", "content": "hello"}))
@@ -4967,10 +4987,74 @@ class TestApprovalFlow:
         assert (tmp_path / "outputs" / "approvals" / approval_id / "manifest.json").exists()
 
     @pytest.mark.asyncio
+    async def test_accept_resumes_task_list_execution_after_high_risk_gate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+
+        def add_numbers(a: int, b: int) -> int:
+            return a + b
+
+        registry.register_tools([
+            ToolDef(
+                name="add_numbers",
+                description="两数相加",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "integer"},
+                        "b": {"type": "integer"},
+                    },
+                    "required": ["a", "b"],
+                },
+                func=add_numbers,
+            )
+        ])
+
+        engine = AgentEngine(config, registry)
+        engine._task_store.create("测试任务", ["写入文件", "继续计算"])
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["write_text_file", "add_numbers", "task_update"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        first_round = _make_tool_call_response([
+            (
+                "call_write",
+                "write_text_file",
+                json.dumps({"file_path": "resume.txt", "content": "ok"}, ensure_ascii=False),
+            )
+        ])
+        resume_round = _make_tool_call_response([
+            ("call_add", "add_numbers", json.dumps({"a": 1, "b": 2}, ensure_ascii=False))
+        ])
+        done_round = _make_text_response("后续子任务已完成")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_round, resume_round, done_round]
+        )
+
+        first_reply = await engine.chat("开始执行")
+        assert "待确认" in first_reply
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+
+        accept_reply = await engine.chat(f"/accept {approval_id}")
+        assert "已执行待确认操作" in accept_reply
+        assert "后续子任务已完成" in accept_reply
+        assert (tmp_path / "resume.txt").read_text(encoding="utf-8") == "ok"
+
+    @pytest.mark.asyncio
     async def test_reject_pending(self, tmp_path: Path) -> None:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "b.txt", "content": "world"}))
@@ -4990,6 +5074,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "c.txt", "content": "undo"}))
@@ -5010,6 +5095,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_failing_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "err.txt", "content": "x"}))
@@ -5032,6 +5118,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine1 = AgentEngine(config, registry)
+        _activate_test_tools(engine1, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "restart.txt", "content": "v"}))
@@ -5053,6 +5140,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["write_text_file"])
 
         on_reply = await engine.chat("/fullAccess on")
         assert "已开启" in on_reply
@@ -5075,7 +5163,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_custom_tool()
         engine = AgentEngine(config, registry)
-        engine._active_skill = None
+        _activate_test_tools(engine, ["custom_tool"])
 
         tool_response = _make_tool_call_response([("call_1", "custom_tool", "{}")])
         text_response = _make_text_response("完成")
@@ -5120,6 +5208,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_audit_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["create_chart"])
         engine._execute_tool_with_audit = AsyncMock(return_value=('{"status":"success"}', None))
 
         tool_response = _make_tool_call_response([
@@ -5134,3 +5223,173 @@ class TestApprovalFlow:
         assert reply == "完成"
         assert engine._approval.pending is None
         engine._execute_tool_with_audit.assert_awaited_once()
+
+
+class TestDiscoveryToolScope:
+    """Task 2: 基础发现工具集 scope 收窄测试。"""
+
+    def test_no_route_result_uses_discovery_set(self) -> None:
+        """route_result=None 且无 active_skill 时使用基础发现工具集。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS, MUTATING_ALL_TOOLS
+
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        scope = engine._get_current_tool_scope(route_result=None)
+        scope_set = set(scope)
+
+        # 基础发现工具中已注册的应在 scope 中
+        registered = set(registry.get_tool_names())
+        for tool_name in DISCOVERY_TOOLS:
+            if tool_name in registered:
+                assert tool_name in scope_set, f"基础工具 {tool_name} 应在 scope 中"
+
+        # 元工具应在 scope 中
+        assert "select_skill" in scope_set
+        assert "ask_user" in scope_set
+        assert "discover_tools" in scope_set
+
+        # 写入工具不应在 scope 中
+        for tool_name in MUTATING_ALL_TOOLS:
+            if tool_name in registered:
+                assert tool_name not in scope_set, f"写入工具 {tool_name} 不应在基础 scope 中"
+
+    def test_all_tools_route_uses_discovery_set(self) -> None:
+        """all_tools 路由模式下，tool_scope 为空时使用基础发现工具集。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS
+
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="all_tools",
+            system_contexts=[],
+        )
+        scope = engine._get_current_tool_scope(route_result=route_result)
+        scope_set = set(scope)
+
+        registered = set(registry.get_tool_names())
+        for tool_name in DISCOVERY_TOOLS:
+            if tool_name in registered:
+                assert tool_name in scope_set
+
+        assert "select_skill" in scope_set
+        assert "discover_tools" in scope_set
+
+    def test_active_skill_overrides_discovery_set(self) -> None:
+        """active_skill 激活后，scope 应包含 skill 的 allowed_tools。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_skill = Skillpack(
+            name="data_basic",
+            description="数据处理",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="test",
+            source="system",
+            root_dir="/tmp/data_basic",
+        )
+        scope = engine._get_current_tool_scope(route_result=None)
+        assert "add_numbers" in scope
+
+
+class TestDiscoverTools:
+    """Task 3: discover_tools 元工具测试。"""
+
+    def test_discover_tools_in_meta_tool_names(self) -> None:
+        from excelmanus.engine import _META_TOOL_NAMES
+        assert "discover_tools" in _META_TOOL_NAMES
+
+    def test_discover_tools_returns_category_tools(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        # data_read 分类需要 read_excel 已注册
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取 Excel 文件。",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda: None,
+            ),
+        ])
+        engine = AgentEngine(config, registry)
+        result = engine._handle_discover_tools(category="data_read")
+        assert "read_excel" in result
+
+    def test_discover_tools_all_category(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        result = engine._handle_discover_tools(category="all")
+        assert "全部工具分类" in result
+
+    def test_discover_tools_unknown_category(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        result = engine._handle_discover_tools(category="nonexistent")
+        assert "未知分类" in result
+
+    def test_discover_tools_schema_in_meta_tools(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        meta_tools = engine._build_meta_tools()
+        names = [t["function"]["name"] for t in meta_tools]
+        assert "discover_tools" in names
+        discover = next(t for t in meta_tools if t["function"]["name"] == "discover_tools")
+        params = discover["function"]["parameters"]
+        assert "category" in params["properties"]
+        assert "enum" in params["properties"]["category"]
+
+    @pytest.mark.asyncio
+    async def test_execute_discover_tools_via_tool_call(self) -> None:
+        """通过 _execute_tool_call 调用 discover_tools。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_discover",
+            function=SimpleNamespace(
+                name="discover_tools",
+                arguments=json.dumps({"category": "all"}),
+            ),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["discover_tools"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert "全部工具分类" in result.result
+
+
+class TestAlwaysAvailableToolsExpanded:
+    """Task 8: _ALWAYS_AVAILABLE_TOOLS 扩展测试。"""
+
+    def test_always_available_includes_memory_and_skills(self) -> None:
+        from excelmanus.engine import _ALWAYS_AVAILABLE_TOOLS
+        assert "memory_save" in _ALWAYS_AVAILABLE_TOOLS
+        assert "memory_read_topic" in _ALWAYS_AVAILABLE_TOOLS
+        assert "list_skills" in _ALWAYS_AVAILABLE_TOOLS
+
+    def test_memory_tools_in_discovery_scope(self) -> None:
+        """memory 工具通过 _ensure_always_available 注入到基础 scope 中。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        scope = engine._get_current_tool_scope(route_result=None)
+        scope_set = set(scope)
+        # memory_save 和 memory_read_topic 通过 always-available 注入
+        # 但前提是它们已在 registry 中注册
+        registered = set(registry.get_tool_names())
+        if "memory_save" in registered:
+            assert "memory_save" in scope_set
+        if "memory_read_topic" in registered:
+            assert "memory_read_topic" in scope_set

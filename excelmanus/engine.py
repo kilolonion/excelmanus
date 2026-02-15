@@ -49,6 +49,7 @@ from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResu
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
+from excelmanus.tools.policy import DISCOVERY_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
     AdvisorContext,
@@ -64,8 +65,11 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
-_ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_to_subagent")
+_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user", "discover_tools")
+_ALWAYS_AVAILABLE_TOOLS = (
+    "task_create", "task_update", "ask_user", "delegate_to_subagent",
+    "memory_save", "memory_read_topic", "list_skills",
+)
 _PLAN_CONTEXT_MAX_CHARS = 6000
 _MAX_PLAN_AUTO_CONTINUE = 3  # 计划审批后自动续跑最大次数
 _MIN_SYSTEM_CONTEXT_CHARS = 256
@@ -81,7 +85,6 @@ _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
 _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
-_ASK_USER_REPAIR_ERROR_CODE = "ASK_USER_REQUIRED_BUT_MISSING"
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "planner",
@@ -257,34 +260,6 @@ def _looks_like_html_document(text: str) -> bool:
     return "<html" in lowered and "</html>" in lowered and "<head" in lowered
 
 
-_TEXT_QUESTION_PATTERNS = (
-    "请确认",
-    "请先确认",
-    "请选择",
-    "请先选择",
-    "你希望",
-    "你想",
-    "请提供",
-    "请说明",
-    "please confirm",
-    "please choose",
-    "which one",
-    "would you like",
-    "do you want",
-)
-
-
-def _looks_like_text_question(text: str) -> bool:
-    """判断文本是否像在向用户提问（而非报告结果）。"""
-    compact = " ".join(str(text or "").split())
-    if not compact:
-        return False
-    lowered = compact.lower()
-    if any(marker in lowered for marker in _TEXT_QUESTION_PATTERNS):
-        return True
-    return False
-
-
 def _summarize_text(text: str, max_len: int = 120) -> str:
     """将文本压缩为单行摘要，避免日志过长。"""
     compact = " ".join(text.split())
@@ -421,7 +396,7 @@ class AgentEngine:
         )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=self._all_tool_names(),
+            tool_scope=[],
             route_mode="all_tools",
             system_contexts=[],
         )
@@ -462,6 +437,7 @@ class AgentEngine:
         self._question_flow = QuestionFlowManager(max_queue_size=8)
         self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
+        self._pending_approval_route_result: SkillMatchResult | None = None
         self._plan_mode_enabled: bool = False
         self._plan_intercept_task_create: bool = True
         self._pending_plan: PendingPlanState | None = None
@@ -1158,84 +1134,6 @@ class AgentEngine:
             return None
         return resolved[0]
 
-    @staticmethod
-    def _detect_user_decision_reason(reply_text: str) -> str | None:
-        """识别文本提问触发 ask_user 的原因分类。"""
-        compact = " ".join(str(reply_text or "").split())
-        if not compact:
-            return None
-        if not _looks_like_text_question(compact):
-            return None
-
-        if (
-            "不一致" in compact
-            or "冲突" in compact
-            or "返回为空" in compact
-            or "0 个文件" in compact
-            or "0行" in compact
-        ):
-            return "result_conflict"
-
-        if (
-            "请提供" in compact
-            or "请补充" in compact
-            or "请说明" in compact
-            or "请指定" in compact
-            or "请确认两点" in compact
-        ):
-            return "missing_parameters"
-
-        if (
-            "是否只比较" in compact
-            or "哪种" in compact
-            or "哪个" in compact
-            or "还是" in compact
-            or "或者" in compact
-        ):
-            return "multiple_paths"
-
-        return "text_question"
-
-    @staticmethod
-    def _build_force_ask_user_instruction(reason: str) -> str:
-        """构造本轮临时注入的 ask_user 强制指令。"""
-        return (
-            "## ask_user 强制修正（本轮生效）\n"
-            f"- 检测到用户决策场景：{reason}。\n"
-            "- 你必须立即调用 `ask_user`，不得输出纯文本提问。\n"
-            "- 问题要具体，候选项给出可执行路径；若字段缺失可用最小选项集。\n"
-            "- 如果不调用 ask_user，本轮视为失败。"
-        )
-
-    @staticmethod
-    def _build_ask_user_missing_error(
-        *,
-        reason: str,
-        detail: str,
-    ) -> str:
-        """构造 ask_user 强制失败时的结构化错误文本。"""
-        payload = {
-            "error_code": _ASK_USER_REPAIR_ERROR_CODE,
-            "reason": reason,
-            "message": "检测到需要用户决策，但模型未调用 ask_user。",
-            "detail": detail,
-        }
-        return json.dumps(payload, ensure_ascii=False)
-
-    def _needs_user_decision(
-        self,
-        *,
-        reply_text: str,
-        tool_scope: Sequence[str],
-    ) -> tuple[bool, str]:
-        """判定是否应强制 ask_user，并返回原因标签。"""
-        if "ask_user" not in set(tool_scope):
-            return False, "ask_user_not_allowed"
-        reason = self._detect_user_decision_reason(reply_text)
-        if reason is None:
-            return False, "not_needed"
-        return True, reason
-
     def _blocked_skillpacks(self) -> set[str] | None:
         """返回当前会话被限制的技能包集合。"""
         if self._full_access_enabled:
@@ -1483,6 +1381,8 @@ class AgentEngine:
 
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """构建 LLM-Native 元工具定义。"""
+        from excelmanus.tools.policy import TOOL_CATEGORIES
+
         skill_catalog = "当前无可用技能。"
         skill_names: list[str] = []
         if self._skill_router is not None:
@@ -1687,7 +1587,81 @@ class AgentEngine:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "discover_tools",
+                    "description": (
+                        "按类别查询可用工具及其功能说明。"
+                        "当你不确定该用哪个工具、或需要了解某类操作有哪些工具时调用。"
+                        "返回该类别下所有工具的名称和描述。"
+                        "注意：查询到的写入类工具需要先通过 select_skill 激活对应技能后才能使用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "description": "工具类别",
+                                "enum": list(TOOL_CATEGORIES.keys()) + ["all"],
+                            },
+                        },
+                        "required": ["category"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ]
+
+    def _handle_discover_tools(self, category: str) -> str:
+        """处理 discover_tools 元工具调用，返回指定类别的工具列表。"""
+        from excelmanus.tools.policy import TOOL_CATEGORIES
+
+        _CATEGORY_LABELS: dict[str, str] = {
+            "data_read": "数据读取",
+            "data_write": "数据写入",
+            "format": "格式化",
+            "advanced_format": "高级格式",
+            "chart": "图表",
+            "sheet": "工作表操作",
+            "file": "文件操作",
+            "code": "代码执行",
+        }
+
+        registered = set(self._all_tool_names())
+
+        if category == "all":
+            lines = ["## 全部工具分类\n"]
+            for cat, tools in TOOL_CATEGORIES.items():
+                label = _CATEGORY_LABELS.get(cat, cat)
+                available = [t for t in tools if t in registered]
+                if available:
+                    tool_descs: list[str] = []
+                    for t in available:
+                        tool_def = self._registry.get_tool(t)
+                        desc = (tool_def.description.split("。")[0] + "。") if tool_def and tool_def.description else ""
+                        tool_descs.append(f"  - {t}：{desc}")
+                    lines.append(f"### {label}")
+                    lines.extend(tool_descs)
+            lines.append("\n使用 select_skill 激活对应技能后即可调用写入类工具。")
+            return "\n".join(lines)
+
+        if category not in TOOL_CATEGORIES:
+            available_cats = ", ".join(sorted(TOOL_CATEGORIES.keys()))
+            return f"未知分类 '{category}'。可用分类：{available_cats}, all"
+
+        tools = TOOL_CATEGORIES[category]
+        label = _CATEGORY_LABELS.get(category, category)
+        lines = [f"## {label} 工具\n"]
+        for t in tools:
+            if t not in registered:
+                continue
+            tool_def = self._registry.get_tool(t)
+            desc = tool_def.description if tool_def and tool_def.description else "(无描述)"
+            lines.append(f"- {t}：{desc}")
+        if not any(line.startswith("- ") for line in lines):
+            lines.append("(该分类下无已注册工具)")
+        return "\n".join(lines)
 
     async def _handle_select_skill(self, skill_name: str, reason: str = "") -> str:
         """处理 select_skill 调用：激活技能并返回技能上下文。"""
@@ -1842,7 +1816,9 @@ class AgentEngine:
             merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
             return self._apply_window_mode_tool_filter(merged_scope)
 
-        scope = self._all_tool_names()
+        # 无 skill 激活、无路由指定 scope：使用基础发现工具集
+        registered = set(self._all_tool_names())
+        scope = [t for t in DISCOVERY_TOOLS if t in registered]
         for tool_name in _META_TOOL_NAMES:
             if tool_name not in scope:
                 scope.append(tool_name)
@@ -2540,7 +2516,10 @@ class AgentEngine:
             return ChatResult(reply="系统问题上下文缺失：approval_id 为空。")
 
         if selected_label == _SUBAGENT_APPROVAL_OPTION_ACCEPT:
-            accept_reply = await self._handle_accept_command(["/accept", approval_id])
+            accept_reply = await self._handle_accept_command(
+                ["/accept", approval_id],
+                on_event=on_event,
+            )
             reply = (
                 f"{accept_reply}\n"
                 "若需要子代理自动继续执行，建议选择「开启 fullAccess 后重试（推荐）」。"
@@ -2666,14 +2645,17 @@ class AgentEngine:
             self._pending_question_route_result = None
             return ChatResult(reply="当前没有待回答问题。")
 
-        tool_result = json.dumps(parsed.to_tool_result(), ensure_ascii=False)
-        self._memory.add_tool_result(popped.tool_call_id, tool_result)
-        logger.info("已接收问题回答: %s", parsed.question_id)
-
         system_action = self._system_question_actions.pop(parsed.question_id, None)
+        action_type = str(system_action.get("type", "")).strip() if system_action else ""
+
+        # plan 审批是系统级问题，不对应真实 tool_call，避免写入孤立 tool result。
+        if action_type != _SYSTEM_Q_PLAN_APPROVAL:
+            tool_result = json.dumps(parsed.to_tool_result(), ensure_ascii=False)
+            self._memory.add_tool_result(popped.tool_call_id, tool_result)
+
+        logger.info("已接收问题回答: %s", parsed.question_id)
         if system_action is not None:
             self._pending_question_route_result = None
-            action_type = str(system_action.get("type", "")).strip()
             if action_type == _SYSTEM_Q_SUBAGENT_APPROVAL:
                 action_result = await self._handle_subagent_approval_answer(
                     action=system_action,
@@ -2750,7 +2732,6 @@ class AgentEngine:
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
-        ask_user_repair_used = False
 
         for iteration in range(start_iteration, max_iter + 1):
             self._emit(
@@ -2843,120 +2824,6 @@ class AgentEngine:
                         total_tokens=total_prompt_tokens + total_completion_tokens,
                     )
 
-                needs_decision, decision_reason = self._needs_user_decision(
-                    reply_text=reply_text,
-                    tool_scope=tool_scope,
-                )
-                if needs_decision and not ask_user_repair_used:
-                    ask_user_repair_used = True
-                    logger.info(
-                        "触发 ask_user 强制修正: iteration=%s reason=%s",
-                        iteration,
-                        decision_reason,
-                    )
-                    forced_system_prompts = list(system_prompts)
-                    forced_system_prompts.append(
-                        self._build_force_ask_user_instruction(decision_reason)
-                    )
-                    forced_messages = self._memory.trim_for_request(
-                        system_prompts=forced_system_prompts,
-                        max_context_tokens=self._config.max_context_tokens,
-                    )
-                    forced_kwargs = dict(kwargs)
-                    forced_kwargs["messages"] = forced_messages
-                    # 部分 OpenAI 兼容端点（如 gpt-5.3-codex）不接受嵌套 function。
-                    forced_kwargs["tool_choice"] = {
-                        "type": "function",
-                        "name": "ask_user",
-                    }
-
-                    forced_response = await self._create_chat_completion_with_system_fallback(
-                        forced_kwargs
-                    )
-                    forced_message, forced_usage = _extract_completion_message(forced_response)
-                    forced_tool_calls = _normalize_tool_calls(
-                        getattr(forced_message, "tool_calls", None)
-                    )
-                    if forced_usage is not None:
-                        total_prompt_tokens += _usage_token(forced_usage, "prompt_tokens")
-                        total_completion_tokens += _usage_token(
-                            forced_usage, "completion_tokens"
-                        )
-
-                    if not forced_tool_calls:
-                        error_reply = self._build_ask_user_missing_error(
-                            reason=decision_reason,
-                            detail="修正回合仍未产生 tool_calls。",
-                        )
-                        self._memory.add_assistant_message(error_reply)
-                        self._last_iteration_count = iteration
-                        logger.warning("ask_user 强制修正失败：未返回任何 tool_calls")
-                        logger.info("最终结果摘要: %s", _summarize_text(error_reply))
-                        return ChatResult(
-                            reply=error_reply,
-                            tool_calls=list(all_tool_results),
-                            iterations=iteration,
-                            truncated=False,
-                            prompt_tokens=total_prompt_tokens,
-                            completion_tokens=total_completion_tokens,
-                            total_tokens=total_prompt_tokens + total_completion_tokens,
-                        )
-
-                    forced_tool_names = [
-                        str(getattr(getattr(tc, "function", None), "name", "") or "")
-                        for tc in forced_tool_calls
-                    ]
-                    if "ask_user" not in forced_tool_names:
-                        error_reply = self._build_ask_user_missing_error(
-                            reason=decision_reason,
-                            detail=(
-                                "修正回合返回了 tool_calls，但未包含 ask_user。"
-                                f" returned={forced_tool_names}"
-                            ),
-                        )
-                        self._memory.add_assistant_message(error_reply)
-                        self._last_iteration_count = iteration
-                        logger.warning(
-                            "ask_user 强制修正失败：tool_calls 未包含 ask_user，returned=%s",
-                            forced_tool_names,
-                        )
-                        logger.info("最终结果摘要: %s", _summarize_text(error_reply))
-                        return ChatResult(
-                            reply=error_reply,
-                            tool_calls=list(all_tool_results),
-                            iterations=iteration,
-                            truncated=False,
-                            prompt_tokens=total_prompt_tokens,
-                            completion_tokens=total_completion_tokens,
-                            total_tokens=total_prompt_tokens + total_completion_tokens,
-                        )
-
-                    message = forced_message
-                    tool_calls = forced_tool_calls
-                    logger.info(
-                        "ask_user 强制修正成功: iteration=%s reason=%s",
-                        iteration,
-                        decision_reason,
-                    )
-                elif needs_decision:
-                    error_reply = self._build_ask_user_missing_error(
-                        reason=decision_reason,
-                        detail="ask_user 强制修正已执行过一次，仍未进入待回答状态。",
-                    )
-                    self._memory.add_assistant_message(error_reply)
-                    self._last_iteration_count = iteration
-                    logger.warning("ask_user 强制修正已用尽，返回结构化错误")
-                    logger.info("最终结果摘要: %s", _summarize_text(error_reply))
-                    return ChatResult(
-                        reply=error_reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
-                    )
-
             if not tool_calls:
                 self._memory.add_assistant_message(reply_text)
                 self._last_iteration_count = iteration
@@ -3032,6 +2899,7 @@ class AgentEngine:
                     self._memory.add_tool_result(tool_call_id, tc_result.result)
 
                 if tc_result.pending_approval:
+                    self._pending_approval_route_result = route_result
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     self._last_iteration_count = iteration
@@ -3354,6 +3222,23 @@ class AgentEngine:
                                         defer_tool_result = True
                                         success = True
                                         error = None
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str if success else None,
+                            error=error if not success else None,
+                        )
+                    elif tool_name == "discover_tools":
+                        category_value = arguments.get("category", "all")
+                        if not isinstance(category_value, str):
+                            result_str = "工具参数错误: category 必须为字符串。"
+                            success = False
+                            error = result_str
+                        else:
+                            result_str = self._handle_discover_tools(category=category_value)
+                            success = True
+                            error = None
                         log_tool_call(
                             logger,
                             tool_name,
@@ -3788,6 +3673,7 @@ class AgentEngine:
         self._question_flow.clear()
         self._system_question_actions.clear()
         self._pending_question_route_result = None
+        self._pending_approval_route_result = None
         self._pending_plan = None
         self._approved_plan_context = None
         self._task_store.clear()
@@ -4044,7 +3930,7 @@ class AgentEngine:
         if self._skill_router is None:
             return SkillMatchResult(
                 skills_used=[],
-                tool_scope=self._all_tool_names(),
+                tool_scope=[],
                 route_mode="all_tools",
                 system_contexts=[],
             )
@@ -4162,6 +4048,8 @@ class AgentEngine:
 
         if tc_result.pending_question and self._pending_question_route_result is None:
             self._pending_question_route_result = route_result
+        if tc_result.pending_approval:
+            self._pending_approval_route_result = route_result
 
         if self._question_flow.has_pending():
             reply = self._question_flow.format_prompt()
@@ -4298,12 +4186,17 @@ class AgentEngine:
             return self.switch_model(model_arg)
 
         if command == "/accept":
-            return await self._handle_accept_command(parts)
+            return await self._handle_accept_command(parts, on_event=on_event)
         if command == "/reject":
             return self._handle_reject_command(parts)
         return self._handle_undo_command(parts)
 
-    async def _handle_accept_command(self, parts: list[str]) -> str:
+    async def _handle_accept_command(
+        self,
+        parts: list[str],
+        *,
+        on_event: EventCallback | None = None,
+    ) -> str:
         """执行待确认操作。"""
         if len(parts) != 2:
             return "无效参数。用法：/accept <id>。"
@@ -4327,14 +4220,18 @@ class AgentEngine:
             )
         except ToolNotAllowedError:
             self._approval.clear_pending()
+            self._pending_approval_route_result = None
             return (
                 f"accept 执行失败：工具 `{pending.tool_name}` 当前不在授权范围内。"
             )
         except Exception as exc:  # noqa: BLE001
             self._approval.clear_pending()
+            self._pending_approval_route_result = None
             return f"accept 执行失败：{exc}"
 
         self._approval.clear_pending()
+        route_to_resume = self._pending_approval_route_result
+        self._pending_approval_route_result = None
         lines = [
             f"已执行待确认操作 `{approval_id}`。",
             f"- 工具: `{record.tool_name}`",
@@ -4345,14 +4242,30 @@ class AgentEngine:
             lines.append(f"- 结果摘要: {record.result_preview}")
         if record.undoable:
             lines.append(f"- 回滚命令: `/undo {approval_id}`")
-        return "\n".join(lines)
+        if route_to_resume is None or not self._has_incomplete_tasks():
+            return "\n".join(lines)
+
+        resume_iteration = self._last_iteration_count + 1
+        self._set_window_perception_turn_hints(
+            user_message="审批已通过，继续执行剩余子任务",
+            is_new_task=False,
+        )
+        resumed = await self._tool_calling_loop(
+            route_to_resume,
+            on_event,
+            start_iteration=resume_iteration,
+        )
+        return "\n".join(lines) + f"\n\n{resumed.reply}"
 
     def _handle_reject_command(self, parts: list[str]) -> str:
         """拒绝待确认操作。"""
         if len(parts) != 2:
             return "无效参数。用法：/reject <id>。"
         approval_id = parts[1].strip()
-        return self._approval.reject_pending(approval_id)
+        result = self._approval.reject_pending(approval_id)
+        if self._approval.pending is None:
+            self._pending_approval_route_result = None
+        return result
 
     def _handle_undo_command(self, parts: list[str]) -> str:
         """回滚已确认操作。"""
@@ -4500,6 +4413,12 @@ class AgentEngine:
         provided_id = parts[2].strip() if len(parts) == 3 else ""
         if provided_id and provided_id != expected_id:
             return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
+
+        if pending.draft.source == "task_create_hook" and pending.tool_call_id:
+            self._memory.add_tool_result(
+                pending.tool_call_id,
+                f"计划 `{expected_id}` 已拒绝，task_create 已取消执行。",
+            )
 
         self._pending_plan = None
         return f"已拒绝计划 `{expected_id}`。"
