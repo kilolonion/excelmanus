@@ -43,6 +43,7 @@ allowed_tools:
   - delete_sheet
   - copy_range_between_sheets
   - memory_read_topic
+  - focus_window
 triggers: []
 file_patterns:
   - "*.xlsx"

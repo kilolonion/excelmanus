@@ -32,6 +32,17 @@ class DetailLevel(str, Enum):
     NONE = "none"
 
 
+class IntentTag(str, Enum):
+    """窗口意图标签。"""
+
+    AGGREGATE = "aggregate"
+    FORMAT = "format"
+    VALIDATE = "validate"
+    FORMULA = "formula"
+    ENTRY = "entry"
+    GENERAL = "general"
+
+
 @dataclass
 class ColumnDef:
     """列定义。"""
@@ -100,6 +111,8 @@ class WindowState:
     preview_rows: list[Any] = field(default_factory=list)
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # v2 主字段：结构化 schema，columns 继续保留兼容旧渲染路径。
+    schema: list[ColumnDef] = field(default_factory=list)
     columns: list[ColumnDef] = field(default_factory=list)
     total_rows: int = 0
     total_cols: int = 0
@@ -122,6 +135,12 @@ class WindowState:
     last_access_seq: int = 0
     # 休眠窗口不参与当前轮渲染，但保留缓存以便后续唤醒复用。
     dormant: bool = False
+    # 意图层：用于控制序列化维度偏好。
+    intent_tag: IntentTag = IntentTag.GENERAL
+    intent_confidence: float = 0.0
+    intent_source: str = "default"
+    intent_updated_turn: int = 0
+    intent_lock_until_turn: int = 0
 
 
 @dataclass

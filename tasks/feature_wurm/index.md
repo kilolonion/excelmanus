@@ -735,6 +735,13 @@ window_data_buffer_max_rows: int = 200     # 内存缓冲区行数上限
 
 ## 十二、实施计划（渐进式三阶段）
 
+> **详细实施计划已拆分为独立文件：**
+> - [P_plan_phase1.md](./P_plan_phase1.md) — Phase 1：anchored 模式（模型扩展 + ingest + 序列化 + engine 集成）
+> - [P_plan_phase2.md](./P_plan_phase2.md) — Phase 2：unified 模式 + 安全阀 + focus_window 工具
+> - [P_plan_phase3.md](./P_plan_phase3.md) — Phase 3：adaptive 模式 + 跨模型验证
+>
+> 以下为概览，具体任务清单、涉及文件、验收标准请查看对应计划文件。
+
 ### Phase 1：anchored 模式（最小风险，~5 天）
 
 | 步骤 | 内容 | 工期 |
