@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from pathlib import Path
 import json
 import random
 from dataclasses import dataclass, field
@@ -301,6 +302,10 @@ class ChatResult:
         """兼容旧调用方将 chat 结果当作字符串直接使用。"""
         return self.reply
 
+    def __hash__(self) -> int:
+        """自定义 __eq__ 后必须显式定义 __hash__，否则实例不可哈希。"""
+        return hash(self.reply)
+
     def __eq__(self, other: object) -> bool:
         """兼容与 str 比较，同时保留 ChatResult 间的结构化比较。"""
         if isinstance(other, str):
@@ -319,8 +324,15 @@ class ChatResult:
         return item in self.reply
 
     def __getattr__(self, name: str) -> Any:
-        """兼容 result.strip()/startswith() 等字符串方法。"""
-        return getattr(self.reply, name)
+        """兼容 result.strip()/startswith() 等字符串方法。
+
+        使用 object.__getattribute__ 避免 self.reply 未初始化时无限递归。
+        """
+        try:
+            reply = object.__getattribute__(self, "reply")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(reply, name)
 
 
 @dataclass
@@ -373,6 +385,11 @@ class AgentEngine:
             else None
         )
         self._memory = ConversationMemory(config)
+        # 将工作区绝对路径注入系统提示词，使 LLM 能识别工作区内的绝对路径
+        resolved_root = str(Path(config.workspace_root).resolve())
+        self._memory.system_prompt = self._memory.system_prompt.replace(
+            "{workspace_root}", resolved_root
+        )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             tool_scope=self._all_tool_names(),
@@ -437,6 +454,7 @@ class AgentEngine:
                 window_full_total_budget_tokens=config.window_full_total_budget_tokens,
                 window_data_buffer_max_rows=config.window_data_buffer_max_rows,
             ),
+            adaptive_model_mode_overrides=dict(config.adaptive_model_mode_overrides or {}),
             advisor_mode=(
                 "rules"
                 if config.window_perception_advisor_mode == "rules"
@@ -445,6 +463,10 @@ class AgentEngine:
             advisor_trigger_window_count=config.window_perception_advisor_trigger_window_count,
             advisor_trigger_turn=config.window_perception_advisor_trigger_turn,
             advisor_plan_ttl_turns=config.window_perception_advisor_plan_ttl_turns,
+            intent_enabled=config.window_intent_enabled,
+            intent_sticky_turns=config.window_intent_sticky_turns,
+            intent_repeat_warn_threshold=config.window_intent_repeat_warn_threshold,
+            intent_repeat_trip_threshold=config.window_intent_repeat_trip_threshold,
         )
         self._window_perception.bind_async_advisor_runner(
             self._run_window_perception_advisor_async
@@ -1376,7 +1398,8 @@ class AgentEngine:
             "仅在当前工具列表不足以完成用户请求时调用。\n"
             "如果用户只是闲聊、问候、询问能力或不需要执行工具，请不要调用本工具，直接回复。\n"
             "⚠️ 信息隔离：不要向用户提及技能名称、工具名称、技能包等内部概念，"
-            "只需自然地执行任务并呈现结果。\n\n"
+            "只需自然地执行任务并呈现结果。\n"
+            "重要：调用本工具后立即执行任务，不要仅输出计划文字。\n\n"
             "Skill_Catalog:\n"
             f"{skill_catalog}"
         )
@@ -1387,18 +1410,21 @@ class AgentEngine:
             "(2) 需要执行复杂数据分析时委派 analyst；"
             "(3) 需要批量写入或格式化时委派 writer；"
             "(4) 需要编写和调试 Python 脚本时委派 coder。"
-            "当搜索结果不确定、需要逐个检查多个目标时，优先委派 explorer 而非自己逐个尝试。\n\n"
+            "当搜索结果不确定、需要逐个检查多个目标时，优先委派 explorer 而非自己逐个尝试。\n"
+            "注意：委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
             "Subagent_Catalog:\n"
             f"{subagent_catalog or '当前无可用子代理。'}"
         )
         list_subagents_description = "列出当前可用的全部 subagent 及职责。"
         ask_user_description = (
-            "向用户发起结构化选择题以消除歧义。适用场景："
-            "(1) 搜索到多个候选文件/sheet，需要用户确认目标；"
-            "(2) 用户指令存在多种合理解读，需要确认意图；"
-            "(3) 操作涉及不可逆选择（如覆盖文件），需要用户决策。"
-            "规则：已知答案时不要问；选项应具体（如列出实际文件名），不要泛泛而问。"
-            "触发后暂停执行，等待用户回答后继续。"
+            "向用户提问并获取回答。这是与用户进行结构化交互的唯一方式。"
+            "当你需要用户做选择、确认意图或做决定时，必须调用本工具，"
+            "不要在文本回复中列出编号选项让用户回复。"
+            "典型场景：多个候选目标需确认、指令有多种解读、"
+            "任务有多条可行路径（如大文件的输出方式）、不可逆操作需确认。"
+            "不需要问的情况：只有一条合理路径时直接执行；用户意图已明确时默认行动。"
+            "选项应具体（列出实际文件名/方案名），不要泛泛而问。"
+            "调用后暂停执行，等待用户回答后继续。"
         )
         return [
             {
@@ -2447,10 +2473,11 @@ class AgentEngine:
             )
 
         if selected_label == _PLAN_APPROVAL_OPTION_APPROVE:
-            return await self._handle_plan_approve(
+            reply = await self._handle_plan_approve(
                 parts=["/plan", "approve"],
                 on_event=on_event,
             )
+            return ChatResult(reply=reply)
 
         if selected_label == _PLAN_APPROVAL_OPTION_REJECT:
             reply = self._handle_plan_reject(parts=["/plan", "reject"])
@@ -2908,6 +2935,7 @@ class AgentEngine:
         defer_tool_result = False
 
         # 执行工具调用
+        hook_skill = self._pick_route_skill(route_result)
         if parse_error is not None:
             result_str = f"工具参数解析错误: {parse_error}"
             success = False
@@ -2919,7 +2947,6 @@ class AgentEngine:
                 error=error,
             )
         else:
-            hook_skill = self._pick_route_skill(route_result)
             pre_hook_raw = self._run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.PRE_TOOL_USE,
@@ -3325,14 +3352,15 @@ class AgentEngine:
         success: bool,
     ) -> str:
         """在工具返回中附加窗口感知信息。"""
-        mode = self._effective_window_return_mode()
+        requested_mode = self._requested_window_return_mode()
         try:
             return self._window_perception.enrich_tool_result(
                 tool_name=tool_name,
                 arguments=arguments,
                 result_text=result_text,
                 success=success,
-                mode=mode,
+                mode=requested_mode,
+                model_id=self._active_model,
             )
         except Exception:
             logger.warning(
@@ -3347,6 +3375,7 @@ class AgentEngine:
                     result_text=result_text,
                     success=success,
                     mode="enriched",
+                    model_id=self._active_model,
                 )
             except Exception:
                 return result_text
@@ -3366,14 +3395,24 @@ class AgentEngine:
             success=success,
         )
 
-    def _effective_window_return_mode(self) -> str:
-        """Phase2 支持模式：unified / anchored / enriched。"""
-        raw_mode = str(getattr(self._config, "window_return_mode", "enriched") or "enriched").strip().lower()
-        if raw_mode == "unified":
-            return "unified"
-        if raw_mode == "anchored":
-            return "anchored"
+    def _requested_window_return_mode(self) -> str:
+        """读取配置中的请求模式（含 adaptive）。"""
+        raw_mode = str(
+            getattr(self._config, "window_return_mode", "adaptive") or "adaptive"
+        ).strip().lower()
+        if raw_mode in {"unified", "anchored", "enriched", "adaptive"}:
+            return raw_mode
         return "enriched"
+
+    def _effective_window_return_mode(self) -> str:
+        """返回当前会话有效模式（只会是 unified/anchored/enriched）。"""
+        if not self._window_perception.enabled:
+            return "enriched"
+        requested_mode = self._requested_window_return_mode()
+        return self._window_perception.resolve_effective_mode(
+            requested_mode=requested_mode,
+            model_id=self._active_model,
+        )
 
     def _apply_tool_result_hard_cap(self, text: str) -> str:
         """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
@@ -3492,6 +3531,8 @@ class AgentEngine:
         self._pending_question_route_result = None
         self._pending_plan = None
         self._approved_plan_context = None
+        self._task_store.clear()
+        self._approval.clear_pending()
         self._window_perception.reset()
 
     # ── 多模型切换 ──────────────────────────────────
@@ -3637,15 +3678,16 @@ class AgentEngine:
             merged_contexts = list(route_result.system_contexts)
             budget = self._config.skills_context_char_budget
             if budget <= 0:
-                remaining_budget = 0
+                # budget <= 0 表示无限制，全量加载历史上下文
+                remaining_budget = -1
             else:
                 used_chars = sum(len(ctx) for ctx in merged_contexts)
                 remaining_budget = budget - used_chars
 
-            if budget <= 0 or remaining_budget > 0:
+            if remaining_budget != 0:
                 history_contexts = build_contexts_with_budget(
                     history_skills,
-                    remaining_budget,
+                    remaining_budget if remaining_budget > 0 else -1,
                 )
                 merged_contexts.extend(history_contexts)
         else:
@@ -4592,16 +4634,20 @@ class AgentEngine:
 
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
+        requested_mode = self._requested_window_return_mode()
         return self._window_perception.build_system_notice(
-            mode=self._effective_window_return_mode(),
+            mode=requested_mode,
+            model_id=self._active_model,
         )
 
     def _set_window_perception_turn_hints(self, *, user_message: str, is_new_task: bool) -> None:
         """设置窗口感知层的当前轮提示。"""
+        clipped_hint = self._clip_window_hint(user_message)
         self._window_perception.set_turn_hints(
             is_new_task=is_new_task,
-            user_intent_summary=self._clip_window_hint(user_message),
+            user_intent_summary=clipped_hint,
             agent_recent_output=self._clip_window_hint(self._latest_assistant_text()),
+            turn_intent_hint=clipped_hint,
         )
 
     def _latest_assistant_text(self) -> str:
