@@ -56,7 +56,7 @@ from excelmanus.window_perception import (
     PerceptionBudget,
     WindowPerceptionManager,
 )
-from excelmanus.window_perception.models import WindowState
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
@@ -5097,7 +5097,7 @@ class AgentEngine:
 
     async def _run_window_perception_advisor_async(
         self,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,

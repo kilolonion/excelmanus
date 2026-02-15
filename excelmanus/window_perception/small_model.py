@@ -8,7 +8,8 @@ from typing import Any
 
 from .advisor import LifecyclePlan, WindowAdvice
 from .advisor_context import AdvisorContext
-from .models import PerceptionBudget, WindowState
+from .domain import Window
+from .models import PerceptionBudget
 
 TASK_TYPES: tuple[str, ...] = (
     "DATA_COMPARISON",
@@ -26,7 +27,7 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECAS
 
 def build_advisor_messages(
     *,
-    windows: list[WindowState],
+    windows: list[Window],
     active_window_id: str | None,
     budget: PerceptionBudget,
     context: AdvisorContext,

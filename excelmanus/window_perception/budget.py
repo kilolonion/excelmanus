@@ -7,7 +7,8 @@ from collections.abc import Callable
 from excelmanus.memory import TokenCounter
 
 from .advisor import LifecyclePlan, WindowTier
-from .models import DetailLevel, PerceptionBudget, WindowRenderAction, WindowSnapshot, WindowState
+from .domain import Window
+from .models import DetailLevel, PerceptionBudget, WindowRenderAction, WindowSnapshot
 
 
 class WindowBudgetAllocator:
@@ -27,11 +28,11 @@ class WindowBudgetAllocator:
     def allocate(
         self,
         *,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
-        render_keep: Callable[[WindowState], str],
-        render_minimized: Callable[[WindowState], str],
-        render_background: Callable[[WindowState], str] | None = None,
+        render_keep: Callable[[Window], str],
+        render_minimized: Callable[[Window], str],
+        render_background: Callable[[Window], str] | None = None,
         lifecycle_plan: LifecyclePlan | None = None,
     ) -> list[WindowSnapshot]:
         """分配窗口动作并返回快照。"""
@@ -99,12 +100,12 @@ class WindowBudgetAllocator:
     def _allocate_single(
         self,
         *,
-        item: WindowState,
+        item: Window,
         desired_tier: WindowTier,
         remaining: int,
-        render_keep: Callable[[WindowState], str],
-        render_background: Callable[[WindowState], str],
-        render_minimized: Callable[[WindowState], str],
+        render_keep: Callable[[Window], str],
+        render_background: Callable[[Window], str],
+        render_minimized: Callable[[Window], str],
         must_keep: bool,
     ) -> WindowSnapshot:
         active_text = render_keep(item)
@@ -169,7 +170,7 @@ class WindowBudgetAllocator:
             estimated_tokens=0,
         )
 
-    def _tier_from_idle(self, item: WindowState, active_window_id: str | None) -> WindowTier:
+    def _tier_from_idle(self, item: Window, active_window_id: str | None) -> WindowTier:
         if item.id == active_window_id:
             return "active"
 

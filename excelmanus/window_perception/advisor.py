@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from .advisor_context import AdvisorContext
-from .models import IntentTag, PerceptionBudget, WindowState
+from .domain import Window
+from .models import IntentTag, PerceptionBudget
 
 WindowTier = Literal["active", "background", "suspended", "terminated"]
 _VALID_TASK_TYPES = {
@@ -47,7 +48,7 @@ class WindowLifecycleAdvisor(Protocol):
     def advise(
         self,
         *,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,
@@ -63,7 +64,7 @@ class RuleBasedAdvisor:
     def advise(
         self,
         *,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,
@@ -147,7 +148,7 @@ class HybridAdvisor:
     def advise(
         self,
         *,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,

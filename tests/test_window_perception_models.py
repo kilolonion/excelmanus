@@ -1,7 +1,8 @@
 """窗口感知模型测试。"""
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception import DetailLevel, IntentTag, PerceptionBudget, Viewport, WindowType
-from excelmanus.window_perception.models import WindowState
+from tests.window_factories import make_window
 
 
 class TestWindowModels:
@@ -14,7 +15,7 @@ class TestWindowModels:
         assert viewport.visible_cols == 10
 
     def test_window_state_defaults(self) -> None:
-        state = WindowState(id="w1", type=WindowType.SHEET, title="test")
+        state = make_window(id="w1", type=WindowType.SHEET, title="test")
         assert state.sheet_tabs == []
         assert state.preview_rows == []
         assert state.metadata == {}
@@ -48,3 +49,4 @@ def test_legacy_windowstate_is_not_exported() -> None:
     import excelmanus.window_perception as wp
 
     assert not hasattr(wp, "WindowState")
+    assert hasattr(wp, "Window")

@@ -25,7 +25,8 @@ from excelmanus.task_list import TaskStatus
 from excelmanus.tools import ToolRegistry, task_tools
 from excelmanus.tools.registry import ToolDef
 from excelmanus.window_perception import AdvisorContext, PerceptionBudget, WindowType
-from excelmanus.window_perception.models import WindowState
+from excelmanus.window_perception.domain import Window
+from tests.window_factories import make_window
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -413,7 +414,7 @@ class TestModelSwitchConsistency:
         )
 
         _ = await engine._run_window_perception_advisor_async(
-            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
             context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
@@ -449,7 +450,7 @@ class TestModelSwitchConsistency:
         monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
 
         plan = await engine._run_window_perception_advisor_async(
-            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
             context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
@@ -500,7 +501,7 @@ class TestModelSwitchConsistency:
         monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
 
         plan = await engine._run_window_perception_advisor_async(
-            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
             context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
@@ -537,7 +538,7 @@ class TestModelSwitchConsistency:
         )
 
         plan = await engine._run_window_perception_advisor_async(
-            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
             context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
