@@ -2864,9 +2864,10 @@ class AgentEngine:
                     )
                     forced_kwargs = dict(kwargs)
                     forced_kwargs["messages"] = forced_messages
+                    # 部分 OpenAI 兼容端点（如 gpt-5.3-codex）不接受嵌套 function。
                     forced_kwargs["tool_choice"] = {
                         "type": "function",
-                        "function": {"name": "ask_user"},
+                        "name": "ask_user",
                     }
 
                     forced_response = await self._create_chat_completion_with_system_fallback(

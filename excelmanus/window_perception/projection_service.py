@@ -14,21 +14,31 @@ def project_notice(window: Window, ctx: dict[str, Any] | None = None) -> NoticeP
 
     context = ctx if isinstance(ctx, dict) else {}
     identity = str(context.get("identity") or _infer_identity(window))
-    rows = int(window.total_rows or (window.viewport.total_rows if window.viewport else 0) or len(window.data_buffer))
-    cols = int(window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns or window.schema))
+    if isinstance(window, ExplorerWindow):
+        rows = len(window.entries)
+        cols = 1 if rows > 0 else 0
+        range_ref = "-"
+        sheet_tabs: tuple[str, ...] = ()
+        preview_rows: tuple[dict[str, Any], ...] = ()
+    else:
+        rows = int(window.total_rows or (window.viewport.total_rows if window.viewport else 0) or len(window.data_buffer))
+        cols = int(window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns or window.schema))
+        range_ref = window.viewport_range or (window.viewport.range_ref if window.viewport else "-")
+        sheet_tabs = tuple(window.sheet_tabs)
+        preview_rows = tuple(window.preview_rows)
 
     return NoticeProjection(
         window_id=window.id,
         kind="explorer" if window.type == WindowType.EXPLORER else "sheet",
         title=window.title,
         identity=identity,
-        range_ref=window.viewport_range or (window.viewport.range_ref if window.viewport else "-"),
+        range_ref=range_ref,
         rows=max(0, rows),
         cols=max(0, cols),
         intent=window.intent_tag.value,
         summary=window.summary or "",
-        sheet_tabs=tuple(window.sheet_tabs),
-        preview_rows=tuple(window.preview_rows),
+        sheet_tabs=sheet_tabs,
+        preview_rows=preview_rows,
     )
 
 

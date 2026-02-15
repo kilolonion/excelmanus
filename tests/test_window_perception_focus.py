@@ -52,7 +52,7 @@ def _build_manager_and_window() -> tuple[WindowPerceptionManager, Window]:
         detail_level=DetailLevel.FULL,
     )
     manager._windows[window.id] = window
-    manager._sheet_index[(window.file_path or "", window.sheet_name or "")] = window.id
+    manager._register_window_identity(window)
     manager._active_window_id = window.id
     return manager, window
 

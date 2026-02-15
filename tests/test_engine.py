@@ -4006,7 +4006,7 @@ class TestChatPureText:
         second_call_kwargs = engine._client.chat.completions.create.call_args_list[1].kwargs
         assert second_call_kwargs["tool_choice"] == {
             "type": "function",
-            "function": {"name": "ask_user"},
+            "name": "ask_user",
         }
 
     @pytest.mark.asyncio

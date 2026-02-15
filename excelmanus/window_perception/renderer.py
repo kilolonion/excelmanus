@@ -7,7 +7,7 @@ from typing import Any
 from .domain import ExplorerWindow, SheetWindow, Window
 from .models import DetailLevel, IntentTag, WindowSnapshot, WindowType
 from .projection_models import NoticeProjection, ToolPayloadProjection
-from .projection_service import project_tool_payload
+from .projection_service import project_notice, project_tool_payload
 
 
 def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enriched") -> str:
@@ -35,6 +35,8 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
 def render_window_keep(
     window: Window | NoticeProjection,
     *,
+    payload: ToolPayloadProjection | None = None,
+    detail_level: DetailLevel | None = None,
     mode: str = "enriched",
     max_rows: int = 25,
     current_iteration: int = 0,
@@ -42,99 +44,66 @@ def render_window_keep(
 ) -> str:
     """渲染 ACTIVE 窗口。"""
     if isinstance(window, NoticeProjection):
-        return _render_notice_projection(window)
-
-    if isinstance(window, ExplorerWindow):
-        return _render_explorer(window)
-    if mode in {"anchored", "unified"}:
-        if window.detail_level == DetailLevel.ICON:
-            return render_window_minimized(window, intent_profile=intent_profile)
-        if window.detail_level == DetailLevel.SUMMARY:
-            return render_window_background(window, intent_profile=intent_profile)
-        if window.detail_level == DetailLevel.NONE:
-            return ""
-        if window.data_buffer:
+        projection = window
+        effective_level = detail_level or DetailLevel.FULL
+        effective_payload = payload
+    else:
+        if isinstance(window, ExplorerWindow):
+            return _render_explorer(window)
+        if mode in {"anchored", "unified"} and window.detail_level == DetailLevel.FULL and window.data_buffer:
             return render_window_wurm_full(
                 window,
                 max_rows=max_rows,
                 current_iteration=current_iteration,
                 intent_profile=intent_profile,
             )
-    return _render_sheet(window)
+        projection = project_notice(window)
+        effective_level = detail_level or window.detail_level
+        effective_payload = payload or project_tool_payload(window)
+
+    if mode in {"anchored", "unified"}:
+        profile = _normalize_projection_intent_profile(projection, intent_profile=intent_profile)
+        if effective_level == DetailLevel.ICON:
+            return _render_minimized_projection(projection, payload=effective_payload, intent_profile=profile)
+        if effective_level == DetailLevel.SUMMARY:
+            return _render_background_projection(projection, payload=effective_payload, intent_profile=profile)
+        if effective_level == DetailLevel.NONE:
+            return ""
+    return _render_notice_projection(projection, payload=effective_payload, detail_level=effective_level)
 
 
 def render_window_background(
-    window: Window,
+    window: Window | NoticeProjection,
     *,
+    payload: ToolPayloadProjection | None = None,
     intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 BACKGROUND 窗口（结构缩略图）。"""
-    profile = _normalize_intent_profile(window, intent_profile=intent_profile)
-    if isinstance(window, ExplorerWindow):
-        title = window.title or "资源管理器"
-        summary = window.summary or "目录视图"
-        return f"[BG -- {title}] {summary}"
-
-    file_name = window.file_path or "未知文件"
-    sheet_name = window.sheet_name or "未知Sheet"
-    lines = [f"[BG -- {file_name} / {sheet_name}]"]
-
-    viewport = window.viewport
-    if viewport is not None:
-        lines.append(f"{viewport.total_rows}r x {viewport.total_cols}c")
-
-    columns = _extract_columns_from_preview(window.preview_rows)
-    if columns:
-        lines.append("列: " + ", ".join(columns))
-    lines.append(f"intent: {profile['intent']}（{profile['focus_text']}）")
-
-    if profile.get("show_style"):
-        lines.extend(_render_style_summary_lines(window))
-    if profile.get("show_quality"):
-        lines.append("quality: " + _build_quality_summary(window.data_buffer))
-    if profile.get("show_formula"):
-        lines.append("formula: " + _build_formula_summary(window))
-    if profile.get("show_change") and window.change_log:
-        latest = window.change_log[-1]
-        lines.append(f"recent: {latest.tool_summary}")
-
-    parts: list[str] = []
-    if viewport is not None:
-        parts.append(f"viewport: {viewport.range_ref}")
-    if window.sheet_tabs:
-        tabs = [f"[{name}]" for name in window.sheet_tabs[:8]]
-        if len(window.sheet_tabs) > 8:
-            tabs.append("...")
-        parts.append("tabs: " + " ".join(tabs))
-    if parts:
-        lines.append(" | ".join(parts))
-
-    return "\n".join(lines)
+    if isinstance(window, NoticeProjection):
+        projection = window
+        effective_payload = payload
+    else:
+        projection = project_notice(window)
+        effective_payload = payload or project_tool_payload(window)
+    profile = _normalize_projection_intent_profile(projection, intent_profile=intent_profile)
+    return _render_background_projection(projection, payload=effective_payload, intent_profile=profile)
 
 
 def render_window_minimized(
-    window: Window,
+    window: Window | NoticeProjection,
     *,
+    payload: ToolPayloadProjection | None = None,
     intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 SUSPENDED 窗口（一行摘要）。"""
-    profile = _normalize_intent_profile(window, intent_profile=intent_profile)
-    if isinstance(window, ExplorerWindow):
-        title = window.title or "资源管理器"
-        summary = window.summary or "目录视图"
-        return f"[IDLE -- {title}] {summary}"
-
-    file_name = window.file_path or "未知文件"
-    sheet_name = window.sheet_name or "未知Sheet"
-    viewport = window.viewport
-    if viewport is not None and viewport.total_rows > 0 and viewport.total_cols > 0:
-        return (
-            f"[IDLE -- {file_name} / {sheet_name} | {viewport.total_rows}x{viewport.total_cols}]"
-            f" intent={profile['intent']}"
-        )
-
-    summary = window.summary or "上次视图已压缩"
-    return f"[IDLE -- {file_name} / {sheet_name}] {summary} | intent={profile['intent']}"
+    if isinstance(window, NoticeProjection):
+        projection = window
+        effective_payload = payload
+    else:
+        projection = project_notice(window)
+        effective_payload = payload or project_tool_payload(window)
+    profile = _normalize_projection_intent_profile(projection, intent_profile=intent_profile)
+    return _render_minimized_projection(projection, payload=effective_payload, intent_profile=profile)
 
 
 def build_tool_perception_payload(window: Window | None) -> dict[str, Any] | None:
@@ -289,8 +258,35 @@ def _render_explorer(window: ExplorerWindow) -> str:
     return "\n".join(lines)
 
 
-def _render_notice_projection(projection: NoticeProjection) -> str:
+def _render_notice_projection(
+    projection: NoticeProjection,
+    *,
+    payload: ToolPayloadProjection | None = None,
+    detail_level: DetailLevel = DetailLevel.FULL,
+) -> str:
     """Render notice DTO without reading mutable window fields."""
+    if projection.kind == "explorer":
+        directory = payload.directory if payload is not None else projection.identity
+        lines = [
+            "[ACTIVE -- 资源管理器]",
+            f"path: {directory or '.'}",
+        ]
+        entries = list(payload.entries) if payload is not None else []
+        if entries:
+            for entry in entries[:15]:
+                lines.append(str(entry))
+            if len(entries) > 15:
+                lines.append(f"  ... (+{len(entries) - 15} more)")
+        elif projection.summary:
+            lines.append(projection.summary)
+        return "\n".join(lines)
+
+    if payload is not None and payload.window_type == "sheet":
+        if detail_level == DetailLevel.ICON:
+            return _render_minimized_projection(projection, payload=payload, intent_profile=None)
+        if detail_level == DetailLevel.SUMMARY:
+            return _render_background_projection(projection, payload=payload, intent_profile=None)
+        return _render_sheet_projection(projection, payload=payload)
 
     lines = [
         f"[ACTIVE -- {projection.window_id}]",
@@ -301,6 +297,90 @@ def _render_notice_projection(projection: NoticeProjection) -> str:
     if projection.summary:
         lines.append(f"summary: {projection.summary}")
     return "\n".join(lines)
+
+
+def _render_sheet_projection(projection: NoticeProjection, *, payload: ToolPayloadProjection) -> str:
+    file_name = payload.file or "未知文件"
+    sheet_name = payload.sheet or "未知Sheet"
+    lines = [f"[ACTIVE -- {file_name} / {sheet_name}]"]
+
+    if payload.sheet_tabs:
+        tabs = []
+        current = sheet_name
+        for item in payload.sheet_tabs:
+            token = f">{item}" if item == current else item
+            tabs.append(f"[{token}]")
+        lines.append("tabs: " + " ".join(tabs))
+
+    lines.append(
+        "range: "
+        f"{payload.viewport_range or projection.range_ref} ({projection.rows}r x {projection.cols}c)"
+    )
+    if payload.freeze_panes:
+        lines.append(f"freeze: {payload.freeze_panes}")
+    if payload.style_summary:
+        lines.append("style:")
+        lines.append(f"  {payload.style_summary}")
+    if projection.summary:
+        lines.append(f"summary: {projection.summary}")
+    return "\n".join(lines)
+
+
+def _render_background_projection(
+    projection: NoticeProjection,
+    *,
+    payload: ToolPayloadProjection | None,
+    intent_profile: dict[str, Any] | None,
+) -> str:
+    intent = str((intent_profile or {}).get("intent") or projection.intent or "general").strip().lower()
+    focus = str((intent_profile or {}).get("focus_text") or "通用浏览")
+    if projection.kind == "explorer":
+        title = projection.title or "资源管理器"
+        summary = projection.summary or "目录视图"
+        return f"[BG -- {title}] {summary}"
+
+    file_name = payload.file if payload is not None else "未知文件"
+    sheet_name = payload.sheet if payload is not None else "未知Sheet"
+    lines = [f"[BG -- {file_name} / {sheet_name}]"]
+    lines.append(f"{projection.rows}r x {projection.cols}c")
+
+    if projection.preview_rows:
+        cols = [str(k) for k in projection.preview_rows[0].keys()][:10]
+        if cols:
+            lines.append("列: " + ", ".join(cols))
+    lines.append(f"intent: {intent}（{focus}）")
+
+    parts: list[str] = []
+    if projection.range_ref:
+        parts.append(f"viewport: {projection.range_ref}")
+    if payload is not None and payload.sheet_tabs:
+        tabs = [f"[{name}]" for name in payload.sheet_tabs[:8]]
+        if len(payload.sheet_tabs) > 8:
+            tabs.append("...")
+        parts.append("tabs: " + " ".join(tabs))
+    if parts:
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def _render_minimized_projection(
+    projection: NoticeProjection,
+    *,
+    payload: ToolPayloadProjection | None,
+    intent_profile: dict[str, Any] | None,
+) -> str:
+    intent = str((intent_profile or {}).get("intent") or projection.intent or "general").strip().lower()
+    if projection.kind == "explorer":
+        title = projection.title or "资源管理器"
+        summary = projection.summary or "目录视图"
+        return f"[IDLE -- {title}] {summary}"
+
+    file_name = payload.file if payload is not None else "未知文件"
+    sheet_name = payload.sheet if payload is not None else "未知Sheet"
+    if projection.rows > 0 and projection.cols > 0:
+        return f"[IDLE -- {file_name} / {sheet_name} | {projection.rows}x{projection.cols}] intent={intent}"
+    summary = projection.summary or "上次视图已压缩"
+    return f"[IDLE -- {file_name} / {sheet_name}] {summary} | intent={intent}"
 
 
 def _render_sheet(window: SheetWindow) -> str:
@@ -499,6 +579,31 @@ def _normalize_intent_profile(
     if intent == IntentTag.FORMAT:
         default_rows = 3
     profile.setdefault("max_rows", default_rows)
+    return profile
+
+
+def _normalize_projection_intent_profile(
+    projection: NoticeProjection,
+    *,
+    intent_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = dict(intent_profile or {})
+    intent_value = str(profile.get("intent") or projection.intent or IntentTag.GENERAL.value).strip().lower()
+    try:
+        intent = IntentTag(intent_value)
+    except ValueError:
+        intent = IntentTag.GENERAL
+
+    focus_map = {
+        IntentTag.AGGREGATE: "统计优先",
+        IntentTag.FORMAT: "样式优先",
+        IntentTag.VALIDATE: "质量校验优先",
+        IntentTag.FORMULA: "公式排查优先",
+        IntentTag.ENTRY: "写入变更优先",
+        IntentTag.GENERAL: "通用浏览",
+    }
+    profile["intent"] = intent.value
+    profile.setdefault("focus_text", focus_map[intent])
     return profile
 
 

@@ -19,7 +19,7 @@ from .advisor import HybridAdvisor, LifecyclePlan, RuleBasedAdvisor, WindowLifec
 from .advisor_context import AdvisorContext
 from .budget import WindowBudgetAllocator
 from .confirmation import build_confirmation_record, serialize_confirmation
-from .delta import ExplorerDelta, SheetReadDelta
+from .delta import ExplorerDelta, FieldAppendDelta, FieldSetDelta, SheetReadDelta
 from .domain import ExplorerWindow, SheetWindow, Window
 from .extractor import (
     compute_scroll_position,
@@ -65,6 +65,7 @@ from .models import (
     WindowRenderAction,
     WindowType,
 )
+from .projection_service import project_notice, project_tool_payload
 from .renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -182,8 +183,6 @@ class WindowPerceptionManager:
             RuleBasedAdvisor() if self._advisor_mode == "rules" else HybridAdvisor()
         )
         self._windows: dict[str, Window] = {}
-        self._explorer_index: dict[str, str] = {}
-        self._sheet_index: dict[tuple[str, str], str] = {}
         self._locator = WindowLocator()
         self._active_window_id: str | None = None
         self._seq: int = 0
@@ -252,8 +251,6 @@ class WindowPerceptionManager:
         """重置状态。"""
         self._cancel_advisor_task()
         self._windows.clear()
-        self._explorer_index.clear()
-        self._sheet_index.clear()
         self._locator = WindowLocator()
         self._active_window_id = None
         self._seq = 0
@@ -287,22 +284,22 @@ class WindowPerceptionManager:
             normalized = normalize_path(raw)
             if not normalized or not is_excel_path(normalized):
                 continue
-            key = (normalized, "")
-            window_id = self._sheet_index.get(key)
-            if window_id is None:
+            window = self._find_sheet_window(
+                file_path=normalized,
+                sheet_name="",
+            )
+            if window is None:
                 window = SheetWindow.new(
                     id=self._new_id("sheet"),
                     title=normalized,
                     file_path=normalized,
                     sheet_name="",
                 )
-                window.summary = summary
+                self._set_window_field(window, "summary", summary)
                 self._windows[window.id] = window
-                self._sheet_index[key] = window.id
-                window_id = window.id
-            window = self._windows[window_id]
+                self._register_window_identity(window)
             self._wake_window(window)
-            window.summary = summary
+            self._set_window_field(window, "summary", summary)
             self._touch(window)
 
     def build_system_notice(self, *, mode: str = "enriched", model_id: str = "") -> str:
@@ -351,18 +348,22 @@ class WindowPerceptionManager:
             windows=active_windows,
             active_window_id=self._active_window_id,
             render_keep=lambda window: render_window_keep(
-                window,
+                project_notice(window),
+                payload=project_tool_payload(window),
+                detail_level=window.detail_level,
                 mode=effective_mode,
                 max_rows=full_rows,
                 current_iteration=window.current_iteration,
                 intent_profile=self._build_intent_profile(window, level="full"),
             ),
             render_background=lambda window: render_window_background(
-                window,
+                project_notice(window),
+                payload=project_tool_payload(window),
                 intent_profile=self._build_intent_profile(window, level="summary"),
             ),
             render_minimized=lambda window: render_window_minimized(
-                window,
+                project_notice(window),
+                payload=project_tool_payload(window),
                 intent_profile=self._build_intent_profile(window, level="icon"),
             ),
             lifecycle_plan=lifecycle_plan,
@@ -669,7 +670,7 @@ class WindowPerceptionManager:
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
     ) -> Window | None:
-        """Locate window using identity index first, then legacy indexes."""
+        """Locate window by strong identity, then minimal active fallback."""
 
         if window_type == WindowType.EXPLORER:
             directory = normalize_path(extract_directory(arguments, result_json)) or "."
@@ -713,32 +714,53 @@ class WindowPerceptionManager:
         result_json: dict[str, Any] | None,
     ) -> Window | None:
         if window_type == WindowType.EXPLORER:
-            # 修复：从 _explorer_index 查找，而非返回 active sheet 窗口
             directory = normalize_path(extract_directory(arguments, result_json)) or "."
-            window_id = self._explorer_index.get(directory)
-            if window_id:
-                return self._windows.get(window_id)
-            # 回退：查找任意 explorer 窗口
+            window = self._find_explorer_window(directory=directory)
+            if window is not None:
+                return window
             for wid, win in self._windows.items():
                 if win.type == WindowType.EXPLORER and not win.dormant:
                     return win
             return None
 
         file_path = normalize_path(extract_file_path(arguments, result_json))
-        sheet_name = extract_sheet_name(arguments, result_json)
+        sheet_name = str(extract_sheet_name(arguments, result_json) or "").strip()
         if not file_path and self._active_window_id:
             active = self._windows.get(self._active_window_id)
             if active is not None and active.type == WindowType.SHEET:
                 file_path = active.file_path or ""
                 if not sheet_name:
                     sheet_name = active.sheet_name or ""
-        key = (file_path, sheet_name)
-        window_id = self._sheet_index.get(key)
-        if window_id is None and self._active_window_id:
+        window = self._find_sheet_window(file_path=file_path, sheet_name=sheet_name)
+        if window is not None:
+            return window
+        if self._active_window_id:
             active = self._windows.get(self._active_window_id)
             if active is not None and active.type == WindowType.SHEET:
                 return active
-        return self._windows.get(window_id) if window_id else None
+        return None
+
+    def _find_explorer_window(self, *, directory: str) -> ExplorerWindow | None:
+        normalized = normalize_path(directory) or "."
+        for window in self._windows.values():
+            if window.type != WindowType.EXPLORER:
+                continue
+            if normalize_path(window.directory or ".") == normalized:
+                return window  # type: ignore[return-value]
+        return None
+
+    def _find_sheet_window(self, *, file_path: str, sheet_name: str) -> SheetWindow | None:
+        normalized_file = normalize_path(file_path or "")
+        normalized_sheet = str(sheet_name or "").strip().lower()
+        for window in self._windows.values():
+            if window.type != WindowType.SHEET:
+                continue
+            if normalize_path(window.file_path or "") != normalized_file:
+                continue
+            if str(window.sheet_name or "").strip().lower() != normalized_sheet:
+                continue
+            return window  # type: ignore[return-value]
+        return None
 
     def _apply_delta_pipeline(
         self,
@@ -796,6 +818,30 @@ class WindowPerceptionManager:
             change_summary=canonical_tool_name,
         )
 
+    @staticmethod
+    def _window_kind(window: Window) -> Literal["explorer", "sheet"]:
+        return "explorer" if window.type == WindowType.EXPLORER else "sheet"
+
+    def _set_window_field(self, window: Window, field: str, value: Any) -> None:
+        apply_delta(
+            window,
+            FieldSetDelta(
+                kind=self._window_kind(window),
+                field=field,
+                value=value,
+            ),
+        )
+
+    def _append_window_field(self, window: Window, field: str, value: Any) -> None:
+        apply_delta(
+            window,
+            FieldAppendDelta(
+                kind=self._window_kind(window),
+                field=field,
+                value=value,
+            ),
+        )
+
     def _register_window_identity(self, window: Window) -> None:
         if window.type == WindowType.EXPLORER:
             directory = normalize_path(window.directory or "") or "."
@@ -825,12 +871,12 @@ class WindowPerceptionManager:
     ) -> None:
         """根据工具类别将结果写入 WURM 数据容器。"""
         iteration = self._operation_seq
-        window.current_iteration = iteration
+        self._set_window_field(window, "current_iteration", iteration)
         rows = extract_data_rows(result_json, canonical_tool_name)
         columns = extract_columns(result_json, rows)
         if columns:
-            window.columns = columns
-            window.schema = list(columns)
+            self._set_window_field(window, "columns", columns)
+            self._set_window_field(window, "schema", list(columns))
         self._sync_window_schema_columns(window)
 
         if window.type == WindowType.EXPLORER:
@@ -865,8 +911,12 @@ class WindowPerceptionManager:
             default_rows=self._budget.default_rows,
             default_cols=self._budget.default_cols,
         )
-        window.viewport_range = range_ref
-        window.max_cached_rows = max(1, int(self._budget.window_data_buffer_max_rows))
+        self._set_window_field(window, "viewport_range", range_ref)
+        self._set_window_field(
+            window,
+            "max_cached_rows",
+            max(1, int(self._budget.window_data_buffer_max_rows)),
+        )
 
         if canonical_tool_name in {"filter_data"}:
             filter_condition = {
@@ -939,41 +989,42 @@ class WindowPerceptionManager:
             )
 
         if window.viewport is not None:
-            window.total_rows = window.viewport.total_rows
-            window.total_cols = window.viewport.total_cols
+            self._set_window_field(window, "total_rows", window.viewport.total_rows)
+            self._set_window_field(window, "total_cols", window.viewport.total_cols)
         if window.total_rows <= 0:
-            window.total_rows = len(window.data_buffer)
+            self._set_window_field(window, "total_rows", len(window.data_buffer))
         if window.total_cols <= 0:
-            window.total_cols = len(window.columns or window.schema)
-        window.detail_level = DetailLevel.FULL
+            self._set_window_field(window, "total_cols", len(window.columns or window.schema))
+        self._set_window_field(window, "detail_level", DetailLevel.FULL)
         self._append_operation(window, canonical_tool_name, arguments, True)
         self._append_change(window, change)
 
-    @staticmethod
     def _append_operation(
+        self,
         window: Window,
         tool_name: str,
         arguments: dict[str, Any],
         success: bool,
     ) -> None:
-        window.operation_history.append(
+        self._append_window_field(
+            window,
+            "operation_history",
             OpEntry(
                 tool_name=tool_name,
                 arguments=dict(arguments),
                 iteration=window.current_iteration,
                 success=success,
-            )
+            ),
         )
         max_entries = max(1, int(window.max_history_entries))
         if len(window.operation_history) > max_entries:
-            window.operation_history = window.operation_history[-max_entries:]
+            self._set_window_field(window, "operation_history", window.operation_history[-max_entries:])
 
-    @staticmethod
-    def _append_change(window: Window, record) -> None:
-        window.change_log.append(record)
+    def _append_change(self, window: Window, record) -> None:
+        self._append_window_field(window, "change_log", record)
         max_entries = max(1, int(window.max_change_records))
         if len(window.change_log) > max_entries:
-            window.change_log = window.change_log[-max_entries:]
+            self._set_window_field(window, "change_log", window.change_log[-max_entries:])
 
     def _update_explorer_window(
         self,
@@ -983,23 +1034,27 @@ class WindowPerceptionManager:
     ) -> Window:
         directory = normalize_path(extract_directory(arguments, result_json)) or "."
         entries = extract_explorer_entries(result_json)
-
-        window_id = self._explorer_index.get(directory)
-        if window_id is None:
+        identity = ExplorerIdentity(directory_norm=directory)
+        window_id: str | None = None
+        try:
+            window_id = self._locator.find(identity, expected_kind=WindowType.EXPLORER.value)
+        except LocatorReject as exc:
+            self._last_identity_reject_code = exc.code
+        window = self._windows.get(window_id) if window_id else None
+        if window is None:
+            window = self._find_explorer_window(directory=directory)
+        if window is None:
             window = ExplorerWindow.new(
                 id=self._new_id("explorer"),
                 title="资源管理器",
                 directory=directory,
             )
             self._windows[window.id] = window
-            self._explorer_index[directory] = window.id
-        else:
-            window = self._windows[window_id]
 
         self._wake_window(window)
-        window.directory = directory
-        window.entries = [str(item) for item in entries]
-        window.summary = f"{len(entries)} 个可见项" if entries else "目录视图"
+        self._set_window_field(window, "directory", directory)
+        self._set_window_field(window, "entries", [str(item) for item in entries])
+        self._set_window_field(window, "summary", f"{len(entries)} 个可见项" if entries else "目录视图")
         self._register_window_identity(window)
         self._touch(window)
         self._active_window_id = window.id
@@ -1022,28 +1077,37 @@ class WindowPerceptionManager:
                 if not sheet_name:
                     sheet_name = active.sheet_name or ""
 
-        key = (file_path, sheet_name)
-        window_id = self._sheet_index.get(key)
-        if window_id is None:
+        normalized_sheet = str(sheet_name or "").strip()
+        window_id: str | None = None
+        if file_path and normalized_sheet:
+            identity = SheetIdentity(
+                file_path_norm=file_path,
+                sheet_name_norm=normalized_sheet.lower(),
+            )
+            try:
+                window_id = self._locator.find(identity, expected_kind=WindowType.SHEET.value)
+            except LocatorReject as exc:
+                self._last_identity_reject_code = exc.code
+        window = self._windows.get(window_id) if window_id else None
+        if window is None:
+            window = self._find_sheet_window(file_path=file_path, sheet_name=normalized_sheet)
+        if window is None:
             window = SheetWindow.new(
                 id=self._new_id("sheet"),
-                title=f"{file_path}/{sheet_name}" if file_path or sheet_name else "表格窗口",
+                title=f"{file_path}/{normalized_sheet}" if file_path or normalized_sheet else "表格窗口",
                 file_path=file_path or "",
-                sheet_name=sheet_name or "",
+                sheet_name=normalized_sheet or "",
             )
             self._windows[window.id] = window
-            self._sheet_index[key] = window.id
-        else:
-            window = self._windows[window_id]
 
         self._wake_window(window)
         tabs = extract_sheet_tabs(result_json)
         if tabs:
-            window.sheet_tabs = tabs
-        if sheet_name:
-            window.sheet_name = sheet_name
+            self._set_window_field(window, "sheet_tabs", tabs)
+        if normalized_sheet:
+            self._set_window_field(window, "sheet_name", normalized_sheet)
         if file_path:
-            window.file_path = file_path
+            self._set_window_field(window, "file_path", file_path)
 
         total_rows, total_cols = extract_shape(result_json)
         range_ref = extract_range_ref(
@@ -1064,52 +1128,60 @@ class WindowPerceptionManager:
             viewport.total_rows = total_rows
         if total_cols > 0:
             viewport.total_cols = total_cols
-        window.viewport = viewport
-        window.viewport_range = range_ref
-        window.total_rows = viewport.total_rows
-        window.total_cols = viewport.total_cols
-        window.max_cached_rows = max(1, int(self._budget.window_data_buffer_max_rows))
+        self._set_window_field(window, "viewport", viewport)
+        self._set_window_field(window, "viewport_range", range_ref)
+        self._set_window_field(window, "total_rows", viewport.total_rows)
+        self._set_window_field(window, "total_cols", viewport.total_cols)
+        self._set_window_field(
+            window,
+            "max_cached_rows",
+            max(1, int(self._budget.window_data_buffer_max_rows)),
+        )
 
         scroll_position = compute_scroll_position(
             geometry,
             total_rows=viewport.total_rows,
             total_cols=viewport.total_cols,
         )
-        window.scroll_position = scroll_position
+        self._set_window_field(window, "scroll_position", scroll_position)
 
         preview = extract_preview_rows(result_json)
         if preview:
-            window.preview_rows = preview
+            self._set_window_field(window, "preview_rows", preview)
             if not window.data_buffer:
                 normalized_preview = extract_data_rows({"preview": preview}, "read_excel")
                 if normalized_preview:
-                    window.data_buffer = normalized_preview
+                    self._set_window_field(window, "data_buffer", normalized_preview)
             if not (window.columns or window.schema):
                 inferred_columns = extract_columns({"preview": preview}, window.data_buffer)
                 if inferred_columns:
-                    window.columns = inferred_columns
-                    window.schema = list(inferred_columns)
+                    self._set_window_field(window, "columns", inferred_columns)
+                    self._set_window_field(window, "schema", list(inferred_columns))
         self._sync_window_schema_columns(window)
 
         status_bar = extract_status_bar(window.preview_rows)
         if status_bar:
-            window.status_bar = status_bar
+            self._set_window_field(window, "status_bar", status_bar)
 
         freeze = extract_freeze_panes(result_json)
         if freeze:
-            window.freeze_panes = freeze
+            self._set_window_field(window, "freeze_panes", freeze)
 
         column_widths = extract_column_widths(result_json, sheet_name=window.sheet_name or "")
         if column_widths:
-            window.column_widths = column_widths
+            self._set_window_field(window, "column_widths", column_widths)
 
         row_heights = extract_row_heights(result_json)
         if row_heights:
-            window.row_heights = row_heights
+            self._set_window_field(window, "row_heights", row_heights)
 
         merged_ranges = extract_merged_ranges(result_json)
         if merged_ranges:
-            window.merged_ranges = [str(item).strip().upper() for item in merged_ranges if str(item).strip()]
+            self._set_window_field(
+                window,
+                "merged_ranges",
+                [str(item).strip().upper() for item in merged_ranges if str(item).strip()],
+            )
         add_ranges, remove_ranges = extract_merged_range_delta(result_json)
         if add_ranges or remove_ranges:
             existing = {
@@ -1120,34 +1192,34 @@ class WindowPerceptionManager:
             existing.update(add_ranges)
             for removed in remove_ranges:
                 existing.discard(removed)
-            window.merged_ranges = sorted(existing)
+            self._set_window_field(window, "merged_ranges", sorted(existing))
 
         conditional_effects = extract_conditional_effects(result_json)
         if conditional_effects:
-            window.conditional_effects = [str(item) for item in conditional_effects]
+            self._set_window_field(window, "conditional_effects", [str(item) for item in conditional_effects])
 
         style_summary = extract_style_summary(result_json)
         if style_summary:
-            window.style_summary = style_summary
+            self._set_window_field(window, "style_summary", style_summary)
 
         if canonical_tool_name in {"write_excel", "write_to_sheet", "write_cells", "format_cells", "format_range"}:
             target_range = str(arguments.get("range") or arguments.get("cell_range") or arguments.get("cell") or "").strip()
             if target_range:
-                window.summary = f"最近修改区域: {target_range}"
+                self._set_window_field(window, "summary", f"最近修改区域: {target_range}")
         elif canonical_tool_name in {"adjust_column_width"}:
             if column_widths:
-                window.summary = f"最近调整列宽: {len(column_widths)}列"
+                self._set_window_field(window, "summary", f"最近调整列宽: {len(column_widths)}列")
         elif canonical_tool_name in {"adjust_row_height"}:
             if row_heights:
-                window.summary = f"最近调整行高: {len(row_heights)}行"
+                self._set_window_field(window, "summary", f"最近调整行高: {len(row_heights)}行")
         elif canonical_tool_name in {"merge_cells", "unmerge_cells"}:
             merged_total = len(window.merged_ranges)
-            window.summary = f"当前合并区域: {merged_total}处"
+            self._set_window_field(window, "summary", f"当前合并区域: {merged_total}处")
         elif canonical_tool_name in {"add_color_scale", "add_data_bar", "add_conditional_rule"}:
             effect_total = len(window.conditional_effects)
-            window.summary = f"条件格式视觉效果: {effect_total}条"
+            self._set_window_field(window, "summary", f"条件格式视觉效果: {effect_total}条")
         elif canonical_tool_name in {"copy_sheet", "rename_sheet", "delete_sheet", "create_sheet", "list_sheets", "describe_sheets"}:
-            window.summary = "工作表元信息已更新"
+            self._set_window_field(window, "summary", "工作表元信息已更新")
 
         self._register_window_identity(window)
         self._touch(window)
@@ -1181,7 +1253,7 @@ class WindowPerceptionManager:
         normalized_action = str(action or "").strip().lower()
         previous_active_id = self._active_window_id if self._active_window_id != window.id else None
         self._operation_seq += 1
-        window.current_iteration = self._operation_seq
+        self._set_window_field(window, "current_iteration", self._operation_seq)
         self._wake_window(window)
         self._touch(window)
         self._active_window_id = window.id
@@ -1189,7 +1261,7 @@ class WindowPerceptionManager:
             self._downgrade_previous_focus(previous_active_id)
 
         if normalized_action == "restore":
-            window.detail_level = DetailLevel.FULL
+            self._set_window_field(window, "detail_level", DetailLevel.FULL)
             self._append_operation(window, "focus_window", {"action": normalized_action}, True)
             return {
                 "status": "ok",
@@ -1202,20 +1274,24 @@ class WindowPerceptionManager:
             restored = bool(window.unfiltered_buffer is not None)
             if restored:
                 restored_rows = list(window.unfiltered_buffer or [])
-                window.data_buffer = restored_rows
-                window.filter_state = None
-                window.unfiltered_buffer = None
+                self._set_window_field(window, "data_buffer", restored_rows)
+                self._set_window_field(window, "filter_state", None)
+                self._set_window_field(window, "unfiltered_buffer", None)
                 active_range = window.viewport_range or "A1:A1"
-                window.cached_ranges = [
+                self._set_window_field(
+                    window,
+                    "cached_ranges",
+                    [
                     CachedRange(
                         range_ref=active_range,
                         rows=restored_rows[: max(1, int(window.max_cached_rows))],
                         is_current_viewport=True,
                         added_at_iteration=window.current_iteration,
                     )
-                ]
-            window.stale_hint = None
-            window.detail_level = DetailLevel.FULL
+                    ],
+                )
+            self._set_window_field(window, "stale_hint", None)
+            self._set_window_field(window, "detail_level", DetailLevel.FULL)
             self._apply_window_intent(
                 window=window,
                 tag=IntentTag.VALIDATE,
@@ -1256,7 +1332,7 @@ class WindowPerceptionManager:
                 self._range_contains(cached.range_ref, target_range)
                 for cached in window.cached_ranges
             )
-            window.viewport_range = target_range
+            self._set_window_field(window, "viewport_range", target_range)
             self._set_current_viewport_range(window, target_range)
             # focus 补读/滚动继承窗口意图，不主动改写 intent。
             self._append_operation(
@@ -1294,9 +1370,9 @@ class WindowPerceptionManager:
         if previous is None or previous.type != WindowType.SHEET or previous.dormant:
             return
         if self._budget.system_budget_tokens < max(80, self._budget.minimized_tokens * 2):
-            previous.detail_level = DetailLevel.ICON
+            self._set_window_field(previous, "detail_level", DetailLevel.ICON)
         else:
-            previous.detail_level = DetailLevel.SUMMARY
+            self._set_window_field(previous, "detail_level", DetailLevel.SUMMARY)
 
     def ingest_focus_read_result(
         self,
@@ -1318,10 +1394,10 @@ class WindowPerceptionManager:
         columns = extract_columns(result_json, rows)
 
         self._operation_seq += 1
-        window.current_iteration = self._operation_seq
+        self._set_window_field(window, "current_iteration", self._operation_seq)
         if columns:
-            window.columns = columns
-            window.schema = list(columns)
+            self._set_window_field(window, "columns", columns)
+            self._set_window_field(window, "schema", list(columns))
         self._sync_window_schema_columns(window)
 
         affected = ingest_read_result(
@@ -1331,13 +1407,13 @@ class WindowPerceptionManager:
             iteration=window.current_iteration,
         )
         if window.viewport is not None:
-            window.total_rows = window.viewport.total_rows
-            window.total_cols = window.viewport.total_cols
+            self._set_window_field(window, "total_rows", window.viewport.total_rows)
+            self._set_window_field(window, "total_cols", window.viewport.total_cols)
         if window.total_rows <= 0:
-            window.total_rows = len(window.data_buffer)
+            self._set_window_field(window, "total_rows", len(window.data_buffer))
         if window.total_cols <= 0:
-            window.total_cols = len(window.columns or window.schema)
-        window.detail_level = DetailLevel.FULL
+            self._set_window_field(window, "total_cols", len(window.columns or window.schema))
+        self._set_window_field(window, "detail_level", DetailLevel.FULL)
         self._touch(window)
         self._active_window_id = window.id
 
@@ -1461,8 +1537,7 @@ class WindowPerceptionManager:
             and c_min_row <= t_min_row <= t_max_row <= c_max_row
         )
 
-    @staticmethod
-    def _set_current_viewport_range(window: Window, target_range: str) -> None:
+    def _set_current_viewport_range(self, window: Window, target_range: str) -> None:
         selected = False
         for cached in window.cached_ranges:
             matches = (
@@ -1472,13 +1547,15 @@ class WindowPerceptionManager:
             cached.is_current_viewport = matches
             selected = selected or matches
         if not selected:
-            window.cached_ranges.append(
+            self._append_window_field(
+                window,
+                "cached_ranges",
                 CachedRange(
                     range_ref=target_range,
                     rows=[],
                     is_current_viewport=True,
                     added_at_iteration=window.current_iteration,
-                )
+                ),
             )
 
     def _repeat_thresholds_for_intent(self, intent_tag: IntentTag) -> tuple[int, int]:
@@ -1614,16 +1691,24 @@ class WindowPerceptionManager:
             return
 
         if tag == window.intent_tag and not force:
-            window.intent_confidence = max(window.intent_confidence, normalized_conf)
+            self._set_window_field(
+                window,
+                "intent_confidence",
+                max(window.intent_confidence, normalized_conf),
+            )
             if normalized_source != "default":
-                window.intent_source = normalized_source
+                self._set_window_field(window, "intent_source", normalized_source)
             return
 
-        window.intent_tag = tag
-        window.intent_confidence = normalized_conf
-        window.intent_source = normalized_source
-        window.intent_updated_turn = current_turn
-        window.intent_lock_until_turn = current_turn + max(0, self._intent_sticky_turns - 1)
+        self._set_window_field(window, "intent_tag", tag)
+        self._set_window_field(window, "intent_confidence", normalized_conf)
+        self._set_window_field(window, "intent_source", normalized_source)
+        self._set_window_field(window, "intent_updated_turn", current_turn)
+        self._set_window_field(
+            window,
+            "intent_lock_until_turn",
+            current_turn + max(0, self._intent_sticky_turns - 1),
+        )
 
     def _intent_from_user(self, text: str) -> tuple[IntentTag, float]:
         normalized = str(text or "").strip()
@@ -1772,12 +1857,11 @@ class WindowPerceptionManager:
     def _current_turn(self) -> int:
         return max(1, int(self._notice_turn))
 
-    @staticmethod
-    def _sync_window_schema_columns(window: Window) -> None:
+    def _sync_window_schema_columns(self, window: Window) -> None:
         if window.schema and not window.columns:
-            window.columns = list(window.schema)
+            self._set_window_field(window, "columns", list(window.schema))
         elif window.columns and not window.schema:
-            window.schema = list(window.columns)
+            self._set_window_field(window, "schema", list(window.columns))
 
     def _log_lifecycle_reason_codes(self, plan: LifecyclePlan) -> None:
         if not logger.isEnabledFor(logging.DEBUG):
@@ -1802,7 +1886,7 @@ class WindowPerceptionManager:
                 continue
             if window.last_access_seq > self._last_notice_operation_seq:
                 continue
-            window.idle_turns += 1
+            self._set_window_field(window, "idle_turns", window.idle_turns + 1)
 
     def _recycle_idle_windows(self) -> None:
         """按 idle 阈值自动回收窗口（标记 dormant）。"""
@@ -1826,35 +1910,16 @@ class WindowPerceptionManager:
             self._active_window_id = None
 
     def _touch(self, window: Window) -> None:
-        window.last_access_seq = self._operation_seq
-        window.idle_turns = 0
+        self._set_window_field(window, "last_access_seq", self._operation_seq)
+        self._set_window_field(window, "idle_turns", 0)
 
     def _new_id(self, prefix: str) -> str:
         self._seq += 1
         return f"{prefix}_{self._seq}"
 
     def _drop_window(self, window_id: str) -> None:
-        window = self._windows.pop(window_id, None)
-        if window is None:
+        if self._windows.pop(window_id, None) is None:
             return
-
-        if window.type == WindowType.EXPLORER:
-            directories = [
-                key
-                for key, val in self._explorer_index.items()
-                if val == window_id
-            ]
-            for key in directories:
-                self._explorer_index.pop(key, None)
-
-        if window.type == WindowType.SHEET:
-            keys = [
-                key
-                for key, val in self._sheet_index.items()
-                if val == window_id
-            ]
-            for key in keys:
-                self._sheet_index.pop(key, None)
 
         if self._active_window_id == window_id:
             self._active_window_id = None
@@ -1863,16 +1928,15 @@ class WindowPerceptionManager:
         window = self._windows.get(window_id)
         if window is None:
             return
-        window.dormant = True
-        window.detail_level = DetailLevel.NONE
+        self._set_window_field(window, "dormant", True)
+        self._set_window_field(window, "detail_level", DetailLevel.NONE)
         if self._active_window_id == window_id:
             self._active_window_id = None
 
-    @staticmethod
-    def _wake_window(window: Window) -> None:
-        window.dormant = False
+    def _wake_window(self, window: Window) -> None:
+        self._set_window_field(window, "dormant", False)
         if window.detail_level == DetailLevel.NONE:
-            window.detail_level = DetailLevel.FULL
+            self._set_window_field(window, "detail_level", DetailLevel.FULL)
 
     def _evict_dormant_windows(self) -> None:
         dormant = [item for item in self._windows.values() if item.dormant]

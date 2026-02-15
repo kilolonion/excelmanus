@@ -91,6 +91,24 @@ class IntentDelta:
     kind: str = "sheet"
 
 
+@dataclass(frozen=True)
+class FieldSetDelta:
+    """Generic field-set delta for manager-side controlled mutations."""
+
+    field: str
+    value: Any
+    kind: str
+
+
+@dataclass(frozen=True)
+class FieldAppendDelta:
+    """Generic append delta for manager-side controlled mutations."""
+
+    field: str
+    value: Any
+    kind: str
+
+
 WindowDelta = (
     ExplorerDelta
     | SheetReadDelta
@@ -100,4 +118,6 @@ WindowDelta = (
     | SheetFocusDelta
     | LifecycleDelta
     | IntentDelta
+    | FieldSetDelta
+    | FieldAppendDelta
 )
