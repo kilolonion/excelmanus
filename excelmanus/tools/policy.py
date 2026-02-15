@@ -211,6 +211,62 @@ SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = (
 )
 
 
+# ── 基础发现工具集（无 skill 激活时的默认 scope） ──────────
+
+DISCOVERY_TOOLS: frozenset[str] = frozenset({
+    # 数据探查
+    "read_excel",
+    "scan_excel_files",
+    "analyze_data",
+    "filter_data",
+    "group_aggregate",
+    # 结构探查
+    "list_sheets",
+    "list_directory",
+    "get_file_info",
+    "search_files",
+    "read_text_file",
+    # 样式感知
+    "read_cell_styles",
+    # 窗口
+    "focus_window",
+})
+
+
+# ── 工具分类映射（用于 discover_tools 元工具和工具索引） ────
+
+TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "data_read": (
+        "read_excel", "scan_excel_files", "analyze_data",
+        "filter_data", "group_aggregate", "analyze_sheet_mapping",
+    ),
+    "data_write": (
+        "write_excel", "write_cells", "transform_data",
+        "insert_rows", "insert_columns",
+    ),
+    "format": (
+        "format_cells", "adjust_column_width", "adjust_row_height",
+        "read_cell_styles", "merge_cells", "unmerge_cells",
+    ),
+    "advanced_format": (
+        "apply_threshold_icon_format", "style_card_blocks",
+        "scale_range_unit", "apply_dashboard_dark_theme",
+        "add_color_scale", "add_data_bar", "add_conditional_rule",
+        "set_print_layout", "set_page_header_footer",
+    ),
+    "chart": ("create_chart", "create_excel_chart"),
+    "sheet": (
+        "list_sheets", "create_sheet", "copy_sheet",
+        "rename_sheet", "delete_sheet", "copy_range_between_sheets",
+    ),
+    "file": (
+        "list_directory", "get_file_info", "search_files",
+        "read_text_file", "copy_file", "rename_file", "delete_file",
+    ),
+    "code": ("write_text_file", "run_code", "run_shell"),
+}
+
+
 # ── fallback 路由只读发现工具 ───────────────────────────────
 
 FALLBACK_DISCOVERY_TOOLS: tuple[str, ...] = (
