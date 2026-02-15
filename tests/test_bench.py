@@ -227,7 +227,7 @@ def test_run_suite_serial_mode_enables_render(tmp_path: Path) -> None:
     ]
     render_flags: list[bool] = []
 
-    async def _fake_run_case(case, config, *, render_enabled):
+    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False):
         render_flags.append(render_enabled)
         return _make_result(case.id)
 
@@ -255,7 +255,7 @@ def test_run_suite_concurrent_mode_disables_render_and_keeps_order(tmp_path: Pat
     delays = {"c1": 0.05, "c2": 0.01, "c3": 0.02}
     render_flags: list[bool] = []
 
-    async def _fake_run_case(case, config, *, render_enabled):
+    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False):
         render_flags.append(render_enabled)
         await asyncio.sleep(delays[case.id])
         return _make_result(case.id)
@@ -383,7 +383,7 @@ def test_run_suites_serial_calls_run_suite_in_order(tmp_path: Path) -> None:
 
     call_order: list[str] = []
 
-    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1, trace_enabled=False):
         call_order.append(Path(path).stem)
         return [_make_result(f"{Path(path).stem}_c1")]
 
@@ -417,7 +417,7 @@ def test_run_suites_parallel_runs_concurrently(tmp_path: Path) -> None:
 
     timestamps: list[float] = []
 
-    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1, trace_enabled=False):
         import time as _time
         timestamps.append(_time.monotonic())
         await asyncio.sleep(0.05)
@@ -442,7 +442,7 @@ def test_run_suites_returns_one_on_failure(tmp_path: Path) -> None:
     suite_path = tmp_path / "suite_fail.json"
     suite_path.write_text("{}", encoding="utf-8")
 
-    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1, trace_enabled=False):
         return [
             _make_result("ok_case"),
             _make_result("fail_case", status="error", error={"type": "E", "message": "x"}),
@@ -470,7 +470,7 @@ def test_run_suites_global_summary_has_suite_details(tmp_path: Path) -> None:
     suite_a.write_text("{}", encoding="utf-8")
     suite_b.write_text("{}", encoding="utf-8")
 
-    async def _fake_run_suite(path, config, output_dir, *, concurrency=1):
+    async def _fake_run_suite(path, config, output_dir, *, concurrency=1, trace_enabled=False):
         stem = Path(path).stem
         if stem == "suite_a":
             return [_make_result("a1"), _make_result("a2")]
