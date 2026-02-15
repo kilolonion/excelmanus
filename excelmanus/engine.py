@@ -267,8 +267,14 @@ _FORMULA_ADVICE_PATTERN = _re.compile(
     r"=(?:IF|DATE|VLOOKUP|HLOOKUP|INDEX|MATCH|SUMIF|COUNTIF|CONCATENATE|LEFT|RIGHT|MID|"
     r"AVERAGE|MAX|MIN|SUM|TRIM|LEN|FIND|SEARCH|IFERROR|AND|OR|NOT|TEXT|VALUE|ROUND|"
     r"SUMPRODUCT|OFFSET|INDIRECT|SUBSTITUTE|UPPER|LOWER|PROPER|DATEDIF|YEARFRAC|"
-    r"NETWORKDAYS|WORKDAY|EOMONTH|EDATE|DAYS|DATEVALUE|TIMEVALUE|NOW|TODAY)\s*\(",
+    r"NETWORKDAYS|WORKDAY|EOMONTH|EDATE|DAYS|DATEVALUE|TIMEVALUE|NOW|TODAY|"
+    r"LARGE|TEXTJOIN|LET|TEXTSPLIT|XMATCH|VSTACK|SEQUENCE|FILTER|SORT|UNIQUE|"
+    r"LAMBDA|CHOOSECOLS|CHOOSEROWS|HSTACK)\s*\(",
     _re.IGNORECASE,
+)
+
+_FORMULA_ADVICE_FALLBACK_PATTERN = _re.compile(
+    r"(?<![<>=!])=(?![<>=])\s*[A-Z][A-Z0-9_]{2,}\s*\(",
 )
 
 
@@ -276,7 +282,10 @@ def _contains_formula_advice(text: str) -> bool:
     """检测回复文本中是否包含 Excel 公式建议（而非实际执行）。"""
     if not text:
         return False
-    return bool(_FORMULA_ADVICE_PATTERN.search(text))
+    return bool(
+        _FORMULA_ADVICE_PATTERN.search(text)
+        or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text)
+    )
 
 
 _WRITE_ACTION_VERBS = _re.compile(
@@ -2800,15 +2809,7 @@ class AgentEngine:
             self._last_failure_count = 0
         # 执行守卫标记重置
         self._execution_guard_fired = False  # type: ignore[attr-defined]
-        self._empty_response_guard_fired = False  # type: ignore[attr-defined]
-        self._read_write_guard_fired = False  # type: ignore[attr-defined]
         has_write_tool_call = False
-        # 提取用户原始消息用于守卫意图检测
-        _user_original_message = (
-            self._memory._messages[0].get("content", "")
-            if self._memory._messages
-            else ""
-        )
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -2923,38 +2924,6 @@ class AgentEngine:
                     )
                     self._memory.add_user_message(guard_msg)
                     logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
-                    continue
-
-                # ── 空响应守卫：首轮纯文本无工具调用 ──
-                if (
-                    iteration == start_iteration
-                    and iteration < max_iter - 1
-                    and not getattr(self, "_empty_response_guard_fired", False)
-                    and _detect_write_intent(_user_original_message)
-                ):
-                    self._empty_response_guard_fired = True  # type: ignore[attr-defined]
-                    guard_msg = (
-                        "⚠️ 你返回了纯文本但没有调用任何工具。"
-                        "用户请求涉及文件操作，请立即调用工具执行。"
-                    )
-                    self._memory.add_user_message(guard_msg)
-                    logger.info("空响应守卫触发：首轮无工具调用，注入继续执行提示")
-                    continue
-
-                # ── 读写不匹配守卫：只做了读取但任务需要写入 ──
-                if (
-                    not has_write_tool_call
-                    and iteration < max_iter - 1
-                    and not getattr(self, "_read_write_guard_fired", False)
-                    and _detect_write_intent(_user_original_message)
-                ):
-                    self._read_write_guard_fired = True  # type: ignore[attr-defined]
-                    guard_msg = (
-                        "⚠️ 你只执行了读取操作但没有完成写入。"
-                        "用户请求需要修改文件，请继续调用写入工具完成任务。"
-                    )
-                    self._memory.add_user_message(guard_msg)
-                    logger.info("读写不匹配守卫触发：仅读取未写入，注入继续执行提示")
                     continue
 
                 self._last_iteration_count = iteration
