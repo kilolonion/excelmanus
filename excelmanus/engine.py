@@ -45,7 +45,7 @@ from excelmanus.skillpacks import (
 )
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
-from excelmanus.task_list import TaskStore
+from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
@@ -4111,6 +4111,10 @@ class AgentEngine:
                     is_new_task=False,
                 )
                 resumed = await self._tool_calling_loop(route_to_resume, on_event)
+                # 自动续跑：若任务清单仍有未完成子任务，自动继续
+                resumed = await self._auto_continue_task_loop(
+                    route_to_resume, on_event, resumed
+                )
             finally:
                 self._suspend_task_create_plan_once = False
             return f"{resume_prefix}\n\n{resumed.reply}"
@@ -4476,7 +4480,7 @@ class AgentEngine:
         # 自主执行指令
         parts.append(
             "【自主执行指令】计划已获用户批准，你必须自主连续执行所有子任务直到全部完成。"
-            "严禁在中间步骤停下来等待用户发送"继续"或确认。"
+            "严禁在中间步骤停下来等待用户发送「继续」或确认。"
             "每完成一个子任务后，立即用 task_update 标记完成，然后继续执行下一个。"
             "仅在遇到需要用户决策的歧义或 accept 门禁时才暂停。"
         )
