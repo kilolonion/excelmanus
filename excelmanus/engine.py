@@ -55,8 +55,8 @@ from excelmanus.window_perception import (
     LifecyclePlan,
     PerceptionBudget,
     WindowPerceptionManager,
-    WindowState,
 )
+from excelmanus.window_perception.models import WindowState
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:

@@ -24,7 +24,8 @@ from excelmanus.subagent import SubagentConfig, SubagentResult
 from excelmanus.task_list import TaskStatus
 from excelmanus.tools import ToolRegistry, task_tools
 from excelmanus.tools.registry import ToolDef
-from excelmanus.window_perception import AdvisorContext, PerceptionBudget, WindowState, WindowType
+from excelmanus.window_perception import AdvisorContext, PerceptionBudget, WindowType
+from excelmanus.window_perception.models import WindowState
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────

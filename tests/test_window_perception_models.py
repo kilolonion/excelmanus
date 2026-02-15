@@ -1,6 +1,7 @@
 """窗口感知模型测试。"""
 
-from excelmanus.window_perception import DetailLevel, IntentTag, PerceptionBudget, Viewport, WindowState, WindowType
+from excelmanus.window_perception import DetailLevel, IntentTag, PerceptionBudget, Viewport, WindowType
+from excelmanus.window_perception.models import WindowState
 
 
 class TestWindowModels:
@@ -41,3 +42,9 @@ class TestWindowModels:
         assert budget.window_full_max_rows == 25
         assert budget.window_full_total_budget_tokens == 500
         assert budget.window_data_buffer_max_rows == 200
+
+
+def test_legacy_windowstate_is_not_exported() -> None:
+    import excelmanus.window_perception as wp
+
+    assert not hasattr(wp, "WindowState")

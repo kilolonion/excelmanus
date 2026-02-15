@@ -8,6 +8,7 @@ from excelmanus.window_perception.confirmation import (
     serialize_confirmation,
 )
 from excelmanus.window_perception.models import ChangeRecord, IntentTag, WindowState, WindowType
+from excelmanus.window_perception.projection_models import ConfirmationProjection
 
 
 def _build_window() -> WindowState:
@@ -73,3 +74,26 @@ def test_unified_confirmation_round_trip() -> None:
     assert parsed.change_summary == record.change_summary
     assert parsed.intent == record.intent
     assert parsed.hint == ""
+
+
+def test_confirmation_uses_confirmation_projection_shape_priority() -> None:
+    window = _build_window()
+    projection = ConfirmationProjection(
+        window_label="sheet_1: sales.xlsx / Q1",
+        operation="read_excel",
+        range_ref="B2:H10",
+        rows=9,
+        cols=7,
+        change_summary="added@B2:H10",
+        intent="aggregate",
+    )
+
+    record = build_confirmation_record(
+        window=window,
+        tool_name="read_excel",
+        projection=projection,
+    )
+
+    assert record.range_ref == "B2:H10"
+    assert record.rows == 9
+    assert record.cols == 7
