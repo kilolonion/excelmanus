@@ -5516,7 +5516,8 @@ class TestToolInjectionOptimizationE2E:
         prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
         assert error is None
         full_prompt = "\n".join(prompts)
-        assert "工具索引" not in full_prompt
+        # 检查工具索引区块标题不存在（而非子串匹配，因为 _SEGMENT_TOOL_POLICY 中也提到了"工具索引"）
+        assert "## 工具索引" not in full_prompt
 
     def test_discover_tools_category_enum_matches_tool_categories(self) -> None:
         """discover_tools 的 category enum 应与 TOOL_CATEGORIES 一致。"""
