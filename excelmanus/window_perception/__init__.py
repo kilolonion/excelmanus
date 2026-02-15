@@ -9,6 +9,7 @@ from .confirmation import (
     parse_confirmation,
     serialize_confirmation,
 )
+from .domain import BaseWindow, ExplorerData, ExplorerWindow, SheetData, SheetWindow
 from .focus import FocusService
 from .manager import WindowPerceptionManager
 from .models import (
@@ -42,11 +43,14 @@ __all__ = [
     "AdaptiveModeSelector",
     "build_confirmation_record",
     "build_advisor_messages",
+    "BaseWindow",
     "CachedRange",
     "ChangeRecord",
     "ColumnDef",
     "ConfirmationRecord",
     "DetailLevel",
+    "ExplorerData",
+    "ExplorerWindow",
     "IntentTag",
     "IntentDecision",
     "HybridAdvisor",
@@ -58,6 +62,8 @@ __all__ = [
     "repeat_threshold",
     "resolve_intent_decision",
     "serialize_confirmation",
+    "SheetData",
+    "SheetWindow",
     "FocusService",
     "RepeatDetector",
     "RuleBasedAdvisor",
