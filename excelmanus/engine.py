@@ -81,6 +81,7 @@ _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
 _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
+_ASK_USER_REPAIR_ERROR_CODE = "ASK_USER_REQUIRED_BUT_MISSING"
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "planner",
@@ -254,6 +255,34 @@ def _looks_like_html_document(text: str) -> bool:
     if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
         return True
     return "<html" in lowered and "</html>" in lowered and "<head" in lowered
+
+
+_TEXT_QUESTION_PATTERNS = (
+    "请确认",
+    "请先确认",
+    "请选择",
+    "请先选择",
+    "你希望",
+    "你想",
+    "请提供",
+    "请说明",
+    "please confirm",
+    "please choose",
+    "which one",
+    "would you like",
+    "do you want",
+)
+
+
+def _looks_like_text_question(text: str) -> bool:
+    """判断文本是否像在向用户提问（而非报告结果）。"""
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return False
+    lowered = compact.lower()
+    if any(marker in lowered for marker in _TEXT_QUESTION_PATTERNS):
+        return True
+    return False
 
 
 def _summarize_text(text: str, max_len: int = 120) -> str:
@@ -825,11 +854,9 @@ class AgentEngine:
         # 兼容直接调用 engine.chat("/skill ...") 的旧路径：
         # 若调用方未显式传 slash_command，自动从用户输入中解析。
         if effective_slash_command is None:
-            manual_skill_name = self.resolve_skill_command(user_message)
-            if manual_skill_name is not None:
-                effective_slash_command = manual_skill_name
-                _, _, tail = user_message.strip()[1:].partition(" ")
-                effective_raw_args = tail.strip()
+            manual_skill_with_args = self._resolve_skill_command_with_args(user_message)
+            if manual_skill_with_args is not None:
+                effective_slash_command, effective_raw_args = manual_skill_with_args
 
         route_result = await self._route_skills(
             user_message,
@@ -1021,6 +1048,78 @@ class AgentEngine:
         """命令名归一化：小写并移除连字符/下划线。"""
         return name.strip().lower().replace("-", "").replace("_", "")
 
+    @staticmethod
+    def _iter_slash_command_lines(user_message: str) -> list[str]:
+        """提取消息中所有可能的斜杠命令片段（支持命令出现在句中）。"""
+        text = user_message.strip()
+        if not text:
+            return []
+        command_lines: list[str] = []
+        for idx, char in enumerate(text):
+            if char != "/":
+                continue
+            if idx > 0 and not text[idx - 1].isspace():
+                continue
+            command_line = text[idx + 1 :].strip()
+            if command_line:
+                command_lines.append(command_line)
+        return command_lines
+
+    def _resolve_skill_from_command_line(
+        self,
+        command_line: str,
+        *,
+        skill_names: Sequence[str],
+    ) -> tuple[str, str] | None:
+        """解析单个命令片段，返回 (skill_name, raw_args)。"""
+        lower_to_name = {name.lower(): name for name in skill_names}
+        command_line_lower = command_line.lower()
+
+        # 1) 精确匹配（含命名空间）
+        exact = lower_to_name.get(command_line_lower)
+        if exact is not None:
+            return exact, ""
+
+        # 2) 前缀匹配（/skill_name 后跟参数）
+        for candidate in sorted(skill_names, key=len, reverse=True):
+            lower_candidate = candidate.lower()
+            if command_line_lower == lower_candidate:
+                return candidate, ""
+            if command_line_lower.startswith(lower_candidate + " "):
+                raw_args = command_line[len(candidate) :].strip()
+                return candidate, raw_args
+
+        command_token, _, raw_tail = command_line.partition(" ")
+
+        # 先尝试已注册技能匹配，之后再按路径输入兜底排除，避免误伤命名空间技能。
+        if "/" in command_token and "." in command_token:
+            return None
+
+        # 3) 无分隔符归一兜底匹配（兼容旧命令）
+        normalized_cmd = self._normalize_skill_command_name(command_token)
+        normalized_matches = [
+            name
+            for name in skill_names
+            if self._normalize_skill_command_name(name) == normalized_cmd
+        ]
+        if len(normalized_matches) == 1:
+            return normalized_matches[0], raw_tail.strip()
+        return None
+
+    def _resolve_skill_command_with_args(self, user_message: str) -> tuple[str, str] | None:
+        """解析消息中的手动 Skill 命令并返回 (skill_name, raw_args)。"""
+        skill_names = self._list_manual_invocable_skill_names()
+        if not skill_names:
+            return None
+        for command_line in self._iter_slash_command_lines(user_message):
+            resolved = self._resolve_skill_from_command_line(
+                command_line,
+                skill_names=skill_names,
+            )
+            if resolved is not None:
+                return resolved
+        return None
+
     def _list_loaded_skill_names(self) -> list[str]:
         """获取当前可匹配的 Skill 名称；为空时尝试主动加载。"""
         if self._skill_router is None:
@@ -1053,52 +1152,89 @@ class AgentEngine:
         return names
 
     def resolve_skill_command(self, user_message: str) -> str | None:
-        """将 `/skill_name ...` 解析为 Skill 名称（用于手动调用）。"""
-        text = user_message.strip()
-        if not text.startswith("/"):
+        """将消息中的 `/skill_name ...` 解析为 Skill 名称（用于手动调用）。"""
+        resolved = self._resolve_skill_command_with_args(user_message)
+        if resolved is None:
+            return None
+        return resolved[0]
+
+    @staticmethod
+    def _detect_user_decision_reason(reply_text: str) -> str | None:
+        """识别文本提问触发 ask_user 的原因分类。"""
+        compact = " ".join(str(reply_text or "").split())
+        if not compact:
+            return None
+        if not _looks_like_text_question(compact):
             return None
 
-        command_line = text[1:]
-        if not command_line:
-            return None
+        if (
+            "不一致" in compact
+            or "冲突" in compact
+            or "返回为空" in compact
+            or "0 个文件" in compact
+            or "0行" in compact
+        ):
+            return "result_conflict"
 
-        # 手动命令解析仅允许 user_invocable=True 的技能。
-        skill_names = self._list_manual_invocable_skill_names()
-        if not skill_names:
-            return None
+        if (
+            "请提供" in compact
+            or "请补充" in compact
+            or "请说明" in compact
+            or "请指定" in compact
+            or "请确认两点" in compact
+        ):
+            return "missing_parameters"
 
-        lower_to_name = {name.lower(): name for name in skill_names}
-        command_line_lower = command_line.lower()
+        if (
+            "是否只比较" in compact
+            or "哪种" in compact
+            or "哪个" in compact
+            or "还是" in compact
+            or "或者" in compact
+        ):
+            return "multiple_paths"
 
-        # 1) 精确匹配（含命名空间）
-        exact = lower_to_name.get(command_line_lower)
-        if exact is not None:
-            return exact
+        return "text_question"
 
-        # 2) 前缀匹配（/skill_name 后跟参数）
-        for candidate in sorted(skill_names, key=len, reverse=True):
-            lower_candidate = candidate.lower()
-            if command_line_lower == lower_candidate:
-                return candidate
-            if command_line_lower.startswith(lower_candidate + " "):
-                return candidate
+    @staticmethod
+    def _build_force_ask_user_instruction(reason: str) -> str:
+        """构造本轮临时注入的 ask_user 强制指令。"""
+        return (
+            "## ask_user 强制修正（本轮生效）\n"
+            f"- 检测到用户决策场景：{reason}。\n"
+            "- 你必须立即调用 `ask_user`，不得输出纯文本提问。\n"
+            "- 问题要具体，候选项给出可执行路径；若字段缺失可用最小选项集。\n"
+            "- 如果不调用 ask_user，本轮视为失败。"
+        )
 
-        # 先尝试已注册技能匹配，之后再按路径输入兜底排除，避免误伤命名空间技能。
-        command_token = command_line.split(maxsplit=1)[0]
-        if "/" in command_token and "." in command_token:
-            return None
+    @staticmethod
+    def _build_ask_user_missing_error(
+        *,
+        reason: str,
+        detail: str,
+    ) -> str:
+        """构造 ask_user 强制失败时的结构化错误文本。"""
+        payload = {
+            "error_code": _ASK_USER_REPAIR_ERROR_CODE,
+            "reason": reason,
+            "message": "检测到需要用户决策，但模型未调用 ask_user。",
+            "detail": detail,
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
-        # 3) 无分隔符归一兜底匹配（兼容旧命令）
-        command = command_token
-        normalized_cmd = self._normalize_skill_command_name(command)
-        normalized_matches = [
-            name
-            for name in skill_names
-            if self._normalize_skill_command_name(name) == normalized_cmd
-        ]
-        if len(normalized_matches) == 1:
-            return normalized_matches[0]
-        return None
+    def _needs_user_decision(
+        self,
+        *,
+        reply_text: str,
+        tool_scope: Sequence[str],
+    ) -> tuple[bool, str]:
+        """判定是否应强制 ask_user，并返回原因标签。"""
+        if "ask_user" not in set(tool_scope):
+            return False, "ask_user_not_allowed"
+        reason = self._detect_user_decision_reason(reply_text)
+        if reason is None:
+            return False, "not_needed"
+        return True, reason
 
     def _blocked_skillpacks(self) -> set[str] | None:
         """返回当前会话被限制的技能包集合。"""
@@ -1518,8 +1654,8 @@ class AgentEngine:
                                     },
                                     "options": {
                                         "type": "array",
-                                        "description": "候选项（2-4个），系统会自动追加 Other。",
-                                        "minItems": 2,
+                                        "description": "候选项（1-4个），系统会自动追加 Other。",
+                                        "minItems": 1,
                                         "maxItems": 4,
                                         "items": {
                                             "type": "object",
@@ -1533,7 +1669,7 @@ class AgentEngine:
                                                     "description": "该选项的权衡说明",
                                                 },
                                             },
-                                            "required": ["label", "description"],
+                                            "required": ["label"],
                                             "additionalProperties": False,
                                         },
                                     },
@@ -1542,7 +1678,7 @@ class AgentEngine:
                                         "description": "是否允许多选",
                                     },
                                 },
-                                "required": ["text", "header", "options"],
+                                "required": ["text", "options"],
                                 "additionalProperties": False,
                             },
                         },
@@ -2614,6 +2750,7 @@ class AgentEngine:
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        ask_user_repair_used = False
 
         for iteration in range(start_iteration, max_iter + 1):
             self._emit(
@@ -2705,6 +2842,121 @@ class AgentEngine:
                         completion_tokens=total_completion_tokens,
                         total_tokens=total_prompt_tokens + total_completion_tokens,
                     )
+
+                needs_decision, decision_reason = self._needs_user_decision(
+                    reply_text=reply_text,
+                    tool_scope=tool_scope,
+                )
+                if needs_decision and not ask_user_repair_used:
+                    ask_user_repair_used = True
+                    logger.info(
+                        "触发 ask_user 强制修正: iteration=%s reason=%s",
+                        iteration,
+                        decision_reason,
+                    )
+                    forced_system_prompts = list(system_prompts)
+                    forced_system_prompts.append(
+                        self._build_force_ask_user_instruction(decision_reason)
+                    )
+                    forced_messages = self._memory.trim_for_request(
+                        system_prompts=forced_system_prompts,
+                        max_context_tokens=self._config.max_context_tokens,
+                    )
+                    forced_kwargs = dict(kwargs)
+                    forced_kwargs["messages"] = forced_messages
+                    forced_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "function": {"name": "ask_user"},
+                    }
+
+                    forced_response = await self._create_chat_completion_with_system_fallback(
+                        forced_kwargs
+                    )
+                    forced_message, forced_usage = _extract_completion_message(forced_response)
+                    forced_tool_calls = _normalize_tool_calls(
+                        getattr(forced_message, "tool_calls", None)
+                    )
+                    if forced_usage is not None:
+                        total_prompt_tokens += _usage_token(forced_usage, "prompt_tokens")
+                        total_completion_tokens += _usage_token(
+                            forced_usage, "completion_tokens"
+                        )
+
+                    if not forced_tool_calls:
+                        error_reply = self._build_ask_user_missing_error(
+                            reason=decision_reason,
+                            detail="修正回合仍未产生 tool_calls。",
+                        )
+                        self._memory.add_assistant_message(error_reply)
+                        self._last_iteration_count = iteration
+                        logger.warning("ask_user 强制修正失败：未返回任何 tool_calls")
+                        logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                        return ChatResult(
+                            reply=error_reply,
+                            tool_calls=list(all_tool_results),
+                            iterations=iteration,
+                            truncated=False,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            total_tokens=total_prompt_tokens + total_completion_tokens,
+                        )
+
+                    forced_tool_names = [
+                        str(getattr(getattr(tc, "function", None), "name", "") or "")
+                        for tc in forced_tool_calls
+                    ]
+                    if "ask_user" not in forced_tool_names:
+                        error_reply = self._build_ask_user_missing_error(
+                            reason=decision_reason,
+                            detail=(
+                                "修正回合返回了 tool_calls，但未包含 ask_user。"
+                                f" returned={forced_tool_names}"
+                            ),
+                        )
+                        self._memory.add_assistant_message(error_reply)
+                        self._last_iteration_count = iteration
+                        logger.warning(
+                            "ask_user 强制修正失败：tool_calls 未包含 ask_user，returned=%s",
+                            forced_tool_names,
+                        )
+                        logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                        return ChatResult(
+                            reply=error_reply,
+                            tool_calls=list(all_tool_results),
+                            iterations=iteration,
+                            truncated=False,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            total_tokens=total_prompt_tokens + total_completion_tokens,
+                        )
+
+                    message = forced_message
+                    tool_calls = forced_tool_calls
+                    logger.info(
+                        "ask_user 强制修正成功: iteration=%s reason=%s",
+                        iteration,
+                        decision_reason,
+                    )
+                elif needs_decision:
+                    error_reply = self._build_ask_user_missing_error(
+                        reason=decision_reason,
+                        detail="ask_user 强制修正已执行过一次，仍未进入待回答状态。",
+                    )
+                    self._memory.add_assistant_message(error_reply)
+                    self._last_iteration_count = iteration
+                    logger.warning("ask_user 强制修正已用尽，返回结构化错误")
+                    logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                    return ChatResult(
+                        reply=error_reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
+
+            if not tool_calls:
                 self._memory.add_assistant_message(reply_text)
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))

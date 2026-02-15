@@ -224,6 +224,48 @@ def _openai_tools_to_gemini(
     return [{"functionDeclarations": declarations}]
 
 
+def _map_openai_tool_choice_to_gemini(tool_choice: Any) -> dict[str, Any] | None:
+    """将 OpenAI tool_choice 映射为 Gemini toolConfig.functionCallingConfig。"""
+    if tool_choice is None:
+        return None
+
+    if isinstance(tool_choice, str):
+        normalized = tool_choice.strip().lower()
+        if normalized == "auto":
+            return {"functionCallingConfig": {"mode": "AUTO"}}
+        if normalized == "required":
+            return {"functionCallingConfig": {"mode": "ANY"}}
+        if normalized == "none":
+            return {"functionCallingConfig": {"mode": "NONE"}}
+        return None
+
+    if not isinstance(tool_choice, dict):
+        return None
+
+    tc_type = str(tool_choice.get("type", "")).strip().lower()
+    if tc_type in {"auto", "none", "required"}:
+        return _map_openai_tool_choice_to_gemini(tc_type)
+
+    name = ""
+    if tc_type == "function":
+        function_value = tool_choice.get("function")
+        if isinstance(function_value, dict):
+            name = str(function_value.get("name", "")).strip()
+        if not name:
+            name = str(tool_choice.get("name", "")).strip()
+    elif tc_type == "tool":
+        name = str(tool_choice.get("name", "")).strip()
+
+    if name:
+        return {
+            "functionCallingConfig": {
+                "mode": "ANY",
+                "allowedFunctionNames": [name],
+            }
+        }
+    return None
+
+
 def _clean_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
     """清理 JSON Schema 使其兼容 Gemini API。
 
@@ -392,6 +434,7 @@ class _GeminiChatCompletions:
             model=model,
             messages=messages,
             tools=tools,
+            tool_choice=kwargs.get("tool_choice"),
         )
 
 
@@ -427,6 +470,7 @@ class GeminiClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        tool_choice: Any = None,
     ) -> _ChatCompletion:
         """执行 Gemini generateContent 请求。"""
         # 如果 URL 中包含模型名，优先使用（允许用户只填完整 URL 不配 MODEL）
@@ -443,6 +487,10 @@ class GeminiClient:
         gemini_tools = _openai_tools_to_gemini(tools_list)
         if gemini_tools:
             body["tools"] = gemini_tools
+
+        mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
+        if mapped_tool_config is not None:
+            body["toolConfig"] = mapped_tool_config
 
         # 构建请求 URL
         url = f"{self._base_url}/models/{effective_model}:generateContent"

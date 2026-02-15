@@ -66,6 +66,8 @@ class ParsedAnswer:
 class QuestionFlowManager:
     """问题流管理器：维护 FIFO 队列与答案解析规则。"""
 
+    DEFAULT_HEADER = "需要确认"
+    DEFAULT_OPTION_DESCRIPTION = "按此选项继续执行"
     OTHER_LABEL = "Other"
     OTHER_DESCRIPTION = "可输入其他答案"
 
@@ -214,13 +216,13 @@ class QuestionFlowManager:
         if not text:
             raise ValueError("question.text 不能为空。")
         if not header:
-            raise ValueError("question.header 不能为空。")
+            header = self.DEFAULT_HEADER
         if len(header) > 12:
             raise ValueError("question.header 长度不能超过 12。")
         if not isinstance(raw_options, list):
             raise ValueError("question.options 必须是数组。")
-        if len(raw_options) < 2 or len(raw_options) > 4:
-            raise ValueError("question.options 数量必须在 2 到 4 之间。")
+        if len(raw_options) < 1 or len(raw_options) > 4:
+            raise ValueError("question.options 数量必须在 1 到 4 之间。")
         if not isinstance(multi_select_raw, bool):
             raise ValueError("question.multiSelect 必须是布尔值。")
 
@@ -234,7 +236,7 @@ class QuestionFlowManager:
             if not label:
                 raise ValueError("选项 label 不能为空。")
             if not description:
-                raise ValueError("选项 description 不能为空。")
+                description = self.DEFAULT_OPTION_DESCRIPTION
             normalized = _normalize_text(label)
             if normalized in {_normalize_text("other"), _normalize_text("其他")}:
                 # 系统统一追加 Other，忽略模型显式传入。
@@ -251,8 +253,8 @@ class QuestionFlowManager:
                 )
             )
 
-        if len(base_options) < 2 or len(base_options) > 4:
-            raise ValueError("去重后的有效选项数量必须在 2 到 4 之间。")
+        if len(base_options) < 1 or len(base_options) > 4:
+            raise ValueError("去重后的有效选项数量必须在 1 到 4 之间。")
 
         options = list(base_options)
         options.append(

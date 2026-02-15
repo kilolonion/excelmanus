@@ -178,6 +178,37 @@ def _chat_tools_to_responses_tools(
     return responses_tools or None
 
 
+def _map_chat_tool_choice_to_responses(tool_choice: Any) -> Any:
+    """将 Chat Completions 风格 tool_choice 映射为 Responses API 格式。"""
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, str):
+        normalized = tool_choice.strip().lower()
+        if normalized in {"auto", "none", "required"}:
+            return normalized
+        return None
+    if not isinstance(tool_choice, dict):
+        return None
+
+    # OpenAI Chat 强制工具格式：
+    # {"type":"function","function":{"name":"ask_user"}}
+    tc_type = str(tool_choice.get("type", "")).strip().lower()
+    if tc_type == "function":
+        function_value = tool_choice.get("function")
+        if isinstance(function_value, dict):
+            name = str(function_value.get("name", "")).strip()
+            if name:
+                return {"type": "function", "name": name}
+        name = str(tool_choice.get("name", "")).strip()
+        if name:
+            return {"type": "function", "name": name}
+        return None
+
+    if tc_type in {"auto", "none", "required"}:
+        return tc_type
+    return None
+
+
 # ── 格式转换：Responses API → Chat Completions ──────────────────
 
 
@@ -279,6 +310,7 @@ class _ResponsesChatCompletions:
             model=model,
             messages=messages,
             tools=tools,
+            tool_choice=kwargs.get("tool_choice"),
         )
 
 
@@ -315,6 +347,7 @@ class OpenAIResponsesClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        tool_choice: Any = None,
     ) -> _ChatCompletion:
         """执行 Responses API 请求。"""
         instructions, input_items = _chat_messages_to_responses_input(messages)
@@ -330,6 +363,10 @@ class OpenAIResponsesClient:
         responses_tools = _chat_tools_to_responses_tools(tools_list)
         if responses_tools:
             body["tools"] = responses_tools
+
+        mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
+        if mapped_tool_choice is not None:
+            body["tool_choice"] = mapped_tool_choice
 
         url = f"{self._base_url}/responses"
         headers = {

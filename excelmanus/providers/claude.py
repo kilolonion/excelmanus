@@ -204,6 +204,44 @@ def _openai_tools_to_claude(
     return claude_tools or None
 
 
+def _map_openai_tool_choice_to_claude(tool_choice: Any) -> dict[str, Any] | None:
+    """将 OpenAI tool_choice 映射为 Claude Messages API tool_choice。"""
+    if tool_choice is None:
+        return None
+
+    if isinstance(tool_choice, str):
+        normalized = tool_choice.strip().lower()
+        if normalized == "auto":
+            return {"type": "auto"}
+        if normalized == "required":
+            return {"type": "any"}
+        if normalized == "none":
+            # Claude 不提供 none，降级为 auto，后续由模型自行决定不调工具。
+            return {"type": "auto"}
+        return None
+
+    if not isinstance(tool_choice, dict):
+        return None
+
+    tc_type = str(tool_choice.get("type", "")).strip().lower()
+    if tc_type in {"auto", "none", "required"}:
+        return _map_openai_tool_choice_to_claude(tc_type)
+
+    name = ""
+    if tc_type == "function":
+        function_value = tool_choice.get("function")
+        if isinstance(function_value, dict):
+            name = str(function_value.get("name", "")).strip()
+        if not name:
+            name = str(tool_choice.get("name", "")).strip()
+    elif tc_type == "tool":
+        name = str(tool_choice.get("name", "")).strip()
+
+    if name:
+        return {"type": "tool", "name": name}
+    return None
+
+
 # ── 格式转换：Claude → OpenAI ─────────────────────────────────
 
 
@@ -289,6 +327,7 @@ class _ClaudeChatCompletions:
             model=model,
             messages=messages,
             tools=tools,
+            tool_choice=kwargs.get("tool_choice"),
         )
 
 
@@ -322,6 +361,7 @@ class ClaudeClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        tool_choice: Any = None,
     ) -> _ChatCompletion:
         """执行 Claude Messages API 请求。"""
         system_text, claude_messages = _openai_messages_to_claude(messages)
@@ -338,6 +378,10 @@ class ClaudeClient:
         claude_tools = _openai_tools_to_claude(tools_list)
         if claude_tools:
             body["tools"] = claude_tools
+
+        mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
+        if mapped_tool_choice is not None:
+            body["tool_choice"] = mapped_tool_choice
 
         url = f"{self._base_url}/v1/messages"
         headers = {
