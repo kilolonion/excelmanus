@@ -280,7 +280,11 @@ def _contains_formula_advice(text: str) -> bool:
 
 
 _WRITE_ACTION_VERBS = _re.compile(
-    r"(删除|替换|写入|创建|修改|格式化|转置|排序|过滤|合并|计算|填充|插入|移动|复制到|粘贴|更新|设置|调整|添加|生成)",
+    r"(删除|替换|写入|创建|修改|格式化|转置|排序|过滤|合并|计算|填充|插入|移动|复制到|粘贴|更新|设置|调整|添加|生成"
+    r"|delete|remove|replace|write|create|modify|format|transpose|merge"
+    r"|fill|insert|move|paste|update|generate"
+    r"|find\s+and\s+(?:replace|delete)|put\s+in|place\s+in|enter\s+in|apply)",
+    _re.IGNORECASE,
 )
 
 _FILE_REFERENCE_PATTERN = _re.compile(
