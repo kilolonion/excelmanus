@@ -62,13 +62,37 @@ pip install -e ".[dev]"
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 subagent 委派提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 subagent 执行 | `true` |
 | `EXCELMANUS_SUBAGENT_MODEL` | subagent 模型（为空时回退主模型） | — |
-| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `6` |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `2` |
 | `EXCELMANUS_MAX_CONTEXT_TOKENS` | 对话上下文 token 上限 | `128000` |
 | `EXCELMANUS_HOOKS_COMMAND_ENABLED` | 是否允许 `command` hook 执行 | `false` |
 | `EXCELMANUS_HOOKS_COMMAND_ALLOWLIST` | `command` hook 白名单前缀（逗号分隔） | 空 |
 | `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
 | `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
+
+### 窗口感知层配置
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_WINDOW_PERCEPTION_ENABLED` | 是否启用窗口感知层 | `true` |
+| `EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS` | 系统注入窗口预算 | `3000` |
+| `EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS` | 工具返回附加预算 | `500` |
+| `EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS` | 最大窗口数 | `6` |
+| `EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS` | 默认视口行数 | `25` |
+| `EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS` | 默认视口列数 | `10` |
+| `EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS` | 最小化窗口预算 | `80` |
+| `EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE` | 进入后台阈值（idle turn） | `1` |
+| `EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE` | 进入挂起阈值（idle turn） | `3` |
+| `EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE` | 进入关闭阈值（idle turn） | `5` |
+| `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE` | 生命周期顾问模式（`rules`/`hybrid`） | `hybrid` |
+| `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS` | 小模型顾问超时（毫秒） | `800` |
+| `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT` | 触发小模型的窗口数阈值 | `3` |
+| `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN` | 触发小模型的对话轮次阈值 | `4` |
+| `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS` | 小模型计划有效轮数（TTL） | `2` |
+
+窗口感知顾问行为：
+- `rules`：仅使用确定性规则（无小模型调用）。
+- `hybrid`：规则兜底 + 异步小模型缓存，失败或超时自动回退规则，不阻塞主链路。
 
 ### 破坏性升级迁移清单（本次单期整改）
 

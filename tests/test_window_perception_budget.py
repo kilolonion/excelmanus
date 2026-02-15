@@ -77,3 +77,23 @@ class TestWindowBudget:
         )
 
         assert snapshots[0].action == WindowRenderAction.CLOSE
+
+    def test_hybrid_lifecycle_plan_uses_advised_tier(self) -> None:
+        budget = PerceptionBudget(system_budget_tokens=1000, max_windows=2)
+        allocator = WindowBudgetAllocator(budget)
+        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=1)
+
+        snapshots = allocator.allocate(
+            windows=[w1],
+            active_window_id=None,
+            render_keep=lambda _: "ACTIVE",
+            render_background=lambda _: "BACKGROUND",
+            render_minimized=lambda _: "SUSPENDED",
+            lifecycle_plan=LifecyclePlan(
+                advices=[WindowAdvice(window_id="w1", tier="suspended")],
+                source="hybrid",
+            ),
+        )
+
+        assert snapshots[0].action == WindowRenderAction.MINIMIZE
+        assert snapshots[0].rendered_text == "SUSPENDED"

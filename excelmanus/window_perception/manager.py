@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from copy import deepcopy
+from typing import Any, Awaitable, Callable, Literal
 
 from excelmanus.memory import TokenCounter
 
-from .advisor import RuleBasedAdvisor, WindowLifecycleAdvisor
+from .advisor import HybridAdvisor, LifecyclePlan, RuleBasedAdvisor, WindowLifecycleAdvisor
 from .advisor_context import AdvisorContext
 from .budget import WindowBudgetAllocator
 from .extractor import (
@@ -43,6 +45,11 @@ from .renderer import (
 )
 from .rules import classify_tool
 
+AsyncAdvisorRunner = Callable[
+    [list[WindowState], str | None, PerceptionBudget, AdvisorContext],
+    Awaitable[LifecyclePlan | None],
+]
+
 
 class WindowPerceptionManager:
     """维护窗口状态并生成上下文注入。"""
@@ -54,10 +61,19 @@ class WindowPerceptionManager:
         *,
         enabled: bool,
         budget: PerceptionBudget,
+        advisor_mode: Literal["rules", "hybrid"] = "hybrid",
+        advisor_trigger_window_count: int = 3,
+        advisor_trigger_turn: int = 4,
+        advisor_plan_ttl_turns: int = 2,
     ) -> None:
         self._enabled = enabled
         self._budget = budget
-        self._advisor: WindowLifecycleAdvisor = RuleBasedAdvisor()
+        self._advisor_mode: Literal["rules", "hybrid"] = (
+            advisor_mode if advisor_mode in {"rules", "hybrid"} else "hybrid"
+        )
+        self._advisor: WindowLifecycleAdvisor = (
+            RuleBasedAdvisor() if self._advisor_mode == "rules" else HybridAdvisor()
+        )
         self._windows: dict[str, WindowState] = {}
         self._explorer_index: dict[str, str] = {}
         self._sheet_index: dict[tuple[str, str], str] = {}
@@ -67,14 +83,40 @@ class WindowPerceptionManager:
         self._notice_turn: int = 0
         self._last_notice_operation_seq: int = 0
         self._last_window_count: int = 0
+        self._turn_hint_is_new_task: bool = False
+        self._turn_hint_user_intent_summary: str = ""
+        self._turn_hint_agent_recent_output: str = ""
+        self._advisor_runner: AsyncAdvisorRunner | None = None
+        self._advisor_task: asyncio.Task[None] | None = None
+        self._cached_small_model_plan: LifecyclePlan | None = None
+        self._advisor_trigger_window_count = max(1, int(advisor_trigger_window_count))
+        self._advisor_trigger_turn = max(1, int(advisor_trigger_turn))
+        self._advisor_plan_ttl_turns = max(0, int(advisor_plan_ttl_turns))
 
     @property
     def enabled(self) -> bool:
         """是否启用窗口感知层。"""
         return self._enabled
 
+    def bind_async_advisor_runner(self, runner: AsyncAdvisorRunner | None) -> None:
+        """绑定异步小模型顾问回调。"""
+        self._advisor_runner = runner
+
+    def set_turn_hints(
+        self,
+        *,
+        is_new_task: bool,
+        user_intent_summary: str = "",
+        agent_recent_output: str = "",
+    ) -> None:
+        """设置当前轮次提示信息。"""
+        self._turn_hint_is_new_task = bool(is_new_task)
+        self._turn_hint_user_intent_summary = self._normalize_hint(user_intent_summary, max_chars=200)
+        self._turn_hint_agent_recent_output = self._normalize_hint(agent_recent_output, max_chars=200)
+
     def reset(self) -> None:
         """重置状态。"""
+        self._cancel_advisor_task()
         self._windows.clear()
         self._explorer_index.clear()
         self._sheet_index.clear()
@@ -84,6 +126,10 @@ class WindowPerceptionManager:
         self._notice_turn = 0
         self._last_notice_operation_seq = 0
         self._last_window_count = 0
+        self._turn_hint_is_new_task = False
+        self._turn_hint_user_intent_summary = ""
+        self._turn_hint_agent_recent_output = ""
+        self._cached_small_model_plan = None
 
     def observe_subagent_context(
         self,
@@ -136,16 +182,23 @@ class WindowPerceptionManager:
             self._last_window_count = 0
             return ""
 
+        is_new_task = self._turn_hint_is_new_task
+        self._turn_hint_is_new_task = False
         context = AdvisorContext(
             turn_number=self._notice_turn,
-            is_new_task=self._notice_turn == 1,
+            is_new_task=is_new_task,
             window_count_changed=len(active_windows) != self._last_window_count,
+            user_intent_summary=self._turn_hint_user_intent_summary,
+            agent_recent_output=self._turn_hint_agent_recent_output,
         )
+        cached_small_model_plan = self._get_fresh_small_model_plan(current_turn=context.turn_number)
         lifecycle_plan = self._advisor.advise(
             windows=active_windows,
             active_window_id=self._active_window_id,
             budget=self._budget,
             context=context,
+            small_model_plan=cached_small_model_plan,
+            plan_ttl_turns=self._advisor_plan_ttl_turns,
         )
 
         allocator = WindowBudgetAllocator(self._budget)
@@ -167,6 +220,10 @@ class WindowPerceptionManager:
 
         self._last_notice_operation_seq = self._operation_seq
         self._last_window_count = len([item for item in self._windows.values() if not item.dormant])
+        self._schedule_async_advisor(
+            active_windows=[item for item in self._windows.values() if not item.dormant],
+            context=context,
+        )
 
         return render_system_notice(visible)
 
@@ -481,6 +538,118 @@ class WindowPerceptionManager:
         to_drop = sorted(dormant, key=lambda item: item.last_access_seq)[:overflow]
         for item in to_drop:
             self._drop_window(item.id)
+
+    def _schedule_async_advisor(
+        self,
+        *,
+        active_windows: list[WindowState],
+        context: AdvisorContext,
+    ) -> None:
+        if self._advisor_mode != "hybrid":
+            return
+        if self._advisor_runner is None:
+            return
+        if not active_windows:
+            return
+        if not self._should_invoke_small_model(context=context, active_windows=active_windows):
+            return
+        if self._advisor_task is not None and not self._advisor_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        windows_snapshot = [deepcopy(item) for item in active_windows]
+        context_snapshot = AdvisorContext(
+            turn_number=context.turn_number,
+            is_new_task=context.is_new_task,
+            window_count_changed=context.window_count_changed,
+            user_intent_summary=context.user_intent_summary,
+            agent_recent_output=context.agent_recent_output,
+            task_type=context.task_type,
+        )
+        task = loop.create_task(
+            self._run_async_advisor(
+                windows=windows_snapshot,
+                active_window_id=self._active_window_id,
+                context=context_snapshot,
+            )
+        )
+        self._advisor_task = task
+        task.add_done_callback(self._on_advisor_task_done)
+
+    async def _run_async_advisor(
+        self,
+        *,
+        windows: list[WindowState],
+        active_window_id: str | None,
+        context: AdvisorContext,
+    ) -> None:
+        runner = self._advisor_runner
+        if runner is None:
+            return
+
+        try:
+            plan = await runner(windows, active_window_id, self._budget, context)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+        if plan is None:
+            return
+        if plan.generated_turn <= 0:
+            plan.generated_turn = context.turn_number
+        self._cached_small_model_plan = plan
+
+    def _on_advisor_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._advisor_task is task:
+            self._advisor_task = None
+        if task.cancelled():
+            return
+        try:
+            _ = task.exception()
+        except Exception:
+            return
+
+    def _cancel_advisor_task(self) -> None:
+        task = self._advisor_task
+        self._advisor_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _get_fresh_small_model_plan(self, *, current_turn: int) -> LifecyclePlan | None:
+        plan = self._cached_small_model_plan
+        if plan is None:
+            return None
+        if int(plan.generated_turn) <= 0:
+            return None
+        if current_turn - int(plan.generated_turn) > self._advisor_plan_ttl_turns:
+            return None
+        return plan
+
+    def _should_invoke_small_model(
+        self,
+        *,
+        context: AdvisorContext,
+        active_windows: list[WindowState],
+    ) -> bool:
+        if context.is_new_task:
+            return True
+        if context.window_count_changed:
+            return True
+        if len(active_windows) >= self._advisor_trigger_window_count:
+            return True
+        return context.turn_number >= self._advisor_trigger_turn
+
+    @staticmethod
+    def _normalize_hint(text: str, *, max_chars: int) -> str:
+        normalized = " ".join(str(text or "").split())
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[:max_chars]
 
     def _truncate_tool_append(self, text: str) -> str:
         max_tokens = max(0, int(self._budget.tool_append_tokens))

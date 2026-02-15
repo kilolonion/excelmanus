@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Sequence
 
@@ -136,10 +138,58 @@ class ToolRegistry:
         if tool is None:
             raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
 
+        # 先做函数签名绑定校验，拦截缺参/多参等调用层错误，
+        # 以结构化错误返回给模型，便于其在下一轮自动修正参数。
+        signature: inspect.Signature | None = None
+        try:
+            signature = inspect.signature(tool.func)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            try:
+                signature.bind(**arguments)
+            except TypeError as exc:
+                logger.warning(
+                    "工具 '%s' 参数绑定失败: %s; arguments=%s",
+                    tool_name,
+                    exc,
+                    arguments,
+                )
+                return self._format_argument_validation_error(
+                    tool=tool,
+                    arguments=arguments,
+                    detail=str(exc),
+                )
+
         try:
             return tool.func(**arguments)
         except Exception as exc:
             raise ToolExecutionError(f"工具 '{tool_name}' 执行失败: {exc}") from exc
+
+    @staticmethod
+    def _format_argument_validation_error(
+        *,
+        tool: ToolDef,
+        arguments: dict[str, Any],
+        detail: str,
+    ) -> str:
+        """构造统一的参数校验错误返回（JSON 字符串）。"""
+        schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+        required_raw = schema.get("required")
+        required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
+        properties_raw = schema.get("properties")
+        accepted_fields = sorted(str(item) for item in properties_raw.keys()) if isinstance(properties_raw, dict) else []
+        payload = {
+            "status": "error",
+            "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
+            "tool": tool.name,
+            "message": "工具参数不完整或不匹配，请根据工具 schema 补齐后重试。",
+            "detail": detail,
+            "required_fields": required,
+            "accepted_fields": accepted_fields,
+            "provided_fields": sorted(arguments.keys()),
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。"""

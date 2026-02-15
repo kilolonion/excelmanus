@@ -14,7 +14,12 @@ def render_system_notice(snapshots: list[WindowSnapshot]) -> str:
     body = "\n\n".join(item.rendered_text for item in snapshots if item.rendered_text.strip())
     if not body:
         return ""
-    return "## 窗口感知上下文\n" + body
+    return (
+        "## 窗口感知上下文\n"
+        "以下是你当前已打开的窗口实时状态，数据与工具返回完全一致。\n"
+        "如果所需信息已在下方窗口中（列名、行数、预览数据等），直接引用回答，无需重复调用工具获取。\n\n"
+        + body
+    )
 
 
 def render_window_keep(window: WindowState) -> str:

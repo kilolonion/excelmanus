@@ -469,8 +469,14 @@ class GeminiClient:
                 url, json=body, headers=headers, params=params,
             )
         except httpx.HTTPError as exc:
-            logger.error("Gemini HTTP 请求失败: %s", exc)
-            raise RuntimeError(f"Gemini API 请求失败: {exc}") from exc
+            error_text = str(exc).strip()
+            error_detail = (
+                f"{exc.__class__.__name__}: {error_text}"
+                if error_text
+                else repr(exc)
+            )
+            logger.error("Gemini HTTP 请求失败: %s", error_detail)
+            raise RuntimeError(f"Gemini API 请求失败: {error_detail}") from exc
 
         if resp.status_code != 200:
             error_text = resp.text[:500]

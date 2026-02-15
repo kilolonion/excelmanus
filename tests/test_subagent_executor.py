@@ -700,6 +700,78 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_tool_result_enricher_applies_to_subagent_tool_result(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = ToolRegistry()
+
+    def read_excel(file_path: str) -> str:
+        payload = {"file": file_path, "sheet": "Sheet1"}
+        return json.dumps(payload, ensure_ascii=False)
+
+    registry.register_tool(
+        ToolDef(
+            name="read_excel",
+            description="读取 Excel",
+            input_schema={
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=read_excel,
+        )
+    )
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="explorer",
+        description="增强回调测试",
+        allowed_tools=["read_excel"],
+        permission_mode="readOnly",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _tool_call_message(
+                                "read_excel",
+                                {"file_path": "examples/bench/stress_test_comprehensive.xlsx"},
+                            )
+                        ),
+                        _response_from_message(_text_message("完成")),
+                    ]
+                )
+            )
+        )
+    )
+    calls: list[tuple[str, bool]] = []
+
+    def _enricher(tool_name: str, arguments: dict[str, object], text: str, success: bool) -> str:
+        _ = arguments
+        calls.append((tool_name, success))
+        return f"{text}\n[WINDOW_ENRICHED]"
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(
+            config=sub_cfg,
+            prompt="读取样本",
+            tool_result_enricher=_enricher,
+        )
+
+    assert result.success is True
+    assert calls == [("read_excel", True)]
+
+
+@pytest.mark.asyncio
 async def test_memory_scope_project_loads_and_persists_memory(tmp_path: Path) -> None:
     config = _make_config(tmp_path, memory_enabled=True, memory_auto_load_lines=200)
     registry = _registry_with_tools(tmp_path)

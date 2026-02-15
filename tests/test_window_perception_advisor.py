@@ -1,6 +1,6 @@
 """窗口生命周期顾问测试。"""
 
-from excelmanus.window_perception.advisor import RuleBasedAdvisor
+from excelmanus.window_perception.advisor import HybridAdvisor, LifecyclePlan, RuleBasedAdvisor, WindowAdvice
 from excelmanus.window_perception.advisor_context import AdvisorContext
 from excelmanus.window_perception.models import PerceptionBudget, WindowState, WindowType
 
@@ -49,3 +49,80 @@ class TestRuleBasedAdvisor:
 
         assert plan.advices[0].tier == "active"
 
+
+class TestHybridAdvisor:
+    """混合顾问测试。"""
+
+    def test_uses_small_model_plan_when_fresh_and_valid(self) -> None:
+        advisor = HybridAdvisor()
+        budget = PerceptionBudget()
+        windows = [
+            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=0),
+            WindowState(id="w2", type=WindowType.SHEET, title="B", idle_turns=2),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id="w1",
+            budget=budget,
+            context=AdvisorContext(turn_number=5, task_type="GENERAL_BROWSE"),
+            small_model_plan=LifecyclePlan(
+                advices=[
+                    WindowAdvice(window_id="w2", tier="suspended", reason="已完成"),
+                ],
+                source="small_model",
+                task_type="DATA_COMPARISON",
+                generated_turn=4,
+            ),
+            plan_ttl_turns=2,
+        )
+        tiers = {item.window_id: item.tier for item in plan.advices}
+        assert plan.source == "hybrid"
+        assert tiers["w1"] == "active"
+        assert tiers["w2"] == "suspended"
+
+    def test_invalid_small_model_plan_falls_back_to_rules(self) -> None:
+        advisor = HybridAdvisor()
+        budget = PerceptionBudget()
+        windows = [
+            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=3),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id=None,
+            budget=budget,
+            context=AdvisorContext(turn_number=6, task_type="GENERAL_BROWSE"),
+            small_model_plan=LifecyclePlan(
+                advices=[WindowAdvice(window_id="unknown", tier="active")],
+                source="small_model",
+                task_type="UNKNOWN_TASK",
+                generated_turn=5,
+            ),
+            plan_ttl_turns=2,
+        )
+        assert plan.source == "rules"
+        assert plan.advices[0].tier == "suspended"
+
+    def test_expired_small_model_plan_falls_back_to_rules(self) -> None:
+        advisor = HybridAdvisor()
+        budget = PerceptionBudget()
+        windows = [
+            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=1),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id=None,
+            budget=budget,
+            context=AdvisorContext(turn_number=10, task_type="GENERAL_BROWSE"),
+            small_model_plan=LifecyclePlan(
+                advices=[WindowAdvice(window_id="w1", tier="terminated")],
+                source="small_model",
+                task_type="GENERAL_BROWSE",
+                generated_turn=2,
+            ),
+            plan_ttl_turns=2,
+        )
+        assert plan.source == "rules"
+        assert plan.advices[0].tier == "background"

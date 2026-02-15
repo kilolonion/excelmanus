@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from excelmanus.config import ExcelManusConfig, ModelProfile
@@ -22,6 +24,7 @@ from excelmanus.subagent import SubagentConfig, SubagentResult
 from excelmanus.task_list import TaskStatus
 from excelmanus.tools import ToolRegistry, task_tools
 from excelmanus.tools.registry import ToolDef
+from excelmanus.window_perception import AdvisorContext, PerceptionBudget, WindowState, WindowType
 
 
 # ── 辅助工厂 ──────────────────────────────────────────────
@@ -386,6 +389,161 @@ class TestModelSwitchConsistency:
         assert engine._router_model == "router-fixed"
         assert engine._router_client is old_router_client
         assert engine._router_client is not engine._client
+
+    @pytest.mark.asyncio
+    async def test_window_perception_advisor_follows_router_model_after_switch(self) -> None:
+        config = _make_config(
+            model="main-a",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+            window_perception_advisor_mode="hybrid",
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        engine.switch_model("alt")
+        engine._router_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
+        )
+
+        _ = await engine._run_window_perception_advisor_async(
+            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            active_window_id="w1",
+            budget=PerceptionBudget(),
+            context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
+        )
+
+        _, kwargs = engine._router_client.chat.completions.create.call_args
+        assert kwargs["model"] == "main-b"
+
+    @pytest.mark.asyncio
+    async def test_window_perception_advisor_retries_once_on_transient_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _TransientError(Exception):
+            def __init__(self) -> None:
+                super().__init__("rate limit")
+                self.status_code = 429
+                self.response = SimpleNamespace(headers={"Retry-After": "0.1"})
+
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_timeout_ms=20_000,
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        mocked_create = AsyncMock(
+            side_effect=[
+                _TransientError(),
+                _make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}'),
+            ]
+        )
+        engine._router_client.chat.completions.create = mocked_create
+        mocked_sleep = AsyncMock(return_value=None)
+        monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
+
+        plan = await engine._run_window_perception_advisor_async(
+            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            active_window_id="w1",
+            budget=PerceptionBudget(),
+            context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
+        )
+
+        assert plan is not None
+        assert mocked_create.await_count == 2
+        mocked_sleep.assert_awaited_once()
+
+    def test_is_transient_window_advisor_exception_detects_nested_connect_error(self) -> None:
+        wrapped = RuntimeError("Gemini API 请求失败: ")
+        wrapped.__cause__ = httpx.ConnectError("")
+        assert AgentEngine._is_transient_window_advisor_exception(wrapped) is True
+
+    def test_extract_retry_after_seconds_from_nested_exception(self) -> None:
+        class _RateLimitError(Exception):
+            def __init__(self) -> None:
+                super().__init__("rate limited")
+                self.response = SimpleNamespace(headers={"Retry-After": "0.6"})
+
+        wrapped = RuntimeError("Gemini API 请求失败: ")
+        wrapped.__cause__ = _RateLimitError()
+
+        retry_after = AgentEngine._extract_retry_after_seconds(wrapped)
+        assert retry_after == pytest.approx(0.6)
+
+    @pytest.mark.asyncio
+    async def test_window_perception_advisor_retries_on_wrapped_connect_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wrapped = RuntimeError("Gemini API 请求失败: ")
+        wrapped.__cause__ = httpx.ConnectError("")
+
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_timeout_ms=20_000,
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        mocked_create = AsyncMock(
+            side_effect=[
+                wrapped,
+                _make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}'),
+            ]
+        )
+        engine._router_client.chat.completions.create = mocked_create
+        mocked_sleep = AsyncMock(return_value=None)
+        monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
+
+        plan = await engine._run_window_perception_advisor_async(
+            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            active_window_id="w1",
+            budget=PerceptionBudget(),
+            context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
+        )
+
+        assert plan is not None
+        assert mocked_create.await_count == 2
+        mocked_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_window_perception_advisor_timeout_does_not_retry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _slow_response(**_kwargs):
+            await asyncio.sleep(0.2)
+            return _make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
+
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_timeout_ms=20,
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        mocked_create = AsyncMock(side_effect=_slow_response)
+        engine._router_client.chat.completions.create = mocked_create
+
+        def _unexpected_retry_delay(_exc: Exception) -> float:
+            raise AssertionError("不应进入重试分支")
+
+        monkeypatch.setattr(
+            AgentEngine,
+            "_window_advisor_retry_delay_seconds",
+            staticmethod(_unexpected_retry_delay),
+        )
+
+        plan = await engine._run_window_perception_advisor_async(
+            windows=[WindowState(id="w1", type=WindowType.SHEET, title="A")],
+            active_window_id="w1",
+            budget=PerceptionBudget(),
+            context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
+        )
+
+        assert plan is None
+        assert mocked_create.await_count == 1
 
 
 class TestSystemMessageMode:
@@ -929,6 +1087,211 @@ class TestContextBudgetAndHardCap:
         )
         notice5 = engine._build_window_perception_notice()
         assert "【窗口 · reactivate.xlsx / Q1】" in notice5
+
+    @pytest.mark.asyncio
+    async def test_window_perception_hybrid_advisor_is_non_blocking(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 200, "columns": 8},
+                    "preview": [{"列A": 1, "列B": 2}],
+                },
+                ensure_ascii=False,
+            )
+
+        async def _slow_response(**_kwargs):
+            await asyncio.sleep(0.2)
+            return _make_text_response(
+                '{"task_type":"GENERAL_BROWSE","advices":[]}'
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_trigger_window_count=1,
+            window_perception_advisor_trigger_turn=1,
+            window_perception_advisor_timeout_ms=1000,
+        )
+        engine = AgentEngine(config, registry)
+        engine._router_client.chat.completions.create = AsyncMock(side_effect=_slow_response)
+
+        tc = SimpleNamespace(
+            id="call_read_init",
+            function=SimpleNamespace(
+                name="read_excel",
+                arguments=json.dumps({"file_path": "sales.xlsx", "sheet_name": "Q1"}),
+            ),
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        started = time.monotonic()
+        notice = engine._build_window_perception_notice()
+        elapsed = time.monotonic() - started
+        assert "sales.xlsx" in notice
+        assert elapsed < 0.15
+
+    @pytest.mark.asyncio
+    async def test_window_perception_hybrid_advisor_applies_cached_plan_next_turn(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 2004, "columns": 12},
+                    "preview": [{"订单编号": "ORD-1", "日期": "2025-01-01", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_trigger_window_count=1,
+            window_perception_advisor_trigger_turn=1,
+            window_perception_advisor_plan_ttl_turns=2,
+        )
+        engine = AgentEngine(config, registry)
+        engine._router_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
+        )
+
+        async def _read(file_path: str, iteration: int) -> None:
+            tc = SimpleNamespace(
+                id=f"call_read_{iteration}",
+                function=SimpleNamespace(
+                    name="read_excel",
+                    arguments=json.dumps({"file_path": file_path, "sheet_name": "Q1"}),
+                ),
+            )
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=iteration,
+                route_result=None,
+            )
+
+        await _read("sales.xlsx", 1)
+        await _read("catalog.xlsx", 2)
+
+        first_notice = engine._build_window_perception_notice()
+        assert "sales.xlsx / Q1" in first_notice
+        assert "catalog.xlsx / Q1" in first_notice
+
+        plan_text = '{"task_type":"GENERAL_BROWSE","advices":[{"window_id":"sheet_1","tier":"suspended","reason":"done"}]}'
+        engine._router_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response(plan_text)
+        )
+
+        _ = engine._build_window_perception_notice()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        second_notice = engine._build_window_perception_notice()
+        assert "【挂起 · sales.xlsx / Q1" in second_notice
+
+    @pytest.mark.asyncio
+    async def test_window_perception_hybrid_advisor_falls_back_when_router_fails(self) -> None:
+        def read_excel(file_path: str, sheet_name: str) -> str:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "sheet": sheet_name,
+                    "shape": {"rows": 2004, "columns": 12},
+                    "preview": [{"订单编号": "ORD-1", "日期": "2025-01-01", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "sheet_name": {"type": "string"},
+                    },
+                    "required": ["file_path", "sheet_name"],
+                },
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(
+            window_perception_advisor_mode="hybrid",
+            window_perception_advisor_trigger_window_count=1,
+            window_perception_advisor_trigger_turn=1,
+        )
+        engine = AgentEngine(config, registry)
+        engine._router_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("router failed")
+        )
+
+        async def _read(file_path: str, iteration: int) -> None:
+            tc = SimpleNamespace(
+                id=f"call_read_{iteration}",
+                function=SimpleNamespace(
+                    name="read_excel",
+                    arguments=json.dumps({"file_path": file_path, "sheet_name": "Q1"}),
+                ),
+            )
+            await engine._execute_tool_call(
+                tc=tc,
+                tool_scope=["read_excel"],
+                on_event=None,
+                iteration=iteration,
+                route_result=None,
+            )
+
+        await _read("sales.xlsx", 1)
+        await _read("catalog.xlsx", 2)
+        _ = engine._build_window_perception_notice()
+        await asyncio.sleep(0)
+        fallback_notice = engine._build_window_perception_notice()
+        assert "【后台 · sales.xlsx / Q1】" in fallback_notice
 
 
 class TestTaskUpdateFailureSemantics:
@@ -1496,6 +1859,42 @@ class TestDelegateSubagent:
         prompts = engine._build_system_prompts([])
         assert len(prompts) == 1
         assert "examples/bench/stress_test_comprehensive.xlsx" in prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_run_subagent_passes_window_context_and_enricher(self) -> None:
+        config = _make_config(window_perception_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.get.return_value = SubagentConfig(
+            name="explorer",
+            description="测试",
+            allowed_tools=["read_excel"],
+            permission_mode="readOnly",
+        )
+        engine._subagent_executor.run = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="ok",
+                subagent_name="explorer",
+                permission_mode="readOnly",
+                conversation_id="conv_x",
+            )
+        )
+
+        engine._window_perception.observe_subagent_context(
+            candidate_paths=["./examples/bench/stress_test_comprehensive.xlsx"],
+            subagent_name="explorer",
+            task="预热窗口",
+        )
+
+        result = await engine.run_subagent(agent_name="explorer", prompt="请分析")
+
+        assert result.success is True
+        kwargs = engine._subagent_executor.run.await_args.kwargs
+        assert "窗口感知上下文" in kwargs["parent_context"]
+        assert callable(kwargs["tool_result_enricher"])
 
     @pytest.mark.asyncio
     async def test_delegate_pending_approval_asks_user_and_supports_fullaccess_retry(

@@ -6,6 +6,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 import json
+import random
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -71,6 +72,10 @@ _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
+_WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
+_WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
+_WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
+_WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "planner",
@@ -1821,12 +1826,20 @@ class AgentEngine:
                 permission_mode="default",
                 conversation_id="",
             )
+        parent_context_parts: list[str] = []
+        parent_summary = self._build_parent_context_summary()
+        if parent_summary:
+            parent_context_parts.append(parent_summary)
+        window_context = self._build_window_perception_notice()
+        if window_context:
+            parent_context_parts.append(window_context)
         return await self._subagent_executor.run(
             config=config,
             prompt=prompt,
-            parent_context=self._build_parent_context_summary(),
+            parent_context="\n\n".join(parent_context_parts),
             on_event=on_event,
             full_access_enabled=self._full_access_enabled,
+            tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
         )
 
     async def _delegate_to_subagent(
@@ -3185,6 +3198,21 @@ class AgentEngine:
             )
             return result_text
 
+    def _enrich_subagent_tool_result_with_window_perception(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        success: bool,
+    ) -> str:
+        """子代理工具结果复用主会话窗口感知增强逻辑。"""
+        return self._enrich_tool_result_with_window_perception(
+            tool_name=tool_name,
+            arguments=arguments,
+            result_text=result_text,
+            success=success,
+        )
+
     def _apply_tool_result_hard_cap(self, text: str) -> str:
         """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
         normalized = str(text or "")
@@ -4249,6 +4277,122 @@ class AgentEngine:
             return normalized
         return normalized[:max_chars]
 
+    @staticmethod
+    def _iter_exception_chain(exc: Exception) -> list[Exception]:
+        """遍历异常链（__cause__ / __context__），用于提取底层错误信息。"""
+        chain: list[Exception] = []
+        seen: set[int] = set()
+        current: Exception | None = exc
+        while current is not None and id(current) not in seen:
+            chain.append(current)
+            seen.add(id(current))
+            next_exc = getattr(current, "__cause__", None)
+            if not isinstance(next_exc, Exception):
+                next_exc = getattr(current, "__context__", None)
+            current = next_exc if isinstance(next_exc, Exception) else None
+        return chain
+
+    @staticmethod
+    def _is_transient_window_advisor_exception(exc: Exception) -> bool:
+        """判断顾问调用异常是否可进行一次轻量重试。"""
+        transient_keywords = (
+            "429",
+            "too many requests",
+            "rate limit",
+            "service unavailable",
+            "temporarily unavailable",
+            "connection reset",
+            "connection aborted",
+            "connection closed",
+            "server disconnected",
+            "broken pipe",
+            "econnreset",
+            "network is unreachable",
+            "timed out",
+            "timeout",
+            "connecterror",
+            "temporary failure in name resolution",
+            "name or service not known",
+        )
+        for candidate in AgentEngine._iter_exception_chain(exc):
+            status_code = getattr(candidate, "status_code", None)
+            if isinstance(status_code, int) and (
+                status_code == 429 or 500 <= status_code < 600
+            ):
+                return True
+
+            name = candidate.__class__.__name__.lower()
+            if name in {
+                "ratelimiterror",
+                "apiconnectionerror",
+                "apitimeouterror",
+                "connecterror",
+                "proxyerror",
+                "networkerror",
+                "transporterror",
+            }:
+                return True
+
+            text = f"{candidate} {candidate!r}".lower()
+            if any(keyword in text for keyword in transient_keywords):
+                return True
+
+        return False
+
+    @staticmethod
+    def _extract_retry_after_seconds(exc: Exception) -> float | None:
+        """尽量从异常响应头提取 Retry-After（秒）。"""
+        for candidate in AgentEngine._iter_exception_chain(exc):
+            response = getattr(candidate, "response", None)
+            if response is None:
+                continue
+            headers = getattr(response, "headers", None)
+            if headers is None:
+                continue
+
+            raw_retry_after: Any = None
+            get_header = getattr(headers, "get", None)
+            if callable(get_header):
+                raw_retry_after = get_header("retry-after") or get_header("Retry-After")
+            elif isinstance(headers, dict):
+                raw_retry_after = headers.get("retry-after") or headers.get("Retry-After")
+
+            if raw_retry_after is None:
+                continue
+            try:
+                retry_after_seconds = float(str(raw_retry_after).strip())
+            except (TypeError, ValueError):
+                continue
+            if retry_after_seconds < 0:
+                continue
+            return retry_after_seconds
+        return None
+
+    @staticmethod
+    def _window_advisor_retry_delay_seconds(exc: Exception) -> float:
+        """计算轻量重试等待时间。"""
+        retry_after = AgentEngine._extract_retry_after_seconds(exc)
+        if retry_after is not None:
+            return max(
+                _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
+                min(_WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS, retry_after),
+            )
+        return random.uniform(
+            _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
+            _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
+        )
+
+    @staticmethod
+    def _window_advisor_retry_timeout_seconds(primary_timeout_seconds: float) -> float:
+        """计算二次快速重试超时，确保短于首轮。"""
+        retry_timeout = min(
+            _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS,
+            max(0.1, float(primary_timeout_seconds) * 0.4),
+        )
+        if retry_timeout >= primary_timeout_seconds:
+            retry_timeout = max(0.1, primary_timeout_seconds - 0.1)
+        return retry_timeout
+
     async def _run_window_perception_advisor_async(
         self,
         windows: list[WindowState],
@@ -4267,20 +4411,43 @@ class AgentEngine:
             0.1,
             int(self._config.window_perception_advisor_timeout_ms) / 1000,
         )
-        try:
-            response = await asyncio.wait_for(
+
+        async def _invoke(timeout: float) -> Any:
+            return await asyncio.wait_for(
                 self._router_client.chat.completions.create(
                     model=self._router_model,
                     messages=messages,
                 ),
-                timeout=timeout_seconds,
+                timeout=timeout,
             )
+
+        try:
+            response = await _invoke(timeout_seconds)
         except asyncio.TimeoutError:
             logger.info("窗口感知小模型调用超时（%.2fs）", timeout_seconds)
             return None
-        except Exception:
-            logger.warning("窗口感知小模型调用失败，已回退规则顾问", exc_info=True)
-            return None
+        except Exception as exc:
+            if not self._is_transient_window_advisor_exception(exc):
+                logger.warning("窗口感知小模型调用失败，已回退规则顾问", exc_info=True)
+                return None
+
+            retry_delay_seconds = self._window_advisor_retry_delay_seconds(exc)
+            retry_timeout_seconds = self._window_advisor_retry_timeout_seconds(timeout_seconds)
+            logger.info(
+                "窗口感知小模型触发瞬时错误，%.2fs 后执行一次快速重试（%.2fs）：%s",
+                retry_delay_seconds,
+                retry_timeout_seconds,
+                exc.__class__.__name__,
+            )
+            await asyncio.sleep(retry_delay_seconds)
+            try:
+                response = await _invoke(retry_timeout_seconds)
+            except asyncio.TimeoutError:
+                logger.info("窗口感知小模型快速重试超时（%.2fs）", retry_timeout_seconds)
+                return None
+            except Exception:
+                logger.warning("窗口感知小模型快速重试失败，已回退规则顾问", exc_info=True)
+                return None
 
         message, _ = _extract_completion_message(response)
         content = _message_content_to_text(getattr(message, "content", None)).strip()
