@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
 # 三模式 AB 对比测试：OFF / ENRICHED / ANCHORED
-# 用法：bash bench/run_3way_ab.sh [--suites suite1.json,suite2.json]
+# 用法：bash bench/run_3way_ab.sh [--suites suite1.json,suite2.json] [--trace]
 # 默认运行三个窗口感知相关套件
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
@@ -31,11 +31,16 @@ DEFAULT_SUITES=(
 
 # 解析参数
 SUITES=()
+TRACE_FLAG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --suites)
             IFS=',' read -ra SUITES <<< "$2"
             shift 2
+            ;;
+        --trace)
+            TRACE_FLAG="--trace"
+            shift
             ;;
         *)
             echo "未知参数: $1"
@@ -56,6 +61,9 @@ echo "════════════════════════�
 echo "  三模式 AB 对比测试"
 echo "  输出目录: ${BASE_OUTPUT}"
 echo "  套件数量: ${#SUITES[@]}"
+if [[ -n "$TRACE_FLAG" ]]; then
+    echo "  Trace: ON"
+fi
 echo "═══════════════════════════════════════════════════"
 
 # 构建 --suite 参数（一次传入多个 suite，避免 argparse 覆盖）
@@ -70,7 +78,8 @@ EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/off" \
-    --concurrency 1
+    --concurrency 1 \
+    $TRACE_FLAG
 
 echo "✓ OFF 模式完成"
 echo ""
@@ -87,7 +96,8 @@ EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/enriched" \
-    --concurrency 1
+    --concurrency 1 \
+    $TRACE_FLAG
 
 echo "✓ ENRICHED 模式完成"
 echo ""
@@ -103,7 +113,8 @@ EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT=1 \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
     --output-dir "${BASE_OUTPUT}/anchored" \
-    --concurrency 1
+    --concurrency 1 \
+    $TRACE_FLAG
 
 echo "✓ ANCHORED 模式完成"
 echo ""

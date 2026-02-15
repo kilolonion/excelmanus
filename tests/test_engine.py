@@ -2280,6 +2280,71 @@ class TestManualSkillSlashCommand:
         assert isinstance(result, ChatResult)
         assert "不允许手动调用" in result.reply
 
+    @pytest.mark.asyncio
+    async def test_guidance_only_slash_with_args_falls_back_to_task_route(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        guidance_skill = Skillpack(
+            name="guidance_only",
+            description="仅方法论约束",
+            allowed_tools=[],
+            triggers=[],
+            instructions="只提供规范，不直接绑定工具",
+            source="project",
+            root_dir="/tmp/guidance_only",
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpack.return_value = guidance_skill
+        mock_loader.get_skillpacks.return_value = {"guidance_only": guidance_skill}
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        engine._skill_router = mock_router
+
+        slash_route = SkillMatchResult(
+            skills_used=["guidance_only"],
+            tool_scope=[],
+            route_mode="slash_direct",
+            system_contexts=["[Skillpack] guidance_only"],
+            parameterized=True,
+        )
+        fallback_route = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["add_numbers"],
+            route_mode="fallback",
+            system_contexts=["fallback-context"],
+            parameterized=False,
+        )
+        engine._route_skills = AsyncMock(side_effect=[slash_route, fallback_route])
+        engine._tool_calling_loop = AsyncMock(return_value=ChatResult(reply="ok"))
+
+        result = await engine.chat(
+            "/guidance_only 查看哪个表格最大",
+            slash_command="guidance_only",
+            raw_args="查看哪个表格最大",
+        )
+
+        assert result.reply == "ok"
+        assert engine._route_skills.await_count == 2
+        first_call = engine._route_skills.await_args_list[0]
+        assert first_call.args[0] == "/guidance_only 查看哪个表格最大"
+        assert first_call.kwargs["slash_command"] == "guidance_only"
+        second_call = engine._route_skills.await_args_list[1]
+        assert second_call.args[0] == "查看哪个表格最大"
+        assert second_call.kwargs.get("slash_command") is None
+
+        loop_route = engine._tool_calling_loop.await_args.args[0]
+        assert loop_route.route_mode == "fallback"
+        assert any("Slash Guidance" in item for item in loop_route.system_contexts)
+
+        user_messages = [
+            msg.get("content", "")
+            for msg in engine.memory.get_messages()
+            if msg.get("role") == "user"
+        ]
+        assert user_messages == ["查看哪个表格最大"]
+
 
 class TestForkPathRemoved:
     """fork 链路已硬移除，仅保留显式 delegate_to_subagent。"""
@@ -3185,6 +3250,26 @@ class TestMCPScopeSelector:
         )
         assert "add_numbers" in scope
         assert mcp_tool in scope
+
+    def test_merge_with_loaded_skills_does_not_persist_manual_slash_skill(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._loaded_skill_names = {"history_skill"}
+        engine._skill_router = MagicMock()
+        engine._skill_router._loader = MagicMock()
+
+        route_result = SkillMatchResult(
+            skills_used=["manual_slash_skill"],
+            tool_scope=["add_numbers"],
+            route_mode="slash_direct",
+            system_contexts=["ctx"],
+            parameterized=True,
+        )
+        merged = engine._merge_with_loaded_skills(route_result)
+
+        assert merged == route_result
+        assert engine._loaded_skill_names == {"history_skill"}
 
     def test_scope_expands_mcp_all_selector(self) -> None:
         config = _make_config()

@@ -68,6 +68,26 @@ bash bench/run_3way_ab.sh --suites bench/cases/suite_01_基础读取类.json,ben
 .venv/bin/python bench/analyze_3way.py outputs/bench_3way_XXXXXXXX
 ```
 
+### 5. 启用 Engine 内部交互轨迹
+
+通过 `--trace` 标志或环境变量 `EXCELMANUS_BENCH_TRACE=1` 启用，记录 engine 向 agent 注入的系统提示、窗口感知增强、工具范围决策等内部交互数据。默认关闭，避免日志膨胀。
+
+```bash
+# CLI 方式
+.venv/bin/python -m excelmanus.bench \
+    --suite bench/cases/suite_basic.json \
+    --output-dir outputs/bench_trace \
+    --trace
+
+# 环境变量方式
+EXCELMANUS_BENCH_TRACE=1 .venv/bin/python -m excelmanus.bench \
+    --suite bench/cases/suite_basic.json \
+    --output-dir outputs/bench_trace
+
+# 三模式 AB 对比 + trace
+bash bench/run_3way_ab.sh --trace
+```
+
 ---
 
 ## 测试套件总览
@@ -237,6 +257,57 @@ outputs/bench_test/
 
 3. **header_row 准确性**：检查 `read_excel` 参数中的 `header_row` 是否与路由预览一致
 
+### Engine 内部交互轨迹（`--trace`）
+
+启用 `--trace` 后，输出 JSON 中会增加 `engine_trace` 字段，记录三类事件：
+
+| 事件类型 | 说明 |
+|----------|------|
+| `system_prompts_injected` | 每轮迭代注入的系统提示，分解为各组件（base、skill_context、window_perception、access_notice 等），含字符数和内容 |
+| `window_perception_enrichment` | 窗口感知增强工具返回值时的前后对比（原始字符数、增强字符数、增加的后缀内容） |
+| `tool_scope_resolved` | 每轮迭代可用的工具列表及数量 |
+
+单轮用例的 `engine_trace` 在顶层，多轮用例的 `engine_trace` 在各 `turns[].engine_trace` 中。
+
+```json
+{
+  "engine_trace": [
+    {
+      "timestamp": "2026-02-15T12:00:00+00:00",
+      "event": "system_prompts_injected",
+      "iteration": 1,
+      "data": {
+        "prompt_count": 3,
+        "total_chars": 12500,
+        "skill_context_count": 1,
+        "context_error": null,
+        "components": [
+          {"label": "base_system_prompt", "char_count": 8000, "content": "...", "truncated": false},
+          {"label": "skill_context_1", "char_count": 3000, "content": "...", "truncated": false},
+          {"label": "window_perception_notice", "char_count": 1500, "content": "...", "truncated": false}
+        ]
+      }
+    },
+    {
+      "event": "tool_scope_resolved",
+      "iteration": 1,
+      "data": {"tool_count": 15, "tools": ["read_excel", "write_excel", "..."]}
+    },
+    {
+      "event": "window_perception_enrichment",
+      "iteration": 1,
+      "data": {
+        "tool_name": "read_excel",
+        "original_chars": 2000,
+        "enriched_chars": 2800,
+        "added_chars": 800,
+        "enriched_suffix": "..."
+      }
+    }
+  ]
+}
+```
+
 ---
 
 ## 外部 Benchmark 数据集
@@ -287,6 +358,7 @@ spreadsheetbench_verified_400/
 | `EXCELMANUS_WINDOW_PERCEPTION_ENABLED` | `0` / `1` | 窗口感知开关 |
 | `EXCELMANUS_WINDOW_RETURN_MODE` | `enriched` / `anchored` | 窗口返回模式 |
 | `EXCELMANUS_BENCH_DISABLE_PLAN_INTERCEPT` | `1` | 跳过计划拦截门禁 |
+| `EXCELMANUS_BENCH_TRACE` | `0` / `1` | Engine 内部交互轨迹记录（默认关闭） |
 
 ---
 
