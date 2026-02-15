@@ -1,8 +1,8 @@
 import pytest
 
 from excelmanus.window_perception.apply import DeltaReject, apply_delta
-from excelmanus.window_perception.delta import ExplorerDelta, SheetReadDelta
-from excelmanus.window_perception.domain import ExplorerWindow
+from excelmanus.window_perception.delta import ExplorerDelta, SheetReadDelta, SheetStyleDelta
+from excelmanus.window_perception.domain import ExplorerWindow, SheetWindow
 
 
 def test_apply_delta_rejects_kind_mismatch() -> None:
@@ -14,3 +14,27 @@ def test_apply_delta_rejects_kind_mismatch() -> None:
 
     # Keep import coverage for both delta contracts in this first task.
     assert ExplorerDelta(directory="/tmp").kind == "explorer"
+
+
+def test_apply_delta_updates_sheet_style_fields() -> None:
+    window = SheetWindow.new(
+        id="sheet_1",
+        title="s",
+        file_path="a.xlsx",
+        sheet_name="Sheet1",
+    )
+    delta = SheetStyleDelta(
+        style_summary="bold+fill",
+        column_widths={"A": 12.0},
+        row_heights={"1": 24.0},
+        merged_ranges=["A1:B1"],
+        conditional_effects=["A1:A10 color-scale"],
+    )
+
+    apply_delta(window, delta)
+
+    assert window.style_summary == "bold+fill"
+    assert window.column_widths == {"A": 12.0}
+    assert window.row_heights == {"1": 24.0}
+    assert window.merged_ranges == ["A1:B1"]
+    assert window.conditional_effects == ["A1:A10 color-scale"]

@@ -20,7 +20,7 @@ from .advisor_context import AdvisorContext
 from .budget import WindowBudgetAllocator
 from .confirmation import build_confirmation_record, serialize_confirmation
 from .delta import ExplorerDelta, SheetReadDelta
-from .domain import ExplorerWindow, SheetWindow
+from .domain import ExplorerWindow, SheetWindow, Window
 from .extractor import (
     compute_scroll_position,
     extract_column_widths,
@@ -54,7 +54,7 @@ from .ingest import (
     summarize_shape,
 )
 from .identity import ExplorerIdentity, SheetIdentity
-from .locator import WindowLocator
+from .locator import LocatorReject, WindowLocator
 from .models import (
     CachedRange,
     DetailLevel,
@@ -63,7 +63,6 @@ from .models import (
     PerceptionBudget,
     Viewport,
     WindowRenderAction,
-    WindowState,
     WindowType,
 )
 from .renderer import (
@@ -87,7 +86,7 @@ from .rules import classify_tool
 from .strategies import get_strategy
 
 AsyncAdvisorRunner = Callable[
-    [list[WindowState], str | None, PerceptionBudget, AdvisorContext],
+    [list[Window], str | None, PerceptionBudget, AdvisorContext],
     Awaitable[LifecyclePlan | None],
 ]
 
@@ -182,7 +181,7 @@ class WindowPerceptionManager:
         self._advisor: WindowLifecycleAdvisor = (
             RuleBasedAdvisor() if self._advisor_mode == "rules" else HybridAdvisor()
         )
-        self._windows: dict[str, WindowState] = {}
+        self._windows: dict[str, Window] = {}
         self._explorer_index: dict[str, str] = {}
         self._sheet_index: dict[tuple[str, str], str] = {}
         self._locator = WindowLocator()
@@ -219,11 +218,17 @@ class WindowPerceptionManager:
             model_mode_overrides=adaptive_model_mode_overrides or {},
         )
         self._turn_hint_intent_hint: str = ""
+        self._last_identity_reject_code: str | None = None
 
     @property
     def enabled(self) -> bool:
         """是否启用窗口感知层。"""
         return self._enabled
+
+    @property
+    def last_identity_reject_code(self) -> str | None:
+        """最近一次 identity/locator 显式拒绝码。"""
+        return self._last_identity_reject_code
 
     def bind_async_advisor_runner(self, runner: AsyncAdvisorRunner | None) -> None:
         """绑定异步小模型顾问回调。"""
@@ -263,6 +268,7 @@ class WindowPerceptionManager:
         self._cached_small_model_plan = None
         self._repeat_detector = RepeatDetector()
         self._adaptive_selector.reset()
+        self._last_identity_reject_code = None
 
     def observe_subagent_context(
         self,
@@ -284,14 +290,13 @@ class WindowPerceptionManager:
             key = (normalized, "")
             window_id = self._sheet_index.get(key)
             if window_id is None:
-                window = WindowState(
+                window = SheetWindow.new(
                     id=self._new_id("sheet"),
-                    type=WindowType.SHEET,
                     title=normalized,
                     file_path=normalized,
                     sheet_name="",
-                    summary=summary,
                 )
+                window.summary = summary
                 self._windows[window.id] = window
                 self._sheet_index[key] = window.id
                 window_id = window.id
@@ -618,7 +623,7 @@ class WindowPerceptionManager:
     def generate_confirmation(
         self,
         *,
-        window: WindowState,
+        window: Window,
         tool_name: str,
         mode: str = "anchored",
         repeat_warning: bool = False,
@@ -663,13 +668,17 @@ class WindowPerceptionManager:
         window_type: WindowType,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
-    ) -> WindowState | None:
+    ) -> Window | None:
         """Locate window using identity index first, then legacy indexes."""
 
         if window_type == WindowType.EXPLORER:
             directory = normalize_path(extract_directory(arguments, result_json)) or "."
             identity = ExplorerIdentity(directory_norm=directory)
-            window_id = self._locator.find(identity)
+            try:
+                window_id = self._locator.find(identity, expected_kind=WindowType.EXPLORER.value)
+            except LocatorReject as exc:
+                self._last_identity_reject_code = exc.code
+                return None
             if window_id:
                 return self._windows.get(window_id)
             return self._resolve_target_window(window_type, arguments, result_json)
@@ -688,7 +697,11 @@ class WindowPerceptionManager:
                 file_path_norm=file_path,
                 sheet_name_norm=sheet_name.lower(),
             )
-            window_id = self._locator.find(identity)
+            try:
+                window_id = self._locator.find(identity, expected_kind=WindowType.SHEET.value)
+            except LocatorReject as exc:
+                self._last_identity_reject_code = exc.code
+                return None
             if window_id:
                 return self._windows.get(window_id)
         return self._resolve_target_window(window_type, arguments, result_json)
@@ -698,7 +711,7 @@ class WindowPerceptionManager:
         window_type: WindowType,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
-    ) -> WindowState | None:
+    ) -> Window | None:
         if window_type == WindowType.EXPLORER:
             # 修复：从 _explorer_index 查找，而非返回 active sheet 窗口
             directory = normalize_path(extract_directory(arguments, result_json)) or "."
@@ -730,7 +743,7 @@ class WindowPerceptionManager:
     def _apply_delta_pipeline(
         self,
         *,
-        window: WindowState,
+        window: Window,
         canonical_tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -743,9 +756,7 @@ class WindowPerceptionManager:
             arguments=arguments,
             result_json=result_json,
         )
-        domain_window = self._to_domain_window(window)
-        apply_delta(domain_window, delta)
-        self._append_delta_audit(window, delta)
+        apply_delta(window, delta)
         self._apply_ingest(
             window=window,
             canonical_tool_name=canonical_tool_name,
@@ -756,7 +767,7 @@ class WindowPerceptionManager:
     def _build_window_delta(
         self,
         *,
-        window: WindowState,
+        window: Window,
         canonical_tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -785,46 +796,29 @@ class WindowPerceptionManager:
             change_summary=canonical_tool_name,
         )
 
-    @staticmethod
-    def _to_domain_window(window: WindowState) -> ExplorerWindow | SheetWindow:
-        if window.type == WindowType.EXPLORER:
-            return ExplorerWindow.new(
-                id=window.id,
-                title=window.title or "资源管理器",
-                directory=window.directory or ".",
-            )
-        return SheetWindow.new(
-            id=window.id,
-            title=window.title or "表格窗口",
-            file_path=window.file_path or "",
-            sheet_name=window.sheet_name or "",
-        )
-
-    @staticmethod
-    def _append_delta_audit(window: WindowState, delta: ExplorerDelta | SheetReadDelta) -> None:
-        audit = window.metadata.get("delta_audit")
-        if not isinstance(audit, list):
-            audit = []
-            window.metadata["delta_audit"] = audit
-        audit.append({"kind": delta.kind})
-
-    def _register_window_identity(self, window: WindowState) -> None:
+    def _register_window_identity(self, window: Window) -> None:
         if window.type == WindowType.EXPLORER:
             directory = normalize_path(window.directory or "") or "."
-            self._locator.register(window.id, ExplorerIdentity(directory_norm=directory))
+            try:
+                self._locator.register(window.id, ExplorerIdentity(directory_norm=directory))
+            except LocatorReject as exc:
+                self._last_identity_reject_code = exc.code
             return
         file_path = normalize_path(window.file_path or "")
         sheet_name = str(window.sheet_name or "").strip().lower()
         if file_path and sheet_name:
-            self._locator.register(
-                window.id,
-                SheetIdentity(file_path_norm=file_path, sheet_name_norm=sheet_name),
-            )
+            try:
+                self._locator.register(
+                    window.id,
+                    SheetIdentity(file_path_norm=file_path, sheet_name_norm=sheet_name),
+                )
+            except LocatorReject as exc:
+                self._last_identity_reject_code = exc.code
 
     def _apply_ingest(
         self,
         *,
-        window: WindowState,
+        window: Window,
         canonical_tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -957,7 +951,7 @@ class WindowPerceptionManager:
 
     @staticmethod
     def _append_operation(
-        window: WindowState,
+        window: Window,
         tool_name: str,
         arguments: dict[str, Any],
         success: bool,
@@ -975,7 +969,7 @@ class WindowPerceptionManager:
             window.operation_history = window.operation_history[-max_entries:]
 
     @staticmethod
-    def _append_change(window: WindowState, record) -> None:
+    def _append_change(window: Window, record) -> None:
         window.change_log.append(record)
         max_entries = max(1, int(window.max_change_records))
         if len(window.change_log) > max_entries:
@@ -986,15 +980,14 @@ class WindowPerceptionManager:
         *,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
-    ) -> WindowState:
+    ) -> Window:
         directory = normalize_path(extract_directory(arguments, result_json)) or "."
         entries = extract_explorer_entries(result_json)
 
         window_id = self._explorer_index.get(directory)
         if window_id is None:
-            window = WindowState(
+            window = ExplorerWindow.new(
                 id=self._new_id("explorer"),
-                type=WindowType.EXPLORER,
                 title="资源管理器",
                 directory=directory,
             )
@@ -1005,7 +998,7 @@ class WindowPerceptionManager:
 
         self._wake_window(window)
         window.directory = directory
-        window.metadata["entries"] = entries
+        window.entries = [str(item) for item in entries]
         window.summary = f"{len(entries)} 个可见项" if entries else "目录视图"
         self._register_window_identity(window)
         self._touch(window)
@@ -1018,7 +1011,7 @@ class WindowPerceptionManager:
         canonical_tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
-    ) -> WindowState:
+    ) -> Window:
         file_path = normalize_path(extract_file_path(arguments, result_json))
         sheet_name = extract_sheet_name(arguments, result_json)
 
@@ -1032,12 +1025,11 @@ class WindowPerceptionManager:
         key = (file_path, sheet_name)
         window_id = self._sheet_index.get(key)
         if window_id is None:
-            window = WindowState(
+            window = SheetWindow.new(
                 id=self._new_id("sheet"),
-                type=WindowType.SHEET,
                 title=f"{file_path}/{sheet_name}" if file_path or sheet_name else "表格窗口",
-                file_path=file_path or None,
-                sheet_name=sheet_name or None,
+                file_path=file_path or "",
+                sheet_name=sheet_name or "",
             )
             self._windows[window.id] = window
             self._sheet_index[key] = window.id
@@ -1083,7 +1075,7 @@ class WindowPerceptionManager:
             total_rows=viewport.total_rows,
             total_cols=viewport.total_cols,
         )
-        window.metadata["scroll_position"] = scroll_position
+        window.scroll_position = scroll_position
 
         preview = extract_preview_rows(result_json)
         if preview:
@@ -1101,7 +1093,7 @@ class WindowPerceptionManager:
 
         status_bar = extract_status_bar(window.preview_rows)
         if status_bar:
-            window.metadata["status_bar"] = status_bar
+            window.status_bar = status_bar
 
         freeze = extract_freeze_panes(result_json)
         if freeze:
@@ -1109,30 +1101,30 @@ class WindowPerceptionManager:
 
         column_widths = extract_column_widths(result_json, sheet_name=window.sheet_name or "")
         if column_widths:
-            window.metadata["column_widths"] = column_widths
+            window.column_widths = column_widths
 
         row_heights = extract_row_heights(result_json)
         if row_heights:
-            window.metadata["row_heights"] = row_heights
+            window.row_heights = row_heights
 
         merged_ranges = extract_merged_ranges(result_json)
         if merged_ranges:
-            window.metadata["merged_ranges"] = merged_ranges
+            window.merged_ranges = [str(item).strip().upper() for item in merged_ranges if str(item).strip()]
         add_ranges, remove_ranges = extract_merged_range_delta(result_json)
         if add_ranges or remove_ranges:
             existing = {
                 str(item).strip().upper()
-                for item in window.metadata.get("merged_ranges", [])
+                for item in window.merged_ranges
                 if str(item).strip()
             }
             existing.update(add_ranges)
             for removed in remove_ranges:
                 existing.discard(removed)
-            window.metadata["merged_ranges"] = sorted(existing)
+            window.merged_ranges = sorted(existing)
 
         conditional_effects = extract_conditional_effects(result_json)
         if conditional_effects:
-            window.metadata["conditional_effects"] = conditional_effects
+            window.conditional_effects = [str(item) for item in conditional_effects]
 
         style_summary = extract_style_summary(result_json)
         if style_summary:
@@ -1149,10 +1141,10 @@ class WindowPerceptionManager:
             if row_heights:
                 window.summary = f"最近调整行高: {len(row_heights)}行"
         elif canonical_tool_name in {"merge_cells", "unmerge_cells"}:
-            merged_total = len(window.metadata.get("merged_ranges", []))
+            merged_total = len(window.merged_ranges)
             window.summary = f"当前合并区域: {merged_total}处"
         elif canonical_tool_name in {"add_color_scale", "add_data_bar", "add_conditional_rule"}:
-            effect_total = len(window.metadata.get("conditional_effects", []))
+            effect_total = len(window.conditional_effects)
             window.summary = f"条件格式视觉效果: {effect_total}条"
         elif canonical_tool_name in {"copy_sheet", "rename_sheet", "delete_sheet", "create_sheet", "list_sheets", "describe_sheets"}:
             window.summary = "工作表元信息已更新"
@@ -1388,7 +1380,7 @@ class WindowPerceptionManager:
             return is_write_like_tool(normalized)
         return normalized in _WRITE_LIKE_TOOLS
 
-    def _reset_repeat_counter_after_write(self, window: WindowState) -> None:
+    def _reset_repeat_counter_after_write(self, window: Window) -> None:
         try:
             file_path = str(window.file_path or "").strip()
             sheet_name = str(window.sheet_name or "").strip()
@@ -1402,7 +1394,7 @@ class WindowPerceptionManager:
         *,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
-        window: WindowState | None = None,
+        window: Window | None = None,
     ) -> tuple[str, str, str] | None:
         file_path = normalize_path(extract_file_path(arguments, result_json))
         sheet_name = str(extract_sheet_name(arguments, result_json) or "").strip()
@@ -1470,7 +1462,7 @@ class WindowPerceptionManager:
         )
 
     @staticmethod
-    def _set_current_viewport_range(window: WindowState, target_range: str) -> None:
+    def _set_current_viewport_range(window: Window, target_range: str) -> None:
         selected = False
         for cached in window.cached_ranges:
             matches = (
@@ -1507,7 +1499,7 @@ class WindowPerceptionManager:
     def _resolve_window_intent(
         self,
         *,
-        window: WindowState | None,
+        window: Window | None,
         canonical_tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -1602,7 +1594,7 @@ class WindowPerceptionManager:
     def _apply_window_intent(
         self,
         *,
-        window: WindowState,
+        window: Window,
         tag: IntentTag,
         confidence: float,
         source: str,
@@ -1711,7 +1703,7 @@ class WindowPerceptionManager:
             return [str(payload)]
         return []
 
-    def _task_type_from_windows(self, windows: list[WindowState]) -> str:
+    def _task_type_from_windows(self, windows: list[Window]) -> str:
         hint_tag, hint_conf = self._intent_from_user(self._turn_hint_intent_hint or self._turn_hint_user_intent_summary)
         if hint_tag != IntentTag.GENERAL and hint_conf >= 0.5:
             if self._rule_engine_version == "v2":
@@ -1732,7 +1724,7 @@ class WindowPerceptionManager:
                 return _INTENT_TO_TASK_TYPE.get(window.intent_tag, "GENERAL_BROWSE")
         return "GENERAL_BROWSE"
 
-    def _build_intent_profile(self, window: WindowState, *, level: str) -> dict[str, Any]:
+    def _build_intent_profile(self, window: Window, *, level: str) -> dict[str, Any]:
         intent = window.intent_tag
         profile: dict[str, Any] = {
             "intent": intent.value,
@@ -1781,7 +1773,7 @@ class WindowPerceptionManager:
         return max(1, int(self._notice_turn))
 
     @staticmethod
-    def _sync_window_schema_columns(window: WindowState) -> None:
+    def _sync_window_schema_columns(window: Window) -> None:
         if window.schema and not window.columns:
             window.columns = list(window.schema)
         elif window.columns and not window.schema:
@@ -1833,7 +1825,7 @@ class WindowPerceptionManager:
         if active.last_access_seq <= self._last_notice_operation_seq:
             self._active_window_id = None
 
-    def _touch(self, window: WindowState) -> None:
+    def _touch(self, window: Window) -> None:
         window.last_access_seq = self._operation_seq
         window.idle_turns = 0
 
@@ -1877,7 +1869,7 @@ class WindowPerceptionManager:
             self._active_window_id = None
 
     @staticmethod
-    def _wake_window(window: WindowState) -> None:
+    def _wake_window(window: Window) -> None:
         window.dormant = False
         if window.detail_level == DetailLevel.NONE:
             window.detail_level = DetailLevel.FULL
@@ -1894,7 +1886,7 @@ class WindowPerceptionManager:
     def _schedule_async_advisor(
         self,
         *,
-        active_windows: list[WindowState],
+        active_windows: list[Window],
         context: AdvisorContext,
     ) -> None:
         if self._advisor_mode != "hybrid":
@@ -1935,7 +1927,7 @@ class WindowPerceptionManager:
     async def _run_async_advisor(
         self,
         *,
-        windows: list[WindowState],
+        windows: list[Window],
         active_window_id: str | None,
         context: AdvisorContext,
     ) -> None:
@@ -1986,7 +1978,7 @@ class WindowPerceptionManager:
         self,
         *,
         context: AdvisorContext,
-        active_windows: list[WindowState],
+        active_windows: list[Window],
     ) -> bool:
         if context.is_new_task:
             return True
