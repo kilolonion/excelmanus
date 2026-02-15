@@ -911,3 +911,39 @@ class TestModelsRouterHooksAndMcpConfig:
         monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "maybe")
         with pytest.raises(ConfigError, match="EXCELMANUS_MCP_SHARED_MANAGER"):
             load_config()
+
+
+class TestAutoActivateDefaultSkill:
+    """默认技能预激活配置项测试。"""
+
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_default_is_true(self, monkeypatch) -> None:
+        """auto_activate_default_skill 默认值为 True。"""
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.auto_activate_default_skill is True
+
+    def test_env_false(self, monkeypatch) -> None:
+        """环境变量可关闭 auto_activate_default_skill。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL", "0")
+        cfg = load_config()
+        assert cfg.auto_activate_default_skill is False
+
+    def test_env_true_explicit(self, monkeypatch) -> None:
+        """环境变量显式开启。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL", "true")
+        cfg = load_config()
+        assert cfg.auto_activate_default_skill is True
+
+    def test_invalid_raises_error(self, monkeypatch) -> None:
+        """非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL", "maybe")
+        with pytest.raises(ConfigError, match="EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL"):
+            load_config()

@@ -112,6 +112,8 @@ class ExcelManusConfig:
     window_intent_repeat_warn_threshold: int = 2
     window_intent_repeat_trip_threshold: int = 3
     window_rule_engine_version: str = "v1"
+    # 默认技能预激活：非斜杠路由时自动激活 general_excel
+    auto_activate_default_skill: bool = True
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -682,6 +684,12 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION")
     )
 
+    auto_activate_default_skill = _parse_bool(
+        os.environ.get("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL"),
+        "EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL",
+        True,
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -757,5 +765,6 @@ def load_config() -> ExcelManusConfig:
         window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
         window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
         window_rule_engine_version=window_rule_engine_version,
+        auto_activate_default_skill=auto_activate_default_skill,
         models=models,
     )
