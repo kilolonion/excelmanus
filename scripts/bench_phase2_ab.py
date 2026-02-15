@@ -67,9 +67,7 @@ GROUPS: dict[str, dict[str, Any]] = {
 }
 
 DEFAULT_SUITES = [
-    "bench/cases/suite_phase2_data.json",
-    "bench/cases/suite_phase2_visual.json",
-    "bench/cases/suite_phase2_file_code.json",
+    "bench/cases/suite_phase2_quick.json",
 ]
 
 # ── 工具函数 ──────────────────────────────────────────────
