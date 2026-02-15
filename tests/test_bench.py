@@ -227,7 +227,7 @@ def test_run_suite_serial_mode_enables_render(tmp_path: Path) -> None:
     ]
     render_flags: list[bool] = []
 
-    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False):
+    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False, output_dir=None):
         render_flags.append(render_enabled)
         return _make_result(case.id)
 
@@ -255,7 +255,7 @@ def test_run_suite_concurrent_mode_disables_render_and_keeps_order(tmp_path: Pat
     delays = {"c1": 0.05, "c2": 0.01, "c3": 0.02}
     render_flags: list[bool] = []
 
-    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False):
+    async def _fake_run_case(case, config, *, render_enabled, trace_enabled=False, output_dir=None):
         render_flags.append(render_enabled)
         await asyncio.sleep(delays[case.id])
         return _make_result(case.id)
