@@ -2,7 +2,8 @@
 
 from excelmanus.window_perception.advisor import LifecyclePlan, WindowAdvice
 from excelmanus.window_perception.budget import WindowBudgetAllocator
-from excelmanus.window_perception.models import PerceptionBudget, WindowRenderAction, WindowState, WindowType
+from excelmanus.window_perception.models import PerceptionBudget, WindowRenderAction, WindowType
+from tests.window_factories import make_window
 
 
 class TestWindowBudget:
@@ -11,8 +12,8 @@ class TestWindowBudget:
     def test_active_window_kept_when_budget_sufficient(self) -> None:
         budget = PerceptionBudget(system_budget_tokens=1000, max_windows=3)
         allocator = WindowBudgetAllocator(budget)
-        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", last_access_seq=10)
-        w2 = WindowState(id="w2", type=WindowType.SHEET, title="B", last_access_seq=9)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", last_access_seq=10)
+        w2 = make_window(id="w2", type=WindowType.SHEET, title="B", last_access_seq=9)
 
         snapshots = allocator.allocate(
             windows=[w1, w2],
@@ -27,8 +28,8 @@ class TestWindowBudget:
     def test_non_active_windows_can_be_closed_under_tight_budget(self) -> None:
         budget = PerceptionBudget(system_budget_tokens=1, max_windows=2)
         allocator = WindowBudgetAllocator(budget)
-        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", last_access_seq=2)
-        w2 = WindowState(id="w2", type=WindowType.SHEET, title="B", last_access_seq=1)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", last_access_seq=2)
+        w2 = make_window(id="w2", type=WindowType.SHEET, title="B", last_access_seq=1)
 
         snapshots = allocator.allocate(
             windows=[w1, w2],
@@ -42,7 +43,7 @@ class TestWindowBudget:
     def test_background_tier_uses_background_renderer(self) -> None:
         budget = PerceptionBudget(system_budget_tokens=1000, max_windows=2)
         allocator = WindowBudgetAllocator(budget)
-        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=2)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=2)
 
         snapshots = allocator.allocate(
             windows=[w1],
@@ -62,7 +63,7 @@ class TestWindowBudget:
     def test_terminated_tier_closes_window(self) -> None:
         budget = PerceptionBudget(system_budget_tokens=1000, max_windows=2)
         allocator = WindowBudgetAllocator(budget)
-        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=6)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=6)
 
         snapshots = allocator.allocate(
             windows=[w1],
@@ -81,7 +82,7 @@ class TestWindowBudget:
     def test_hybrid_lifecycle_plan_uses_advised_tier(self) -> None:
         budget = PerceptionBudget(system_budget_tokens=1000, max_windows=2)
         allocator = WindowBudgetAllocator(budget)
-        w1 = WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=1)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=1)
 
         snapshots = allocator.allocate(
             windows=[w1],

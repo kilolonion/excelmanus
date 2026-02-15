@@ -1,5 +1,6 @@
 """WURM ingest 模块测试。"""
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.ingest import (
     deduplicated_merge,
     extract_columns,
@@ -10,11 +11,12 @@ from excelmanus.window_perception.ingest import (
     is_adjacent_or_overlapping,
     union_range,
 )
-from excelmanus.window_perception.models import CachedRange, ColumnDef, DetailLevel, WindowState, WindowType
+from excelmanus.window_perception.models import CachedRange, ColumnDef, DetailLevel, WindowType
+from tests.window_factories import make_window
 
 
-def _build_window() -> WindowState:
-    return WindowState(
+def _build_window() -> Window:
+    return make_window(
         id="W1",
         type=WindowType.SHEET,
         title="sheet",

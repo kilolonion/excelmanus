@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.focus import FocusService
 from excelmanus.window_perception.manager import WindowPerceptionManager
 from excelmanus.window_perception.models import (
@@ -13,17 +14,17 @@ from excelmanus.window_perception.models import (
     DetailLevel,
     IntentTag,
     PerceptionBudget,
-    WindowState,
     WindowType,
 )
+from tests.window_factories import make_window
 
 
-def _build_manager_and_window() -> tuple[WindowPerceptionManager, WindowState]:
+def _build_manager_and_window() -> tuple[WindowPerceptionManager, Window]:
     manager = WindowPerceptionManager(
         enabled=True,
         budget=PerceptionBudget(),
     )
-    window = WindowState(
+    window = make_window(
         id="sheet_1",
         type=WindowType.SHEET,
         title="sales.xlsx/Q1",

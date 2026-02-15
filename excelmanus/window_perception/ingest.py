@@ -7,7 +7,8 @@ from typing import Any
 
 from openpyxl.utils.cell import get_column_letter, range_boundaries
 
-from .models import CachedRange, ChangeRecord, ColumnDef, DetailLevel, WindowState
+from .domain import Window
+from .models import CachedRange, ChangeRecord, ColumnDef, DetailLevel
 
 
 def extract_data_rows(result_json: dict[str, Any] | None, tool_name: str) -> list[dict[str, Any]]:
@@ -65,7 +66,7 @@ def summarize_shape(
 
 
 def ingest_read_result(
-    window: WindowState,
+    window: Window,
     *,
     new_range: str,
     new_rows: list[dict[str, Any]],
@@ -131,7 +132,7 @@ def ingest_read_result(
 
 
 def ingest_write_result(
-    window: WindowState,
+    window: Window,
     *,
     target_range: str,
     result_json: dict[str, Any] | None,
@@ -156,7 +157,7 @@ def ingest_write_result(
 
 
 def ingest_filter_result(
-    window: WindowState,
+    window: Window,
     *,
     filter_condition: dict[str, Any],
     filtered_rows: list[dict[str, Any]],
@@ -280,7 +281,7 @@ def _infer_type(values: Iterable[Any], *, fallback_idx: int) -> str:
     return "unknown"
 
 
-def _trim_cached_ranges(window: WindowState) -> None:
+def _trim_cached_ranges(window: Window) -> None:
     total_rows = sum(len(cached.rows) for cached in window.cached_ranges)
     max_rows = max(1, int(window.max_cached_rows))
     while total_rows > max_rows:
@@ -292,7 +293,7 @@ def _trim_cached_ranges(window: WindowState) -> None:
         window.cached_ranges.remove(oldest)
 
 
-def _rebuild_data_buffer(window: WindowState) -> None:
+def _rebuild_data_buffer(window: Window) -> None:
     buffer: list[dict[str, Any]] = []
     for cached in window.cached_ranges:
         buffer.extend(cached.rows)
@@ -311,7 +312,7 @@ def _to_matrix(value: Any) -> list[list[Any]]:
     return matrix
 
 
-def _apply_preview_patch(window: WindowState, *, target_range: str, matrix: list[list[Any]]) -> list[int]:
+def _apply_preview_patch(window: Window, *, target_range: str, matrix: list[list[Any]]) -> list[int]:
     column_defs = window.columns or window.schema
     if not column_defs:
         return []

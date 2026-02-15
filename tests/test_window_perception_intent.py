@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.manager import WindowPerceptionManager
-from excelmanus.window_perception.models import IntentTag, PerceptionBudget, WindowState, WindowType
+from excelmanus.window_perception.models import IntentTag, PerceptionBudget, WindowType
+from tests.window_factories import make_window
 
 
 def _build_manager() -> WindowPerceptionManager:
@@ -13,8 +15,8 @@ def _build_manager() -> WindowPerceptionManager:
     )
 
 
-def _build_window() -> WindowState:
-    return WindowState(
+def _build_window() -> Window:
+    return make_window(
         id="sheet_1",
         type=WindowType.SHEET,
         title="sales.xlsx/Q1",
@@ -93,4 +95,3 @@ def test_formula_intent_from_write_arguments() -> None:
     )
     assert decision["tag"] == IntentTag.FORMULA
     assert decision["source"] == "tool_rule"
-

@@ -1,8 +1,9 @@
 """窗口感知小模型协议测试。"""
 
 from excelmanus.window_perception.advisor_context import AdvisorContext
-from excelmanus.window_perception.models import PerceptionBudget, Viewport, WindowState, WindowType
+from excelmanus.window_perception.models import PerceptionBudget, Viewport, WindowType
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
+from tests.window_factories import make_window
 
 
 class TestWindowPerceptionSmallModel:
@@ -10,7 +11,7 @@ class TestWindowPerceptionSmallModel:
 
     def test_build_messages_contains_required_fields(self) -> None:
         windows = [
-            WindowState(
+            make_window(
                 id="sheet_1",
                 type=WindowType.SHEET,
                 title="A",

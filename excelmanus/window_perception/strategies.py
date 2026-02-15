@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from .domain import ExplorerWindow, SheetWindow, Window
 from .extractor import (
     extract_directory,
     extract_explorer_entries,
@@ -22,7 +23,6 @@ from .models import (
     ChangeRecord,
     DetailLevel,
     IntentTag,
-    WindowState,
     WindowType,
 )
 
@@ -71,7 +71,7 @@ class WindowTypeStrategy(Protocol):
 
     def build_inline_confirmation(
         self,
-        window: WindowState,
+        window: Window,
         tool_name: str,
         result_json: dict[str, Any] | None,
     ) -> str:
@@ -80,7 +80,7 @@ class WindowTypeStrategy(Protocol):
 
     def apply_ingest(
         self,
-        window: WindowState,
+        window: Window,
         tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -91,7 +91,7 @@ class WindowTypeStrategy(Protocol):
 
     def render_full(
         self,
-        window: WindowState,
+        window: Window,
         *,
         max_rows: int,
         current_iteration: int,
@@ -102,7 +102,7 @@ class WindowTypeStrategy(Protocol):
 
     def render_background(
         self,
-        window: WindowState,
+        window: Window,
         *,
         intent_profile: dict[str, Any] | None,
     ) -> str:
@@ -111,7 +111,7 @@ class WindowTypeStrategy(Protocol):
 
     def render_minimized(
         self,
-        window: WindowState,
+        window: Window,
         *,
         intent_profile: dict[str, Any] | None,
     ) -> str:
@@ -216,7 +216,7 @@ class ExplorerStrategy:
 
     def build_inline_confirmation(
         self,
-        window: WindowState,
+        window: ExplorerWindow,
         tool_name: str,
         result_json: dict[str, Any] | None,
     ) -> str:
@@ -236,7 +236,7 @@ class ExplorerStrategy:
 
     def apply_ingest(
         self,
-        window: WindowState,
+        window: ExplorerWindow,
         tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -244,7 +244,7 @@ class ExplorerStrategy:
     ) -> None:
         """更新 explorer 窗口的 entries 和元数据。"""
         entries = _format_explorer_entries_ascii(result_json)
-        window.metadata["entries"] = entries
+        window.entries = entries
         window.total_rows = len(entries)
         window.total_cols = 0
         window.current_iteration = iteration
@@ -272,7 +272,7 @@ class ExplorerStrategy:
 
     def render_full(
         self,
-        window: WindowState,
+        window: ExplorerWindow,
         *,
         max_rows: int = 25,
         current_iteration: int = 0,
@@ -285,8 +285,8 @@ class ExplorerStrategy:
             f"[ACTIVE -- {title}]",
             f"path: {directory}",
         ]
-        entries = window.metadata.get("entries")
-        if isinstance(entries, list) and entries:
+        entries = window.entries
+        if entries:
             for entry in entries[:15]:
                 lines.append(str(entry))
             if len(entries) > 15:
@@ -297,7 +297,7 @@ class ExplorerStrategy:
 
     def render_background(
         self,
-        window: WindowState,
+        window: ExplorerWindow,
         *,
         intent_profile: dict[str, Any] | None = None,
     ) -> str:
@@ -308,7 +308,7 @@ class ExplorerStrategy:
 
     def render_minimized(
         self,
-        window: WindowState,
+        window: ExplorerWindow,
         *,
         intent_profile: dict[str, Any] | None = None,
     ) -> str:
@@ -333,7 +333,7 @@ class SheetStrategy:
 
     def build_inline_confirmation(
         self,
-        window: WindowState,
+        window: SheetWindow,
         tool_name: str,
         result_json: dict[str, Any] | None,
     ) -> str:
@@ -369,7 +369,7 @@ class SheetStrategy:
 
     def apply_ingest(
         self,
-        window: WindowState,
+        window: SheetWindow,
         tool_name: str,
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
@@ -476,7 +476,7 @@ class SheetStrategy:
 
     def render_full(
         self,
-        window: WindowState,
+        window: SheetWindow,
         *,
         max_rows: int = 25,
         current_iteration: int = 0,
@@ -494,7 +494,7 @@ class SheetStrategy:
 
     def render_background(
         self,
-        window: WindowState,
+        window: SheetWindow,
         *,
         intent_profile: dict[str, Any] | None = None,
     ) -> str:
@@ -505,7 +505,7 @@ class SheetStrategy:
 
     def render_minimized(
         self,
-        window: WindowState,
+        window: SheetWindow,
         *,
         intent_profile: dict[str, Any] | None = None,
     ) -> str:

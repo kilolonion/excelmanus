@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.manager import WindowPerceptionManager
 from excelmanus.window_perception.models import (
     CachedRange,
     DetailLevel,
     IntentTag,
     PerceptionBudget,
-    WindowState,
     WindowType,
 )
+from tests.window_factories import make_window
 
 
 def _build_manager() -> WindowPerceptionManager:
@@ -20,8 +21,8 @@ def _build_manager() -> WindowPerceptionManager:
     )
 
 
-def _build_sheet_window(window_id: str) -> WindowState:
-    return WindowState(
+def _build_sheet_window(window_id: str) -> Window:
+    return make_window(
         id=window_id,
         type=WindowType.SHEET,
         title=f"{window_id}.xlsx/Q1",

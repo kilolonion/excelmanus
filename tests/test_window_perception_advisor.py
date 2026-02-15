@@ -2,7 +2,8 @@
 
 from excelmanus.window_perception.advisor import HybridAdvisor, LifecyclePlan, RuleBasedAdvisor, WindowAdvice
 from excelmanus.window_perception.advisor_context import AdvisorContext
-from excelmanus.window_perception.models import PerceptionBudget, WindowState, WindowType
+from excelmanus.window_perception.models import PerceptionBudget, WindowType
+from tests.window_factories import make_window
 
 
 class TestRuleBasedAdvisor:
@@ -16,10 +17,10 @@ class TestRuleBasedAdvisor:
             terminate_after_idle=5,
         )
         windows = [
-            WindowState(id="w0", type=WindowType.SHEET, title="A", idle_turns=0),
-            WindowState(id="w1", type=WindowType.SHEET, title="B", idle_turns=1),
-            WindowState(id="w3", type=WindowType.SHEET, title="C", idle_turns=3),
-            WindowState(id="w5", type=WindowType.SHEET, title="D", idle_turns=5),
+            make_window(id="w0", type=WindowType.SHEET, title="A", idle_turns=0),
+            make_window(id="w1", type=WindowType.SHEET, title="B", idle_turns=1),
+            make_window(id="w3", type=WindowType.SHEET, title="C", idle_turns=3),
+            make_window(id="w5", type=WindowType.SHEET, title="D", idle_turns=5),
         ]
 
         plan = advisor.advise(
@@ -38,7 +39,7 @@ class TestRuleBasedAdvisor:
     def test_active_window_always_active(self) -> None:
         advisor = RuleBasedAdvisor()
         budget = PerceptionBudget()
-        window = WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=999)
+        window = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=999)
 
         plan = advisor.advise(
             windows=[window],
@@ -57,8 +58,8 @@ class TestHybridAdvisor:
         advisor = HybridAdvisor()
         budget = PerceptionBudget()
         windows = [
-            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=0),
-            WindowState(id="w2", type=WindowType.SHEET, title="B", idle_turns=2),
+            make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=0),
+            make_window(id="w2", type=WindowType.SHEET, title="B", idle_turns=2),
         ]
 
         plan = advisor.advise(
@@ -85,7 +86,7 @@ class TestHybridAdvisor:
         advisor = HybridAdvisor()
         budget = PerceptionBudget()
         windows = [
-            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=3),
+            make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=3),
         ]
 
         plan = advisor.advise(
@@ -108,7 +109,7 @@ class TestHybridAdvisor:
         advisor = HybridAdvisor()
         budget = PerceptionBudget()
         windows = [
-            WindowState(id="w1", type=WindowType.SHEET, title="A", idle_turns=1),
+            make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=1),
         ]
 
         plan = advisor.advise(
