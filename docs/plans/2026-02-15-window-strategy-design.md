@@ -1,295 +1,356 @@
-# 窗口感知层优化：类型策略模式 + ASCII 标记
+# 窗口模型泛化设计（概念定案）
 
-> 日期：2026-02-15
-> 状态：设计中
-> 范围：`excelmanus/window_perception/`
+> 日期：2026-02-15  
+> 状态：已评审（概念层）  
+> 范围：`excelmanus/window_perception/`  
+> 决策前提：本轮讨论显式忽略“代码改造成本”，仅按概念正确性评估。
 
-## 1. 问题背景
+---
 
-### 1.1 explorer 窗口在 unified 模式下信息丢失
+## 1. 目标与结论
 
-当 LLM 调用 `list_directory` 或 `scan_excel_files` 时，工具函数正确返回了 JSON 结果，
-但窗口感知层的 unified 模式将原始结果替换为一行确认摘要：
+### 1.1 目标
 
-```
-✅ [explorer_1: 未知文件 / 未知Sheet] list_directory: - | 0行×0列 | enriched | 意图=general
-```
+将当前以 `WindowState` 为中心的宽对象模型，重构为：
 
-LLM 看到 `0行×0列` 后判定目录为空，直接回复用户，不再触发下一轮。
+- `BaseWindow`（极薄基类）
+- `ExplorerWindow` / `SheetWindow`（判别联合子类）
+- 每种窗口对应 `typed data container`
+- 横切语义（intent/audit/focus）与业务数据解耦
 
-根因链：
-1. `ingest_and_confirm()` 对所有窗口类型走同一条 unified 路径
-2. `_apply_ingest()` 对 EXPLORER 类型直接 return，不设置 `total_rows`/`total_cols`
-3. `build_confirmation_record()` 读取 `window.total_rows`（为 0），生成 `0行×0列`
-4. 确认文本完全替代原始 JSON，LLM 当前轮丢失所有目录信息
+### 1.2 最终结论
 
-### 1.2 WindowState 模型是 sheet-centric 的
+采用以下概念架构：
 
-核心字段（viewport, data_buffer, cached_ranges, columns, schema）全是 Excel 概念。
-explorer 数据被塞进 `metadata["entries"]`，是非结构化的 hack。
+1. `Window = ExplorerWindow | SheetWindow`（判别联合）
+2. `BaseWindow` 只承载身份与生命周期不变量
+3. 业务数据只存在于 `ExplorerData` / `SheetData`
+4. `IntentState` / `AuditState` / `FocusState` 作为独立横切域组合到窗口
+5. 投影层（notice/tool payload/confirmation）纯只读，不回写状态
 
-### 1.3 确认协议一刀切
+---
 
-所有窗口类型共用 `build_confirmation_record`，格式 `行×列` 对 explorer 无意义。
+## 2. 类型模型（字段级草案）
 
-### 1.4 _resolve_target_window 对 explorer 有 bug
+### 2.1 顶层类型
 
-当 `active_window_id` 指向 sheet 窗口时，explorer 工具的 ingest 会错误定位到 sheet 窗口。
+```text
+Window = ExplorerWindow | SheetWindow
 
-### 1.5 emoji 标记对 LLM 不友好
-
-窗口渲染中大量使用 emoji（📁📊🎯📝⚠🧠📑📐📍🧊🧭📏🔗🎨），
-在 tokenizer 中通常占 2-3 token，且不同模型对 emoji 语义理解不一致。
-
-## 2. 设计方案：窗口类型策略模式
-
-### 2.1 核心思路
-
-引入 `WindowTypeStrategy` 协议，将 ingest、confirm、render 行为按窗口类型分发。
-WindowState 数据结构不变，通过策略对象解耦行为。
-
-### 2.2 策略协议
-
-```python
-class WindowTypeStrategy(Protocol):
-    """窗口类型行为策略。"""
-
-    def should_replace_result(self) -> bool:
-        """unified 模式下是否用确认文本替代原始结果。
-        返回 False 时走 enriched fallback（保留原始结果 + 追加感知块）。
-        """
-        ...
-
-    def build_inline_confirmation(
-        self,
-        window: WindowState,
-        tool_name: str,
-        result_json: dict[str, Any] | None,
-    ) -> str:
-        """构建类型特定的 inline 确认文本。
-        仅在 should_replace_result() 返回 True 时调用。
-        """
-        ...
-
-    def apply_ingest(
-        self,
-        window: WindowState,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result_json: dict[str, Any] | None,
-        iteration: int,
-    ) -> None:
-        """将工具结果摄入窗口数据容器。"""
-        ...
-
-    def render_full(
-        self,
-        window: WindowState,
-        *,
-        max_rows: int,
-        current_iteration: int,
-        intent_profile: dict[str, Any] | None,
-    ) -> str:
-        """渲染完整窗口内容（system_notice 中的 ACTIVE 级别）。"""
-        ...
-
-    def render_background(
-        self,
-        window: WindowState,
-        *,
-        intent_profile: dict[str, Any] | None,
-    ) -> str:
-        """渲染背景摘要。"""
-        ...
-
-    def render_minimized(
-        self,
-        window: WindowState,
-        *,
-        intent_profile: dict[str, Any] | None,
-    ) -> str:
-        """渲染最小化摘要。"""
-        ...
+BaseWindow
+- id: WindowId
+- kind: WindowKind
+- title: str
+- lifecycle: LifecycleState
 ```
 
-### 2.3 ExplorerStrategy
+### 2.2 生命周期域
 
-```python
-class ExplorerStrategy:
-    """explorer 窗口策略。"""
-
-    def should_replace_result(self) -> bool:
-        return True  # 用 inline confirmation 替代原始 JSON
-
-    def build_inline_confirmation(self, window, tool_name, result_json):
-        """生成包含 entries 列表的 inline 确认。"""
-        # 格式示例：
-        # [OK] [explorer_1: .] list_directory | 12 items
-        # [DIR] excelmanus
-        # [DIR] tests
-        # [XLS] 城市分组总金额汇总.xlsx (1.2MB, 2025-02-14)
-        #   -- Sheet1: 1000r x 15c | header: [城市, 金额, 日期, ...]
-        # [FILE] pyproject.toml (3.2KB)
-        ...
-
-    def apply_ingest(self, window, tool_name, arguments, result_json, iteration):
-        """更新 explorer 窗口的 entries 和 total_rows。"""
-        entries = extract_explorer_entries(result_json)
-        window.metadata["entries"] = entries
-        window.total_rows = len(entries)
-        window.total_cols = 0  # explorer 无列概念
-        ...
-
-    def render_full(self, window, **kwargs):
-        """渲染完整目录列表。"""
-        # [explorer_1 -- 资源管理器]
-        # [PATH] .
-        # [DIR] excelmanus
-        # [XLS] 城市分组总金额汇总.xlsx (1.2MB)
-        # ...
-        ...
+```text
+LifecycleState
+- detail_level: DetailLevel
+- idle_turns: int
+- last_access_seq: int
+- dormant: bool
 ```
 
-对于 `scan_excel_files`，inline confirmation 更丰富：
+### 2.3 Explorer 窗口
 
-```
-[OK] [explorer_1: .] scan_excel_files | 3 excel files
-[XLS] 城市分组总金额汇总.xlsx (1.2MB)
-  -- Sheet1: 1000r x 15c | header: [城市, 金额, 日期, ...]
-[XLS] 销售数据.xlsx (500KB)
-  -- Sheet1: 200r x 8c | header: [产品, 数量, 单价, ...]
-  -- Sheet2: 50r x 5c | header: [汇总, 总计, ...]
-```
+```text
+ExplorerWindow(BaseWindow)
+- data: ExplorerData
+- intent: IntentState
+- audit: AuditState
+- focus: FocusState
 
-### 2.4 SheetStrategy
-
-封装现有 `_apply_ingest` 中 sheet 分支、`render_window_wurm_full`、
-`render_window_background`、`render_window_minimized` 的 sheet 逻辑。
-行为不变，只是从 manager.py 中抽取到策略类。
-
-### 2.5 策略注册与分发
-
-```python
-# window_perception/strategies.py
-
-_STRATEGIES: dict[WindowType, WindowTypeStrategy] = {
-    WindowType.EXPLORER: ExplorerStrategy(),
-    WindowType.SHEET: SheetStrategy(),
-}
-
-def get_strategy(window_type: WindowType) -> WindowTypeStrategy:
-    return _STRATEGIES[window_type]
+ExplorerData
+- directory: str
+- entries: list[str]
 ```
 
-manager.py 中的分发点：
+### 2.4 Sheet 窗口
 
-```python
-# ingest_and_confirm() 中
-strategy = get_strategy(classification.window_type)
-if not strategy.should_replace_result():
-    return self._enriched_fallback(...)
-# ... ingest + inline confirmation
+```text
+SheetWindow(BaseWindow)
+- data: SheetData
+- intent: IntentState
+- audit: AuditState
+- focus: FocusState
 
-# render_window_keep() 中
-strategy = get_strategy(window.type)
-return strategy.render_full(window, ...)
+SheetData
+- file_path: str
+- sheet_name: str
+- sheet_tabs: list[str]
+- viewport: ViewportState
+- schema: list[ColumnDef]
+- cache: CacheState
+- style: StyleState
+- filter: FilterState
 ```
 
-## 3. ASCII 标记替换 emoji
+### 2.5 Sheet 子域
 
-### 3.1 标记映射表
+```text
+ViewportState
+- range_ref: str
+- visible_rows: int
+- visible_cols: int
+- total_rows: int
+- total_cols: int
 
-| 旧 emoji | 新标记 | 用途 |
-|----------|--------|------|
-| ✅ | `[OK]` | 工具执行成功 |
-| ❌ | `[FAIL]` | 工具执行失败 |
-| 📁 | `[DIR]` | 目录 |
-| 📊 | `[XLS]` | Excel 文件 |
-| 📄 | `[FILE]` | 普通文件 |
-| 🎯 | `intent:` | 意图标签 |
-| 📝 | `recent:` | 最近操作 |
-| ⚠ | `[STALE]` | 数据过期警告 |
-| 🧠 | `intent:` | 意图（合并到 intent:） |
-| 📑 | `sheet:` | 当前工作表 |
-| 📐 | `range:` | 数据范围 |
-| 📍 | `viewport:` | 当前视口 |
-| 🧊 | `freeze:` | 冻结窗格 |
-| 🧭 | `scroll:` | 滚动条位置 |
-| ↘️ | `remain:` | 剩余数据 |
-| 📏 | `col-width:` | 列宽 |
-| 🔗 | `merged:` | 合并单元格 |
-| 🎨 | `style:` | 样式概要 |
+CacheState
+- viewport_range: str
+- cached_ranges: list[CachedRange]
+- data_buffer: list[dict[str, Any]]
+- max_cached_rows: int
+- stale_hint: str | None
 
-### 3.2 窗口标题格式
+StyleState
+- freeze_panes: str | None
+- style_summary: str
+- column_widths: dict[str, float]
+- row_heights: dict[str, float]
+- merged_ranges: list[str]
+- conditional_effects: list[str]
+- status_bar: dict[str, Any]
+- scroll_position: dict[str, Any]
 
-旧：`【当前环境 · 资源管理器】`、`【后台 · 文件 / Sheet】`、`【挂起 · ...】`
-新：`[ACTIVE -- 资源管理器]`、`[BG -- 文件 / Sheet]`、`[IDLE -- ...]`
-
-### 3.3 确认协议格式
-
-旧：`✅ [explorer_1: 未知文件 / 未知Sheet] list_directory: - | 0行×0列 | enriched | 意图=general`
-新：`[OK] [explorer_1: .] list_directory | 12 items`（explorer inline confirmation）
-新：`[OK] [sheet_1: file.xlsx / Sheet1] read_excel: A1:J25 | 100r x 10c | added@A1:J25 | intent=general`（sheet）
-
-### 3.4 enriched 感知块格式
-
-旧：
-```
-───────────── 环境感知 ─────────────
-📊 文件: data.xlsx
-🧠 意图: general
-📑 当前Sheet: Sheet1
-📐 数据范围: 100行 × 10列
-📍 当前视口: A1:J25
-────────────────────────────────────
+FilterState
+- active: bool
+- condition: dict[str, Any] | None
+- unfiltered_buffer: list[dict[str, Any]] | None
 ```
 
-新：
+### 2.6 横切域
+
+```text
+IntentState
+- tag: IntentTag
+- confidence: float
+- source: str
+- updated_turn: int
+- lock_until_turn: int
+
+AuditState
+- operations: list[OpEntry]
+- changes: list[ChangeRecord]
+- max_history_entries: int
+- max_change_records: int
+- current_iteration: int
+
+FocusState
+- active_range: str
+- last_focus_turn: int
 ```
---- perception ---
-file: data.xlsx
-intent: general
-sheet: Sheet1
-range: 100r x 10c
-viewport: A1:J25
---- end ---
+
+---
+
+## 3. 接口契约（核心流程）
+
+```text
+classify(tool_call, tool_result) -> WindowDelta | DeltaReject
+locate(state, delta) -> WindowId | CreateWindow
+apply_delta(window, delta) -> ApplyResult
+
+evaluate_lifecycle(window, context) -> LifecycleAdvice
+project_notice(window, view_mode) -> NoticeProjection
+project_tool_payload(window) -> ToolPayloadProjection
+project_confirmation(window, op_context) -> ConfirmationProjection
 ```
 
-## 4. 改动范围
+### 3.1 契约职责
 
-### 4.1 新增文件
+1. `classify`：仅做解析与判别，不改状态。
+2. `locate`：只做 identity 命中/创建决策，不做业务更新。
+3. `apply_delta`：唯一状态写入口，原子、确定、可审计。
+4. `project_*`：纯只读投影，不得回写。
+5. `evaluate_lifecycle`：仅依赖生命周期/意图/焦点域，不下钻业务容器细节。
 
-- `window_perception/strategies.py`：策略协议 + ExplorerStrategy + SheetStrategy
+### 3.2 ApplyResult
 
-### 4.2 修改文件
+```text
+ApplyResult =
+  | Applied(window, audit_events, derived_updates)
+  | Rejected(reason_code, reason_detail, suggested_action?)
+```
 
-| 文件 | 改动内容 |
-|------|----------|
-| `manager.py` | `ingest_and_confirm` 按策略分发；`_apply_ingest` explorer 分支委托策略；修复 `_resolve_target_window` explorer bug |
-| `renderer.py` | `render_window_keep` / `render_window_background` / `render_window_minimized` 委托策略；`render_tool_perception_block` / `build_tool_perception_payload` emoji→ASCII；`render_system_notice` 标题格式 |
-| `confirmation.py` | `serialize_confirmation` 中 `✅`→`[OK]`；explorer 确认格式 |
-| `extractor.py` | `extract_explorer_entries` 中 emoji 前缀→ASCII 标记 |
-| `rule_registry.py` | 无改动（分类逻辑不变） |
-| `models.py` | 无改动（数据结构不变） |
+---
 
-### 4.3 测试
+## 4. 生命周期状态机
 
-- 新增 `tests/test_window_strategies.py`：策略单元测试
-- 修改现有窗口感知测试中的 emoji 断言→ASCII 断言
+```mermaid
+stateDiagram-v2
+    [*] --> New
+    New --> Active: "delta applied & focused"
+    Active --> Background: "idle >= bg_after"
+    Background --> Suspended: "idle >= suspend_after"
+    Suspended --> Terminated: "idle >= terminate_after"
+    Background --> Active: "focus/read/write hit"
+    Suspended --> Active: "focus/read/write hit (revive)"
+    Terminated --> Active: "new delta maps same identity (recreate/revive)"
+    Active --> Active: "delta applied"
+```
 
-## 5. 分步实施计划
+### 4.1 状态语义
 
-1. 新增 `strategies.py`，定义协议 + ExplorerStrategy + SheetStrategy
-2. 修改 `extractor.py`：emoji→ASCII
-3. 修改 `renderer.py`：emoji→ASCII + 委托策略渲染
-4. 修改 `confirmation.py`：emoji→ASCII + explorer 确认格式
-5. 修改 `manager.py`：ingest 按策略分发 + 修复 _resolve_target_window bug
-6. 更新测试
-7. 端到端验证：CLI 中 list_directory / scan_excel_files 在 unified 模式下返回正确内容
+1. `New`：已创建，未进入稳定调度。
+2. `Active`：高优先渲染态。
+3. `Background`：降级摘要态。
+4. `Suspended`：最小信息保留态。
+5. `Terminated`：不渲染态，可按 identity 复活。
 
-## 6. 风险与回退
+### 4.2 迁移冲突优先级
 
-- SheetStrategy 封装现有逻辑，行为不变，风险低
-- ExplorerStrategy 是新行为，需要验证 inline confirmation 对不同 LLM 的效果
-- ASCII 标记替换是纯文本变更，不影响逻辑，但需要更新所有相关测试断言
-- 回退方案：如果策略模式引入问题，可以在 `get_strategy` 中返回 None 回退到原有逻辑
+同轮若同时出现降级与 `FocusHit`，`FocusHit` 优先。
+
+---
+
+## 5. Identity 设计
+
+### 5.1 主键模型
+
+```text
+ExplorerIdentity
+- directory_norm: str
+
+SheetIdentity
+- file_path_norm: str
+- sheet_name_norm: str
+```
+
+### 5.2 规则
+
+1. `id` 是技术实例标识，`identity` 是业务语义主键。
+2. `locate` 仅按 identity 命中，不按标题/摘要等弱信号命中。
+3. identity 建立后禁止 silent drift。
+
+### 5.3 规范化
+
+1. 路径统一绝对化与分隔符规则。
+2. sheet 名匹配使用规范化值，展示保留可读形式。
+3. 主键字段缺失时返回 `INCOMPLETE_IDENTITY`，不猜测。
+
+### 5.4 冲突码
+
+- `WINDOW_KIND_CONFLICT`
+- `WINDOW_IDENTITY_CONFLICT`
+- `AMBIGUOUS_LOCATE`
+- `INCOMPLETE_IDENTITY`
+
+---
+
+## 6. 投影协议（Notice / Tool Payload / Confirmation）
+
+### 6.1 统一原则
+
+1. 先结构化 DTO，再文本渲染。
+2. 投影函数完全只读。
+3. 同状态输入必须得到确定性输出。
+
+### 6.2 Context
+
+```text
+ProjectionContext
+- mode: enriched | anchored | unified
+- detail_budget: int
+- rows_budget: int
+- now_turn: int
+- locale: str
+```
+
+### 6.3 DTO 草案
+
+```text
+NoticeProjection
+- window_id
+- window_kind
+- tier
+- title
+- headline
+- facts
+- warnings
+- intent_hint
+- token_estimate
+
+ToolPayloadProjection
+- window_id
+- window_kind
+- identity
+- compact_metrics
+- highlights
+- intent
+- range_ref
+
+ConfirmationProjection
+- window_label
+- operation
+- affected_range
+- shape
+- change_summary
+- intent
+- hint
+- confidence
+```
+
+### 6.4 投影错误码
+
+- `PROJECTION_INSUFFICIENT_DATA`
+- `PROJECTION_IDENTITY_MISSING`
+- `PROJECTION_RANGE_UNRESOLVED`
+- `PROJECTION_INVARIANT_BROKEN`
+
+---
+
+## 7. 全局不变量
+
+1. `window.kind` 不可变。
+2. `ExplorerDelta` 不能作用于 `SheetWindow`，反之亦然。
+3. `project_*` 不得修改任何状态。
+4. 所有状态变化必须经 `apply_delta`。
+5. `BaseWindow` 不承载类型专属业务字段。
+6. 三类投影的 `identity/intent/window_id` 必须一致。
+
+---
+
+## 8. 定案清单
+
+### 8.1 必须做（Must）
+
+1. 判别联合窗口模型：`ExplorerWindow | SheetWindow`。
+2. 极薄 `BaseWindow`。
+3. typed data containers 全量承载业务数据。
+4. 横切域对象组合（intent/audit/focus）。
+5. 单入口状态写入（`apply_delta`）。
+6. identity 统一解析与冲突显式化。
+7. 投影层与状态层彻底解耦。
+
+### 8.2 禁止做（Must Not）
+
+1. 禁止回引核心 `metadata: dict[str, Any]` 兜底。
+2. 禁止在 `BaseWindow` 回填 `file_path/sheet_name/directory/viewport` 等字段。
+3. 禁止 `project_*` 回写。
+4. 禁止散写字段绕过 `apply_delta`。
+5. 禁止默认分支吞掉 window kind。
+6. 禁止 identity 静默漂移。
+
+### 8.3 可选做（Optional）
+
+1. `Terminated` tombstone + TTL 复活策略。
+2. `AuditState` 向 event-sourcing 演进。
+3. 投影输出增加稳定哈希，服务快照测试。
+
+---
+
+## 9. 设计验收标准（Concept-level）
+
+1. 类型层面无法构造 explorer/sheet 混杂非法状态。
+2. 所有窗口变更都可追溯到 `WindowDelta`。
+3. 生命周期迁移仅由状态机驱动，不被业务代码侧写。
+4. notice/tool payload/confirmation 三类输出一致且可解释。
+
+---
+
+## 10. 后续动作
+
+1. 本文作为概念基线，下一步进入实现计划文档（TDD + 分任务执行）。
+2. 实施阶段若出现与不变量冲突，以本文不变量优先。
