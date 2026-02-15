@@ -64,6 +64,11 @@ def _make_engine() -> MagicMock:
     engine.has_pending_approval = MagicMock(return_value=False)
     engine.current_pending_approval = MagicMock(return_value=None)
     engine.extract_and_save_memory = AsyncMock(return_value=None)
+    engine.initialize_mcp = AsyncMock(return_value=None)
+    engine.shutdown_mcp = AsyncMock(return_value=None)
+    engine.mcp_connected_count = 0
+    engine._mcp_manager = MagicMock()
+    engine._mcp_manager.get_server_info.return_value = []
     return engine
 
 
@@ -93,7 +98,7 @@ class TestRenderWelcome:
             mock_console.print.assert_called_once()
 
     def test_welcome_contains_version(self) -> None:
-        """欢迎面板应包含版本号。"""
+        """欢迎面板应包含模型信息（版本号已移至启动序列 Logo 区域）。"""
         from io import StringIO
         from rich.console import Console as RealConsole
 
@@ -102,7 +107,7 @@ class TestRenderWelcome:
         with patch("excelmanus.cli.console", real_console):
             _render_welcome(self._make_config(), 3)
         text_str = buf.getvalue()
-        assert "v4.0.0" in text_str
+        assert "qwen-max-latest" in text_str
 
 
 class TestRenderHelp:
@@ -1034,7 +1039,9 @@ class TestCliEntryPoints:
         engine.list_loaded_skillpacks.return_value = []
 
         registry = MagicMock()
+        registry.get_tool_names.return_value = []
         loader = MagicMock()
+        loader.list_skillpacks.return_value = []
         router = MagicMock()
         loader.load_all.return_value = {}
 
@@ -1065,7 +1072,9 @@ class TestCliEntryPoints:
         engine.list_loaded_skillpacks.return_value = []
 
         registry = MagicMock()
+        registry.get_tool_names.return_value = []
         loader = MagicMock()
+        loader.list_skillpacks.return_value = []
         router = MagicMock()
         loader.load_all.return_value = {}
 

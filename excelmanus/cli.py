@@ -465,52 +465,33 @@ if _PROMPT_TOOLKIT_ENABLED:
 def _render_welcome(
     config: "ExcelManusConfig", skill_count: int, mcp_count: int = 0
 ) -> None:
-    """渲染欢迎信息面板 — 含 Logo、版本、模型、技能包、MCP 信息。"""
+    """渲染欢迎信息面板 — 环境摘要与快捷命令。"""
     from excelmanus.config import ExcelManusConfig  # noqa: F811 避免循环导入
 
-    # 构建信息区
     info = Text()
-    info.append(_LOGO, style="bold green")
-    info.append(f"\n  v{__version__}", style="bold white")
-    info.append("  ·  基于大语言模型的 Excel 智能代理\n\n", style="dim white")
 
     # 环境信息
     model_display = config.model
-    info.append("  模型  ", style="dim white")
+    info.append("  模型    ", style="dim white")
     info.append(f"{model_display}\n", style="bold #f0c674")
-    info.append("  技能  ", style="dim white")
-    info.append(f"{skill_count} 个 Skillpack 已加载\n", style="bold #b5bd68")
     info.append("  子代理  ", style="dim white")
     info.append(
         ("已启用" if config.subagent_enabled else "已禁用") + "\n",
         style="bold #81a2be" if config.subagent_enabled else "bold #cc6666",
     )
-    # MCP 状态
-    info.append("  MCP   ", style="dim white")
-    if mcp_count > 0:
-        info.append(f"{mcp_count} 个 Server 已连接\n", style="bold #b294bb")
-    else:
-        info.append("未配置\n", style="dim white")
-    info.append("  目录  ", style="dim white")
+    info.append("  目录    ", style="dim white")
     info.append(f"{os.path.abspath(config.workspace_root)}\n\n", style="white")
 
     # 快捷命令
-    info.append("  命令  ", style="dim white")
-    info.append("/help", style="#b5bd68")
-    info.append("  /history", style="#b5bd68")
-    info.append("  /clear", style="#b5bd68")
-    info.append("  /skills", style="#b5bd68")
-    info.append("  /subagent", style="#b5bd68")
-    info.append("  /mcp", style="#b5bd68")
-    info.append("  /config", style="#b5bd68")
-    info.append("  /fullAccess", style="#b5bd68")
-    info.append("  /accept <id>", style="#b5bd68")
-    info.append("  /reject <id>", style="#b5bd68")
-    info.append("  /undo <id>", style="#b5bd68")
-    info.append("  /plan", style="#b5bd68")
-    info.append("  /model", style="#b5bd68")
-    info.append("  /<skill_name>", style="#b5bd68")
-    info.append("  exit\n", style="#b5bd68")
+    info.append("  命令    ", style="dim white")
+    cmds = [
+        "/help", "/history", "/clear", "/skills", "/subagent",
+        "/mcp", "/config", "/fullAccess", "/accept <id>",
+        "/reject <id>", "/undo <id>", "/plan", "/model",
+        "/<skill_name>", "exit",
+    ]
+    info.append("  ".join(cmds), style="#b5bd68")
+    info.append("\n")
 
     console.print(
         Panel(
@@ -1873,32 +1854,50 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
 async def _async_main() -> None:
     """异步入口：初始化组件并启动 REPL。"""
-    # 加载配置
+    import time as _time
+
+    # ── 打印 Logo ──────────────────────────────────
+    console.print(Text(_LOGO, style="bold green"), highlight=False)
+    console.print(
+        f"  v{__version__}  ·  基于大语言模型的 Excel 智能代理\n",
+        style="dim white",
+    )
+
+    # ── 1. 加载配置 ─────────────────────────────────
     try:
         config = load_config()
     except ConfigError as exc:
         console.print(f"  [red]✗ 配置错误：{exc}[/red]")
         sys.exit(1)
 
-    # 配置日志
     setup_logging(config.log_level)
+    console.print("  [green]✓[/green] 配置已加载", highlight=False)
 
-    # 初始化 ToolRegistry
+    # ── 2. 注册内置工具 ─────────────────────────────
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
+    builtin_count = len(registry.get_tool_names())
+    console.print(
+        f"  [green]✓[/green] [bold]{builtin_count}[/bold] 个内置工具已注册",
+        highlight=False,
+    )
 
-    # 初始化 Skillpack 路由
+    # ── 3. 加载 Skillpacks ──────────────────────────
     loader = SkillpackLoader(config, registry)
     loader.load_all()
     router = SkillRouter(config, loader)
+    skill_count = len(loader.list_skillpacks())
+    console.print(
+        f"  [green]✓[/green] [bold]{skill_count}[/bold] 个 Skillpack 已加载",
+        highlight=False,
+    )
 
-    # 根据 memory_enabled 创建持久记忆组件
+    # ── 4. 持久记忆 ─────────────────────────────────
     persistent_memory = None
     memory_extractor = None
     if config.memory_enabled:
         from excelmanus.persistent_memory import PersistentMemory
         from excelmanus.memory_extractor import MemoryExtractor
-
         from excelmanus.providers import create_client as _create_client
 
         persistent_memory = PersistentMemory(
@@ -1910,8 +1909,17 @@ async def _async_main() -> None:
             base_url=config.base_url,
         )
         memory_extractor = MemoryExtractor(client=_client, model=config.model)
+        console.print(
+            "  [green]✓[/green] 持久记忆已启用",
+            highlight=False,
+        )
+    else:
+        console.print(
+            "  [dim]○ 持久记忆已禁用[/dim]",
+            highlight=False,
+        )
 
-    # 创建 AgentEngine
+    # ── 5. 创建引擎 ─────────────────────────────────
     engine = AgentEngine(
         config,
         registry,
@@ -1922,15 +1930,40 @@ async def _async_main() -> None:
     _sync_skill_command_suggestions(engine)
     _sync_model_suggestions(engine)
 
-    # 初始化 MCP 连接
-    try:
-        await engine.initialize_mcp()
-    except Exception:
-        logger.warning("MCP 初始化失败，已跳过", exc_info=True)
+    # ── 6. MCP 连接（可能较慢，用 spinner）──────────
+    mcp_count = 0
+    mcp_tool_count = 0
+    with console.status(
+        "  [dim]⟳ 正在连接 MCP Server…[/dim]",
+        spinner="dots",
+        spinner_style="cyan",
+    ):
+        t0 = _time.monotonic()
+        try:
+            await engine.initialize_mcp()
+        except Exception:
+            logger.warning("MCP 初始化失败，已跳过", exc_info=True)
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
 
-    # 渲染欢迎信息
-    skill_count = len(engine.list_loaded_skillpacks())
     mcp_count = engine.mcp_connected_count
+    if mcp_count > 0:
+        # 统计远程工具总数
+        for info in engine._mcp_manager.get_server_info():
+            if info.get("status") == "ready":
+                mcp_tool_count += info.get("tool_count", 0)
+        console.print(
+            f"  [green]✓[/green] [bold]{mcp_count}[/bold] 个 MCP Server 已连接"
+            f"  [dim]({mcp_tool_count} 个远程工具, {elapsed_ms}ms)[/dim]",
+            highlight=False,
+        )
+    else:
+        console.print(
+            f"  [dim]○ 无 MCP Server[/dim]  [dim]({elapsed_ms}ms)[/dim]",
+            highlight=False,
+        )
+
+    # ── 启动信息面板 ────────────────────────────────
+    console.print()  # 启动序列与面板之间留白
     _render_welcome(config, skill_count, mcp_count)
 
     # 启动 REPL 循环
