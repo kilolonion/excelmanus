@@ -137,6 +137,106 @@ def _parse_pre_route_response(text: str, model_used: str, latency_ms: float) -> 
     )
 
 
+
+def _is_gemini_url(base_url: str) -> bool:
+    """判断是否为 Gemini 原生 API URL。"""
+    lower = base_url.lower()
+    return "v1beta" in lower or ("gemini" in lower and "/v1/" not in lower)
+
+
+async def _call_gemini_native(
+    *,
+    user_message: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout_ms: int,
+) -> tuple[str, float]:
+    """调用 Gemini 原生 API，返回 (response_text, latency_ms)。"""
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": _USER_PROMPT_TEMPLATE.format(user_message=user_message[:500])}],
+            }
+        ],
+        "systemInstruction": {
+            "parts": [{"text": _SYSTEM_PROMPT}]
+        },
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 150,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+
+    start = time.monotonic()
+    async with httpx.AsyncClient(timeout=timeout_ms / 1000.0) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    latency_ms = (time.monotonic() - start) * 1000
+
+    # 提取响应文本
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"] or ""
+    except (KeyError, IndexError, TypeError):
+        text = ""
+
+    return text, latency_ms
+
+
+async def _call_openai_compatible(
+    *,
+    user_message: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout_ms: int,
+) -> tuple[str, float]:
+    """调用 OpenAI 兼容 API，返回 (response_text, latency_ms)。"""
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": _USER_PROMPT_TEMPLATE.format(user_message=user_message[:500])},
+    ]
+
+    start = time.monotonic()
+    async with httpx.AsyncClient(timeout=timeout_ms / 1000.0) as client:
+        resp = await client.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": 0.0,
+                "max_tokens": 150,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    latency_ms = (time.monotonic() - start) * 1000
+
+    # 提取响应文本
+    try:
+        text = data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        text = ""
+
+    return text, latency_ms
+
+
 async def pre_route_skill(
     user_message: str,
     *,
@@ -146,6 +246,9 @@ async def pre_route_skill(
     timeout_ms: int = 10000,
 ) -> PreRouteResult:
     """调用小模型预判最佳 skillpack。
+
+    支持 OpenAI 兼容格式和 Gemini 原生 API 格式。
+    通过 base_url 自动判断使用哪种协议。
 
     Args:
         user_message: 用户输入
@@ -177,29 +280,24 @@ async def pre_route_skill(
             model_used=model,
         )
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _USER_PROMPT_TEMPLATE.format(user_message=trimmed[:500])},
-    ]
-
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout_ms / 1000.0) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": 0.0,
-                    "max_tokens": 150,
-                },
+        if _is_gemini_url(base_url):
+            text, latency_ms = await _call_gemini_native(
+                user_message=trimmed,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                timeout_ms=timeout_ms,
             )
-            resp.raise_for_status()
-            data = resp.json()
+        else:
+            text, latency_ms = await _call_openai_compatible(
+                user_message=trimmed,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                timeout_ms=timeout_ms,
+            )
     except Exception as exc:
         latency_ms = (time.monotonic() - start) * 1000
         logger.warning("预路由调用失败(%s): %s", model, exc)
@@ -212,12 +310,5 @@ async def pre_route_skill(
             raw_response=str(exc),
         )
 
-    latency_ms = (time.monotonic() - start) * 1000
-
-    # 提取响应文本
-    try:
-        text = data["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        text = ""
-
     return _parse_pre_route_response(text, model_used=model, latency_ms=latency_ms)
+
