@@ -1,0 +1,60 @@
+{
+  "suite_name": "窗口感知_超复杂场景",
+  "description": "6+轮对话场景，验证窗口感知在极端多轮、多窗口、跨表关联中的表现差异",
+  "cases": [
+    {
+      "id": "wp_ultra_01",
+      "name": "全表审计_六轮串行探查",
+      "messages": [
+        "帮我看一下 examples/bench/stress_test_comprehensive.xlsx 有哪些工作表，每个表有多少行多少列",
+        "读取「销售明细」的前5行数据，告诉我列名和数据类型",
+        "读取「员工花名册」的前5行数据，告诉我列名和数据类型",
+        "读取「产品目录」的前5行数据，告诉我列名",
+        "现在告诉我：「销售明细」「员工花名册」「产品目录」这三张表之间可以通过哪些字段关联？请列出所有可能的关联关系",
+        "按「产品」分组统计销售明细中每种产品的总销售数量和总金额，并告诉我销售额最高和最低的产品分别是什么"
+      ],
+      "tags": ["ultra_complex", "multi_sheet", "cross_table", "aggregation", "6_turns"]
+    },
+    {
+      "id": "wp_ultra_02",
+      "name": "跨表数据分析_七轮渐进",
+      "messages": [
+        "查看 examples/bench/stress_test_comprehensive.xlsx 有哪些工作表",
+        "读取「月度汇总」的全部数据结构，告诉我列名和行数",
+        "读取「城市分析」的全部数据，告诉我有哪些城市",
+        "读取「财务报表」的前10行数据",
+        "「月度汇总」中哪个月份的销售额最高？",
+        "「城市分析」中哪个城市的订单数最多？",
+        "综合以上所有表的信息，给我一个简要的业务分析总结：包括最佳月份、最佳城市、以及财务报表的关键指标"
+      ],
+      "tags": ["ultra_complex", "multi_sheet", "progressive_analysis", "summary", "7_turns"]
+    },
+    {
+      "id": "wp_ultra_03",
+      "name": "多维度交叉分析_六轮",
+      "messages": [
+        "打开 examples/bench/stress_test_comprehensive.xlsx，先看一下「销售明细」有哪些列",
+        "统计「销售明细」中每个城市的订单数量",
+        "统计「销售明细」中每种产品的平均单价",
+        "读取「KPI仪表盘」的数据",
+        "读取「考勤表」的前5行数据和列名",
+        "现在请综合回答：1）哪个城市订单最多 2）哪种产品平均单价最高 3）KPI仪表盘中有哪些关键指标"
+      ],
+      "tags": ["ultra_complex", "multi_dimension", "cross_analysis", "6_turns"]
+    },
+    {
+      "id": "wp_ultra_04",
+      "name": "深度数据探查与写入_七轮",
+      "messages": [
+        "查看 examples/bench/stress_test_comprehensive.xlsx 的所有工作表信息",
+        "读取「销售明细」前3行，确认数据结构",
+        "筛选「销售明细」中状态为「已完成」的订单，统计有多少条",
+        "按「城市」分组统计已完成订单的总金额",
+        "读取「产品目录」前5行，看看产品的成本价和零售价",
+        "找出「产品目录」中利润率最高的前3个产品",
+        "将以上分析结果（各城市已完成订单金额 + 高利润产品TOP3）写入该文件的一个新工作表「分析报告」中"
+      ],
+      "tags": ["ultra_complex", "filter", "aggregate", "write", "7_turns"]
+    }
+  ]
+}

@@ -238,7 +238,7 @@ def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
         )
     )
     loaded = registry.load_all()
-    assert loaded["explorer"].max_iterations == 4
+    assert loaded["explorer"].max_iterations == 60
     assert loaded["explorer"].max_consecutive_failures == 2
 
 

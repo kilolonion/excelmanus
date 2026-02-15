@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from excelmanus.tools import (
@@ -58,6 +60,33 @@ class TestToolRegistry:
     def test_get_tool_not_found(self) -> None:
         registry = ToolRegistry()
         assert registry.get_tool("nonexistent") is None
+
+    def test_call_tool_missing_required_argument_returns_structured_error(self) -> None:
+        registry = ToolRegistry()
+
+        def _need_file_path(file_path: str) -> str:
+            return file_path
+
+        registry.register_tool(
+            ToolDef(
+                name="need_file_path",
+                description="需要 file_path 参数",
+                input_schema={
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "required": ["file_path"],
+                    "additionalProperties": False,
+                },
+                func=_need_file_path,
+            )
+        )
+
+        raw = registry.call_tool("need_file_path", {})
+        payload = json.loads(raw)
+        assert payload["status"] == "error"
+        assert payload["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
+        assert payload["tool"] == "need_file_path"
+        assert "file_path" in payload["required_fields"]
 
 
 class TestToolDefTruncate:

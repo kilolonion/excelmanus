@@ -364,7 +364,7 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.subagent_enabled is True
         assert cfg.subagent_model is None
-        assert cfg.subagent_max_iterations == 6
+        assert cfg.subagent_max_iterations == 120
         assert cfg.subagent_max_consecutive_failures == 2
         assert cfg.subagent_user_dir == "~/.excelmanus/agents"
         assert cfg.subagent_project_dir == ".excelmanus/agents"
@@ -605,6 +605,11 @@ class TestWindowPerceptionConfig:
         assert cfg.window_perception_background_after_idle == 1
         assert cfg.window_perception_suspend_after_idle == 3
         assert cfg.window_perception_terminate_after_idle == 5
+        assert cfg.window_perception_advisor_mode == "hybrid"
+        assert cfg.window_perception_advisor_timeout_ms == 800
+        assert cfg.window_perception_advisor_trigger_window_count == 3
+        assert cfg.window_perception_advisor_trigger_turn == 4
+        assert cfg.window_perception_advisor_plan_ttl_turns == 2
 
     def test_window_perception_values_from_env(self, monkeypatch) -> None:
         """支持通过环境变量覆盖全部窗口感知配置。"""
@@ -619,6 +624,11 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE", "2")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE", "4")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "7")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE", "rules")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS", "950")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT", "5")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN", "6")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS", "4")
 
         cfg = load_config()
         assert cfg.window_perception_enabled is False
@@ -631,6 +641,11 @@ class TestWindowPerceptionConfig:
         assert cfg.window_perception_background_after_idle == 2
         assert cfg.window_perception_suspend_after_idle == 4
         assert cfg.window_perception_terminate_after_idle == 7
+        assert cfg.window_perception_advisor_mode == "rules"
+        assert cfg.window_perception_advisor_timeout_ms == 950
+        assert cfg.window_perception_advisor_trigger_window_count == 5
+        assert cfg.window_perception_advisor_trigger_turn == 6
+        assert cfg.window_perception_advisor_plan_ttl_turns == 4
 
     def test_window_perception_enabled_invalid_value_raises_error(self, monkeypatch) -> None:
         """窗口感知开关非法值应抛出 ConfigError。"""
@@ -658,6 +673,13 @@ class TestWindowPerceptionConfig:
         self._set_required_env(monkeypatch)
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "NaN")
         with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE"):
+            load_config()
+
+    def test_window_perception_advisor_mode_invalid_raises_error(self, monkeypatch) -> None:
+        """顾问模式非法值应抛出 ConfigError。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE", "smart")
+        with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE"):
             load_config()
 
 

@@ -9,6 +9,15 @@ from .advisor_context import AdvisorContext
 from .models import PerceptionBudget, WindowState
 
 WindowTier = Literal["active", "background", "suspended", "terminated"]
+_VALID_TASK_TYPES = {
+    "DATA_COMPARISON",
+    "FORMAT_CHECK",
+    "FORMULA_DEBUG",
+    "DATA_ENTRY",
+    "ANOMALY_SEARCH",
+    "GENERAL_BROWSE",
+}
+_VALID_TIERS: set[str] = {"active", "background", "suspended", "terminated"}
 
 
 @dataclass
@@ -27,6 +36,8 @@ class LifecyclePlan:
 
     advices: list[WindowAdvice]
     source: Literal["rules", "small_model", "hybrid"] = "rules"
+    task_type: str = "GENERAL_BROWSE"
+    generated_turn: int = 0
 
 
 class WindowLifecycleAdvisor(Protocol):
@@ -39,6 +50,8 @@ class WindowLifecycleAdvisor(Protocol):
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,
+        small_model_plan: LifecyclePlan | None = None,
+        plan_ttl_turns: int = 2,
     ) -> LifecyclePlan:
         """输出窗口生命周期计划。"""
 
@@ -53,8 +66,10 @@ class RuleBasedAdvisor:
         active_window_id: str | None,
         budget: PerceptionBudget,
         context: AdvisorContext,
+        small_model_plan: LifecyclePlan | None = None,
+        plan_ttl_turns: int = 2,
     ) -> LifecyclePlan:
-        del context
+        del small_model_plan, plan_ttl_turns
 
         bg_after, suspend_after, terminate_after = self._normalize_thresholds(budget)
         advices: list[WindowAdvice] = []
@@ -77,7 +92,12 @@ class RuleBasedAdvisor:
                 )
             )
 
-        return LifecyclePlan(advices=advices, source="rules")
+        return LifecyclePlan(
+            advices=advices,
+            source="rules",
+            task_type=context.task_type or "GENERAL_BROWSE",
+            generated_turn=context.turn_number,
+        )
 
     @staticmethod
     def _normalize_thresholds(budget: PerceptionBudget) -> tuple[int, int, int]:
@@ -86,3 +106,106 @@ class RuleBasedAdvisor:
         terminate_after = max(suspend_after + 1, int(budget.terminate_after_idle))
         return background_after, suspend_after, terminate_after
 
+
+class HybridAdvisor:
+    """规则顾问基线 + 小模型计划覆盖。"""
+
+    def __init__(self, rule_advisor: WindowLifecycleAdvisor | None = None) -> None:
+        self._rule_advisor = rule_advisor or RuleBasedAdvisor()
+
+    def advise(
+        self,
+        *,
+        windows: list[WindowState],
+        active_window_id: str | None,
+        budget: PerceptionBudget,
+        context: AdvisorContext,
+        small_model_plan: LifecyclePlan | None = None,
+        plan_ttl_turns: int = 2,
+    ) -> LifecyclePlan:
+        base_plan = self._rule_advisor.advise(
+            windows=windows,
+            active_window_id=active_window_id,
+            budget=budget,
+            context=context,
+        )
+        if small_model_plan is None:
+            return base_plan
+        if not self._is_plan_fresh(
+            plan=small_model_plan,
+            current_turn=context.turn_number,
+            plan_ttl_turns=plan_ttl_turns,
+        ):
+            return base_plan
+        if not self._is_valid_task_type(small_model_plan.task_type):
+            return base_plan
+        if not small_model_plan.advices:
+            return base_plan
+
+        known_window_ids = {window.id for window in windows}
+        merged: dict[str, WindowAdvice] = {
+            advice.window_id: WindowAdvice(
+                window_id=advice.window_id,
+                tier=advice.tier,
+                reason=advice.reason,
+                custom_summary=advice.custom_summary,
+            )
+            for advice in base_plan.advices
+        }
+
+        applied = 0
+        for advice in small_model_plan.advices:
+            if advice.window_id not in known_window_ids:
+                continue
+            if advice.tier not in _VALID_TIERS:
+                continue
+            merged[advice.window_id] = WindowAdvice(
+                window_id=advice.window_id,
+                tier=advice.tier,
+                reason=advice.reason,
+                custom_summary=advice.custom_summary,
+            )
+            applied += 1
+
+        if applied == 0:
+            return base_plan
+
+        if active_window_id and active_window_id in merged:
+            active_advice = merged[active_window_id]
+            merged[active_window_id] = WindowAdvice(
+                window_id=active_window_id,
+                tier="active",
+                reason=active_advice.reason or "active_window_forced",
+                custom_summary=active_advice.custom_summary,
+            )
+
+        ordered_advices = [
+            merged.get(
+                advice.window_id,
+                WindowAdvice(window_id=advice.window_id, tier=advice.tier, reason=advice.reason),
+            )
+            for advice in base_plan.advices
+        ]
+        return LifecyclePlan(
+            advices=ordered_advices,
+            source="hybrid",
+            task_type=small_model_plan.task_type,
+            generated_turn=context.turn_number,
+        )
+
+    @staticmethod
+    def _is_valid_task_type(task_type: str) -> bool:
+        return (task_type or "").strip() in _VALID_TASK_TYPES
+
+    @staticmethod
+    def _is_plan_fresh(
+        *,
+        plan: LifecyclePlan,
+        current_turn: int,
+        plan_ttl_turns: int,
+    ) -> bool:
+        ttl = max(0, int(plan_ttl_turns))
+        generated_turn = int(plan.generated_turn)
+        if generated_turn <= 0:
+            return False
+        return current_turn - generated_turn <= ttl

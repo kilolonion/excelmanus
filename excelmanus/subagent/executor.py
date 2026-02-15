@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import openai
@@ -23,6 +23,8 @@ from excelmanus.subagent.tool_filter import FilteredToolRegistry
 _SUMMARY_MAX_CHARS = 4000
 _SUBAGENT_BLOCKED_META_TOOLS = {"select_skill", "delegate_to_subagent", "list_subagents"}
 logger = get_logger("subagent.executor")
+
+ToolResultEnricher = Callable[[str, dict[str, Any], str, bool], str]
 
 
 @dataclass
@@ -57,6 +59,7 @@ class SubagentExecutor:
         parent_context: str = "",
         on_event: EventCallback | None = None,
         full_access_enabled: bool = False,
+        tool_result_enricher: ToolResultEnricher | None = None,
     ) -> SubagentResult:
         """执行单次子代理任务。"""
         conversation_id = str(uuid4())
@@ -162,6 +165,7 @@ class SubagentExecutor:
                         tool_scope=tool_scope,
                         full_access_enabled=full_access_enabled,
                         persistent_memory=persistent_memory,
+                        tool_result_enricher=tool_result_enricher,
                     )
                     content = result.result[:_SUMMARY_MAX_CHARS]
                     memory.add_tool_result(call_id, content)
@@ -296,6 +300,7 @@ class SubagentExecutor:
         tool_scope: list[str],
         full_access_enabled: bool,
         persistent_memory: "PersistentMemory | None",
+        tool_result_enricher: ToolResultEnricher | None,
     ) -> _ExecResult:
         """执行子代理内单次工具调用（含审批桥接）。"""
         if not registry.is_tool_available(tool_name):
@@ -361,13 +366,20 @@ class SubagentExecutor:
                     error = f"工具执行错误: {exc}"
                     return _ExecResult(success=False, result=error, error=str(exc))
                 raw_text = str(raw_result)
-                return _ExecResult(
-                    success=True,
-                    result=self._truncate_tool_result(
+                enriched = self._apply_tool_result_enricher(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    text=self._truncate_tool_result(
                         registry=registry,
                         tool_name=tool_name,
                         text=raw_text,
                     ),
+                    success=True,
+                    tool_result_enricher=tool_result_enricher,
+                )
+                return _ExecResult(
+                    success=True,
+                    result=enriched,
                     raw_result=raw_text,
                 )
 
@@ -393,13 +405,20 @@ class SubagentExecutor:
                 return _ExecResult(success=False, result=error, error=str(exc))
 
             changes = [change.path for change in record.changes]
-            return _ExecResult(
-                success=True,
-                result=self._truncate_tool_result(
+            enriched = self._apply_tool_result_enricher(
+                tool_name=tool_name,
+                arguments=arguments,
+                text=self._truncate_tool_result(
                     registry=registry,
                     tool_name=tool_name,
                     text=result_text,
                 ),
+                success=True,
+                tool_result_enricher=tool_result_enricher,
+            )
+            return _ExecResult(
+                success=True,
+                result=enriched,
                 file_changes=changes,
                 raw_result=result_text,
             )
@@ -418,7 +437,14 @@ class SubagentExecutor:
                 tool_name=tool_name,
                 text=raw_text,
             )
-            return _ExecResult(success=True, result=text, raw_result=raw_text)
+            enriched = self._apply_tool_result_enricher(
+                tool_name=tool_name,
+                arguments=arguments,
+                text=text,
+                success=True,
+                tool_result_enricher=tool_result_enricher,
+            )
+            return _ExecResult(success=True, result=enriched, raw_result=raw_text)
         except Exception as exc:  # noqa: BLE001
             error = f"工具执行错误: {exc}"
             return _ExecResult(success=False, result=error, error=str(exc))
@@ -535,6 +561,29 @@ class SubagentExecutor:
         if tool_def is None:
             return text
         return tool_def.truncate_result(text)
+
+    @staticmethod
+    def _apply_tool_result_enricher(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        text: str,
+        success: bool,
+        tool_result_enricher: ToolResultEnricher | None,
+    ) -> str:
+        """对工具返回执行外部增强（如窗口感知），失败时回退原文。"""
+        if tool_result_enricher is None:
+            return text
+        try:
+            enriched = tool_result_enricher(tool_name, arguments, text, success)
+        except Exception:
+            logger.warning(
+                "子代理工具结果增强失败，已回退原始结果: tool=%s",
+                tool_name,
+                exc_info=True,
+            )
+            return text
+        return str(enriched) if enriched is not None else text
 
     @classmethod
     def _extract_excel_paths_from_arguments(cls, arguments: dict[str, Any]) -> list[str]:

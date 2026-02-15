@@ -22,7 +22,7 @@ class SubagentConfig:
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     permission_mode: SubagentPermissionMode = "default"
-    max_iterations: int = 6
+    max_iterations: int = 120
     max_consecutive_failures: int = 2
     skills: list[str] = field(default_factory=list)
     memory_scope: SubagentMemoryScope | None = None

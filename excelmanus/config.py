@@ -67,7 +67,7 @@ class ExcelManusConfig:
     # subagent 执行配置
     subagent_enabled: bool = True
     subagent_model: str | None = None
-    subagent_max_iterations: int = 6
+    subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 2
     subagent_user_dir: str = "~/.excelmanus/agents"
     subagent_project_dir: str = ".excelmanus/agents"
@@ -420,7 +420,7 @@ def load_config() -> ExcelManusConfig:
     subagent_max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
-        6,
+        120,
     )
     subagent_max_consecutive_failures = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
