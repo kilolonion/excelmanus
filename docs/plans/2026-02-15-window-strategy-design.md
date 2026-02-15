@@ -1,7 +1,7 @@
 # 窗口模型泛化设计（概念定案）
 
 > 日期：2026-02-15  
-> 状态：已评审并完成首轮实现（Task 1-8）  
+> 状态：已评审并完成彻底泛化落地（WindowState 已从主链路移除）  
 > 范围：`excelmanus/window_perception/`  
 > 决策前提：本轮讨论显式忽略“代码改造成本”，仅按概念正确性评估。
 
@@ -9,10 +9,9 @@
 
 ## 实施同步（2026-02-15）
 
-1. `WindowState` 已从 `excelmanus.window_perception` 顶层导出移除，外部需从 `models` 显式导入。
-2. manager 摄入路径已落地 `classify -> locate(identity) -> apply_delta -> ingest`。
-3. projection 层新增 `identity` 在 tool payload 中的显式承载，并增加一致性回归测试：
-   `test_projection_identity_intent_consistency_across_outputs`。
+1. 主模型已切换为 `Window = ExplorerWindow | SheetWindow`，`models.py` 保留枚举和值对象，`WindowState` 类定义已删除。
+2. manager 主路径已落地 `classify -> locate(identity) -> apply_delta(real window) -> ingest/project`，不再进行 `WindowState -> domain` 临时旁路转换。
+3. projection/renderer/confirmation 全部以 `Window` 或 projection DTO 为输入；`metadata` 不再承载核心字段（entries/scroll/style/status 等已迁移至 typed container）。
 
 ---
 

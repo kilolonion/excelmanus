@@ -10,6 +10,25 @@
 
 ---
 
+## Completion Status (2026-02-15)
+
+- `WindowState` class has been removed from `excelmanus/window_perception/models.py`; core model is now `Window = ExplorerWindow | SheetWindow`.
+- `domain.py` now owns `BaseWindow`, `ExplorerWindow`, `SheetWindow`, typed containers, and cross-cutting states (`LifecycleState`, `IntentState`, `AuditState`, `FocusState`).
+- `WindowPerceptionManager` now mutates real `Window` objects through `apply_delta(window, delta)` without temporary `_to_domain_window` conversion.
+- `projection_service.py`, `renderer.py`, and `confirmation.py` now consume `Window`/projection DTOs rather than `WindowState`.
+- Core metadata escape-hatch keys were migrated to typed fields (`entries`, `scroll_position`, `status_bar`, `column_widths`, `row_heights`, `merged_ranges`, `conditional_effects`).
+- `engine.py` and related tests were migrated to the new `Window` model.
+
+## Final Validation Commands
+
+1. `uv run --extra dev pytest tests/test_window_*.py -v`
+2. `uv run --extra dev pytest tests/test_engine.py -k "window_perception" -v`
+3. `uv run --extra dev pytest tests/test_window_*.py tests/test_engine.py -k "window_perception" -v`
+4. `rg "WindowState" excelmanus tests`
+5. `rg "metadata\\[\"(entries|scroll_position|status_bar|column_widths|row_heights|merged_ranges|conditional_effects)\"\\]" excelmanus/window_perception`
+
+---
+
 ### Task 1: Introduce Window Domain Types (Base + Subclasses + Typed Data)
 
 **Files:**
