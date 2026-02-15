@@ -16,6 +16,9 @@ _EXPLORER_TOOLS = {
 
 _SHEET_TOOLS = {
     "read_excel",
+    "analyze_data",
+    "filter_data",
+    "transform_data",
     "list_sheets",
     "write_excel",
     "write_cells",

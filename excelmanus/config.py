@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ class ModelProfile:
 # Base URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,10 @@ class ExcelManusConfig:
     window_perception_advisor_trigger_window_count: int = 3
     window_perception_advisor_trigger_turn: int = 4
     window_perception_advisor_plan_ttl_turns: int = 2
+    window_return_mode: str = "enriched"
+    window_full_max_rows: int = 25
+    window_full_total_budget_tokens: int = 500
+    window_data_buffer_max_rows: int = 200
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -193,6 +200,20 @@ def _parse_window_perception_advisor_mode(value: str | None) -> str:
             f"{value!r}"
         )
     return normalized
+
+
+def _parse_window_return_mode(value: str | None) -> str:
+    """解析工具返回模式，非法值自动回退 enriched。"""
+    if value is None:
+        return "enriched"
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_WINDOW_RETURN_MODES:
+        return normalized
+    logger.warning(
+        "配置项 EXCELMANUS_WINDOW_RETURN_MODE 非法(%r)，已回退为 enriched",
+        value,
+    )
+    return "enriched"
 
 
 def _extract_first_model(raw: str | None) -> dict | None:
@@ -544,6 +565,24 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS",
         2,
     )
+    window_return_mode = _parse_window_return_mode(
+        os.environ.get("EXCELMANUS_WINDOW_RETURN_MODE")
+    )
+    window_full_max_rows = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_FULL_MAX_ROWS"),
+        "EXCELMANUS_WINDOW_FULL_MAX_ROWS",
+        25,
+    )
+    window_full_total_budget_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS"),
+        "EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS",
+        500,
+    )
+    window_data_buffer_max_rows = _parse_int(
+        os.environ.get("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS"),
+        "EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS",
+        200,
+    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -610,5 +649,9 @@ def load_config() -> ExcelManusConfig:
         window_perception_advisor_trigger_window_count=window_perception_advisor_trigger_window_count,
         window_perception_advisor_trigger_turn=window_perception_advisor_trigger_turn,
         window_perception_advisor_plan_ttl_turns=window_perception_advisor_plan_ttl_turns,
+        window_return_mode=window_return_mode,
+        window_full_max_rows=window_full_max_rows,
+        window_full_total_budget_tokens=window_full_total_budget_tokens,
+        window_data_buffer_max_rows=window_data_buffer_max_rows,
         models=models,
     )

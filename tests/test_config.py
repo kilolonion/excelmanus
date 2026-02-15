@@ -590,6 +590,26 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        # 固定窗口感知默认值，避免本地 .env 干扰“默认值”断言。
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ENABLED", "true")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS", "3000")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS", "500")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS", "6")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS", "25")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS", "10")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS", "80")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE", "1")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE", "3")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "5")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE", "hybrid")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS", "800")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT", "3")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN", "4")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS", "2")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "enriched")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_MAX_ROWS", "25")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS", "500")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS", "200")
 
     def test_window_perception_defaults(self, monkeypatch) -> None:
         """窗口感知层默认值应符合 v4 设定。"""
@@ -610,6 +630,10 @@ class TestWindowPerceptionConfig:
         assert cfg.window_perception_advisor_trigger_window_count == 3
         assert cfg.window_perception_advisor_trigger_turn == 4
         assert cfg.window_perception_advisor_plan_ttl_turns == 2
+        assert cfg.window_return_mode == "enriched"
+        assert cfg.window_full_max_rows == 25
+        assert cfg.window_full_total_budget_tokens == 500
+        assert cfg.window_data_buffer_max_rows == 200
 
     def test_window_perception_values_from_env(self, monkeypatch) -> None:
         """支持通过环境变量覆盖全部窗口感知配置。"""
@@ -629,6 +653,10 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT", "5")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN", "6")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS", "4")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "anchored")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_MAX_ROWS", "40")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS", "700")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS", "300")
 
         cfg = load_config()
         assert cfg.window_perception_enabled is False
@@ -646,6 +674,10 @@ class TestWindowPerceptionConfig:
         assert cfg.window_perception_advisor_trigger_window_count == 5
         assert cfg.window_perception_advisor_trigger_turn == 6
         assert cfg.window_perception_advisor_plan_ttl_turns == 4
+        assert cfg.window_return_mode == "anchored"
+        assert cfg.window_full_max_rows == 40
+        assert cfg.window_full_total_budget_tokens == 700
+        assert cfg.window_data_buffer_max_rows == 300
 
     def test_window_perception_enabled_invalid_value_raises_error(self, monkeypatch) -> None:
         """窗口感知开关非法值应抛出 ConfigError。"""
@@ -681,6 +713,13 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE", "smart")
         with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE"):
             load_config()
+
+    def test_window_return_mode_invalid_fallback_to_enriched(self, monkeypatch) -> None:
+        """window_return_mode 非法值应回退 enriched，而非抛错。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "invalid-mode")
+        cfg = load_config()
+        assert cfg.window_return_mode == "enriched"
 
 
 class TestLogLevelValidation:

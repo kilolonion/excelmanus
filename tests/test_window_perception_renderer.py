@@ -1,6 +1,6 @@
 """窗口感知渲染测试。"""
 
-from excelmanus.window_perception.models import Viewport, WindowRenderAction, WindowSnapshot, WindowState, WindowType
+from excelmanus.window_perception.models import ColumnDef, DetailLevel, Viewport, WindowRenderAction, WindowSnapshot, WindowState, WindowType
 from excelmanus.window_perception.renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -85,6 +85,38 @@ class TestWindowRenderer:
         ]
         text = render_system_notice(snapshots)
         assert "窗口感知上下文" in text
+
+    def test_render_system_notice_anchored_mode(self) -> None:
+        snapshots = [
+            WindowSnapshot(
+                window_id="w1",
+                action=WindowRenderAction.KEEP,
+                rendered_text="[W1 · sales.xlsx / Q1]",
+                estimated_tokens=100,
+            )
+        ]
+        text = render_system_notice(snapshots, mode="anchored")
+        assert "数据窗口" in text
+
+    def test_render_window_keep_anchored_full(self) -> None:
+        window = WindowState(
+            id="W3",
+            type=WindowType.SHEET,
+            title="sheet",
+            file_path="sales.xlsx",
+            sheet_name="Q1",
+            viewport=Viewport(range_ref="A1:C10", total_rows=100, total_cols=3),
+            viewport_range="A1:C10",
+            detail_level=DetailLevel.FULL,
+            columns=[ColumnDef(name="日期"), ColumnDef(name="产品"), ColumnDef(name="金额")],
+            data_buffer=[
+                {"日期": "2024-01-01", "产品": "A", "金额": 100},
+                {"日期": "2024-01-02", "产品": "B", "金额": 120},
+            ],
+        )
+        text = render_window_keep(window, mode="anchored", max_rows=10, current_iteration=1)
+        assert "W3 · sales.xlsx / Q1" in text
+        assert "列: [日期, 产品, 金额]" in text
 
     def test_tool_payload_and_block(self) -> None:
         window = WindowState(

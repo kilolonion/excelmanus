@@ -34,7 +34,23 @@ from .extractor import (
     normalize_path,
     parse_json_payload,
 )
-from .models import PerceptionBudget, Viewport, WindowRenderAction, WindowState, WindowType
+from .ingest import (
+    extract_columns,
+    extract_data_rows,
+    ingest_filter_result,
+    ingest_read_result,
+    ingest_write_result,
+    make_change_record,
+)
+from .models import (
+    DetailLevel,
+    OpEntry,
+    PerceptionBudget,
+    Viewport,
+    WindowRenderAction,
+    WindowState,
+    WindowType,
+)
 from .renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -167,7 +183,7 @@ class WindowPerceptionManager:
             window.summary = summary
             self._touch(window)
 
-    def build_system_notice(self) -> str:
+    def build_system_notice(self, *, mode: str = "enriched") -> str:
         """构建系统注入窗口快照。"""
         if not self._enabled:
             return ""
@@ -202,10 +218,16 @@ class WindowPerceptionManager:
         )
 
         allocator = WindowBudgetAllocator(self._budget)
+        full_rows = allocator.compute_window_full_max_rows(len(active_windows))
         snapshots = allocator.allocate(
             windows=active_windows,
             active_window_id=self._active_window_id,
-            render_keep=render_window_keep,
+            render_keep=lambda window: render_window_keep(
+                window,
+                mode=mode,
+                max_rows=full_rows,
+                current_iteration=window.current_iteration,
+            ),
             render_background=render_window_background,
             render_minimized=render_window_minimized,
             lifecycle_plan=lifecycle_plan,
@@ -225,7 +247,7 @@ class WindowPerceptionManager:
             context=context,
         )
 
-        return render_system_notice(visible)
+        return render_system_notice(visible, mode=mode)
 
     def enrich_tool_result(
         self,
@@ -234,10 +256,19 @@ class WindowPerceptionManager:
         arguments: dict[str, Any],
         result_text: str,
         success: bool,
+        mode: str = "enriched",
     ) -> str:
         """增强工具返回。"""
         if not self._enabled or not success:
             return result_text
+
+        if mode == "anchored":
+            return self.ingest_and_confirm(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_text=result_text,
+                success=success,
+            )
 
         payload = self.update_from_tool_call(
             tool_name=tool_name,
@@ -254,6 +285,60 @@ class WindowPerceptionManager:
         if not block.strip():
             return result_text
         return f"{result_text}\n\n{block}" if result_text.strip() else block
+
+    def ingest_and_confirm(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        success: bool,
+    ) -> str:
+        """WURM 路径：ingest + anchored 确认，异常时原子回退 enriched。"""
+        if not self._enabled or not success:
+            return result_text
+
+        classification = classify_tool(tool_name)
+        if classification.window_type is None:
+            return result_text
+
+        parsed = parse_json_payload(result_text)
+        result_json = parsed if isinstance(parsed, dict) else None
+        try:
+            payload = self.update_from_tool_call(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_text=result_text,
+            )
+            if payload is None:
+                return result_text
+
+            window = self._resolve_target_window(classification.window_type, arguments, result_json)
+            if window is None:
+                return self._enriched_fallback(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result_text=result_text,
+                    success=success,
+                )
+
+            self._apply_ingest(
+                window=window,
+                canonical_tool_name=classification.canonical_name,
+                arguments=arguments,
+                result_json=result_json,
+            )
+            return self.generate_confirmation(
+                window=window,
+                tool_name=classification.canonical_name or tool_name,
+            )
+        except Exception:
+            return self._enriched_fallback(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_text=result_text,
+                success=success,
+            )
 
     def update_from_tool_call(
         self,
@@ -288,6 +373,226 @@ class WindowPerceptionManager:
             result_json=result_json,
         )
         return build_tool_perception_payload(window)
+
+    def generate_confirmation(
+        self,
+        *,
+        window: WindowState,
+        tool_name: str,
+    ) -> str:
+        """生成 anchored 模式工具确认文本。"""
+        rows = window.total_rows or (window.viewport.total_rows if window.viewport else 0) or len(window.data_buffer)
+        cols = window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns)
+        preview_text = "无数据行（已更新窗口元信息）"
+        if window.data_buffer:
+            first_row = window.data_buffer[0]
+            values = [str(first_row.get(col.name, "")) for col in window.columns[:5]]
+            if not any(values):
+                values = [str(v) for v in list(first_row.values())[:5]]
+            preview_text = " | ".join(values) if values else "无可预览字段"
+
+        return (
+            f"✅ {tool_name} 执行成功 → {rows}行×{cols}列\n"
+            f"  数据已写入窗口[{window.id}]，请在系统上下文「数据窗口」区域查看完整内容。\n"
+            f"  首行预览: {preview_text}"
+        )
+
+    def _enriched_fallback(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        success: bool,
+    ) -> str:
+        """ingest 失败时回退到 enriched 逻辑。"""
+        payload = self.update_from_tool_call(
+            tool_name=tool_name,
+            arguments=arguments,
+            result_text=result_text,
+        )
+        if payload is None:
+            return result_text
+        block = render_tool_perception_block(payload)
+        if not block:
+            return result_text
+        block = self._truncate_tool_append(block)
+        if not block.strip():
+            return result_text
+        return f"{result_text}\n\n{block}" if result_text.strip() else block
+
+    def _resolve_target_window(
+        self,
+        window_type: WindowType,
+        arguments: dict[str, Any],
+        result_json: dict[str, Any] | None,
+    ) -> WindowState | None:
+        if window_type == WindowType.EXPLORER:
+            if self._active_window_id:
+                return self._windows.get(self._active_window_id)
+            return None
+
+        file_path = normalize_path(extract_file_path(arguments, result_json))
+        sheet_name = extract_sheet_name(arguments, result_json)
+        if not file_path and self._active_window_id:
+            active = self._windows.get(self._active_window_id)
+            if active is not None and active.type == WindowType.SHEET:
+                file_path = active.file_path or ""
+                if not sheet_name:
+                    sheet_name = active.sheet_name or ""
+        key = (file_path, sheet_name)
+        window_id = self._sheet_index.get(key)
+        if window_id is None and self._active_window_id:
+            active = self._windows.get(self._active_window_id)
+            if active is not None and active.type == WindowType.SHEET:
+                return active
+        return self._windows.get(window_id) if window_id else None
+
+    def _apply_ingest(
+        self,
+        *,
+        window: WindowState,
+        canonical_tool_name: str,
+        arguments: dict[str, Any],
+        result_json: dict[str, Any] | None,
+    ) -> None:
+        """根据工具类别将结果写入 WURM 数据容器。"""
+        iteration = self._operation_seq
+        window.current_iteration = iteration
+        rows = extract_data_rows(result_json, canonical_tool_name)
+        columns = extract_columns(result_json, rows)
+        if columns:
+            window.columns = columns
+
+        if window.type == WindowType.EXPLORER:
+            self._append_operation(window, canonical_tool_name, arguments, True)
+            self._append_change(
+                window,
+                make_change_record(
+                    operation="enrich",
+                    tool_summary=f"{canonical_tool_name}",
+                    affected_range="-",
+                    change_type="enriched",
+                    iteration=iteration,
+                    affected_row_indices=[],
+                ),
+            )
+            return
+
+        range_ref = extract_range_ref(
+            arguments,
+            default_rows=self._budget.default_rows,
+            default_cols=self._budget.default_cols,
+        )
+        window.viewport_range = range_ref
+        window.max_cached_rows = max(1, int(self._budget.window_data_buffer_max_rows))
+
+        if canonical_tool_name in {"filter_data"}:
+            filter_condition = {
+                "column": arguments.get("column"),
+                "operator": arguments.get("operator"),
+                "value": arguments.get("value"),
+            }
+            affected = ingest_filter_result(
+                window,
+                filter_condition=filter_condition,
+                filtered_rows=rows,
+                iteration=iteration,
+            )
+            change = make_change_record(
+                operation="filter",
+                tool_summary=f"{canonical_tool_name}({filter_condition})",
+                affected_range=range_ref,
+                change_type="filtered",
+                iteration=iteration,
+                affected_row_indices=affected,
+            )
+        elif canonical_tool_name in {
+            "write_excel",
+            "write_to_sheet",
+            "write_cells",
+            "format_cells",
+            "format_range",
+            "adjust_column_width",
+            "adjust_row_height",
+            "merge_cells",
+            "unmerge_cells",
+            "add_color_scale",
+            "add_data_bar",
+            "add_conditional_rule",
+        }:
+            target_range = str(
+                arguments.get("range")
+                or arguments.get("cell_range")
+                or arguments.get("cell")
+                or range_ref
+            ).strip()
+            affected = ingest_write_result(
+                window,
+                target_range=target_range,
+                result_json=result_json,
+                iteration=iteration,
+            )
+            change = make_change_record(
+                operation="write",
+                tool_summary=f"{canonical_tool_name}({target_range})",
+                affected_range=target_range,
+                change_type="modified",
+                iteration=iteration,
+                affected_row_indices=affected,
+            )
+        else:
+            affected = ingest_read_result(
+                window,
+                new_range=range_ref,
+                new_rows=rows,
+                iteration=iteration,
+            )
+            change = make_change_record(
+                operation="read",
+                tool_summary=f"{canonical_tool_name}({range_ref})",
+                affected_range=range_ref,
+                change_type="added" if rows else "enriched",
+                iteration=iteration,
+                affected_row_indices=affected,
+            )
+
+        if window.viewport is not None:
+            window.total_rows = window.viewport.total_rows
+            window.total_cols = window.viewport.total_cols
+        if window.total_rows <= 0:
+            window.total_rows = len(window.data_buffer)
+        if window.total_cols <= 0:
+            window.total_cols = len(window.columns)
+        window.detail_level = DetailLevel.FULL
+        self._append_operation(window, canonical_tool_name, arguments, True)
+        self._append_change(window, change)
+
+    @staticmethod
+    def _append_operation(
+        window: WindowState,
+        tool_name: str,
+        arguments: dict[str, Any],
+        success: bool,
+    ) -> None:
+        window.operation_history.append(
+            OpEntry(
+                tool_name=tool_name,
+                arguments=dict(arguments),
+                iteration=window.current_iteration,
+                success=success,
+            )
+        )
+        max_entries = max(1, int(window.max_history_entries))
+        if len(window.operation_history) > max_entries:
+            window.operation_history = window.operation_history[-max_entries:]
+
+    @staticmethod
+    def _append_change(window: WindowState, record) -> None:
+        window.change_log.append(record)
+        max_entries = max(1, int(window.max_change_records))
+        if len(window.change_log) > max_entries:
+            window.change_log = window.change_log[-max_entries:]
 
     def _update_explorer_window(
         self,
@@ -380,6 +685,10 @@ class WindowPerceptionManager:
         if total_cols > 0:
             viewport.total_cols = total_cols
         window.viewport = viewport
+        window.viewport_range = range_ref
+        window.total_rows = viewport.total_rows
+        window.total_cols = viewport.total_cols
+        window.max_cached_rows = max(1, int(self._budget.window_data_buffer_max_rows))
 
         scroll_position = compute_scroll_position(
             geometry,
@@ -391,6 +700,14 @@ class WindowPerceptionManager:
         preview = extract_preview_rows(result_json)
         if preview:
             window.preview_rows = preview
+            if not window.data_buffer:
+                normalized_preview = extract_data_rows({"preview": preview}, "read_excel")
+                if normalized_preview:
+                    window.data_buffer = normalized_preview
+            if not window.columns:
+                inferred_columns = extract_columns({"preview": preview}, window.data_buffer)
+                if inferred_columns:
+                    window.columns = inferred_columns
 
         status_bar = extract_status_bar(window.preview_rows)
         if status_bar:
@@ -523,12 +840,15 @@ class WindowPerceptionManager:
         if window is None:
             return
         window.dormant = True
+        window.detail_level = DetailLevel.NONE
         if self._active_window_id == window_id:
             self._active_window_id = None
 
     @staticmethod
     def _wake_window(window: WindowState) -> None:
         window.dormant = False
+        if window.detail_level == DetailLevel.NONE:
+            window.detail_level = DetailLevel.FULL
 
     def _evict_dormant_windows(self) -> None:
         dormant = [item for item in self._windows.values() if item.dormant]

@@ -11,6 +11,7 @@ class WindowType(str, Enum):
     """窗口类型。"""
 
     EXPLORER = "explorer"
+    FOLDER = "explorer"
     SHEET = "sheet"
 
 
@@ -20,6 +21,55 @@ class WindowRenderAction(str, Enum):
     KEEP = "keep"
     MINIMIZE = "minimize"
     CLOSE = "close"
+
+
+class DetailLevel(str, Enum):
+    """窗口细节级别。"""
+
+    FULL = "full"
+    SUMMARY = "summary"
+    ICON = "icon"
+    NONE = "none"
+
+
+@dataclass
+class ColumnDef:
+    """列定义。"""
+
+    name: str
+    inferred_type: str = "unknown"
+
+
+@dataclass
+class CachedRange:
+    """缓存范围块。"""
+
+    range_ref: str
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    is_current_viewport: bool = False
+    added_at_iteration: int = 0
+
+
+@dataclass
+class OpEntry:
+    """单次操作记录。"""
+
+    tool_name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    iteration: int = 0
+    success: bool = True
+
+
+@dataclass
+class ChangeRecord:
+    """单次变更记录。"""
+
+    operation: str
+    tool_summary: str
+    affected_range: str
+    change_type: str
+    iteration: int
+    affected_row_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +100,22 @@ class WindowState:
     preview_rows: list[Any] = field(default_factory=list)
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    columns: list[ColumnDef] = field(default_factory=list)
+    total_rows: int = 0
+    total_cols: int = 0
+    viewport_range: str = ""
+    cached_ranges: list[CachedRange] = field(default_factory=list)
+    data_buffer: list[dict[str, Any]] = field(default_factory=list)
+    max_cached_rows: int = 200
+    stale_hint: str | None = None
+    filter_state: dict[str, Any] | None = None
+    unfiltered_buffer: list[dict[str, Any]] | None = None
+    operation_history: list[OpEntry] = field(default_factory=list)
+    max_history_entries: int = 20
+    change_log: list[ChangeRecord] = field(default_factory=list)
+    max_change_records: int = 5
+    current_iteration: int = 0
+    detail_level: DetailLevel = DetailLevel.FULL
     # 空闲轮次：每次 build_system_notice 周期内，未被访问窗口递增。
     idle_turns: int = 0
     # 操作序号（非对话 turn），用于窗口优先级排序。
@@ -81,3 +147,6 @@ class PerceptionBudget:
     background_after_idle: int = 1
     suspend_after_idle: int = 3
     terminate_after_idle: int = 5
+    window_full_max_rows: int = 25
+    window_full_total_budget_tokens: int = 500
+    window_data_buffer_max_rows: int = 200

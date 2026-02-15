@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
-# 三模式 AB 对比测试：OFF / RULES / HYBRID
+# 三模式 AB 对比测试：OFF / ENRICHED / ANCHORED
 # 用法：bash bench/run_3way_ab.sh [--suites suite1.json,suite2.json]
 # 默认运行三个窗口感知相关套件
 # ──────────────────────────────────────────────────────────
@@ -80,32 +80,32 @@ echo ""
 # 间隔 5 秒，避免 API 限流
 sleep 5
 
-# ── 模式 2: RULES ──
-echo "▶ [2/3] 模式 RULES — 窗口感知开启，仅规则顾问"
-echo "─────────────────────────────────────────────────"
+# ── 模式 2: ENRICHED ──
+echo "▶ [2/3] 模式 ENRICHED — 现有增强返回路径"
+echo "──────────────────────────────────────────────"
 EXCELMANUS_WINDOW_PERCEPTION_ENABLED=1 \
-EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE=rules \
+EXCELMANUS_WINDOW_RETURN_MODE=enriched \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
-    --output-dir "${BASE_OUTPUT}/rules" \
+    --output-dir "${BASE_OUTPUT}/enriched" \
     --concurrency 1
 
-echo "✓ RULES 模式完成"
+echo "✓ ENRICHED 模式完成"
 echo ""
 
 sleep 5
 
-# ── 模式 3: HYBRID ──
-echo "▶ [3/3] 模式 HYBRID — 窗口感知开启 + 小模型顾问"
-echo "──────────────────────────────────────────────────"
+# ── 模式 3: ANCHORED ──
+echo "▶ [3/3] 模式 ANCHORED — WURM Phase1 轻量确认"
+echo "──────────────────────────────────────────────"
 EXCELMANUS_WINDOW_PERCEPTION_ENABLED=1 \
-EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE=hybrid \
+EXCELMANUS_WINDOW_RETURN_MODE=anchored \
     $PYTHON -m excelmanus.bench \
     "${SUITE_ARGS[@]}" \
-    --output-dir "${BASE_OUTPUT}/hybrid" \
+    --output-dir "${BASE_OUTPUT}/anchored" \
     --concurrency 1
 
-echo "✓ HYBRID 模式完成"
+echo "✓ ANCHORED 模式完成"
 echo ""
 
 echo "═══════════════════════════════════════════════════"
