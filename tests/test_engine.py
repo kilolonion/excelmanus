@@ -5393,3 +5393,33 @@ class TestAlwaysAvailableToolsExpanded:
             assert "memory_save" in scope_set
         if "memory_read_topic" in registered:
             assert "memory_read_topic" in scope_set
+
+
+class TestToolIndexNotice:
+    """Task 4: 工具分组索引注入测试。"""
+
+    def test_build_tool_index_notice_with_discovery_scope(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        scope = ["read_excel", "scan_excel_files", "analyze_data",
+                 "filter_data", "list_directory", "search_files"]
+        notice = engine._build_tool_index_notice(scope)
+        assert "工具索引" in notice
+        assert "read_excel" in notice
+        assert "discover_tools" in notice or "select_skill" in notice
+
+    def test_build_tool_index_notice_empty_scope(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        notice = engine._build_tool_index_notice([])
+        assert notice == ""
+
+    def test_tool_index_not_in_notice_when_no_categorized_tools(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        # add_numbers 不在任何分类中
+        notice = engine._build_tool_index_notice(["add_numbers"])
+        assert notice == ""

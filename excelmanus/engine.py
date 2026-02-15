@@ -1436,12 +1436,11 @@ class AgentEngine:
                         skill_catalog = "\n".join(lines)
 
         select_skill_description = (
-            "激活一个技能包来获取执行任务所需的工具。"
-            "仅在当前工具列表不足以完成用户请求时调用。\n"
-            "如果用户只是闲聊、问候、询问能力或不需要执行工具，请不要调用本工具，直接回复。\n"
-            "⚠️ 信息隔离：不要向用户提及技能名称、工具名称、技能包等内部概念，"
-            "只需自然地执行任务并呈现结果。\n"
-            "重要：调用本工具后立即执行任务，不要仅输出计划文字。\n\n"
+            "激活技能包获取写入/格式化/图表等执行工具。"
+            "当前仅有只读探查工具可用，需要修改数据时必须先激活对应技能。\n"
+            "不确定该激活哪个技能时，先调用 discover_tools 查看工具分类。\n"
+            "⚠️ 不要向用户提及技能名称或工具名称等内部概念。\n"
+            "调用后立即执行任务，不要仅输出计划。\n\n"
             "Skill_Catalog:\n"
             f"{skill_catalog}"
         )
@@ -4601,6 +4600,13 @@ class AgentEngine:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
+        # 无 skill 激活时注入工具分组索引
+        if self._active_skill is None:
+            _tool_scope = self._get_current_tool_scope(route_result=None)
+            _tool_index = self._build_tool_index_notice(_tool_scope)
+            if _tool_index:
+                base_prompt = base_prompt + "\n\n" + _tool_index
+
         if self._transient_hook_contexts:
             hook_context = "\n".join(self._transient_hook_contexts).strip()
             self._transient_hook_contexts.clear()
@@ -4871,6 +4877,41 @@ class AgentEngine:
             mode=requested_mode,
             model_id=self._active_model,
         )
+    def _build_tool_index_notice(self, tool_scope: Sequence[str]) -> str:
+        """生成当前可用工具的分类索引，注入 system prompt。
+
+        仅在无 skill 激活时生成，帮助 LLM 快速定位工具类别。
+        """
+        from excelmanus.tools.policy import TOOL_CATEGORIES
+
+        _CATEGORY_LABELS: dict[str, str] = {
+            "data_read": "数据读取",
+            "data_write": "数据写入",
+            "format": "格式化",
+            "advanced_format": "高级格式",
+            "chart": "图表",
+            "sheet": "工作表操作",
+            "file": "文件操作",
+            "code": "代码执行",
+        }
+
+        scope_set = set(tool_scope)
+        lines: list[str] = []
+        for cat, tools in TOOL_CATEGORIES.items():
+            available = [t for t in tools if t in scope_set]
+            if available:
+                label = _CATEGORY_LABELS.get(cat, cat)
+                lines.append(f"- {label}：{', '.join(available)}")
+        if not lines:
+            return ""
+        return (
+            "## 工具索引\n"
+            + "\n".join(lines)
+            + "\n\n需要更多工具时，调用 select_skill 激活对应技能，"
+            "或调用 discover_tools 查询完整工具列表。"
+        )
+
+
 
     def _set_window_perception_turn_hints(self, *, user_message: str, is_new_task: bool) -> None:
         """设置窗口感知层的当前轮提示。"""

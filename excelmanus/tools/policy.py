@@ -267,16 +267,6 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
 }
 
 
-# ── fallback 路由只读发现工具 ───────────────────────────────
-
-FALLBACK_DISCOVERY_TOOLS: tuple[str, ...] = (
-    "scan_excel_files",
-    "list_directory",
-    "search_files",
-    "list_sheets",
-    "get_file_info",
-    "read_excel",
-    "filter_data",
-    "analyze_data",
-    "group_aggregate",
-)
+# ── fallback 路由只读发现工具（已废弃，使用 DISCOVERY_TOOLS 替代） ──
+# 保留以兼容外部引用，内容与 DISCOVERY_TOOLS 同步
+FALLBACK_DISCOVERY_TOOLS: tuple[str, ...] = tuple(sorted(DISCOVERY_TOOLS))
