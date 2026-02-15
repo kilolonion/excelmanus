@@ -836,6 +836,12 @@ class AgentEngine:
             slash_command=effective_slash_command,
             raw_args=effective_raw_args if effective_slash_command else None,
         )
+        route_result, user_message = await self._adapt_guidance_only_slash_route(
+            route_result=route_result,
+            user_message=user_message,
+            slash_command=effective_slash_command,
+            raw_args=effective_raw_args,
+        )
         route_result = self._merge_with_loaded_skills(route_result)
         # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
         effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
@@ -3640,9 +3646,63 @@ class AgentEngine:
         self._router_client = self._client
         self._router_model = self._active_model
 
+    async def _adapt_guidance_only_slash_route(
+        self,
+        *,
+        route_result: SkillMatchResult,
+        user_message: str,
+        slash_command: str | None,
+        raw_args: str,
+    ) -> tuple[SkillMatchResult, str]:
+        """将仅指导型 slash 技能回落为任务执行路由，避免“只讲不做”。
+
+        触发条件：
+        - 手动 slash 命令命中（route_mode=slash_direct）
+        - 命中的 skill 无 allowed_tools，且不是 command_dispatch=tool
+        - slash 参数中包含可执行任务文本
+        """
+        if not slash_command or route_result.route_mode != "slash_direct":
+            return route_result, user_message
+
+        task_text = raw_args.strip()
+        if not task_text:
+            return route_result, user_message
+
+        skill = self._pick_route_skill(route_result)
+        if skill is None:
+            return route_result, user_message
+        if skill.command_dispatch == "tool" or skill.allowed_tools:
+            return route_result, user_message
+
+        fallback = await self._route_skills(task_text)
+        guidance_context = (
+            f"[Slash Guidance] 已启用技能 `{skill.name}` 的方法论约束。\n"
+            "该技能仅用于补充执行规范，不改变用户任务目标。\n"
+            "请优先调用工具完成任务，不要只输出「我先…」「我将…」等计划性文字。"
+        )
+        fallback_contexts = list(fallback.system_contexts)
+        fallback_contexts.append(guidance_context)
+        adapted = SkillMatchResult(
+            skills_used=list(fallback.skills_used),
+            tool_scope=list(fallback.tool_scope),
+            route_mode=fallback.route_mode,
+            system_contexts=fallback_contexts,
+            parameterized=fallback.parameterized,
+        )
+        logger.info(
+            "斜杠技能 %s 为 guidance-only，已回落到任务路由: %s",
+            skill.name,
+            _summarize_text(task_text),
+        )
+        return adapted, task_text
+
     def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
         """将本轮路由结果与会话内历史已加载的 skill 合并。"""
         if self._skill_router is None:
+            return route_result
+
+        # 手动 slash 技能仅作用于当前轮，避免跨轮污染会话上下文。
+        if route_result.route_mode == "slash_direct":
             return route_result
 
         # 更新累积记录

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import os
 import sys
 import time
 import uuid
@@ -39,6 +40,9 @@ logger = get_logger("bench")
 
 # 工具结果最大保留字符数（避免日志过大）
 _TOOL_RESULT_MAX_CHARS = 8000
+
+# trace 模式下系统提示最大保留字符数
+_TRACE_SYSTEM_PROMPT_MAX_CHARS = 50000
 
 # ── 数据模型 ──────────────────────────────────────────────
 
@@ -106,11 +110,13 @@ class TurnResult:
     total_tokens: int = 0
     status: str = "ok"
     error: dict[str, Any] | None = None
+    # engine 内部交互轨迹（--trace 启用时有值）
+    engine_trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
         tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
-        return {
+        result = {
             "turn_index": self.turn_index,
             "message": self.message,
             "reply": self.reply,
@@ -137,6 +143,9 @@ class TurnResult:
                 "llm_call_count": len(self.llm_calls),
             },
         }
+        if self.engine_trace:
+            result["engine_trace"] = self.engine_trace
+        return result
 
 
 @dataclass
@@ -170,6 +179,8 @@ class BenchResult:
     status: str = "ok"
     # 结构化错误信息（status=error 时有值）
     error: dict[str, Any] | None = None
+    # engine 内部交互轨迹（--trace 启用时有值）
+    engine_trace: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
@@ -216,6 +227,9 @@ class BenchResult:
         # 多轮对话时输出各轮次详情
         if self.turns:
             result["turns"] = [t.to_dict() for t in self.turns]
+        # engine 内部交互轨迹
+        if self.engine_trace:
+            result["engine_trace"] = self.engine_trace
         return result
 
 
@@ -452,6 +466,138 @@ class _LLMCallInterceptor:
         self._engine._client.chat.completions.create = self._original_create
 
 
+class _EngineTracer:
+    """拦截 engine 关键方法，记录程序向 agent 注入的指令和内部决策。
+
+    通过 monkey-patch 以下方法实现：
+    - ``_prepare_system_prompts_for_request`` → 记录每轮注入的系统提示（分解各组件）
+    - ``_enrich_tool_result_with_window_perception`` → 记录窗口感知增强前后对比
+    - ``_get_current_tool_scope`` → 记录每轮工具范围决策
+
+    通过环境变量 ``EXCELMANUS_BENCH_TRACE=1`` 或 CLI ``--trace`` 启用。
+    """
+
+    def __init__(self, engine: AgentEngine) -> None:
+        self.entries: list[dict[str, Any]] = []
+        self._engine = engine
+        self._iteration = 0
+
+        # 保存原始方法
+        self._orig_prepare = engine._prepare_system_prompts_for_request
+        self._orig_enrich = engine._enrich_tool_result_with_window_perception
+        self._orig_scope = engine._get_current_tool_scope
+
+        # monkey-patch
+        engine._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
+        engine._enrich_tool_result_with_window_perception = self._traced_enrich  # type: ignore[assignment]
+        engine._get_current_tool_scope = self._traced_scope  # type: ignore[assignment]
+
+    def _traced_prepare(
+        self, skill_contexts: list[str],
+    ) -> tuple[list[str], str | None]:
+        """拦截系统提示构建，记录各组件内容。"""
+        self._iteration += 1
+        prompts, error = self._orig_prepare(skill_contexts)
+
+        # 分解记录各组件
+        components: list[dict[str, Any]] = []
+        for idx, prompt in enumerate(prompts):
+            label = "base_system_prompt" if idx == 0 else f"context_{idx}"
+            # 尝试识别组件类型
+            if idx > 0:
+                snippet = prompt[:200]
+                if "窗口感知" in snippet or "Window Perception" in snippet:
+                    label = "window_perception_notice"
+                elif "权限提示" in snippet or "fullAccess" in snippet:
+                    label = "access_notice"
+                elif "MCP" in snippet:
+                    label = "mcp_context_notice"
+                elif "Hook" in snippet:
+                    label = "hook_context"
+                elif "计划" in snippet and "已批准" in snippet:
+                    label = "approved_plan_context"
+                else:
+                    label = f"skill_context_{idx}"
+            components.append({
+                "label": label,
+                "char_count": len(prompt),
+                "content": prompt[:_TRACE_SYSTEM_PROMPT_MAX_CHARS],
+                "truncated": len(prompt) > _TRACE_SYSTEM_PROMPT_MAX_CHARS,
+            })
+
+        self.entries.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": "system_prompts_injected",
+            "iteration": self._iteration,
+            "data": {
+                "prompt_count": len(prompts),
+                "total_chars": sum(len(p) for p in prompts),
+                "skill_context_count": len(skill_contexts),
+                "context_error": error,
+                "components": components,
+            },
+        })
+        return prompts, error
+
+    def _traced_enrich(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result_text: str,
+        success: bool,
+    ) -> str:
+        """拦截窗口感知增强，记录前后对比。"""
+        enriched = self._orig_enrich(
+            tool_name=tool_name,
+            arguments=arguments,
+            result_text=result_text,
+            success=success,
+        )
+        # 仅在内容实际被增强时记录
+        if enriched != result_text:
+            self.entries.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "window_perception_enrichment",
+                "iteration": self._iteration,
+                "data": {
+                    "tool_name": tool_name,
+                    "original_chars": len(result_text),
+                    "enriched_chars": len(enriched),
+                    "added_chars": len(enriched) - len(result_text),
+                    "enriched_suffix": enriched[len(result_text):][:2000],
+                },
+            })
+        return enriched
+
+    def _traced_scope(self, **kwargs: Any) -> list[str]:
+        """拦截工具范围决策，记录可用工具列表。"""
+        scope = self._orig_scope(**kwargs)
+        self.entries.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": "tool_scope_resolved",
+            "iteration": self._iteration,
+            "data": {
+                "tool_count": len(scope),
+                "tools": list(scope),
+            },
+        })
+        return scope
+
+    def snapshot_and_reset(self) -> list[dict[str, Any]]:
+        """快照当前 trace 数据并重置，用于多轮分轮记录。"""
+        snapshot = list(self.entries)
+        self.entries = []
+        self._iteration = 0
+        return snapshot
+
+    def restore(self) -> None:
+        """恢复原始方法。"""
+        self._engine._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
+        self._engine._enrich_tool_result_with_window_perception = self._orig_enrich  # type: ignore[assignment]
+        self._engine._get_current_tool_scope = self._orig_scope  # type: ignore[assignment]
+
+
 # ── 执行器 ────────────────────────────────────────────────
 
 
@@ -489,15 +635,22 @@ async def run_case(
     config: ExcelManusConfig,
     *,
     render_enabled: bool = True,
+    trace_enabled: bool = False,
 ) -> BenchResult:
     """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。
 
     支持多轮对话：当 case.messages 包含多条消息时，依次发送给同一个
     engine 实例，ConversationMemory 自然保持上下文。
+
+    Args:
+        trace_enabled: 启用 engine 内部交互轨迹记录（系统提示注入、
+            窗口感知增强、工具范围决策等）。通过 ``--trace`` 或
+            ``EXCELMANUS_BENCH_TRACE=1`` 启用。
     """
     engine = _create_engine(config)
     collector = _EventCollector(render_enabled=render_enabled)
     interceptor = _LLMCallInterceptor(engine)
+    tracer = _EngineTracer(engine) if trace_enabled else None
     timestamp = datetime.now(timezone.utc).isoformat()
 
     # 归一化消息列表：兼容单轮 message 和多轮 messages
@@ -570,6 +723,7 @@ async def run_case(
                         "type": type(exc).__name__,
                         "message": str(exc),
                     },
+                    engine_trace=tracer.snapshot_and_reset() if tracer else [],
                 )
                 all_turns.append(turn_result)
                 all_tool_calls.extend(snap["tool_calls"])
@@ -615,6 +769,7 @@ async def run_case(
                 prompt_tokens=chat_result.prompt_tokens,
                 completion_tokens=chat_result.completion_tokens,
                 total_tokens=chat_result.total_tokens,
+                engine_trace=tracer.snapshot_and_reset() if tracer else [],
             )
             all_turns.append(turn_result)
 
@@ -645,8 +800,15 @@ async def run_case(
                 )
     finally:
         interceptor.restore()
+        if tracer is not None:
+            tracer.restore()
 
     case_elapsed = time.monotonic() - case_start
+
+    # 单轮用例的 engine_trace 直接从 tracer 获取（多轮已在各 turn 中记录）
+    case_engine_trace: list[dict[str, Any]] = []
+    if tracer is not None and not is_multi_turn:
+        case_engine_trace = tracer.snapshot_and_reset()
 
     result = BenchResult(
         case_id=case.id,
@@ -670,6 +832,7 @@ async def run_case(
         turns=all_turns if is_multi_turn else [],
         status=case_status,
         error=case_error,
+        engine_trace=case_engine_trace,
     )
 
     # 单轮时打印最终回复（多轮已在循环中逐轮打印）
@@ -819,6 +982,7 @@ async def run_suite(
     output_dir: Path,
     *,
     concurrency: int = 1,
+    trace_enabled: bool = False,
 ) -> list[BenchResult]:
     """运行整个测试套件。"""
     if concurrency < 1:
@@ -827,10 +991,11 @@ async def run_suite(
     suite_name, cases = _load_suite(suite_path)
     logger.info("═" * 50)
     logger.info(
-        "开始执行套件: %s (%d 个用例, 并发=%d)",
+        "开始执行套件: %s (%d 个用例, 并发=%d%s)",
         suite_name,
         len(cases),
         concurrency,
+        ", trace=ON" if trace_enabled else "",
     )
     logger.info("═" * 50)
 
@@ -841,7 +1006,11 @@ async def run_suite(
         render_enabled: bool,
     ) -> tuple[int, BenchResult, Path]:
         try:
-            result = await run_case(case, config, render_enabled=render_enabled)
+            result = await run_case(
+                case, config,
+                render_enabled=render_enabled,
+                trace_enabled=trace_enabled,
+            )
         except Exception as exc:  # pragma: no cover - 兜底保护
             logger.error("用例 %s 执行崩溃: %s", case.id, exc, exc_info=True)
             result = BenchResult(
@@ -977,7 +1146,13 @@ async def run_suite(
 # ── 入口 ──────────────────────────────────────────────────
 
 
-async def run_single(message: str, config: ExcelManusConfig, output_dir: Path) -> BenchResult:
+async def run_single(
+    message: str,
+    config: ExcelManusConfig,
+    output_dir: Path,
+    *,
+    trace_enabled: bool = False,
+) -> BenchResult:
     """直接运行一条用户消息作为测试用例。"""
     case = BenchCase(
         id="adhoc",
@@ -985,7 +1160,11 @@ async def run_single(message: str, config: ExcelManusConfig, output_dir: Path) -
         message=message,
         messages=[message],
     )
-    result = await run_case(case, config, render_enabled=True)
+    result = await run_case(
+        case, config,
+        render_enabled=True,
+        trace_enabled=trace_enabled,
+    )
     filepath = _save_result(result, output_dir)
     logger.info("日志已保存: %s", filepath)
     return result
@@ -1055,6 +1234,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default="outputs/bench",
         help="日志输出目录（默认 outputs/bench）",
     )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        default=False,
+        help="启用 engine 内部交互轨迹记录（系统提示注入、窗口感知增强、工具范围等）。"
+        "也可通过 EXCELMANUS_BENCH_TRACE=1 环境变量启用。",
+    )
     return parser
 
 
@@ -1105,6 +1291,7 @@ async def _run_suites(
     *,
     concurrency: int = 1,
     suite_concurrency: int = 1,
+    trace_enabled: bool = False,
 ) -> int:
     """并发运行多个 suite，带 Rich Live 进度面板和全局汇总。
 
@@ -1151,6 +1338,7 @@ async def _run_suites(
                     config,
                     output_dir,
                     concurrency=concurrency,
+                    trace_enabled=trace_enabled,
                 )
                 ok_count = sum(1 for r in results if r.status == "ok")
                 fail_count = len(results) - ok_count
@@ -1287,11 +1475,14 @@ async def _main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    # trace 模式：CLI --trace 或环境变量 EXCELMANUS_BENCH_TRACE=1
+    trace_enabled = args.trace or os.environ.get("EXCELMANUS_BENCH_TRACE", "0") == "1"
+
     if plan.mode == "message":
         config = load_config()
         setup_logging(config.log_level)
         output_dir = Path(args.output_dir)
-        await run_single(plan.message, config, output_dir)
+        await run_single(plan.message, config, output_dir, trace_enabled=trace_enabled)
         return 0
 
     if plan.mode == "suite":
@@ -1309,6 +1500,7 @@ async def _main(argv: list[str] | None = None) -> int:
             output_dir,
             concurrency=args.concurrency,
             suite_concurrency=args.suite_concurrency,
+            trace_enabled=trace_enabled,
         )
 
     # all 模式
@@ -1331,6 +1523,7 @@ async def _main(argv: list[str] | None = None) -> int:
         output_dir,
         concurrency=args.concurrency,
         suite_concurrency=args.suite_concurrency,
+        trace_enabled=trace_enabled,
     )
 
 
