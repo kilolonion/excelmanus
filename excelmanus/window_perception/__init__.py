@@ -22,7 +22,6 @@ from .models import (
     PerceptionBudget,
     Viewport,
     WindowSnapshot,
-    WindowState,
     WindowType,
 )
 from .repeat_detector import RepeatDetector
@@ -77,7 +76,6 @@ __all__ = [
     "WindowAdvice",
     "WindowLifecycleAdvisor",
     "WindowSnapshot",
-    "WindowState",
     "WindowType",
     "WindowPerceptionManager",
 ]
