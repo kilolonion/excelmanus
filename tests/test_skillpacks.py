@@ -775,8 +775,8 @@ class TestSkillRouter:
         assert "list_skills" in result.tool_scope
 
     @pytest.mark.asyncio
-    async def test_non_slash_returns_fallback(self, tmp_path: Path) -> None:
-        """非斜杠消息返回 fallback 结果（全量工具 + 技能目录）。"""
+    async def test_non_slash_returns_all_tools(self, tmp_path: Path) -> None:
+        """非斜杠消息应返回 all_tools 路由（tool_scope 为空）。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -804,13 +804,9 @@ class TestSkillRouter:
         router = SkillRouter(config, loader)
 
         result = await router.route("请分析这个文件")
-        assert result.route_mode == "fallback"
-        assert "list_skills" in result.tool_scope
-        # 只读数据工具应在 fallback 模式下直接可用，无需 select_skill
-        assert "filter_data" in result.tool_scope
-        assert "analyze_data" in result.tool_scope
-        # 技能目录通过 select_skill 元工具 description 传递，不再注入 system_contexts
-        assert not any("可用技能" in ctx for ctx in result.system_contexts)
+        assert result.route_mode == "all_tools"
+        assert result.tool_scope == []
+        assert result.skills_used == []
 
     @pytest.mark.asyncio
     async def test_non_slash_injects_large_file_context(self, tmp_path: Path) -> None:
@@ -849,6 +845,82 @@ class TestSkillRouter:
         joined = "\n".join(result.system_contexts)
         assert "检测到大文件 Excel" in joined
         assert str(large_file.resolve()) in joined
+
+    @pytest.mark.asyncio
+    async def test_non_slash_mutating_intent_still_returns_all_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """写入意图下非斜杠路由仍应直接放开全量工具。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "format_basic",
+            description="格式化",
+            allowed_tools=["format_cells", "read_excel"],
+            triggers=["格式", "字体", "红色"],
+        )
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="通用兜底",
+            allowed_tools=["write_excel", "read_excel"],
+            triggers=[],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("把A列字体改成红色并保存")
+
+        assert result.route_mode == "all_tools"
+        assert result.tool_scope == []
+        assert result.skills_used == []
+
+    @pytest.mark.asyncio
+    async def test_non_slash_mutating_intent_without_trigger_still_all_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """写入意图即使无触发词，也应直接放开全量工具。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="数据分析",
+            allowed_tools=["read_excel", "analyze_data"],
+            triggers=["分析"],
+        )
+        _write_skillpack(
+            system_dir,
+            "general_excel",
+            description="通用兜底",
+            allowed_tools=["write_excel", "read_excel"],
+            triggers=[],
+        )
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("请修改这个文件并保存到原路径")
+
+        assert result.route_mode == "all_tools"
+        assert result.tool_scope == []
+        assert result.skills_used == []
 
     @pytest.mark.asyncio
     async def test_slash_direct_parameterized_injects_large_file_context(

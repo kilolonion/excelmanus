@@ -1,0 +1,18 @@
+{
+  "suite_name": "SpreadsheetBench 单题测试 #44628",
+  "description": "按产品首字母分组求和 — SUMIF + 通配符",
+  "source": "SpreadsheetBench (NeurIPS 2024) — bench/external/spreadsheetbench/spreadsheetbench_verified_400",
+  "cases": [
+    {
+      "id": "sb_44628",
+      "name": "按首字母分组求和 SUMIF",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/44628/1_44628_init.xlsx. Group and sum the total sales of all products by using the first letter of each product's name, such as 'A' from the product SKU 'A2-3442-2244', and aggregate the sales for all SKUs starting with the same letter. Display these results in D3:G3.",
+      "tags": ["cell_level", "formula", "sumif", "spreadsheetbench"],
+      "expected": {
+        "answer_position": "D3:G3",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/44628/1_44628_golden.xlsx",
+        "source_id": "44628"
+      }
+    }
+  ]
+}
