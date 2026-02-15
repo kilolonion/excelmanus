@@ -14,6 +14,8 @@ import asyncio
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
 import time
 import uuid
@@ -63,6 +65,7 @@ class BenchCase:
     messages: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     expected: dict[str, Any] = field(default_factory=dict)
+    source_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -630,12 +633,83 @@ def _dump_conversation_messages(engine: AgentEngine) -> list[dict[str, Any]]:
         return []
 
 
+# ── 文件隔离 ──────────────────────────────────────────────
+
+# 从 message 文本中自动提取文件路径的正则（支持 .xlsx / .csv / .xls）
+_FILE_PATH_RE = re.compile(
+    r"""(?:^|[\s"'(])"""           # 前导：行首 / 空白 / 引号 / 括号
+    r"""((?:[\w./\\-]+/)*"""       # 目录部分
+    r"""[\w.()-]+"""               # 文件名
+    r"""\.(?:xlsx|csv|xls))""",    # 扩展名
+    re.IGNORECASE,
+)
+
+
+def _extract_file_paths(text: str) -> list[str]:
+    """从文本中提取可能的文件路径。"""
+    return list(dict.fromkeys(_FILE_PATH_RE.findall(text)))
+
+
+def _isolate_source_files(
+    case: BenchCase,
+    workdir: Path,
+) -> list[str]:
+    """将 case 引用的源文件复制到工作目录，返回替换后的 messages。
+
+    优先使用 case.source_files（显式声明），否则从 messages 中
+    自动提取文件路径作为 fallback。
+
+    复制后将 messages 中的原始路径替换为副本路径。
+    """
+    messages = list(case.messages) if case.messages else [case.message]
+
+    # 收集需要隔离的文件路径
+    source_files = list(case.source_files) if case.source_files else []
+    if not source_files:
+        for msg in messages:
+            source_files.extend(_extract_file_paths(msg))
+        # 去重保序
+        source_files = list(dict.fromkeys(source_files))
+
+    if not source_files:
+        return messages
+
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    # 复制文件并构建路径映射
+    path_map: dict[str, str] = {}
+    for src_path_str in source_files:
+        src = Path(src_path_str)
+        if not src.exists():
+            logger.warning("源文件不存在，跳过隔离: %s", src)
+            continue
+        dst = workdir / src.name
+        shutil.copy2(src, dst)
+        path_map[src_path_str] = str(dst)
+        logger.debug("隔离复制: %s → %s", src, dst)
+
+    if not path_map:
+        return messages
+
+    # 替换 messages 中的路径（按路径长度降序替换，避免短路径误匹配长路径的子串）
+    sorted_paths = sorted(path_map.keys(), key=len, reverse=True)
+    replaced: list[str] = []
+    for msg in messages:
+        for old_path in sorted_paths:
+            msg = msg.replace(old_path, path_map[old_path])
+        replaced.append(msg)
+
+    logger.info("文件隔离完成: %d 个文件 → %s", len(path_map), workdir)
+    return replaced
+
+
 async def run_case(
     case: BenchCase,
     config: ExcelManusConfig,
     *,
     render_enabled: bool = True,
     trace_enabled: bool = False,
+    output_dir: Path | None = None,
 ) -> BenchResult:
     """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。
 
@@ -646,6 +720,7 @@ async def run_case(
         trace_enabled: 启用 engine 内部交互轨迹记录（系统提示注入、
             窗口感知增强、工具范围决策等）。通过 ``--trace`` 或
             ``EXCELMANUS_BENCH_TRACE=1`` 启用。
+        output_dir: 日志输出目录，用于构建文件隔离工作目录。
     """
     engine = _create_engine(config)
     collector = _EventCollector(render_enabled=render_enabled)
@@ -653,8 +728,12 @@ async def run_case(
     tracer = _EngineTracer(engine) if trace_enabled else None
     timestamp = datetime.now(timezone.utc).isoformat()
 
-    # 归一化消息列表：兼容单轮 message 和多轮 messages
-    messages = case.messages if case.messages else [case.message]
+    # 文件隔离：将源文件复制到工作目录，替换 messages 中的路径
+    if output_dir is not None:
+        workdir = output_dir / "workfiles" / case.id
+        messages = _isolate_source_files(case, workdir)
+    else:
+        messages = list(case.messages) if case.messages else [case.message]
     is_multi_turn = len(messages) > 1
 
     logger.info(
@@ -894,6 +973,7 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase]]:
             messages=messages,
             tags=item.get("tags", []),
             expected=item.get("expected", {}),
+            source_files=item.get("source_files", []),
         ))
     return suite_name, cases
 
@@ -1010,6 +1090,7 @@ async def run_suite(
                 case, config,
                 render_enabled=render_enabled,
                 trace_enabled=trace_enabled,
+                output_dir=output_dir,
             )
         except Exception as exc:  # pragma: no cover - 兜底保护
             logger.error("用例 %s 执行崩溃: %s", case.id, exc, exc_info=True)
@@ -1164,6 +1245,7 @@ async def run_single(
         case, config,
         render_enabled=True,
         trace_enabled=trace_enabled,
+        output_dir=output_dir,
     )
     filepath = _save_result(result, output_dir)
     logger.info("日志已保存: %s", filepath)
