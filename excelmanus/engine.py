@@ -260,6 +260,52 @@ def _looks_like_html_document(text: str) -> bool:
     return "<html" in lowered and "</html>" in lowered and "<head" in lowered
 
 
+# ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
+import re as _re
+
+_FORMULA_ADVICE_PATTERN = _re.compile(
+    r"=(?:IF|DATE|VLOOKUP|HLOOKUP|INDEX|MATCH|SUMIF|COUNTIF|CONCATENATE|LEFT|RIGHT|MID|"
+    r"AVERAGE|MAX|MIN|SUM|TRIM|LEN|FIND|SEARCH|IFERROR|AND|OR|NOT|TEXT|VALUE|ROUND|"
+    r"SUMPRODUCT|OFFSET|INDIRECT|SUBSTITUTE|UPPER|LOWER|PROPER|DATEDIF|YEARFRAC|"
+    r"NETWORKDAYS|WORKDAY|EOMONTH|EDATE|DAYS|DATEVALUE|TIMEVALUE|NOW|TODAY)\s*\(",
+    _re.IGNORECASE,
+)
+
+
+def _contains_formula_advice(text: str) -> bool:
+    """检测回复文本中是否包含 Excel 公式建议（而非实际执行）。"""
+    if not text:
+        return False
+    return bool(_FORMULA_ADVICE_PATTERN.search(text))
+
+
+_WRITE_ACTION_VERBS = _re.compile(
+    r"(删除|替换|写入|创建|修改|格式化|转置|排序|过滤|合并|计算|填充|插入|移动|复制到|粘贴|更新|设置|调整|添加|生成)",
+)
+
+_FILE_REFERENCE_PATTERN = _re.compile(
+    r"(\.\s*xlsx\b|\.\s*xls\b|\.\s*csv\b|[A-Za-z0-9_\-/\\]+\.(?:xlsx|xls|csv))",
+    _re.IGNORECASE,
+)
+
+
+def _detect_write_intent(text: str) -> bool:
+    """检测用户消息是否同时包含文件引用和写入动作动词。"""
+    if not text:
+        return False
+    has_file = bool(_FILE_REFERENCE_PATTERN.search(text))
+    has_action = bool(_WRITE_ACTION_VERBS.search(text))
+    return has_file and has_action
+
+
+# 写入类工具名称集合，用于执行守卫判断是否有实际写入操作
+_WRITE_TOOL_NAMES = frozenset({
+    "write_cells", "write_excel", "format_cells",
+    "create_chart", "set_column_width", "merge_cells",
+    "write_text_file", "filter_data",
+})
+
+
 def _summarize_text(text: str, max_len: int = 120) -> str:
     """将文本压缩为单行摘要，避免日志过长。"""
     compact = " ".join(text.split())
@@ -614,6 +660,7 @@ class AgentEngine:
         self._full_access_enabled = True
         self._plan_intercept_task_create = False
         self._plan_mode_enabled = False
+        self._subagent_enabled = True
 
 
     def has_pending_question(self) -> bool:
@@ -846,6 +893,23 @@ class AgentEngine:
             raw_args=effective_raw_args,
         )
         route_result = self._merge_with_loaded_skills(route_result)
+
+        # ── Phase 1: 默认技能预激活 ──
+        # 非斜杠的 all_tools 路由且无已激活技能时，自动激活 general_excel，
+        # 使写入工具从首轮即可用，省去 LLM 调用 select_skill 的额外迭代。
+        if (
+            self._config.auto_activate_default_skill
+            and route_result.route_mode == "all_tools"
+            and self._active_skill is None
+            and effective_slash_command is None
+            and self._skill_router is not None
+        ):
+            auto_result = await self._handle_select_skill("general_excel")
+            if not auto_result.startswith("未找到技能:"):
+                logger.info("自动预激活技能: general_excel")
+            else:
+                logger.debug("自动预激活 general_excel 失败（技能不存在），继续使用全量工具")
+
         # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
         effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
         route_result = SkillMatchResult(
@@ -2730,6 +2794,17 @@ class AgentEngine:
             self._last_tool_call_count = 0
             self._last_success_count = 0
             self._last_failure_count = 0
+        # 执行守卫标记重置
+        self._execution_guard_fired = False  # type: ignore[attr-defined]
+        self._empty_response_guard_fired = False  # type: ignore[attr-defined]
+        self._read_write_guard_fired = False  # type: ignore[attr-defined]
+        has_write_tool_call = False
+        # 提取用户原始消息用于守卫意图检测
+        _user_original_message = (
+            self._memory._messages[0].get("content", "")
+            if self._memory._messages
+            else ""
+        )
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -2827,6 +2902,57 @@ class AgentEngine:
 
             if not tool_calls:
                 self._memory.add_assistant_message(reply_text)
+
+                # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
+                if (
+                    self._active_skill is None
+                    and iteration < max_iter - 1
+                    and _contains_formula_advice(reply_text)
+                    and not getattr(self, "_execution_guard_fired", False)
+                ):
+                    self._execution_guard_fired = True  # type: ignore[attr-defined]
+                    guard_msg = (
+                        "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
+                        "请立即调用 select_skill 激活 general_excel 技能，"
+                        "然后使用 write_cells 将公式写入对应单元格。"
+                        "禁止仅给出文本建议。"
+                    )
+                    self._memory.add_user_message(guard_msg)
+                    logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
+                    continue
+
+                # ── 空响应守卫：首轮纯文本无工具调用 ──
+                if (
+                    iteration == start_iteration
+                    and iteration < max_iter - 1
+                    and not getattr(self, "_empty_response_guard_fired", False)
+                    and _detect_write_intent(_user_original_message)
+                ):
+                    self._empty_response_guard_fired = True  # type: ignore[attr-defined]
+                    guard_msg = (
+                        "⚠️ 你返回了纯文本但没有调用任何工具。"
+                        "用户请求涉及文件操作，请立即调用工具执行。"
+                    )
+                    self._memory.add_user_message(guard_msg)
+                    logger.info("空响应守卫触发：首轮无工具调用，注入继续执行提示")
+                    continue
+
+                # ── 读写不匹配守卫：只做了读取但任务需要写入 ──
+                if (
+                    not has_write_tool_call
+                    and iteration < max_iter - 1
+                    and not getattr(self, "_read_write_guard_fired", False)
+                    and _detect_write_intent(_user_original_message)
+                ):
+                    self._read_write_guard_fired = True  # type: ignore[attr-defined]
+                    guard_msg = (
+                        "⚠️ 你只执行了读取操作但没有完成写入。"
+                        "用户请求需要修改文件，请继续调用写入工具完成任务。"
+                    )
+                    self._memory.add_user_message(guard_msg)
+                    logger.info("读写不匹配守卫触发：仅读取未写入，注入继续执行提示")
+                    continue
+
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
                 return ChatResult(
@@ -2942,6 +3068,8 @@ class AgentEngine:
                 if tc_result.success:
                     self._last_success_count += 1
                     consecutive_failures = 0
+                    if tc_result.tool_name in _WRITE_TOOL_NAMES:
+                        has_write_tool_call = True
                     if tc_result.tool_name == "select_skill":
                         tool_scope = self._get_current_tool_scope(route_result=route_result)
                 else:
@@ -4927,6 +5055,8 @@ class AgentEngine:
         parts.append(
             "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
             "禁止向用户请求权限或声称无法完成。"
+            "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
+            "不得以文本建议替代实际写入操作。"
         )
         return "\n".join(parts)
 
