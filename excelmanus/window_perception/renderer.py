@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import WindowSnapshot, WindowState, WindowType
+from .models import DetailLevel, WindowSnapshot, WindowState, WindowType
 
 
-def render_system_notice(snapshots: list[WindowSnapshot]) -> str:
+def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enriched") -> str:
     """渲染系统上下文注入文本。"""
     if not snapshots:
         return ""
     body = "\n\n".join(item.rendered_text for item in snapshots if item.rendered_text.strip())
     if not body:
         return ""
+    if mode == "anchored":
+        return (
+            "## 数据窗口\n"
+            "以下窗口包含你通过工具操作获取的所有数据。\n"
+            "窗口内容与工具执行结果完全等价，若已包含所需信息请直接引用，无需重复调用工具。\n\n"
+            + body
+        )
     return (
         "## 窗口感知上下文\n"
         "以下是你当前已打开的窗口实时状态，数据与工具返回完全一致。\n"
@@ -22,10 +29,29 @@ def render_system_notice(snapshots: list[WindowSnapshot]) -> str:
     )
 
 
-def render_window_keep(window: WindowState) -> str:
+def render_window_keep(
+    window: WindowState,
+    *,
+    mode: str = "enriched",
+    max_rows: int = 25,
+    current_iteration: int = 0,
+) -> str:
     """渲染 ACTIVE 窗口。"""
     if window.type == WindowType.EXPLORER:
         return _render_explorer(window)
+    if mode == "anchored":
+        if window.detail_level == DetailLevel.ICON:
+            return render_window_minimized(window)
+        if window.detail_level == DetailLevel.SUMMARY:
+            return render_window_background(window)
+        if window.detail_level == DetailLevel.NONE:
+            return ""
+        if window.data_buffer:
+            return render_window_wurm_full(
+                window,
+                max_rows=max_rows,
+                current_iteration=current_iteration,
+            )
     return _render_sheet(window)
 
 
@@ -304,6 +330,76 @@ def _render_sheet(window: WindowState) -> str:
     return "\n".join(lines)
 
 
+def render_window_wurm_full(
+    window: WindowState,
+    *,
+    max_rows: int,
+    current_iteration: int,
+) -> str:
+    """渲染 WURM FULL 模式窗口。"""
+    file_name = window.file_path or "未知文件"
+    sheet_name = window.sheet_name or "未知Sheet"
+    lines = [f"[{window.id} · {file_name} / {sheet_name}]"]
+
+    if window.stale_hint:
+        lines.append(f"⚠ stale: {window.stale_hint}")
+
+    if window.change_log:
+        latest = window.change_log[-1]
+        lines.append(f"📝 最近: {latest.tool_summary}")
+
+    if window.sheet_tabs:
+        tabs = []
+        for item in window.sheet_tabs:
+            token = f"▶{item}" if item == sheet_name else item
+            tabs.append(f"[{token}]")
+        lines.append("Tabs: " + " ".join(tabs))
+
+    total_rows = window.total_rows or len(window.data_buffer)
+    total_cols = window.total_cols or len(window.columns)
+    lines.append(f"范围: {total_rows}行×{total_cols}列 | 视口: {window.viewport_range or '-'}")
+
+    column_names = [col.name for col in window.columns]
+    if not column_names and window.data_buffer:
+        column_names = [str(key) for key in window.data_buffer[0].keys()]
+    if column_names:
+        lines.append("列: [" + ", ".join(column_names) + "]")
+
+    # 多范围优先，按当前视口块置后展示以提升注意力。
+    ranges = list(window.cached_ranges)
+    if ranges:
+        ranges.sort(key=lambda item: (0 if not item.is_current_viewport else 1, item.added_at_iteration))
+        for cached in ranges:
+            marker = " [当前视口]" if cached.is_current_viewport else ""
+            lines.append(f"── 缓存范围 {cached.range_ref} ({len(cached.rows)}行){marker} ──")
+            lines.extend(_render_pipe_rows(
+                rows=cached.rows,
+                columns=column_names,
+                max_rows=max_rows,
+                current_iteration=current_iteration,
+                changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
+            ))
+    else:
+        lines.append("数据:")
+        lines.extend(_render_pipe_rows(
+            rows=window.data_buffer,
+            columns=column_names,
+            max_rows=max_rows,
+            current_iteration=current_iteration,
+            changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
+        ))
+
+    status_bar = window.metadata.get("status_bar")
+    if isinstance(status_bar, dict) and status_bar:
+        lines.append(
+            "统计: "
+            f"SUM={_format_number(status_bar.get('sum'))} | "
+            f"COUNT={_format_int(status_bar.get('count'))} | "
+            f"AVG={_format_number(status_bar.get('average'))}"
+        )
+    return "\n".join(lines)
+
+
 def _render_preview(rows: list[Any], *, max_rows: int) -> list[str]:
     rendered: list[str] = []
     for idx, row in enumerate(rows[:max_rows], start=1):
@@ -370,3 +466,30 @@ def _extract_columns_from_preview(rows: list[Any]) -> list[str]:
             seen.add(name)
             columns.append(name)
     return columns
+
+
+def _render_pipe_rows(
+    *,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+    max_rows: int,
+    current_iteration: int,
+    changed_indices: set[int],
+) -> list[str]:
+    _ = current_iteration
+    if not rows:
+        return ["  (无数据)"]
+    if max_rows <= 0:
+        max_rows = 1
+
+    effective_rows = rows[:max_rows]
+    output: list[str] = []
+    for idx, row in enumerate(effective_rows):
+        values = [str(row.get(name, "")) for name in columns] if columns else [str(v) for v in row.values()]
+        prefix = "* " if idx in changed_indices else "  "
+        output.append(prefix + " | ".join(values[:8]))
+
+    omitted = len(rows) - len(effective_rows)
+    if omitted > 0:
+        output.append(f"  ... (共{len(rows)}行，省略{omitted}行)")
+    return output

@@ -874,6 +874,89 @@ class TestContextBudgetAndHardCap:
         assert "Q1" in merged_prompt
 
     @pytest.mark.asyncio
+    async def test_window_perception_anchored_returns_confirmation(self) -> None:
+        def read_excel() -> str:
+            return json.dumps(
+                {
+                    "file": "sales.xlsx",
+                    "sheet": "Q1",
+                    "shape": {"rows": 20, "columns": 5},
+                    "columns": ["日期", "产品", "数量", "单价", "金额"],
+                    "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={"type": "object", "properties": {}},
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(window_return_mode="anchored")
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(name="read_excel", arguments="{}"),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert "数据已写入窗口" in result.result
+        assert "首行预览" in result.result
+        assert "环境感知" not in result.result
+
+    @pytest.mark.asyncio
+    async def test_window_perception_anchored_notice_is_data_window_and_tail(self) -> None:
+        def read_excel() -> str:
+            return json.dumps(
+                {
+                    "file": "sales.xlsx",
+                    "sheet": "Q1",
+                    "shape": {"rows": 20, "columns": 5},
+                    "preview": [{"产品": "A", "金额": 100}],
+                },
+                ensure_ascii=False,
+            )
+
+        registry = ToolRegistry()
+        registry.register_tools([
+            ToolDef(
+                name="read_excel",
+                description="读取",
+                input_schema={"type": "object", "properties": {}},
+                func=read_excel,
+                max_result_chars=0,
+            ),
+        ])
+        config = _make_config(window_return_mode="anchored", system_message_mode="replace")
+        engine = AgentEngine(config, registry)
+        tc = SimpleNamespace(
+            id="call_read",
+            function=SimpleNamespace(name="read_excel", arguments="{}"),
+        )
+        await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["read_excel"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        prompts, error = engine._prepare_system_prompts_for_request(["## SkillCtx\n内容"])
+        assert error is None
+        assert prompts[-1].startswith("## 数据窗口")
+
+    @pytest.mark.asyncio
     async def test_window_perception_notice_respects_budget_and_window_limit(self) -> None:
         def read_excel(file_path: str, sheet_name: str) -> str:
             preview = [

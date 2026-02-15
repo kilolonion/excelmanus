@@ -16,6 +16,10 @@ class TestWindowRules:
         result = classify_tool("read_excel")
         assert result.window_type == WindowType.SHEET
 
+    def test_classify_filter_tool(self) -> None:
+        result = classify_tool("filter_data")
+        assert result.window_type == WindowType.SHEET
+
     def test_classify_sheet_style_tool(self) -> None:
         result = classify_tool("adjust_row_height")
         assert result.window_type == WindowType.SHEET

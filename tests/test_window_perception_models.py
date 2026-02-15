@@ -1,6 +1,6 @@
 """窗口感知模型测试。"""
 
-from excelmanus.window_perception import PerceptionBudget, Viewport, WindowState, WindowType
+from excelmanus.window_perception import DetailLevel, PerceptionBudget, Viewport, WindowState, WindowType
 
 
 class TestWindowModels:
@@ -17,6 +17,11 @@ class TestWindowModels:
         assert state.sheet_tabs == []
         assert state.preview_rows == []
         assert state.metadata == {}
+        assert state.columns == []
+        assert state.data_buffer == []
+        assert state.cached_ranges == []
+        assert state.viewport_range == ""
+        assert state.detail_level == DetailLevel.FULL
         assert state.idle_turns == 0
         assert state.last_access_seq == 0
         assert state.dormant is False
@@ -29,3 +34,6 @@ class TestWindowModels:
         assert budget.background_after_idle == 1
         assert budget.suspend_after_idle == 3
         assert budget.terminate_after_idle == 5
+        assert budget.window_full_max_rows == 25
+        assert budget.window_full_total_budget_tokens == 500
+        assert budget.window_data_buffer_max_rows == 200

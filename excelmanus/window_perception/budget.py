@@ -7,7 +7,7 @@ from collections.abc import Callable
 from excelmanus.memory import TokenCounter
 
 from .advisor import LifecyclePlan, WindowTier
-from .models import PerceptionBudget, WindowRenderAction, WindowSnapshot, WindowState
+from .models import DetailLevel, PerceptionBudget, WindowRenderAction, WindowSnapshot, WindowState
 
 
 class WindowBudgetAllocator:
@@ -15,6 +15,14 @@ class WindowBudgetAllocator:
 
     def __init__(self, budget: PerceptionBudget) -> None:
         self._budget = budget
+
+    def compute_window_full_max_rows(self, active_window_count: int) -> int:
+        """根据 ACTIVE 窗口数量动态分配 FULL 行数。"""
+        if active_window_count <= 1:
+            return max(1, min(50, int(self._budget.window_full_max_rows) * 2))
+        if active_window_count == 2:
+            return max(1, int(self._budget.window_full_max_rows))
+        return max(1, min(15, int(self._budget.window_full_max_rows)))
 
     def allocate(
         self,
@@ -113,6 +121,7 @@ class WindowBudgetAllocator:
                 break
 
             if tier == "active" and active_tokens > 0 and active_tokens <= remaining:
+                item.detail_level = DetailLevel.FULL
                 return WindowSnapshot(
                     window_id=item.id,
                     action=WindowRenderAction.KEEP,
@@ -121,6 +130,7 @@ class WindowBudgetAllocator:
                 )
 
             if tier == "background" and background_tokens > 0 and background_tokens <= remaining:
+                item.detail_level = DetailLevel.SUMMARY
                 return WindowSnapshot(
                     window_id=item.id,
                     action=WindowRenderAction.KEEP,
@@ -134,6 +144,7 @@ class WindowBudgetAllocator:
                     and suspended_tokens <= remaining
                     and remaining >= self._budget.minimized_tokens
                 ):
+                    item.detail_level = DetailLevel.ICON
                     return WindowSnapshot(
                         window_id=item.id,
                         action=WindowRenderAction.MINIMIZE,
@@ -142,6 +153,7 @@ class WindowBudgetAllocator:
                     )
                 if must_keep and suspended_tokens > 0 and suspended_tokens <= remaining:
                     # 兜底分支：活跃窗口在预算紧张时仍尽量保留摘要。
+                    item.detail_level = DetailLevel.ICON
                     return WindowSnapshot(
                         window_id=item.id,
                         action=WindowRenderAction.MINIMIZE,
@@ -149,6 +161,7 @@ class WindowBudgetAllocator:
                         estimated_tokens=suspended_tokens,
                     )
 
+        item.detail_level = DetailLevel.NONE
         return WindowSnapshot(
             window_id=item.id,
             action=WindowRenderAction.CLOSE,

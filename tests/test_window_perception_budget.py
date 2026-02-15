@@ -97,3 +97,10 @@ class TestWindowBudget:
 
         assert snapshots[0].action == WindowRenderAction.MINIMIZE
         assert snapshots[0].rendered_text == "SUSPENDED"
+
+    def test_compute_window_full_max_rows(self) -> None:
+        budget = PerceptionBudget(window_full_max_rows=25)
+        allocator = WindowBudgetAllocator(budget)
+        assert allocator.compute_window_full_max_rows(1) == 50
+        assert allocator.compute_window_full_max_rows(2) == 25
+        assert allocator.compute_window_full_max_rows(3) == 15

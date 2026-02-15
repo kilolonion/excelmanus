@@ -4,7 +4,7 @@
 用法：
     python bench/analyze_3way.py outputs/bench_3way_XXXXXXXX
 
-读取 off/ rules/ hybrid/ 三个子目录的 suite summary，
+读取 `off + enriched + anchored`（或兼容 `off + rules + hybrid`）子目录的 suite summary，
 按用例 ID 对齐生成对比表格和 CSV。
 """
 
@@ -131,8 +131,10 @@ def _print_case_comparison(
     case_id: str,
     case_name: str,
     off: CaseMetrics | None,
-    rules: CaseMetrics | None,
-    hybrid: CaseMetrics | None,
+    mode_a: CaseMetrics | None,
+    mode_b: CaseMetrics | None,
+    mode_a_label: str,
+    mode_b_label: str,
 ) -> None:
     """打印单个用例的三模式对比。"""
     metrics = [
@@ -146,41 +148,46 @@ def _print_case_comparison(
 
     print(f"\n  📋 {case_id}: {case_name}")
     status_parts = []
-    for label, m in [("OFF", off), ("RULES", rules), ("HYBRID", hybrid)]:
+    for label, m in [("OFF", off), (mode_a_label, mode_a), (mode_b_label, mode_b)]:
         if m and m.status != "ok":
             status_parts.append(f"{label}={m.status}")
     if status_parts:
         print(f"     ⚠️  状态异常: {', '.join(status_parts)}")
 
     # 表头
-    print(f"     {'指标':<12} {'OFF':>10} {'RULES':>10} {'HYBRID':>10} {'R vs OFF':>10} {'H vs OFF':>10} {'H vs R':>10}")
+    print(
+        f"     {'指标':<12} {'OFF':>10} {mode_a_label:>10} {mode_b_label:>10} "
+        f"{'A vs OFF':>10} {'B vs OFF':>10} {'B vs A':>10}"
+    )
     print(f"     {'─'*12} {'─'*10} {'─'*10} {'─'*10} {'─'*10} {'─'*10} {'─'*10}")
 
     for attr, label in metrics:
         off_val = getattr(off, attr, 0) if off else 0
-        rules_val = getattr(rules, attr, 0) if rules else 0
-        hybrid_val = getattr(hybrid, attr, 0) if hybrid else 0
+        mode_a_val = getattr(mode_a, attr, 0) if mode_a else 0
+        mode_b_val = getattr(mode_b, attr, 0) if mode_b else 0
 
-        r_vs_off = _pct_change(off_val, rules_val)
-        h_vs_off = _pct_change(off_val, hybrid_val)
-        h_vs_r = _pct_change(rules_val, hybrid_val)
+        a_vs_off = _pct_change(off_val, mode_a_val)
+        b_vs_off = _pct_change(off_val, mode_b_val)
+        b_vs_a = _pct_change(mode_a_val, mode_b_val)
 
         print(
             f"     {label:<12} "
             f"{_format_number(off_val):>10} "
-            f"{_format_number(rules_val):>10} "
-            f"{_format_number(hybrid_val):>10} "
-            f"{r_vs_off:>10} "
-            f"{h_vs_off:>10} "
-            f"{h_vs_r:>10}"
+            f"{_format_number(mode_a_val):>10} "
+            f"{_format_number(mode_b_val):>10} "
+            f"{a_vs_off:>10} "
+            f"{b_vs_off:>10} "
+            f"{b_vs_a:>10}"
         )
 
 
 def _print_suite_summary(
     suite_name: str,
     off: SuiteMetrics | None,
-    rules: SuiteMetrics | None,
-    hybrid: SuiteMetrics | None,
+    mode_a: SuiteMetrics | None,
+    mode_b: SuiteMetrics | None,
+    mode_a_label: str,
+    mode_b_label: str,
 ) -> None:
     """打印套件级汇总。"""
     print(f"\n  📊 套件汇总: {suite_name}")
@@ -192,26 +199,29 @@ def _print_suite_summary(
         ("total_duration", "总耗时(s)"),
     ]
 
-    print(f"     {'指标':<12} {'OFF':>10} {'RULES':>10} {'HYBRID':>10} {'R vs OFF':>10} {'H vs OFF':>10} {'H vs R':>10}")
+    print(
+        f"     {'指标':<12} {'OFF':>10} {mode_a_label:>10} {mode_b_label:>10} "
+        f"{'A vs OFF':>10} {'B vs OFF':>10} {'B vs A':>10}"
+    )
     print(f"     {'─'*12} {'─'*10} {'─'*10} {'─'*10} {'─'*10} {'─'*10} {'─'*10}")
 
     for attr, label in metrics:
         off_val = getattr(off, attr, 0) if off else 0
-        rules_val = getattr(rules, attr, 0) if rules else 0
-        hybrid_val = getattr(hybrid, attr, 0) if hybrid else 0
+        mode_a_val = getattr(mode_a, attr, 0) if mode_a else 0
+        mode_b_val = getattr(mode_b, attr, 0) if mode_b else 0
 
-        r_vs_off = _pct_change(off_val, rules_val)
-        h_vs_off = _pct_change(off_val, hybrid_val)
-        h_vs_r = _pct_change(rules_val, hybrid_val)
+        a_vs_off = _pct_change(off_val, mode_a_val)
+        b_vs_off = _pct_change(off_val, mode_b_val)
+        b_vs_a = _pct_change(mode_a_val, mode_b_val)
 
         print(
             f"     {label:<12} "
             f"{_format_number(off_val):>10} "
-            f"{_format_number(rules_val):>10} "
-            f"{_format_number(hybrid_val):>10} "
-            f"{r_vs_off:>10} "
-            f"{h_vs_off:>10} "
-            f"{h_vs_r:>10}"
+            f"{_format_number(mode_a_val):>10} "
+            f"{_format_number(mode_b_val):>10} "
+            f"{a_vs_off:>10} "
+            f"{b_vs_off:>10} "
+            f"{b_vs_a:>10}"
         )
 
 
@@ -219,20 +229,22 @@ def _export_csv(
     output_path: Path,
     all_suites: set[str],
     off_data: dict[str, SuiteMetrics],
-    rules_data: dict[str, SuiteMetrics],
-    hybrid_data: dict[str, SuiteMetrics],
+    mode_a_data: dict[str, SuiteMetrics],
+    mode_b_data: dict[str, SuiteMetrics],
+    mode_a_label: str,
+    mode_b_label: str,
 ) -> None:
     """导出 CSV 对比表。"""
     rows: list[dict[str, str]] = []
 
     for suite_name in sorted(all_suites):
         off_suite = off_data.get(suite_name)
-        rules_suite = rules_data.get(suite_name)
-        hybrid_suite = hybrid_data.get(suite_name)
+        mode_a_suite = mode_a_data.get(suite_name)
+        mode_b_suite = mode_b_data.get(suite_name)
 
         # 收集所有用例 ID
         all_case_ids: list[str] = []
-        for s in [off_suite, rules_suite, hybrid_suite]:
+        for s in [off_suite, mode_a_suite, mode_b_suite]:
             if s:
                 for cid in s.cases:
                     if cid not in all_case_ids:
@@ -240,42 +252,42 @@ def _export_csv(
 
         for case_id in all_case_ids:
             off_c = off_suite.cases.get(case_id) if off_suite else None
-            rules_c = rules_suite.cases.get(case_id) if rules_suite else None
-            hybrid_c = hybrid_suite.cases.get(case_id) if hybrid_suite else None
+            mode_a_c = mode_a_suite.cases.get(case_id) if mode_a_suite else None
+            mode_b_c = mode_b_suite.cases.get(case_id) if mode_b_suite else None
 
             row = {
                 "suite": suite_name,
                 "case_id": case_id,
-                "case_name": (off_c or rules_c or hybrid_c).case_name,
+                "case_name": (off_c or mode_a_c or mode_b_c).case_name,
                 "off_tokens": str(off_c.total_tokens if off_c else ""),
-                "rules_tokens": str(rules_c.total_tokens if rules_c else ""),
-                "hybrid_tokens": str(hybrid_c.total_tokens if hybrid_c else ""),
+                f"{mode_a_label.lower()}_tokens": str(mode_a_c.total_tokens if mode_a_c else ""),
+                f"{mode_b_label.lower()}_tokens": str(mode_b_c.total_tokens if mode_b_c else ""),
                 "off_iterations": str(off_c.iterations if off_c else ""),
-                "rules_iterations": str(rules_c.iterations if rules_c else ""),
-                "hybrid_iterations": str(hybrid_c.iterations if hybrid_c else ""),
+                f"{mode_a_label.lower()}_iterations": str(mode_a_c.iterations if mode_a_c else ""),
+                f"{mode_b_label.lower()}_iterations": str(mode_b_c.iterations if mode_b_c else ""),
                 "off_tool_calls": str(off_c.tool_calls if off_c else ""),
-                "rules_tool_calls": str(rules_c.tool_calls if rules_c else ""),
-                "hybrid_tool_calls": str(hybrid_c.tool_calls if hybrid_c else ""),
+                f"{mode_a_label.lower()}_tool_calls": str(mode_a_c.tool_calls if mode_a_c else ""),
+                f"{mode_b_label.lower()}_tool_calls": str(mode_b_c.tool_calls if mode_b_c else ""),
                 "off_tool_failures": str(off_c.tool_failures if off_c else ""),
-                "rules_tool_failures": str(rules_c.tool_failures if rules_c else ""),
-                "hybrid_tool_failures": str(hybrid_c.tool_failures if hybrid_c else ""),
+                f"{mode_a_label.lower()}_tool_failures": str(mode_a_c.tool_failures if mode_a_c else ""),
+                f"{mode_b_label.lower()}_tool_failures": str(mode_b_c.tool_failures if mode_b_c else ""),
                 "off_duration": f"{off_c.duration_seconds:.1f}" if off_c else "",
-                "rules_duration": f"{rules_c.duration_seconds:.1f}" if rules_c else "",
-                "hybrid_duration": f"{hybrid_c.duration_seconds:.1f}" if hybrid_c else "",
+                f"{mode_a_label.lower()}_duration": f"{mode_a_c.duration_seconds:.1f}" if mode_a_c else "",
+                f"{mode_b_label.lower()}_duration": f"{mode_b_c.duration_seconds:.1f}" if mode_b_c else "",
                 "off_status": off_c.status if off_c else "",
-                "rules_status": rules_c.status if rules_c else "",
-                "hybrid_status": hybrid_c.status if hybrid_c else "",
-                "rules_vs_off_tokens": _pct_change(
+                f"{mode_a_label.lower()}_status": mode_a_c.status if mode_a_c else "",
+                f"{mode_b_label.lower()}_status": mode_b_c.status if mode_b_c else "",
+                f"{mode_a_label.lower()}_vs_off_tokens": _pct_change(
                     off_c.total_tokens if off_c else 0,
-                    rules_c.total_tokens if rules_c else 0,
+                    mode_a_c.total_tokens if mode_a_c else 0,
                 ),
-                "hybrid_vs_off_tokens": _pct_change(
+                f"{mode_b_label.lower()}_vs_off_tokens": _pct_change(
                     off_c.total_tokens if off_c else 0,
-                    hybrid_c.total_tokens if hybrid_c else 0,
+                    mode_b_c.total_tokens if mode_b_c else 0,
                 ),
-                "hybrid_vs_rules_tokens": _pct_change(
-                    rules_c.total_tokens if rules_c else 0,
-                    hybrid_c.total_tokens if hybrid_c else 0,
+                f"{mode_b_label.lower()}_vs_{mode_a_label.lower()}_tokens": _pct_change(
+                    mode_a_c.total_tokens if mode_a_c else 0,
+                    mode_b_c.total_tokens if mode_b_c else 0,
                 ),
             }
             rows.append(row)
@@ -297,8 +309,10 @@ def _export_csv(
 
 def _print_global_summary(
     off_data: dict[str, SuiteMetrics],
-    rules_data: dict[str, SuiteMetrics],
-    hybrid_data: dict[str, SuiteMetrics],
+    mode_a_data: dict[str, SuiteMetrics],
+    mode_b_data: dict[str, SuiteMetrics],
+    mode_a_label: str,
+    mode_b_label: str,
 ) -> None:
     """打印全局汇总（所有套件合计）。"""
     def _sum_attr(data: dict[str, SuiteMetrics], attr: str) -> int | float:
@@ -319,47 +333,54 @@ def _print_global_summary(
         ("total_duration", "总耗时(s)"),
     ]
 
-    print(f"     {'指标':<12} {'OFF':>12} {'RULES':>12} {'HYBRID':>12} {'R vs OFF':>10} {'H vs OFF':>10} {'H vs R':>10}")
+    print(
+        f"     {'指标':<12} {'OFF':>12} {mode_a_label:>12} {mode_b_label:>12} "
+        f"{'A vs OFF':>10} {'B vs OFF':>10} {'B vs A':>10}"
+    )
     print(f"     {'─'*12} {'─'*12} {'─'*12} {'─'*12} {'─'*10} {'─'*10} {'─'*10}")
 
     for attr, label in metrics:
         off_val = _sum_attr(off_data, attr)
-        rules_val = _sum_attr(rules_data, attr)
-        hybrid_val = _sum_attr(hybrid_data, attr)
+        mode_a_val = _sum_attr(mode_a_data, attr)
+        mode_b_val = _sum_attr(mode_b_data, attr)
 
-        r_vs_off = _pct_change(off_val, rules_val)
-        h_vs_off = _pct_change(off_val, hybrid_val)
-        h_vs_r = _pct_change(rules_val, hybrid_val)
+        a_vs_off = _pct_change(off_val, mode_a_val)
+        b_vs_off = _pct_change(off_val, mode_b_val)
+        b_vs_a = _pct_change(mode_a_val, mode_b_val)
 
         print(
             f"     {label:<12} "
             f"{_format_number(off_val):>12} "
-            f"{_format_number(rules_val):>12} "
-            f"{_format_number(hybrid_val):>12} "
-            f"{r_vs_off:>10} "
-            f"{h_vs_off:>10} "
-            f"{h_vs_r:>10}"
+            f"{_format_number(mode_a_val):>12} "
+            f"{_format_number(mode_b_val):>12} "
+            f"{a_vs_off:>10} "
+            f"{b_vs_off:>10} "
+            f"{b_vs_a:>10}"
         )
 
     # 用例数统计
     off_cases = sum(len(s.cases) for s in off_data.values())
-    rules_cases = sum(len(s.cases) for s in rules_data.values())
-    hybrid_cases = sum(len(s.cases) for s in hybrid_data.values())
+    mode_a_cases = sum(len(s.cases) for s in mode_a_data.values())
+    mode_b_cases = sum(len(s.cases) for s in mode_b_data.values())
     off_errors = sum(
         sum(1 for c in s.cases.values() if c.status != "ok")
         for s in off_data.values()
     )
-    rules_errors = sum(
+    mode_a_errors = sum(
         sum(1 for c in s.cases.values() if c.status != "ok")
-        for s in rules_data.values()
+        for s in mode_a_data.values()
     )
-    hybrid_errors = sum(
+    mode_b_errors = sum(
         sum(1 for c in s.cases.values() if c.status != "ok")
-        for s in hybrid_data.values()
+        for s in mode_b_data.values()
     )
 
-    print(f"\n     用例总数:  OFF={off_cases}  RULES={rules_cases}  HYBRID={hybrid_cases}")
-    print(f"     异常用例:  OFF={off_errors}  RULES={rules_errors}  HYBRID={hybrid_errors}")
+    print(
+        f"\n     用例总数:  OFF={off_cases}  {mode_a_label}={mode_a_cases}  {mode_b_label}={mode_b_cases}"
+    )
+    print(
+        f"     异常用例:  OFF={off_errors}  {mode_a_label}={mode_a_errors}  {mode_b_label}={mode_b_errors}"
+    )
 
 
 # ── 主入口 ────────────────────────────────────────────────
@@ -369,43 +390,50 @@ def main(base_dir: str) -> None:
     base = Path(base_dir)
 
     off_dir = base / "off"
-    rules_dir = base / "rules"
-    hybrid_dir = base / "hybrid"
+    mode_a_label = "ENRICHED"
+    mode_b_label = "ANCHORED"
+    mode_a_dir = base / "enriched"
+    mode_b_dir = base / "anchored"
+    if not (mode_a_dir.exists() and mode_b_dir.exists()):
+        # 兼容旧目录结构
+        mode_a_label = "RULES"
+        mode_b_label = "HYBRID"
+        mode_a_dir = base / "rules"
+        mode_b_dir = base / "hybrid"
 
-    # 检查目录存在
     missing = []
-    for label, d in [("off", off_dir), ("rules", rules_dir), ("hybrid", hybrid_dir)]:
+    for label, d in [("off", off_dir), (mode_a_label.lower(), mode_a_dir), (mode_b_label.lower(), mode_b_dir)]:
         if not d.exists():
             missing.append(label)
     if missing:
         print(f"❌ 缺少目录: {', '.join(missing)}")
-        print(f"   期望结构: {base}/{{off,rules,hybrid}}/")
+        print(f"   期望结构: {base}/{{off,enriched,anchored}} 或 {base}/{{off,rules,hybrid}}")
         sys.exit(1)
 
     # 加载数据
     off_data = _load_mode_results(off_dir)
-    rules_data = _load_mode_results(rules_dir)
-    hybrid_data = _load_mode_results(hybrid_dir)
+    mode_a_data = _load_mode_results(mode_a_dir)
+    mode_b_data = _load_mode_results(mode_b_dir)
 
-    if not off_data and not rules_data and not hybrid_data:
+    if not off_data and not mode_a_data and not mode_b_data:
         print("❌ 未找到任何 suite_summary JSON 文件")
         sys.exit(1)
 
     # 收集所有套件名
-    all_suites = set(off_data.keys()) | set(rules_data.keys()) | set(hybrid_data.keys())
+    all_suites = set(off_data.keys()) | set(mode_a_data.keys()) | set(mode_b_data.keys())
 
     print("\n" + "═" * 80)
     print("  🔬 三模式 AB 对比分析报告")
     print("═" * 80)
     print(f"  数据目录: {base}")
     print(f"  套件数量: {len(all_suites)}")
-    print(f"  模式: OFF / RULES（仅规则） / HYBRID（规则+小模型）")
+    print(f"  模式: OFF / {mode_a_label} / {mode_b_label}")
 
     # 逐套件逐用例对比
     for suite_name in sorted(all_suites):
         off_suite = off_data.get(suite_name)
-        rules_suite = rules_data.get(suite_name)
-        hybrid_suite = hybrid_data.get(suite_name)
+        mode_a_suite = mode_a_data.get(suite_name)
+        mode_b_suite = mode_b_data.get(suite_name)
 
         print(f"\n{'─' * 80}")
         print(f"  📦 套件: {suite_name}")
@@ -413,7 +441,7 @@ def main(base_dir: str) -> None:
 
         # 收集所有用例 ID（保持顺序）
         all_case_ids: list[str] = []
-        for s in [off_suite, rules_suite, hybrid_suite]:
+        for s in [off_suite, mode_a_suite, mode_b_suite]:
             if s:
                 for cid in s.cases:
                     if cid not in all_case_ids:
@@ -421,21 +449,50 @@ def main(base_dir: str) -> None:
 
         for case_id in all_case_ids:
             off_c = off_suite.cases.get(case_id) if off_suite else None
-            rules_c = rules_suite.cases.get(case_id) if rules_suite else None
-            hybrid_c = hybrid_suite.cases.get(case_id) if hybrid_suite else None
-            name = (off_c or rules_c or hybrid_c).case_name
+            mode_a_c = mode_a_suite.cases.get(case_id) if mode_a_suite else None
+            mode_b_c = mode_b_suite.cases.get(case_id) if mode_b_suite else None
+            name = (off_c or mode_a_c or mode_b_c).case_name
 
-            _print_case_comparison(case_id, name, off_c, rules_c, hybrid_c)
+            _print_case_comparison(
+                case_id,
+                name,
+                off_c,
+                mode_a_c,
+                mode_b_c,
+                mode_a_label=mode_a_label,
+                mode_b_label=mode_b_label,
+            )
 
         # 套件汇总
-        _print_suite_summary(suite_name, off_suite, rules_suite, hybrid_suite)
+        _print_suite_summary(
+            suite_name,
+            off_suite,
+            mode_a_suite,
+            mode_b_suite,
+            mode_a_label=mode_a_label,
+            mode_b_label=mode_b_label,
+        )
 
     # 全局汇总
-    _print_global_summary(off_data, rules_data, hybrid_data)
+    _print_global_summary(
+        off_data,
+        mode_a_data,
+        mode_b_data,
+        mode_a_label=mode_a_label,
+        mode_b_label=mode_b_label,
+    )
 
     # 导出 CSV
     csv_path = base / "comparison_report.csv"
-    _export_csv(csv_path, all_suites, off_data, rules_data, hybrid_data)
+    _export_csv(
+        csv_path,
+        all_suites,
+        off_data,
+        mode_a_data,
+        mode_b_data,
+        mode_a_label=mode_a_label,
+        mode_b_label=mode_b_label,
+    )
 
     print("\n" + "═" * 80)
     print("  ✅ 分析完成")

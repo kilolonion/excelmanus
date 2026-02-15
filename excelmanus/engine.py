@@ -428,6 +428,9 @@ class AgentEngine:
                 background_after_idle=config.window_perception_background_after_idle,
                 suspend_after_idle=config.window_perception_suspend_after_idle,
                 terminate_after_idle=config.window_perception_terminate_after_idle,
+                window_full_max_rows=config.window_full_max_rows,
+                window_full_total_budget_tokens=config.window_full_total_budget_tokens,
+                window_data_buffer_max_rows=config.window_data_buffer_max_rows,
             ),
             advisor_mode=(
                 "rules"
@@ -3183,12 +3186,14 @@ class AgentEngine:
         success: bool,
     ) -> str:
         """在工具返回中附加窗口感知信息。"""
+        mode = self._effective_window_return_mode()
         try:
             return self._window_perception.enrich_tool_result(
                 tool_name=tool_name,
                 arguments=arguments,
                 result_text=result_text,
                 success=success,
+                mode=mode,
             )
         except Exception:
             logger.warning(
@@ -3212,6 +3217,13 @@ class AgentEngine:
             result_text=result_text,
             success=success,
         )
+
+    def _effective_window_return_mode(self) -> str:
+        """Phase1 支持模式：enriched / anchored。"""
+        raw_mode = str(getattr(self._config, "window_return_mode", "enriched") or "enriched").strip().lower()
+        if raw_mode == "anchored":
+            return "anchored"
+        return "enriched"
 
     def _apply_tool_result_hard_cap(self, text: str) -> str:
         """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
@@ -4094,6 +4106,7 @@ class AgentEngine:
 
         approved_plan_context = self._build_approved_plan_context_notice()
         window_perception_context = self._build_window_perception_notice()
+        window_at_tail = self._effective_window_return_mode() != "enriched"
         current_skill_contexts = [
             ctx for ctx in skill_contexts if isinstance(ctx, str) and ctx.strip()
         ]
@@ -4104,17 +4117,25 @@ class AgentEngine:
                 merged_parts = [base_prompt]
                 if approved_plan_context:
                     merged_parts.append(approved_plan_context)
-                if window_perception_context:
-                    merged_parts.append(window_perception_context)
                 merged_parts.extend(current_skill_contexts)
+                if window_perception_context:
+                    if window_at_tail:
+                        merged_parts.append(window_perception_context)
+                    else:
+                        merged_parts.insert(2 if approved_plan_context else 1, window_perception_context)
                 return ["\n\n".join(merged_parts)]
 
             prompts = [base_prompt]
             if approved_plan_context:
                 prompts.append(approved_plan_context)
-            if window_perception_context:
-                prompts.append(window_perception_context)
-            prompts.extend(current_skill_contexts)
+            if window_at_tail:
+                prompts.extend(current_skill_contexts)
+                if window_perception_context:
+                    prompts.append(window_perception_context)
+            else:
+                if window_perception_context:
+                    prompts.append(window_perception_context)
+                prompts.extend(current_skill_contexts)
             return prompts
 
         threshold = max(1, int(self._config.max_context_tokens * 0.9))
@@ -4176,7 +4197,8 @@ class AgentEngine:
             base_prompt = base_prompt + "\n\n" + approved_plan_context
 
         window_perception_context = self._build_window_perception_notice()
-        if window_perception_context:
+        window_at_tail = self._effective_window_return_mode() != "enriched"
+        if window_perception_context and not window_at_tail:
             base_prompt = base_prompt + "\n\n" + window_perception_context
 
         # 注入 MCP 服务器概要，让 LLM 感知已连接的外部能力
@@ -4191,13 +4213,20 @@ class AgentEngine:
                 base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
 
         if not skill_contexts:
+            if window_perception_context and window_at_tail:
+                base_prompt = base_prompt + "\n\n" + window_perception_context
             return [base_prompt]
 
         mode = self._effective_system_mode()
         if mode == "merge":
-            merged = "\n\n".join([base_prompt, *skill_contexts])
+            parts = [base_prompt, *skill_contexts]
+            if window_perception_context and window_at_tail:
+                parts.append(window_perception_context)
+            merged = "\n\n".join(parts)
             return [merged]
 
+        if window_perception_context and window_at_tail:
+            return [base_prompt, *skill_contexts, window_perception_context]
         return [base_prompt, *skill_contexts]
 
     def _build_approved_plan_context_notice(self) -> str:
@@ -4250,7 +4279,9 @@ class AgentEngine:
 
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
-        return self._window_perception.build_system_notice()
+        return self._window_perception.build_system_notice(
+            mode=self._effective_window_return_mode(),
+        )
 
     def _set_window_perception_turn_hints(self, *, user_message: str, is_new_task: bool) -> None:
         """设置窗口感知层的当前轮提示。"""
