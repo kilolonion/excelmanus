@@ -2375,7 +2375,7 @@ class AgentEngine:
             accept_reply = await self._handle_accept_command(["/accept", approval_id])
             reply = (
                 f"{accept_reply}\n"
-                "若需要子代理自动继续执行，建议选择“开启 fullAccess 后重试（推荐）”。"
+                "若需要子代理自动继续执行，建议选择「开启 fullAccess 后重试（推荐）」。"
             )
             return ChatResult(reply=reply)
 
