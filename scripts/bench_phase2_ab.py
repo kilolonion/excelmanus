@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import time
 from dataclasses import replace
@@ -199,6 +200,76 @@ def _print_summary(
         console.print(tbl)
 
 
+# ── 组级执行 ──────────────────────────────────────────────
+
+logger = logging.getLogger("bench_phase2")
+
+
+async def _run_group(
+    group_name: str,
+    overrides: dict[str, Any],
+    base_config: ExcelManusConfig,
+    suites: list[str],
+    runs: int,
+    concurrency: int,
+    base_output: Path,
+) -> tuple[str, dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """运行单个实验组的全部 suite × runs，返回 (group_name, agg_data, detail_data)。"""
+    group_config = _make_group_config(base_config, overrides)
+    agg_data: dict[str, dict[str, Any]] = {}
+    detail_data: dict[str, list[dict[str, Any]]] = {}
+
+    logger.info(
+        "[%s] 开始 — preroute_mode=%s, auto_activate=%s",
+        group_name,
+        group_config.skill_preroute_mode,
+        group_config.auto_activate_default_skill,
+    )
+
+    for suite_path in suites:
+        suite_key = _suite_short_name(suite_path)
+        run_metrics: list[dict[str, Any]] = []
+
+        for run_idx in range(1, runs + 1):
+            output_dir = base_output / group_name / suite_key / f"run_{run_idx}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            run_start = time.monotonic()
+            try:
+                results = await run_suite(
+                    suite_path,
+                    group_config,
+                    output_dir,
+                    concurrency=concurrency,
+                    trace_enabled=False,
+                )
+                metrics = _extract_metrics(results)
+                logger.info(
+                    "[%s] %s run %d/%d ✓ %.0f tok, %.1fs, %.1f%% ok, %.1f calls (%.0fs)",
+                    group_name,
+                    suite_key,
+                    run_idx,
+                    runs,
+                    metrics["avg_tokens"],
+                    metrics["avg_duration"],
+                    metrics["success_rate"],
+                    metrics["avg_tool_calls"],
+                    time.monotonic() - run_start,
+                )
+            except Exception as exc:
+                logger.error("[%s] %s run %d/%d ✗ %s", group_name, suite_key, run_idx, runs, exc)
+                metrics = _extract_metrics([])
+                metrics["error"] = str(exc)
+
+            run_metrics.append(metrics)
+
+        agg_data[suite_key] = _aggregate_runs(run_metrics)
+        detail_data[suite_key] = run_metrics
+
+    logger.info("[%s] 完成", group_name)
+    return group_name, agg_data, detail_data
+
+
 # ── 主流程 ────────────────────────────────────────────────
 
 
@@ -231,7 +302,16 @@ async def main() -> None:
         default=1,
         help="case 并发数（默认 1）",
     )
+    parser.add_argument(
+        "--parallel-groups",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否并行执行各组（默认 True，--no-parallel-groups 回退串行）",
+    )
     args = parser.parse_args()
+
+    # 配置 logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
     # 加载主模型配置
     base_config = load_config()
@@ -246,6 +326,7 @@ async def main() -> None:
     console.print(f"  Suites: {[_suite_short_name(s) for s in args.suites]}")
     console.print(f"  每组重复: {args.runs} 次")
     console.print(f"  并发: {args.concurrency}")
+    console.print(f"  并行组: {args.parallel_groups}")
     console.print(f"  输出: {base_output}\n")
 
     # all_data[group][suite_short_name] = aggregated metrics
@@ -255,56 +336,38 @@ async def main() -> None:
 
     total_start = time.monotonic()
 
-    for group_name in args.groups:
-        overrides = GROUPS[group_name]
-        group_config = _make_group_config(base_config, overrides)
-        all_data[group_name] = {}
-        comparison_detail[group_name] = {}
-
-        console.print(f"[bold magenta]▶ 组: {group_name}[/bold magenta]")
-        console.print(f"  preroute_mode={group_config.skill_preroute_mode}, "
-                       f"auto_activate={group_config.auto_activate_default_skill}")
-
-        for suite_path in args.suites:
-            suite_key = _suite_short_name(suite_path)
-            run_metrics: list[dict[str, Any]] = []
-
-            for run_idx in range(1, args.runs + 1):
-                output_dir = base_output / group_name / suite_key / f"run_{run_idx}"
-                output_dir.mkdir(parents=True, exist_ok=True)
-
-                console.print(
-                    f"  [cyan]{suite_key}[/cyan] run {run_idx}/{args.runs} ...",
-                    end=" ",
-                )
-                run_start = time.monotonic()
-
-                try:
-                    results = await run_suite(
-                        suite_path,
-                        group_config,
-                        output_dir,
-                        concurrency=args.concurrency,
-                        trace_enabled=False,
-                    )
-                    metrics = _extract_metrics(results)
-                    console.print(
-                        f"[green]✓[/green] {metrics['avg_tokens']:.0f} tok, "
-                        f"{metrics['avg_duration']:.1f}s, "
-                        f"{metrics['success_rate']}% ok, "
-                        f"{metrics['avg_tool_calls']:.1f} calls "
-                        f"({time.monotonic() - run_start:.0f}s)"
-                    )
-                except Exception as exc:
-                    console.print(f"[red]✗ {exc}[/red]")
-                    metrics = _extract_metrics([])
-                    metrics["error"] = str(exc)
-
-                run_metrics.append(metrics)
-
-            aggregated = _aggregate_runs(run_metrics)
-            all_data[group_name][suite_key] = aggregated
-            comparison_detail[group_name][suite_key] = run_metrics
+    if args.parallel_groups:
+        # ── 并行：所有组同时执行 ──
+        tasks = [
+            _run_group(
+                name,
+                GROUPS[name],
+                base_config,
+                args.suites,
+                args.runs,
+                args.concurrency,
+                base_output,
+            )
+            for name in args.groups
+        ]
+        group_results = await asyncio.gather(*tasks)
+        for group_name, agg, detail in group_results:
+            all_data[group_name] = agg
+            comparison_detail[group_name] = detail
+    else:
+        # ── 串行：逐组执行（回退模式） ──
+        for name in args.groups:
+            group_name, agg, detail = await _run_group(
+                name,
+                GROUPS[name],
+                base_config,
+                args.suites,
+                args.runs,
+                args.concurrency,
+                base_output,
+            )
+            all_data[group_name] = agg
+            comparison_detail[group_name] = detail
 
     total_elapsed = time.monotonic() - total_start
 
@@ -322,6 +385,7 @@ async def main() -> None:
         "suites": [_suite_short_name(s) for s in args.suites],
         "runs_per_group": args.runs,
         "concurrency": args.concurrency,
+        "parallel_groups": args.parallel_groups,
         "total_elapsed_seconds": round(total_elapsed, 2),
         "summary": all_data,
         "detail": comparison_detail,
