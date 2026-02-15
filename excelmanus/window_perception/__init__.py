@@ -9,7 +9,18 @@ from .confirmation import (
     parse_confirmation,
     serialize_confirmation,
 )
-from .domain import BaseWindow, ExplorerData, ExplorerWindow, SheetData, SheetWindow
+from .domain import (
+    AuditState,
+    BaseWindow,
+    ExplorerData,
+    ExplorerWindow,
+    FocusState,
+    IntentState,
+    LifecycleState,
+    SheetData,
+    SheetWindow,
+    Window,
+)
 from .focus import FocusService
 from .manager import WindowPerceptionManager
 from .models import (
@@ -42,6 +53,7 @@ __all__ = [
     "AdaptiveModeSelector",
     "build_confirmation_record",
     "build_advisor_messages",
+    "AuditState",
     "BaseWindow",
     "CachedRange",
     "ChangeRecord",
@@ -50,7 +62,9 @@ __all__ = [
     "DetailLevel",
     "ExplorerData",
     "ExplorerWindow",
+    "FocusState",
     "IntentTag",
+    "IntentState",
     "IntentDecision",
     "HybridAdvisor",
     "LifecyclePlan",
@@ -66,6 +80,7 @@ __all__ = [
     "FocusService",
     "RepeatDetector",
     "RuleBasedAdvisor",
+    "LifecycleState",
     "classify_tool_meta",
     "is_read_like_tool",
     "is_write_like_tool",
@@ -74,6 +89,7 @@ __all__ = [
     "ToolMeta",
     "Viewport",
     "WindowAdvice",
+    "Window",
     "WindowLifecycleAdvisor",
     "WindowSnapshot",
     "WindowType",
