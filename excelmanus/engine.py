@@ -1439,6 +1439,8 @@ class AgentEngine:
             "激活技能包获取写入/格式化/图表等执行工具。"
             "当前仅有只读探查工具可用，需要修改数据时必须先激活对应技能。\n"
             "不确定该激活哪个技能时，先调用 discover_tools 查看工具分类。\n"
+            "⚠️ 当你发现当前工具无法完成任务时，必须调用本工具激活技能，"
+            "不要向用户请求权限或声称缺少能力。\n"
             "⚠️ 不要向用户提及技能名称或工具名称等内部概念。\n"
             "调用后立即执行任务，不要仅输出计划。\n\n"
             "Skill_Catalog:\n"
@@ -4881,6 +4883,8 @@ class AgentEngine:
         """生成当前可用工具的分类索引，注入 system prompt。
 
         仅在无 skill 激活时生成，帮助 LLM 快速定位工具类别。
+        同时列出未激活但可通过 select_skill 获取的工具，
+        让 LLM 了解完整能力图谱并主动激活技能。
         """
         from excelmanus.tools.policy import TOOL_CATEGORIES
 
@@ -4896,20 +4900,35 @@ class AgentEngine:
         }
 
         scope_set = set(tool_scope)
-        lines: list[str] = []
+        active_lines: list[str] = []
+        inactive_lines: list[str] = []
+        registered = set(self._all_tool_names())
+
         for cat, tools in TOOL_CATEGORIES.items():
+            label = _CATEGORY_LABELS.get(cat, cat)
             available = [t for t in tools if t in scope_set]
+            inactive = [t for t in tools if t not in scope_set and t in registered]
             if available:
-                label = _CATEGORY_LABELS.get(cat, cat)
-                lines.append(f"- {label}：{', '.join(available)}")
-        if not lines:
+                active_lines.append(f"- {label}：{', '.join(available)}")
+            if inactive:
+                suffix = " [需 fullAccess]" if cat == "code" else ""
+                inactive_lines.append(f"  · {label}：{', '.join(inactive)}{suffix}")
+
+        if not active_lines and not inactive_lines:
             return ""
-        return (
-            "## 工具索引\n"
-            + "\n".join(lines)
-            + "\n\n需要更多工具时，调用 select_skill 激活对应技能，"
-            "或调用 discover_tools 查询完整工具列表。"
+
+        parts: list[str] = ["## 工具索引"]
+        if active_lines:
+            parts.append("当前可用：")
+            parts.extend(active_lines)
+        if inactive_lines:
+            parts.append("未激活（需 select_skill 激活对应技能后可用）：")
+            parts.extend(inactive_lines)
+        parts.append(
+            "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
+            "禁止向用户请求权限或声称无法完成。"
         )
+        return "\n".join(parts)
 
 
 
