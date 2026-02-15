@@ -50,6 +50,20 @@ def extract_columns(result_json: dict[str, Any] | None, rows: list[dict[str, Any
     return inferred
 
 
+def summarize_shape(
+    rows: list[dict[str, Any]],
+    columns: list[ColumnDef],
+    *,
+    explicit_rows: int = 0,
+    explicit_cols: int = 0,
+) -> tuple[int, int]:
+    """Return rows/cols shape with explicit shape as first priority."""
+
+    row_count = int(explicit_rows or len(rows))
+    col_count = int(explicit_cols or len(columns))
+    return max(0, row_count), max(0, col_count)
+
+
 def ingest_read_result(
     window: WindowState,
     *,
