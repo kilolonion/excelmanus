@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import resolve_sheet_name
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.sheet")
@@ -262,14 +263,17 @@ def copy_sheet(
     wb = load_workbook(safe_path)
 
     if source_sheet not in wb.sheetnames:
-        wb.close()
-        return json.dumps(
-            {
-                "status": "error",
-                "message": f"源工作表 '{source_sheet}' 不存在，可用: {wb.sheetnames}",
-            },
-            ensure_ascii=False,
-        )
+        resolved = resolve_sheet_name(source_sheet, wb.sheetnames)
+        if resolved is None:
+            wb.close()
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"源工作表 '{source_sheet}' 不存在，可用: {wb.sheetnames}",
+                },
+                ensure_ascii=False,
+            )
+        source_sheet = resolved
 
     if new_name and new_name in wb.sheetnames:
         wb.close()
@@ -324,14 +328,17 @@ def rename_sheet(
     wb = load_workbook(safe_path)
 
     if old_name not in wb.sheetnames:
-        wb.close()
-        return json.dumps(
-            {
-                "status": "error",
-                "message": f"工作表 '{old_name}' 不存在，可用: {wb.sheetnames}",
-            },
-            ensure_ascii=False,
-        )
+        resolved = resolve_sheet_name(old_name, wb.sheetnames)
+        if resolved is None:
+            wb.close()
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"工作表 '{old_name}' 不存在，可用: {wb.sheetnames}",
+                },
+                ensure_ascii=False,
+            )
+        old_name = resolved
 
     if new_name in wb.sheetnames:
         wb.close()
@@ -380,14 +387,17 @@ def delete_sheet(
     wb = load_workbook(safe_path)
 
     if sheet_name not in wb.sheetnames:
-        wb.close()
-        return json.dumps(
-            {
-                "status": "error",
-                "message": f"工作表 '{sheet_name}' 不存在，可用: {wb.sheetnames}",
-            },
-            ensure_ascii=False,
-        )
+        resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+        if resolved is None:
+            wb.close()
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": f"工作表 '{sheet_name}' 不存在，可用: {wb.sheetnames}",
+                },
+                ensure_ascii=False,
+            )
+        sheet_name = resolved
 
     if len(wb.sheetnames) <= 1:
         wb.close()
@@ -459,7 +469,8 @@ def copy_range_between_sheets(
 
     # 读取源数据
     src_wb = load_workbook(safe_source, data_only=True)
-    if source_sheet not in src_wb.sheetnames:
+    resolved_source = resolve_sheet_name(source_sheet, src_wb.sheetnames)
+    if resolved_source is None:
         src_wb.close()
         return json.dumps(
             {
@@ -469,7 +480,7 @@ def copy_range_between_sheets(
             ensure_ascii=False,
         )
 
-    src_ws = src_wb[source_sheet]
+    src_ws = src_wb[resolved_source]
 
     # 解析源范围，提取值
     from openpyxl.utils.cell import range_boundaries
@@ -495,10 +506,14 @@ def copy_range_between_sheets(
         tgt_wb = Workbook()
 
     if target_sheet not in tgt_wb.sheetnames:
-        tgt_wb.create_sheet(title=target_sheet)
-        # 如果是新建的 Workbook 且自带默认 Sheet，可移除
-        if "Sheet" in tgt_wb.sheetnames and target_sheet != "Sheet" and len(tgt_wb.sheetnames) > 1:
-            del tgt_wb["Sheet"]
+        resolved_target = resolve_sheet_name(target_sheet, tgt_wb.sheetnames)
+        if resolved_target is not None:
+            target_sheet = resolved_target
+        else:
+            tgt_wb.create_sheet(title=target_sheet)
+            # 如果是新建的 Workbook 且自带默认 Sheet，可移除
+            if "Sheet" in tgt_wb.sheetnames and target_sheet != "Sheet" and len(tgt_wb.sheetnames) > 1:
+                del tgt_wb["Sheet"]
 
     tgt_ws = tgt_wb[target_sheet]
 

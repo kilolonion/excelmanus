@@ -15,6 +15,7 @@ from openpyxl.worksheet.header_footer import HeaderFooter, HeaderFooterItem
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import resolve_sheet_name
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.worksheet")
@@ -103,13 +104,14 @@ def set_print_layout(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    if sheet_name not in wb.sheetnames:
+    resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+    if resolved is None:
         wb.close()
         return json.dumps(
             {"error": f"工作表 '{sheet_name}' 不存在，可用: {wb.sheetnames}"},
             ensure_ascii=False,
         )
-    ws = wb[sheet_name]
+    ws = wb[resolved]
 
     applied: list[str] = []
 
@@ -238,13 +240,14 @@ def set_page_header_footer(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    if sheet_name not in wb.sheetnames:
+    resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+    if resolved is None:
         wb.close()
         return json.dumps(
             {"error": f"工作表 '{sheet_name}' 不存在，可用: {wb.sheetnames}"},
             ensure_ascii=False,
         )
-    ws = wb[sheet_name]
+    ws = wb[resolved]
 
     applied: list[str] = []
 

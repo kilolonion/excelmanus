@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import get_worksheet
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.format")
@@ -114,7 +115,7 @@ def format_cells(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     # 构建 openpyxl 样式对象
     style_font = _build_font(font) if font else None
@@ -166,7 +167,7 @@ def format_cells(
         # 需要重新打开文件读取写入后的样式
         wb2 = load_workbook(safe_path)
         try:
-            ws2 = wb2[sheet_name] if sheet_name and sheet_name in wb2.sheetnames else wb2.active
+            ws2 = get_worksheet(wb2, sheet_name)
             result_data["after_styles"] = _collect_styles_compressed(ws2, max_rows=200)
         finally:
             wb2.close()
@@ -199,7 +200,7 @@ def adjust_column_width(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     adjusted: dict[str, float] = {}
 
@@ -260,7 +261,7 @@ def read_cell_styles(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     # 获取合并单元格范围集合
     merged_ranges = ws.merged_cells.ranges
@@ -387,7 +388,7 @@ def adjust_row_height(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     adjusted: dict[str, float] = {}
 
@@ -441,7 +442,7 @@ def merge_cells_tool(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     ws.merge_cells(cell_range)
     wb.save(safe_path)
@@ -478,7 +479,7 @@ def unmerge_cells_tool(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     ws.unmerge_cells(cell_range)
     wb.save(safe_path)
