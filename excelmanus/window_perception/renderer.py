@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from .models import DetailLevel, IntentTag, WindowSnapshot, WindowState, WindowType
+from .projection_models import NoticeProjection, ToolPayloadProjection
+from .projection_service import project_tool_payload
 
 
 def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enriched") -> str:
@@ -30,7 +32,7 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
 
 
 def render_window_keep(
-    window: WindowState,
+    window: WindowState | NoticeProjection,
     *,
     mode: str = "enriched",
     max_rows: int = 25,
@@ -38,6 +40,9 @@ def render_window_keep(
     intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 ACTIVE 窗口。"""
+    if isinstance(window, NoticeProjection):
+        return _render_notice_projection(window)
+
     if window.type == WindowType.EXPLORER:
         return _render_explorer(window)
     if mode in {"anchored", "unified"}:
@@ -133,45 +138,39 @@ def render_window_minimized(
 
 def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] | None:
     """生成工具返回增强 payload。"""
-    if window is None:
+    projection = project_tool_payload(window)
+    if projection is None:
         return None
 
-    if window.type == WindowType.EXPLORER:
+    if projection.window_type == "explorer":
         return {
             "window_type": "explorer",
-            "title": window.title,
-            "directory": window.directory,
-            "entries": list(window.metadata.get("entries", []))[:12],
+            "title": projection.title,
+            "directory": projection.directory,
+            "entries": list(projection.entries)[:12],
         }
 
-    viewport = window.viewport
-    scroll = window.metadata.get("scroll_position")
-    status_bar = window.metadata.get("status_bar")
-    column_widths = window.metadata.get("column_widths")
-    row_heights = window.metadata.get("row_heights")
-    merged_ranges = window.metadata.get("merged_ranges")
-    conditional_effects = window.metadata.get("conditional_effects")
     return {
         "window_type": "sheet",
-        "file": window.file_path,
-        "sheet": window.sheet_name,
-        "intent": window.intent_tag.value,
-        "sheet_tabs": window.sheet_tabs,
+        "file": projection.file,
+        "sheet": projection.sheet,
+        "intent": projection.intent,
+        "sheet_tabs": list(projection.sheet_tabs),
         "viewport": {
-            "range": viewport.range_ref if viewport else "",
-            "visible_rows": viewport.visible_rows if viewport else 0,
-            "visible_cols": viewport.visible_cols if viewport else 0,
-            "total_rows": viewport.total_rows if viewport else 0,
-            "total_cols": viewport.total_cols if viewport else 0,
+            "range": projection.viewport_range,
+            "visible_rows": projection.visible_rows,
+            "visible_cols": projection.visible_cols,
+            "total_rows": projection.total_rows,
+            "total_cols": projection.total_cols,
         },
-        "freeze_panes": window.freeze_panes,
-        "style_summary": window.style_summary,
-        "scroll_position": scroll if isinstance(scroll, dict) else {},
-        "status_bar": status_bar if isinstance(status_bar, dict) else {},
-        "column_widths": column_widths if isinstance(column_widths, dict) else {},
-        "row_heights": row_heights if isinstance(row_heights, dict) else {},
-        "merged_ranges": merged_ranges if isinstance(merged_ranges, list) else [],
-        "conditional_effects": conditional_effects if isinstance(conditional_effects, list) else [],
+        "freeze_panes": projection.freeze_panes,
+        "style_summary": projection.style_summary,
+        "scroll_position": dict(projection.scroll_position),
+        "status_bar": dict(projection.status_bar),
+        "column_widths": dict(projection.column_widths),
+        "row_heights": dict(projection.row_heights),
+        "merged_ranges": list(projection.merged_ranges),
+        "conditional_effects": list(projection.conditional_effects),
     }
 
 
@@ -282,6 +281,20 @@ def _render_explorer(window: WindowState) -> str:
             lines.append(f"  ... (+{len(entries) - 15} more)")
     elif window.summary:
         lines.append(window.summary)
+    return "\n".join(lines)
+
+
+def _render_notice_projection(projection: NoticeProjection) -> str:
+    """Render notice DTO without reading mutable window fields."""
+
+    lines = [
+        f"[ACTIVE -- {projection.window_id}]",
+        f"identity: {projection.identity}",
+        f"range: {projection.range_ref} ({projection.rows}r x {projection.cols}c)",
+        f"intent: {projection.intent}",
+    ]
+    if projection.summary:
+        lines.append(f"summary: {projection.summary}")
     return "\n".join(lines)
 
 
