@@ -710,6 +710,7 @@ async def run_case(
     render_enabled: bool = True,
     trace_enabled: bool = False,
     output_dir: Path | None = None,
+    suite_name: str = "",
 ) -> BenchResult:
     """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。
 
@@ -730,7 +731,7 @@ async def run_case(
 
     # 文件隔离：将源文件复制到工作目录，替换 messages 中的路径
     if output_dir is not None:
-        workdir = output_dir / "workfiles" / case.id
+        workdir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
         messages = _isolate_source_files(case, workdir)
     else:
         messages = list(case.messages) if case.messages else [case.message]
@@ -1091,6 +1092,7 @@ async def run_suite(
                 render_enabled=render_enabled,
                 trace_enabled=trace_enabled,
                 output_dir=output_dir,
+                suite_name=suite_name,
             )
         except Exception as exc:  # pragma: no cover - 兜底保护
             logger.error("用例 %s 执行崩溃: %s", case.id, exc, exc_info=True)
