@@ -13,7 +13,7 @@ from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import SkillMatchResult, Skillpack
-from excelmanus.tools.policy import FALLBACK_DISCOVERY_TOOLS
+from excelmanus.tools.policy import DISCOVERY_TOOLS, FALLBACK_DISCOVERY_TOOLS
 
 logger = get_logger("skillpacks.router")
 
@@ -39,7 +39,7 @@ class SkillRouter:
         file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
     ) -> SkillMatchResult:
-        """执行路由：仅处理斜杠直连，非斜杠返回 fallback。"""
+        """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
         skillpacks = self._loader.get_skillpacks()
         if not skillpacks:
             skillpacks = self._loader.load_all()
@@ -99,14 +99,10 @@ class SkillRouter:
                 candidate_file_paths=candidate_file_paths,
             )
 
-        # ── 1. 非斜杠消息：返回 fallback 结果（全量工具 + 技能目录）──
-        return self._build_fallback_result(
-            selected=[],
-            route_mode="fallback",
-            all_skillpacks=skillpacks,
+        # ── 1. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
+        return self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
-            blocked_skillpacks=blocked_skillpacks,
         )
 
     def build_skill_catalog(
@@ -204,7 +200,7 @@ class SkillRouter:
         tool_scope = list(result.tool_scope)
         if "list_skills" not in tool_scope:
             tool_scope.append("list_skills")
-        for tool_name in FALLBACK_DISCOVERY_TOOLS:
+        for tool_name in DISCOVERY_TOOLS:
             if tool_name not in tool_scope:
                 tool_scope.append(tool_name)
         system_contexts = list(result.system_contexts)
@@ -227,6 +223,35 @@ class SkillRouter:
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
+        )
+
+    def _build_all_tools_result(
+        self,
+        *,
+        user_message: str,
+        candidate_file_paths: list[str] | None,
+    ) -> SkillMatchResult:
+        """构建非斜杠默认路由：tool_scope 为空表示由引擎放开全量工具。"""
+        system_contexts: list[str] = []
+        large_file_context = self._build_large_file_context(
+            user_message=user_message,
+            candidate_file_paths=candidate_file_paths,
+        )
+        if large_file_context:
+            system_contexts.append(large_file_context)
+
+        file_structure_context = self._build_file_structure_context(
+            candidate_file_paths=candidate_file_paths,
+        )
+        if file_structure_context:
+            system_contexts.append(file_structure_context)
+
+        return SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="all_tools",
+            system_contexts=system_contexts,
+            parameterized=False,
         )
 
     @staticmethod
