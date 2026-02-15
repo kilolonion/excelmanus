@@ -29,23 +29,50 @@ def _payload(
 class TestQuestionValidation:
     """问题参数校验。"""
 
-    def test_header_must_not_be_empty(self) -> None:
+    def test_header_defaults_when_empty(self) -> None:
         manager = QuestionFlowManager()
-        with pytest.raises(ValueError, match="header"):
-            manager.enqueue(_payload(header=""), tool_call_id="call_1")
+        pending = manager.enqueue(_payload(header=""), tool_call_id="call_1")
+        assert pending.header == "需要确认"
 
     def test_header_length_must_be_at_most_12(self) -> None:
         manager = QuestionFlowManager()
         with pytest.raises(ValueError, match="12"):
             manager.enqueue(_payload(header="X" * 13), tool_call_id="call_1")
 
-    def test_options_count_must_be_2_to_4(self) -> None:
+    def test_options_count_must_be_1_to_4(self) -> None:
         manager = QuestionFlowManager()
-        with pytest.raises(ValueError, match="2 到 4"):
+        with pytest.raises(ValueError, match="1 到 4"):
             manager.enqueue(
-                _payload(options=[{"label": "A", "description": "x"}]),
+                {
+                    "header": "实现方案",
+                    "text": "请选择实现方案",
+                    "options": [],
+                    "multiSelect": False,
+                },
                 tool_call_id="call_1",
             )
+
+    def test_single_option_is_allowed(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(
+            _payload(options=[{"label": "A", "description": "x"}]),
+            tool_call_id="call_1",
+        )
+        assert [o.label for o in pending.options] == ["A", "Other"]
+
+    def test_option_description_defaults_when_missing(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(
+            _payload(
+                options=[
+                    {"label": "A"},
+                    {"label": "B", "description": ""},
+                ]
+            ),
+            tool_call_id="call_1",
+        )
+        assert pending.options[0].description == "按此选项继续执行"
+        assert pending.options[1].description == "按此选项继续执行"
 
     def test_duplicate_labels_are_rejected(self) -> None:
         manager = QuestionFlowManager()
