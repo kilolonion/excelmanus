@@ -66,6 +66,7 @@ logger = get_logger("engine")
 _META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = ("task_create", "task_update", "ask_user", "delegate_to_subagent")
 _PLAN_CONTEXT_MAX_CHARS = 6000
+_MAX_PLAN_AUTO_CONTINUE = 3  # 计划审批后自动续跑最大次数
 _MIN_SYSTEM_CONTEXT_CHARS = 256
 _SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
@@ -2121,7 +2122,7 @@ class AgentEngine:
             f"- 文件: `{draft.file_path}`\n"
             f"- 标题: {draft.title}\n"
             f"- 子任务数: {len(draft.subtasks)}\n"
-            "请选择"批准执行"或"拒绝计划"。"
+            "请选择「批准执行」或「拒绝计划」。"
         )
 
     def _enqueue_plan_approval_question(
@@ -4454,7 +4455,7 @@ class AgentEngine:
         return [base_prompt, *skill_contexts]
 
     def _build_approved_plan_context_notice(self) -> str:
-        """注入已批准计划上下文。"""
+        """注入已批准计划上下文 + 任务清单状态 + 自主执行指令。"""
         context = (self._approved_plan_context or "").strip()
         if not context:
             return ""
@@ -4464,7 +4465,91 @@ class AgentEngine:
                 f"{truncated}\n"
                 f"[计划上下文已截断，原始长度: {len(self._approved_plan_context or '')} 字符]"
             )
-        return f"## 已批准计划上下文\n{context}"
+
+        parts = [f"## 已批准计划上下文\n{context}"]
+
+        # 注入任务清单当前状态
+        task_status = self._build_task_list_status_notice()
+        if task_status:
+            parts.append(task_status)
+
+        # 自主执行指令
+        parts.append(
+            "【自主执行指令】计划已获用户批准，你必须自主连续执行所有子任务直到全部完成。"
+            "严禁在中间步骤停下来等待用户发送"继续"或确认。"
+            "每完成一个子任务后，立即用 task_update 标记完成，然后继续执行下一个。"
+            "仅在遇到需要用户决策的歧义或 accept 门禁时才暂停。"
+        )
+        return "\n\n".join(parts)
+
+    def _build_task_list_status_notice(self) -> str:
+        """构建当前任务清单状态摘要，用于注入 system prompt。"""
+        task_list = self._task_store.current
+        if task_list is None:
+            return ""
+        lines = [f"### 任务清单状态「{task_list.title}」"]
+        for idx, item in enumerate(task_list.items):
+            status_icon = {
+                TaskStatus.PENDING: "🔵",
+                TaskStatus.IN_PROGRESS: "🟡",
+                TaskStatus.COMPLETED: "✅",
+                TaskStatus.FAILED: "❌",
+            }.get(item.status, "⬜")
+            lines.append(f"- {status_icon} #{idx} {item.title} ({item.status.value})")
+        return "\n".join(lines)
+
+    def _has_incomplete_tasks(self) -> bool:
+        """检查任务清单是否存在未完成的子任务。"""
+        task_list = self._task_store.current
+        if task_list is None:
+            return False
+        return any(
+            item.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS)
+            for item in task_list.items
+        )
+
+    async def _auto_continue_task_loop(
+        self,
+        route_result: "SkillMatchResult",
+        on_event: EventCallback | None,
+        initial_result: ChatResult,
+    ) -> ChatResult:
+        """计划审批后自动续跑：若任务清单仍有未完成子任务，自动注入续跑消息。"""
+        result = initial_result
+        for attempt in range(_MAX_PLAN_AUTO_CONTINUE):
+            if not self._has_incomplete_tasks():
+                break
+            # 遇到待确认/待回答/待审批时不续跑，交还用户控制
+            if self._approval.has_pending():
+                break
+            if self._question_flow.has_pending():
+                break
+            if self._pending_plan is not None:
+                break
+
+            logger.info(
+                "自动续跑 %d/%d：任务清单仍有未完成子任务",
+                attempt + 1,
+                _MAX_PLAN_AUTO_CONTINUE,
+            )
+            self._memory.add_user_message(
+                "请继续执行剩余的未完成子任务，直到全部完成。"
+            )
+            self._set_window_perception_turn_hints(
+                user_message="继续执行剩余子任务",
+                is_new_task=False,
+            )
+            resumed = await self._tool_calling_loop(route_result, on_event)
+            result = ChatResult(
+                reply=f"{result.reply}\n\n{resumed.reply}",
+                tool_calls=list(result.tool_calls) + list(resumed.tool_calls),
+                iterations=result.iterations + resumed.iterations,
+                truncated=resumed.truncated,
+                prompt_tokens=result.prompt_tokens + resumed.prompt_tokens,
+                completion_tokens=result.completion_tokens + resumed.completion_tokens,
+                total_tokens=result.total_tokens + resumed.total_tokens,
+            )
+        return result
 
     def _build_access_notice(self) -> str:
         """当 fullAccess 关闭时，生成权限限制说明注入 system prompt。"""
