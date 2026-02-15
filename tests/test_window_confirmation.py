@@ -52,7 +52,7 @@ def test_anchored_confirmation_round_trip() -> None:
     assert parsed.cols == record.cols
     assert parsed.change_summary == record.change_summary
     assert parsed.intent == record.intent
-    assert "当前意图" in parsed.hint
+    assert "intent[aggregate]" in parsed.hint
 
 
 def test_unified_confirmation_round_trip() -> None:

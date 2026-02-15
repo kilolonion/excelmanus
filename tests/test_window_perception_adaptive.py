@@ -93,9 +93,9 @@ def test_manager_adaptive_repeat_tripwire_downgrades_one_level() -> None:
     )
 
     assert "首行预览" not in first
-    assert "提示=当前意图[aggregate]下此数据已在窗口" in second
-    assert "意图: aggregate" in third
-    assert "提示: 当前意图[aggregate]下此数据已在窗口" in third
+    assert "hint=intent[aggregate] data already in window" in second
+    assert "intent: aggregate" in third
+    assert "hint: intent[aggregate] data already in window" in third
     assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "anchored"
 
 
