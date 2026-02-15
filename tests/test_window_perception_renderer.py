@@ -1,5 +1,6 @@
 """窗口感知渲染测试。"""
 
+from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.models import (
     ColumnDef,
     DetailLevel,
@@ -7,7 +8,6 @@ from excelmanus.window_perception.models import (
     Viewport,
     WindowRenderAction,
     WindowSnapshot,
-    WindowState,
     WindowType,
 )
 from excelmanus.window_perception.renderer import (
@@ -19,13 +19,14 @@ from excelmanus.window_perception.renderer import (
     render_window_minimized,
 )
 from excelmanus.window_perception.projection_service import project_notice
+from tests.window_factories import make_window
 
 
 class TestWindowRenderer:
     """渲染器测试。"""
 
     def test_render_explorer_window(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="explorer_1",
             type=WindowType.EXPLORER,
             title="资源管理器",
@@ -37,7 +38,7 @@ class TestWindowRenderer:
         assert "sales.xlsx" in text
 
     def test_render_sheet_window(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="sheet_1",
             type=WindowType.SHEET,
             title="sheet",
@@ -54,7 +55,7 @@ class TestWindowRenderer:
         assert "样式类2种" in text
 
     def test_render_minimized(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="sheet_1",
             type=WindowType.SHEET,
             title="sheet",
@@ -68,7 +69,7 @@ class TestWindowRenderer:
         assert "200x15" in text
 
     def test_render_background_contains_columns(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="sheet_2",
             type=WindowType.SHEET,
             title="sheet",
@@ -110,7 +111,7 @@ class TestWindowRenderer:
         assert "数据窗口" in text
 
     def test_render_window_keep_anchored_full(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="W3",
             type=WindowType.SHEET,
             title="sheet",
@@ -130,7 +131,7 @@ class TestWindowRenderer:
         assert "列: [日期, 产品, 金额]" in text or "cols: [日期, 产品, 金额]" in text
 
     def test_tool_payload_and_block(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="sheet_1",
             type=WindowType.SHEET,
             title="sheet",
@@ -139,17 +140,17 @@ class TestWindowRenderer:
             sheet_tabs=["Q1", "Q2", "Q3"],
             viewport=Viewport(range_ref="A1:J25", total_rows=50, total_cols=10),
         )
-        window.metadata["scroll_position"] = {
+        window.scroll_position = {
             "vertical_pct": 0.0,
             "horizontal_pct": 10.0,
             "remaining_rows_pct": 50.0,
             "remaining_cols_pct": 20.0,
         }
-        window.metadata["status_bar"] = {"sum": 371200, "count": 24, "average": 15466.6}
-        window.metadata["column_widths"] = {"A": 12.0, "B": 15.0}
-        window.metadata["row_heights"] = {"1": 24.0, "2": 18.0}
-        window.metadata["merged_ranges"] = ["F1:H1"]
-        window.metadata["conditional_effects"] = ["D2:D7: 条件着色（cellIs/greaterThan）"]
+        window.status_bar = {"sum": 371200, "count": 24, "average": 15466.6}
+        window.column_widths = {"A": 12.0, "B": 15.0}
+        window.row_heights = {"1": 24.0, "2": 18.0}
+        window.merged_ranges = ["F1:H1"]
+        window.conditional_effects = ["D2:D7: 条件着色（cellIs/greaterThan）"]
         payload = build_tool_perception_payload(window)
         assert payload is not None
         block = render_tool_perception_block(payload)
@@ -163,7 +164,7 @@ class TestWindowRenderer:
         assert "cond-fmt: D2:D7:" in block
 
     def test_render_wurm_full_format_intent_prefers_style(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="W4",
             type=WindowType.SHEET,
             title="sheet",
@@ -188,7 +189,7 @@ class TestWindowRenderer:
         assert "style: 字体+填充" in text
 
     def test_render_wurm_full_validate_intent_prefers_quality(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="W5",
             type=WindowType.SHEET,
             title="sheet",
@@ -216,7 +217,7 @@ class TestWindowRenderer:
         assert "quality: empty_cells" in text
 
     def test_renderer_uses_notice_projection_not_window_fields_directly(self) -> None:
-        window = WindowState(
+        window = make_window(
             id="sheet_1",
             type=WindowType.SHEET,
             title="sales.xlsx/Q1",

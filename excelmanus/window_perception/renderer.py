@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import DetailLevel, IntentTag, WindowSnapshot, WindowState, WindowType
+from .domain import ExplorerWindow, SheetWindow, Window
+from .models import DetailLevel, IntentTag, WindowSnapshot, WindowType
 from .projection_models import NoticeProjection, ToolPayloadProjection
 from .projection_service import project_tool_payload
 
@@ -32,7 +33,7 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
 
 
 def render_window_keep(
-    window: WindowState | NoticeProjection,
+    window: Window | NoticeProjection,
     *,
     mode: str = "enriched",
     max_rows: int = 25,
@@ -43,7 +44,7 @@ def render_window_keep(
     if isinstance(window, NoticeProjection):
         return _render_notice_projection(window)
 
-    if window.type == WindowType.EXPLORER:
+    if isinstance(window, ExplorerWindow):
         return _render_explorer(window)
     if mode in {"anchored", "unified"}:
         if window.detail_level == DetailLevel.ICON:
@@ -63,13 +64,13 @@ def render_window_keep(
 
 
 def render_window_background(
-    window: WindowState,
+    window: Window,
     *,
     intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 BACKGROUND 窗口（结构缩略图）。"""
     profile = _normalize_intent_profile(window, intent_profile=intent_profile)
-    if window.type == WindowType.EXPLORER:
+    if isinstance(window, ExplorerWindow):
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
         return f"[BG -- {title}] {summary}"
@@ -112,13 +113,13 @@ def render_window_background(
 
 
 def render_window_minimized(
-    window: WindowState,
+    window: Window,
     *,
     intent_profile: dict[str, Any] | None = None,
 ) -> str:
     """渲染 SUSPENDED 窗口（一行摘要）。"""
     profile = _normalize_intent_profile(window, intent_profile=intent_profile)
-    if window.type == WindowType.EXPLORER:
+    if isinstance(window, ExplorerWindow):
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
         return f"[IDLE -- {title}] {summary}"
@@ -136,7 +137,7 @@ def render_window_minimized(
     return f"[IDLE -- {file_name} / {sheet_name}] {summary} | intent={profile['intent']}"
 
 
-def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] | None:
+def build_tool_perception_payload(window: Window | None) -> dict[str, Any] | None:
     """生成工具返回增强 payload。"""
     projection = project_tool_payload(window)
     if projection is None:
@@ -272,13 +273,13 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _render_explorer(window: WindowState) -> str:
+def _render_explorer(window: ExplorerWindow) -> str:
     lines = [
         "[ACTIVE -- 资源管理器]",
         f"path: {window.directory or '.'}",
     ]
-    entries = window.metadata.get("entries")
-    if isinstance(entries, list) and entries:
+    entries = window.entries
+    if entries:
         for entry in entries[:15]:
             lines.append(str(entry))
         if len(entries) > 15:
@@ -302,7 +303,7 @@ def _render_notice_projection(projection: NoticeProjection) -> str:
     return "\n".join(lines)
 
 
-def _render_sheet(window: WindowState) -> str:
+def _render_sheet(window: SheetWindow) -> str:
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
     lines = [f"[ACTIVE -- {file_name} / {sheet_name}]"]
@@ -334,16 +335,16 @@ def _render_sheet(window: WindowState) -> str:
         lines.append("style:")
         lines.append(f"  {window.style_summary}")
 
-    scroll = window.metadata.get("scroll_position")
-    if isinstance(scroll, dict) and scroll:
+    scroll = window.scroll_position
+    if scroll:
         lines.append(
             "scroll: "
             f"v={_format_percent(scroll.get('vertical_pct'))} | "
             f"h={_format_percent(scroll.get('horizontal_pct'))}"
         )
 
-    status_bar = window.metadata.get("status_bar")
-    if isinstance(status_bar, dict) and status_bar:
+    status_bar = window.status_bar
+    if status_bar:
         lines.append(
             "stats: "
             f"SUM={_format_number(status_bar.get('sum'))} | "
@@ -351,22 +352,22 @@ def _render_sheet(window: WindowState) -> str:
             f"AVG={_format_number(status_bar.get('average'))}"
         )
 
-    column_widths = window.metadata.get("column_widths")
-    if isinstance(column_widths, dict) and column_widths:
+    column_widths = window.column_widths
+    if column_widths:
         lines.append(f"col-width: {_format_map_preview(column_widths, max_items=8)}")
 
-    row_heights = window.metadata.get("row_heights")
-    if isinstance(row_heights, dict) and row_heights:
+    row_heights = window.row_heights
+    if row_heights:
         lines.append(f"row-height: {_format_map_preview(row_heights, max_items=8)}")
 
-    merged_ranges = window.metadata.get("merged_ranges")
-    if isinstance(merged_ranges, list) and merged_ranges:
+    merged_ranges = window.merged_ranges
+    if merged_ranges:
         merged_preview = ", ".join(str(item) for item in merged_ranges[:6])
         extra = f" ...(+{len(merged_ranges) - 6})" if len(merged_ranges) > 6 else ""
         lines.append(f"merged: {merged_preview}{extra}")
 
-    conditional_effects = window.metadata.get("conditional_effects")
-    if isinstance(conditional_effects, list) and conditional_effects:
+    conditional_effects = window.conditional_effects
+    if conditional_effects:
         effect_preview = " | ".join(str(item) for item in conditional_effects[:4])
         extra = f" ...(+{len(conditional_effects) - 4})" if len(conditional_effects) > 4 else ""
         lines.append(f"cond-fmt: {effect_preview}{extra}")
@@ -378,7 +379,7 @@ def _render_sheet(window: WindowState) -> str:
 
 
 def render_window_wurm_full(
-    window: WindowState,
+    window: SheetWindow,
     *,
     max_rows: int,
     current_iteration: int,
@@ -457,8 +458,8 @@ def render_window_wurm_full(
             changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
         ))
 
-    status_bar = window.metadata.get("status_bar")
-    if isinstance(status_bar, dict) and status_bar:
+    status_bar = window.status_bar
+    if status_bar:
         lines.append(
             "统计: "
             f"SUM={_format_number(status_bar.get('sum'))} | "
@@ -469,7 +470,7 @@ def render_window_wurm_full(
 
 
 def _normalize_intent_profile(
-    window: WindowState,
+    window: Window,
     *,
     intent_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -501,22 +502,22 @@ def _normalize_intent_profile(
     return profile
 
 
-def _render_style_summary_lines(window: WindowState) -> list[str]:
+def _render_style_summary_lines(window: SheetWindow) -> list[str]:
     lines: list[str] = []
     if window.style_summary:
         lines.append(f"style: {window.style_summary}")
-    column_widths = window.metadata.get("column_widths")
-    if isinstance(column_widths, dict) and column_widths:
+    column_widths = window.column_widths
+    if column_widths:
         lines.append(f"col-width: {_format_map_preview(column_widths, max_items=6)}")
-    row_heights = window.metadata.get("row_heights")
-    if isinstance(row_heights, dict) and row_heights:
+    row_heights = window.row_heights
+    if row_heights:
         lines.append(f"row-height: {_format_map_preview(row_heights, max_items=6)}")
-    merged_ranges = window.metadata.get("merged_ranges")
-    if isinstance(merged_ranges, list) and merged_ranges:
+    merged_ranges = window.merged_ranges
+    if merged_ranges:
         merged_preview = ", ".join(str(item) for item in merged_ranges[:4])
         lines.append(f"merged: {merged_preview}")
-    conditional_effects = window.metadata.get("conditional_effects")
-    if isinstance(conditional_effects, list) and conditional_effects:
+    conditional_effects = window.conditional_effects
+    if conditional_effects:
         lines.append(f"cond-fmt: {len(conditional_effects)} rules")
     return lines
 
@@ -536,7 +537,7 @@ def _build_quality_summary(rows: list[dict[str, Any]]) -> str:
     return f"empty_cells={empty_cells}, dup_rows={duplicate_rows}"
 
 
-def _build_formula_summary(window: WindowState) -> str:
+def _build_formula_summary(window: Window) -> str:
     hints: list[str] = []
     for row in window.data_buffer[:30]:
         for key, value in row.items():
