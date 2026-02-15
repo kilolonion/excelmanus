@@ -11,6 +11,7 @@ import pandas as pd
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import get_worksheet, resolve_sheet_name
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.data")
@@ -198,8 +199,12 @@ def _detect_header_row(
         return None
 
     try:
-        if sheet_name and sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
+        if sheet_name:
+            resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+            if resolved:
+                ws = wb[resolved]
+            else:
+                ws = wb.active
         else:
             ws = wb.active
         if ws is None:
@@ -295,7 +300,7 @@ def _resolve_formula_columns(
 
     wb = load_workbook(safe_path, data_only=False, read_only=True)
     try:
-        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        ws = get_worksheet(wb, sheet_name)
         if ws is None:
             df.attrs["formula_resolution"] = formula_meta
             return df
@@ -973,7 +978,7 @@ def _collect_style_summary(file_path: Any, sheet_name: str | None) -> dict[str, 
 
     path = Path(file_path) if not isinstance(file_path, Path) else file_path
     wb = load_workbook(path, data_only=True)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     fill_colors: set[str] = set()
     font_colors: set[str] = set()

@@ -19,6 +19,7 @@ from openpyxl import load_workbook
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import get_worksheet, resolve_sheet_name
 from excelmanus.tools import data_tools
 from excelmanus.tools.registry import ToolDef
 
@@ -326,7 +327,7 @@ def create_excel_chart(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     # 创建图表对象
     chart_class_map = {
@@ -384,10 +385,12 @@ def create_excel_chart(
 
     # 放置图表到目标工作表
     target_ws = ws
-    if target_sheet and target_sheet in wb.sheetnames:
-        target_ws = wb[target_sheet]
-    elif target_sheet and target_sheet not in wb.sheetnames:
-        target_ws = wb.create_sheet(title=target_sheet)
+    if target_sheet:
+        resolved_target = resolve_sheet_name(target_sheet, wb.sheetnames)
+        if resolved_target:
+            target_ws = wb[resolved_target]
+        else:
+            target_ws = wb.create_sheet(title=target_sheet)
 
     target_ws.add_chart(chart, target_cell)
     wb.save(safe_path)

@@ -16,6 +16,7 @@ from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import get_worksheet
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.cell")
@@ -80,6 +81,24 @@ def _coerce_value(raw: Any) -> Any:
         pass
     return raw
 
+def _resolve_merged_cell(ws: Any, row: int, col: int) -> tuple[int, int, bool]:
+    """检测 (row, col) 是否在合并区域内，若是则返回主单元格坐标。
+
+    Returns:
+        (actual_row, actual_col, redirected)
+        redirected 为 True 表示目标是合并区域的从属单元格，已重定向到主单元格。
+    """
+    for merged_range in ws.merged_cells.ranges:
+        if (
+            merged_range.min_row <= row <= merged_range.max_row
+            and merged_range.min_col <= col <= merged_range.max_col
+        ):
+            if row == merged_range.min_row and col == merged_range.min_col:
+                return row, col, False  # 就是主单元格，无需重定向
+            return merged_range.min_row, merged_range.min_col, True
+    return row, col, False
+
+
 
 # ── 工具函数 ──────────────────────────────────────────────
 
@@ -130,21 +149,27 @@ def write_cells(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     try:
         if single_mode:
             # 单元格模式
             row, col = _parse_single_cell(cell)  # type: ignore[arg-type]
-            ws.cell(row=row, column=col, value=_coerce_value(value))
+            actual_row, actual_col, redirected = _resolve_merged_cell(ws, row, col)
+            ws.cell(row=actual_row, column=actual_col, value=_coerce_value(value))
             wb.save(safe_path)
-            result = {
+            actual_ref = f"{get_column_letter(actual_col)}{actual_row}"
+            result: dict[str, Any] = {
                 "status": "success",
                 "file": safe_path.name,
-                "cell": cell,
+                "cell": actual_ref if redirected else cell,
                 "value_written": value,
                 "cells_written": 1,
             }
+            if redirected:
+                result["note"] = (
+                    f"{cell} 是合并区域的从属单元格，已自动写入主单元格 {actual_ref}"
+                )
         else:
             # 范围模式
             if values is None or not values:
@@ -160,13 +185,23 @@ def write_cells(
             start_row, start_col = _parse_single_cell(start_ref)
 
             cells_written = 0
+            skipped_merged = 0
             for r_idx, row_data in enumerate(values):
                 if not isinstance(row_data, list):
                     row_data = [row_data]
                 for c_idx, val in enumerate(row_data):
+                    target_row = start_row + r_idx
+                    target_col = start_col + c_idx
+                    actual_row, actual_col, redirected = _resolve_merged_cell(
+                        ws, target_row, target_col
+                    )
+                    if redirected:
+                        # 从属单元格：跳过，值由主单元格决定
+                        skipped_merged += 1
+                        continue
                     ws.cell(
-                        row=start_row + r_idx,
-                        column=start_col + c_idx,
+                        row=actual_row,
+                        column=actual_col,
                         value=_coerce_value(val),
                     )
                     cells_written += 1
@@ -179,13 +214,15 @@ def write_cells(
                 f"{get_column_letter(start_col)}{start_row}"
                 f":{get_column_letter(end_col)}{end_row}"
             )
-            result = {
+            result: dict[str, Any] = {
                 "status": "success",
                 "file": safe_path.name,
                 "range": actual_range,
                 "rows_written": len(values),
                 "cells_written": cells_written,
             }
+            if skipped_merged:
+                result["skipped_merged_cells"] = skipped_merged
     finally:
         wb.close()
 
@@ -195,7 +232,7 @@ def write_cells(
 
         wb2 = _lw(safe_path, data_only=True)
         try:
-            ws2 = wb2[sheet_name] if sheet_name and sheet_name in wb2.sheetnames else wb2.active
+            ws2 = get_worksheet(wb2, sheet_name)
             if single_mode:
                 r, c = _parse_single_cell(cell)  # type: ignore[arg-type]
                 val = ws2.cell(row=r, column=c).value
@@ -248,7 +285,7 @@ def insert_rows(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     rows_before = ws.max_row or 0
     ws.insert_rows(row, amount=count)
@@ -317,7 +354,7 @@ def insert_columns(
     safe_path = guard.resolve_and_validate(file_path)
 
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     cols_before = ws.max_column or 0
     ws.insert_cols(col_idx, amount=count)

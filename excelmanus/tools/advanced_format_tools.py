@@ -16,6 +16,7 @@ from openpyxl.utils.cell import range_boundaries
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._helpers import get_worksheet
 from excelmanus.tools.format_tools import COLOR_NAME_MAP
 from excelmanus.tools.registry import ToolDef
 
@@ -121,7 +122,7 @@ def apply_threshold_icon_format(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     high_s, mid_s, low_s = (s.replace('"', '""') for s in (high_symbol, mid_symbol, low_symbol))
     high_t, mid_t = _to_display_number(high_threshold), _to_display_number(mid_threshold)
@@ -256,7 +257,7 @@ def scale_range_unit(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     number_format = _build_unit_number_format(decimals=decimals, suffix=suffix, thousand_separator=thousand_separator)
     divisor_text = _to_divisor_text(divisor)
@@ -437,7 +438,7 @@ def add_color_scale(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     min_hex = _normalize_hex_color(min_color, "63BE7B")
     max_hex = _normalize_hex_color(max_color, "F8696B")
@@ -510,7 +511,7 @@ def add_data_bar(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     color_hex = _normalize_hex_color(color, "638EC6")
 
@@ -597,7 +598,7 @@ def add_conditional_rule(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = get_worksheet(wb, sheet_name)
 
     # 构建样式参数
     style_font = None
