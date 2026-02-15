@@ -114,6 +114,12 @@ class ExcelManusConfig:
     window_rule_engine_version: str = "v1"
     # 默认技能预激活：非斜杠路由时自动激活 general_excel
     auto_activate_default_skill: bool = True
+    # 小模型预路由配置
+    skill_preroute_mode: str = "off"  # off / deepseek / gemini / meta_only
+    skill_preroute_api_key: str | None = None
+    skill_preroute_base_url: str | None = None
+    skill_preroute_model: str | None = None
+    skill_preroute_timeout_ms: int = 10000
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -690,6 +696,25 @@ def load_config() -> ExcelManusConfig:
         True,
     )
 
+    # 小模型预路由配置
+    skill_preroute_mode_raw = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODE", "off").strip().lower()
+    if skill_preroute_mode_raw not in {"off", "deepseek", "gemini", "meta_only"}:
+        logger.warning(
+            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 非法(%r)，已回退为 off",
+            skill_preroute_mode_raw,
+        )
+        skill_preroute_mode_raw = "off"
+    skill_preroute_api_key = os.environ.get("EXCELMANUS_SKILL_PREROUTE_API_KEY") or None
+    skill_preroute_base_url = os.environ.get("EXCELMANUS_SKILL_PREROUTE_BASE_URL") or None
+    if skill_preroute_base_url:
+        _validate_base_url(skill_preroute_base_url)
+    skill_preroute_model = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODEL") or None
+    skill_preroute_timeout_ms = _parse_int(
+        os.environ.get("EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS"),
+        "EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS",
+        10000,
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -766,5 +791,10 @@ def load_config() -> ExcelManusConfig:
         window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
         window_rule_engine_version=window_rule_engine_version,
         auto_activate_default_skill=auto_activate_default_skill,
+        skill_preroute_mode=skill_preroute_mode_raw,
+        skill_preroute_api_key=skill_preroute_api_key,
+        skill_preroute_base_url=skill_preroute_base_url,
+        skill_preroute_model=skill_preroute_model,
+        skill_preroute_timeout_ms=skill_preroute_timeout_ms,
         models=models,
     )
