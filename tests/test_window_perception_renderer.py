@@ -18,6 +18,7 @@ from excelmanus.window_perception.renderer import (
     render_window_keep,
     render_window_minimized,
 )
+from excelmanus.window_perception.projection_service import project_notice
 
 
 class TestWindowRenderer:
@@ -213,3 +214,21 @@ class TestWindowRenderer:
         )
         assert "intent: validate" in text
         assert "quality: empty_cells" in text
+
+    def test_renderer_uses_notice_projection_not_window_fields_directly(self) -> None:
+        window = WindowState(
+            id="sheet_1",
+            type=WindowType.SHEET,
+            title="sales.xlsx/Q1",
+            file_path="sales.xlsx",
+            sheet_name="Q1",
+            viewport_range="A1:C3",
+            total_rows=3,
+            total_cols=3,
+        )
+        projection = project_notice(window, ctx={"identity": "sales.xlsx#Q1"})
+
+        text = render_window_keep(projection, mode="anchored")
+
+        assert "sales.xlsx#Q1" in text
+        assert "sheet_1" in text

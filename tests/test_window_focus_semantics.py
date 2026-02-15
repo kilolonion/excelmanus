@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from excelmanus.window_perception.manager import WindowPerceptionManager
 from excelmanus.window_perception.models import (
+    CachedRange,
     DetailLevel,
     IntentTag,
     PerceptionBudget,
@@ -103,3 +104,31 @@ def test_scroll_and_expand_keep_original_intent() -> None:
     assert scroll_result["status"] in {"ok", "needs_refill"}
     assert expand_result["status"] in {"ok", "needs_refill"}
     assert window.intent_tag == IntentTag.FORMAT
+
+
+def test_focus_hit_promotes_window_to_active() -> None:
+    manager = _build_manager()
+    old = _build_sheet_window("sheet_1")
+    new = _build_sheet_window("sheet_2")
+    new.cached_ranges = [
+        CachedRange(
+            range_ref="A1:C3",
+            rows=[{"A": 1, "B": 2, "C": 3}],
+            is_current_viewport=True,
+            added_at_iteration=1,
+        )
+    ]
+    manager._windows[old.id] = old
+    manager._windows[new.id] = new
+    manager._active_window_id = old.id
+
+    result = manager.focus_window_action(
+        window_id=new.id,
+        action="scroll",
+        range_ref="A1:C3",
+    )
+
+    assert result["status"] == "ok"
+    assert result["active_window_id"] == new.id
+    assert manager._active_window_id == new.id
+    assert old.detail_level == DetailLevel.SUMMARY

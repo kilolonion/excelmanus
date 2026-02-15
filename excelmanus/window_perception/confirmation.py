@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 
 from .models import ChangeRecord, IntentTag, WindowState
+from .projection_models import ConfirmationProjection
+from .projection_service import project_confirmation
 
 _UNIFIED_RE = re.compile(
     r"^\[OK\] \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| "
@@ -16,7 +18,9 @@ _ANCHORED_HEAD_RE = re.compile(
     r"^\[OK\] \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| (?P<rows>\d+)r x (?P<cols>\d+)c \| (?P<summary>.+)$"
 )
 _ANCHORED_INTENT_RE = re.compile(r"^  intent: (?P<intent>\w+)$")
+_ANCHORED_INTENT_CN_RE = re.compile(r"^  意图: (?P<intent>\w+)$")
 _ANCHORED_HINT_RE = re.compile(r"^  hint: (?P<hint>.+)$")
+_ANCHORED_HINT_CN_RE = re.compile(r"^  提示: (?P<hint>.+)$")
 
 
 @dataclass(frozen=True)
@@ -31,47 +35,57 @@ class ConfirmationRecord:
     change_summary: str
     intent: str
     hint: str = ""
+    localized_hint: str = ""
 
 
 def build_confirmation_record(
     *,
-    window: WindowState,
-    tool_name: str,
+    window: WindowState | None = None,
+    tool_name: str | None = None,
     repeat_warning: bool = False,
+    projection: ConfirmationProjection | None = None,
 ) -> ConfirmationRecord:
     """从窗口状态构建确认对象。"""
-    rows = int(window.total_rows or (window.viewport.total_rows if window.viewport else 0) or len(window.data_buffer))
-    cols = int(window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns or window.schema))
-    file_name = window.file_path or "未知文件"
-    sheet_name = window.sheet_name or "未知Sheet"
-    window_label = f"{window.id}: {file_name} / {sheet_name}"
-    latest_change = _latest_change_summary(window.change_log)
-    change_summary = latest_change or "状态同步"
-    hint = ""
-    if repeat_warning:
-        hint = f"intent[{window.intent_tag.value}] data already in window {window.id}"
+    if projection is None:
+        if window is None or not tool_name:
+            raise ValueError("window/tool_name or projection must be provided")
+        projection = project_confirmation(
+            window,
+            tool_name=tool_name,
+            repeat_warning=repeat_warning,
+        )
+
     return ConfirmationRecord(
-        window_label=window_label,
-        operation=tool_name,
-        range_ref=(window.viewport_range or "-"),
-        rows=max(0, rows),
-        cols=max(0, cols),
-        change_summary=change_summary,
-        intent=window.intent_tag.value,
-        hint=hint,
+        window_label=projection.window_label,
+        operation=projection.operation,
+        range_ref=projection.range_ref,
+        rows=max(0, int(projection.rows)),
+        cols=max(0, int(projection.cols)),
+        change_summary=projection.change_summary,
+        intent=projection.intent,
+        hint=projection.hint,
+        localized_hint=projection.localized_hint,
     )
 
 
-def serialize_confirmation(record: ConfirmationRecord, *, mode: str) -> str:
+def serialize_confirmation(record: ConfirmationRecord | ConfirmationProjection, *, mode: str) -> str:
     """将确认对象序列化为文本。"""
+    if isinstance(record, ConfirmationProjection):
+        record = build_confirmation_record(projection=record)
+
     normalized_mode = str(mode or "anchored").strip().lower()
     if normalized_mode == "unified":
         base = (
             f"[OK] [{record.window_label}] {record.operation}: {record.range_ref} | "
             f"{record.rows}r x {record.cols}c | {record.change_summary} | intent={record.intent}"
         )
+        tails: list[str] = []
         if record.hint:
-            return f"{base} | hint={record.hint}"
+            tails.append(f"hint={record.hint}")
+        if record.localized_hint:
+            tails.append(f"提示={record.localized_hint}")
+        if tails:
+            return f"{base} | " + " | ".join(tails)
         return base
 
     lines = [
@@ -80,10 +94,13 @@ def serialize_confirmation(record: ConfirmationRecord, *, mode: str) -> str:
             f"{record.rows}r x {record.cols}c | {record.change_summary}"
         ),
         f"  intent: {record.intent}",
+        f"  意图: {record.intent}",
         "  hint: data merged into window, prefer referencing window content.",
     ]
     if record.hint:
         lines.append(f"  hint: {record.hint}")
+    if record.localized_hint:
+        lines.append(f"  提示: {record.localized_hint}")
     return "\n".join(lines)
 
 
@@ -114,15 +131,24 @@ def parse_confirmation(text: str) -> ConfirmationRecord | None:
 
     intent = IntentTag.GENERAL.value
     hint = ""
+    hint_cn = ""
     for line in lines[1:]:
         stripped = line.rstrip()
         intent_match = _ANCHORED_INTENT_RE.match(stripped)
         if intent_match is not None:
             intent = intent_match.group("intent").strip()
             continue
+        intent_cn_match = _ANCHORED_INTENT_CN_RE.match(stripped)
+        if intent_cn_match is not None:
+            intent = intent_cn_match.group("intent").strip()
+            continue
         hint_match = _ANCHORED_HINT_RE.match(stripped)
         if hint_match is not None:
             hint = hint_match.group("hint").strip()
+            continue
+        hint_cn_match = _ANCHORED_HINT_CN_RE.match(stripped)
+        if hint_cn_match is not None:
+            hint_cn = hint_cn_match.group("hint").strip()
 
     return ConfirmationRecord(
         window_label=head_match.group("window").strip(),
@@ -132,7 +158,8 @@ def parse_confirmation(text: str) -> ConfirmationRecord | None:
         cols=int(head_match.group("cols")),
         change_summary=head_match.group("summary").strip(),
         intent=intent,
-        hint=hint,
+        hint=hint_cn or hint,
+        localized_hint=hint_cn,
     )
 
 
