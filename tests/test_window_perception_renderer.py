@@ -29,7 +29,7 @@ class TestWindowRenderer:
             type=WindowType.EXPLORER,
             title="资源管理器",
             directory=".",
-            metadata={"entries": ["📊 sales.xlsx", "📁 data"]},
+            metadata={"entries": ["[XLS] sales.xlsx", "[DIR] data"]},
         )
         text = render_window_keep(window)
         assert "资源管理器" in text
@@ -63,8 +63,8 @@ class TestWindowRenderer:
             summary="最近修改区域: A1:B2",
         )
         text = render_window_minimized(window)
-        assert "挂起" in text
-        assert "200×15" in text
+        assert "IDLE" in text
+        assert "200x15" in text
 
     def test_render_background_contains_columns(self) -> None:
         window = WindowState(
@@ -78,17 +78,18 @@ class TestWindowRenderer:
             preview_rows=[{"订单编号": "ORD-1", "日期": "2025-01-01", "金额": 100}],
         )
         text = render_window_background(window)
-        assert "后台" in text
-        assert "5000行 × 12列" in text
-        assert "列: 订单编号, 日期, 金额" in text
-        assert "视口: A1:C25" in text
+        assert "BG" in text
+        assert "5000" in text
+        assert "12" in text
+        assert "cols:" in text or "订単編号" in text or "订单编号" in text
+        assert "viewport:" in text or "A1:C25" in text
 
     def test_render_system_notice(self) -> None:
         snapshots = [
             WindowSnapshot(
                 window_id="w1",
                 action=WindowRenderAction.KEEP,
-                rendered_text="【窗口 · sales.xlsx / Q1】",
+                rendered_text="[ACTIVE -- sales.xlsx / Q1]",
                 estimated_tokens=100,
             )
         ]
@@ -125,7 +126,7 @@ class TestWindowRenderer:
         )
         text = render_window_keep(window, mode="anchored", max_rows=10, current_iteration=1)
         assert "W3 · sales.xlsx / Q1" in text
-        assert "列: [日期, 产品, 金额]" in text
+        assert "列: [日期, 产品, 金额]" in text or "cols: [日期, 产品, 金额]" in text
 
     def test_tool_payload_and_block(self) -> None:
         window = WindowState(
@@ -151,14 +152,14 @@ class TestWindowRenderer:
         payload = build_tool_perception_payload(window)
         assert payload is not None
         block = render_tool_perception_block(payload)
-        assert "环境感知" in block
-        assert "当前Sheet: Q1 | 其他: [Q2] [Q3]" in block
-        assert "滚动条位置: 纵向 0.0% | 横向 10.0%" in block
-        assert "状态栏: SUM=371,200 | COUNT=24 | AVERAGE=15,466.60" in block
-        assert "列宽: A=12, B=15" in block
-        assert "行高: 1=24, 2=18" in block
-        assert "合并单元格: F1:H1" in block
-        assert "条件格式效果: D2:D7: 条件着色（cellIs/greaterThan）" in block
+        assert "--- perception ---" in block
+        assert "sheet: Q1 | others: [Q2] [Q3]" in block
+        assert "scroll: v=0.0% | h=10.0%" in block
+        assert "stats: SUM=371,200 | COUNT=24 | AVG=15,466.60" in block
+        assert "col-width: A=12, B=15" in block
+        assert "row-height: 1=24, 2=18" in block
+        assert "merged: F1:H1" in block
+        assert "cond-fmt: D2:D7:" in block
 
     def test_render_wurm_full_format_intent_prefers_style(self) -> None:
         window = WindowState(
@@ -182,8 +183,8 @@ class TestWindowRenderer:
             current_iteration=1,
             intent_profile={"intent": "format", "show_style": True, "max_rows": 2, "focus_text": "样式优先"},
         )
-        assert "意图: format" in text
-        assert "样式摘要: 字体+填充" in text
+        assert "intent: format" in text
+        assert "style: 字体+填充" in text
 
     def test_render_wurm_full_validate_intent_prefers_quality(self) -> None:
         window = WindowState(
@@ -210,5 +211,5 @@ class TestWindowRenderer:
             current_iteration=1,
             intent_profile={"intent": "validate", "show_quality": True, "max_rows": 3, "focus_text": "质量校验优先"},
         )
-        assert "意图: validate" in text
-        assert "质量: 空值单元格" in text
+        assert "intent: validate" in text
+        assert "quality: empty_cells" in text

@@ -243,7 +243,7 @@ def extract_explorer_entries(result_json: dict[str, Any] | None) -> list[str]:
             size = str(item.get("size", "")).strip()
             sheets = item.get("sheets")
             sheet_count = len(sheets) if isinstance(sheets, list) else 0
-            desc = f"📊 {file_name}"
+            desc = f"[XLS] {file_name}"
             details: list[str] = []
             if size:
                 details.append(size)
@@ -264,9 +264,9 @@ def extract_explorer_entries(result_json: dict[str, Any] | None) -> list[str]:
             if not name:
                 continue
             item_type = str(item.get("type", "")).strip()
-            prefix = "📁" if item_type == "directory" else "📄"
+            prefix = "[DIR]" if item_type == "directory" else "[FILE]"
             if is_excel_path(name):
-                prefix = "📊"
+                prefix = "[XLS]"
             size = str(item.get("size", "")).strip()
             if size:
                 entries.append(f"{prefix} {name} ({size})")
@@ -282,9 +282,9 @@ def extract_explorer_entries(result_json: dict[str, Any] | None) -> list[str]:
             if not path:
                 continue
             item_type = str(item.get("type", "")).strip()
-            prefix = "📁" if item_type == "directory" else "📄"
+            prefix = "[DIR]" if item_type == "directory" else "[FILE]"
             if is_excel_path(path):
-                prefix = "📊"
+                prefix = "[XLS]"
             entries.append(f"{prefix} {path}")
         return entries
 

@@ -78,6 +78,7 @@ from .rule_registry import (
     task_type_from_intent,
 )
 from .rules import classify_tool
+from .strategies import get_strategy
 
 AsyncAdvisorRunner = Callable[
     [list[WindowState], str | None, PerceptionBudget, AdvisorContext],
@@ -524,6 +525,20 @@ class WindowPerceptionManager:
                 self._reset_repeat_counter_after_write(window)
             if str(requested_mode or "").strip().lower() == "adaptive":
                 self._adaptive_selector.mark_ingest_success()
+
+            # 策略分发：仅 explorer 使用策略的 inline confirmation
+            strategy = get_strategy(classification.window_type)
+            if (
+                strategy is not None
+                and classification.window_type == WindowType.EXPLORER
+                and strategy.should_replace_result()
+            ):
+                return strategy.build_inline_confirmation(
+                    window=window,
+                    tool_name=canonical_name,
+                    result_json=result_json,
+                )
+
             return self.generate_confirmation(
                 window=window,
                 tool_name=canonical_name,
@@ -637,8 +652,15 @@ class WindowPerceptionManager:
         result_json: dict[str, Any] | None,
     ) -> WindowState | None:
         if window_type == WindowType.EXPLORER:
-            if self._active_window_id:
-                return self._windows.get(self._active_window_id)
+            # 修复：从 _explorer_index 查找，而非返回 active sheet 窗口
+            directory = normalize_path(extract_directory(arguments, result_json)) or "."
+            window_id = self._explorer_index.get(directory)
+            if window_id:
+                return self._windows.get(window_id)
+            # 回退：查找任意 explorer 窗口
+            for wid, win in self._windows.items():
+                if win.type == WindowType.EXPLORER and not win.dormant:
+                    return win
             return None
 
         file_path = normalize_path(extract_file_path(arguments, result_json))
@@ -676,6 +698,18 @@ class WindowPerceptionManager:
         self._sync_window_schema_columns(window)
 
         if window.type == WindowType.EXPLORER:
+            # 委托给 ExplorerStrategy
+            strategy = get_strategy(WindowType.EXPLORER)
+            if strategy is not None:
+                strategy.apply_ingest(
+                    window=window,
+                    tool_name=canonical_tool_name,
+                    arguments=arguments,
+                    result_json=result_json,
+                    iteration=iteration,
+                )
+                return
+            # 回退：旧逻辑
             self._append_operation(window, canonical_tool_name, arguments, True)
             self._append_change(
                 window,

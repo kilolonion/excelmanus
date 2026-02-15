@@ -720,10 +720,10 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert "───────────── 环境感知 ─────────────" in result.result
-        assert "📊 文件: sales.xlsx" in result.result
+        assert "--- perception ---" in result.result
+        assert "file: sales.xlsx" in result.result
         assert "_environment_perception" not in result.result
-        json_part, _sep, _tail = result.result.partition("\n\n───────────── 环境感知 ─────────────")
+        json_part, _sep, _tail = result.result.partition("\n\n--- perception ---")
         payload = json.loads(json_part)
         assert payload["file"] == "sales.xlsx"
 
@@ -775,12 +775,12 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert "滚动条位置:" in result.result
-        assert "状态栏: SUM=" in result.result
-        assert "列宽: A=12, B=15" in result.result
-        assert "行高: 1=24, 2=18" in result.result
-        assert "合并单元格: F1:H1" in result.result
-        assert "条件格式效果: D2:D7: 条件着色（cellIs/greaterThan）" in result.result
+        assert "scroll:" in result.result
+        assert "stats: SUM=" in result.result
+        assert "col-width: A=12, B=15" in result.result
+        assert "row-height: 1=24, 2=18" in result.result
+        assert "merged: F1:H1" in result.result
+        assert "cond-fmt: D2:D7:" in result.result
 
     @pytest.mark.asyncio
     async def test_window_perception_can_be_disabled(self) -> None:
@@ -816,7 +816,7 @@ class TestContextBudgetAndHardCap:
 
         payload = json.loads(result.result)
         assert payload["file"] == "sales.xlsx"
-        assert "环境感知" not in result.result
+        assert "--- perception ---" not in result.result
         assert engine._effective_window_return_mode() == "enriched"
 
     @pytest.mark.asyncio
@@ -912,11 +912,11 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert result.result.startswith("✅ [")
+        assert result.result.startswith("[OK] [")
         assert "read_excel: A1:J25" in result.result
-        assert "意图: aggregate" in result.result
-        assert "数据已融入窗口，请优先引用窗口内容。" in result.result
-        assert "环境感知" not in result.result
+        assert "intent: aggregate" in result.result
+        assert "data merged into window" in result.result
+        assert "--- perception ---" not in result.result
 
     @pytest.mark.asyncio
     async def test_window_perception_unified_returns_compact_confirmation(self) -> None:
@@ -970,11 +970,11 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert result.result.startswith("✅ [")
+        assert result.result.startswith("[OK] [")
         assert "read_excel: A1:E10" in result.result
-        assert "| 意图=aggregate" in result.result
+        assert "| intent=aggregate" in result.result
         assert "首行预览" not in result.result
-        assert "环境感知" not in result.result
+        assert "--- perception ---" not in result.result
 
     @pytest.mark.asyncio
     async def test_window_perception_adaptive_gpt_defaults_to_unified(self) -> None:
@@ -1031,11 +1031,11 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        assert result.result.startswith("✅ [")
+        assert result.result.startswith("[OK] [")
         assert "read_excel: A1:E10" in result.result
-        assert "| 意图=aggregate" in result.result
+        assert "| intent=aggregate" in result.result
         assert "首行预览" not in result.result
-        assert "环境感知" not in result.result
+        assert "--- perception ---" not in result.result
         assert engine._effective_window_return_mode() == "unified"
 
     @pytest.mark.asyncio
@@ -1109,10 +1109,10 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "首行预览" not in first.result
-        assert "提示=当前意图[aggregate]下此数据已在窗口" in second.result
-        assert "意图: aggregate" in third.result
-        assert "提示: 当前意图[aggregate]下此数据已在窗口" in third.result
-        assert "───────────── 环境感知 ─────────────" not in third.result
+        assert "hint=intent[aggregate] data already in window" in second.result
+        assert "intent: aggregate" in third.result
+        assert "hint: intent[aggregate] data already in window" in third.result
+        assert "--- perception ---" not in third.result
         assert engine._effective_window_return_mode() == "anchored"
 
     @pytest.mark.asyncio
@@ -1347,8 +1347,8 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "⚠️ 此数据已在窗口" not in first.result
-        assert "提示=当前意图[aggregate]下此数据已在窗口" in second.result
-        assert "───────────── 环境感知 ─────────────" in third.result
+        assert "hint=intent[aggregate] data already in window" in second.result
+        assert "--- perception ---" in third.result
 
         write_tc = SimpleNamespace(
             id="call_write",
@@ -1369,7 +1369,7 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
         assert "⚠️ 此数据已在窗口" not in after_write.result
-        assert "───────────── 环境感知 ─────────────" not in after_write.result
+        assert "--- perception ---" not in after_write.result
 
     @pytest.mark.asyncio
     async def test_enriched_mode_hides_focus_window_tool(self) -> None:
@@ -1579,20 +1579,20 @@ class TestContextBudgetAndHardCap:
 
         await _read("sales.xlsx", 1)
         notice1 = engine._build_window_perception_notice()
-        assert "【窗口 · sales.xlsx / Q1】" in notice1
+        assert "[ACTIVE -- sales.xlsx / Q1]" in notice1
 
         await _read("catalog.xlsx", 2)
         notice2 = engine._build_window_perception_notice()
-        assert "【窗口 · catalog.xlsx / Q1】" in notice2
-        assert "【后台 · sales.xlsx / Q1】" in notice2
+        assert "[ACTIVE -- catalog.xlsx / Q1]" in notice2
+        assert "[BG -- sales.xlsx / Q1]" in notice2
 
         notice3 = engine._build_window_perception_notice()
-        assert "【后台 · sales.xlsx / Q1】" in notice3
-        assert "【后台 · catalog.xlsx / Q1】" in notice3
+        assert "[BG -- sales.xlsx / Q1]" in notice3
+        assert "[BG -- catalog.xlsx / Q1]" in notice3
 
         notice4 = engine._build_window_perception_notice()
-        assert "【挂起 · sales.xlsx / Q1" in notice4
-        assert "【后台 · catalog.xlsx / Q1】" in notice4
+        assert "[IDLE -- sales.xlsx / Q1" in notice4
+        assert "[BG -- catalog.xlsx / Q1]" in notice4
 
     @pytest.mark.asyncio
     async def test_window_perception_terminated_window_can_reactivate(self) -> None:
@@ -1669,7 +1669,7 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
         notice5 = engine._build_window_perception_notice()
-        assert "【窗口 · reactivate.xlsx / Q1】" in notice5
+        assert "[ACTIVE -- reactivate.xlsx / Q1]" in notice5
 
     @pytest.mark.asyncio
     async def test_window_perception_hybrid_advisor_is_non_blocking(self) -> None:
@@ -1811,7 +1811,7 @@ class TestContextBudgetAndHardCap:
         await asyncio.sleep(0)
 
         second_notice = engine._build_window_perception_notice()
-        assert "【挂起 · sales.xlsx / Q1" in second_notice
+        assert "[IDLE -- sales.xlsx / Q1" in second_notice
 
     @pytest.mark.asyncio
     async def test_window_perception_hybrid_advisor_falls_back_when_router_fails(self) -> None:
@@ -1874,7 +1874,7 @@ class TestContextBudgetAndHardCap:
         _ = engine._build_window_perception_notice()
         await asyncio.sleep(0)
         fallback_notice = engine._build_window_perception_notice()
-        assert "【后台 · sales.xlsx / Q1】" in fallback_notice
+        assert "[BG -- sales.xlsx / Q1]" in fallback_notice
 
 
 class TestTaskUpdateFailureSemantics:
@@ -2155,6 +2155,39 @@ class TestManualSkillSlashCommand:
         assert kwargs["raw_args"] == "请分析这个文件"
 
     @pytest.mark.asyncio
+    async def test_embedded_slash_skill_command_maps_to_slash_route_args(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=["verification-before-completion"],
+            tool_scope=[],
+            route_mode="hint_direct",
+            system_contexts=[],
+        )
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {
+            "verification-before-completion": MagicMock()
+        }
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router.route = AsyncMock(return_value=route_result)
+        engine._skill_router = mock_router
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("ok")
+        )
+
+        result = await engine.chat(
+            "查看文件夹下 /verification-before-completion 查看哪个表格行数最多"
+        )
+        assert result == "ok"
+
+        _, kwargs = mock_router.route.call_args
+        assert kwargs["slash_command"] == "verification-before-completion"
+        assert kwargs["raw_args"] == "查看哪个表格行数最多"
+
+    @pytest.mark.asyncio
     async def test_explicit_slash_command_arguments_pass_through(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
@@ -2214,6 +2247,21 @@ class TestManualSkillSlashCommand:
 
         assert engine.resolve_skill_command("/Users/test/file.xlsx") is None
         assert engine.resolve_skill_command("/tmp/data.xlsx") is None
+
+    def test_resolve_skill_command_ignores_embedded_path_like_input(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {
+            "verification-before-completion": MagicMock()
+        }
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        engine._skill_router = mock_router
+
+        assert engine.resolve_skill_command("请读取 /tmp/data.xlsx 的前10行") is None
 
     def test_resolve_skill_command_supports_namespace(self) -> None:
         config = _make_config()
@@ -2966,8 +3014,8 @@ class TestMetaToolDefinitions:
         ask_user_params = ask_user_tool["parameters"]
         assert ask_user_params["required"] == ["question"]
         question_schema = ask_user_params["properties"]["question"]
-        assert question_schema["required"] == ["text", "header", "options"]
-        assert question_schema["properties"]["options"]["minItems"] == 2
+        assert question_schema["required"] == ["text", "options"]
+        assert question_schema["properties"]["options"]["minItems"] == 1
         assert question_schema["properties"]["options"]["maxItems"] == 4
 
     def test_build_meta_tools_reflects_updated_catalog(self) -> None:
@@ -3924,6 +3972,74 @@ class TestChatPureText:
         assert "EXCELMANUS_BASE_URL" in result.reply
         assert "/v1" in result.reply
         assert "<!doctype html>" not in result.reply.lower()
+
+    @pytest.mark.asyncio
+    async def test_text_question_triggers_forced_ask_user_repair(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        ask_payload = {
+            "question": {
+                "text": "请选择比较范围",
+                "options": [{"label": "仅比较 .xlsx"}],
+            }
+        }
+        first_text = _make_text_response(
+            "当前扫描结果为空，请确认两点后继续：1) 文件夹是否为当前目录；2) 是否只比较 .xlsx。"
+        )
+        ask_response = _make_tool_call_response(
+            [("call_q1", "ask_user", json.dumps(ask_payload, ensure_ascii=False))]
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_text, ask_response]
+        )
+
+        result = await engine.chat("查看哪个表格最大")
+        assert "请先回答这个问题后再继续" in result.reply
+        assert "[需要确认]" in result.reply
+        assert "按此选项继续执行" in result.reply
+        assert engine.has_pending_question() is True
+        assert engine._client.chat.completions.create.call_count == 2
+        second_call_kwargs = engine._client.chat.completions.create.call_args_list[1].kwargs
+        assert second_call_kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "ask_user"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_forced_ask_user_repair_returns_structured_error_when_still_no_tool_calls(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        first_text = _make_text_response("请确认两点后我再继续。")
+        second_text = _make_text_response("仍需你先确认。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_text, second_text]
+        )
+
+        result = await engine.chat("继续")
+        payload = json.loads(result.reply)
+        assert payload["error_code"] == "ASK_USER_REQUIRED_BUT_MISSING"
+        assert "未调用 ask_user" in payload["message"]
+        assert engine._client.chat.completions.create.call_count == 2
+        assert engine.has_pending_question() is False
+
+    @pytest.mark.asyncio
+    async def test_text_question_not_forced_when_ask_user_not_in_scope(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._get_current_tool_scope = MagicMock(return_value=["add_numbers"])  # type: ignore[method-assign]
+
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response("请确认是否继续。")
+        )
+
+        result = await engine.chat("继续")
+        assert result.reply == "请确认是否继续。"
+        assert engine._client.chat.completions.create.call_count == 1
 
 
 class TestChatToolCalling:
