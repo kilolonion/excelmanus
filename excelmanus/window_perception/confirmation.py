@@ -8,15 +8,15 @@ import re
 from .models import ChangeRecord, IntentTag, WindowState
 
 _UNIFIED_RE = re.compile(
-    r"^✅ \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| "
-    r"(?P<rows>\d+)行×(?P<cols>\d+)列 \| (?P<summary>.+?) \| 意图=(?P<intent>\w+)"
-    r"(?: \| 提示=(?P<hint>.*))?$"
+    r"^\[OK\] \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| "
+    r"(?P<rows>\d+)r x (?P<cols>\d+)c \| (?P<summary>.+?) \| intent=(?P<intent>\w+)"
+    r"(?: \| hint=(?P<hint>.*))?$"
 )
 _ANCHORED_HEAD_RE = re.compile(
-    r"^✅ \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| (?P<rows>\d+)行×(?P<cols>\d+)列 \| (?P<summary>.+)$"
+    r"^\[OK\] \[(?P<window>[^\]]+)\] (?P<op>[^:]+): (?P<range>[^|]+?) \| (?P<rows>\d+)r x (?P<cols>\d+)c \| (?P<summary>.+)$"
 )
-_ANCHORED_INTENT_RE = re.compile(r"^  意图: (?P<intent>\w+)$")
-_ANCHORED_HINT_RE = re.compile(r"^  提示: (?P<hint>.+)$")
+_ANCHORED_INTENT_RE = re.compile(r"^  intent: (?P<intent>\w+)$")
+_ANCHORED_HINT_RE = re.compile(r"^  hint: (?P<hint>.+)$")
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ def build_confirmation_record(
     change_summary = latest_change or "状态同步"
     hint = ""
     if repeat_warning:
-        hint = f"当前意图[{window.intent_tag.value}]下此数据已在窗口 {window.id} 中"
+        hint = f"intent[{window.intent_tag.value}] data already in window {window.id}"
     return ConfirmationRecord(
         window_label=window_label,
         operation=tool_name,
@@ -67,23 +67,23 @@ def serialize_confirmation(record: ConfirmationRecord, *, mode: str) -> str:
     normalized_mode = str(mode or "anchored").strip().lower()
     if normalized_mode == "unified":
         base = (
-            f"✅ [{record.window_label}] {record.operation}: {record.range_ref} | "
-            f"{record.rows}行×{record.cols}列 | {record.change_summary} | 意图={record.intent}"
+            f"[OK] [{record.window_label}] {record.operation}: {record.range_ref} | "
+            f"{record.rows}r x {record.cols}c | {record.change_summary} | intent={record.intent}"
         )
         if record.hint:
-            return f"{base} | 提示={record.hint}"
+            return f"{base} | hint={record.hint}"
         return base
 
     lines = [
         (
-            f"✅ [{record.window_label}] {record.operation}: {record.range_ref} | "
-            f"{record.rows}行×{record.cols}列 | {record.change_summary}"
+            f"[OK] [{record.window_label}] {record.operation}: {record.range_ref} | "
+            f"{record.rows}r x {record.cols}c | {record.change_summary}"
         ),
-        f"  意图: {record.intent}",
-        "  提示: 数据已融入窗口，请优先引用窗口内容。",
+        f"  intent: {record.intent}",
+        "  hint: data merged into window, prefer referencing window content.",
     ]
     if record.hint:
-        lines.append(f"  提示: {record.hint}")
+        lines.append(f"  hint: {record.hint}")
     return "\n".join(lines)
 
 

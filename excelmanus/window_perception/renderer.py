@@ -67,39 +67,39 @@ def render_window_background(
     if window.type == WindowType.EXPLORER:
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
-        return f"【后台 · {title}】{summary}"
+        return f"[BG -- {title}] {summary}"
 
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
-    lines = [f"【后台 · {file_name} / {sheet_name}】"]
+    lines = [f"[BG -- {file_name} / {sheet_name}]"]
 
     viewport = window.viewport
     if viewport is not None:
-        lines.append(f"{viewport.total_rows}行 × {viewport.total_cols}列")
+        lines.append(f"{viewport.total_rows}r x {viewport.total_cols}c")
 
     columns = _extract_columns_from_preview(window.preview_rows)
     if columns:
         lines.append("列: " + ", ".join(columns))
-    lines.append(f"意图: {profile['intent']}（{profile['focus_text']}）")
+    lines.append(f"intent: {profile['intent']}（{profile['focus_text']}）")
 
     if profile.get("show_style"):
         lines.extend(_render_style_summary_lines(window))
     if profile.get("show_quality"):
-        lines.append("质量: " + _build_quality_summary(window.data_buffer))
+        lines.append("quality: " + _build_quality_summary(window.data_buffer))
     if profile.get("show_formula"):
-        lines.append("公式线索: " + _build_formula_summary(window))
+        lines.append("formula: " + _build_formula_summary(window))
     if profile.get("show_change") and window.change_log:
         latest = window.change_log[-1]
-        lines.append(f"最近变更: {latest.tool_summary}")
+        lines.append(f"recent: {latest.tool_summary}")
 
     parts: list[str] = []
     if viewport is not None:
-        parts.append(f"视口: {viewport.range_ref}")
+        parts.append(f"viewport: {viewport.range_ref}")
     if window.sheet_tabs:
         tabs = [f"[{name}]" for name in window.sheet_tabs[:8]]
         if len(window.sheet_tabs) > 8:
             tabs.append("...")
-        parts.append("Tabs: " + " ".join(tabs))
+        parts.append("tabs: " + " ".join(tabs))
     if parts:
         lines.append(" | ".join(parts))
 
@@ -116,19 +116,19 @@ def render_window_minimized(
     if window.type == WindowType.EXPLORER:
         title = window.title or "资源管理器"
         summary = window.summary or "目录视图"
-        return f"【挂起 · {title}】{summary}"
+        return f"[IDLE -- {title}] {summary}"
 
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
     viewport = window.viewport
     if viewport is not None and viewport.total_rows > 0 and viewport.total_cols > 0:
         return (
-            f"【挂起 · {file_name} / {sheet_name} | {viewport.total_rows}×{viewport.total_cols}】"
-            f" 意图={profile['intent']}"
+            f"[IDLE -- {file_name} / {sheet_name} | {viewport.total_rows}x{viewport.total_cols}]"
+            f" intent={profile['intent']}"
         )
 
     summary = window.summary or "上次视图已压缩"
-    return f"【挂起 · {file_name} / {sheet_name}】{summary} | 意图={profile['intent']}"
+    return f"[IDLE -- {file_name} / {sheet_name}] {summary} | intent={profile['intent']}"
 
 
 def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] | None:
@@ -182,14 +182,14 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
 
     if payload.get("window_type") == "explorer":
         lines = [
-            "───────────── 环境感知 ─────────────",
-            f"📁 目录: {payload.get('directory') or '.'}",
+            "--- perception ---",
+            f"path: {payload.get('directory') or '.'}",
         ]
         entries = payload.get("entries")
         if isinstance(entries, list) and entries:
             for entry in entries[:8]:
-                lines.append(f"  · {entry}")
-        lines.append("────────────────────────────────────")
+                lines.append(f"  {entry}")
+        lines.append("--- end ---")
         return "\n".join(lines)
 
     viewport = payload.get("viewport") if isinstance(payload.get("viewport"), dict) else {}
@@ -206,23 +206,23 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
     other_tabs = [f"[{name}]" for name in tab_names if name != current_sheet]
 
     lines = [
-        "───────────── 环境感知 ─────────────",
-        f"📊 文件: {payload.get('file') or '未知'}",
-        f"🧠 意图: {payload.get('intent') or 'general'}",
+        "--- perception ---",
+        f"file: {payload.get('file') or '未知'}",
+        f"intent: {payload.get('intent') or 'general'}",
         (
-            f"📑 当前Sheet: {current_sheet} | 其他: {' '.join(other_tabs)}"
+            f"sheet: {current_sheet} | others: {' '.join(other_tabs)}"
             if other_tabs
-            else f"📑 当前Sheet: {current_sheet}"
+            else f"sheet: {current_sheet}"
         ),
         (
-            "📐 数据范围: "
-            f"{viewport.get('total_rows', 0)}行 × {viewport.get('total_cols', 0)}列"
+            "range: "
+            f"{viewport.get('total_rows', 0)}r x {viewport.get('total_cols', 0)}c"
         ),
-        f"📍 当前视口: {viewport.get('range') or '未知'}",
+        f"viewport: {viewport.get('range') or '未知'}",
     ]
     freeze = payload.get("freeze_panes")
     if freeze:
-        lines.append(f"🧊 冻结: {freeze}")
+        lines.append(f"freeze: {freeze}")
 
     scroll = payload.get("scroll_position")
     if isinstance(scroll, dict) and scroll:
@@ -230,54 +230,56 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
         horizontal = _format_percent(scroll.get("horizontal_pct"))
         remain_rows = _format_percent(scroll.get("remaining_rows_pct"))
         remain_cols = _format_percent(scroll.get("remaining_cols_pct"))
-        lines.append(f"🧭 滚动条位置: 纵向 {vertical} | 横向 {horizontal}")
-        lines.append(f"↘️  剩余数据: 下方 {remain_rows} | 右侧 {remain_cols}")
+        lines.append(f"scroll: v={vertical} | h={horizontal}")
+        lines.append(f"remain: below={remain_rows} | right={remain_cols}")
 
     status_bar = payload.get("status_bar")
     if isinstance(status_bar, dict) and status_bar:
         lines.append(
-            "📊 状态栏: "
+            "stats: "
             f"SUM={_format_number(status_bar.get('sum'))} | "
             f"COUNT={_format_int(status_bar.get('count'))} | "
-            f"AVERAGE={_format_number(status_bar.get('average'))}"
+            f"AVG={_format_number(status_bar.get('average'))}"
         )
 
     column_widths = payload.get("column_widths")
     if isinstance(column_widths, dict) and column_widths:
-        lines.append(f"📏 列宽: {_format_map_preview(column_widths, max_items=8)}")
+        lines.append(f"col-width: {_format_map_preview(column_widths, max_items=8)}")
 
     row_heights = payload.get("row_heights")
     if isinstance(row_heights, dict) and row_heights:
-        lines.append(f"📐 行高: {_format_map_preview(row_heights, max_items=8)}")
+        lines.append(f"row-height: {_format_map_preview(row_heights, max_items=8)}")
 
     merged_ranges = payload.get("merged_ranges")
     if isinstance(merged_ranges, list) and merged_ranges:
         merged_preview = ", ".join(str(item) for item in merged_ranges[:6])
         extra = f" ...(+{len(merged_ranges) - 6})" if len(merged_ranges) > 6 else ""
-        lines.append(f"🔗 合并单元格: {merged_preview}{extra}")
+        lines.append(f"merged: {merged_preview}{extra}")
 
     conditional_effects = payload.get("conditional_effects")
     if isinstance(conditional_effects, list) and conditional_effects:
         effect_preview = " | ".join(str(item) for item in conditional_effects[:4])
         extra = f" ...(+{len(conditional_effects) - 4})" if len(conditional_effects) > 4 else ""
-        lines.append(f"🎯 条件格式效果: {effect_preview}{extra}")
+        lines.append(f"cond-fmt: {effect_preview}{extra}")
 
     style_summary = payload.get("style_summary")
     if style_summary:
-        lines.append(f"🎨 样式概要: {style_summary}")
-    lines.append("────────────────────────────────────")
+        lines.append(f"style: {style_summary}")
+    lines.append("--- end ---")
     return "\n".join(lines)
 
 
 def _render_explorer(window: WindowState) -> str:
     lines = [
-        "【当前环境 · 资源管理器】",
-        f"📁 {window.directory or '.'}",
+        "[ACTIVE -- 资源管理器]",
+        f"path: {window.directory or '.'}",
     ]
     entries = window.metadata.get("entries")
     if isinstance(entries, list) and entries:
         for entry in entries[:15]:
-            lines.append(f"{entry}")
+            lines.append(str(entry))
+        if len(entries) > 15:
+            lines.append(f"  ... (+{len(entries) - 15} more)")
     elif window.summary:
         lines.append(window.summary)
     return "\n".join(lines)
@@ -286,74 +288,74 @@ def _render_explorer(window: WindowState) -> str:
 def _render_sheet(window: WindowState) -> str:
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
-    lines = [f"【窗口 · {file_name} / {sheet_name}】"]
+    lines = [f"[ACTIVE -- {file_name} / {sheet_name}]"]
 
     if window.sheet_tabs:
         tabs = []
         current = sheet_name
         for item in window.sheet_tabs:
-            token = f"▶{item}" if item == current else item
+            token = f">{item}" if item == current else item
             tabs.append(f"[{token}]")
-        lines.append("工作表: " + " ".join(tabs))
+        lines.append("tabs: " + " ".join(tabs))
 
     viewport = window.viewport
     if viewport is not None:
         lines.append(
-            "可见区域: "
-            f"{viewport.range_ref}（共 {viewport.total_rows}行 × {viewport.total_cols}列）"
+            "range: "
+            f"{viewport.range_ref} ({viewport.total_rows}r x {viewport.total_cols}c)"
         )
 
     if window.freeze_panes:
-        lines.append(f"冻结窗格: {window.freeze_panes}")
+        lines.append(f"freeze: {window.freeze_panes}")
 
     preview = window.preview_rows
     if isinstance(preview, list) and preview:
-        lines.append("预览数据:")
+        lines.append("preview:")
         lines.extend(_render_preview(preview, max_rows=8))
 
     if window.style_summary:
-        lines.append("样式信息:")
-        lines.append(f"  · {window.style_summary}")
+        lines.append("style:")
+        lines.append(f"  {window.style_summary}")
 
     scroll = window.metadata.get("scroll_position")
     if isinstance(scroll, dict) and scroll:
         lines.append(
-            "滚动条位置: "
-            f"纵向 {_format_percent(scroll.get('vertical_pct'))} | "
-            f"横向 {_format_percent(scroll.get('horizontal_pct'))}"
+            "scroll: "
+            f"v={_format_percent(scroll.get('vertical_pct'))} | "
+            f"h={_format_percent(scroll.get('horizontal_pct'))}"
         )
 
     status_bar = window.metadata.get("status_bar")
     if isinstance(status_bar, dict) and status_bar:
         lines.append(
-            "状态栏: "
+            "stats: "
             f"SUM={_format_number(status_bar.get('sum'))} | "
             f"COUNT={_format_int(status_bar.get('count'))} | "
-            f"AVERAGE={_format_number(status_bar.get('average'))}"
+            f"AVG={_format_number(status_bar.get('average'))}"
         )
 
     column_widths = window.metadata.get("column_widths")
     if isinstance(column_widths, dict) and column_widths:
-        lines.append(f"列宽: {_format_map_preview(column_widths, max_items=8)}")
+        lines.append(f"col-width: {_format_map_preview(column_widths, max_items=8)}")
 
     row_heights = window.metadata.get("row_heights")
     if isinstance(row_heights, dict) and row_heights:
-        lines.append(f"行高: {_format_map_preview(row_heights, max_items=8)}")
+        lines.append(f"row-height: {_format_map_preview(row_heights, max_items=8)}")
 
     merged_ranges = window.metadata.get("merged_ranges")
     if isinstance(merged_ranges, list) and merged_ranges:
         merged_preview = ", ".join(str(item) for item in merged_ranges[:6])
         extra = f" ...(+{len(merged_ranges) - 6})" if len(merged_ranges) > 6 else ""
-        lines.append(f"合并单元格: {merged_preview}{extra}")
+        lines.append(f"merged: {merged_preview}{extra}")
 
     conditional_effects = window.metadata.get("conditional_effects")
     if isinstance(conditional_effects, list) and conditional_effects:
         effect_preview = " | ".join(str(item) for item in conditional_effects[:4])
         extra = f" ...(+{len(conditional_effects) - 4})" if len(conditional_effects) > 4 else ""
-        lines.append(f"条件格式效果: {effect_preview}{extra}")
+        lines.append(f"cond-fmt: {effect_preview}{extra}")
 
     if window.summary:
-        lines.append(f"摘要: {window.summary}")
+        lines.append(f"summary: {window.summary}")
 
     return "\n".join(lines)
 
@@ -370,42 +372,42 @@ def render_window_wurm_full(
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
     lines = [f"[{window.id} · {file_name} / {sheet_name}]"]
-    lines.append(f"🎯 意图: {profile['intent']}（{profile['focus_text']}）")
+    lines.append(f"intent: {profile['intent']}（{profile['focus_text']}）")
 
     if window.stale_hint:
-        lines.append(f"⚠ stale: {window.stale_hint}")
+        lines.append(f"[STALE] {window.stale_hint}")
 
     if window.change_log:
         latest = window.change_log[-1]
-        lines.append(f"📝 最近: {latest.tool_summary}")
+        lines.append(f"recent: {latest.tool_summary}")
 
     if window.sheet_tabs:
         tabs = []
         for item in window.sheet_tabs:
             token = f"▶{item}" if item == sheet_name else item
             tabs.append(f"[{token}]")
-        lines.append("Tabs: " + " ".join(tabs))
+        lines.append("tabs: " + " ".join(tabs))
 
     total_rows = window.total_rows or len(window.data_buffer)
     columns = window.columns or window.schema
     total_cols = window.total_cols or len(columns)
-    lines.append(f"范围: {total_rows}行×{total_cols}列 | 视口: {window.viewport_range or '-'}")
+    lines.append(f"range: {total_rows}r x {total_cols}c | viewport: {window.viewport_range or '-'}")
 
     column_names = [col.name for col in columns]
     if not column_names and window.data_buffer:
         column_names = [str(key) for key in window.data_buffer[0].keys()]
     if column_names:
-        lines.append("列: [" + ", ".join(column_names) + "]")
+        lines.append("cols: [" + ", ".join(column_names) + "]")
 
     if profile.get("show_style"):
         lines.extend(_render_style_summary_lines(window))
     if profile.get("show_quality"):
-        lines.append("质量: " + _build_quality_summary(window.data_buffer))
+        lines.append("quality: " + _build_quality_summary(window.data_buffer))
     if profile.get("show_formula"):
-        lines.append("公式线索: " + _build_formula_summary(window))
+        lines.append("formula: " + _build_formula_summary(window))
     if profile.get("show_change") and window.change_log:
         latest = window.change_log[-1]
-        lines.append(f"变更聚焦: {latest.tool_summary} @ {latest.affected_range}")
+        lines.append(f"change-focus: {latest.tool_summary} @ {latest.affected_range}")
 
     # 多范围优先，按当前视口块置后展示以提升注意力。
     render_max_rows = max(1, min(max_rows, int(profile.get("max_rows", max_rows))))
@@ -413,11 +415,11 @@ def render_window_wurm_full(
     if ranges:
         ranges.sort(key=lambda item: (0 if not item.is_current_viewport else 1, item.added_at_iteration))
         for cached in ranges:
-            marker = " [当前视口]" if cached.is_current_viewport else ""
+            marker = " [current-viewport]" if cached.is_current_viewport else ""
             rows_to_render = cached.rows
             if profile.get("show_quality"):
                 rows_to_render = _pick_anomaly_rows(cached.rows, limit=render_max_rows) or cached.rows
-            lines.append(f"── 缓存范围 {cached.range_ref} ({len(cached.rows)}行){marker} ──")
+            lines.append(f"-- cached {cached.range_ref} ({len(cached.rows)}r){marker} --")
             lines.extend(_render_pipe_rows(
                 rows=rows_to_render,
                 columns=column_names,
@@ -429,7 +431,7 @@ def render_window_wurm_full(
         rows_to_render = window.data_buffer
         if profile.get("show_quality"):
             rows_to_render = _pick_anomaly_rows(window.data_buffer, limit=render_max_rows) or window.data_buffer
-        lines.append("数据:")
+        lines.append("data:")
         lines.extend(_render_pipe_rows(
             rows=rows_to_render,
             columns=column_names,
@@ -485,20 +487,20 @@ def _normalize_intent_profile(
 def _render_style_summary_lines(window: WindowState) -> list[str]:
     lines: list[str] = []
     if window.style_summary:
-        lines.append(f"样式摘要: {window.style_summary}")
+        lines.append(f"style: {window.style_summary}")
     column_widths = window.metadata.get("column_widths")
     if isinstance(column_widths, dict) and column_widths:
-        lines.append(f"列宽: {_format_map_preview(column_widths, max_items=6)}")
+        lines.append(f"col-width: {_format_map_preview(column_widths, max_items=6)}")
     row_heights = window.metadata.get("row_heights")
     if isinstance(row_heights, dict) and row_heights:
-        lines.append(f"行高: {_format_map_preview(row_heights, max_items=6)}")
+        lines.append(f"row-height: {_format_map_preview(row_heights, max_items=6)}")
     merged_ranges = window.metadata.get("merged_ranges")
     if isinstance(merged_ranges, list) and merged_ranges:
         merged_preview = ", ".join(str(item) for item in merged_ranges[:4])
-        lines.append(f"合并: {merged_preview}")
+        lines.append(f"merged: {merged_preview}")
     conditional_effects = window.metadata.get("conditional_effects")
     if isinstance(conditional_effects, list) and conditional_effects:
-        lines.append(f"条件格式: {len(conditional_effects)}条")
+        lines.append(f"cond-fmt: {len(conditional_effects)} rules")
     return lines
 
 
@@ -514,7 +516,7 @@ def _build_quality_summary(rows: list[dict[str, Any]]) -> str:
         signature_counter[signature] = signature_counter.get(signature, 0) + 1
         if signature_counter[signature] == 2:
             duplicate_rows += 1
-    return f"空值单元格={empty_cells}，疑似重复行={duplicate_rows}"
+    return f"empty_cells={empty_cells}, dup_rows={duplicate_rows}"
 
 
 def _build_formula_summary(window: WindowState) -> str:
@@ -532,8 +534,8 @@ def _build_formula_summary(window: WindowState) -> str:
         return " | ".join(hints)
     if window.change_log:
         latest = window.change_log[-1]
-        return f"最近公式相关变更区域: {latest.affected_range}"
-    return "未检测到明显公式线索"
+        return f"recent formula area: {latest.affected_range}"
+    return "no formula hints detected"
 
 
 def _looks_like_formula_call(text: str) -> bool:
@@ -642,7 +644,7 @@ def _render_pipe_rows(
 ) -> list[str]:
     _ = current_iteration
     if not rows:
-        return ["  (无数据)"]
+        return ["  (no data)"]
     if max_rows <= 0:
         max_rows = 1
 
@@ -655,5 +657,5 @@ def _render_pipe_rows(
 
     omitted = len(rows) - len(effective_rows)
     if omitted > 0:
-        output.append(f"  ... (共{len(rows)}行，省略{omitted}行)")
+        output.append(f"  ... ({len(rows)} total, {omitted} omitted)")
     return output
