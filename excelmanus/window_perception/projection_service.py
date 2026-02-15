@@ -43,6 +43,7 @@ def project_tool_payload(window: WindowState | None) -> ToolPayloadProjection | 
         return ToolPayloadProjection(
             window_type="explorer",
             title=window.title,
+            identity=_infer_identity(window),
             directory=window.directory or ".",
             entries=safe_entries,
         )
@@ -57,6 +58,7 @@ def project_tool_payload(window: WindowState | None) -> ToolPayloadProjection | 
     return ToolPayloadProjection(
         window_type="sheet",
         title=window.title,
+        identity=_infer_identity(window),
         file=window.file_path or "",
         sheet=window.sheet_name or "",
         intent=window.intent_tag.value,
