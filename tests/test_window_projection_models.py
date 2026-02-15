@@ -2,12 +2,13 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from excelmanus.window_perception.models import IntentTag, WindowState, WindowType
+from excelmanus.window_perception.models import IntentTag, WindowType
 from excelmanus.window_perception.projection_service import project_confirmation, project_notice, project_tool_payload
+from tests.window_factories import make_window
 
 
 def test_notice_projection_is_read_only_and_contains_identity() -> None:
-    window = WindowState(
+    window = make_window(
         id="sheet_1",
         type=WindowType.SHEET,
         title="sales.xlsx/Q1",
@@ -30,7 +31,7 @@ def test_notice_projection_is_read_only_and_contains_identity() -> None:
 
 
 def test_projection_identity_intent_consistency_across_outputs() -> None:
-    window = WindowState(
+    window = make_window(
         id="sheet_1",
         type=WindowType.SHEET,
         title="sales.xlsx/Q1",

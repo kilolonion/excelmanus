@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import ChangeRecord, WindowState, WindowType
+from .domain import ExplorerWindow, SheetWindow, Window
+from .models import ChangeRecord, WindowType
 from .projection_models import ConfirmationProjection, NoticeProjection, ToolPayloadProjection
 
 
-def project_notice(window: WindowState, ctx: dict[str, Any] | None = None) -> NoticeProjection:
+def project_notice(window: Window, ctx: dict[str, Any] | None = None) -> NoticeProjection:
     """Build read-only notice projection from mutable window state."""
 
     context = ctx if isinstance(ctx, dict) else {}
@@ -31,15 +32,14 @@ def project_notice(window: WindowState, ctx: dict[str, Any] | None = None) -> No
     )
 
 
-def project_tool_payload(window: WindowState | None) -> ToolPayloadProjection | None:
+def project_tool_payload(window: Window | None) -> ToolPayloadProjection | None:
     """Build read-only tool payload projection from window state."""
 
     if window is None:
         return None
 
-    if window.type == WindowType.EXPLORER:
-        entries = window.metadata.get("entries")
-        safe_entries = tuple(str(item) for item in entries[:12]) if isinstance(entries, list) else ()
+    if isinstance(window, ExplorerWindow):
+        safe_entries = tuple(str(item) for item in window.entries[:12])
         return ToolPayloadProjection(
             window_type="explorer",
             title=window.title,
@@ -49,12 +49,12 @@ def project_tool_payload(window: WindowState | None) -> ToolPayloadProjection | 
         )
 
     viewport = window.viewport
-    scroll = window.metadata.get("scroll_position")
-    status_bar = window.metadata.get("status_bar")
-    column_widths = window.metadata.get("column_widths")
-    row_heights = window.metadata.get("row_heights")
-    merged_ranges = window.metadata.get("merged_ranges")
-    conditional_effects = window.metadata.get("conditional_effects")
+    scroll = window.scroll_position
+    status_bar = window.status_bar
+    column_widths = window.column_widths
+    row_heights = window.row_heights
+    merged_ranges = window.merged_ranges
+    conditional_effects = window.conditional_effects
     return ToolPayloadProjection(
         window_type="sheet",
         title=window.title,
@@ -84,7 +84,7 @@ def project_tool_payload(window: WindowState | None) -> ToolPayloadProjection | 
 
 
 def project_confirmation(
-    window: WindowState,
+    window: Window,
     *,
     tool_name: str,
     repeat_warning: bool = False,
@@ -117,8 +117,8 @@ def project_confirmation(
     )
 
 
-def _infer_identity(window: WindowState) -> str:
-    if window.type == WindowType.EXPLORER:
+def _infer_identity(window: Window) -> str:
+    if isinstance(window, ExplorerWindow):
         return window.directory or "."
     file_path = window.file_path or "unknown-file"
     sheet_name = window.sheet_name or "unknown-sheet"

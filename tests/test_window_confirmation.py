@@ -7,12 +7,14 @@ from excelmanus.window_perception.confirmation import (
     parse_confirmation,
     serialize_confirmation,
 )
-from excelmanus.window_perception.models import ChangeRecord, IntentTag, WindowState, WindowType
+from excelmanus.window_perception.domain import Window
+from excelmanus.window_perception.models import ChangeRecord, IntentTag, WindowType
 from excelmanus.window_perception.projection_models import ConfirmationProjection
+from tests.window_factories import make_window
 
 
-def _build_window() -> WindowState:
-    window = WindowState(
+def _build_window() -> Window:
+    window = make_window(
         id="sheet_1",
         type=WindowType.SHEET,
         title="sales.xlsx/Q1",

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from .models import ChangeRecord, IntentTag, WindowState
+from .domain import Window
+from .models import ChangeRecord, IntentTag
 from .projection_models import ConfirmationProjection
 from .projection_service import project_confirmation
 
@@ -40,7 +41,7 @@ class ConfirmationRecord:
 
 def build_confirmation_record(
     *,
-    window: WindowState | None = None,
+    window: Window | None = None,
     tool_name: str | None = None,
     repeat_warning: bool = False,
     projection: ConfirmationProjection | None = None,
@@ -158,7 +159,7 @@ def parse_confirmation(text: str) -> ConfirmationRecord | None:
         cols=int(head_match.group("cols")),
         change_summary=head_match.group("summary").strip(),
         intent=intent,
-        hint=hint_cn or hint,
+        hint=hint or hint_cn,
         localized_hint=hint_cn,
     )
 
