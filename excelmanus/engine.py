@@ -46,7 +46,7 @@ from excelmanus.skillpacks import (
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStore
-from excelmanus.tools import task_tools
+from excelmanus.tools import focus_tools, task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
@@ -72,6 +72,9 @@ _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
+_SYSTEM_Q_PLAN_APPROVAL = "plan_approval"
+_PLAN_APPROVAL_OPTION_APPROVE = "批准执行"
+_PLAN_APPROVAL_OPTION_REJECT = "拒绝计划"
 _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
@@ -413,6 +416,7 @@ class AgentEngine:
         self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
         self._plan_mode_enabled: bool = False
+        self._plan_intercept_task_create: bool = True
         self._pending_plan: PendingPlanState | None = None
         self._approved_plan_context: str | None = None
         self._suspend_task_create_plan_once: bool = False
@@ -443,6 +447,10 @@ class AgentEngine:
         )
         self._window_perception.bind_async_advisor_runner(
             self._run_window_perception_advisor_async
+        )
+        focus_tools.init_focus_manager(
+            manager=self._window_perception,
+            refill_reader=self._focus_window_refill_reader,
         )
 
         # ── 持久记忆集成 ──────────────────────────────────
@@ -566,6 +574,19 @@ class AgentEngine:
     def plan_mode_enabled(self) -> bool:
         """当前会话是否启用 plan mode。"""
         return self._plan_mode_enabled
+
+    def enable_bench_sandbox(self) -> None:
+        """启用 benchmark 沙盒模式：解除所有交互式阻塞。
+
+        - fullAccess = True：高风险工具直接执行，不弹确认
+        - plan 拦截关闭：task_create 直接执行，不生成待审批计划
+        - plan mode 关闭：普通对话不进入仅规划路径
+        - subagent 启用：允许委派子代理
+        """
+        self._full_access_enabled = True
+        self._plan_intercept_task_create = False
+        self._plan_mode_enabled = False
+
 
     def has_pending_question(self) -> bool:
         """当前会话是否存在待回答问题。"""
@@ -1627,7 +1648,8 @@ class AgentEngine:
             scope = self._expand_tool_scope_patterns(self._active_skill.allowed_tools)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return self._append_global_mcp_tools(self._ensure_always_available(scope))
+            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            return self._apply_window_mode_tool_filter(merged_scope)
 
         # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
         if (
@@ -1638,7 +1660,8 @@ class AgentEngine:
             scope = self._expand_tool_scope_patterns(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            return self._append_global_mcp_tools(self._ensure_always_available(scope))
+            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            return self._apply_window_mode_tool_filter(merged_scope)
 
         # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
         # 仅使用路由授权工具，并追加必要元工具。
@@ -1647,13 +1670,21 @@ class AgentEngine:
             for tool_name in _META_TOOL_NAMES:
                 if tool_name not in scope:
                     scope.append(tool_name)
-            return self._append_global_mcp_tools(self._ensure_always_available(scope))
+            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            return self._apply_window_mode_tool_filter(merged_scope)
 
         scope = self._all_tool_names()
         for tool_name in _META_TOOL_NAMES:
             if tool_name not in scope:
                 scope.append(tool_name)
-        return self._append_global_mcp_tools(self._ensure_always_available(scope))
+        merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+        return self._apply_window_mode_tool_filter(merged_scope)
+
+    def _apply_window_mode_tool_filter(self, scope: list[str]) -> list[str]:
+        """按 window_return_mode 过滤工具可见性。"""
+        if self._effective_window_return_mode() != "enriched":
+            return scope
+        return [tool for tool in scope if tool != "focus_window"]
 
     @staticmethod
     def _ensure_always_available(scope: list[str]) -> list[str]:
@@ -2090,10 +2121,52 @@ class AgentEngine:
             f"- 文件: `{draft.file_path}`\n"
             f"- 标题: {draft.title}\n"
             f"- 子任务数: {len(draft.subtasks)}\n"
-            "请执行以下命令之一：\n"
-            f"- `/plan approve {draft.plan_id}` 批准并继续执行\n"
-            f"- `/plan reject {draft.plan_id}` 拒绝该计划"
+            "请选择"批准执行"或"拒绝计划"。"
         )
+
+    def _enqueue_plan_approval_question(
+        self,
+        *,
+        draft: PlanDraft,
+        on_event: EventCallback | None,
+        iteration: int = 0,
+    ) -> PendingQuestion:
+        """创建 plan 审批系统问题并入队。"""
+        # 使用虚拟 tool_call_id（plan mode 无真实工具调用）
+        virtual_tool_call_id = f"plan_approval_{draft.plan_id}"
+        question_payload = {
+            "header": "计划审批",
+            "text": (
+                f"已生成计划草案「{draft.title}」"
+                f"（ID: {draft.plan_id}，子任务: {len(draft.subtasks)}）。"
+                "请选择是否批准执行。"
+            ),
+            "options": [
+                {
+                    "label": _PLAN_APPROVAL_OPTION_APPROVE,
+                    "description": "批准计划并开始执行任务。",
+                },
+                {
+                    "label": _PLAN_APPROVAL_OPTION_REJECT,
+                    "description": "拒绝该计划，不执行。",
+                },
+            ],
+            "multiSelect": False,
+        }
+        pending = self._question_flow.enqueue(
+            question_payload=question_payload,
+            tool_call_id=virtual_tool_call_id,
+        )
+        self._system_question_actions[pending.question_id] = {
+            "type": _SYSTEM_Q_PLAN_APPROVAL,
+            "plan_id": draft.plan_id,
+        }
+        self._emit_user_question_event(
+            question=pending,
+            on_event=on_event,
+            iteration=iteration,
+        )
+        return pending
 
     async def _intercept_task_create_with_plan(
         self,
@@ -2115,6 +2188,10 @@ class AgentEngine:
         if error is not None:
             return f"计划生成失败：{error}", None, f"计划生成失败：{error}"
         assert draft is not None
+        self._enqueue_plan_approval_question(
+            draft=draft,
+            on_event=on_event,
+        )
         return self._format_pending_plan_prompt(), draft.plan_id, None
 
     async def _run_plan_mode_only(
@@ -2138,6 +2215,10 @@ class AgentEngine:
         if error is not None:
             return ChatResult(reply=f"计划生成失败：{error}")
         assert draft is not None
+        self._enqueue_plan_approval_question(
+            draft=draft,
+            on_event=on_event,
+        )
         return ChatResult(reply=self._format_pending_plan_prompt())
 
     @staticmethod
@@ -2336,6 +2417,53 @@ class AgentEngine:
         )
         return ChatResult(reply=manual)
 
+    async def _handle_plan_approval_answer(
+        self,
+        *,
+        action: dict[str, Any],
+        parsed: Any,
+        on_event: EventCallback | None,
+    ) -> ChatResult:
+        """处理 plan 审批系统问题的回答。"""
+        selected_options = (
+            parsed.selected_options if hasattr(parsed, "selected_options") else []
+        )
+        selected_label = (
+            str(selected_options[0].get("label", "")).strip()
+            if selected_options
+            else ""
+        )
+        plan_id = str(action.get("plan_id", "")).strip()
+
+        pending = self._pending_plan
+        if pending is None:
+            return ChatResult(reply="当前没有待审批计划。")
+
+        expected_id = pending.draft.plan_id
+        if plan_id and plan_id != expected_id:
+            return ChatResult(
+                reply=f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
+            )
+
+        if selected_label == _PLAN_APPROVAL_OPTION_APPROVE:
+            return await self._handle_plan_approve(
+                parts=["/plan", "approve"],
+                on_event=on_event,
+            )
+
+        if selected_label == _PLAN_APPROVAL_OPTION_REJECT:
+            reply = self._handle_plan_reject(parts=["/plan", "reject"])
+            return ChatResult(reply=reply)
+
+        # 用户选了"其他"或无法识别的选项
+        return ChatResult(
+            reply=(
+                "已记录你的回答。你可以手动执行以下命令：\n"
+                f"- `/plan approve {expected_id}` 批准并继续执行\n"
+                f"- `/plan reject {expected_id}` 拒绝该计划"
+            )
+        )
+
     async def _handle_pending_question_answer(
         self,
         *,
@@ -2378,6 +2506,12 @@ class AgentEngine:
             action_type = str(system_action.get("type", "")).strip()
             if action_type == _SYSTEM_Q_SUBAGENT_APPROVAL:
                 action_result = await self._handle_subagent_approval_answer(
+                    action=system_action,
+                    parsed=parsed,
+                    on_event=on_event,
+                )
+            elif action_type == _SYSTEM_Q_PLAN_APPROVAL:
+                action_result = await self._handle_plan_approval_answer(
                     action=system_action,
                     parsed=parsed,
                     on_event=on_event,
@@ -2967,7 +3101,11 @@ class AgentEngine:
                             arguments,
                             result=result_str,
                         )
-                    elif tool_name == "task_create" and not skip_plan_once_for_task_create:
+                    elif (
+                        tool_name == "task_create"
+                        and self._plan_intercept_task_create
+                        and not skip_plan_once_for_task_create
+                    ):
                         result_str, plan_id, plan_error = await self._intercept_task_create_with_plan(
                             arguments=arguments,
                             route_result=route_result,
@@ -3197,11 +3335,20 @@ class AgentEngine:
             )
         except Exception:
             logger.warning(
-                "窗口感知增强失败，已回退原始工具结果: tool=%s",
+                "窗口感知增强失败，已回退 enriched 模式: tool=%s",
                 tool_name,
                 exc_info=True,
             )
-            return result_text
+            try:
+                return self._window_perception.enrich_tool_result(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    result_text=result_text,
+                    success=success,
+                    mode="enriched",
+                )
+            except Exception:
+                return result_text
 
     def _enrich_subagent_tool_result_with_window_perception(
         self,
@@ -3219,8 +3366,10 @@ class AgentEngine:
         )
 
     def _effective_window_return_mode(self) -> str:
-        """Phase1 支持模式：enriched / anchored。"""
+        """Phase2 支持模式：unified / anchored / enriched。"""
         raw_mode = str(getattr(self._config, "window_return_mode", "enriched") or "enriched").strip().lower()
+        if raw_mode == "unified":
+            return "unified"
         if raw_mode == "anchored":
             return "anchored"
         return "enriched"
@@ -4040,6 +4189,81 @@ class AgentEngine:
             return [tool.name for tool in get_all_tools()]
 
         return []
+
+    def _focus_window_refill_reader(
+        self,
+        *,
+        file_path: str,
+        sheet_name: str,
+        range_ref: str,
+    ) -> dict[str, Any]:
+        """focus_window 自动补读回调。"""
+        if not file_path or not sheet_name or not range_ref:
+            return {"success": False, "error": "缺少 file_path/sheet_name/range 参数"}
+
+        all_tools = self._all_tool_names()
+        full_scope = list(all_tools)
+        read_sheet_tools: list[str] = []
+        for tool_name in all_tools:
+            if not tool_name.startswith("mcp_"):
+                continue
+            try:
+                _, origin_name = parse_tool_prefix(tool_name)
+            except ValueError:
+                continue
+            if origin_name == "read_sheet":
+                read_sheet_tools.append(tool_name)
+
+        for tool_name in read_sheet_tools:
+            try:
+                arguments = {
+                    "file_path": file_path,
+                    "sheet_name": sheet_name,
+                    "range": range_ref,
+                }
+                result_text = str(
+                    self._registry.call_tool(
+                        tool_name,
+                        arguments,
+                        tool_scope=full_scope,
+                    )
+                )
+                return {
+                    "success": True,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "result_text": result_text,
+                }
+            except Exception:
+                continue
+
+        if "read_excel" in all_tools:
+            arguments: dict[str, Any] = {"file_path": file_path, "sheet_name": sheet_name}
+            try:
+                from openpyxl.utils.cell import range_boundaries
+
+                _, min_row, _, max_row = range_boundaries(range_ref)
+                arguments["max_rows"] = max(1, int(max_row) - int(min_row) + 1)
+            except Exception:
+                pass
+            try:
+                result_text = str(
+                    self._registry.call_tool(
+                        "read_excel",
+                        arguments,
+                        tool_scope=full_scope,
+                    )
+                )
+                return {
+                    "success": True,
+                    "tool_name": "read_excel",
+                    "arguments": arguments,
+                    "result_text": result_text,
+                }
+            except Exception as exc:
+                return {"success": False, "error": f"补读失败: {exc}"}
+
+        return {"success": False, "error": "未找到可用读取工具（read_sheet/read_excel）"}
 
     def _get_openai_tools(self, tool_scope: Sequence[str] | None) -> list[dict[str, Any]]:
         get_openai_schemas = getattr(self._registry, "get_openai_schemas", None)
