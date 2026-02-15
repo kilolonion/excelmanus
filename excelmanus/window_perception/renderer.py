@@ -146,12 +146,14 @@ def build_tool_perception_payload(window: WindowState | None) -> dict[str, Any] 
         return {
             "window_type": "explorer",
             "title": projection.title,
+            "identity": projection.identity,
             "directory": projection.directory,
             "entries": list(projection.entries)[:12],
         }
 
     return {
         "window_type": "sheet",
+        "identity": projection.identity,
         "file": projection.file,
         "sheet": projection.sheet,
         "intent": projection.intent,
@@ -182,6 +184,7 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
     if payload.get("window_type") == "explorer":
         lines = [
             "--- perception ---",
+            f"identity: {payload.get('identity') or '.'}",
             f"path: {payload.get('directory') or '.'}",
         ]
         entries = payload.get("entries")
@@ -206,6 +209,7 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
 
     lines = [
         "--- perception ---",
+        f"identity: {payload.get('identity') or 'unknown-file#unknown-sheet'}",
         f"file: {payload.get('file') or '未知'}",
         f"intent: {payload.get('intent') or 'general'}",
         (

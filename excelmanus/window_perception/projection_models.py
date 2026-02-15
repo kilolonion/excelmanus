@@ -29,6 +29,7 @@ class ToolPayloadProjection:
 
     window_type: str
     title: str
+    identity: str = ""
     directory: str = ""
     entries: tuple[str, ...] = ()
     file: str = ""

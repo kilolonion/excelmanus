@@ -1,9 +1,18 @@
 # 窗口模型泛化设计（概念定案）
 
 > 日期：2026-02-15  
-> 状态：已评审（概念层）  
+> 状态：已评审并完成首轮实现（Task 1-8）  
 > 范围：`excelmanus/window_perception/`  
 > 决策前提：本轮讨论显式忽略“代码改造成本”，仅按概念正确性评估。
+
+---
+
+## 实施同步（2026-02-15）
+
+1. `WindowState` 已从 `excelmanus.window_perception` 顶层导出移除，外部需从 `models` 显式导入。
+2. manager 摄入路径已落地 `classify -> locate(identity) -> apply_delta -> ingest`。
+3. projection 层新增 `identity` 在 tool payload 中的显式承载，并增加一致性回归测试：
+   `test_projection_identity_intent_consistency_across_outputs`。
 
 ---
 

@@ -285,7 +285,7 @@ Expected: FAIL (old field mutation path).
 
 **Step 4: Run tests to verify they pass**
 
-Run: `pytest tests/test_window_perception_focus.py tests/test_window_focus_semantics.py tests/test_engine.py::TestEngineWindowPerception -v`  
+Run: `pytest tests/test_window_perception_focus.py tests/test_window_focus_semantics.py tests/test_engine.py -k "window_perception" -v`  
 Expected: PASS on updated cases.
 
 **Step 5: Commit**
@@ -379,3 +379,4 @@ git commit -m "test/docs(window): finalize generalized window model rollout"
 - Maintain strict TDD order per step: fail -> implement -> pass -> commit.
 - If a task uncovers hidden coupling, create a micro-task before continuing; do not bypass failing tests.
 - Preserve invariant checks in tests (kind mismatch, identity drift, projection read-only behavior).
+- `tests/test_engine.py::TestEngineWindowPerception` selector was stale in this repository; use `-k "window_perception"` equivalent scope.
