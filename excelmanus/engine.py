@@ -907,29 +907,95 @@ class AgentEngine:
         )
         route_result = self._merge_with_loaded_skills(route_result)
 
-        # ── Phase 1: 默认技能预激活 ──
-        # 非斜杠的 all_tools 路由且无已激活技能时，自动激活 general_excel，
-        # 使写入工具从首轮即可用，省去 LLM 调用 select_skill 的额外迭代。
+        # ── Phase 1: 技能预激活 ──
+        # 根据 skill_preroute_mode 决定预激活策略：
+        # - off: 确定性激活 general_excel（当前默认行为）
+        # - meta_only: 不预激活，仅保留元工具 + DISCOVERY_TOOLS
+        # - deepseek / gemini: 小模型预判后精准激活
+        auto_activated_skill_name: str | None = None
+        pre_route_result: "PreRouteResult | None" = None
+        preroute_mode = self._config.skill_preroute_mode
+
         if (
-            self._config.auto_activate_default_skill
-            and route_result.route_mode == "all_tools"
+            route_result.route_mode == "all_tools"
             and self._active_skill is None
             and effective_slash_command is None
             and self._skill_router is not None
         ):
-            auto_result = await self._handle_select_skill("general_excel")
-            if not auto_result.startswith("未找到技能:"):
-                logger.info("自动预激活技能: general_excel")
+            if preroute_mode in ("deepseek", "gemini"):
+                # 小模型预路由
+                from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
+                api_key = self._config.skill_preroute_api_key or self._config.api_key
+                base_url = self._config.skill_preroute_base_url or self._config.base_url
+                model_name = self._config.skill_preroute_model or self._config.model
+                try:
+                    pre_route_result = await pre_route_skill(
+                        user_message,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model_name,
+                        timeout_ms=self._config.skill_preroute_timeout_ms,
+                    )
+                    logger.info(
+                        "预路由结果: skill=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
+                        pre_route_result.skill_name,
+                        pre_route_result.confidence,
+                        pre_route_result.latency_ms,
+                        pre_route_result.model_used,
+                        pre_route_result.reason,
+                    )
+                    if pre_route_result.skill_name is not None:
+                        auto_result = await self._handle_select_skill(pre_route_result.skill_name)
+                        if not auto_result.startswith("未找到技能:"):
+                            auto_activated_skill_name = pre_route_result.skill_name
+                            logger.info("预路由激活技能: %s", auto_activated_skill_name)
+                        else:
+                            logger.warning(
+                                "预路由选择的技能 %s 不存在，回退 general_excel",
+                                pre_route_result.skill_name,
+                            )
+                            auto_result = await self._handle_select_skill("general_excel")
+                            if not auto_result.startswith("未找到技能:"):
+                                auto_activated_skill_name = "general_excel"
+                except Exception as exc:
+                    logger.warning("预路由调用异常: %s，回退 general_excel", exc)
+                    if self._config.auto_activate_default_skill:
+                        auto_result = await self._handle_select_skill("general_excel")
+                        if not auto_result.startswith("未找到技能:"):
+                            auto_activated_skill_name = "general_excel"
+
+            elif preroute_mode == "meta_only":
+                # 仅元工具模式：不预激活任何 skill，让 LLM 自己 select_skill
+                logger.info("meta_only 模式：跳过预激活，仅保留元工具")
+
             else:
-                logger.debug("自动预激活 general_excel 失败（技能不存在），继续使用全量工具")
+                # off 模式：确定性激活 general_excel（当前默认行为）
+                if self._config.auto_activate_default_skill:
+                    auto_result = await self._handle_select_skill("general_excel")
+                    if not auto_result.startswith("未找到技能:"):
+                        logger.info("自动预激活技能: general_excel")
+                        auto_activated_skill_name = "general_excel"
+                    else:
+                        logger.debug("自动预激活 general_excel 失败（技能不存在），继续使用全量工具")
 
         # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
         effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
+
+        # 补全 skills_used 和 system_contexts
+        final_skills_used = list(route_result.skills_used)
+        final_system_contexts = list(route_result.system_contexts)
+        if auto_activated_skill_name and self._active_skill is not None:
+            if auto_activated_skill_name not in final_skills_used:
+                final_skills_used.append(auto_activated_skill_name)
+            skill_context = self._active_skill.render_context()
+            if skill_context.strip():
+                final_system_contexts.append(skill_context)
+
         route_result = SkillMatchResult(
-            skills_used=list(route_result.skills_used),
+            skills_used=final_skills_used,
             tool_scope=effective_tool_scope,
             route_mode=route_result.route_mode,
-            system_contexts=list(route_result.system_contexts),
+            system_contexts=final_system_contexts,
             parameterized=route_result.parameterized,
         )
         self._last_route_result = route_result
