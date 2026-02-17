@@ -224,3 +224,32 @@ class TestAddConditionalRule:
             add_conditional_rule(str(fp), "B2:B21", rule_type="icon_set")
         )
         assert "error" in result
+
+    def test_numeric_formula_auto_coercion(self, tmp_path: Path) -> None:
+        """formula 传入数值时自动转为 values，兼容 LLM 误传场景。"""
+        fp = _make_numeric_sheet(tmp_path)
+        result = json.loads(
+            add_conditional_rule(
+                str(fp), "B2:B21",
+                rule_type="cell_is",
+                operator="lessThan",
+                formula=1000,
+                fill_color="FF0000",
+            )
+        )
+        assert result["status"] == "success"
+        assert "cell_is(lessThan)" in result["rule_detail"]
+
+    def test_numeric_formula_float_auto_coercion(self, tmp_path: Path) -> None:
+        """formula 传入浮点数时自动转为 values。"""
+        fp = _make_numeric_sheet(tmp_path)
+        result = json.loads(
+            add_conditional_rule(
+                str(fp), "B2:B21",
+                rule_type="cell_is",
+                operator="greaterThan",
+                formula=99.5,
+                fill_color="00FF00",
+            )
+        )
+        assert result["status"] == "success"

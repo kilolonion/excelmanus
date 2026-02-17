@@ -160,15 +160,97 @@ class TestRunCodeFile:
 
 
 class TestRunCodeValidation:
-    """参数互斥校验测试。"""
+    """参数校验测试。"""
 
-    def test_both_params_raises(self, workspace: Path) -> None:
-        with pytest.raises(ValueError, match="互斥"):
-            code_tools.run_code(code="print(1)", script_path="x.py")
+    def test_both_params_prefers_script_path(self, workspace: Path) -> None:
+        """当 code 和 script_path 都传了非空值时，优先使用 script_path。"""
+        script = workspace / "scripts" / "temp" / "both.py"
+        script.write_text("print('from_file')\n", encoding="utf-8")
+        result = json.loads(
+            code_tools.run_code(
+                code="print('from_code')",
+                script_path="scripts/temp/both.py",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["mode"] == "file"
+        assert "from_file" in result["stdout_tail"]
 
     def test_neither_param_raises(self, workspace: Path) -> None:
         with pytest.raises(ValueError, match="必须指定"):
             code_tools.run_code()
+
+    def test_empty_code_with_script_path(self, workspace: Path) -> None:
+        """code 为空字符串 + script_path 有值 → 走文件模式（LLM 常见调用模式）。"""
+        script = workspace / "scripts" / "temp" / "empty_code.py"
+        script.write_text("print('script_ok')\n", encoding="utf-8")
+        result = json.loads(
+            code_tools.run_code(
+                code="",
+                script_path="scripts/temp/empty_code.py",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["mode"] == "file"
+        assert "script_ok" in result["stdout_tail"]
+
+    def test_whitespace_code_with_script_path(self, workspace: Path) -> None:
+        """code 为纯空白 + script_path 有值 → 走文件模式。"""
+        script = workspace / "scripts" / "temp" / "ws.py"
+        script.write_text("print('ws_ok')\n", encoding="utf-8")
+        result = json.loads(
+            code_tools.run_code(
+                code="   ",
+                script_path="scripts/temp/ws.py",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["mode"] == "file"
+
+    def test_both_empty_raises(self, workspace: Path) -> None:
+        """code 和 script_path 都为空字符串 → 报错。"""
+        with pytest.raises(ValueError, match="必须指定"):
+            code_tools.run_code(code="", script_path="")
+
+    def test_empty_script_path_with_code(self, workspace: Path) -> None:
+        """script_path 为空字符串 + code 有值 → 走内联模式（LLM 常见调用模式）。"""
+        result = json.loads(
+            code_tools.run_code(
+                code="print('inline_ok')",
+                script_path="",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["mode"] == "inline"
+        assert "inline_ok" in result["stdout_tail"]
+
+    def test_empty_stdout_stderr_file(self, workspace: Path) -> None:
+        """stdout_file / stderr_file 为空字符串 → 视为未传，不写文件。"""
+        result = json.loads(
+            code_tools.run_code(
+                code="print('no_file')",
+                stdout_file="",
+                stderr_file="",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert result["stdout_file"] is None
+        assert result["stderr_file"] is None
+
+    def test_whitespace_only_params_raises(self, workspace: Path) -> None:
+        """所有字符串参数都是纯空白 → 报错。"""
+        with pytest.raises(ValueError, match="必须指定"):
+            code_tools.run_code(code="   ", script_path="  ")
 
 
 class TestGetTools:
