@@ -583,11 +583,11 @@ class _EngineTracer:
         engine._get_current_tool_scope = self._traced_scope  # type: ignore[assignment]
 
     def _traced_prepare(
-        self, skill_contexts: list[str],
+        self, skill_contexts: list[str], **kwargs: Any,
     ) -> tuple[list[str], str | None]:
         """拦截系统提示构建，记录各组件内容。"""
         self._iteration += 1
-        prompts, error = self._orig_prepare(skill_contexts)
+        prompts, error = self._orig_prepare(skill_contexts, **kwargs)
 
         # 分解记录各组件
         components: list[dict[str, Any]] = []

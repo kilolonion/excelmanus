@@ -80,7 +80,14 @@ def _resolve_input(path_str: str) -> tuple[Path, dict]:
         print(f"[自动发现] {chosen.name}", file=sys.stderr)
         return chosen, _load(str(chosen))
 
-    # 没有 suite，查找 run 文件
+    # 没有 suite，查找 global 汇总文件
+    global_files = sorted(p.glob("global_*.json"))
+    if global_files:
+        chosen = global_files[-1]
+        print(f"[自动发现] {chosen.name}", file=sys.stderr)
+        return chosen, _load(str(chosen))
+
+    # 没有 global，查找 run 文件
     run_files = sorted(p.glob("run_*.json"))
     if run_files:
         if len(run_files) == 1:
@@ -133,7 +140,11 @@ def _get_engine_trace(data: dict) -> list[dict]:
 
 
 def _is_suite(data: dict) -> bool:
-    return data.get("kind") == "suite_summary"
+    return data.get("kind") in ("suite_summary", "global_summary")
+
+
+def _is_global(data: dict) -> bool:
+    return data.get("kind") == "global_summary"
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -148,10 +159,44 @@ def _truncate(text: str, max_chars: int) -> str:
 def cmd_overview(args: argparse.Namespace) -> int:
     path, data = _resolve_input(args.file)
 
+    if _is_global(data):
+        return _overview_global(data)
+
     if _is_suite(data):
         return _overview_suite(data, args)
 
     return _overview_case(data)
+
+
+def _overview_global(data: dict) -> int:
+    """Global 汇总文件的 overview 输出。"""
+    execution = data.get("execution", {})
+    stats = data.get("stats", {})
+    suites = data.get("suites", [])
+
+    print(f"全局汇总: {data.get('timestamp', '?')}")
+    print(f"Suite 数: {execution.get('suite_count', len(suites))}  "
+          f"Suite 并发: {execution.get('suite_concurrency', '?')}  "
+          f"Case 并发: {execution.get('case_concurrency', '?')}")
+    print(f"总案例: {stats.get('total_cases', 0)}  "
+          f"通过: {stats.get('passed', 0)}  "
+          f"失败: {stats.get('failed', 0)}")
+    print(f"总 Token: {stats.get('total_tokens', 0)}  "
+          f"总耗时: {stats.get('total_duration_seconds', 0):.1f}s  "
+          f"工具失败: {stats.get('tool_failures', 0)}")
+    print()
+
+    if suites:
+        print(f"{'Suite':<30} {'案例':>4} {'通过':>4} {'失败':>4}")
+        print("─" * 50)
+        for s in suites:
+            print(
+                f"{s.get('name', '?'):<30} "
+                f"{s.get('case_count', 0):>4} "
+                f"{s.get('passed', 0):>4} "
+                f"{s.get('failed', 0):>4}"
+            )
+    return 0
 
 
 
@@ -167,6 +212,14 @@ def _overview_suite(data: dict, args: argparse.Namespace) -> int:
     print(f"路径: {meta.get('suite_path', '?')}")
     print(f"状态: {execution.get('status', '?')}  并发: {execution.get('concurrency', '?')}")
     print(f"案例数: {meta.get('case_count', len(cases))}")
+    # schema v3: 从首个 case 提取模型信息
+    if cases:
+        first_model = cases[0].get("meta", {}).get("active_model", "")
+        first_config = cases[0].get("meta", {}).get("config_snapshot", {})
+        if first_model:
+            print(f"模型: {first_model}")
+        elif first_config.get("model"):
+            print(f"模型: {first_config['model']}")
     failed = result.get("failed_case_ids", [])
     if failed:
         print(f"失败案例: {', '.join(failed)}")
@@ -205,9 +258,9 @@ def _overview_suite(data: dict, args: argparse.Namespace) -> int:
     # 案例明细表
     print(
         f"{'ID':<16} {'状态':<6} {'耗时':>6} {'迭代':>4} "
-        f"{'工具':>4} {'失败':>4} {'Token':>8} {'LLM':>4}  技能"
+        f"{'工具':>4} {'失败':>4} {'Token':>8} {'LLM':>4}  {'写意图':<10} 技能"
     )
-    print("─" * 80)
+    print("─" * 95)
 
     for c in cases:
         cm = c.get("meta", {})
@@ -221,13 +274,14 @@ def _overview_suite(data: dict, args: argparse.Namespace) -> int:
         fails = cs.get("tool_failures", 0)
         tokens = cs.get("total_tokens", 0)
         llm = cs.get("llm_call_count", 0)
+        write_hint = ce.get("write_hint", "-") or "-"
         print(
             f"{cm.get('case_id', '?'):<16} {status:<6} {dur:>5.1f}s {iters:>4} "
-            f"{tools:>4} {fails:>4} {tokens:>8} {llm:>4}  {skills}"
+            f"{tools:>4} {fails:>4} {tokens:>8} {llm:>4}  {write_hint:<10} {skills}"
         )
 
     # 汇总行
-    print("─" * 80)
+    print("─" * 95)
     n = len(cases)
     total_time = sum(c.get("execution", {}).get("duration_seconds", 0) for c in cases)
     total_tokens = sum(c.get("stats", {}).get("total_tokens", 0) for c in cases)
@@ -255,11 +309,36 @@ def _overview_case(data: dict) -> int:
     stats = data.get("stats", {})
     print(f"案例: {meta.get('case_id', '?')} — {meta.get('case_name', '?')}")
     print(f"模型: {meta.get('active_model', '?')}")
+    # schema v3: config_snapshot
+    config_snap = meta.get("config_snapshot", {})
+    if config_snap:
+        snap_model = config_snap.get("model", "")
+        snap_router = config_snap.get("router_model", "")
+        if snap_model:
+            print(f"配置模型: {snap_model}" + (f"  路由模型: {snap_router}" if snap_router else ""))
     print(f"状态: {execution.get('status', '?')}  迭代: {execution.get('iterations', '?')}")
+    # schema v3: write_hint
+    write_hint = execution.get("write_hint", "")
+    if write_hint and write_hint != "unknown":
+        print(f"写意图: {write_hint}")
     print(f"耗时: {execution.get('duration_seconds', '?')}s")
     print(f"Token: {stats.get('prompt_tokens', 0)}p + {stats.get('completion_tokens', 0)}c = {stats.get('total_tokens', 0)}")
     print(f"工具调用: {stats.get('tool_call_count', 0)} (成功 {stats.get('tool_successes', 0)}, 失败 {stats.get('tool_failures', 0)})")
     print(f"LLM 调用: {len(llm_calls)} 轮")
+    # schema v3: 任务/问答/审批事件摘要
+    artifacts = data.get("artifacts", {})
+    task_events = artifacts.get("task_events", [])
+    question_events = artifacts.get("question_events", [])
+    approval_events = artifacts.get("approval_events", [])
+    if task_events or question_events or approval_events:
+        parts = []
+        if task_events:
+            parts.append(f"任务事件 {len(task_events)}")
+        if question_events:
+            parts.append(f"问答 {len(question_events)}")
+        if approval_events:
+            parts.append(f"审批 {len(approval_events)}")
+        print(f"交互事件: {' | '.join(parts)}")
     print()
 
     if not llm_calls:
@@ -615,6 +694,15 @@ def _failures_suite(suite_path: Path, data: dict, args: argparse.Namespace) -> i
         print(f"━━━ {case_id} — {cm.get('case_name', '?')} ━━━")
         print(f"  状态: {ce.get('status', '?')}  迭代: {ce.get('iterations', 0)}  耗时: {ce.get('duration_seconds', 0):.1f}s")
         print(f"  Token: {cs.get('total_tokens', 0)}  工具: {cs.get('tool_call_count', 0)} (失败 {cs.get('tool_failures', 0)})")
+        model = cm.get("active_model", "")
+        write_hint = ce.get("write_hint", "")
+        if model or write_hint:
+            parts = []
+            if model:
+                parts.append(f"模型: {model}")
+            if write_hint and write_hint != "unknown":
+                parts.append(f"写意图: {write_hint}")
+            print(f"  {'  '.join(parts)}")
         _print_error(ce.get("error"), indent="  ")
 
         # 尝试加载详细日志获取更多上下文
@@ -692,9 +780,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         f"{'ID':<16} {'状态A':<6} {'状态B':<6} "
         f"{'耗时A':>6} {'耗时B':>6} {'Δ耗时':>7} "
         f"{'TokenA':>8} {'TokenB':>8} {'ΔToken':>8} "
-        f"{'工具A':>4} {'工具B':>4}"
+        f"{'工具A':>4} {'工具B':>4} {'写A':<10} {'写B':<10}"
     )
-    print("─" * 100)
+    print("─" * 115)
 
     total_da = total_db = 0.0
     total_ta = total_tb = 0
@@ -718,6 +806,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         tla = ca.get("stats", {}).get("tool_call_count", 0) if ca else 0
         tlb = cb.get("stats", {}).get("tool_call_count", 0) if cb else 0
 
+        wa = ca.get("execution", {}).get("write_hint", "-") if ca else "-"
+        wb = cb.get("execution", {}).get("write_hint", "-") if cb else "-"
+
         total_da += da
         total_db += db
         total_ta += ta
@@ -733,10 +824,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
             f"{cid:<16} {sa:<6} {sb:<6} "
             f"{da:>5.1f}s {db:>5.1f}s {dd_str} "
             f"{ta:>8} {tb:>8} {dt_str} "
-            f"{tla:>4} {tlb:>4}"
+            f"{tla:>4} {tlb:>4} {wa or '-':<10} {wb or '-':<10}"
         )
 
-    print("─" * 100)
+    print("─" * 115)
     dd_total = total_db - total_da
     dt_total = total_tb - total_ta
     print(
