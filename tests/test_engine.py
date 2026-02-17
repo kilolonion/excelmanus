@@ -437,6 +437,81 @@ class TestModelSwitchConsistency:
         assert kwargs["model"] == "main-b"
 
     @pytest.mark.asyncio
+    async def test_run_subagent_uses_active_model_when_subroute_not_configured(self) -> None:
+        config = _make_config(
+            model="main-a",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        engine.switch_model("alt")
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.get.return_value = SubagentConfig(
+            name="explorer",
+            description="只读探查",
+            permission_mode="readOnly",
+        )
+        engine._subagent_executor.run = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="完成",
+                subagent_name="explorer",
+                permission_mode="readOnly",
+                conversation_id="conv-1",
+            )
+        )
+
+        _ = await engine.run_subagent(agent_name="explorer", prompt="请分析")
+
+        kwargs = engine._subagent_executor.run.await_args.kwargs
+        assert kwargs["config"].model == "main-b"
+
+    @pytest.mark.asyncio
+    async def test_run_subagent_keeps_global_subroute_model_when_configured(self) -> None:
+        config = _make_config(
+            model="main-a",
+            subagent_model="sub-fixed",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        engine.switch_model("alt")
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.get.return_value = SubagentConfig(
+            name="explorer",
+            description="只读探查",
+            permission_mode="readOnly",
+        )
+        engine._subagent_executor.run = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="完成",
+                subagent_name="explorer",
+                permission_mode="readOnly",
+                conversation_id="conv-2",
+            )
+        )
+
+        _ = await engine.run_subagent(agent_name="explorer", prompt="请分析")
+
+        kwargs = engine._subagent_executor.run.await_args.kwargs
+        assert kwargs["config"].model == "sub-fixed"
+
+    @pytest.mark.asyncio
     async def test_window_perception_advisor_retries_once_on_transient_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -721,7 +796,7 @@ class TestContextBudgetAndHardCap:
                 max_result_chars=0,
             ),
         ])
-        config = _make_config()
+        config = _make_config(window_return_mode="enriched")
         engine = AgentEngine(config, registry)
         tc = SimpleNamespace(
             id="call_read",
@@ -777,7 +852,7 @@ class TestContextBudgetAndHardCap:
                 max_result_chars=0,
             ),
         ])
-        engine = AgentEngine(_make_config(), registry)
+        engine = AgentEngine(_make_config(window_return_mode="enriched"), registry)
         tc = SimpleNamespace(
             id="call_read",
             function=SimpleNamespace(name="read_excel", arguments="{}"),
@@ -864,7 +939,7 @@ class TestContextBudgetAndHardCap:
                 max_result_chars=0,
             ),
         ])
-        config = _make_config(system_message_mode="replace")
+        config = _make_config(system_message_mode="replace", window_return_mode="enriched")
         engine = AgentEngine(config, registry)
 
         tc = SimpleNamespace(
@@ -930,7 +1005,7 @@ class TestContextBudgetAndHardCap:
         assert result.result.startswith("[OK] [")
         assert "read_excel: A1:J25" in result.result
         assert "intent: aggregate" in result.result
-        assert "data merged into window" in result.result
+        assert "write actions must be confirmed by write-tool results" in result.result
         assert "--- perception ---" not in result.result
 
     @pytest.mark.asyncio
@@ -1124,9 +1199,9 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "首行预览" not in first.result
-        assert "hint=intent[aggregate] data already in window" in second.result
+        assert "hint=intent[aggregate] repeat read detected" in second.result
         assert "intent: aggregate" in third.result
-        assert "hint: intent[aggregate] data already in window" in third.result
+        assert "hint: intent[aggregate] repeat read detected" in third.result
         assert "--- perception ---" not in third.result
         assert engine._effective_window_return_mode() == "anchored"
 
@@ -1362,7 +1437,7 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "⚠️ 此数据已在窗口" not in first.result
-        assert "hint=intent[aggregate] data already in window" in second.result
+        assert "hint=intent[aggregate] repeat read detected" in second.result
         assert "--- perception ---" in third.result
 
         write_tc = SimpleNamespace(
@@ -1412,14 +1487,14 @@ class TestContextBudgetAndHardCap:
         anchored_scope = anchored_engine._get_current_tool_scope(route_result=route_result)
         assert "focus_window" in anchored_scope
 
-        adaptive_enriched_engine = AgentEngine(
+        adaptive_anchored_engine = AgentEngine(
             _make_config(window_return_mode="adaptive", model="deepseek-chat"),
             registry,
         )
-        adaptive_enriched_scope = adaptive_enriched_engine._get_current_tool_scope(
+        adaptive_anchored_scope = adaptive_anchored_engine._get_current_tool_scope(
             route_result=route_result
         )
-        assert "focus_window" not in adaptive_enriched_scope
+        assert "focus_window" in adaptive_anchored_scope
 
         adaptive_unified_engine = AgentEngine(
             _make_config(window_return_mode="adaptive", model="gpt-5.2"),
@@ -1470,6 +1545,7 @@ class TestContextBudgetAndHardCap:
         prompts, error = engine._prepare_system_prompts_for_request(["## SkillCtx\n内容"])
         assert error is None
         assert prompts[-1].startswith("## 数据窗口")
+        assert "A | 100" in prompts[-1]
 
     @pytest.mark.asyncio
     async def test_window_perception_notice_respects_budget_and_window_limit(self) -> None:
@@ -1513,6 +1589,7 @@ class TestContextBudgetAndHardCap:
             window_perception_system_budget_tokens=400,
             window_perception_max_windows=2,
             window_perception_minimized_tokens=40,
+            window_return_mode="enriched",
         )
         engine = AgentEngine(config, registry)
 
@@ -1573,6 +1650,7 @@ class TestContextBudgetAndHardCap:
             window_perception_background_after_idle=1,
             window_perception_suspend_after_idle=3,
             window_perception_terminate_after_idle=5,
+            window_return_mode="enriched",
         )
         engine = AgentEngine(config, registry)
 
@@ -1643,6 +1721,7 @@ class TestContextBudgetAndHardCap:
             window_perception_background_after_idle=1,
             window_perception_suspend_after_idle=2,
             window_perception_terminate_after_idle=3,
+            window_return_mode="enriched",
         )
         engine = AgentEngine(config, registry)
 
@@ -2636,7 +2715,7 @@ class TestDelegateSubagent:
 
     @pytest.mark.asyncio
     async def test_run_subagent_passes_window_context_and_enricher(self) -> None:
-        config = _make_config(window_perception_enabled=True)
+        config = _make_config(window_perception_enabled=True, window_return_mode="enriched")
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
@@ -3082,7 +3161,11 @@ class TestMetaToolDefinitions:
 
         delegate_tool = by_name["delegate_to_subagent"]["function"]
         delegate_params = delegate_tool["parameters"]
-        assert delegate_params["required"] == ["task"]
+        assert delegate_params["required"] == []
+        assert "task" in delegate_params["properties"]
+        assert "task_brief" in delegate_params["properties"]
+        assert delegate_params["properties"]["task_brief"]["type"] == "object"
+        assert delegate_params["properties"]["task_brief"]["required"] == ["title"]
         assert delegate_params["properties"]["file_paths"]["type"] == "array"
         assert "agent_name" in delegate_params["properties"]
         assert delegate_params["properties"]["agent_name"]["enum"] == ["folder_summarizer"]
@@ -3178,6 +3261,164 @@ class TestMetaToolScopeUpdate:
         tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
         add_numbers_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_2")
         assert "3" in add_numbers_msg.get("content", "")
+
+    @pytest.mark.asyncio
+    async def test_select_skill_refreshes_system_context_for_next_round(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        chart_skill = Skillpack(
+            name="chart_basic",
+            description="图表技能",
+            allowed_tools=["fail_tool"],
+            triggers=["图表"],
+            instructions="图表指引",
+            source="system",
+            root_dir="/tmp/chart_basic",
+        )
+        data_skill = Skillpack(
+            name="data_basic",
+            description="数据技能",
+            allowed_tools=["add_numbers"],
+            triggers=["数据"],
+            instructions="数据指引",
+            source="system",
+            root_dir="/tmp/data_basic",
+        )
+
+        skill_map = {
+            "chart_basic": chart_skill,
+            "data_basic": data_skill,
+        }
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = skill_map
+        mock_loader.get_skillpack.side_effect = lambda name: skill_map.get(name)
+
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(side_effect=lambda **kwargs: skill_map.get(kwargs["name"]))
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- chart_basic：图表技能\n- data_basic：数据技能",
+            ["chart_basic", "data_basic"],
+        )
+        engine._skill_router = mock_router
+
+        route_result = SkillMatchResult(
+            skills_used=["chart_basic"],
+            tool_scope=["select_skill"],
+            route_mode="slash_direct",
+            system_contexts=[chart_skill.render_context(), "## 文件结构预览\nsheet=销售明细"],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        first_resp = _make_tool_call_response(
+            [
+                ("call_1", "select_skill", json.dumps({"skill_name": "data_basic"})),
+            ]
+        )
+        second_resp = _make_tool_call_response(
+            [
+                ("call_2", "add_numbers", json.dumps({"a": 1, "b": 2})),
+            ]
+        )
+        third_resp = _make_text_response("done")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_resp, second_resp, third_resp]
+        )
+
+        result = await engine.chat("测试切换后上下文")
+        assert result == "done"
+
+        second_call_messages = engine._client.chat.completions.create.call_args_list[1].kwargs["messages"]
+        system_text = "\n\n".join(
+            str(msg.get("content", ""))
+            for msg in second_call_messages
+            if msg.get("role") == "system"
+        )
+        assert "[Skillpack] data_basic" in system_text
+        assert "[Skillpack] chart_basic" not in system_text
+        assert "文件结构预览" in system_text
+
+
+class TestPreRouteCompositeFallback:
+    """复合预路由命中时回退 general_excel。"""
+
+    @pytest.mark.asyncio
+    async def test_deepseek_preroute_multi_skill_falls_back_to_general_excel(self) -> None:
+        from excelmanus.skillpacks.pre_router import PreRouteResult
+
+        config = _make_config(
+            skill_preroute_mode="deepseek",
+            skill_preroute_model="router-model",
+            skill_preroute_api_key="router-key",
+            skill_preroute_base_url="https://router.example.com/v1",
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        chart_skill = Skillpack(
+            name="chart_basic",
+            description="图表技能",
+            allowed_tools=["fail_tool"],
+            triggers=["图表"],
+            instructions="chart",
+            source="system",
+            root_dir="/tmp/chart_basic",
+        )
+        general_skill = Skillpack(
+            name="general_excel",
+            description="通用兜底",
+            allowed_tools=["add_numbers"],
+            triggers=[],
+            instructions="general",
+            source="system",
+            root_dir="/tmp/general_excel",
+        )
+        skill_map = {
+            "chart_basic": chart_skill,
+            "general_excel": general_skill,
+        }
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = skill_map
+        mock_loader.get_skillpack.side_effect = lambda name: skill_map.get(name)
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router._find_skill_by_name = MagicMock(side_effect=lambda **kwargs: skill_map.get(kwargs["name"]))
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- chart_basic：图表技能\n- general_excel：通用兜底",
+            ["chart_basic", "general_excel"],
+        )
+        engine._skill_router = mock_router
+
+        engine._route_skills = AsyncMock(
+            return_value=SkillMatchResult(
+                skills_used=[],
+                tool_scope=[],
+                route_mode="all_tools",
+                system_contexts=[],
+            )
+        )
+
+        pre_route_mock = AsyncMock(
+            return_value=PreRouteResult(
+                skill_name="chart_basic",
+                skill_names=["chart_basic", "format_basic"],
+                confidence=0.93,
+                reason="复合任务",
+                latency_ms=3.0,
+                model_used="router-model",
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response("ok"))
+        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
+            result = await engine.chat("先画图，再把表头美化")
+
+        assert result == "ok"
+        assert engine._active_skill is not None
+        assert engine._active_skill.name == "general_excel"
+        assert "general_excel" in engine.last_route_result.skills_used
 
 
 class TestFallbackScopeGuard:
@@ -5428,6 +5669,30 @@ class TestToolIndexNotice:
 class TestToolInjectionOptimizationE2E:
     """Task 7: 工具注入优化端到端集成测试。"""
 
+    @staticmethod
+    def _make_registry_with_categorized_tools() -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def _noop(**_: object) -> str:
+            return "ok"
+
+        for tool_name in (
+            "read_excel",
+            "create_chart",
+            "format_cells",
+            "write_excel",
+            "list_sheets",
+        ):
+            registry.register_tool(
+                ToolDef(
+                    name=tool_name,
+                    description=f"{tool_name} tool",
+                    input_schema={"type": "object", "properties": {}},
+                    func=_noop,
+                )
+            )
+        return registry
+
     def test_initial_scope_is_discovery_set_not_full(self) -> None:
         """首轮 scope 应为基础发现工具集 + 元工具，不含写入工具。"""
         from excelmanus.tools.policy import DISCOVERY_TOOLS, MUTATING_ALL_TOOLS
@@ -5499,25 +5764,29 @@ class TestToolInjectionOptimizationE2E:
         # 所以工具索引可能为空。这是正确行为。
         # 但如果 registry 注册了 DISCOVERY_TOOLS 中的工具，则应包含索引。
 
-    def test_tool_index_not_in_system_prompt_when_skill_active(self) -> None:
-        """skill 激活时 system prompt 中不应包含工具索引。"""
-        config = _make_config()
-        registry = _make_registry_with_tools()
+    @pytest.mark.parametrize("mode", ["off", "deepseek", "gemini", "meta_only", "hybrid"])
+    def test_tool_index_in_system_prompt_when_skill_active_all_modes(self, mode: str) -> None:
+        """skill 激活时所有模式都应注入工具索引（紧凑版）。"""
+        config = _make_config(skill_preroute_mode=mode)
+        registry = self._make_registry_with_categorized_tools()
         engine = AgentEngine(config, registry)
         engine._active_skill = Skillpack(
-            name="data_basic",
-            description="test",
-            allowed_tools=["add_numbers"],
+            name="chart_basic",
+            description="chart",
+            allowed_tools=["read_excel", "create_chart", "list_sheets"],
             triggers=[],
-            instructions="test",
+            instructions="chart skill",
             source="system",
-            root_dir="/tmp",
+            root_dir="/tmp/chart_basic",
         )
-        prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
+        prompts, error = engine._prepare_system_prompts_for_request(
+            skill_contexts=[engine._active_skill.render_context()]
+        )
         assert error is None
         full_prompt = "\n".join(prompts)
-        # 检查工具索引区块标题不存在（而非子串匹配，因为 _SEGMENT_TOOL_POLICY 中也提到了"工具索引"）
-        assert "## 工具索引" not in full_prompt
+        assert "## 工具索引" in full_prompt
+        assert "未激活（需 select_skill 激活对应技能后可用）" in full_prompt
+        assert "format_cells" in full_prompt
 
     def test_discover_tools_category_enum_matches_tool_categories(self) -> None:
         """discover_tools 的 category enum 应与 TOOL_CATEGORIES 一致。"""
