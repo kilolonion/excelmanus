@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -807,6 +809,84 @@ class TestSkillRouter:
         assert result.route_mode == "all_tools"
         assert result.tool_scope == []
         assert result.skills_used == []
+
+    @pytest.mark.asyncio
+    async def test_classify_write_hint_uses_lexical_fallback_without_router_model(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _make_config(system_dir, user_dir, project_dir, router_model=None)
+        loader = SkillpackLoader(config, _tool_registry())
+        router = SkillRouter(config, loader)
+
+        hint = await router._classify_write_hint("请先画一个柱状图，然后美化表头")
+        assert hint == "may_write"
+
+    @pytest.mark.asyncio
+    async def test_classify_write_hint_model_parse_failure_falls_back_to_lexical(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            router_model="router-model",
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        router = SkillRouter(config, loader)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="not-a-json"),
+                    )
+                ]
+            )
+        )
+        with patch("excelmanus.providers.create_client", return_value=mock_client):
+            hint = await router._classify_write_hint("把这个 sheet 美化并画图")
+        assert hint == "may_write"
+
+    @pytest.mark.asyncio
+    async def test_classify_write_hint_model_error_falls_back_to_read_only_lexical(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            router_model="router-model",
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        router = SkillRouter(config, loader)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch("excelmanus.providers.create_client", return_value=mock_client):
+            hint = await router._classify_write_hint("请读取这个文件并做统计分析")
+        assert hint == "read_only"
 
     @pytest.mark.asyncio
     async def test_non_slash_injects_large_file_context(self, tmp_path: Path) -> None:
