@@ -252,6 +252,8 @@ class SheetCache:
     max_cached_rows: int = 200
     stale_hint: str | None = None
     unfiltered_buffer: list[dict[str, Any]] | None = None
+    last_op_kind: str | None = None        # "read" | "write" | "filter" | None
+    last_write_range: str | None = None    # 写操作受影响范围
 
 
 @dataclass
@@ -502,6 +504,22 @@ class SheetWindow(BaseWindow):
     @unfiltered_buffer.setter
     def unfiltered_buffer(self, value: list[dict[str, Any]] | None) -> None:
         self.data.cache.unfiltered_buffer = list(value) if isinstance(value, list) else None
+
+    @property
+    def last_op_kind(self) -> str | None:
+        return self.data.cache.last_op_kind
+
+    @last_op_kind.setter
+    def last_op_kind(self, value: str | None) -> None:
+        self.data.cache.last_op_kind = value
+
+    @property
+    def last_write_range(self) -> str | None:
+        return self.data.cache.last_write_range
+
+    @last_write_range.setter
+    def last_write_range(self, value: str | None) -> None:
+        self.data.cache.last_write_range = value
 
     @property
     def scroll_position(self) -> dict[str, Any]:
