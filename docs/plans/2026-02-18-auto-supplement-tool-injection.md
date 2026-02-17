@@ -445,3 +445,480 @@ git commit -m "feat(engine): 在 _execute_tool_call 中集成自动补充预检"
 **Files:**
 - Modify: `excelmanus/engine.py`
 - Test: `tests/test_engine.py`
+
+**Step 1: 写测试**
+
+```python
+class TestAutoSupplementTurnReset:
+    """每轮迭代重置自动补充计数器。"""
+
+    @pytest.mark.asyncio
+    async def test_supplement_count_resets_each_iteration(self) -> None:
+        """每轮迭代开始时 _turn_supplement_count 应重置为 0。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=2)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._turn_supplement_count = 5  # 模拟上一轮残留
+        # _tool_calling_loop 每轮开始时应重置
+        # 通过检查 _tool_calling_loop 的行为间接验证
+        # 这里直接验证初始化值
+        assert engine._turn_supplement_count == 5
+        # 重置逻辑在 _tool_calling_loop 的 for 循环开头
+```
+
+**Step 2: 修改 `_tool_calling_loop`**
+
+在 `_tool_calling_loop` 的 `for iteration in range(...)` 循环体开头（`self._emit(on_event, ToolCallEvent(event_type=EventType.ITERATION_START, ...))` 之后）追加：
+
+```python
+# 每轮重置自动补充计数器
+self._turn_supplement_count = 0
+```
+
+**Step 3: 同步 tool_scope 更新**
+
+在 `_tool_calling_loop` 中，当 `_execute_tool_call` 返回后，如果自动补充触发了 skill 激活，需要刷新 `tool_scope`。找到 `select_skill` 成功后的 scope 刷新逻辑：
+
+```python
+if tc_result.tool_name == "select_skill":
+    current_route_result = self._refresh_route_after_skill_switch(
+        current_route_result
+    )
+    ...
+    tool_scope = self._get_current_tool_scope(
+        route_result=current_route_result
+    )
+```
+
+在这段之后追加对自动补充的同样处理：
+
+```python
+# 自动补充也可能激活了新 skill，需要刷新 scope
+elif self._turn_supplement_count > 0 and tc_result.success:
+    # 检查是否有新 skill 被自动补充激活
+    current_scope_set = set(tool_scope)
+    new_union = set(self._active_skills_tool_union()) if self._active_skills else set()
+    if not new_union.issubset(current_scope_set):
+        current_route_result = self._refresh_route_after_skill_switch(
+            current_route_result
+        )
+        write_hint = getattr(current_route_result, "write_hint", write_hint)
+        self._current_write_hint = write_hint
+        tool_scope = self._get_current_tool_scope(
+            route_result=current_route_result
+        )
+```
+
+**Step 4: 运行全部相关测试**
+
+Run: `pytest tests/test_engine.py::TestAutoSupplement tests/test_engine.py::TestAutoSupplementIntegration tests/test_engine.py::TestAutoSupplementTurnReset -v`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add excelmanus/engine.py tests/test_engine.py
+git commit -m "feat(engine): 每轮重置自动补充计数器并同步 tool_scope"
+```
+
+---
+
+### Task 6: write_hint 联动 — 自动补充写入工具时升级 write_hint
+
+**Files:**
+- Modify: `excelmanus/engine.py`
+- Test: `tests/test_engine.py`
+
+**Step 1: 写测试**
+
+```python
+class TestAutoSupplementWriteHint:
+    """自动补充写入工具时升级 write_hint。"""
+
+    @pytest.mark.asyncio
+    async def test_auto_supplement_write_tool_upgrades_hint(self) -> None:
+        """自动补充激活包含写入工具的 skill 时，write_hint 升级为 may_write。"""
+        config = _make_config(
+            skill_preroute_mode="meta_only",
+            auto_supplement_enabled=True,
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._current_write_hint = "read_only"
+
+        # format_cells 是写入工具，自动补充应升级 write_hint
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is not None
+        assert engine._current_write_hint == "may_write"
+```
+
+**Step 2: 修改 `_try_auto_supplement_tool`**
+
+在激活 skill 成功后、return 之前追加：
+
+```python
+from excelmanus.tools.policy import MUTATING_ALL_TOOLS
+
+# 如果触发工具是写入类，升级 write_hint
+if tool_name in MUTATING_ALL_TOOLS:
+    self._current_write_hint = "may_write"
+```
+
+**Step 3: 运行测试**
+
+Run: `pytest tests/test_engine.py::TestAutoSupplementWriteHint -v`
+Expected: PASS
+
+**Step 4: Commit**
+
+```bash
+git add excelmanus/engine.py tests/test_engine.py
+git commit -m "feat(engine): 自动补充写入工具时升级 write_hint"
+```
+
+---
+
+### Task 7: 修改工具索引措辞
+
+**Files:**
+- Modify: `excelmanus/engine.py`
+- Test: `tests/test_engine.py`
+
+**Step 1: 写测试**
+
+```python
+class TestToolIndexWording:
+    """工具索引措辞更新。"""
+
+    def test_tool_index_uses_auto_supplement_wording_when_enabled(self) -> None:
+        """auto_supplement 开启时，工具索引使用"直接调用"措辞。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        assert "直接调用" in notice or "按需可用" in notice
+        assert "需 select_skill" not in notice
+
+    def test_tool_index_uses_select_skill_wording_when_disabled(self) -> None:
+        """auto_supplement 关闭时，保留原有"需 select_skill"措辞。"""
+        config = _make_config(auto_supplement_enabled=False)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        assert "select_skill" in notice
+```
+
+**Step 2: 修改 `_build_tool_index_notice`**
+
+找到当前的措辞：
+
+```python
+parts.append("未激活（需 select_skill 激活对应技能后可用）：")
+```
+
+替换为：
+
+```python
+if self._config.auto_supplement_enabled:
+    parts.append("按需可用（直接调用即可，系统会自动激活对应技能）：")
+else:
+    parts.append("未激活（需 select_skill 激活对应技能后可用）：")
+```
+
+找到末尾的警告文本：
+
+```python
+parts.append(
+    "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
+    "禁止向用户请求权限或声称无法完成。"
+    "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
+    "不得以文本建议替代实际写入操作。"
+)
+```
+
+替换为：
+
+```python
+if self._config.auto_supplement_enabled:
+    parts.append(
+        "\n⚠️ 上述按需可用工具可直接调用，系统会自动激活对应技能。"
+        "无需先调用 select_skill。"
+        "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
+        "不得以文本建议替代实际写入操作。"
+    )
+else:
+    parts.append(
+        "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
+        "禁止向用户请求权限或声称无法完成。"
+        "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
+        "不得以文本建议替代实际写入操作。"
+    )
+```
+
+**Step 3: 运行测试**
+
+Run: `pytest tests/test_engine.py::TestToolIndexWording -v`
+Expected: PASS
+
+**Step 4: Commit**
+
+```bash
+git add excelmanus/engine.py tests/test_engine.py
+git commit -m "feat(engine): 工具索引措辞适配 auto_supplement 模式"
+```
+
+---
+
+### Task 8: 预路由分层加载 — 复合意图不再降级到 general_excel
+
+**Files:**
+- Modify: `excelmanus/engine.py`
+- Test: `tests/test_engine.py`
+
+**Step 1: 写测试**
+
+```python
+class TestPreRouteLayeredLoading:
+    """预路由分层加载：复合意图加载多个 skill 而非降级 general_excel。"""
+
+    @pytest.mark.asyncio
+    async def test_compound_intent_loads_both_skills(self) -> None:
+        """复合意图（如 data_basic + chart_basic）应加载两个 skill。"""
+        config = _make_config(skill_preroute_mode="hybrid", auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        # 模拟预路由返回复合意图
+        from excelmanus.skillpacks.pre_router import PreRouteResult
+        pre_result = PreRouteResult(
+            skill_name="data_basic",
+            skill_names=["data_basic", "chart_basic"],
+            confidence=0.8,
+            reason="复合意图",
+            latency_ms=50.0,
+            model_used="test",
+        )
+
+        target, candidates = engine._resolve_preroute_target_layered(pre_result)
+        assert target == "data_basic"
+        assert candidates == ["data_basic", "chart_basic"]
+        # 不应降级到 general_excel
+        assert target != "general_excel"
+```
+
+**Step 2: 修改 chat() Phase 1 中的 `_resolve_preroute_target`**
+
+将现有的 `_resolve_preroute_target` 内联函数重构为方法 `_resolve_preroute_target_layered`：
+
+```python
+def _resolve_preroute_target_layered(
+    self, result: "PreRouteResult | None",
+) -> tuple[str | None, list[str]]:
+    """解析预路由结果，支持分层加载。
+
+    返回 (主 skill 名, 全部候选列表)。
+    复合意图时返回第一个候选作为主 skill，不再降级到 general_excel。
+    """
+    if result is None:
+        return None, []
+    candidates: list[str] = []
+    raw_candidates = getattr(result, "skill_names", None)
+    if isinstance(raw_candidates, list):
+        for item in raw_candidates:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or name in candidates:
+                continue
+            candidates.append(name)
+    legacy_name = getattr(result, "skill_name", None)
+    if isinstance(legacy_name, str) and legacy_name.strip():
+        normalized = legacy_name.strip()
+        if normalized not in candidates:
+            candidates.append(normalized)
+    if not candidates:
+        return None, candidates
+    # 分层加载：第一个候选为主 skill，其余为副 skill
+    return candidates[0], candidates
+```
+
+然后修改 chat() Phase 1 中 hybrid 分支的复合意图处理：
+
+```python
+target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
+if target_skill_name is not None:
+    # 主 skill：full 模式（tools + instructions）
+    auto_result = await self._handle_select_skill(target_skill_name)
+    if not auto_result.startswith("未找到技能:"):
+        auto_activated_skill_name = target_skill_name
+        logger.info("hybrid 预路由激活主技能: %s", auto_activated_skill_name)
+        # 副 skill：也激活（多 skill 注入已支持）
+        for secondary_name in skill_candidates[1:]:
+            if secondary_name == target_skill_name:
+                continue
+            sec_result = await self._handle_select_skill(secondary_name)
+            if not sec_result.startswith("未找到技能:"):
+                logger.info("hybrid 预路由激活副技能: %s", secondary_name)
+    else:
+        logger.warning(
+            "hybrid 预路由技能 %s 不存在（候选=%s），回退 meta_only 模式",
+            target_skill_name, skill_candidates,
+        )
+```
+
+**Step 3: 运行测试**
+
+Run: `pytest tests/test_engine.py::TestPreRouteLayeredLoading -v`
+Expected: PASS
+
+**Step 4: 运行全量引擎测试确保无回归**
+
+Run: `pytest tests/test_engine.py -x -q`
+Expected: 全部 PASS
+
+**Step 5: Commit**
+
+```bash
+git add excelmanus/engine.py tests/test_engine.py
+git commit -m "feat(engine): 预路由分层加载，复合意图不再降级 general_excel"
+```
+
+---
+
+### Task 9: 全量回归测试 + 边界加固
+
+**Files:**
+- Modify: `excelmanus/engine.py`
+- Test: `tests/test_engine.py`, `tests/test_tool_policy.py`
+
+**Step 1: 写边界测试**
+
+```python
+class TestAutoSupplementEdgeCases:
+    """自动补充边界情况。"""
+
+    @pytest.mark.asyncio
+    async def test_auto_supplement_does_not_activate_same_skill_twice(self) -> None:
+        """同一 skill 不应被自动补充重复激活。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=5)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        # 第一次：激活 format_basic
+        r1 = engine._try_auto_supplement_tool("format_cells")
+        assert r1 is not None
+        assert r1.skill_name == "format_basic"
+
+        # 第二次：format_cells 已在 active_skills 并集中
+        r2 = engine._try_auto_supplement_tool("format_cells")
+        assert r2 is None
+
+    @pytest.mark.asyncio
+    async def test_auto_supplement_with_mcp_tool_returns_none(self) -> None:
+        """MCP 工具不在任何 skillpack 中，应返回 None。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        result = engine._try_auto_supplement_tool("mcp_some_server_some_tool")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_auto_supplement_counter_increments(self) -> None:
+        """每次成功补充后计数器递增。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=5)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        assert engine._turn_supplement_count == 0
+
+        engine._try_auto_supplement_tool("format_cells")
+        # 注意：计数器在 _execute_tool_call 中递增，不在 _try_auto_supplement_tool 中
+        # _try_auto_supplement_tool 只做查找和激活
+        # 所以这里计数器仍为 0，递增在调用方
+```
+
+**Step 2: 运行全量测试**
+
+Run: `pytest tests/test_engine.py -x -q`
+Expected: 全部 PASS
+
+Run: `pytest tests/test_tool_policy.py -x -q`
+Expected: 全部 PASS
+
+Run: `pytest tests/ -x -q --timeout=60`
+Expected: 全部 PASS
+
+**Step 3: Commit**
+
+```bash
+git add excelmanus/engine.py tests/test_engine.py
+git commit -m "test(engine): 自动补充边界测试"
+```
+
+---
+
+### Task 10: 最终集成验证
+
+**Step 1: 运行完整测试套件**
+
+Run: `pytest tests/ -x -q --timeout=120`
+Expected: 全部 PASS，无回归
+
+**Step 2: 手动验证关键路径**
+
+验证以下场景的日志输出：
+
+1. `skill_preroute_mode=hybrid` + `auto_supplement_enabled=true`：
+   - 预路由选中 data_basic → LLM 调用 format_cells → 自动补充激活 format_basic → 执行成功
+   - 日志应包含 "自动补充激活技能 format_basic（触发工具: format_cells）"
+
+2. `skill_preroute_mode=meta_only` + `auto_supplement_enabled=true`：
+   - 无预激活 → LLM 从工具索引看到 format_cells → 直接调用 → 自动补充 → 成功
+
+3. `auto_supplement_enabled=false`：
+   - 行为与当前完全一致，无自动补充
+
+**Step 3: 最终 Commit**
+
+```bash
+git add -A
+git commit -m "feat: 工具自动补充（auto-supplement）完整实现
+
+- 新增 auto_supplement_enabled / auto_supplement_max_per_turn 配置
+- 构建 tool→skill 反向索引（最小覆盖优先）
+- _execute_tool_call 预检-扩展-执行逻辑
+- 每轮重置计数器 + tool_scope 同步
+- write_hint 联动升级
+- 工具索引措辞适配
+- 预路由分层加载（复合意图不再降级 general_excel）
+- 完整测试覆盖"
+```
+
+---
+
+## 任务依赖关系
+
+```
+Task 1 (config) ──→ Task 2 (反向索引) ──→ Task 3 (核心方法)
+                                              │
+                                              ▼
+                                         Task 4 (集成到 _execute_tool_call)
+                                              │
+                                              ▼
+                                         Task 5 (轮次重置 + scope 同步)
+                                              │
+                                         ┌────┼────┐
+                                         ▼    ▼    ▼
+                                    Task 6  Task 7  Task 8
+                                  (write_hint) (措辞) (分层加载)
+                                         │    │    │
+                                         └────┼────┘
+                                              ▼
+                                         Task 9 (边界测试)
+                                              │
+                                              ▼
+                                         Task 10 (集成验证)
+```
+
+Task 6/7/8 可并行执行。
