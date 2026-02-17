@@ -120,6 +120,9 @@ class ExcelManusConfig:
     skill_preroute_base_url: str | None = None
     skill_preroute_model: str | None = None
     skill_preroute_timeout_ms: int = 10000
+    # 工具自动补充：LLM 调用未授权工具时自动激活对应 skillpack
+    auto_supplement_enabled: bool = True
+    auto_supplement_max_per_turn: int = 3
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -715,6 +718,17 @@ def load_config() -> ExcelManusConfig:
         10000,
     )
 
+    auto_supplement_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_AUTO_SUPPLEMENT_ENABLED"),
+        "EXCELMANUS_AUTO_SUPPLEMENT_ENABLED",
+        True,
+    )
+    auto_supplement_max_per_turn = _parse_int(
+        os.environ.get("EXCELMANUS_AUTO_SUPPLEMENT_MAX_PER_TURN"),
+        "EXCELMANUS_AUTO_SUPPLEMENT_MAX_PER_TURN",
+        3,
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -796,5 +810,7 @@ def load_config() -> ExcelManusConfig:
         skill_preroute_base_url=skill_preroute_base_url,
         skill_preroute_model=skill_preroute_model,
         skill_preroute_timeout_ms=skill_preroute_timeout_ms,
+        auto_supplement_enabled=auto_supplement_enabled,
+        auto_supplement_max_per_turn=auto_supplement_max_per_turn,
         models=models,
     )
