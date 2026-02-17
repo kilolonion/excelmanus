@@ -194,6 +194,16 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
         ),
         f"viewport: {viewport.get('range') or '未知'}",
     ]
+
+    # 列截断警告：当实际列数超过视口可见列数时提醒
+    _visible_cols = viewport.get("visible_cols", 0)
+    _total_cols = viewport.get("total_cols", 0)
+    if _total_cols > _visible_cols > 0:
+        lines.append(
+            f"⚠️ 列截断：工作表共 {_total_cols} 列，视口仅显示 {_visible_cols} 列，"
+            f"格式化整行时建议使用行引用（如 1:1）"
+        )
+
     freeze = payload.get("freeze_panes")
     if freeze:
         lines.append(f"freeze: {freeze}")
