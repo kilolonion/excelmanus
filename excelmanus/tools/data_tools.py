@@ -412,12 +412,44 @@ def _read_df(
 ) -> tuple[pd.DataFrame, int]:
     """统一读取 Excel 为 DataFrame，含 header 自动检测 + 公式列求值。
 
+    当自动检测的 header_row 导致超过 50% 列名为 Unnamed 时，
+    自动向下尝试最多 5 行寻找更合理的表头。
+
     Returns:
         (DataFrame, effective_header_row) 元组。
     """
     kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
     effective_header = kwargs.get("header", 0)
     df = pd.read_excel(**kwargs)
+
+    # 仅在自动检测模式下（用户未显式指定 header_row）执行 Unnamed 回退
+    if header_row is None:
+        unnamed_ratio = (
+            sum(1 for c in df.columns if str(c).startswith("Unnamed"))
+            / max(len(df.columns), 1)
+        )
+        if unnamed_ratio > 0.5:
+            logger.info(
+                "自动检测 header_row=%d 产生 %.0f%% Unnamed 列名，尝试回退",
+                effective_header, unnamed_ratio * 100,
+            )
+            for try_header in range(effective_header + 1, min(effective_header + 6, 30)):
+                retry_kwargs = {**kwargs, "header": try_header}
+                try:
+                    df_retry = pd.read_excel(**retry_kwargs)
+                except Exception:
+                    break
+                if df_retry.empty:
+                    break
+                retry_unnamed = sum(
+                    1 for c in df_retry.columns if str(c).startswith("Unnamed")
+                )
+                if retry_unnamed / max(len(df_retry.columns), 1) < 0.3:
+                    logger.info("回退成功：header_row=%d → %d", effective_header, try_header)
+                    df = df_retry
+                    effective_header = try_header
+                    break
+
     df = _resolve_formula_columns(df, safe_path, sheet_name, effective_header)
     return df, effective_header
 

@@ -249,3 +249,41 @@ class TestDeepHeaderRead:
         parsed = json.loads(result)
         assert parsed.get("detected_header_row") == 7
         assert parsed["columns"][:3] == ["月份", "营收", "成本"]
+
+
+class TestUnnamedFallback:
+    """当自动检测的 header_row 产生 Unnamed 列名时，应自动回退到下一行。"""
+
+    def test_fallback_on_unnamed_columns(self, tmp_path: Path) -> None:
+        """非合并但内容为空的标题行导致 Unnamed 时，_read_df 应自动重试。"""
+        wb = Workbook()
+        ws = wb.active
+        # 第 0 行：3 个非空值但不是好的列名（会被选为 header 但产生 Unnamed）
+        ws["A1"] = "标题A"
+        ws["B1"] = "标题B"
+        ws["C1"] = "标题C"
+        ws["D1"] = None
+        ws["E1"] = None
+        ws["F1"] = None
+        # 第 1 行：真正的表头
+        ws["A2"] = "月份"
+        ws["B2"] = "产品"
+        ws["C2"] = "销售额"
+        ws["D2"] = "成本"
+        ws["E2"] = "利润"
+        ws["F2"] = "地区"
+        # 数据行
+        ws["A3"] = "1月"
+        ws["B3"] = "产品A"
+        ws["C3"] = 10000
+        ws["D3"] = 6000
+        ws["E3"] = 4000
+        ws["F3"] = "华东"
+        fp = tmp_path / "unnamed_fallback.xlsx"
+        wb.save(fp)
+
+        from excelmanus.tools.data_tools import _read_df
+        df, effective_header = _read_df(fp, None)
+        # 列名不应包含 Unnamed
+        unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed"))
+        assert unnamed_count == 0, f"列名中仍有 Unnamed: {list(df.columns)}"
