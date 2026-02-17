@@ -21,13 +21,14 @@ def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enrich
         return (
             "## 数据窗口\n"
             "以下窗口包含你通过工具操作获取的所有数据。\n"
-            "窗口内容与工具执行结果完全等价，若已包含所需信息请直接引用，无需重复调用工具。\n\n"
+            "窗口内容是最近一次工具结果快照；若窗口未覆盖所需范围，再补充读取。\n"
+            "写入类任务必须调用写入工具并依据其返回确认完成。\n\n"
             + body
         )
     return (
         "## 窗口感知上下文\n"
-        "以下是你当前已打开的窗口实时状态，数据与工具返回完全一致。\n"
-        "如果所需信息已在下方窗口中，直接引用回答或基于窗口数据调用工具执行，无需重复读取。\n\n"
+        "以下是你当前已打开的窗口实时状态。\n"
+        "若窗口信息不足或未覆盖目标范围，再补充读取；写入类任务必须以写入工具返回为准。\n\n"
         + body
     )
 
@@ -325,6 +326,20 @@ def _render_sheet_projection(projection: NoticeProjection, *, payload: ToolPaylo
         lines.append(f"summary: {projection.summary}")
     return "\n".join(lines)
 
+def _range_overlaps(range_a: str, range_b: str) -> bool:
+    """判断两个 Excel 范围是否有交集。"""
+    try:
+        from openpyxl.utils.cell import range_boundaries
+        a_min_col, a_min_row, a_max_col, a_max_row = range_boundaries(range_a)
+        b_min_col, b_min_row, b_max_col, b_max_row = range_boundaries(range_b)
+    except (ValueError, TypeError):
+        return False
+    return not (
+        a_max_row < b_min_row or b_max_row < a_min_row
+        or a_max_col < b_min_col or b_max_col < a_min_col
+    )
+
+
 
 def _render_background_projection(
     projection: NoticeProjection,
@@ -411,6 +426,13 @@ def _render_sheet(window: SheetWindow) -> str:
         lines.append("preview:")
         lines.extend(_render_preview(preview, max_rows=8))
 
+    # 列截断提示：当实际列数超过视口可见列数时，提醒 LLM 还有未显示的列
+    if viewport is not None and viewport.total_cols > viewport.visible_cols > 0:
+        lines.append(
+            f"⚠️ 还有 {viewport.total_cols - viewport.visible_cols} 列未在视口中显示"
+            f"（总列数: {viewport.total_cols}）"
+        )
+
     if window.style_summary:
         lines.append("style:")
         lines.append(f"  {window.style_summary}")
@@ -467,6 +489,9 @@ def render_window_wurm_full(
 ) -> str:
     """渲染 WURM FULL 模式窗口。"""
     profile = _normalize_intent_profile(window, intent_profile=intent_profile)
+    last_op_kind = getattr(window, "last_op_kind", None)
+    focus_range = getattr(window, "last_write_range", None)
+    is_write_focus = last_op_kind == "write" and bool(focus_range)
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
     lines = [f"[{window.id} · {file_name} / {sheet_name}]"]
@@ -512,24 +537,48 @@ def render_window_wurm_full(
     ranges = list(window.cached_ranges)
     if ranges:
         ranges.sort(key=lambda item: (0 if not item.is_current_viewport else 1, item.added_at_iteration))
+        any_focus_hit = False
         for cached in ranges:
             marker = " [current-viewport]" if cached.is_current_viewport else ""
-            rows_to_render = cached.rows
-            if profile.get("show_quality"):
-                rows_to_render = _pick_anomaly_rows(cached.rows, limit=render_max_rows) or cached.rows
-            lines.append(f"-- cached {cached.range_ref} ({len(cached.rows)}r){marker} --")
-            lines.extend(_render_pipe_rows(
-                rows=rows_to_render,
-                columns=column_names,
-                max_rows=render_max_rows,
-                current_iteration=current_iteration,
-                changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
-            ))
+            if is_write_focus:
+                if _range_overlaps(cached.range_ref, focus_range):
+                    any_focus_hit = True
+                    focus_marker = " [FOCUS·STALE]" if window.stale_hint else " [FOCUS]"
+                    lines.append(f"-- cached {cached.range_ref} ({len(cached.rows)}r){marker}{focus_marker} --")
+                    rows_to_render = cached.rows
+                    if profile.get("show_quality"):
+                        rows_to_render = _pick_anomaly_rows(cached.rows, limit=render_max_rows) or cached.rows
+                    lines.extend(_render_pipe_rows(
+                        rows=rows_to_render,
+                        columns=column_names,
+                        max_rows=render_max_rows,
+                        current_iteration=current_iteration,
+                        changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
+                    ))
+                else:
+                    lines.append(f"-- cached {cached.range_ref} ({len(cached.rows)}r){marker} [collapsed] --")
+            else:
+                rows_to_render = cached.rows
+                if profile.get("show_quality"):
+                    rows_to_render = _pick_anomaly_rows(cached.rows, limit=render_max_rows) or cached.rows
+                lines.append(f"-- cached {cached.range_ref} ({len(cached.rows)}r){marker} --")
+                lines.extend(_render_pipe_rows(
+                    rows=rows_to_render,
+                    columns=column_names,
+                    max_rows=render_max_rows,
+                    current_iteration=current_iteration,
+                    changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
+                ))
+        if is_write_focus and not any_focus_hit:
+            lines.append(f"⚠️ 写入范围 {focus_range} 不在缓存视口中，数据可能需要重新读取")
     else:
         rows_to_render = window.data_buffer
         if profile.get("show_quality"):
             rows_to_render = _pick_anomaly_rows(window.data_buffer, limit=render_max_rows) or window.data_buffer
-        lines.append("data:")
+        if is_write_focus:
+            lines.append(f"data: (write-focus @ {focus_range})")
+        else:
+            lines.append("data:")
         lines.extend(_render_pipe_rows(
             rows=rows_to_render,
             columns=column_names,
@@ -537,6 +586,11 @@ def render_window_wurm_full(
             current_iteration=current_iteration,
             changed_indices=set(window.change_log[-1].affected_row_indices) if window.change_log else set(),
         ))
+
+    # 列截断提示：当实际列数超过可见列数时，提醒 LLM 还有未显示的列
+    visible_cols = len(column_names)
+    if total_cols > visible_cols > 0:
+        lines.append(f"⚠️ 还有 {total_cols - visible_cols} 列未在视口中显示（总列数: {total_cols}）")
 
     status_bar = window.status_bar
     if status_bar:
