@@ -338,6 +338,10 @@ def read_cell_styles(
                         entry["merged"] = True
                     cell_styles.append(entry)
 
+    # 在 wb.close() 之前保存 shape 信息
+    sheet_max_row = ws.max_row or 0
+    sheet_max_col = ws.max_column or 0
+
     wb.close()
 
     # 构建合并范围列表
@@ -348,6 +352,8 @@ def read_cell_styles(
         "file": safe_path.name,
         "range": cell_range,
         "total_cells": total_cells,
+        "rows": sheet_max_row,
+        "columns": sheet_max_col,
         "summary": {
             "fill_colors_used": sorted(fill_colors),
             "font_colors_used": sorted(font_colors),
