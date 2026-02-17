@@ -43,7 +43,7 @@ class ExcelManusConfig:
     base_url: str
     model: str
     max_iterations: int = 20
-    max_consecutive_failures: int = 3
+    max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
     workspace_root: str = "."
@@ -72,7 +72,7 @@ class ExcelManusConfig:
     subagent_enabled: bool = True
     subagent_model: str | None = None
     subagent_max_iterations: int = 120
-    subagent_max_consecutive_failures: int = 2
+    subagent_max_consecutive_failures: int = 6
     subagent_user_dir: str = "~/.excelmanus/agents"
     subagent_project_dir: str = ".excelmanus/agents"
     # 跨会话持久记忆配置
@@ -115,7 +115,7 @@ class ExcelManusConfig:
     # 默认技能预激活：非斜杠路由时自动激活 general_excel
     auto_activate_default_skill: bool = True
     # 小模型预路由配置
-    skill_preroute_mode: str = "off"  # off / deepseek / gemini / meta_only
+    skill_preroute_mode: str = "hybrid"  # off / deepseek / gemini / meta_only / hybrid
     skill_preroute_api_key: str | None = None
     skill_preroute_base_url: str | None = None
     skill_preroute_model: str | None = None
@@ -420,7 +420,7 @@ def load_config() -> ExcelManusConfig:
     max_consecutive_failures = _parse_int(
         os.environ.get("EXCELMANUS_MAX_CONSECUTIVE_FAILURES"),
         "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
-        3,
+        6,
     )
     session_ttl_seconds = _parse_int(
         os.environ.get("EXCELMANUS_SESSION_TTL_SECONDS"),
@@ -526,7 +526,7 @@ def load_config() -> ExcelManusConfig:
     subagent_max_consecutive_failures = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
         "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
-        2,
+        6,
     )
     subagent_user_dir = os.environ.get(
         "EXCELMANUS_SUBAGENT_USER_DIR",
@@ -698,7 +698,7 @@ def load_config() -> ExcelManusConfig:
 
     # 小模型预路由配置
     skill_preroute_mode_raw = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODE", "off").strip().lower()
-    if skill_preroute_mode_raw not in {"off", "deepseek", "gemini", "meta_only"}:
+    if skill_preroute_mode_raw not in {"off", "deepseek", "gemini", "meta_only", "hybrid"}:
         logger.warning(
             "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 非法(%r)，已回退为 off",
             skill_preroute_mode_raw,

@@ -103,3 +103,4 @@ class SkillMatchResult:
     route_mode: str
     system_contexts: list[str] = field(default_factory=list)
     parameterized: bool = False
+    write_hint: str = "unknown"  # "may_write" | "read_only" | "unknown"
