@@ -8,7 +8,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _MODE_ORDER = ("unified", "anchored", "enriched")
-_SAFE_MODE = "enriched"
+_DEFAULT_MODE = "anchored"
 
 
 @dataclass
@@ -18,7 +18,7 @@ class AdaptiveModeSelector:
     model_mode_overrides: dict[str, str] = field(default_factory=dict)
     current_mode: str | None = None
     consecutive_ingest_failures: int = 0
-    requested_mode: str = _SAFE_MODE
+    requested_mode: str = _DEFAULT_MODE
 
     _DEFAULT_PREFIX_MAP: tuple[tuple[str, str], ...] = (
         ("gpt-5", "unified"),
@@ -27,7 +27,7 @@ class AdaptiveModeSelector:
         ("kimi", "anchored"),
         ("claude-sonnet", "anchored"),
         ("sonnet", "anchored"),
-        ("deepseek", "enriched"),
+        ("deepseek", "anchored"),
     )
 
     def __post_init__(self) -> None:
@@ -51,9 +51,9 @@ class AdaptiveModeSelector:
 
     def downgrade(self, *, reason: str) -> str:
         """按 unified->anchored->enriched 链路降级。"""
-        previous = self.current_mode or _SAFE_MODE
+        previous = self.current_mode or _DEFAULT_MODE
         if previous not in _MODE_ORDER:
-            previous = _SAFE_MODE
+            previous = _DEFAULT_MODE
         index = _MODE_ORDER.index(previous)
         target = _MODE_ORDER[min(index + 1, len(_MODE_ORDER) - 1)]
         self.current_mode = target
@@ -86,12 +86,12 @@ class AdaptiveModeSelector:
         """重置会话状态。"""
         self.current_mode = None
         self.consecutive_ingest_failures = 0
-        self.requested_mode = _SAFE_MODE
+        self.requested_mode = _DEFAULT_MODE
 
     def _resolve_initial_mode(self, model_id: str) -> str:
         normalized = str(model_id or "").strip().lower()
         if not normalized:
-            return _SAFE_MODE
+            return _DEFAULT_MODE
 
         # override 优先，按最长前缀匹配
         override_mode = self._match_prefix(self.model_mode_overrides, normalized)
@@ -101,7 +101,7 @@ class AdaptiveModeSelector:
         # 默认映射，按最长前缀匹配
         default_map = {prefix: mode for prefix, mode in self._DEFAULT_PREFIX_MAP}
         matched = self._match_prefix(default_map, normalized)
-        return matched or _SAFE_MODE
+        return matched or _DEFAULT_MODE
 
     @staticmethod
     def _match_prefix(prefix_map: dict[str, str], model_id: str) -> str:
@@ -117,10 +117,10 @@ class AdaptiveModeSelector:
 
     @staticmethod
     def _normalize_requested_mode(requested_mode: str) -> str:
-        value = str(requested_mode or _SAFE_MODE).strip().lower()
+        value = str(requested_mode or _DEFAULT_MODE).strip().lower()
         if value in {"adaptive", "unified", "anchored", "enriched"}:
             return value
-        return _SAFE_MODE
+        return _DEFAULT_MODE
 
     @staticmethod
     def _normalize_overrides(raw: dict[str, str] | None) -> dict[str, str]:
