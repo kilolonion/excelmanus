@@ -205,6 +205,37 @@ class TestDetectHeaderRow:
         result = data_tools._detect_header_row(excel_with_deep_header, "KPI")
         assert result == 7
 
+    def test_merged_title_row_skipped(self, tmp_path: Path) -> None:
+        """合并标题行（跨多列）应被跳过，检测到真正的 header。"""
+        wb = Workbook()
+        ws = wb.active
+        # 第 0 行：合并标题 "2024年销售数据" 跨 A1:F1
+        ws.append(["2024年销售数据", None, None, None, None, None])
+        ws.merge_cells("A1:F1")
+        # 第 1 行：真正的表头
+        ws.append(["月份", "产品", "地区", "销售额", "成本", "利润"])
+        # 第 2 行：数据
+        ws.append(["1月", "产品A", "华东", 10000, 6000, 4000])
+        ws.append(["2月", "产品B", "华北", 12000, 7000, 5000])
+        fp = tmp_path / "merged_title.xlsx"
+        wb.save(fp)
+        assert data_tools._detect_header_row(fp, None) == 1
+
+    def test_merged_title_two_rows_skipped(self, tmp_path: Path) -> None:
+        """两行合并标题都应被跳过。"""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["年度销售报表", None, None, None])
+        ws.merge_cells("A1:D1")
+        ws.append(["生成时间：2024-01", None, None, None])
+        ws.merge_cells("A2:D2")
+        ws.append(["月份", "产品", "销售额", "利润"])
+        ws.append(["1月", "A", 10000, 4000])
+        fp = tmp_path / "two_merged_titles.xlsx"
+        wb.save(fp)
+        assert data_tools._detect_header_row(fp, None) == 2
+
+
 
 class TestDeepHeaderRead:
     """深层表头自动读取回归。"""
@@ -218,3 +249,75 @@ class TestDeepHeaderRead:
         parsed = json.loads(result)
         assert parsed.get("detected_header_row") == 7
         assert parsed["columns"][:3] == ["月份", "营收", "成本"]
+
+
+class TestUnnamedFallback:
+    """当自动检测的 header_row 产生 Unnamed 列名时，应自动回退到下一行。"""
+
+    def test_fallback_on_unnamed_columns(self, tmp_path: Path) -> None:
+        """非合并但内容为空的标题行导致 Unnamed 时，_read_df 应自动重试。"""
+        wb = Workbook()
+        ws = wb.active
+        # 第 0 行：3 个非空值但不是好的列名（会被选为 header 但产生 Unnamed）
+        ws["A1"] = "标题A"
+        ws["B1"] = "标题B"
+        ws["C1"] = "标题C"
+        ws["D1"] = None
+        ws["E1"] = None
+        ws["F1"] = None
+        # 第 1 行：真正的表头
+        ws["A2"] = "月份"
+        ws["B2"] = "产品"
+        ws["C2"] = "销售额"
+        ws["D2"] = "成本"
+        ws["E2"] = "利润"
+        ws["F2"] = "地区"
+        # 数据行
+        ws["A3"] = "1月"
+        ws["B3"] = "产品A"
+        ws["C3"] = 10000
+        ws["D3"] = 6000
+        ws["E3"] = 4000
+        ws["F3"] = "华东"
+        fp = tmp_path / "unnamed_fallback.xlsx"
+        wb.save(fp)
+
+        from excelmanus.tools.data_tools import _read_df
+        df, effective_header = _read_df(fp, None)
+        # 列名不应包含 Unnamed
+        unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed"))
+        assert unnamed_count == 0, f"列名中仍有 Unnamed: {list(df.columns)}"
+
+class TestUnnamedWarning:
+    """read_excel 返回结果中应包含 Unnamed 列名警告。"""
+
+    def test_unnamed_warning_present(self, tmp_path: Path) -> None:
+        """当列名中仍有 Unnamed 时，summary 应包含警告字段。"""
+        wb = Workbook()
+        ws = wb.active
+        # 构造一个即使回退也无法消除 Unnamed 的场景：
+        # 表头行有 3 个非空 + 3 个空（Unnamed 占比 50%，不触发回退）
+        ws.append(["A", "B", "C", None, None, None])
+        ws.append([1, 2, 3, 4, 5, 6])
+        ws.append([7, 8, 9, 10, 11, 12])
+        fp = tmp_path / "all_unnamed.xlsx"
+        wb.save(fp)
+
+        data_tools.init_guard(str(tmp_path))
+        result_json = json.loads(data_tools.read_excel(str(fp)))
+        # 应该有 unnamed_columns_warning 字段
+        assert "unnamed_columns_warning" in result_json
+
+    def test_no_warning_when_clean(self, tmp_path: Path) -> None:
+        """列名正常时不应有警告。"""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["月份", "产品", "销售额"])
+        ws.append(["1月", "A", 10000])
+        fp = tmp_path / "clean.xlsx"
+        wb.save(fp)
+
+        data_tools.init_guard(str(tmp_path))
+        result_json = json.loads(data_tools.read_excel(str(fp)))
+        assert "unnamed_columns_warning" not in result_json
+

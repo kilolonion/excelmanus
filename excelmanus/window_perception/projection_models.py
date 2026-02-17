@@ -49,6 +49,7 @@ class ToolPayloadProjection:
     row_heights: dict[str, Any] = field(default_factory=dict)
     merged_ranges: tuple[str, ...] = ()
     conditional_effects: tuple[str, ...] = ()
+    sheet_dimensions: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,3 +65,4 @@ class ConfirmationProjection:
     intent: str
     hint: str = ""
     localized_hint: str = ""
+    sheet_dimensions: tuple[tuple[str, int, int], ...] = ()

@@ -64,6 +64,10 @@ class TestTokenCounter:
 class TestConversationMemory:
     """ConversationMemory 基本功能测试。"""
 
+    def test_default_system_prompt_blocks_write_completion_claims_without_tool_result(self) -> None:
+        assert "写入完成声明门禁" in _DEFAULT_SYSTEM_PROMPT
+        assert "未收到写入类工具成功返回前" in _DEFAULT_SYSTEM_PROMPT
+
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
         """初始状态只有 system 消息。"""
         msgs = memory.get_messages()

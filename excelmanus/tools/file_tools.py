@@ -176,7 +176,7 @@ def get_file_info(file_path: str) -> str:
     return json.dumps(info, ensure_ascii=False, indent=2)
 
 
-def search_files(pattern: str = "*", directory: str = ".", max_results: int = 50) -> str:
+def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) -> str:
     """按 glob 模式搜索工作区内的文件。
 
     Args:
@@ -480,7 +480,7 @@ def get_tools() -> list[ToolDef]:
             func=get_file_info,
         ),
         ToolDef(
-            name="search_files",
+            name="find_files",
             description="按 glob 模式在工作区内搜索文件，如 '*.xlsx'、'**/*.csv'",
             input_schema={
                 "type": "object",
@@ -504,7 +504,7 @@ def get_tools() -> list[ToolDef]:
                 "required": [],
                 "additionalProperties": False,
             },
-            func=search_files,
+            func=find_files,
         ),
         ToolDef(
             name="read_text_file",

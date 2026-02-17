@@ -42,11 +42,91 @@ class ToolDef:
     max_result_chars: int = 3000
 
     def truncate_result(self, text: str) -> str:
-        """若文本超过 max_result_chars 则截断并附加提示。"""
+        """若文本超过 max_result_chars 则截断并附加提示。
+
+        对 JSON 格式的工具结果采用智能截断策略：
+        保留所有非 list 的元数据字段，仅缩减最大的 list 字段（通常是 data/preview），
+        确保截断后的结果仍是合法 JSON，且关键元数据不丢失。
+        """
         limit = self.max_result_chars
         if limit <= 0 or len(text) <= limit:
             return text
+        # 尝试 JSON 感知截断
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                truncated = self._truncate_json_smart(parsed, limit)
+                if truncated is not None:
+                    return truncated
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        # 回退到字符截断
         return f"{text[:limit]}\n[结果已截断，原始长度: {len(text)} 字符]"
+
+    @staticmethod
+    def _truncate_json_smart(data: dict, limit: int) -> str | None:
+        """JSON 感知截断：保留元数据，缩减最大的 list 字段。
+
+        策略：找到 dict 中最大的 list 字段，逐步减半其元素数量，
+        直到序列化后长度 <= limit。如果缩减到 0 个元素仍超限，返回 None 回退字符截断。
+        """
+        # 找到所有 list 类型的字段及其大小
+        list_fields = {
+            k: len(v) for k, v in data.items()
+            if isinstance(v, list) and len(v) > 0
+        }
+        if not list_fields:
+            # 没有可缩减的 list 字段，回退
+            return None
+
+        # 按 list 长度降序排列，优先缩减最大的
+        sorted_fields = sorted(list_fields.keys(), key=lambda k: list_fields[k], reverse=True)
+        target_field = sorted_fields[0]
+        original_list = data[target_field]
+        original_len = len(original_list)
+
+        # 二分搜索合适的截断长度
+        lo, hi = 0, original_len
+        best_result: str | None = None
+
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if mid == 0:
+                # 尝试空列表
+                data[target_field] = []
+            else:
+                data[target_field] = original_list[:mid]
+
+            # 添加截断提示到 dict 中
+            if mid < original_len:
+                data[f"_{target_field}_truncated"] = True
+                data[f"_{target_field}_note"] = (
+                    f"[{target_field} 已截断: 显示 {mid}/{original_len} 条]"
+                )
+            else:
+                data.pop(f"_{target_field}_truncated", None)
+                data.pop(f"_{target_field}_note", None)
+
+            try:
+                candidate = json.dumps(data, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                data[target_field] = original_list
+                data.pop(f"_{target_field}_truncated", None)
+                data.pop(f"_{target_field}_note", None)
+                return None
+
+            if len(candidate) <= limit:
+                best_result = candidate
+                lo = mid + 1  # 尝试保留更多元素
+            else:
+                hi = mid - 1
+
+        # 恢复原始数据（避免副作用）
+        data[target_field] = original_list
+        data.pop(f"_{target_field}_truncated", None)
+        data.pop(f"_{target_field}_note", None)
+
+        return best_result
 
     def to_openai_schema(
         self, mode: OpenAISchemaMode = "responses"
@@ -164,7 +244,16 @@ class ToolRegistry:
         try:
             return tool.func(**arguments)
         except Exception as exc:
-            raise ToolExecutionError(f"工具 '{tool_name}' 执行失败: {exc}") from exc
+            logger.warning(
+                "工具 '%s' 执行异常: %s; arguments=%s",
+                tool_name,
+                exc,
+                arguments,
+            )
+            return self._format_execution_error(
+                tool_name=tool_name,
+                exc=exc,
+            )
 
     @staticmethod
     def _format_argument_validation_error(
@@ -190,6 +279,37 @@ class ToolRegistry:
             "provided_fields": sorted(arguments.keys()),
         }
         return json.dumps(payload, ensure_ascii=False)
+    @staticmethod
+    def _format_execution_error(
+        *,
+        tool_name: str,
+        exc: Exception,
+    ) -> str:
+        """构造统一的工具执行错误返回（JSON 字符串），透传原始异常信息。"""
+        payload = {
+            "status": "error",
+            "error_code": "TOOL_EXECUTION_ERROR",
+            "tool": tool_name,
+            "exception": type(exc).__name__,
+            "message": str(exc),
+        }
+        # 如果有链式异常（__cause__），也透传
+        if exc.__cause__ is not None and str(exc.__cause__) != str(exc):
+            payload["cause"] = str(exc.__cause__)
+        return json.dumps(payload, ensure_ascii=False)
+    @staticmethod
+    def is_error_result(result: Any) -> bool:
+        """检测工具返回值是否为 registry 层格式化的错误 JSON。"""
+        if not isinstance(result, str):
+            return False
+        # 快速前缀检测，避免对所有返回值做 JSON 解析
+        if not result.startswith('{"status": "error"'):
+            return False
+        try:
+            parsed = json.loads(result)
+            return isinstance(parsed, dict) and parsed.get("status") == "error"
+        except (json.JSONDecodeError, AttributeError):
+            return False
 
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。"""

@@ -1,0 +1,171 @@
+{
+  "suite_name": "SpreadsheetBench 自动抽样套件（10题）",
+  "description": "由 scripts/bench_pick.py 自动生成，从 verified-400 筛选 10 题，候选池 362 题",
+  "source": "SpreadsheetBench (NeurIPS 2024) — bench/external/spreadsheetbench/spreadsheetbench_verified_400",
+  "trace": true,
+  "sampling": {
+    "method": "filtered_random",
+    "seed": 20260216,
+    "total": 10,
+    "pool_size": 362,
+    "cell_level": 5,
+    "sheet_level": 5
+  },
+  "cases": [
+    {
+      "id": "sb_24_23",
+      "name": "SpreadsheetBench #24-23",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/24-23/1_24-23_init.xlsx. In my Excel spreadsheet, which has over 13,000 rows, I need to filter column A for the groups labeled '@9T', 'SAL', and 'T9A', and then delete these rows. The attached example only shows 207 rows. Can the provided code handle deleting the rows without taking excessive amounts of time?",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "sheet_level"
+      ],
+      "expected": {
+        "answer_position": "A2:D207",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/24-23/1_24-23_golden.xlsx",
+        "source_id": "24-23",
+        "answer_sheet": "Sheet1"
+      }
+    },
+    {
+      "id": "sb_147_48",
+      "name": "SpreadsheetBench #147-48",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/147-48/1_147-48_init.xlsx. I want to create a macro or transpose data similar to how I manually transposed data from Column A to Column C onwards. The data I've shown is a trimmed version, whereas the actual file is much longer. However, when I tried the macro provided by a forum user, it resulted in a 'run time error 7 out of memory'. After an adjustment was suggested to the macro code, it worked correctly.",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "sheet_level"
+      ],
+      "expected": {
+        "answer_position": "'Sheet1'!C1:K6",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/147-48/1_147-48_golden.xlsx",
+        "source_id": "147-48",
+        "answer_sheet": "Sheet1"
+      }
+    },
+    {
+      "id": "sb_105_24",
+      "name": "SpreadsheetBench #105-24",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/105-24/1_105-24_init.xlsx. In my Excel file, the 'Open' sheet contains IDs in Columns C and K. Find all these IDs and replace them with their respective Names. The corresponding Names for these IDs are located in Columns A and B of the 'Productivity' sheet. I require assistance with creating a macro or to automate this replacement process and also automatically consider any new additions to Columns A and B in the future for replacements. Do not create instructions, explanations, or a ID_Lookup_Helper tab. Do not create add data to any other columns other than C or K in the Open tab.  Do not hide any data.",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "sheet_level"
+      ],
+      "expected": {
+        "answer_position": "'Open'!C2:C23",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/105-24/1_105-24_golden.xlsx",
+        "source_id": "105-24",
+        "answer_sheet": "Open"
+      }
+    },
+    {
+      "id": "sb_302_1",
+      "name": "SpreadsheetBench #302-1",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/302-1/1_302-1_init.xlsx. How can I match and replace the values in Sheet1 and Sheet2 with those in the ITEMS sheet based on column B? Specifically, if the value in cell B2 of Sheet1 or Sheet2 does not match the value in cell B2 of the ITEMS sheet, then B2 in Sheet1 or Sheet2 should be replaced with the corresponding value from the ITEMS sheet. This comparison and replacement should be done for each cell in column B. After the replacement, column B in both Sheet1 and Sheet2 should match column B in the ITEMS sheet - the outcome I'm expecting are detailed in 'result sheet1' and 'result sheet2'. My actual dataset could be up to 500 rows.",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "sheet_level"
+      ],
+      "expected": {
+        "answer_position": "'SHEET1'!B2:B8,'SHEET2'!B2:B7",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/302-1/1_302-1_golden.xlsx",
+        "source_id": "302-1",
+        "answer_sheet": "'Sheet1','Sheet2'"
+      }
+    },
+    {
+      "id": "sb_56599",
+      "name": "SpreadsheetBench #56599",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/56599/1_56599_init.xlsx. How can I find the Book Number associated with a given slip number on my Excel sheet where each book contains 10 slips, each with a unique number? I attempted using a formula in B2 by provided Looking Slip number in M5 and if Cell is blank or not found write \"not found - please re-enter\". Each number in my Excel sheet has seven digits.",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "cell_level"
+      ],
+      "expected": {
+        "answer_position": "B2",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/56599/1_56599_golden.xlsx",
+        "source_id": "56599"
+      }
+    },
+    {
+      "id": "sb_49237",
+      "name": "SpreadsheetBench #49237",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/49237/1_49237_init.xlsx. How can I add a period to a cell in Excel if there is a middle initial present, and leave it blank if there is no middle initial? The middle initial is obtained from the full name in cell E19 with first name in E5 and last name in E7. The extraction formula I'm using for the middle name is `=TRIM(MID(E19,LEN(E5)+1,LEN(E19)-LEN(E5&E7)))`, which gives the middle name in E9. Then I'm converting it to proper case with `=PROPER(E9)` in F10, and I'm taking the initial from that result with `=LEFT(F10)` in F7. If F7 contains an initial, I want to add a period after it. Otherwise, F7 should remain blank. Every formula I've tried results in a `#VALUE` error. What formula should I use to achieve this?",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "cell_level"
+      ],
+      "expected": {
+        "answer_position": "F7",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/49237/1_49237_golden.xlsx",
+        "source_id": "49237"
+      }
+    },
+    {
+      "id": "sb_35747",
+      "name": "SpreadsheetBench #35747",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/35747/1_35747_init.xlsx. How can I create a formula in cell M2 that counts the number of values within the range B2:J11 that are greater than 100, where the corresponding date in B1:J1 is greater than or equal to a start date in M1, less than an end date in N1, and where the Asset ID in column A2:A11 matches the Asset ID in L2? \nCount how many values in B2:J11 if:\nB2:J11 > 100\nB1:J1 >= M1",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "cell_level"
+      ],
+      "expected": {
+        "answer_position": "M2",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/35747/1_35747_golden.xlsx",
+        "source_id": "35747"
+      }
+    },
+    {
+      "id": "sb_440_24",
+      "name": "SpreadsheetBench #440-24",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/440-24/1_440-24_init.xlsx. How can I automatically replace the data in the same cell with expanded values in Excel, so that the values in column B become the same as the corresponding values in column H, with the new expanded values overwriting the existing values in column B?",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "sheet_level"
+      ],
+      "expected": {
+        "answer_position": "'Sheet1'!B3:B22",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/440-24/1_440-24_golden.xlsx",
+        "source_id": "440-24",
+        "answer_sheet": "Sheet1"
+      }
+    },
+    {
+      "id": "sb_51289",
+      "name": "SpreadsheetBench #51289",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/51289/1_51289_init.xlsx. In my spreadsheet consisting of a range from A1:H2, the first row contains only the text 'cat' or 'dog' while the second row has random numbers. How do I identify which 'cat' and which 'dog' have the associated first and second largest numbers, and display these rankings in row 4? I encountered a problem when trying to search for the largest number associated with 'dog' if the largest number in the row is associated with 'cat', using a formula that involves an IF and AND statement. I have tried using a combination if(and statement that looks for \"dog\" and then looks for Large(A2:H2,1), but if \"cat\" has the largest number, then looking for \"dog\" with the largest number across the row fails. Any help appreciated.dog1 = largest # dog\ndog2 = 2nd largest # dog",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "cell_level"
+      ],
+      "expected": {
+        "answer_position": "A4:H4",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/51289/1_51289_golden.xlsx",
+        "source_id": "51289"
+      }
+    },
+    {
+      "id": "sb_45372",
+      "name": "SpreadsheetBench #45372",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/45372/1_45372_init.xlsx. Calculate a forecast total value in Excel column E based on the time. For instance, before 09:45, the value should come from column B, and after 09:45, it should switch to the value in column C.  Finish by applying fill hex color #FFC000 to E2:E15 and ensuring all other formatting remains unchanged from the original file. If it's 0, just leave blank",
+      "tags": [
+        "spreadsheetbench",
+        "verified_400",
+        "cell_level"
+      ],
+      "expected": {
+        "answer_position": "E2:E15",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/45372/1_45372_golden.xlsx",
+        "source_id": "45372"
+      }
+    }
+  ]
+}

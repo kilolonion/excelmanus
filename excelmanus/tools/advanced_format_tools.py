@@ -547,7 +547,7 @@ def add_conditional_rule(
     rule_type: str,
     sheet_name: str | None = None,
     operator: str | None = None,
-    formula: str | list[str] | None = None,
+    formula: str | int | float | list[str] | None = None,
     values: list[float] | None = None,
     font_color: str | None = None,
     fill_color: str | None = None,
@@ -595,6 +595,17 @@ def add_conditional_rule(
             ensure_ascii=False,
         )
 
+    # ── 参数兼容：formula 为数值时自动转入 values ──
+    if isinstance(formula, (int, float)):
+        if values is None:
+            values = [float(formula)]
+        formula = None
+    # ── 参数兼容：formula 为数值列表时自动转入 values ──
+    elif isinstance(formula, list) and formula and all(isinstance(v, (int, float)) for v in formula):
+        if values is None:
+            values = [float(v) for v in formula]
+        formula = None
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     wb = load_workbook(safe_path)
@@ -616,76 +627,80 @@ def add_conditional_rule(
 
     rule_detail = rule_type
 
-    if rule_type == "cell_is":
-        if operator is None:
-            wb.close()
-            return json.dumps(
-                {"error": "cell_is 规则需要 operator 参数"},
-                ensure_ascii=False,
-            )
-        rule_kwargs: dict[str, Any] = {"operator": operator}
-        if operator in ("between", "notBetween"):
-            if values is None or len(values) != 2:
+    try:
+        if rule_type == "cell_is":
+            if operator is None:
                 wb.close()
                 return json.dumps(
-                    {"error": f"operator='{operator}' 需要 values 参数包含恰好 2 个值"},
+                    {"error": "cell_is 规则需要 operator 参数"},
                     ensure_ascii=False,
                 )
-            rule_kwargs["formula"] = [str(values[0]), str(values[1])]
-        else:
-            if formula is not None:
-                rule_kwargs["formula"] = [formula] if isinstance(formula, str) else formula
-            elif values is not None and len(values) >= 1:
-                rule_kwargs["formula"] = [str(values[0])]
+            rule_kwargs: dict[str, Any] = {"operator": operator}
+            if operator in ("between", "notBetween"):
+                if values is None or len(values) != 2:
+                    wb.close()
+                    return json.dumps(
+                        {"error": f"operator='{operator}' 需要 values 参数包含恰好 2 个值"},
+                        ensure_ascii=False,
+                    )
+                rule_kwargs["formula"] = [str(values[0]), str(values[1])]
             else:
+                if formula is not None:
+                    rule_kwargs["formula"] = [formula] if isinstance(formula, str) else formula
+                elif values is not None and len(values) >= 1:
+                    rule_kwargs["formula"] = [str(values[0])]
+                else:
+                    wb.close()
+                    return json.dumps(
+                        {"error": "cell_is 规则需要 formula（字符串）或 values（数值数组，如 values=[1000]）参数指定比较值"},
+                        ensure_ascii=False,
+                    )
+            if style_font:
+                rule_kwargs["font"] = style_font
+            if style_fill:
+                rule_kwargs["fill"] = style_fill
+            rule = CellIsRule(**rule_kwargs)
+            rule_detail = f"cell_is({operator})"
+
+        elif rule_type == "formula":
+            if formula is None:
                 wb.close()
                 return json.dumps(
-                    {"error": "cell_is 规则需要 formula 或 values 参数指定比较值"},
+                    {"error": "formula 规则需要 formula 参数"},
                     ensure_ascii=False,
                 )
-        if style_font:
-            rule_kwargs["font"] = style_font
-        if style_fill:
-            rule_kwargs["fill"] = style_fill
-        rule = CellIsRule(**rule_kwargs)
-        rule_detail = f"cell_is({operator})"
+            formula_list = [formula] if isinstance(formula, str) else formula
+            rule_kwargs = {"formula": formula_list}
+            if style_font:
+                rule_kwargs["font"] = style_font
+            if style_fill:
+                rule_kwargs["fill"] = style_fill
+            rule = FormulaRule(**rule_kwargs)
+            rule_detail = f"formula({formula_list[0][:60]})"
 
-    elif rule_type == "formula":
-        if formula is None:
-            wb.close()
-            return json.dumps(
-                {"error": "formula 规则需要 formula 参数"},
-                ensure_ascii=False,
+        elif rule_type == "icon_set":
+            if icon_style is None:
+                wb.close()
+                return json.dumps(
+                    {"error": "icon_set 规则需要 icon_style 参数"},
+                    ensure_ascii=False,
+                )
+            rule = IconSetRule(
+                icon_style=icon_style,
+                type="percent",
+                values=[0, 33, 67],
+                showValue=True,
+                reverse=reverse_icons,
             )
-        formula_list = [formula] if isinstance(formula, str) else formula
-        rule_kwargs = {"formula": formula_list}
-        if style_font:
-            rule_kwargs["font"] = style_font
-        if style_fill:
-            rule_kwargs["fill"] = style_fill
-        rule = FormulaRule(**rule_kwargs)
-        rule_detail = f"formula({formula_list[0][:60]})"
+            rule_detail = f"icon_set({icon_style})"
 
-    elif rule_type == "icon_set":
-        if icon_style is None:
-            wb.close()
-            return json.dumps(
-                {"error": "icon_set 规则需要 icon_style 参数"},
-                ensure_ascii=False,
-            )
-        rule = IconSetRule(
-            icon_style=icon_style,
-            type="percent",
-            values=[0, 33, 67],
-            showValue=True,
-            reverse=reverse_icons,
-        )
-        rule_detail = f"icon_set({icon_style})"
+        ws.conditional_formatting.add(cell_range, rule)
 
-    ws.conditional_formatting.add(cell_range, rule)
-
-    wb.save(safe_path)
-    wb.close()
+        wb.save(safe_path)
+        wb.close()
+    except Exception:
+        wb.close()
+        raise
 
     logger.info("add_conditional_rule: %s[%s] %s %s", safe_path.name, sheet_name, cell_range, rule_detail)
     return json.dumps(
@@ -846,8 +861,8 @@ def get_tools() -> list[ToolDef]:
             name="add_conditional_rule",
             description=(
                 "添加通用条件格式规则。rule_type 支持三种："
-                "(1) cell_is — 基于值比较（如 >1000 高亮），需 operator + formula/values；"
-                "(2) formula — 基于公式条件（如 FATAL 行整行变色），需 formula；"
+                "(1) cell_is — 基于值比较（如 >1000 高亮），需 operator + values（如 values=[1000]）；"
+                "(2) formula — 基于公式条件（如 FATAL 行整行变色），需 formula（字符串）；"
                 "(3) icon_set — 图标集（如 3Arrows 三箭头），需 icon_style"
             ),
             input_schema={
@@ -870,12 +885,24 @@ def get_tools() -> list[ToolDef]:
                         "description": "cell_is 模式的比较运算符",
                     },
                     "formula": {
-                        "description": "公式字符串。cell_is 模式下是比较值，formula 模式下是条件公式（如 '=$C2=\"FATAL\"'）",
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "number"},
+                        ],
+                        "description": (
+                            "formula 模式的条件公式字符串（如 '=$C2=\"FATAL\"'），"
+                            "或 cell_is 模式的数值比较值（如 1000）。"
+                            "cell_is 模式推荐使用 values 参数传递数值。"
+                        ),
                     },
                     "values": {
                         "type": "array",
                         "items": {"type": "number"},
-                        "description": "between/notBetween 的两个边界值，或单值比较的数值",
+                        "description": (
+                            "cell_is 模式的数值参数。"
+                            "单值比较（greaterThan/lessThan/equal 等）传 1 个值，如 values=[1000]；"
+                            "范围比较（between/notBetween）传 2 个值，如 values=[50, 150]。"
+                        ),
                     },
                     "font_color": {"type": "string", "description": "条件满足时的字体颜色"},
                     "fill_color": {"type": "string", "description": "条件满足时的填充颜色"},

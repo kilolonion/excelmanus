@@ -17,9 +17,9 @@ def test_selector_prefix_mapping_and_unknown_fallback() -> None:
     selector.reset()
     assert selector.select_mode(model_id="claude-sonnet-4-5-20250929", requested_mode="adaptive") == "anchored"
     selector.reset()
-    assert selector.select_mode(model_id="deepseek-ai/DeepSeek-V3.2", requested_mode="adaptive") == "enriched"
+    assert selector.select_mode(model_id="deepseek-ai/DeepSeek-V3.2", requested_mode="adaptive") == "anchored"
     selector.reset()
-    assert selector.select_mode(model_id="unknown-model", requested_mode="adaptive") == "enriched"
+    assert selector.select_mode(model_id="unknown-model", requested_mode="adaptive") == "anchored"
 
 
 def test_selector_override_and_longest_prefix() -> None:
@@ -93,9 +93,9 @@ def test_manager_adaptive_repeat_tripwire_downgrades_one_level() -> None:
     )
 
     assert "首行预览" not in first
-    assert "hint=intent[aggregate] data already in window" in second
+    assert "hint=intent[aggregate] repeat read detected" in second
     assert "intent: aggregate" in third
-    assert "hint: intent[aggregate] data already in window" in third
+    assert "hint: intent[aggregate] repeat read detected" in third
     assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "anchored"
 
 

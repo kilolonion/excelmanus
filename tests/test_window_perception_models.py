@@ -10,9 +10,9 @@ class TestWindowModels:
 
     def test_viewport_defaults(self) -> None:
         viewport = Viewport()
-        assert viewport.range_ref == "A1:J25"
+        assert viewport.range_ref == "A1:T25"
         assert viewport.visible_rows == 25
-        assert viewport.visible_cols == 10
+        assert viewport.visible_cols == 20
 
     def test_window_state_defaults(self) -> None:
         state = make_window(id="w1", type=WindowType.SHEET, title="test")

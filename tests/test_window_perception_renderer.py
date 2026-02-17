@@ -109,6 +109,8 @@ class TestWindowRenderer:
         ]
         text = render_system_notice(snapshots, mode="anchored")
         assert "数据窗口" in text
+        assert "无需重复调用工具" not in text
+        assert "写入类任务" in text
 
     def test_render_window_keep_anchored_full(self) -> None:
         window = make_window(
@@ -233,3 +235,28 @@ class TestWindowRenderer:
 
         assert "sales.xlsx#Q1" in text
         assert "sheet_1" in text
+
+    def test_tool_perception_block_column_truncation_warning(self) -> None:
+        """当 total_cols > visible_cols 时，perception block 应包含列截断警告。"""
+        window = make_window(
+            id="sheet_trunc",
+            type=WindowType.SHEET,
+            title="sheet",
+            file_path="sales.xlsx",
+            sheet_name="Q1",
+            sheet_tabs=["Q1"],
+            viewport=Viewport(
+                range_ref="A1:J25",
+                visible_rows=25,
+                visible_cols=10,
+                total_rows=2004,
+                total_cols=12,
+            ),
+        )
+        payload = build_tool_perception_payload(window)
+        assert payload is not None
+        block = render_tool_perception_block(payload)
+        assert "2004r x 12c" in block
+        assert "12 列" in block
+        assert "10 列" in block
+

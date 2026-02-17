@@ -1,0 +1,24 @@
+{
+  "suite_name": "write_hint A/B 对比测试",
+  "description": "3 个 case 覆盖纯读取、明确写入、边界统计，用于验证 may_write/read_only 标记是否生效",
+  "cases": [
+    {
+      "id": "wh_read_only",
+      "name": "纯读取：读取销售明细前10行",
+      "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中销售明细的前10行数据，告诉我列名",
+      "tags": ["data_read", "write_hint_test"]
+    },
+    {
+      "id": "wh_may_write",
+      "name": "明确写入：新增利润估算列",
+      "message": "在 examples/bench/stress_test_comprehensive.xlsx「销售明细」末尾新增一列「利润估算」，公式为：实付金额 × 30%",
+      "tags": ["formula", "write", "write_hint_test"]
+    },
+    {
+      "id": "wh_boundary",
+      "name": "边界：统计分析",
+      "message": "对 examples/bench/stress_test_comprehensive.xlsx 的销售明细做统计分析，告诉我总订单数、各状态的订单数量分布",
+      "tags": ["data_read", "statistics", "write_hint_test"]
+    }
+  ]
+}

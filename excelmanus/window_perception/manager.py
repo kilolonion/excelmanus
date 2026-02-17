@@ -35,6 +35,7 @@ from .extractor import (
     extract_range_ref,
     extract_row_heights,
     extract_shape,
+    extract_sheet_dimensions,
     extract_sheet_name,
     extract_sheet_tabs,
     extract_status_bar,
@@ -65,7 +66,6 @@ from .models import (
     WindowRenderAction,
     WindowType,
 )
-from .projection_service import project_notice, project_tool_payload
 from .renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -348,8 +348,7 @@ class WindowPerceptionManager:
             windows=active_windows,
             active_window_id=self._active_window_id,
             render_keep=lambda window: render_window_keep(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 detail_level=window.detail_level,
                 mode=effective_mode,
                 max_rows=full_rows,
@@ -357,13 +356,11 @@ class WindowPerceptionManager:
                 intent_profile=self._build_intent_profile(window, level="full"),
             ),
             render_background=lambda window: render_window_background(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 intent_profile=self._build_intent_profile(window, level="summary"),
             ),
             render_minimized=lambda window: render_window_minimized(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 intent_profile=self._build_intent_profile(window, level="icon"),
             ),
             lifecycle_plan=lifecycle_plan,
@@ -919,11 +916,18 @@ class WindowPerceptionManager:
         )
 
         if canonical_tool_name in {"filter_data"}:
-            filter_condition = {
-                "column": arguments.get("column"),
-                "operator": arguments.get("operator"),
-                "value": arguments.get("value"),
-            }
+            # 适配多条件模式：优先使用 conditions 数组
+            if arguments.get("conditions"):
+                filter_condition = {
+                    "conditions": arguments["conditions"],
+                    "logic": arguments.get("logic", "and"),
+                }
+            else:
+                filter_condition = {
+                    "column": arguments.get("column"),
+                    "operator": arguments.get("operator"),
+                    "value": arguments.get("value"),
+                }
             affected = ingest_filter_result(
                 window,
                 filter_condition=filter_condition,
@@ -995,6 +999,17 @@ class WindowPerceptionManager:
             self._set_window_field(window, "total_rows", len(window.data_buffer))
         if window.total_cols <= 0:
             self._set_window_field(window, "total_cols", len(window.columns or window.schema))
+        # 设置操作类型标记，供渲染器聚焦渲染使用
+        if change.operation == "write":
+            self._set_window_field(window, "last_op_kind", "write")
+            self._set_window_field(window, "last_write_range", change.affected_range)
+        elif change.operation == "filter":
+            self._set_window_field(window, "last_op_kind", "filter")
+            self._set_window_field(window, "last_write_range", None)
+        else:
+            self._set_window_field(window, "last_op_kind", "read")
+            self._set_window_field(window, "last_write_range", None)
+
         self._set_window_field(window, "detail_level", DetailLevel.FULL)
         self._append_operation(window, canonical_tool_name, arguments, True)
         self._append_change(window, change)
@@ -1104,6 +1119,9 @@ class WindowPerceptionManager:
         tabs = extract_sheet_tabs(result_json)
         if tabs:
             self._set_window_field(window, "sheet_tabs", tabs)
+        sheet_dims = extract_sheet_dimensions(result_json)
+        if sheet_dims:
+            self._set_window_field(window, "sheet_dimensions", sheet_dims)
         if normalized_sheet:
             self._set_window_field(window, "sheet_name", normalized_sheet)
         if file_path:

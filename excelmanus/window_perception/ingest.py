@@ -32,7 +32,11 @@ def extract_data_rows(result_json: dict[str, Any] | None, tool_name: str) -> lis
 
 
 def extract_columns(result_json: dict[str, Any] | None, rows: list[dict[str, Any]]) -> list[ColumnDef]:
-    """提取并推断列信息。"""
+    """提取并推断列信息。
+
+    当列名为 Unnamed 模式时，从数据行中提取样本值作为标注，
+    帮助 LLM 更准确地识别列含义。
+    """
     raw_columns = result_json.get("columns") if isinstance(result_json, dict) else None
     names: list[str] = []
 
@@ -44,10 +48,35 @@ def extract_columns(result_json: dict[str, Any] | None, rows: list[dict[str, Any
     if not names:
         return []
 
+    # 构建原始名称到标注名称的映射
+    has_unnamed = any(name.startswith("Unnamed") for name in names)
+    annotated_names: list[str] = []
+    if has_unnamed and rows:
+        for name in names:
+            if name.startswith("Unnamed"):
+                sample = None
+                for row in rows[:3]:
+                    val = row.get(name)
+                    if val is not None and str(val).strip():
+                        sample = str(val).strip()
+                        break
+                if sample:
+                    if len(sample) > 20:
+                        sample = sample[:20] + "…"
+                    annotated_names.append(f"{name}(样本:{sample})")
+                else:
+                    annotated_names.append(name)
+            else:
+                annotated_names.append(name)
+    else:
+        annotated_names = list(names)
+
     inferred: list[ColumnDef] = []
-    for idx, name in enumerate(names):
-        values = [row.get(name) for row in rows[:50]]
-        inferred.append(ColumnDef(name=name, inferred_type=_infer_type(values, fallback_idx=idx)))
+    for idx, annotated_name in enumerate(annotated_names):
+        # 用原始列名从 rows 中取值
+        original_key = names[idx]
+        values = [row.get(original_key) for row in rows[:50]]
+        inferred.append(ColumnDef(name=annotated_name, inferred_type=_infer_type(values, fallback_idx=idx)))
     return inferred
 
 
@@ -177,6 +206,7 @@ def ingest_filter_result(
             added_at_iteration=iteration,
         )
     ]
+    window.preview_rows = list(filtered_rows[:50])
     window.detail_level = DetailLevel.FULL
     window.current_iteration = iteration
     if not filtered_rows:

@@ -59,7 +59,7 @@ ExcelManus 当前使用算法打分（trigger/description 词汇匹配）做路�
 #### 验收标准
 
 1. THE AgentEngine SHALL 在每轮对话开始时将 `explore_data` 工具包含在 LLM 可用工具集中
-2. WHEN LLM 调用 `explore_data` 时，THE AgentEngine SHALL 在独立上下文中启动子代理，仅提供只读工具集（read_excel、analyze_data、filter_data、list_sheets、get_file_info、search_files、list_directory、read_text_file、read_cell_styles）
+2. WHEN LLM 调用 `explore_data` 时，THE AgentEngine SHALL 在独立上下文中启动子代理，仅提供只读工具集（read_excel、analyze_data、filter_data、list_sheets、get_file_info、find_files、list_directory、read_text_file、read_cell_styles）
 3. WHEN 子代理执行完成后，THE AgentEngine SHALL 将子代理输出的摘要作为工具调用结果返回给主 LLM
 4. WHEN 子代理连续工具调用失败次数达到配置的熔断阈值时，THE AgentEngine SHALL 提前终止子代理并返回错误摘要
 5. WHEN 子代理达到最大迭代次数时，THE AgentEngine SHALL 终止子代理并返回有限摘要

@@ -85,6 +85,12 @@ def serialize_confirmation(record: ConfirmationRecord | ConfirmationProjection, 
             tails.append(f"hint={record.hint}")
         if record.localized_hint:
             tails.append(f"提示={record.localized_hint}")
+        if hasattr(record, 'sheet_dimensions') and record.sheet_dimensions:
+            dims_parts = [f"{name}({r}r×{c}c)" for name, r, c in record.sheet_dimensions]
+            if len(dims_parts) > 20:
+                dims_parts = dims_parts[:20]
+                dims_parts.append(f"...(+{len(record.sheet_dimensions) - 20})")
+            tails.append(f"sheets={' | '.join(dims_parts)}")
         if tails:
             return f"{base} | " + " | ".join(tails)
         return base
@@ -96,8 +102,15 @@ def serialize_confirmation(record: ConfirmationRecord | ConfirmationProjection, 
         ),
         f"  intent: {record.intent}",
         f"  意图: {record.intent}",
-        "  hint: data merged into window, prefer referencing window content.",
+        "  hint: window snapshot synced; write actions must be confirmed by write-tool results.",
     ]
+    if hasattr(record, 'sheet_dimensions') and record.sheet_dimensions:
+        dims_parts = [f"{name}({r}r×{c}c)" for name, r, c in record.sheet_dimensions]
+        # 限制显示数量，避免过长
+        if len(dims_parts) > 20:
+            dims_parts = dims_parts[:20]
+            dims_parts.append(f"...(+{len(record.sheet_dimensions) - 20})")
+        lines.append(f"  sheets: {' | '.join(dims_parts)}")
     if record.hint:
         lines.append(f"  hint: {record.hint}")
     if record.localized_hint:

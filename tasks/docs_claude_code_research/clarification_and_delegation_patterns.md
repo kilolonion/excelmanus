@@ -13,7 +13,7 @@
 ```
 用户：读取"销售明细"工作表的前 10 行数据
   ↓ 轮次 1: select_skill → file_ops
-  ↓ 轮次 2: search_files → 找到 6 个 .xlsx（关键信息已到手！）
+  ↓ 轮次 2: find_files → 找到 6 个 .xlsx（关键信息已到手！）
   ↓ 轮次 3: read_excel("examples/demo/销售数据示例.xlsx") → 默认 sheet，没有"销售明细"
   ↓ 轮次 4: read_excel(..., sheet_name="销售明细") → 失败
   ↓ 轮次 5: read_excel("examples/demo/demo_sales_data.xlsx") → 也没有
@@ -208,7 +208,7 @@ delegate_description = (
 ```
 用户：读取"销售明细"工作表的前 10 行数据
 
-轮次 1: search_files("**/*.xlsx") → 找到 6 个文件
+轮次 1: find_files("**/*.xlsx") → 找到 6 个文件
 轮次 2: 意识到不确定哪个文件有"销售明细" sheet
         → 方案 A: ask_user 让用户选择
         → 方案 B: delegate_to_subagent(explorer, "列出所有 xlsx 文件的 sheet 名称")

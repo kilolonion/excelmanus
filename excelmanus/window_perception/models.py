@@ -87,9 +87,9 @@ class ChangeRecord:
 class Viewport:
     """窗口视口信息。"""
 
-    range_ref: str = "A1:J25"
+    range_ref: str = "A1:T25"
     visible_rows: int = 25
-    visible_cols: int = 10
+    visible_cols: int = 20
     total_rows: int = 0
     total_cols: int = 0
 
@@ -112,7 +112,7 @@ class PerceptionBudget:
     tool_append_tokens: int = 500
     max_windows: int = 6
     default_rows: int = 25
-    default_cols: int = 10
+    default_cols: int = 20
     minimized_tokens: int = 80
     background_after_idle: int = 1
     suspend_after_idle: int = 3
