@@ -265,6 +265,22 @@ class ApprovalManager:
             error_type = type(exc).__name__
             error_message = str(exc)
 
+        # ── 检测 registry 层返回的结构化错误 JSON（工具不再抛异常） ──
+        if execute_error is None and result_text.startswith('{"status": "error"'):
+            try:
+                _err_payload = json.loads(result_text)
+                if isinstance(_err_payload, dict) and _err_payload.get("status") == "error":
+                    _error_code = _err_payload.get("error_code", "")
+                    if _error_code == "TOOL_EXECUTION_ERROR":
+                        error_type = "ToolExecutionError"
+                    else:
+                        error_type = _err_payload.get("exception") or "ToolExecutionError"
+                    error_message = _err_payload.get("message") or result_text
+                    # 创建一个虚拟异常对象以保持后续逻辑兼容
+                    execute_error = RuntimeError(error_message)
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
         if use_workspace_scan:
             after, after_partial, _, _ = self._collect_workspace_snapshots()
         else:

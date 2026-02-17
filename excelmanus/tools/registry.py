@@ -164,7 +164,16 @@ class ToolRegistry:
         try:
             return tool.func(**arguments)
         except Exception as exc:
-            raise ToolExecutionError(f"工具 '{tool_name}' 执行失败: {exc}") from exc
+            logger.warning(
+                "工具 '%s' 执行异常: %s; arguments=%s",
+                tool_name,
+                exc,
+                arguments,
+            )
+            return self._format_execution_error(
+                tool_name=tool_name,
+                exc=exc,
+            )
 
     @staticmethod
     def _format_argument_validation_error(
@@ -190,6 +199,37 @@ class ToolRegistry:
             "provided_fields": sorted(arguments.keys()),
         }
         return json.dumps(payload, ensure_ascii=False)
+    @staticmethod
+    def _format_execution_error(
+        *,
+        tool_name: str,
+        exc: Exception,
+    ) -> str:
+        """构造统一的工具执行错误返回（JSON 字符串），透传原始异常信息。"""
+        payload = {
+            "status": "error",
+            "error_code": "TOOL_EXECUTION_ERROR",
+            "tool": tool_name,
+            "exception": type(exc).__name__,
+            "message": str(exc),
+        }
+        # 如果有链式异常（__cause__），也透传
+        if exc.__cause__ is not None and str(exc.__cause__) != str(exc):
+            payload["cause"] = str(exc.__cause__)
+        return json.dumps(payload, ensure_ascii=False)
+    @staticmethod
+    def is_error_result(result: Any) -> bool:
+        """检测工具返回值是否为 registry 层格式化的错误 JSON。"""
+        if not isinstance(result, str):
+            return False
+        # 快速前缀检测，避免对所有返回值做 JSON 解析
+        if not result.startswith('{"status": "error"'):
+            return False
+        try:
+            parsed = json.loads(result)
+            return isinstance(parsed, dict) and parsed.get("status") == "error"
+        except (json.JSONDecodeError, AttributeError):
+            return False
 
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。"""

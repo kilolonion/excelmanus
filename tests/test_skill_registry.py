@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from hypothesis import given, strategies as st
 
@@ -128,7 +130,7 @@ class TestToolRegistryUnit:
             registry.call_tool("nonexistent", {})
 
     def test_call_tool_execution_error(self) -> None:
-        """工具执行异常应包装为 ToolExecutionError。"""
+        """工具执行异常应返回结构化 JSON 错误（不再抛异常）。"""
         def bad_func(**kwargs):
             raise ValueError("boom")
 
@@ -140,8 +142,13 @@ class TestToolRegistryUnit:
         )
         registry = ToolRegistry()
         registry.register_tools([tool])
-        with pytest.raises(ToolExecutionError, match="boom"):
-            registry.call_tool("bad", {})
+        result = registry.call_tool("bad", {})
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == "TOOL_EXECUTION_ERROR"
+        assert parsed["tool"] == "bad"
+        assert parsed["exception"] == "ValueError"
+        assert "boom" in parsed["message"]
 
     def test_duplicate_tool_name_raises(self) -> None:
         """重复工具名应报错。"""
