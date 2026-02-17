@@ -35,6 +35,7 @@ from .extractor import (
     extract_range_ref,
     extract_row_heights,
     extract_shape,
+    extract_sheet_dimensions,
     extract_sheet_name,
     extract_sheet_tabs,
     extract_status_bar,
@@ -1118,6 +1119,9 @@ class WindowPerceptionManager:
         tabs = extract_sheet_tabs(result_json)
         if tabs:
             self._set_window_field(window, "sheet_tabs", tabs)
+        sheet_dims = extract_sheet_dimensions(result_json)
+        if sheet_dims:
+            self._set_window_field(window, "sheet_dimensions", sheet_dims)
         if normalized_sheet:
             self._set_window_field(window, "sheet_name", normalized_sheet)
         if file_path:

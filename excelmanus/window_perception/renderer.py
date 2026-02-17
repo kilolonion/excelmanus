@@ -144,6 +144,7 @@ def build_tool_perception_payload(window: Window | None) -> dict[str, Any] | Non
         "row_heights": dict(projection.row_heights),
         "merged_ranges": list(projection.merged_ranges),
         "conditional_effects": list(projection.conditional_effects),
+        "sheet_dimensions": list(projection.sheet_dimensions) if projection.sheet_dimensions else [],
     }
 
 
@@ -194,6 +195,14 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
         ),
         f"viewport: {viewport.get('range') or '未知'}",
     ]
+
+    sheet_dimensions = payload.get("sheet_dimensions")
+    if isinstance(sheet_dimensions, (list, tuple)) and sheet_dimensions:
+        dims_parts = [f"{name}({r}r×{c}c)" for name, r, c in sheet_dimensions]
+        if len(dims_parts) > 20:
+            dims_parts = dims_parts[:20]
+            dims_parts.append(f"...(+{len(sheet_dimensions) - 20})")
+        lines.append(f"sheets: {' | '.join(dims_parts)}")
 
     # 列截断警告：当实际列数超过视口可见列数时提醒
     _visible_cols = viewport.get("visible_cols", 0)
