@@ -383,7 +383,7 @@ class TestSelectSkillCalls:
             result = asyncio.run(engine._handle_select_skill(invalid_name))
 
             assert f"未找到技能: {invalid_name}" == result
-            assert engine._active_skill is None
+            assert not engine._active_skills
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
@@ -447,25 +447,28 @@ class TestToolScopeTransitions:
                 ],
             )
 
-            # 初始态：全量工具 + META + ALWAYS
+            # 初始态：DISCOVERY_TOOLS ∩ registered + META + ALWAYS
             initial_scope = engine._get_current_tool_scope()
-            expected_initial = set(engine._registry.get_tool_names())
-            expected_initial |= {"select_skill", "delegate_to_subagent", "list_subagents", "ask_user"}
-            expected_initial |= {"task_create", "task_update"}
+            from excelmanus.tools.policy import DISCOVERY_TOOLS as _DT
+            from excelmanus.engine import _META_TOOL_NAMES, _ALWAYS_AVAILABLE_TOOLS
+            expected_initial = set(_DT) & set(engine._registry.get_tool_names())
+            expected_initial |= set(_META_TOOL_NAMES)
+            expected_initial |= set(_ALWAYS_AVAILABLE_TOOLS)
             assert set(initial_scope) == expected_initial
 
             # 激活技能 A：allowed_tools + select_skill + _ALWAYS_AVAILABLE_TOOLS
+            # hybrid 模式下还会追加 discover_tools
             asyncio.run(engine._handle_select_skill(skill_a))
             scope_a = engine._get_current_tool_scope()
-            expected_a = set(tools_a) | {"select_skill"}
-            expected_a |= {"task_create", "task_update", "ask_user", "delegate_to_subagent"}
+            expected_a = set(tools_a) | {"select_skill", "discover_tools"}
+            expected_a |= set(_ALWAYS_AVAILABLE_TOOLS)
             assert set(scope_a) == expected_a
 
-            # 激活技能 B：同理
+            # 激活技能 B：多 skill 同时激活，scope = A ∪ B 的并集
             asyncio.run(engine._handle_select_skill(skill_b))
             scope_b = engine._get_current_tool_scope()
-            expected_b = set(tools_b) | {"select_skill"}
-            expected_b |= {"task_create", "task_update", "ask_user", "delegate_to_subagent"}
+            expected_b = set(tools_a) | set(tools_b) | {"select_skill", "discover_tools"}
+            expected_b |= set(_ALWAYS_AVAILABLE_TOOLS)
             assert set(scope_b) == expected_b
 
 
