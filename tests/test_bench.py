@@ -232,7 +232,7 @@ def test_run_suite_serial_mode_enables_render(tmp_path: Path) -> None:
         return _make_result(case.id)
 
     with (
-        patch("excelmanus.bench._load_suite", return_value=("demo", cases)),
+        patch("excelmanus.bench._load_suite", return_value=("demo", cases, False)),
         patch("excelmanus.bench.run_case", side_effect=_fake_run_case),
         patch(
             "excelmanus.bench._save_result",
@@ -261,7 +261,7 @@ def test_run_suite_concurrent_mode_disables_render_and_keeps_order(tmp_path: Pat
         return _make_result(case.id)
 
     with (
-        patch("excelmanus.bench._load_suite", return_value=("demo", cases)),
+        patch("excelmanus.bench._load_suite", return_value=("demo", cases, False)),
         patch("excelmanus.bench.run_case", side_effect=_fake_run_case),
         patch(
             "excelmanus.bench._save_result",
@@ -275,12 +275,13 @@ def test_run_suite_concurrent_mode_disables_render_and_keeps_order(tmp_path: Pat
     assert render_flags == [False, False, False]
 
 
-def test_bench_result_to_dict_schema_v2() -> None:
+def test_bench_result_to_dict_schema_v3() -> None:
     payload = _make_result("c1").to_dict()
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["kind"] == "case_result"
     assert payload["execution"]["status"] == "ok"
     assert payload["meta"]["case_id"] == "c1"
+    assert payload["meta"]["active_model"] == ""
     assert set(payload.keys()) == {
         "schema_version",
         "kind",
@@ -293,7 +294,7 @@ def test_bench_result_to_dict_schema_v2() -> None:
     }
 
 
-def test_save_suite_summary_schema_v2(tmp_path: Path) -> None:
+def test_save_suite_summary_schema_v3(tmp_path: Path) -> None:
     results = [
         _make_result("c1"),
         _make_result(
@@ -313,7 +314,7 @@ def test_save_suite_summary_schema_v2(tmp_path: Path) -> None:
     )
 
     payload = json.loads(summary_path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["kind"] == "suite_summary"
     assert payload["execution"]["concurrency"] == 2
     assert payload["execution"]["status"] == "completed_with_errors"
@@ -339,6 +340,10 @@ def test_run_case_exception_returns_structured_error() -> None:
                 skills_used=[],
                 tool_scope=[],
             )
+
+        @property
+        def current_model(self) -> str:
+            return "test-model"
 
         async def chat(self, *_args, **_kwargs):
             raise RuntimeError("boom")
@@ -367,7 +372,7 @@ def test_run_single_still_saves_log_file(tmp_path: Path) -> None:
     saved_files = list(tmp_path.glob("run_*.json"))
     assert len(saved_files) == 1
     payload = json.loads(saved_files[0].read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["kind"] == "case_result"
 
 
