@@ -37,6 +37,13 @@ from excelmanus.logger import get_logger, setup_logging
 from excelmanus.renderer import StreamRenderer
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
 from excelmanus.tools import ToolRegistry
+from excelmanus.bench_validator import (
+    ValidationSummary,
+    aggregate_suite_validation,
+    merge_assertions,
+    validate_case,
+)
+from excelmanus.bench_reporter import save_suite_report
 
 logger = get_logger("bench")
 
@@ -67,6 +74,7 @@ class BenchCase:
     expected: dict[str, Any] = field(default_factory=dict)
     source_files: list[str] = field(default_factory=list)
     auto_replies: list[str] = field(default_factory=list)
+    assertions: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -564,7 +572,7 @@ class _EngineTracer:
     - ``_enrich_tool_result_with_window_perception`` → 记录窗口感知增强前后对比
     - ``_get_current_tool_scope`` → 记录每轮工具范围决策
 
-    通过环境变量 ``EXCELMANUS_BENCH_TRACE=1`` 或 CLI ``--trace`` 启用。
+    通过环境变量 ``EXCELMANUS_BENCH_TRACE=0`` 或 CLI ``--no-trace`` 禁用。
     """
 
     def __init__(self, engine: AgentEngine) -> None:
@@ -798,7 +806,7 @@ async def run_case(
     config: ExcelManusConfig,
     *,
     render_enabled: bool = True,
-    trace_enabled: bool = False,
+    trace_enabled: bool = True,
     output_dir: Path | None = None,
     suite_name: str = "",
 ) -> BenchResult:
@@ -809,8 +817,8 @@ async def run_case(
 
     Args:
         trace_enabled: 启用 engine 内部交互轨迹记录（系统提示注入、
-            窗口感知增强、工具范围决策等）。通过 ``--trace`` 或
-            ``EXCELMANUS_BENCH_TRACE=1`` 启用。
+            窗口感知增强、工具范围决策等）。默认开启，可通过 ``--no-trace`` 或
+            ``EXCELMANUS_BENCH_TRACE=0`` 禁用。
         output_dir: 日志输出目录，用于构建文件隔离工作目录。
     """
     engine = _create_engine(config)
@@ -1103,13 +1111,17 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
     - 多轮：``{"messages": ["...", "..."]}``
     加载时统一归一化为 messages 列表。
 
+    suite 级 ``assertions`` 会与每个 case 的 ``assertions`` 合并
+    （case 级覆盖 suite 级同名字段）。
+
     返回 (suite_name, cases, trace)。
     """
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     suite_name = data.get("suite_name", Path(path).stem)
-    suite_trace = bool(data.get("trace", False))
+    suite_trace = bool(data.get("trace", True))
+    suite_assertions = data.get("assertions", {})
     cases: list[BenchCase] = []
     for item in data.get("cases", []):
         # 多轮格式优先
@@ -1122,6 +1134,11 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
             message = raw_message
             messages = [message] if message else []
 
+        # 合并 suite 级 + case 级 assertions
+        case_assertions = merge_assertions(
+            suite_assertions, item.get("assertions"),
+        )
+
         cases.append(BenchCase(
             id=item["id"],
             name=item.get("name", item["id"]),
@@ -1131,20 +1148,50 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
             expected=item.get("expected", {}),
             source_files=item.get("source_files", []),
             auto_replies=item.get("auto_replies", []),
+            assertions=case_assertions,
         ))
     return suite_name, cases, suite_trace
 
 
-def _save_result(result: BenchResult, output_dir: Path) -> Path:
-    """保存单个用例结果到 JSON 文件。"""
+def _save_result(
+    result: BenchResult,
+    output_dir: Path,
+    assertions: dict[str, Any] | None = None,
+) -> tuple[Path, ValidationSummary | None]:
+    """保存单个用例结果到 JSON 文件。
+
+    如果提供了 assertions，会自动执行断言校验并将结果嵌入输出 JSON。
+
+    Returns:
+        (filepath, validation_summary) — validation_summary 仅在有 assertions 时非 None。
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     short_id = uuid.uuid4().hex[:6]
     filename = f"run_{ts}_{result.case_id}_{short_id}.json"
     filepath = output_dir / filename
+
+    result_dict = result.to_dict()
+
+    # 执行断言校验
+    validation: ValidationSummary | None = None
+    if assertions:
+        validation = validate_case(result_dict, assertions)
+        result_dict["validation"] = validation.to_dict()
+        if validation.failed > 0:
+            logger.warning(
+                "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
+                result.case_id, validation.passed, validation.total, validation.failed,
+            )
+        else:
+            logger.info(
+                "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
+                result.case_id, validation.passed, validation.total,
+            )
+
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(result.to_dict(), f, ensure_ascii=False, indent=2)
-    return filepath
+        json.dump(result_dict, f, ensure_ascii=False, indent=2)
+    return filepath, validation
 
 
 def _save_suite_summary(
@@ -1219,7 +1266,7 @@ async def run_suite(
     output_dir: Path,
     *,
     concurrency: int = 1,
-    trace_enabled: bool = False,
+    trace_enabled: bool = True,
 ) -> list[BenchResult]:
     """运行整个测试套件。"""
     if concurrency < 1:
@@ -1237,6 +1284,10 @@ async def run_suite(
         ", trace=ON" if trace_enabled else "",
     )
     logger.info("═" * 50)
+
+    # 收集每个 case 的 validation 结果（用于 suite 级聚合）
+    case_validations: list[tuple[str, ValidationSummary]] = []
+    _validations_lock = asyncio.Lock()
 
     async def _execute_case(
         index: int,
@@ -1277,7 +1328,13 @@ async def run_suite(
                 },
             )
         try:
-            filepath = _save_result(result, output_dir)
+            filepath, validation = _save_result(
+                result, output_dir,
+                assertions=case.assertions or None,
+            )
+            if validation is not None:
+                async with _validations_lock:
+                    case_validations.append((case.id, validation))
             logger.info("  日志已保存: %s", filepath)
         except Exception as exc:  # pragma: no cover - 文件系统异常兜底
             logger.error("用例 %s 日志保存失败: %s", case.id, exc, exc_info=True)
@@ -1380,6 +1437,41 @@ async def run_suite(
         total_failures,
         case_errors,
     )
+
+    # ── 断言校验汇总 + 自动报告 ──
+    suite_validation = None
+    if case_validations:
+        suite_validation = aggregate_suite_validation(case_validations)
+        logger.info(
+            "  断言校验: %d/%d 通过 (%.1f%%) │ 失败案例: %s",
+            suite_validation.passed,
+            suite_validation.total_assertions,
+            suite_validation.pass_rate,
+            ", ".join(suite_validation.failed_cases) or "无",
+        )
+
+    # 自动生成 Markdown 报告
+    try:
+        # 读取刚保存的 suite summary JSON 用于生成报告
+        with open(summary_path, encoding="utf-8") as f:
+            suite_summary_dict = json.load(f)
+        # 将 validation 信息注入到 suite summary 的各 case 中
+        if case_validations:
+            validation_map = dict(case_validations)
+            for case_dict in suite_summary_dict.get("artifacts", {}).get("cases", []):
+                cid = case_dict.get("meta", {}).get("case_id")
+                if cid and cid in validation_map:
+                    case_dict["validation"] = validation_map[cid].to_dict()
+            suite_summary_dict["validation"] = suite_validation.to_dict()
+        report_path = save_suite_report(
+            suite_summary_dict,
+            output_dir,
+            suite_validation=suite_validation,
+        )
+        logger.info("  📄 报告已生成: %s", report_path)
+    except Exception as exc:
+        logger.warning("  报告生成失败: %s", exc)
+
     logger.info("═" * 50)
     return normalized_results
 
@@ -1392,7 +1484,7 @@ async def run_single(
     config: ExcelManusConfig,
     output_dir: Path,
     *,
-    trace_enabled: bool = False,
+    trace_enabled: bool = True,
 ) -> BenchResult:
     """直接运行一条用户消息作为测试用例。"""
     case = BenchCase(
@@ -1477,11 +1569,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="日志输出目录（默认 outputs/bench）",
     )
     parser.add_argument(
-        "--trace",
+        "--no-trace",
         action="store_true",
         default=False,
-        help="启用 engine 内部交互轨迹记录（系统提示注入、窗口感知增强、工具范围等）。"
-        "也可通过 EXCELMANUS_BENCH_TRACE=1 环境变量启用。",
+        help="禁用 engine 内部交互轨迹记录（默认开启）。"
+        "也可通过 EXCELMANUS_BENCH_TRACE=0 环境变量禁用。",
     )
     return parser
 
@@ -1533,7 +1625,7 @@ async def _run_suites(
     *,
     concurrency: int = 1,
     suite_concurrency: int = 1,
-    trace_enabled: bool = False,
+    trace_enabled: bool = True,
 ) -> int:
     """并发运行多个 suite，带 Rich Live 进度面板和全局汇总。
 
@@ -1717,8 +1809,8 @@ async def _main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
-    # trace 模式：CLI --trace 或环境变量 EXCELMANUS_BENCH_TRACE=1
-    trace_enabled = args.trace or os.environ.get("EXCELMANUS_BENCH_TRACE", "0") == "1"
+    # trace 模式：默认开启，可通过 --no-trace 或 EXCELMANUS_BENCH_TRACE=0 禁用
+    trace_enabled = not args.no_trace and os.environ.get("EXCELMANUS_BENCH_TRACE", "1") != "0"
 
     if plan.mode == "message":
         config = load_config()
