@@ -145,6 +145,7 @@ def _make_case_entry(item: dict, dataset_base: str) -> dict:
         "message": message,
         "tags": ["spreadsheetbench", "verified_400", tag],
         "expected": expected,
+        "source_files": [init_file],
     }
 
 
