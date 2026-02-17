@@ -1,0 +1,18 @@
+{
+  "suite_name": "SpreadsheetBench 单题测试 #52917",
+  "description": "日期拼接公式 — 将日/月/年列合并为完整日期",
+  "source": "SpreadsheetBench (NeurIPS 2024) — bench/external/spreadsheetbench/spreadsheetbench_verified_400",
+  "cases": [
+    {
+      "id": "sb_52917",
+      "name": "日期拼接 DATE 公式",
+      "message": "Open the file bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/52917/1_52917_init.xlsx. I need to create a formula that can combine day, month, and year data from separate columns A, B, and C into a complete date format in column J, as shown in my attached file.",
+      "tags": ["cell_level", "formula", "date", "spreadsheetbench"],
+      "expected": {
+        "answer_position": "J2:J9",
+        "golden_file": "bench/external/spreadsheetbench/spreadsheetbench_verified_400/spreadsheet/52917/1_52917_golden.xlsx",
+        "source_id": "52917"
+      }
+    }
+  ]
+}
