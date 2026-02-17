@@ -998,6 +998,17 @@ class WindowPerceptionManager:
             self._set_window_field(window, "total_rows", len(window.data_buffer))
         if window.total_cols <= 0:
             self._set_window_field(window, "total_cols", len(window.columns or window.schema))
+        # 设置操作类型标记，供渲染器聚焦渲染使用
+        if change.operation == "write":
+            self._set_window_field(window, "last_op_kind", "write")
+            self._set_window_field(window, "last_write_range", change.affected_range)
+        elif change.operation == "filter":
+            self._set_window_field(window, "last_op_kind", "filter")
+            self._set_window_field(window, "last_write_range", None)
+        else:
+            self._set_window_field(window, "last_op_kind", "read")
+            self._set_window_field(window, "last_write_range", None)
+
         self._set_window_field(window, "detail_level", DetailLevel.FULL)
         self._append_operation(window, canonical_tool_name, arguments, True)
         self._append_change(window, change)
