@@ -68,6 +68,30 @@ def _get_guard() -> FileAccessGuard:
     return _guard
 
 
+def build_completeness_meta(
+    total_available: int,
+    returned: int,
+    *,
+    entity_name: str = "行",
+) -> dict[str, Any]:
+    """构建数据完整性元数据，供工具统一使用。
+
+    当 returned < total_available 时，附加截断标记和自然语言提示，
+    帮助 LLM 正确理解数据范围，避免将预览数据误判为全量数据。
+    """
+    meta: dict[str, Any] = {
+        "total_available": total_available,
+        "returned": returned,
+    }
+    if returned < total_available:
+        meta["is_truncated"] = True
+        meta["truncation_note"] = (
+            f"⚠️ 仅返回 {returned} {entity_name}（共 {total_available} {entity_name}）。"
+            f"如需操作全量数据，请注意实际数据范围。"
+        )
+    return meta
+
+
 def init_guard(workspace_root: str) -> None:
     """初始化文件访问守卫（供外部配置调用）。
 
@@ -404,6 +428,23 @@ def _resolve_formula_columns(
     return df
 
 
+def _get_sheet_total_rows(safe_path: Any, sheet_name: str | None) -> int | None:
+    """用 openpyxl read_only 模式快速获取 sheet 总行数（不加载全部数据）。"""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(safe_path, read_only=True, data_only=True)
+        try:
+            if sheet_name and sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            else:
+                ws = wb.active
+            return ws.max_row or 0
+        finally:
+            wb.close()
+    except Exception:
+        return None
+
+
 def _read_df(
     safe_path: Any,
     sheet_name: str | None,
@@ -496,14 +537,30 @@ def read_excel(
 
     df, effective_header = _read_df(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
 
+    # 当 max_rows 限制了读取行数时，获取 sheet 实际总行数
+    total_rows_in_sheet: int | None = None
+    if max_rows is not None:
+        total_rows_in_sheet = _get_sheet_total_rows(safe_path, sheet_name)
+
     # 构建摘要信息
     summary: dict[str, Any] = {
         "file": str(safe_path.name),
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
-        "columns": [str(c) for c in df.columns],
-        "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
-        "preview": json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso")),
     }
+
+    # 数据完整性指示：截断元数据放在 columns/preview 之前，确保即使被引擎层截断也能保留
+    if total_rows_in_sheet is not None and total_rows_in_sheet > df.shape[0]:
+        completeness = build_completeness_meta(
+            total_available=total_rows_in_sheet,
+            returned=df.shape[0],
+        )
+        summary["total_rows_in_sheet"] = total_rows_in_sheet
+        summary["is_truncated"] = completeness.get("is_truncated", False)
+        summary["truncation_note"] = completeness.get("truncation_note", "")
+
+    summary["columns"] = [str(c) for c in df.columns]
+    summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
+    summary["preview"] = json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso"))
     formula_meta = df.attrs.get("formula_resolution")
     if isinstance(formula_meta, dict):
         if formula_meta.get("resolved_columns") or formula_meta.get("unresolved_columns"):
@@ -1750,6 +1807,7 @@ def group_aggregate(
             result_df = result_df.sort_values(by=candidates[0], ascending=ascending)
 
     # 限制行数
+    total_before_limit = len(result_df)
     if limit is not None and limit > 0:
         result_df = result_df.head(limit)
 
@@ -1762,6 +1820,15 @@ def group_aggregate(
         "columns": [str(c) for c in result_df.columns],
         "data": json.loads(result_df.to_json(orient="records", force_ascii=False, date_format="iso")),
     }
+    if limit is not None and limit > 0 and total_before_limit > limit:
+        completeness = build_completeness_meta(
+            total_available=total_before_limit,
+            returned=len(result_df),
+            entity_name="组",
+        )
+        result["is_truncated"] = completeness.get("is_truncated", False)
+        result["truncation_note"] = completeness.get("truncation_note", "")
+
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
