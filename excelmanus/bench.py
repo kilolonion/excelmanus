@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 from rich.live import Live
@@ -276,6 +276,68 @@ class BenchResult:
         if self.approval_events:
             result["artifacts"]["approval_events"] = self.approval_events
         return result
+
+
+# ── 进度追踪 ──────────────────────────────────────────────
+
+
+@dataclass
+class _SuiteProgress:
+    """追踪单个 suite 的 case 级执行进度（用于并发面板实时显示）。"""
+
+    suite_name: str
+    total_cases: int = 0
+    done_cases: int = 0
+    ok_cases: int = 0
+    fail_cases: int = 0
+    total_tokens: int = 0
+    current_case: str = ""  # 当前正在执行的 case 名
+    start_time: float = field(default_factory=time.monotonic)
+    status: str = "⏳ 等待中"  # 面板显示的状态文本
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.start_time
+
+    def elapsed_str(self) -> str:
+        s = self.elapsed()
+        if s < 60:
+            return f"{s:.0f}s"
+        return f"{s / 60:.1f}m"
+
+    def progress_bar(self) -> str:
+        """生成简易进度条，如 ████░░░░ 3/8。"""
+        if self.total_cases == 0:
+            return ""
+        filled = int(self.done_cases / self.total_cases * 8)
+        bar = "█" * filled + "░" * (8 - filled)
+        return f"{bar} {self.done_cases}/{self.total_cases}"
+
+    def status_line(self) -> str:
+        """构建面板中的状态行。"""
+        if self.status.startswith("⏳"):
+            return self.status
+        if self.status.startswith("✅") or self.status.startswith("⚠"):
+            # 已完成
+            tok = f"{self.total_tokens:,}" if self.total_tokens else "0"
+            return f"{self.status}  {self.elapsed_str()}  {tok} tok"
+        if self.status.startswith("💥"):
+            return self.status
+        # 执行中
+        parts = [f"🔄 {self.progress_bar()}"]
+        if self.ok_cases or self.fail_cases:
+            parts.append(f"{self.ok_cases}✅")
+            if self.fail_cases:
+                parts.append(f"{self.fail_cases}❌")
+        parts.append(self.elapsed_str())
+        if self.total_tokens:
+            parts.append(f"{self.total_tokens:,} tok")
+        if self.current_case:
+            parts.append(f"▸ {self.current_case}")
+        return "  ".join(parts)
+
+
+# 进度回调类型：(case_id, case_name, result_or_none) — result 为 None 表示开始执行
+ProgressCallback = Callable[[str, str, BenchResult | None], None]
 
 
 # ── 事件收集器 ────────────────────────────────────────────
@@ -1267,6 +1329,7 @@ async def run_suite(
     *,
     concurrency: int = 1,
     trace_enabled: bool = True,
+    on_progress: ProgressCallback | None = None,
 ) -> list[BenchResult]:
     """运行整个测试套件。"""
     if concurrency < 1:
@@ -1295,6 +1358,9 @@ async def run_suite(
         *,
         render_enabled: bool,
     ) -> tuple[int, BenchResult, Path]:
+        # 通知开始执行
+        if on_progress:
+            on_progress(case.id, case.name, None)
         try:
             result = await run_case(
                 case, config,
@@ -1339,6 +1405,9 @@ async def run_suite(
         except Exception as exc:  # pragma: no cover - 文件系统异常兜底
             logger.error("用例 %s 日志保存失败: %s", case.id, exc, exc_info=True)
             filepath = output_dir / f"run_save_error_{case.id}.json"
+        # 通知完成
+        if on_progress:
+            on_progress(case.id, case.name, result)
         return index, result, filepath
 
     results: list[BenchResult | None] = [None] * len(cases)
@@ -1499,7 +1568,7 @@ async def run_single(
         trace_enabled=trace_enabled,
         output_dir=output_dir,
     )
-    filepath = _save_result(result, output_dir)
+    filepath, _ = _save_result(result, output_dir)
     logger.info("日志已保存: %s", filepath)
     return result
 
@@ -1632,32 +1701,104 @@ async def _run_suites(
     返回 shell 退出码（0 = 全部成功，1 = 存在失败）。
     """
     total_suites = len(suite_paths)
+    global_start = time.monotonic()
 
-    # 每个 suite 的状态追踪
-    suite_states: dict[str, str] = {}  # suite_name -> 状态文本
+    # 每个 suite 的进度追踪
+    progress_map: dict[str, _SuiteProgress] = {}
     suite_results: list[tuple[str, list[BenchResult]]] = []
     results_lock = asyncio.Lock()
 
-    # 用 suite 文件名做简短标识
     def _short_name(p: Path) -> str:
         return p.stem
 
+    # 预加载 suite 获取 case 数量
     for p in suite_paths:
-        suite_states[_short_name(p)] = "⏳ 等待中"
+        name = _short_name(p)
+        try:
+            _, cases, _ = _load_suite(p)
+            total = len(cases)
+        except Exception:
+            total = 0
+        progress_map[name] = _SuiteProgress(suite_name=name, total_cases=total)
 
     def _build_progress_table() -> Table:
         """构建实时进度表格。"""
-        table = Table(
-            title="Bench 并发执行面板",
-            show_lines=True,
-            expand=False,
-        )
-        table.add_column("Suite", style="cyan", min_width=25)
-        table.add_column("状态", min_width=20)
+        elapsed = time.monotonic() - global_start
+        elapsed_str = f"{elapsed:.0f}s" if elapsed < 60 else f"{elapsed / 60:.1f}m"
+        # 全局统计
+        g_done = sum(p.done_cases for p in progress_map.values())
+        g_total = sum(p.total_cases for p in progress_map.values())
+        g_ok = sum(p.ok_cases for p in progress_map.values())
+        g_fail = sum(p.fail_cases for p in progress_map.values())
+        g_tok = sum(p.total_tokens for p in progress_map.values())
 
-        for name, status in suite_states.items():
-            table.add_row(name, status)
+        title = (
+            f"Bench 并发执行面板  ⏱ {elapsed_str}"
+            f"  │  {g_done}/{g_total} cases"
+            f"  {g_ok}✅ {g_fail}❌"
+            f"  │  {g_tok:,} tok"
+        )
+        table = Table(title=title, show_lines=True, expand=True)
+        table.add_column("Suite", style="cyan", min_width=20, max_width=35)
+        table.add_column("进度", min_width=12, max_width=18)
+        table.add_column("状态", min_width=30)
+        table.add_column("耗时", justify="right", min_width=6, max_width=8)
+        table.add_column("Tokens", justify="right", min_width=8, max_width=12)
+
+        for prog in progress_map.values():
+            # 进度列
+            if prog.done_cases > 0 or prog.status.startswith("🔄"):
+                progress_col = prog.progress_bar()
+            else:
+                progress_col = ""
+
+            # 状态列
+            if prog.status.startswith("🔄"):
+                # 执行中：显示当前 case 和通过/失败
+                parts = []
+                if prog.ok_cases or prog.fail_cases:
+                    parts.append(f"{prog.ok_cases}✅")
+                    if prog.fail_cases:
+                        parts.append(f"{prog.fail_cases}❌")
+                if prog.current_case:
+                    case_display = prog.current_case
+                    if len(case_display) > 20:
+                        case_display = case_display[:18] + "…"
+                    parts.append(f"▸ {case_display}")
+                status_col = "🔄 " + "  ".join(parts) if parts else "🔄 执行中"
+            else:
+                status_col = prog.status
+
+            # 耗时列
+            if prog.status.startswith("⏳"):
+                time_col = ""
+            else:
+                time_col = prog.elapsed_str()
+
+            # Token 列
+            tok_col = f"{prog.total_tokens:,}" if prog.total_tokens else ""
+
+            table.add_row(prog.suite_name, progress_col, status_col, time_col, tok_col)
+
         return table
+
+    def _make_progress_cb(name: str) -> ProgressCallback:
+        """为指定 suite 创建进度回调。"""
+        def _cb(case_id: str, case_name: str, result: BenchResult | None) -> None:
+            prog = progress_map[name]
+            if result is None:
+                # case 开始执行
+                prog.current_case = case_name or case_id
+            else:
+                # case 完成
+                prog.done_cases += 1
+                prog.total_tokens += result.total_tokens
+                if result.status == "ok":
+                    prog.ok_cases += 1
+                else:
+                    prog.fail_cases += 1
+                prog.current_case = ""
+        return _cb
 
     async def _suite_worker(
         suite_path: Path,
@@ -1665,7 +1806,9 @@ async def _run_suites(
     ) -> None:
         name = _short_name(suite_path)
         async with sem:
-            suite_states[name] = "🔄 执行中..."
+            prog = progress_map[name]
+            prog.status = "🔄 执行中"
+            prog.start_time = time.monotonic()
             try:
                 results = await run_suite(
                     suite_path,
@@ -1673,17 +1816,18 @@ async def _run_suites(
                     output_dir,
                     concurrency=concurrency,
                     trace_enabled=trace_enabled,
+                    on_progress=_make_progress_cb(name),
                 )
                 ok_count = sum(1 for r in results if r.status == "ok")
                 fail_count = len(results) - ok_count
                 if fail_count:
-                    suite_states[name] = f"⚠️  完成 ({ok_count}✅ {fail_count}❌)"
+                    prog.status = f"⚠️  完成 ({ok_count}✅ {fail_count}❌)"
                 else:
-                    suite_states[name] = f"✅ 完成 ({ok_count} 用例)"
+                    prog.status = f"✅ 完成 ({ok_count} 用例)"
                 async with results_lock:
                     suite_results.append((name, results))
             except Exception as exc:
-                suite_states[name] = f"💥 崩溃: {exc}"
+                prog.status = f"💥 崩溃: {exc}"
                 async with results_lock:
                     suite_results.append((name, []))
 
@@ -1691,7 +1835,6 @@ async def _run_suites(
     is_parallel = suite_concurrency > 1 and total_suites > 1
 
     if is_parallel:
-        # 并发模式：启动 Live 进度面板
         logger.info(
             "启动并发模式：%d 个 suite，suite 并发=%d，case 并发=%d",
             total_suites,
@@ -1709,14 +1852,11 @@ async def _run_suites(
             console=console,
             refresh_per_second=2,
         ) as live:
-            # 定期刷新进度表
             while not all(t.done() for t in tasks):
                 live.update(_build_progress_table())
                 await asyncio.sleep(0.5)
-            # 最终刷新一次
             live.update(_build_progress_table())
 
-        # 收集异常（不应发生，_suite_worker 内部已兜底）
         for t in tasks:
             if t.exception():  # pragma: no cover
                 logger.error("suite 任务异常: %s", t.exception())
