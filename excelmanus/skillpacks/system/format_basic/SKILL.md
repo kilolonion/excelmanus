@@ -67,10 +67,18 @@ version: "2.0.0"
 - 颜色参数支持中文名（如"红色"、"浅蓝"）和十六进制码（如 "FF0000"），优先使用用户的表达方式。
 - 边框支持统一模式（四边相同）和单边差异化模式（left/right/top/bottom 独立设置）。
 
-3. 布局操作
+3. 条件格式
+- `add_conditional_rule` 支持三种模式：
+  - **cell_is**（值比较）：需要 `operator` + `values`。数值比较用 `values` 数组，如 `values=[1000]`；范围比较用两个值，如 `values=[50, 150]`。
+  - **formula**（公式条件）：需要 `formula` 字符串，如 `formula='=$C2="FATAL"'`。
+  - **icon_set**（图标集）：需要 `icon_style`，如 `icon_style="3Arrows"`。
+- 颜色参数支持中文名（"红色"）和十六进制（"FF0000"）。
+- 示例：销售额低于 1000 高亮红色 → `add_conditional_rule(cell_range="I4:I2000", rule_type="cell_is", operator="lessThan", values=[1000], fill_color="红色")`
+
+4. 布局操作
 - 合并单元格前确认范围内只有左上角有数据，避免数据丢失。
 - 行高/列宽调整支持手动指定和自动适配两种模式。
 
-4. 输出规范
+5. 输出规范
 - 返回修改范围与影响单元格数量。
 - 建议用户核实关键格式变更。
