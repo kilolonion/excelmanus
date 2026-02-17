@@ -66,6 +66,7 @@ class BenchCase:
     tags: list[str] = field(default_factory=list)
     expected: dict[str, Any] = field(default_factory=dict)
     source_files: list[str] = field(default_factory=list)
+    auto_replies: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,6 +116,12 @@ class TurnResult:
     error: dict[str, Any] | None = None
     # engine 内部交互轨迹（--trace 启用时有值）
     engine_trace: list[dict[str, Any]] = field(default_factory=list)
+    # 当前使用的模型标识
+    active_model: str = ""
+    # 任务/问答/审批事件
+    task_events: list[dict[str, Any]] = field(default_factory=list)
+    question_events: list[dict[str, Any]] = field(default_factory=list)
+    approval_events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
@@ -139,6 +146,7 @@ class TurnResult:
             },
             "status": self.status,
             "error": self.error,
+            "active_model": self.active_model,
             "stats": {
                 "tool_call_count": len(self.tool_calls),
                 "tool_successes": tool_successes,
@@ -148,6 +156,12 @@ class TurnResult:
         }
         if self.engine_trace:
             result["engine_trace"] = self.engine_trace
+        if self.task_events:
+            result["task_events"] = self.task_events
+        if self.question_events:
+            result["question_events"] = self.question_events
+        if self.approval_events:
+            result["approval_events"] = self.approval_events
         return result
 
 
@@ -184,12 +198,22 @@ class BenchResult:
     error: dict[str, Any] | None = None
     # engine 内部交互轨迹（--trace 启用时有值）
     engine_trace: list[dict[str, Any]] = field(default_factory=list)
+    # 当前使用的模型标识
+    active_model: str = ""
+    # write_hint 分类结果（may_write / read_only / unknown）
+    write_hint: str = "unknown"
+    # 关键配置快照（用于事后审计）
+    config_snapshot: dict[str, Any] = field(default_factory=dict)
+    # 任务/问答/审批事件
+    task_events: list[dict[str, Any]] = field(default_factory=list)
+    question_events: list[dict[str, Any]] = field(default_factory=list)
+    approval_events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
         tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
         result: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "case_result",
             "timestamp": self.timestamp,
             "meta": {
@@ -197,6 +221,8 @@ class BenchResult:
                 "case_name": self.case_name,
                 "message": self.message,
                 "turn_count": len(self.turns) if self.turns else 1,
+                "active_model": self.active_model,
+                "config_snapshot": self.config_snapshot,
             },
             "execution": {
                 "duration_seconds": round(self.duration_seconds, 2),
@@ -206,6 +232,7 @@ class BenchResult:
                 "tool_scope": self.tool_scope,
                 "status": self.status,
                 "error": self.error,
+                "write_hint": self.write_hint,
             },
             "artifacts": {
                 "tool_calls": [tc.to_dict() for tc in self.tool_calls],
@@ -233,6 +260,13 @@ class BenchResult:
         # engine 内部交互轨迹
         if self.engine_trace:
             result["engine_trace"] = self.engine_trace
+        # 任务/问答/审批事件
+        if self.task_events:
+            result["artifacts"]["task_events"] = self.task_events
+        if self.question_events:
+            result["artifacts"]["question_events"] = self.question_events
+        if self.approval_events:
+            result["artifacts"]["approval_events"] = self.approval_events
         return result
 
 
@@ -255,6 +289,13 @@ class _EventCollector:
         self.skills_used: list[str] = []
         self.tool_scope: list[str] = []
         self.subagent_events: list[dict[str, Any]] = []
+        self.task_events: list[dict[str, Any]] = []
+        self.question_events: list[dict[str, Any]] = []
+        self.approval_events: list[dict[str, Any]] = []
+        # CHAT_SUMMARY 事件中的 token 统计
+        self.summary_prompt_tokens: int = 0
+        self.summary_completion_tokens: int = 0
+        self.summary_total_tokens: int = 0
         # 用于计算工具调用耗时
         self._pending_tool_starts: dict[str, float] = {}
 
@@ -314,6 +355,40 @@ class _EventCollector:
                 "tool_calls": event.subagent_tool_calls,
             })
 
+        elif event.event_type == EventType.CHAT_SUMMARY:
+            self.summary_prompt_tokens = event.prompt_tokens
+            self.summary_completion_tokens = event.completion_tokens
+            self.summary_total_tokens = event.total_tokens
+
+        elif event.event_type == EventType.TASK_LIST_CREATED:
+            self.task_events.append({
+                "event_type": event.event_type.value,
+                "task_list_data": event.task_list_data,
+            })
+
+        elif event.event_type == EventType.TASK_ITEM_UPDATED:
+            self.task_events.append({
+                "event_type": event.event_type.value,
+                "task_index": event.task_index,
+                "task_status": event.task_status,
+                "task_result": event.task_result,
+            })
+
+        elif event.event_type == EventType.USER_QUESTION:
+            self.question_events.append({
+                "event_type": event.event_type.value,
+                "question_id": event.question_id,
+                "question_header": event.question_header,
+                "question_text": event.question_text,
+            })
+
+        elif event.event_type == EventType.PENDING_APPROVAL:
+            self.approval_events.append({
+                "event_type": event.event_type.value,
+                "approval_id": event.approval_id,
+                "approval_tool_name": event.approval_tool_name,
+            })
+
     def snapshot_and_reset(self) -> dict[str, Any]:
         """快照当前收集的数据并重置，用于多轮对话分轮记录。
 
@@ -326,6 +401,12 @@ class _EventCollector:
             "skills_used": list(self.skills_used),
             "tool_scope": list(self.tool_scope),
             "subagent_events": list(self.subagent_events),
+            "task_events": list(self.task_events),
+            "question_events": list(self.question_events),
+            "approval_events": list(self.approval_events),
+            "summary_prompt_tokens": self.summary_prompt_tokens,
+            "summary_completion_tokens": self.summary_completion_tokens,
+            "summary_total_tokens": self.summary_total_tokens,
         }
         # 重置
         self.thinking_log = []
@@ -334,6 +415,12 @@ class _EventCollector:
         self.skills_used = []
         self.tool_scope = []
         self.subagent_events = []
+        self.task_events = []
+        self.question_events = []
+        self.approval_events = []
+        self.summary_prompt_tokens = 0
+        self.summary_completion_tokens = 0
+        self.summary_total_tokens = 0
         self._pending_tool_starts.clear()
         return snapshot
 
@@ -573,9 +660,12 @@ class _EngineTracer:
             })
         return enriched
 
-    def _traced_scope(self, **kwargs: Any) -> list[str]:
+    def _traced_scope(
+        self,
+        route_result: Any = None,
+    ) -> list[str]:
         """拦截工具范围决策，记录可用工具列表。"""
-        scope = self._orig_scope(**kwargs)
+        scope = self._orig_scope(route_result=route_result)
         self.entries.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": "tool_scope_resolved",
@@ -759,6 +849,12 @@ async def run_case(
     case_status = "ok"
     case_error: dict[str, Any] | None = None
 
+    # 自动回复队列（用于 ask_user 自动应答）
+    _AUTO_REPLY_DEFAULT = "1"
+    _MAX_AUTO_REPLY_ROUNDS = 10
+    auto_reply_queue = list(case.auto_replies)
+    auto_reply_count = 0
+
     try:
         for turn_idx, msg in enumerate(messages):
             if is_multi_turn:
@@ -804,6 +900,10 @@ async def run_case(
                         "message": str(exc),
                     },
                     engine_trace=tracer.snapshot_and_reset() if tracer else [],
+                    active_model=engine.current_model,
+                    task_events=snap["task_events"],
+                    question_events=snap["question_events"],
+                    approval_events=snap["approval_events"],
                 )
                 all_turns.append(turn_result)
                 all_tool_calls.extend(snap["tool_calls"])
@@ -817,6 +917,38 @@ async def run_case(
                 }
                 # 某轮异常后中止后续轮次
                 break
+
+            # ── 自动回复 ask_user 问题 ──
+            while (
+                engine.has_pending_question()
+                and auto_reply_count < _MAX_AUTO_REPLY_ROUNDS
+            ):
+                reply_text = (
+                    auto_reply_queue.pop(0)
+                    if auto_reply_queue
+                    else _AUTO_REPLY_DEFAULT
+                )
+                auto_reply_count += 1
+                pending_q = engine.current_pending_question()
+                q_header = getattr(pending_q, "header", "") if pending_q else ""
+                logger.info(
+                    "  ⤷ 自动回复 ask_user #%d: %r → %r",
+                    auto_reply_count, q_header, reply_text,
+                )
+                if render_enabled:
+                    _console.print(
+                        f"  [dim]⤷ 自动回复 ask_user:[/dim] {reply_text}"
+                    )
+                try:
+                    chat_result = await engine.chat(
+                        reply_text,
+                        on_event=collector.on_event,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "自动回复 ask_user 异常: %s", exc, exc_info=True,
+                    )
+                    break
 
             turn_elapsed = time.monotonic() - turn_start
             # 快照本轮收集器数据
@@ -850,6 +982,10 @@ async def run_case(
                 completion_tokens=chat_result.completion_tokens,
                 total_tokens=chat_result.total_tokens,
                 engine_trace=tracer.snapshot_and_reset() if tracer else [],
+                active_model=engine.current_model,
+                task_events=snap["task_events"],
+                question_events=snap["question_events"],
+                approval_events=snap["approval_events"],
             )
             all_turns.append(turn_result)
 
@@ -890,6 +1026,17 @@ async def run_case(
     if tracer is not None and not is_multi_turn:
         case_engine_trace = tracer.snapshot_and_reset()
 
+    # 采集 write_hint
+    _write_hint = str(getattr(engine, "_current_write_hint", "unknown"))
+
+    # 采集关键 config 快照
+    _config_snapshot = {
+        "model": config.model,
+        "base_url": config.base_url,
+        "router_model": config.router_model,
+        "router_base_url": config.router_base_url,
+    }
+
     result = BenchResult(
         case_id=case.id,
         case_name=case.name,
@@ -913,6 +1060,9 @@ async def run_case(
         status=case_status,
         error=case_error,
         engine_trace=case_engine_trace,
+        active_model=engine.current_model,
+        write_hint=_write_hint,
+        config_snapshot=_config_snapshot,
     )
 
     # 单轮时打印最终回复（多轮已在循环中逐轮打印）
@@ -929,8 +1079,9 @@ async def run_case(
 
     failures = sum(1 for tc in result.tool_calls if not tc.success)
     turn_info = f" ({len(messages)} 轮)" if is_multi_turn else ""
+    auto_reply_info = f" │ {auto_reply_count} 次自动回复" if auto_reply_count else ""
     logger.info(
-        "✓ 用例 %s 完成%s: %d 迭代 │ %d 工具调用(失败%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用",
+        "✓ 用例 %s 完成%s: %d 迭代 │ %d 工具调用(失败%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用%s",
         case.id,
         turn_info,
         result.iterations,
@@ -939,22 +1090,26 @@ async def run_case(
         result.total_tokens,
         result.duration_seconds,
         len(result.llm_calls),
+        auto_reply_info,
     )
     return result
 
 
-def _load_suite(path: str | Path) -> tuple[str, list[BenchCase]]:
+def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
     """从 JSON 文件加载测试套件。
 
     兼容两种 case 格式：
     - 单轮：``{"message": "..."}``
     - 多轮：``{"messages": ["...", "..."]}``
     加载时统一归一化为 messages 列表。
+
+    返回 (suite_name, cases, trace)。
     """
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     suite_name = data.get("suite_name", Path(path).stem)
+    suite_trace = bool(data.get("trace", False))
     cases: list[BenchCase] = []
     for item in data.get("cases", []):
         # 多轮格式优先
@@ -975,8 +1130,9 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase]]:
             tags=item.get("tags", []),
             expected=item.get("expected", {}),
             source_files=item.get("source_files", []),
+            auto_replies=item.get("auto_replies", []),
         ))
-    return suite_name, cases
+    return suite_name, cases, suite_trace
 
 
 def _save_result(result: BenchResult, output_dir: Path) -> Path:
@@ -1022,7 +1178,7 @@ def _save_suite_summary(
     suite_status = "ok" if not failed_case_ids else "completed_with_errors"
 
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "suite_summary",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "meta": {
@@ -1069,7 +1225,9 @@ async def run_suite(
     if concurrency < 1:
         raise ValueError("concurrency 必须 >= 1")
 
-    suite_name, cases = _load_suite(suite_path)
+    suite_name, cases, suite_trace = _load_suite(suite_path)
+    # suite JSON 中的 trace 字段与参数取 OR
+    trace_enabled = trace_enabled or suite_trace
     logger.info("═" * 50)
     logger.info(
         "开始执行套件: %s (%d 个用例, 并发=%d%s)",
@@ -1491,7 +1649,7 @@ async def _run_suites(
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         short_id = uuid.uuid4().hex[:6]
         global_summary = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "global_summary",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "execution": {

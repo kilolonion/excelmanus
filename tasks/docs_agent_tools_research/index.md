@@ -51,7 +51,7 @@
 | read_file | 读取文件 |
 | edit_file | 编辑文件 |
 | list_dir | 目录列表 |
-| search_files | 文件搜索 |
+| find_files | 文件搜索 |
 | codebase_search | ⭐ AI 语义代码搜索 |
 | run_terminal_command | 终端命令 |
 | browser_action | 浏览器操作 |
@@ -61,7 +61,7 @@
 
 | 类别 | 工具 | 数量 |
 |------|------|------|
-| **数据操作** | read_excel, write_excel, analyze_data, filter_data, transform_data, scan_excel_files | 6 |
+| **数据操作** | read_excel, write_excel, analyze_data, filter_data, transform_data, inspect_excel_files | 6 |
 | **单元格** | write_cells, insert_rows, insert_columns | 3 |
 | **格式化** | format_cells, adjust_column_width, adjust_row_height, merge_cells, unmerge_cells + 高级格式 | 5+ |
 | **工作表** | create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets | 5 |
@@ -103,7 +103,7 @@
 **借鉴**：ExcelManus 应增强关键工具的描述，特别是：
 - `run_code`：明确 "仅在专用工具无法完成时使用"（当前已有，可进一步强化）
 - `task_create`：已有良好的使用场景描述（可保持）
-- `read_excel` vs `scan_excel_files`：需要明确选择指引
+- `read_excel` vs `inspect_excel_files`：需要明确选择指引
 - `write_cells` vs `write_excel`：需要明确单元格级 vs DataFrame 级的场景区分
 
 ### 2.3 规划与任务管理

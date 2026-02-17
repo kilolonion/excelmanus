@@ -22,6 +22,14 @@ _EXCEL_PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+_MAY_WRITE_HINT_RE = re.compile(
+    r"(创建|修改|写入|删除|替换|填充|插入|更新|设置|格式化|高亮|加粗|标红|美化|条件格式|画图|生成图表|柱状图|饼图|折线图|雷达图|散点图|排序|合并|转置|拆分|write|update|format|chart)",
+    re.IGNORECASE,
+)
+_READ_ONLY_HINT_RE = re.compile(
+    r"(查看|列出|读取|扫描|分析|统计|对比|检查|预览|read|scan|analyz|inspect|list)",
+    re.IGNORECASE,
+)
 
 class SkillRouter:
     """简化后的技能路由器：仅负责斜杠直连路由和技能目录生成。"""
@@ -100,9 +108,12 @@ class SkillRouter:
             )
 
         # ── 1. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
+        # 并行调用小模型判断 write_hint
+        write_hint = await self._classify_write_hint(user_message)
         return self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
+            write_hint=write_hint,
         )
 
     def build_skill_catalog(
@@ -230,6 +241,7 @@ class SkillRouter:
         *,
         user_message: str,
         candidate_file_paths: list[str] | None,
+        write_hint: str = "unknown",
     ) -> SkillMatchResult:
         """构建非斜杠默认路由：tool_scope 为空表示由引擎放开全量工具。"""
         system_contexts: list[str] = []
@@ -252,7 +264,106 @@ class SkillRouter:
             route_mode="all_tools",
             system_contexts=system_contexts,
             parameterized=False,
+            write_hint=write_hint,
         )
+
+    async def _classify_write_hint(self, user_message: str) -> str:
+        """调用小模型判断用户消息是否涉及写入操作。
+
+        返回 "may_write" | "read_only" | "unknown"。
+        超时、解析失败、未配置 router_model 时均返回 "unknown"。
+
+        降级策略：当 router 端点不可用时，自动降级使用主模型。
+        """
+        import asyncio
+        import json as _json
+
+        lexical_hint = self._classify_write_hint_lexical(user_message)
+
+        if not self._config.router_model:
+            return lexical_hint or "unknown"
+
+        from excelmanus.providers import create_client
+
+        system_prompt = (
+            "你是任务分类器。判断用户请求是否涉及文件写入或修改表格操作。"
+            '只输出 JSON: {"write_hint": "may_write"} 或 {"write_hint": "read_only"}\n'
+            "判断为 may_write 的信号：\n"
+            "- 明确的写入动词：创建、修改、写入、删除、替换、填充、插入、更新、设置\n"
+            "- 明确的格式化动词：格式化、高亮、加粗、标红、美化、条件格式\n"
+            "- 明确的图表动词：画图、生成图表、柱状图、饼图\n"
+            "- 明确的结构操作：排序、合并、转置、拆分、复制到\n"
+            "判断为 read_only 的信号：\n"
+            "- 查看、列出、读取、扫描、分析、统计、对比、检查、预览\n"
+            "当不能完全确定有写入操作时请优先使用 read_only"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message[:500]},
+        ]
+
+        async def _try_classify(api_key: str, base_url: str, model: str, timeout: float) -> str | None:
+            """尝试用指定端点分类，成功返回 hint，失败返回 None。"""
+            client = create_client(api_key=api_key, base_url=base_url)
+            try:
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=30,
+                        temperature=0,
+                    ),
+                    timeout=timeout,
+                )
+                text = (response.choices[0].message.content or "").strip()
+                for candidate in [text]:
+                    left = candidate.find("{")
+                    right = candidate.rfind("}")
+                    if left >= 0 and right > left:
+                        candidate = candidate[left:right + 1]
+                    try:
+                        data = _json.loads(candidate)
+                        hint = str(data.get("write_hint", "")).strip().lower()
+                        if hint in ("may_write", "read_only"):
+                            return hint
+                    except (_json.JSONDecodeError, TypeError, AttributeError):
+                        pass
+                return lexical_hint
+            except Exception:
+                return lexical_hint
+
+        # 1) 先尝试 router 端点
+        result = await _try_classify(
+            api_key=self._config.router_api_key or self._config.api_key,
+            base_url=self._config.router_base_url or self._config.base_url,
+            model=self._config.router_model,
+            timeout=20,
+        )
+        if result is not None:
+            return result
+
+        # 2) 降级：使用主模型
+        result = await _try_classify(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            model=self._config.model,
+            timeout=20,
+        )
+        if result is not None:
+            return result
+
+        return "unknown"
+
+    def _classify_write_hint_lexical(self, user_message: str) -> str | None:
+        """本地词法兜底：优先识别写入/格式化/图表等明确写意图。"""
+        text = str(user_message or "").strip()
+        if not text:
+            return None
+        if _MAY_WRITE_HINT_RE.search(text):
+            return "may_write"
+        if _READ_ONLY_HINT_RE.search(text):
+            return "read_only"
+        return None
 
     @staticmethod
     def _normalize_skill_name(name: str) -> str:

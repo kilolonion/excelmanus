@@ -947,3 +947,29 @@ class TestAutoActivateDefaultSkill:
         monkeypatch.setenv("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL", "maybe")
         with pytest.raises(ConfigError, match="EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL"):
             load_config()
+
+class TestAutoSupplementConfig:
+    """auto_supplement 配置项测试。"""
+
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://test.example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_auto_supplement_defaults(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        config = load_config()
+        assert config.auto_supplement_enabled is True
+        assert config.auto_supplement_max_per_turn == 3
+
+    def test_auto_supplement_disabled_from_env(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_AUTO_SUPPLEMENT_ENABLED", "false")
+        config = load_config()
+        assert config.auto_supplement_enabled is False
+
+    def test_auto_supplement_max_per_turn_from_env(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_AUTO_SUPPLEMENT_MAX_PER_TURN", "5")
+        config = load_config()
+        assert config.auto_supplement_max_per_turn == 5

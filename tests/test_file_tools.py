@@ -107,37 +107,37 @@ class TestGetFileInfo:
             file_tools.get_file_info("../etc/passwd")
 
 
-# ── search_files ─────────────────────────────────────────
+# ── find_files ─────────────────────────────────────────
 
 
-class TestSearchFiles:
+class TestFindFiles:
     def test_search_txt(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files("*.txt"))
+        result = json.loads(file_tools.find_files("*.txt"))
         assert result["total"] >= 1
         names = [m["name"] for m in result["matches"]]
         assert "hello.txt" in names
 
     def test_search_recursive(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files("**/*.txt"))
+        result = json.loads(file_tools.find_files("**/*.txt"))
         names = [m["name"] for m in result["matches"]]
         assert "nested.txt" in names
 
     def test_search_no_match(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files("*.docx"))
+        result = json.loads(file_tools.find_files("*.docx"))
         assert result["total"] == 0
 
     def test_search_max_results(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files("*", max_results=2))
+        result = json.loads(file_tools.find_files("*", max_results=2))
         assert result["total"] <= 2
         assert result["truncated"] in (True, False)
 
     def test_search_hidden_excluded(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files(".*"))
+        result = json.loads(file_tools.find_files(".*"))
         names = [m["name"] for m in result["matches"]]
         assert ".hidden" not in names
 
     def test_invalid_directory(self, workspace: Path) -> None:
-        result = json.loads(file_tools.search_files("*", directory="nonexistent"))
+        result = json.loads(file_tools.find_files("*", directory="nonexistent"))
         assert "error" in result
 
 
@@ -284,7 +284,7 @@ class TestGetTools:
         expected = {
             "list_directory",
             "get_file_info",
-            "search_files",
+            "find_files",
             "read_text_file",
             "copy_file",
             "rename_file",

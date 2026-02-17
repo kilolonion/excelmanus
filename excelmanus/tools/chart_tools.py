@@ -103,19 +103,20 @@ def _configure_plot_fonts(labels: pd.Series, title: str) -> None:
 
 
 def create_chart(
-    file_path: str,
-    chart_type: str,
-    x_column: str,
-    y_column: str,
-    output_path: str,
+    file_path: str | None = None,
+    chart_type: str = "",
+    x_column: str = "",
+    y_column: str = "",
+    output_path: str = "",
     title: str | None = None,
     sheet_name: str | None = None,
     header_row: int | None = None,
+    data: list[dict] | None = None,
 ) -> str:
-    """从 Excel 数据生成图表并保存为图片文件。
+    """从 Excel 数据或直接传入的数据生成图表并保存为图片文件。
 
     Args:
-        file_path: 数据源 Excel 文件路径。
+        file_path: 数据源 Excel 文件路径。当提供 data 时可省略。
         chart_type: 图表类型，支持 bar/line/pie/scatter/radar。
         x_column: X 轴（或标签）列名。
         y_column: Y 轴（或数值）列名。
@@ -123,6 +124,8 @@ def create_chart(
         title: 图表标题，默认自动生成。
         sheet_name: 工作表名称，默认读取第一个。
         header_row: 表头行号（从0开始），默认自动检测。
+        data: 直接传入的数据（如 group_aggregate 返回的 data 字段）。
+              提供此参数时无需 file_path，数据将直接用于绘图。
 
     Returns:
         JSON 格式的操作结果。
@@ -133,24 +136,33 @@ def create_chart(
             ensure_ascii=False,
         )
 
+    if data is None and file_path is None:
+        return json.dumps(
+            {"status": "error", "message": "必须提供 file_path 或 data 参数之一"},
+            ensure_ascii=False,
+        )
+
     guard = _get_guard()
-    safe_input = guard.resolve_and_validate(file_path)
     safe_output = guard.resolve_and_validate(output_path)
 
     # 读取数据
-    kwargs: dict[str, Any] = {"io": safe_input}
     detected_header_row: int | None = None
-    if sheet_name is not None:
-        kwargs["sheet_name"] = sheet_name
-    if header_row is not None:
-        kwargs["header"] = header_row
+    if data is not None:
+        # 直接使用传入的数据，跳过 Excel 读取
+        df = pd.DataFrame(data)
     else:
-        detected = data_tools._detect_header_row(safe_input, sheet_name)
-        if detected is not None and detected > 0:
-            kwargs["header"] = detected
-            detected_header_row = detected
-
-    df = pd.read_excel(**kwargs)
+        safe_input = guard.resolve_and_validate(file_path)  # type: ignore[arg-type]
+        kwargs: dict[str, Any] = {"io": safe_input}
+        if sheet_name is not None:
+            kwargs["sheet_name"] = sheet_name
+        if header_row is not None:
+            kwargs["header"] = header_row
+        else:
+            detected = data_tools._detect_header_row(safe_input, sheet_name)
+            if detected is not None and detected > 0:
+                kwargs["header"] = detected
+                detected_header_row = detected
+        df = pd.read_excel(**kwargs)
 
     # 校验列名
     for col_name, col_label in [(x_column, "x_column"), (y_column, "y_column")]:
@@ -436,7 +448,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="create_chart",
-            description="从 Excel 数据生成图表（柱状图、折线图、饼图、散点图、雷达图）并保存为图片",
+            description="从 Excel 数据生成图表（柱状图、折线图、饼图、散点图、雷达图）并保存为图片。支持直接传入 data 参数（如 group_aggregate 的返回数据），无需先写入 Excel",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -471,10 +483,15 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "表头行号（从0开始），默认自动检测",
+                        "description": "表头行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
+                    },
+                    "data": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "直接传入的数据（如 group_aggregate 返回的 data 字段）。提供此参数时无需 file_path，数据将直接用于绘图",
                     },
                 },
-                "required": ["file_path", "chart_type", "x_column", "y_column", "output_path"],
+                "required": ["chart_type", "x_column", "y_column", "output_path"],
                 "additionalProperties": False,
             },
             func=create_chart,

@@ -22,11 +22,11 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "analyze_sheet_mapping",
         "list_sheets",
         "get_file_info",
-        "search_files",
+        "find_files",
         "list_directory",
         "read_text_file",
         "read_cell_styles",
-        "scan_excel_files",
+        "inspect_excel_files",
         "list_skills",
         "memory_read_topic",
         # 任务工具仅修改会话内存态，不触达工作区文件。
@@ -163,11 +163,11 @@ SUBAGENT_READ_ONLY_TOOLS: tuple[str, ...] = (
     "analyze_sheet_mapping",
     "list_sheets",
     "get_file_info",
-    "search_files",
+    "find_files",
     "list_directory",
     "read_text_file",
     "read_cell_styles",
-    "scan_excel_files",
+    "inspect_excel_files",
 )
 
 SUBAGENT_ANALYSIS_EXTRA_TOOLS: tuple[str, ...] = (
@@ -216,7 +216,7 @@ SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = (
 DISCOVERY_TOOLS: frozenset[str] = frozenset({
     # 数据探查
     "read_excel",
-    "scan_excel_files",
+    "inspect_excel_files",
     "analyze_data",
     "filter_data",
     "group_aggregate",
@@ -224,7 +224,7 @@ DISCOVERY_TOOLS: frozenset[str] = frozenset({
     "list_sheets",
     "list_directory",
     "get_file_info",
-    "search_files",
+    "find_files",
     "read_text_file",
     # 样式感知
     "read_cell_styles",
@@ -237,7 +237,7 @@ DISCOVERY_TOOLS: frozenset[str] = frozenset({
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "data_read": (
-        "read_excel", "scan_excel_files", "analyze_data",
+        "read_excel", "inspect_excel_files", "analyze_data",
         "filter_data", "group_aggregate", "analyze_sheet_mapping",
     ),
     "data_write": (
@@ -260,10 +260,68 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "rename_sheet", "delete_sheet", "copy_range_between_sheets",
     ),
     "file": (
-        "list_directory", "get_file_info", "search_files",
+        "list_directory", "get_file_info", "find_files",
         "read_text_file", "copy_file", "rename_file", "delete_file",
     ),
     "code": ("write_text_file", "run_code", "run_shell"),
+}
+
+
+# ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
+
+TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
+    # data_read
+    "read_excel": "读取 Excel 数据摘要与前10行预览，可按需附加样式/图表/公式等维度",
+    "inspect_excel_files": "批量扫描目录下所有 Excel 文件概况，快速了解工作区全貌",
+    "analyze_data": "对 Excel 数据做描述性统计分析，输出均值/中位数/缺失值等",
+    "filter_data": "按条件筛选 Excel 数据行，支持多条件组合、排序和 Top-N",
+    "group_aggregate": "按列分组聚合统计（SUM/COUNT/MEAN 等），适用于汇总报表",
+    "analyze_sheet_mapping": "分析两个工作表键字段的映射覆盖率，跨表写回前做口径校验",
+    # data_write
+    "write_excel": "将行数据批量写入 Excel 工作表，已有文件仅替换指定 sheet",
+    "write_cells": "向指定单元格或范围写入值/公式，不影响其他区域数据",
+    "transform_data": "对 Excel 数据执行列级转换（重命名、增删列、排序）",
+    "insert_rows": "在 Excel 指定行号前插入空行，已有数据自动下移",
+    "insert_columns": "在 Excel 指定列前插入空列，已有数据自动右移",
+    # format
+    "format_cells": "对单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）",
+    "adjust_column_width": "调整 Excel 列宽，支持手动指定或自动适配内容",
+    "adjust_row_height": "调整 Excel 行高，支持手动指定或自动适配",
+    "read_cell_styles": "读取单元格范围的现有样式信息（字体、颜色、边框、合并状态）",
+    "merge_cells": "合并 Excel 指定范围的单元格",
+    "unmerge_cells": "取消合并 Excel 指定范围的单元格",
+    # advanced_format
+    "apply_threshold_icon_format": "三段阈值图标化显示（↑—↓），适用于 KPI 达标率等指标",
+    "style_card_blocks": "批量卡片化区域样式（粗边框+圆角+阴影），适用于仪表盘布局",
+    "scale_range_unit": "按除数缩放数值并统一单位格式（如元转万），适用于报表单位换算",
+    "apply_dashboard_dark_theme": "一键应用暗色仪表盘主题（底色+卡片+指标高亮+图表样式）",
+    "add_color_scale": "添加二色或三色渐变色阶条件格式，适用于热力图效果",
+    "add_data_bar": "添加数据条条件格式，单元格内按比例显示彩色条",
+    "add_conditional_rule": "添加通用条件格式规则（值比较高亮、公式条件、图标集）",
+    "set_print_layout": "设置打印布局（打印区域、纸张方向/大小、缩放、重复表头行）",
+    "set_page_header_footer": "设置页眉页脚内容，支持页码/日期/工作表名等占位符",
+    # chart
+    "create_chart": "从 Excel 数据生成图表并保存为 PNG 图片（柱/折/饼/散/雷达）",
+    "create_excel_chart": "在 Excel 中插入原生嵌入式图表对象（柱/折/饼/散/面积）",
+    # sheet
+    "list_sheets": "列出 Excel 文件中所有工作表的名称、行列数等概况信息",
+    "create_sheet": "在已有 Excel 文件中新建空白工作表",
+    "copy_sheet": "复制工作表（同文件内），生成副本",
+    "rename_sheet": "重命名 Excel 文件中的工作表",
+    "delete_sheet": "删除 Excel 文件中的工作表（需二次确认）",
+    "copy_range_between_sheets": "从源工作表复制指定范围数据到目标工作表，支持跨文件",
+    # file
+    "list_directory": "列出指定目录下的文件和子目录，返回名称、类型和大小",
+    "get_file_info": "获取文件或目录的详细信息（大小、修改时间、扩展名等）",
+    "find_files": "按 glob 模式在工作区内搜索文件（如 *.xlsx、**/*.csv）",
+    "read_text_file": "读取非 Excel 文本文件内容（CSV、TXT、JSON 等）",
+    "copy_file": "复制文件到工作区内的新位置",
+    "rename_file": "重命名或移动文件到工作区内的新位置",
+    "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",
+    # code
+    "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
+    "run_code": "执行 Python 代码或脚本，仅在专用工具无法完成时使用",
+    "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
 }
 
 

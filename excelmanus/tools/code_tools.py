@@ -334,9 +334,17 @@ def run_code(
     - **内联模式**：传入 ``code`` 参数，内部写临时文件执行后清理。
     - **文件模式**：传入 ``script_path`` 参数，直接执行已有 ``.py`` 文件。
     """
-    # ── 参数互斥校验 ──
+    # ── 参数规范化：空字符串 / 纯空白视为未传 ──
+    # LLM 生成 JSON 时常传 "" 或 "  "，在互斥校验前统一转为 None
+    code = None if not code or not code.strip() else code
+    script_path = None if not script_path or not script_path.strip() else script_path.strip()
+    stdout_file = None if not stdout_file or not stdout_file.strip() else stdout_file.strip()
+    stderr_file = None if not stderr_file or not stderr_file.strip() else stderr_file.strip()
+
+    # ── 参数校验 ──
     if code is not None and script_path is not None:
-        raise ValueError("code 与 script_path 互斥，请只传其中一个")
+        # 两者都传了非空值，优先使用 script_path
+        code = None
     if code is None and script_path is None:
         raise ValueError("必须指定 code 或 script_path 其中之一")
     if timeout_seconds <= 0:

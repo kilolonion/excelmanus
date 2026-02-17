@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 from datetime import date, datetime
@@ -65,6 +66,30 @@ def _get_guard() -> FileAccessGuard:
         # 默认使用当前工作目录，可通过 init_guard() 覆盖
         _guard = FileAccessGuard(".")
     return _guard
+
+
+def build_completeness_meta(
+    total_available: int,
+    returned: int,
+    *,
+    entity_name: str = "行",
+) -> dict[str, Any]:
+    """构建数据完整性元数据，供工具统一使用。
+
+    当 returned < total_available 时，附加截断标记和自然语言提示，
+    帮助 LLM 正确理解数据范围，避免将预览数据误判为全量数据。
+    """
+    meta: dict[str, Any] = {
+        "total_available": total_available,
+        "returned": returned,
+    }
+    if returned < total_available:
+        meta["is_truncated"] = True
+        meta["truncation_note"] = (
+            f"⚠️ 仅返回 {returned} {entity_name}（共 {total_available} {entity_name}）。"
+            f"如需操作全量数据，请注意实际数据范围。"
+        )
+    return meta
 
 
 def init_guard(workspace_root: str) -> None:
@@ -155,7 +180,7 @@ def _header_row_score(
     return score
 
 
-def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None = None) -> int | None:
+def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None = None, skip_rows: set[int] | None = None) -> int | None:
     """基于抽样行猜测 header 行号（0-indexed）。"""
     if not rows:
         return None
@@ -165,6 +190,8 @@ def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None =
     best_score = float("-inf")
 
     for idx in range(upper):
+        if skip_rows and idx in skip_rows:
+            continue
         row = _trim_trailing_nulls_generic(rows[idx])
         next_row = _trim_trailing_nulls_generic(rows[idx + 1]) if idx + 1 < upper else None
         score = _header_row_score(row, idx, next_row)
@@ -194,7 +221,7 @@ def _detect_header_row(
     """
     try:
         from openpyxl import load_workbook
-        wb = load_workbook(safe_path, read_only=True, data_only=True)
+        wb = load_workbook(safe_path, read_only=False, data_only=True)
     except Exception:
         return None
 
@@ -210,8 +237,17 @@ def _detect_header_row(
         if ws is None:
             return None
 
-        rows: list[list[Any]] = []
+        # 收集宽合并行（列跨度 > 50% 总列数）
         scan_cols = max(1, min(max_scan_columns, ws.max_column or max_scan_columns))
+        wide_merged_rows: set[int] = set()
+        for merged_range in ws.merged_cells.ranges:
+            col_span = merged_range.max_col - merged_range.min_col + 1
+            if col_span > scan_cols * 0.5:
+                for r in range(merged_range.min_row, merged_range.max_row + 1):
+                    if r <= max_scan:
+                        wide_merged_rows.add(r - 1)  # 转为 0-indexed
+
+        rows: list[list[Any]] = []
         for row in ws.iter_rows(
             min_row=1,
             max_row=max_scan,
@@ -224,7 +260,7 @@ def _detect_header_row(
         if not rows:
             return None
 
-        return _guess_header_row_from_rows(rows, max_scan=max_scan)
+        return _guess_header_row_from_rows(rows, max_scan=max_scan, skip_rows=wide_merged_rows)
     finally:
         wb.close()
 
@@ -241,8 +277,9 @@ def _build_read_kwargs(
         safe_path: 已校验的文件路径。
         sheet_name: 工作表名称。
         max_rows: 最大读取行数。
-        header_row: 列头所在行号（从0开始），默认0。
-            当 Excel 文件有合并标题行时，需指定真正的列头行。
+        header_row: 列头所在行号（从0开始），默认自动检测。
+            不传此参数时工具会启发式检测真正的表头行；
+            仅在自动检测不准确时才显式指定。
 
     Returns:
         可直接传给 pd.read_excel 的关键字参数字典。
@@ -391,6 +428,23 @@ def _resolve_formula_columns(
     return df
 
 
+def _get_sheet_total_rows(safe_path: Any, sheet_name: str | None) -> int | None:
+    """用 openpyxl read_only 模式快速获取 sheet 总行数（不加载全部数据）。"""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(safe_path, read_only=True, data_only=True)
+        try:
+            if sheet_name and sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+            else:
+                ws = wb.active
+            return ws.max_row or 0
+        finally:
+            wb.close()
+    except Exception:
+        return None
+
+
 def _read_df(
     safe_path: Any,
     sheet_name: str | None,
@@ -399,12 +453,44 @@ def _read_df(
 ) -> tuple[pd.DataFrame, int]:
     """统一读取 Excel 为 DataFrame，含 header 自动检测 + 公式列求值。
 
+    当自动检测的 header_row 导致超过 50% 列名为 Unnamed 时，
+    自动向下尝试最多 5 行寻找更合理的表头。
+
     Returns:
         (DataFrame, effective_header_row) 元组。
     """
     kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
     effective_header = kwargs.get("header", 0)
     df = pd.read_excel(**kwargs)
+
+    # 仅在自动检测模式下（用户未显式指定 header_row）执行 Unnamed 回退
+    if header_row is None:
+        unnamed_ratio = (
+            sum(1 for c in df.columns if str(c).startswith("Unnamed"))
+            / max(len(df.columns), 1)
+        )
+        if unnamed_ratio > 0.5:
+            logger.info(
+                "自动检测 header_row=%d 产生 %.0f%% Unnamed 列名，尝试回退",
+                effective_header, unnamed_ratio * 100,
+            )
+            for try_header in range(effective_header + 1, min(effective_header + 6, 30)):
+                retry_kwargs = {**kwargs, "header": try_header}
+                try:
+                    df_retry = pd.read_excel(**retry_kwargs)
+                except Exception:
+                    break
+                if df_retry.empty:
+                    break
+                retry_unnamed = sum(
+                    1 for c in df_retry.columns if str(c).startswith("Unnamed")
+                )
+                if retry_unnamed / max(len(df_retry.columns), 1) < 0.3:
+                    logger.info("回退成功：header_row=%d → %d", effective_header, try_header)
+                    df = df_retry
+                    effective_header = try_header
+                    break
+
     df = _resolve_formula_columns(df, safe_path, sheet_name, effective_header)
     return df, effective_header
 
@@ -429,7 +515,7 @@ def read_excel(
         sheet_name: 工作表名称，默认读取第一个。
         max_rows: 最大读取行数，默认全部读取。
         include_style_summary: 是否附带样式概览（已废弃，请用 include=["styles"]）。
-        header_row: 列头所在行号（从0开始），默认0。
+        header_row: 列头所在行号（从0开始），默认自动检测。
             当工作表有合并标题行时，需指定真正的列头行号。
         include: 按需请求的额外维度列表。可选值：
             styles — 压缩样式类（Style Classes + cell_style_map + merged_ranges）
@@ -451,14 +537,30 @@ def read_excel(
 
     df, effective_header = _read_df(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
 
+    # 当 max_rows 限制了读取行数时，获取 sheet 实际总行数
+    total_rows_in_sheet: int | None = None
+    if max_rows is not None:
+        total_rows_in_sheet = _get_sheet_total_rows(safe_path, sheet_name)
+
     # 构建摘要信息
     summary: dict[str, Any] = {
         "file": str(safe_path.name),
         "shape": {"rows": df.shape[0], "columns": df.shape[1]},
-        "columns": [str(c) for c in df.columns],
-        "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
-        "preview": json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso")),
     }
+
+    # 数据完整性指示：截断元数据放在 columns/preview 之前，确保即使被引擎层截断也能保留
+    if total_rows_in_sheet is not None and total_rows_in_sheet > df.shape[0]:
+        completeness = build_completeness_meta(
+            total_available=total_rows_in_sheet,
+            returned=df.shape[0],
+        )
+        summary["total_rows_in_sheet"] = total_rows_in_sheet
+        summary["is_truncated"] = completeness.get("is_truncated", False)
+        summary["truncation_note"] = completeness.get("truncation_note", "")
+
+    summary["columns"] = [str(c) for c in df.columns]
+    summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
+    summary["preview"] = json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso"))
     formula_meta = df.attrs.get("formula_resolution")
     if isinstance(formula_meta, dict):
         if formula_meta.get("resolved_columns") or formula_meta.get("unresolved_columns"):
@@ -467,6 +569,14 @@ def read_excel(
     # 当 header_row 被自动检测时，告知 LLM 实际使用的行号
     if header_row is None and effective_header != 0:
         summary["detected_header_row"] = effective_header
+
+    # Unnamed 列名警告：提醒 LLM 列名不可靠，建议指定 header_row
+    unnamed_cols = [str(c) for c in df.columns if str(c).startswith("Unnamed")]
+    if unnamed_cols:
+        summary["unnamed_columns_warning"] = (
+            f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
+            f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
+        )
 
     # 向后兼容：include_style_summary=True 映射为 include=["styles"]
     include_set: set[str] = set()
@@ -553,7 +663,7 @@ def analyze_data(
     Args:
         file_path: Excel 文件路径。
         sheet_name: 工作表名称，默认第一个。
-        header_row: 列头所在行号（从0开始），默认0。
+        header_row: 列头所在行号（从0开始），默认自动检测。
 
     Returns:
         JSON 格式的统计分析结果。
@@ -588,23 +698,35 @@ def analyze_data(
 
 def filter_data(
     file_path: str,
-    column: str,
-    operator: str,
-    value: Any,
+    column: str | None = None,
+    operator: str | None = None,
+    value: Any = None,
     sheet_name: str | None = None,
     header_row: int | None = None,
     columns: list[str] | None = None,
+    conditions: list[dict[str, Any]] | None = None,
+    logic: str = "and",
+    max_rows: int | None = None,
+    sort_by: str | None = None,
+    ascending: bool = True,
+    limit: int | None = None,
 ) -> str:
-    """根据条件过滤 Excel 数据行。
+    """根据条件过滤 Excel 数据行并可选排序，支持单条件和多条件 AND/OR 组合。
 
     Args:
         file_path: Excel 文件路径。
-        column: 要过滤的列名。
-        operator: 比较运算符，支持 eq/ne/gt/ge/lt/le/contains。
-        value: 比较值。
+        column: 要过滤的列名（单条件模式）。
+        operator: 比较运算符，支持 eq/ne/gt/ge/lt/le/contains（单条件模式）。
+        value: 比较值（单条件模式）。
         sheet_name: 工作表名称，默认第一个。
-        header_row: 列头所在行号（从0开始），默认0。
+        header_row: 列头所在行号（从0开始），默认自动检测。
         columns: 只返回指定列（投影），默认返回全部列。
+        conditions: 多条件数组，每个元素为 {"column": str, "operator": str, "value": Any}。
+        logic: 多条件组合方式，"and"（默认）或 "or"。
+        max_rows: 最多返回的数据行数，默认返回全部。
+        sort_by: 排序列名，默认不排序。
+        ascending: 排序方向，默认升序。
+        limit: 排序后限制返回行数，默认返回全部。
 
     Returns:
         JSON 格式的过滤结果。
@@ -614,14 +736,6 @@ def filter_data(
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
-    if column not in df.columns:
-        return json.dumps(
-            {"error": f"列 '{column}' 不存在，可用列: {[str(c) for c in df.columns]}"},
-            ensure_ascii=False,
-            default=str,
-        )
-
-    # 根据运算符过滤
     ops = {
         "eq": lambda s, v: s == v,
         "ne": lambda s, v: s != v,
@@ -632,14 +746,49 @@ def filter_data(
         "contains": lambda s, v: s.astype(str).str.contains(str(v), na=False),
     }
 
-    if operator not in ops:
+    # 构建条件列表：兼容单条件和多条件
+    if conditions:
+        cond_list = conditions
+    elif column is not None and operator is not None:
+        cond_list = [{"column": column, "operator": operator, "value": value}]
+    else:
         return json.dumps(
-            {"error": f"不支持的运算符 '{operator}'，支持: {list(ops.keys())}"},
+            {"error": "请提供 column/operator/value 单条件，或 conditions 多条件数组"},
             ensure_ascii=False,
         )
 
-    mask = ops[operator](df[column], value)
-    filtered = df[mask]
+    if logic not in ("and", "or"):
+        return json.dumps(
+            {"error": f"不支持的逻辑运算符 '{logic}'，支持: and, or"},
+            ensure_ascii=False,
+        )
+
+    # 逐条件构建 mask
+    masks = []
+    for cond in cond_list:
+        col = cond.get("column")
+        op = cond.get("operator")
+        val = cond.get("value")
+        if col not in df.columns:
+            return json.dumps(
+                {"error": f"列 '{col}' 不存在，可用列: {[str(c) for c in df.columns]}"},
+                ensure_ascii=False,
+                default=str,
+            )
+        if op not in ops:
+            return json.dumps(
+                {"error": f"不支持的运算符 '{op}'，支持: {list(ops.keys())}"},
+                ensure_ascii=False,
+            )
+        masks.append(ops[op](df[col], val))
+
+    # 组合 mask
+    if logic == "and":
+        combined_mask = functools.reduce(lambda a, b: a & b, masks)
+    else:
+        combined_mask = functools.reduce(lambda a, b: a | b, masks)
+
+    filtered = df[combined_mask]
 
     # 投影：只保留指定列
     if columns:
@@ -649,13 +798,41 @@ def filter_data(
     else:
         missing_cols = []
 
+    # 排序
+    if sort_by is not None:
+        if sort_by not in filtered.columns:
+            return json.dumps(
+                {"error": f"排序列 '{sort_by}' 不存在，可用列: {[str(c) for c in filtered.columns]}"},
+                ensure_ascii=False,
+                default=str,
+            )
+        # 对排序列做数值转换以支持文本型数值的正确排序
+        sort_key = _coerce_numeric(filtered[sort_by])
+        filtered = filtered.assign(**{"__sort_key__": sort_key}).sort_values(
+            by="__sort_key__", ascending=ascending, na_position="last", kind="mergesort"
+        ).drop(columns=["__sort_key__"])
+
+    # 排序后限制返回行数（limit）
+    total_filtered = len(filtered)
+    if limit is not None and limit > 0:
+        filtered = filtered.head(limit)
+
+    # max_rows 兜底限制
+    if max_rows is not None and max_rows > 0:
+        filtered = filtered.head(max_rows)
+
     result: dict[str, Any] = {
         "file": str(safe_path.name),
-        "filter": {"column": column, "operator": operator, "value": value},
+        "filters": cond_list,
+        "logic": logic,
         "original_rows": len(df),
-        "filtered_rows": int(mask.sum()),
+        "filtered_rows": total_filtered,
+        "returned_rows": len(filtered),
         "data": json.loads(filtered.to_json(orient="records", force_ascii=False)),
     }
+    if total_filtered > len(filtered):
+        result["truncated"] = True
+        result["note"] = f"结果已截断，共 {total_filtered} 条匹配，返回前 {len(filtered)} 条"
     if missing_cols:
         result["missing_columns"] = missing_cols
 
@@ -684,7 +861,7 @@ def transform_data(
         operations: 转换操作列表，每项包含 type 和对应参数。
         sheet_name: 工作表名称，默认第一个。
         output_path: 输出文件路径，默认覆盖源文件。
-        header_row: 列头所在行号（从0开始），默认0。
+        header_row: 列头所在行号（从0开始），默认自动检测。
 
     Returns:
         JSON 格式的转换结果。
@@ -787,7 +964,7 @@ def transform_data(
 
 
 
-# scan_excel_files 可用的 include 维度
+# inspect_excel_files 可用的 include 维度
 _SCAN_FILES_DIMENSIONS = (
     "freeze_panes",
     "charts",
@@ -797,7 +974,7 @@ _SCAN_FILES_DIMENSIONS = (
 )
 
 
-def scan_excel_files(
+def inspect_excel_files(
     directory: str = ".",
     max_files: int = 20,
     preview_rows: int = 3,
@@ -840,17 +1017,15 @@ def scan_excel_files(
         )
 
     # 收集 Excel 文件（.xlsx / .xlsm），跳过隐藏文件和临时文件
+    # 先收集全部再排序，确保结果确定性（glob 返回顺序依赖文件系统，不可靠）
     excel_paths: list[Path] = []
     for ext in ("*.xlsx", "*.xlsm"):
         for p in safe_dir.glob(ext):
             if p.name.startswith((".", "~$")):
                 continue
             excel_paths.append(p)
-            if len(excel_paths) >= max_files:
-                break
-        if len(excel_paths) >= max_files:
-            break
     excel_paths.sort(key=lambda p: p.name.lower())
+    excel_paths = excel_paths[:max_files]
 
     files_summary: list[dict[str, Any]] = []
     for fp in excel_paths:
@@ -931,10 +1106,17 @@ def scan_excel_files(
         file_info["sheets"] = sheets_info
         files_summary.append(file_info)
 
+    # 紧凑文件清单放在最前，即使详细信息被截断也能保留完整文件列表
+    file_list = [
+        {"file": fp.name, "size": _format_size(fp.stat().st_size)}
+        for fp in excel_paths
+    ]
+
     result: dict[str, Any] = {
         "directory": directory,
         "excel_files_found": len(excel_paths),
         "truncated": len(excel_paths) >= max_files,
+        "file_list": file_list,
         "files": files_summary,
     }
     if invalid_dims:
@@ -1505,7 +1687,7 @@ def group_aggregate(
             支持的聚合函数：count, sum, mean, min, max, median, std, nunique, first, last。
             特殊值 "*" 作为键表示对所有行计数（等价于 COUNT(*)）。
         sheet_name: 工作表名称，默认第一个。
-        header_row: 列头所在行号（从0开始），默认0。
+        header_row: 列头所在行号（从0开始），默认自动检测。
         sort_by: 结果排序列名，默认不排序。
         ascending: 排序方向，默认升序。
         limit: 限制返回行数，默认全部返回。
@@ -1625,6 +1807,7 @@ def group_aggregate(
             result_df = result_df.sort_values(by=candidates[0], ascending=ascending)
 
     # 限制行数
+    total_before_limit = len(result_df)
     if limit is not None and limit > 0:
         result_df = result_df.head(limit)
 
@@ -1637,6 +1820,15 @@ def group_aggregate(
         "columns": [str(c) for c in result_df.columns],
         "data": json.loads(result_df.to_json(orient="records", force_ascii=False, date_format="iso")),
     }
+    if limit is not None and limit > 0 and total_before_limit > limit:
+        completeness = build_completeness_meta(
+            total_available=total_before_limit,
+            returned=len(result_df),
+            entity_name="组",
+        )
+        result["is_truncated"] = completeness.get("is_truncated", False)
+        result["truncation_note"] = completeness.get("truncation_note", "")
+
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
@@ -1806,7 +1998,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时，需指定真正的列头行号（例如标题占1行则传1）",
+                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                     "include": {
                         "type": "array",
@@ -1890,7 +2082,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                 },
                 "required": ["file_path"],
@@ -1900,7 +2092,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="filter_data",
-            description="根据条件过滤 Excel 数据行，支持 eq/ne/gt/ge/lt/le/contains 运算符。可通过 columns 参数只返回指定列以减少数据量",
+            description="根据条件过滤 Excel 数据行并可选排序。支持单条件（column/operator/value）和多条件 AND/OR 组合（conditions 数组）。可通过 columns 参数只返回指定列，通过 sort_by 排序结果，通过 max_rows 限制返回行数以减少数据量。适用于排序、筛选、Top-N 等场景",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -1910,15 +2102,38 @@ def get_tools() -> list[ToolDef]:
                     },
                     "column": {
                         "type": "string",
-                        "description": "要过滤的列名",
+                        "description": "要过滤的列名（单条件模式，与 operator/value 配合使用）",
                     },
                     "operator": {
                         "type": "string",
                         "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains"],
-                        "description": "比较运算符",
+                        "description": "比较运算符（单条件模式）",
                     },
                     "value": {
-                        "description": "比较值（数字或字符串）",
+                        "description": "比较值（数字或字符串，单条件模式）",
+                    },
+                    "conditions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {"type": "string", "description": "列名"},
+                                "operator": {
+                                    "type": "string",
+                                    "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains"],
+                                    "description": "比较运算符",
+                                },
+                                "value": {"description": "比较值"},
+                            },
+                            "required": ["column", "operator", "value"],
+                        },
+                        "description": "多条件数组，每个元素包含 column/operator/value。与单条件参数二选一",
+                    },
+                    "logic": {
+                        "type": "string",
+                        "enum": ["and", "or"],
+                        "description": "多条件组合逻辑，默认 and。仅在 conditions 有多个条件时生效",
+                        "default": "and",
                     },
                     "sheet_name": {
                         "type": "string",
@@ -1926,21 +2141,38 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                     "columns": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "只返回指定列名列表（投影），默认返回全部列",
                     },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "最多返回的数据行数，默认返回全部匹配行。建议设置以控制返回数据量",
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "排序列名。支持文本型数值列（如含千分位逗号、中文单位后缀）的正确排序",
+                    },
+                    "ascending": {
+                        "type": "boolean",
+                        "description": "排序方向，默认升序。设为 false 表示降序",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "排序后限制返回行数（用于 Top-N 场景），默认返回全部",
+                    },
                 },
-                "required": ["file_path", "column", "operator", "value"],
+                "required": ["file_path"],
                 "additionalProperties": False,
             },
             func=filter_data,
         ),
         ToolDef(
-            name="scan_excel_files",
+            name="inspect_excel_files",
             description=(
                 "批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
                 "通过 include 可按需附加：freeze_panes、charts、images、conditional_formatting、column_widths"
@@ -1986,7 +2218,8 @@ def get_tools() -> list[ToolDef]:
                 "required": [],
                 "additionalProperties": False,
             },
-            func=scan_excel_files,
+            func=inspect_excel_files,
+            max_result_chars=0,
         ),
         ToolDef(
             name="transform_data",
@@ -2000,14 +2233,38 @@ def get_tools() -> list[ToolDef]:
                     },
                     "operations": {
                         "type": "array",
-                        "description": "转换操作列表",
+                        "description": (
+                            "转换操作列表，每项包含 type 及对应参数：\n"
+                            "- sort: by（列名）+ ascending（布尔，默认 true）\n"
+                            "- rename: columns（字典，{\"旧名\": \"新名\"}）\n"
+                            "- add_column: name（列名）+ value（值或表达式）\n"
+                            "- drop_columns: columns（列名列表）"
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "type": {
                                     "type": "string",
                                     "enum": ["rename", "add_column", "drop_columns", "sort"],
-                                    "description": "操作类型",
+                                    "description": "操作类型：rename（重命名列）、add_column（添加列）、drop_columns（删除列）、sort（排序）",
+                                },
+                                "by": {
+                                    "type": "string",
+                                    "description": "sort 操作：排序依据的列名",
+                                },
+                                "ascending": {
+                                    "type": "boolean",
+                                    "description": "sort 操作：是否升序排列，默认 true",
+                                },
+                                "columns": {
+                                    "description": "rename 操作时为字典 {\"旧列名\": \"新列名\"}；drop_columns 操作时为要删除的列名列表",
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "add_column 操作：新列的列名",
+                                },
+                                "value": {
+                                    "description": "add_column 操作：新列的值（可以是常量或表达式）",
                                 },
                             },
                             "required": ["type"],
@@ -2023,7 +2280,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                 },
                 "required": ["file_path", "operations"],
@@ -2033,7 +2290,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="group_aggregate",
-            description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等），支持排序和行数限制。适用于"统计每个X的Y总和/数量"类需求。自动处理含千分位逗号、中文单位后缀的文本型数值列',
+            description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等）。仅适用于"统计每个X的Y总和/数量"类分组聚合需求，不适用于简单排序或筛选（请用 filter_data）。调用时必须提供 aggregations 参数，例如 aggregations={"销售额": "sum"}。自动处理含千分位逗号、中文单位后缀的文本型数值列',
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2050,7 +2307,12 @@ def get_tools() -> list[ToolDef]:
                     },
                     "aggregations": {
                         "type": "object",
-                        "description": "聚合配置，键为列名，值为聚合函数名或列表。支持: count/sum/mean/min/max/median/std/nunique/first/last。用 \"*\" 作为键表示 COUNT(*) 行计数",
+                        "description": (
+                            "【必填】聚合配置字典，键为列名，值为聚合函数名(字符串)或函数名列表。"
+                            "支持的聚合函数: count/sum/mean/min/max/median/std/nunique/first/last。"
+                            "用 \"*\" 作为键表示 COUNT(*) 行计数。"
+                            "示例: {\"销售额\": \"sum\", \"单价\": \"mean\"} 或 {\"*\": \"count\"} 或 {\"金额\": [\"sum\", \"mean\"]}"
+                        ),
                         "additionalProperties": {
                             "oneOf": [
                                 {"type": "string"},
@@ -2064,7 +2326,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认0。当工作表有合并标题行时需指定",
+                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                     "sort_by": {
                         "type": "string",
@@ -2118,11 +2380,11 @@ def get_tools() -> list[ToolDef]:
                     },
                     "left_header_row": {
                         "type": "integer",
-                        "description": "左表表头行号（从0开始），默认自动检测",
+                        "description": "左表表头行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                     "right_header_row": {
                         "type": "integer",
-                        "description": "右表表头行号（从0开始），默认自动检测",
+                        "description": "右表表头行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
                     },
                     "max_unmatched_samples": {
                         "type": "integer",

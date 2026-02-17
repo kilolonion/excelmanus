@@ -252,6 +252,8 @@ class SheetCache:
     max_cached_rows: int = 200
     stale_hint: str | None = None
     unfiltered_buffer: list[dict[str, Any]] | None = None
+    last_op_kind: str | None = None        # "read" | "write" | "filter" | None
+    last_write_range: str | None = None    # 写操作受影响范围
 
 
 @dataclass
@@ -305,6 +307,7 @@ class SheetData:
     focus: SheetFocus = field(default_factory=SheetFocus)
     total_rows: int = 0
     total_cols: int = 0
+    sheet_dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -504,6 +507,22 @@ class SheetWindow(BaseWindow):
         self.data.cache.unfiltered_buffer = list(value) if isinstance(value, list) else None
 
     @property
+    def last_op_kind(self) -> str | None:
+        return self.data.cache.last_op_kind
+
+    @last_op_kind.setter
+    def last_op_kind(self, value: str | None) -> None:
+        self.data.cache.last_op_kind = value
+
+    @property
+    def last_write_range(self) -> str | None:
+        return self.data.cache.last_write_range
+
+    @last_write_range.setter
+    def last_write_range(self, value: str | None) -> None:
+        self.data.cache.last_write_range = value
+
+    @property
     def scroll_position(self) -> dict[str, Any]:
         return self.data.focus.scroll_position
 
@@ -550,6 +569,14 @@ class SheetWindow(BaseWindow):
     @conditional_effects.setter
     def conditional_effects(self, value: list[str]) -> None:
         self.data.style.conditional_effects = [str(item) for item in value if str(item).strip()]
+
+    @property
+    def sheet_dimensions(self) -> dict[str, tuple[int, int]]:
+        return self.data.sheet_dimensions
+
+    @sheet_dimensions.setter
+    def sheet_dimensions(self, value: dict[str, tuple[int, int]]) -> None:
+        self.data.sheet_dimensions = dict(value) if isinstance(value, dict) else {}
 
 
 Window = ExplorerWindow | SheetWindow

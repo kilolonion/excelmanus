@@ -31,6 +31,7 @@ __all__ = [
     "extract_range_ref",
     "extract_row_heights",
     "extract_shape",
+    "extract_sheet_dimensions",
     "extract_sheet_name",
     "extract_sheet_tabs",
     "extract_status_bar",
@@ -158,7 +159,45 @@ def extract_shape(result_json: dict[str, Any] | None) -> tuple[int, int]:
     if rows > 0 or cols > 0:
         return rows, cols
 
+    sheets = result_json.get("sheets")
+    if isinstance(sheets, list) and sheets:
+        first_sheet = sheets[0]
+        if isinstance(first_sheet, dict):
+            rows = _to_int(first_sheet.get("rows"))
+            cols = _to_int(first_sheet.get("columns"))
+            if rows > 0 or cols > 0:
+                return rows, cols
+
     return 0, 0
+
+def extract_sheet_dimensions(
+    result_json: dict[str, Any] | None,
+) -> dict[str, tuple[int, int]]:
+    """从 list_sheets / describe_sheets 返回中提取每个工作表的行列维度。
+
+    Returns:
+        {sheet_name: (rows, cols)} 映射；无数据时返回空 dict。
+    """
+    if not isinstance(result_json, dict):
+        return {}
+
+    sheets = result_json.get("sheets")
+    if not isinstance(sheets, list) or not sheets:
+        return {}
+
+    dims: dict[str, tuple[int, int]] = {}
+    for item in sheets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        rows = _to_int(item.get("rows"))
+        cols = _to_int(item.get("columns"))
+        if rows > 0 or cols > 0:
+            dims[name] = (rows, cols)
+    return dims
+
 
 
 def extract_preview_rows(result_json: dict[str, Any] | None) -> list[Any]:

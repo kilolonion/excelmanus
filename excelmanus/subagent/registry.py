@@ -10,6 +10,7 @@ from excelmanus.logger import get_logger
 from excelmanus.skillpacks.loader import SkillpackLoader, SkillpackValidationError
 from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
 from excelmanus.subagent.models import (
+    SubagentCapabilityMode,
     SubagentConfig,
     SubagentMemoryScope,
     SubagentPermissionMode,
@@ -18,6 +19,7 @@ from excelmanus.subagent.models import (
 logger = get_logger("subagent.registry")
 
 _VALID_PERMISSION_MODES: set[str] = {"default", "acceptEdits", "readOnly", "dontAsk"}
+_VALID_CAPABILITY_MODES: set[str] = {"restricted", "full"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
 _MEMORY_SCOPE_KEYS: tuple[str, ...] = ("memory_scope", "memory-scope", "memory")
 _SUBAGENT_NAME_ALIASES: dict[str, str] = {
@@ -128,6 +130,15 @@ class SubagentRegistry:
                 )
             memory_scope = memory_scope_raw  # type: ignore[assignment]
 
+        capability_mode_raw = SubagentRegistry._as_str(
+            frontmatter.get("capability_mode"),
+            default="restricted",
+        )
+        if capability_mode_raw not in _VALID_CAPABILITY_MODES:
+            raise SkillpackValidationError(
+                f"capability_mode 非法: {capability_mode_raw!r}，必须是 {_VALID_CAPABILITY_MODES}"
+            )
+
         max_iterations = SubagentRegistry._as_int(
             frontmatter.get("max_iterations"),
             default=self._config.subagent_max_iterations,
@@ -152,6 +163,7 @@ class SubagentRegistry:
             max_consecutive_failures=max_failures,
             skills=skills,
             memory_scope=memory_scope,
+            capability_mode=capability_mode_raw,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             system_prompt=body.strip(),
         )

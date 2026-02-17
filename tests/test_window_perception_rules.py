@@ -9,7 +9,7 @@ class TestWindowRules:
     """工具分类测试。"""
 
     def test_classify_explorer_tool(self) -> None:
-        result = classify_tool("scan_excel_files")
+        result = classify_tool("inspect_excel_files")
         assert result.window_type == WindowType.EXPLORER
 
     def test_classify_sheet_tool(self) -> None:

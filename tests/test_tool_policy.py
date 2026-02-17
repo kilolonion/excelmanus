@@ -151,9 +151,9 @@ def test_discovery_tools_are_read_only_or_focus() -> None:
 def test_discovery_tools_expected_members() -> None:
     from excelmanus.tools.policy import DISCOVERY_TOOLS
     expected = {
-        "read_excel", "scan_excel_files", "analyze_data", "filter_data",
+        "read_excel", "inspect_excel_files", "analyze_data", "filter_data",
         "group_aggregate", "list_sheets", "list_directory", "get_file_info",
-        "search_files", "read_text_file", "read_cell_styles", "focus_window",
+        "find_files", "read_text_file", "read_cell_styles", "focus_window",
     }
     assert DISCOVERY_TOOLS == expected
 
@@ -168,7 +168,7 @@ def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
     registry.register_builtin_tools(str(tmp_path))
     registered = set(registry.get_tool_names())
     meta_tools = {"memory_save", "memory_read_topic", "task_create", "task_update",
-                  "list_skills", "focus_window", "scan_excel_files"}
+                  "list_skills", "focus_window", "inspect_excel_files"}
     uncategorized = registered - categorized - meta_tools
     assert not uncategorized, f"未分类工具: {sorted(uncategorized)}"
 
