@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 import json
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -360,6 +360,7 @@ class ChatResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    write_guard_triggered: bool = False
 
     def __str__(self) -> str:
         """兼容旧调用方将 chat 结果当作字符串直接使用。"""
@@ -474,8 +475,8 @@ class AgentEngine:
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
         # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
         self._loaded_skill_names: set[str] = set()
-        # 当前激活技能：None 表示未激活状态
-        self._active_skill: Skillpack | None = None
+        # 当前激活技能列表：末尾为主 skill，空列表表示未激活
+        self._active_skills: list[Skillpack] = []
         # auto 模式系统消息回退缓存：None | "merge"
         self._system_mode_fallback: str | None = None
         # 执行统计（每次 chat 调用后更新）
@@ -599,14 +600,15 @@ class AgentEngine:
 
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
-        if self._active_skill is not None:
+        if self._active_skills:
+            _primary = self._active_skills[-1]
             self._run_skill_hook(
-                skill=self._active_skill,
+                skill=_primary,
                 event=HookEvent.STOP,
                 payload={"reason": "shutdown_mcp"},
             )
             self._run_skill_hook(
-                skill=self._active_skill,
+                skill=_primary,
                 event=HookEvent.SESSION_END,
                 payload={"reason": "shutdown_mcp"},
             )
@@ -916,13 +918,80 @@ class AgentEngine:
         pre_route_result: "PreRouteResult | None" = None
         preroute_mode = self._config.skill_preroute_mode
 
+        def _resolve_preroute_target(result: "PreRouteResult | None") -> tuple[str | None, list[str]]:
+            if result is None:
+                return None, []
+            candidates: list[str] = []
+            raw_candidates = getattr(result, "skill_names", None)
+            if isinstance(raw_candidates, list):
+                for item in raw_candidates:
+                    if not isinstance(item, str):
+                        continue
+                    name = item.strip()
+                    if not name or name in candidates:
+                        continue
+                    candidates.append(name)
+            legacy_name = getattr(result, "skill_name", None)
+            if isinstance(legacy_name, str) and legacy_name.strip():
+                normalized = legacy_name.strip()
+                if normalized not in candidates:
+                    candidates.append(normalized)
+            if len(candidates) >= 2:
+                logger.info(
+                    "预路由命中复合技能 skill_names=%s，降级激活 general_excel",
+                    candidates,
+                )
+                return "general_excel", candidates
+            if len(candidates) == 1:
+                return candidates[0], candidates
+            return None, candidates
+
         if (
             route_result.route_mode == "all_tools"
-            and self._active_skill is None
+            and not self._active_skills
             and effective_slash_command is None
             and self._skill_router is not None
         ):
-            if preroute_mode in ("deepseek", "gemini"):
+            if preroute_mode == "hybrid":
+                # 混合策略：小模型预路由 + 元工具动态扩展
+                from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
+                api_key = self._config.skill_preroute_api_key or self._config.api_key
+                base_url = self._config.skill_preroute_base_url or self._config.base_url
+                model_name = self._config.skill_preroute_model or self._config.model
+                try:
+                    pre_route_result = await pre_route_skill(
+                        user_message,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model_name,
+                        timeout_ms=self._config.skill_preroute_timeout_ms,
+                    )
+                    logger.info(
+                        "hybrid 预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms",
+                        pre_route_result.skill_name,
+                        getattr(pre_route_result, "skill_names", []),
+                        pre_route_result.confidence,
+                        pre_route_result.latency_ms,
+                    )
+                    target_skill_name, skill_candidates = _resolve_preroute_target(pre_route_result)
+                    if target_skill_name is not None:
+                        auto_result = await self._handle_select_skill(target_skill_name)
+                        if not auto_result.startswith("未找到技能:"):
+                            auto_activated_skill_name = target_skill_name
+                            logger.info("hybrid 预路由激活技能: %s", auto_activated_skill_name)
+                        else:
+                            # 预路由选择的技能不存在，回退 meta_only
+                            logger.warning(
+                                "hybrid 预路由技能 %s 不存在（候选=%s），回退 meta_only 模式",
+                                target_skill_name,
+                                skill_candidates,
+                            )
+                    # else: 闲聊场景，不激活任何技能，走 meta_only 路径
+                except Exception as exc:
+                    logger.warning("hybrid 预路由异常: %s，回退 meta_only 模式", exc)
+                    # 不回退到 general_excel，保持 meta_only 的精简工具集
+
+            elif preroute_mode in ("deepseek", "gemini"):
                 # 小模型预路由
                 from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
                 api_key = self._config.skill_preroute_api_key or self._config.api_key
@@ -937,22 +1006,25 @@ class AgentEngine:
                         timeout_ms=self._config.skill_preroute_timeout_ms,
                     )
                     logger.info(
-                        "预路由结果: skill=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
+                        "预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
                         pre_route_result.skill_name,
+                        getattr(pre_route_result, "skill_names", []),
                         pre_route_result.confidence,
                         pre_route_result.latency_ms,
                         pre_route_result.model_used,
                         pre_route_result.reason,
                     )
-                    if pre_route_result.skill_name is not None:
-                        auto_result = await self._handle_select_skill(pre_route_result.skill_name)
+                    target_skill_name, skill_candidates = _resolve_preroute_target(pre_route_result)
+                    if target_skill_name is not None:
+                        auto_result = await self._handle_select_skill(target_skill_name)
                         if not auto_result.startswith("未找到技能:"):
-                            auto_activated_skill_name = pre_route_result.skill_name
+                            auto_activated_skill_name = target_skill_name
                             logger.info("预路由激活技能: %s", auto_activated_skill_name)
                         else:
                             logger.warning(
-                                "预路由选择的技能 %s 不存在，回退 general_excel",
-                                pre_route_result.skill_name,
+                                "预路由选择的技能 %s 不存在（候选=%s），回退 general_excel",
+                                target_skill_name,
+                                skill_candidates,
                             )
                             auto_result = await self._handle_select_skill("general_excel")
                             if not auto_result.startswith("未找到技能:"):
@@ -984,10 +1056,10 @@ class AgentEngine:
         # 补全 skills_used 和 system_contexts
         final_skills_used = list(route_result.skills_used)
         final_system_contexts = list(route_result.system_contexts)
-        if auto_activated_skill_name and self._active_skill is not None:
+        if auto_activated_skill_name and self._active_skills:
             if auto_activated_skill_name not in final_skills_used:
                 final_skills_used.append(auto_activated_skill_name)
-            skill_context = self._active_skill.render_context()
+            skill_context = self._active_skills[-1].render_context()
             if skill_context.strip():
                 final_system_contexts.append(skill_context)
 
@@ -997,6 +1069,7 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=final_system_contexts,
             parameterized=route_result.parameterized,
+            write_hint=getattr(route_result, "write_hint", "unknown"),
         )
         self._last_route_result = route_result
 
@@ -1296,11 +1369,27 @@ class AgentEngine:
         return skillpacks.get(name)
 
     def _pick_route_skill(self, route_result: SkillMatchResult | None) -> Skillpack | None:
-        if self._active_skill is not None:
-            return self._active_skill
+        if self._active_skills:
+            return self._active_skills[-1]
         if route_result is None or not route_result.skills_used:
             return None
         return self._get_loaded_skill(route_result.skills_used[0])
+
+    @property
+    def _primary_skill(self) -> Skillpack | None:
+        """当前主 skill（列表末尾），无激活时返回 None。"""
+        return self._active_skills[-1] if self._active_skills else None
+
+    def _active_skills_tool_union(self) -> list[str]:
+        """所有激活 skill 的 allowed_tools 并集（保序去重）。"""
+        seen: set[str] = set()
+        result: list[str] = []
+        for skill in self._active_skills:
+            for tool in skill.allowed_tools:
+                if tool not in seen:
+                    seen.add(tool)
+                    result.append(tool)
+        return result
 
     @staticmethod
     def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
@@ -1595,8 +1684,11 @@ class AgentEngine:
             "(1) 需要批量探查多个文件/sheet 结构时委派 explorer；"
             "(2) 需要执行复杂数据分析时委派 analyst；"
             "(3) 需要批量写入或格式化时委派 writer；"
-            "(4) 需要编写和调试 Python 脚本时委派 coder。"
+            "(4) 需要编写和调试 Python 脚本时委派 coder；"
+            "(5) 复杂研究或多步骤修改任务委派 full（全能力子代理）。\n"
             "当搜索结果不确定、需要逐个检查多个目标时，优先委派 explorer 而非自己逐个尝试。\n"
+            "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物），"
+            "简单任务直接用 task 字符串。\n"
             "注意：委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
             "Subagent_Catalog:\n"
             f"{subagent_catalog or '当前无可用子代理。'}"
@@ -1612,7 +1704,32 @@ class AgentEngine:
             "选项应具体（列出实际文件名/方案名），不要泛泛而问。"
             "调用后暂停执行，等待用户回答后继续。"
         )
-        return [
+        # 写入门禁：仅当 write_hint == "may_write" 时注入 finish_task
+        finish_task_tool = None
+        if getattr(self, "_current_write_hint", "unknown") == "may_write":
+            finish_task_tool = {
+                "type": "function",
+                "function": {
+                    "name": "finish_task",
+                    "description": (
+                        "任务完成声明。所有写入/修改操作实际执行完毕后调用。"
+                        "summary 填写做了什么和产出。"
+                        "未实际执行写入操作时不得调用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string",
+                                "description": "完成摘要（做了什么、产出是什么）",
+                            },
+                        },
+                        "required": ["summary"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -1646,7 +1763,38 @@ class AgentEngine:
                         "properties": {
                             "task": {
                                 "type": "string",
-                                "description": "需要子代理完成的任务描述",
+                                "description": "简单任务描述（与 task_brief 二选一）",
+                            },
+                            "task_brief": {
+                                "type": "object",
+                                "description": "结构化任务描述，适用于复杂研究或多步骤修改任务（与 task 二选一）",
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "description": "任务标题（一句话概括）",
+                                    },
+                                    "background": {
+                                        "type": "string",
+                                        "description": "任务背景与上下文",
+                                    },
+                                    "objectives": {
+                                        "type": "array",
+                                        "description": "研究或执行目标列表",
+                                        "items": {"type": "string"},
+                                    },
+                                    "constraints": {
+                                        "type": "array",
+                                        "description": "约束条件（如：只修改哪些文件、不要改动哪些模块）",
+                                        "items": {"type": "string"},
+                                    },
+                                    "deliverables": {
+                                        "type": "array",
+                                        "description": "期望的交付物列表",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["title"],
+                                "additionalProperties": False,
                             },
                             "agent_name": {
                                 "type": "string",
@@ -1659,7 +1807,7 @@ class AgentEngine:
                                 "items": {"type": "string"},
                             },
                         },
-                        "required": ["task"],
+                        "required": [],
                         "additionalProperties": False,
                     },
                 },
@@ -1756,6 +1904,9 @@ class AgentEngine:
                 },
             },
         ]
+        if finish_task_tool is not None:
+            tools.append(finish_task_tool)
+        return tools
 
     def _handle_discover_tools(self, category: str) -> str:
         """处理 discover_tools 元工具调用，返回指定类别的工具列表。"""
@@ -1843,11 +1994,64 @@ class AgentEngine:
         if mcp_requirements_error:
             return mcp_requirements_error
 
-        self._active_skill = selected
+        self._active_skills = [
+            s for s in self._active_skills if s.name != selected.name
+        ] + [selected]
         self._loaded_skill_names.add(selected.name)
 
         context_text = selected.render_context()
         return f"OK\n{context_text}"
+
+    @staticmethod
+    def _is_skill_context_text(context: str) -> bool:
+        return str(context or "").lstrip().startswith("[Skillpack]")
+
+    def _refresh_route_after_skill_switch(
+        self,
+        route_result: SkillMatchResult,
+    ) -> SkillMatchResult:
+        """select_skill 成功后同步刷新 route 状态，避免继续使用旧 skill 上下文。"""
+        active_name = self._active_skills[-1].name if self._active_skills else ""
+        merged_skills: list[str] = []
+        if active_name:
+            merged_skills.append(active_name)
+
+        for name in list(route_result.skills_used) + sorted(self._loaded_skill_names):
+            normalized = str(name or "").strip()
+            if not normalized or normalized in merged_skills:
+                continue
+            merged_skills.append(normalized)
+
+        non_skill_contexts = [
+            ctx
+            for ctx in route_result.system_contexts
+            if not self._is_skill_context_text(ctx)
+        ]
+        refreshed_contexts = list(non_skill_contexts)
+        if self._active_skills:
+            active_context = self._active_skills[-1].render_context().strip()
+            if active_context:
+                refreshed_contexts.append(active_context)
+
+        base_result = SkillMatchResult(
+            skills_used=merged_skills,
+            tool_scope=[],
+            route_mode=route_result.route_mode,
+            system_contexts=refreshed_contexts,
+            parameterized=route_result.parameterized,
+            write_hint=getattr(route_result, "write_hint", "unknown"),
+        )
+        refreshed_scope = self._get_current_tool_scope(route_result=base_result)
+        refreshed = SkillMatchResult(
+            skills_used=base_result.skills_used,
+            tool_scope=refreshed_scope,
+            route_mode=base_result.route_mode,
+            system_contexts=base_result.system_contexts,
+            parameterized=base_result.parameterized,
+            write_hint=base_result.write_hint,
+        )
+        self._last_route_result = refreshed
+        return refreshed
 
     @staticmethod
     def _normalize_mcp_identifier(name: str) -> str:
@@ -1931,11 +2135,33 @@ class AgentEngine:
         route_result: SkillMatchResult | None = None,
     ) -> list[str]:
         """根据当前状态返回主代理可用工具范围。"""
-        if self._active_skill is not None:
-            scope = self._expand_tool_scope_patterns(self._active_skill.allowed_tools)
+        route_hint = (
+            getattr(route_result, "write_hint", None)
+            if route_result is not None
+            else None
+        )
+        write_hint = (
+            route_hint
+            if isinstance(route_hint, str) and route_hint
+            else str(getattr(self, "_current_write_hint", "unknown"))
+        )
+
+        def _append_finish_task(scope: list[str]) -> list[str]:
+            if write_hint == "may_write" and "finish_task" not in scope:
+                scope.append("finish_task")
+            return scope
+
+        if self._active_skills:
+            scope = self._expand_tool_scope_patterns(self._active_skills_tool_union())
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            # hybrid 模式下保留 discover_tools，让 LLM 能查询其他类别工具
+            if self._config.skill_preroute_mode == "hybrid":
+                if "discover_tools" not in scope:
+                    scope.append("discover_tools")
+            merged_scope = self._append_global_mcp_tools(
+                self._ensure_always_available(_append_finish_task(scope))
+            )
             return self._apply_window_mode_tool_filter(merged_scope)
 
         # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
@@ -1947,7 +2173,9 @@ class AgentEngine:
             scope = self._expand_tool_scope_patterns(route_result.tool_scope)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            merged_scope = self._append_global_mcp_tools(
+                self._ensure_always_available(_append_finish_task(scope))
+            )
             return self._apply_window_mode_tool_filter(merged_scope)
 
         # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
@@ -1957,7 +2185,9 @@ class AgentEngine:
             for tool_name in _META_TOOL_NAMES:
                 if tool_name not in scope:
                     scope.append(tool_name)
-            merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+            merged_scope = self._append_global_mcp_tools(
+                self._ensure_always_available(_append_finish_task(scope))
+            )
             return self._apply_window_mode_tool_filter(merged_scope)
 
         # 无 skill 激活、无路由指定 scope：使用基础发现工具集
@@ -1966,7 +2196,9 @@ class AgentEngine:
         for tool_name in _META_TOOL_NAMES:
             if tool_name not in scope:
                 scope.append(tool_name)
-        merged_scope = self._append_global_mcp_tools(self._ensure_always_available(scope))
+        merged_scope = self._append_global_mcp_tools(
+            self._ensure_always_available(_append_finish_task(scope))
+        )
         return self._apply_window_mode_tool_filter(merged_scope)
 
     def _apply_window_mode_tool_filter(self, scope: list[str]) -> list[str]:
@@ -2149,6 +2381,10 @@ class AgentEngine:
                 permission_mode="default",
                 conversation_id="",
             )
+        # 运行时模型选择：子代理自身 > 全局 subagent_model > 当前激活主模型
+        # 这样在未配置“子路由模型”时，可随着 /model 切换正确回退到主模型。
+        resolved_model = config.model or self._config.subagent_model or self._active_model
+        runtime_config = config if config.model == resolved_model else replace(config, model=resolved_model)
         parent_context_parts: list[str] = []
         parent_summary = self._build_parent_context_summary()
         if parent_summary:
@@ -2156,14 +2392,84 @@ class AgentEngine:
         window_context = self._build_window_perception_notice()
         if window_context:
             parent_context_parts.append(window_context)
+        # full 模式：构建主代理级别的丰富上下文
+        enriched_contexts: list[str] | None = None
+        if runtime_config.capability_mode == "full":
+            enriched_contexts = self._build_full_mode_contexts()
+
         return await self._subagent_executor.run(
-            config=config,
+            config=runtime_config,
             prompt=prompt,
             parent_context="\n\n".join(parent_context_parts),
             on_event=on_event,
             full_access_enabled=self._full_access_enabled,
             tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
+            enriched_contexts=enriched_contexts,
         )
+
+    def _build_full_mode_contexts(self) -> list[str]:
+        """为 full 模式子代理构建主代理级别的丰富上下文。"""
+        contexts: list[str] = []
+
+        # 1. MCP 扩展能力概要
+        mcp_notice = self._build_mcp_context_notice()
+        if mcp_notice:
+            contexts.append(mcp_notice)
+
+        # 2. 工具分类索引（使用全量工具域）
+        all_tools = list(self._all_tool_names())
+        tool_index = self._build_tool_index_notice(all_tools)
+        if tool_index:
+            contexts.append(tool_index)
+
+        # 3. 权限状态说明
+        access_notice = self._build_access_notice()
+        if access_notice:
+            contexts.append(access_notice)
+
+        return contexts
+
+    @staticmethod
+    def _render_task_brief(brief: dict[str, Any]) -> str:
+        """将结构化 task_brief 渲染为 Markdown 格式的任务指令。"""
+        title = str(brief.get("title", "")).strip()
+        parts: list[str] = [f"## 任务：{title}"]
+
+        background = str(brief.get("background", "")).strip()
+        if background:
+            parts.append(f"### 背景\n{background}")
+
+        objectives = brief.get("objectives")
+        if isinstance(objectives, list) and objectives:
+            items = "\n".join(
+                f"{i + 1}. {str(obj).strip()}"
+                for i, obj in enumerate(objectives)
+                if str(obj).strip()
+            )
+            if items:
+                parts.append(f"### 目标\n{items}")
+
+        constraints = brief.get("constraints")
+        if isinstance(constraints, list) and constraints:
+            items = "\n".join(
+                f"- {str(c).strip()}"
+                for c in constraints
+                if str(c).strip()
+            )
+            if items:
+                parts.append(f"### 约束\n{items}")
+
+        deliverables = brief.get("deliverables")
+        if isinstance(deliverables, list) and deliverables:
+            items = "\n".join(
+                f"- {str(d).strip()}"
+                for d in deliverables
+                if str(d).strip()
+            )
+            if items:
+                parts.append(f"### 交付物\n{items}")
+
+        return "\n\n".join(parts)
 
     async def _delegate_to_subagent(
         self,
@@ -2196,7 +2502,7 @@ class AgentEngine:
             )
         picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
 
-        hook_skill = self._active_skill
+        hook_skill = self._active_skills[-1] if self._active_skills else None
         pre_subagent_hook_raw = self._run_skill_hook(
             skill=hook_skill,
             event=HookEvent.SUBAGENT_START,
@@ -2867,6 +3173,7 @@ class AgentEngine:
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
         all_tool_results: list[ToolCallResult] = []
+        current_route_result = route_result
         # 恢复执行时保留之前的统计，仅首次调用时重置
         if start_iteration <= 1:
             self._last_iteration_count = 0
@@ -2876,6 +3183,12 @@ class AgentEngine:
         # 执行守卫标记重置
         self._execution_guard_fired = False  # type: ignore[attr-defined]
         has_write_tool_call = False
+        self._has_write_tool_call = False
+        consecutive_text_only: int = 0
+        self._finish_task_warned = False
+        write_hint = getattr(current_route_result, "write_hint", "unknown")
+        # 设置实例属性供 _build_meta_tools 读取
+        self._current_write_hint = write_hint
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -2890,7 +3203,8 @@ class AgentEngine:
             )
 
             system_prompts, context_error = self._prepare_system_prompts_for_request(
-                route_result.system_contexts
+                current_route_result.system_contexts,
+                route_result=current_route_result,
             )
             if context_error is not None:
                 self._last_iteration_count = iteration
@@ -2912,7 +3226,7 @@ class AgentEngine:
                 max_context_tokens=self._config.max_context_tokens,
             )
 
-            tool_scope = self._get_current_tool_scope(route_result=route_result)
+            tool_scope = self._get_current_tool_scope(route_result=current_route_result)
             tools = self._build_tools_for_scope(tool_scope=tool_scope)
 
             kwargs: dict[str, Any] = {
@@ -2976,7 +3290,7 @@ class AgentEngine:
 
                 # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
                 if (
-                    self._active_skill is None
+                    not self._active_skills
                     and iteration < max_iter - 1
                     and _contains_formula_advice(reply_text)
                     and not getattr(self, "_execution_guard_fired", False)
@@ -2991,6 +3305,35 @@ class AgentEngine:
                     self._memory.add_user_message(guard_msg)
                     logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
                     continue
+
+                # ── 写入门禁：write_hint == "may_write" 时检查是否有实际写入 ──
+                if write_hint == "may_write" and not has_write_tool_call:
+                    consecutive_text_only += 1
+                    if consecutive_text_only < 2 and iteration < max_iter:
+                        guard_msg = (
+                            "你尚未调用任何写入工具完成实际操作。"
+                            "请先调用 select_skill 激活可写技能，"
+                            "再立即调用对应写入/格式化/图表工具执行。"
+                            "禁止以“先确认后再做”等文本收尾替代执行。"
+                            "完成后再调用 finish_task 并在 summary 中说明结果。"
+                        )
+                        self._memory.add_user_message(guard_msg)
+                        logger.info("写入门禁触发：无写入工具调用，注入继续执行提示 (consecutive=%d)", consecutive_text_only)
+                        continue
+                    else:
+                        # 连续两次纯文本或已接近迭代上限，强制退出
+                        self._last_iteration_count = iteration
+                        logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
+                        return ChatResult(
+                            reply=reply_text,
+                            tool_calls=list(all_tool_results),
+                            iterations=iteration,
+                            truncated=False,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            total_tokens=total_prompt_tokens + total_completion_tokens,
+                            write_guard_triggered=True,
+                        )
 
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
@@ -3057,15 +3400,41 @@ class AgentEngine:
                     tool_scope,
                     on_event,
                     iteration,
-                    route_result=route_result,
+                    route_result=current_route_result,
                 )
 
+                consecutive_text_only = 0
                 all_tool_results.append(tc_result)
+
+                # finish_task 成功接受时退出循环
+                if (
+                    tc_result.tool_name == "finish_task"
+                    and tc_result.success
+                    and "✓" in tc_result.result
+                ):
+                    if tool_call_id:
+                        self._memory.add_tool_result(tool_call_id, tc_result.result)
+                    self._last_iteration_count = iteration
+                    self._last_tool_call_count += 1
+                    self._last_success_count += 1
+                    reply = tc_result.result
+                    self._memory.add_assistant_message(reply)
+                    logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                    return ChatResult(
+                        reply=reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=False,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
+
                 if not tc_result.defer_tool_result and tool_call_id:
                     self._memory.add_tool_result(tool_call_id, tc_result.result)
 
                 if tc_result.pending_approval:
-                    self._pending_approval_route_result = route_result
+                    self._pending_approval_route_result = current_route_result
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     self._last_iteration_count = iteration
@@ -3100,7 +3469,7 @@ class AgentEngine:
                 if tc_result.pending_question:
                     question_started = True
                     if self._pending_question_route_result is None:
-                        self._pending_question_route_result = route_result
+                        self._pending_question_route_result = current_route_result
 
                 # 更新统计
                 self._last_tool_call_count += 1
@@ -3109,8 +3478,16 @@ class AgentEngine:
                     consecutive_failures = 0
                     if tc_result.tool_name in _WRITE_TOOL_NAMES:
                         has_write_tool_call = True
+                        self._has_write_tool_call = True
                     if tc_result.tool_name == "select_skill":
-                        tool_scope = self._get_current_tool_scope(route_result=route_result)
+                        current_route_result = self._refresh_route_after_skill_switch(
+                            current_route_result
+                        )
+                        write_hint = getattr(current_route_result, "write_hint", write_hint)
+                        self._current_write_hint = write_hint
+                        tool_scope = self._get_current_tool_scope(
+                            route_result=current_route_result
+                        )
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -3334,8 +3711,12 @@ class AgentEngine:
                         )
                     elif tool_name == "delegate_to_subagent":
                         task_value = arguments.get("task")
+                        task_brief = arguments.get("task_brief")
+                        # task_brief 优先：渲染为结构化 Markdown
+                        if isinstance(task_brief, dict) and task_brief.get("title"):
+                            task_value = self._render_task_brief(task_brief)
                         if not isinstance(task_value, str) or not task_value.strip():
-                            result_str = "工具参数错误: task 必须为非空字符串。"
+                            result_str = "工具参数错误: task 或 task_brief 必须提供其一。"
                             success = False
                             error = result_str
                         else:
@@ -3418,6 +3799,32 @@ class AgentEngine:
                         result_str = self._handle_list_subagents()
                         success = True
                         error = None
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str,
+                        )
+                    elif tool_name == "finish_task":
+                        summary = arguments.get("summary", "")
+                        _has_write = getattr(self, "_has_write_tool_call", False)
+                        if _has_write:
+                            result_str = f"✓ 任务完成。{summary}"
+                            success = True
+                            error = None
+                        elif getattr(self, "_finish_task_warned", False):
+                            result_str = f"✓ 任务完成（无写入）。{summary}"
+                            success = True
+                            error = None
+                        else:
+                            result_str = (
+                                "⚠️ 未检测到写入类工具的成功调用。"
+                                "如果经分析确实不需要写入，请再次调用 finish_task 并在 summary 中说明原因。"
+                                "否则请先执行写入操作。"
+                            )
+                            self._finish_task_warned = True
+                            success = True
+                            error = None
                         log_tool_call(
                             logger,
                             tool_name,
@@ -3561,6 +3968,15 @@ class AgentEngine:
                     success = False
                     error = str(exc)
                     log_tool_call(logger, tool_name, arguments, error=error)
+
+            # ── 检测 registry 层返回的结构化错误 JSON ──
+            if success and self._registry.is_error_result(result_str):
+                success = False
+                try:
+                    _err = json.loads(result_str)
+                    error = _err.get("message") or result_str
+                except Exception:
+                    error = result_str
 
             post_hook_event = HookEvent.POST_TOOL_USE if success else HookEvent.POST_TOOL_USE_FAILURE
             post_hook_raw = self._run_skill_hook(
@@ -3823,21 +4239,22 @@ class AgentEngine:
 
     def clear_memory(self) -> None:
         """清除对话历史。"""
-        if self._active_skill is not None:
+        if self._active_skills:
+            _primary = self._active_skills[-1]
             self._run_skill_hook(
-                skill=self._active_skill,
+                skill=_primary,
                 event=HookEvent.STOP,
                 payload={"reason": "clear_memory"},
             )
             self._run_skill_hook(
-                skill=self._active_skill,
+                skill=_primary,
                 event=HookEvent.SESSION_END,
                 payload={"reason": "clear_memory"},
             )
         self._memory.clear()
         self._loaded_skill_names.clear()
         self._hook_started_skills.clear()
-        self._active_skill = None
+        self._active_skills.clear()
         self._question_flow.clear()
         self._system_question_actions.clear()
         self._pending_question_route_result = None
@@ -4757,6 +5174,8 @@ class AgentEngine:
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
+        *,
+        route_result: SkillMatchResult | None = None,
     ) -> tuple[list[str], str | None]:
         """构建用于本轮请求的 system prompts，并在必要时压缩上下文。"""
         base_prompt = self._memory.system_prompt
@@ -4769,12 +5188,14 @@ class AgentEngine:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # 无 skill 激活时注入工具分组索引
-        if self._active_skill is None:
-            _tool_scope = self._get_current_tool_scope(route_result=None)
-            _tool_index = self._build_tool_index_notice(_tool_scope)
-            if _tool_index:
-                base_prompt = base_prompt + "\n\n" + _tool_index
+        # 所有模式均注入工具索引，确保模型在 active skill 场景下也感知可扩展能力。
+        _tool_scope = self._get_current_tool_scope(route_result=route_result)
+        _tool_index = self._build_tool_index_notice(
+            _tool_scope,
+            compact=bool(self._active_skills),
+        )
+        if _tool_index:
+            base_prompt = base_prompt + "\n\n" + _tool_index
 
         if self._transient_hook_contexts:
             hook_context = "\n".join(self._transient_hook_contexts).strip()
@@ -5046,14 +5467,19 @@ class AgentEngine:
             mode=requested_mode,
             model_id=self._active_model,
         )
-    def _build_tool_index_notice(self, tool_scope: Sequence[str]) -> str:
+    def _build_tool_index_notice(
+        self,
+        tool_scope: Sequence[str],
+        *,
+        compact: bool = False,
+        max_tools_per_category: int = 8,
+    ) -> str:
         """生成当前可用工具的分类索引，注入 system prompt。
 
-        仅在无 skill 激活时生成，帮助 LLM 快速定位工具类别。
         同时列出未激活但可通过 select_skill 获取的工具，
         让 LLM 了解完整能力图谱并主动激活技能。
         """
-        from excelmanus.tools.policy import TOOL_CATEGORIES
+        from excelmanus.tools.policy import TOOL_CATEGORIES, TOOL_SHORT_DESCRIPTIONS
 
         _CATEGORY_LABELS: dict[str, str] = {
             "data_read": "数据读取",
@@ -5066,20 +5492,45 @@ class AgentEngine:
             "code": "代码执行",
         }
 
+        limit = max(1, int(max_tools_per_category))
         scope_set = set(tool_scope)
         active_lines: list[str] = []
         inactive_lines: list[str] = []
         registered = set(self._all_tool_names())
+        key_inactive_categories = {"data_write", "format", "chart"}
+
+        def _format_tool_list(tools: Sequence[str], *, with_desc: bool = False) -> str:
+            visible = list(tools[:limit])
+            hidden = max(0, len(tools) - len(visible))
+            if not visible:
+                return ""
+            if with_desc:
+                parts_list = []
+                for t in visible:
+                    desc = TOOL_SHORT_DESCRIPTIONS.get(t)
+                    parts_list.append(f"{t}({desc})" if desc else t)
+                text = ", ".join(parts_list)
+            else:
+                text = ", ".join(visible)
+            if hidden > 0:
+                text += f" (+{hidden})"
+            return text
 
         for cat, tools in TOOL_CATEGORIES.items():
             label = _CATEGORY_LABELS.get(cat, cat)
             available = [t for t in tools if t in scope_set]
             inactive = [t for t in tools if t not in scope_set and t in registered]
             if available:
-                active_lines.append(f"- {label}：{', '.join(available)}")
+                line = _format_tool_list(available)
+                if line:
+                    active_lines.append(f"- {label}：{line}")
             if inactive:
+                if compact and cat not in key_inactive_categories:
+                    continue
                 suffix = " [需 fullAccess]" if cat == "code" else ""
-                inactive_lines.append(f"  · {label}：{', '.join(inactive)}{suffix}")
+                line = _format_tool_list(inactive, with_desc=True)
+                if line:
+                    inactive_lines.append(f"  · {label}：{line}{suffix}")
 
         if not active_lines and not inactive_lines:
             return ""

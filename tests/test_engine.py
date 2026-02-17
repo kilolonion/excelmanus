@@ -83,7 +83,7 @@ def _make_registry_with_tools() -> ToolRegistry:
 
 def _activate_test_tools(engine: AgentEngine, tools: list[str] | None = None) -> None:
     """为测试激活一个包含指定工具的 Skillpack，使工具进入 scope。"""
-    engine._active_skill = Skillpack(
+    engine._active_skills = [Skillpack(
         name="_test_scope",
         description="test scope",
         allowed_tools=tools or ["add_numbers", "fail_tool"],
@@ -91,7 +91,7 @@ def _activate_test_tools(engine: AgentEngine, tools: list[str] | None = None) ->
         instructions="test",
         source="system",
         root_dir="/tmp/_test_scope",
-    )
+    )]
 
 
 def _make_text_response(content: str) -> MagicMock:
@@ -2560,7 +2560,7 @@ class TestForkPathRemoved:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="excel_code_runner",
             description="代码处理",
             allowed_tools=[],
@@ -2568,7 +2568,7 @@ class TestForkPathRemoved:
             instructions="",
             source="project",
             root_dir="/tmp/skill",
-        )
+        )]
         route_result = SkillMatchResult(
             skills_used=["excel_code_runner"],
             tool_scope=["add_numbers"],
@@ -2600,7 +2600,7 @@ class TestForkPathRemoved:
         engine._delegate_to_subagent = AsyncMock()
 
         async def _fake_execute_tool_call(*args, **kwargs) -> ToolCallResult:
-            engine._active_skill = Skillpack(
+            engine._active_skills = [Skillpack(
                 name="team/analyst",
                 description="普通技能",
                 allowed_tools=["add_numbers"],
@@ -2608,7 +2608,7 @@ class TestForkPathRemoved:
                 instructions="",
                 source="project",
                 root_dir="/tmp/skill",
-            )
+            )]
             return ToolCallResult(
                 tool_name="select_skill",
                 arguments={"skill_name": "team/analyst"},
@@ -3416,8 +3416,8 @@ class TestPreRouteCompositeFallback:
             result = await engine.chat("先画图，再把表头美化")
 
         assert result == "ok"
-        assert engine._active_skill is not None
-        assert engine._active_skill.name == "general_excel"
+        assert engine._active_skills
+        assert engine._active_skills[-1].name == "general_excel"
         assert "general_excel" in engine.last_route_result.skills_used
 
 
@@ -3598,7 +3598,7 @@ class TestMCPScopeSelector:
         registry = _make_registry_with_tools()
         mcp_tool = self._register_mcp_test_tool(registry)
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="data_basic",
             description="active skill",
             allowed_tools=["add_numbers"],
@@ -3606,7 +3606,7 @@ class TestMCPScopeSelector:
             instructions="test",
             source="project",
             root_dir="/tmp/active_skill",
-        )
+        )]
 
         scope = engine._get_current_tool_scope(
             route_result=SkillMatchResult(
@@ -3845,7 +3845,7 @@ class TestSkillMCPRequirements:
         result = await engine._handle_select_skill("need_mcp")
 
         assert "MCP 依赖未满足" in result
-        assert engine._active_skill is None
+        assert not engine._active_skills
 
     @pytest.mark.asyncio
     async def test_select_skill_accepts_when_required_mcp_server_and_tool_ready(self) -> None:
@@ -3884,8 +3884,8 @@ class TestSkillMCPRequirements:
         result = await engine._handle_select_skill("need_mcp")
 
         assert result.startswith("OK")
-        assert engine._active_skill is not None
-        assert engine._active_skill.name == "need_mcp"
+        assert engine._active_skills
+        assert engine._active_skills[-1].name == "need_mcp"
 
 
 class TestCommandDispatchAndHooks:
@@ -3940,7 +3940,7 @@ class TestCommandDispatchAndHooks:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="hook/deny",
             description="deny hook",
             allowed_tools=["add_numbers"],
@@ -3956,7 +3956,7 @@ class TestCommandDispatchAndHooks:
                     }
                 ]
             },
-        )
+        )]
 
         tc = SimpleNamespace(
             id="call_hook_deny",
@@ -3976,7 +3976,7 @@ class TestCommandDispatchAndHooks:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="hook/ask",
             description="ask hook",
             allowed_tools=["add_numbers"],
@@ -3992,7 +3992,7 @@ class TestCommandDispatchAndHooks:
                     }
                 ]
             },
-        )
+        )]
 
         tc = SimpleNamespace(
             id="call_hook_ask",
@@ -4013,7 +4013,7 @@ class TestCommandDispatchAndHooks:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="hook/update",
             description="update input hook",
             allowed_tools=["add_numbers"],
@@ -4035,7 +4035,7 @@ class TestCommandDispatchAndHooks:
                     }
                 ]
             },
-        )
+        )]
 
         tc = SimpleNamespace(
             id="call_hook_update",
@@ -4078,7 +4078,7 @@ class TestCommandDispatchAndHooks:
             )
         )
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="hook/allow",
             description="allow hook",
             allowed_tools=["write_text_file"],
@@ -4094,7 +4094,7 @@ class TestCommandDispatchAndHooks:
                     }
                 ]
             },
-        )
+        )]
 
         output = tmp_path / "hook_allow.txt"
         tc = SimpleNamespace(
@@ -4158,7 +4158,7 @@ class TestCommandDispatchAndHooks:
                 conversation_id="sub_1",
             )
         )
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="hook/agent",
             description="agent hook",
             allowed_tools=["add_numbers"],
@@ -4181,7 +4181,7 @@ class TestCommandDispatchAndHooks:
                     }
                 ]
             },
-        )
+        )]
 
         tc = SimpleNamespace(
             id="call_hook_agent",
@@ -4439,7 +4439,7 @@ class TestChatToolError:
         messages = engine.memory.get_messages()
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         assert len(tool_msgs) == 1
-        assert "错误" in tool_msgs[0]["content"]
+        assert "TOOL_EXECUTION_ERROR" in tool_msgs[0]["content"]
 
     @pytest.mark.asyncio
     async def test_malformed_arguments_should_not_execute_tool(self) -> None:
@@ -5421,7 +5421,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_custom_tool()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="test/custom",
             description="test",
             allowed_tools=["custom_tool"],
@@ -5429,7 +5429,7 @@ class TestApprovalFlow:
             instructions="",
             source="project",
             root_dir=str(tmp_path),
-        )
+        )]
 
         on_reply = await engine.chat("/fullAccess on")
         assert "已开启" in on_reply
@@ -5526,7 +5526,7 @@ class TestDiscoveryToolScope:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="data_basic",
             description="数据处理",
             allowed_tools=["add_numbers"],
@@ -5534,7 +5534,7 @@ class TestDiscoveryToolScope:
             instructions="test",
             source="system",
             root_dir="/tmp/data_basic",
-        )
+        )]
         scope = engine._get_current_tool_scope(route_result=None)
         assert "add_numbers" in scope
 
@@ -5643,8 +5643,8 @@ class TestToolIndexNotice:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        scope = ["read_excel", "scan_excel_files", "analyze_data",
-                 "filter_data", "list_directory", "search_files"]
+        scope = ["read_excel", "inspect_excel_files", "analyze_data",
+                 "filter_data", "list_directory", "find_files"]
         notice = engine._build_tool_index_notice(scope)
         assert "工具索引" in notice
         assert "read_excel" in notice
@@ -5745,7 +5745,7 @@ class TestToolInjectionOptimizationE2E:
             source="system",
             root_dir="/tmp/data_basic",
         )
-        engine._active_skill = data_skill
+        engine._active_skills = [data_skill]
         scope = engine._get_current_tool_scope(route_result=None)
         assert "add_numbers" in scope
 
@@ -5755,7 +5755,7 @@ class TestToolInjectionOptimizationE2E:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         # 确保无 active_skill
-        assert engine._active_skill is None
+        assert not engine._active_skills
         prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
         assert error is None
         # 合并所有 prompt 检查是否包含工具索引
@@ -5770,7 +5770,7 @@ class TestToolInjectionOptimizationE2E:
         config = _make_config(skill_preroute_mode=mode)
         registry = self._make_registry_with_categorized_tools()
         engine = AgentEngine(config, registry)
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="chart_basic",
             description="chart",
             allowed_tools=["read_excel", "create_chart", "list_sheets"],
@@ -5778,9 +5778,9 @@ class TestToolInjectionOptimizationE2E:
             instructions="chart skill",
             source="system",
             root_dir="/tmp/chart_basic",
-        )
+        )]
         prompts, error = engine._prepare_system_prompts_for_request(
-            skill_contexts=[engine._active_skill.render_context()]
+            skill_contexts=[engine._active_skills[-1].render_context()]
         )
         assert error is None
         full_prompt = "\n".join(prompts)
@@ -5817,7 +5817,7 @@ class TestToolInjectionOptimizationE2E:
                 assert tool in scope_no_skill, f"{tool} 应在无 skill scope 中"
 
         # 有 skill 激活
-        engine._active_skill = Skillpack(
+        engine._active_skills = [Skillpack(
             name="test",
             description="test",
             allowed_tools=["add_numbers"],
@@ -5825,7 +5825,7 @@ class TestToolInjectionOptimizationE2E:
             instructions="test",
             source="system",
             root_dir="/tmp",
-        )
+        )]
         scope_with_skill = set(engine._get_current_tool_scope(route_result=None))
         for tool in _ALWAYS_AVAILABLE_TOOLS:
             if tool in registered:
