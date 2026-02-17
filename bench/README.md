@@ -219,18 +219,100 @@ bash bench/run_3way_ab.sh
 | `message` | 单轮 ✅ | 单轮对话的用户消息 |
 | `messages` | 多轮 ✅ | 多轮对话的消息列表（按顺序发送） |
 | `tags` | ❌ | 分类标签，便于筛选 |
-| `expected` | ❌ | 预期结果（当前仅记录，未做自动断言） |
+| `expected` | ❌ | 预期结果（仅记录，建议使用 `assertions` 替代） |
+| `assertions` | ❌ | 声明式断言规则（case 级覆盖 suite 级同名字段） |
+
+### 断言规则 (assertions)
+
+在 suite JSON 中通过 `assertions` 字段声明自动校验规则。支持 **suite 级默认 + case 级覆盖**。
+
+#### suite 级示例
+
+```json
+{
+  "suite_name": "基础读写套件",
+  "assertions": {
+    "status": "ok",
+    "max_iterations": 10,
+    "max_tool_failures": 1,
+    "no_empty_promise": true,
+    "reply_not_contains": ["抱歉，我无法"]
+  },
+  "cases": [...]
+}
+```
+
+#### case 级覆盖
+
+```json
+{
+  "id": "case_read_top10",
+  "message": "读取前10行...",
+  "assertions": {
+    "max_iterations": 5,
+    "required_tools": ["read_excel"],
+    "reply_contains": ["列名"]
+  }
+}
+```
+
+case 级 `assertions` 会覆盖 suite 级同名字段，未覆盖的继承 suite 级默认值。
+
+#### 支持的规则
+
+| 规则 | 类型 | 说明 |
+|------|------|------|
+| `status` | `str` | 期望用例状态，通常为 `"ok"` |
+| `max_iterations` | `int` | 迭代次数上限 |
+| `max_llm_calls` | `int` | LLM 调用次数上限 |
+| `max_tool_calls` | `int` | 工具调用次数上限 |
+| `max_tool_failures` | `int` | 允许的工具失败数上限 |
+| `max_tokens` | `int` | token 消耗上限 |
+| `max_duration_seconds` | `float` | 耗时上限（秒） |
+| `expected_skill` | `str` | 期望路由到的技能包名称 |
+| `required_tools` | `list[str]` | 必须调用的工具列表 |
+| `forbidden_tools` | `list[str]` | 禁止调用的工具列表 |
+| `no_empty_promise` | `bool` | 首轮不能有"空承诺"（有文字但无 tool_calls） |
+| `reply_contains` | `list[str]` | 最终回复必须包含的关键词 |
+| `reply_not_contains` | `list[str]` | 最终回复不能包含的关键词 |
+
+#### 输出
+
+断言结果自动嵌入到每个 case 的输出 JSON 中：
+
+```json
+{
+  "validation": {
+    "total": 4,
+    "passed": 3,
+    "failed": 1,
+    "results": [
+      {"rule": "status", "passed": true},
+      {"rule": "max_iterations", "passed": true, "expected": "<= 5", "actual": 2},
+      {"rule": "required_tools", "passed": true},
+      {"rule": "expected_skill", "passed": false, "expected": "data_basic", "actual": "general_excel", "message": "路由未命中期望技能"}
+    ]
+  }
+}
+```
+
+Suite 运行结束后自动生成 `report_YYYYMMDD_hash.md` Markdown 报告，包含：
+- 总览表（通过率、断言通过率、Token、耗时等）
+- 用例明细表（每个 case 的断言结果 badge）
+- 断言违规明细（仅失败的 case）
+- 质量检查（空承诺检测、工具失败统计）
 
 ---
 
 ## 输出结构
 
-每次运行产出三类 JSON 文件：
+每次运行产出四类文件：
 
 ```
 outputs/bench_test/
-├── run_YYYYMMDD_caseid_hash.json    # 单个用例详细日志
+├── run_YYYYMMDD_caseid_hash.json    # 单个用例详细日志（含 validation）
 ├── suite_YYYYMMDD_hash.json         # 套件汇总
+├── report_YYYYMMDD_hash.md          # 自动生成的 Markdown 报告
 └── global_YYYYMMDD_hash.json        # 全局汇总
 ```
 

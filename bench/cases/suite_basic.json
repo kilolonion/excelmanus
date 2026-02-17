@@ -1,24 +1,43 @@
 {
   "suite_name": "基础读写套件",
   "description": "覆盖常见 Excel 操作场景，用于验证路由效率和工具调用质量",
+  "assertions": {
+    "status": "ok",
+    "max_iterations": 10,
+    "max_tool_failures": 1,
+    "no_empty_promise": true,
+    "reply_not_contains": ["抱歉，我无法"]
+  },
   "cases": [
     {
       "id": "case_scan_workspace",
       "name": "扫描工作区文件",
       "message": "帮我看看当前目录下有哪些 Excel 文件，分别有什么 sheet",
-      "tags": ["discovery", "scan"]
+      "tags": ["discovery", "scan"],
+      "assertions": {
+        "required_tools": ["list_sheets"]
+      }
     },
     {
       "id": "case_read_sales_top10",
       "name": "读取销售明细前10行",
       "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中销售明细的前10行数据，告诉我列名",
-      "tags": ["data_read", "header_detection"]
+      "tags": ["data_read", "header_detection"],
+      "assertions": {
+        "required_tools": ["read_excel"],
+        "reply_contains": ["列名"],
+        "max_iterations": 5
+      }
     },
     {
       "id": "case_filter_tech_dept",
       "name": "筛选技术部员工",
       "message": "读取 examples/bench/stress_test_comprehensive.xlsx 中\"员工花名册\"里所有部门为\"技术部\"的员工姓名和职级",
-      "tags": ["data_read", "filter", "header_detection"]
+      "tags": ["data_read", "filter", "header_detection"],
+      "assertions": {
+        "required_tools": ["read_excel"],
+        "max_iterations": 5
+      }
     },
     {
       "id": "case_sales_stats",
@@ -36,7 +55,10 @@
       "id": "case_multi_sheet_compare",
       "name": "多 sheet 信息提取",
       "message": "告诉我 examples/bench/stress_test_comprehensive.xlsx 里一共有多少个 sheet，每个 sheet 分别有多少行多少列",
-      "tags": ["discovery", "multi_sheet"]
+      "tags": ["discovery", "multi_sheet"],
+      "assertions": {
+        "required_tools": ["list_sheets"]
+      }
     },
     {
       "id": "case_employee_salary_stats",
@@ -48,7 +70,13 @@
       "id": "case_simple_greeting",
       "name": "简单问候（不应调用工具）",
       "message": "你好，你能做什么？",
-      "tags": ["chat", "no_tool"]
+      "tags": ["chat", "no_tool"],
+      "assertions": {
+        "max_iterations": 2,
+        "max_tool_calls": 0,
+        "no_empty_promise": false,
+        "reply_contains": ["Excel"]
+      }
     }
   ]
 }
