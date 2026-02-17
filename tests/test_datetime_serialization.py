@@ -205,6 +205,37 @@ class TestDetectHeaderRow:
         result = data_tools._detect_header_row(excel_with_deep_header, "KPI")
         assert result == 7
 
+    def test_merged_title_row_skipped(self, tmp_path: Path) -> None:
+        """合并标题行（跨多列）应被跳过，检测到真正的 header。"""
+        wb = Workbook()
+        ws = wb.active
+        # 第 0 行：合并标题 "2024年销售数据" 跨 A1:F1
+        ws.append(["2024年销售数据", None, None, None, None, None])
+        ws.merge_cells("A1:F1")
+        # 第 1 行：真正的表头
+        ws.append(["月份", "产品", "地区", "销售额", "成本", "利润"])
+        # 第 2 行：数据
+        ws.append(["1月", "产品A", "华东", 10000, 6000, 4000])
+        ws.append(["2月", "产品B", "华北", 12000, 7000, 5000])
+        fp = tmp_path / "merged_title.xlsx"
+        wb.save(fp)
+        assert data_tools._detect_header_row(fp, None) == 1
+
+    def test_merged_title_two_rows_skipped(self, tmp_path: Path) -> None:
+        """两行合并标题都应被跳过。"""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["年度销售报表", None, None, None])
+        ws.merge_cells("A1:D1")
+        ws.append(["生成时间：2024-01", None, None, None])
+        ws.merge_cells("A2:D2")
+        ws.append(["月份", "产品", "销售额", "利润"])
+        ws.append(["1月", "A", 10000, 4000])
+        fp = tmp_path / "two_merged_titles.xlsx"
+        wb.save(fp)
+        assert data_tools._detect_header_row(fp, None) == 2
+
+
 
 class TestDeepHeaderRead:
     """深层表头自动读取回归。"""

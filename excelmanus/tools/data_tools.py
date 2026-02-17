@@ -156,7 +156,7 @@ def _header_row_score(
     return score
 
 
-def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None = None) -> int | None:
+def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None = None, skip_rows: set[int] | None = None) -> int | None:
     """基于抽样行猜测 header 行号（0-indexed）。"""
     if not rows:
         return None
@@ -166,6 +166,8 @@ def _guess_header_row_from_rows(rows: list[list[Any]], *, max_scan: int | None =
     best_score = float("-inf")
 
     for idx in range(upper):
+        if skip_rows and idx in skip_rows:
+            continue
         row = _trim_trailing_nulls_generic(rows[idx])
         next_row = _trim_trailing_nulls_generic(rows[idx + 1]) if idx + 1 < upper else None
         score = _header_row_score(row, idx, next_row)
@@ -195,7 +197,7 @@ def _detect_header_row(
     """
     try:
         from openpyxl import load_workbook
-        wb = load_workbook(safe_path, read_only=True, data_only=True)
+        wb = load_workbook(safe_path, read_only=False, data_only=True)
     except Exception:
         return None
 
@@ -211,8 +213,17 @@ def _detect_header_row(
         if ws is None:
             return None
 
-        rows: list[list[Any]] = []
+        # 收集宽合并行（列跨度 > 50% 总列数）
         scan_cols = max(1, min(max_scan_columns, ws.max_column or max_scan_columns))
+        wide_merged_rows: set[int] = set()
+        for merged_range in ws.merged_cells.ranges:
+            col_span = merged_range.max_col - merged_range.min_col + 1
+            if col_span > scan_cols * 0.5:
+                for r in range(merged_range.min_row, merged_range.max_row + 1):
+                    if r <= max_scan:
+                        wide_merged_rows.add(r - 1)  # 转为 0-indexed
+
+        rows: list[list[Any]] = []
         for row in ws.iter_rows(
             min_row=1,
             max_row=max_scan,
@@ -225,7 +236,7 @@ def _detect_header_row(
         if not rows:
             return None
 
-        return _guess_header_row_from_rows(rows, max_scan=max_scan)
+        return _guess_header_row_from_rows(rows, max_scan=max_scan, skip_rows=wide_merged_rows)
     finally:
         wb.close()
 
@@ -599,8 +610,11 @@ def filter_data(
     conditions: list[dict[str, Any]] | None = None,
     logic: str = "and",
     max_rows: int | None = None,
+    sort_by: str | None = None,
+    ascending: bool = True,
+    limit: int | None = None,
 ) -> str:
-    """根据条件过滤 Excel 数据行，支持单条件和多条件 AND/OR 组合。
+    """根据条件过滤 Excel 数据行并可选排序，支持单条件和多条件 AND/OR 组合。
 
     Args:
         file_path: Excel 文件路径。
@@ -613,6 +627,9 @@ def filter_data(
         conditions: 多条件数组，每个元素为 {"column": str, "operator": str, "value": Any}。
         logic: 多条件组合方式，"and"（默认）或 "or"。
         max_rows: 最多返回的数据行数，默认返回全部。
+        sort_by: 排序列名，默认不排序。
+        ascending: 排序方向，默认升序。
+        limit: 排序后限制返回行数，默认返回全部。
 
     Returns:
         JSON 格式的过滤结果。
@@ -684,8 +701,26 @@ def filter_data(
     else:
         missing_cols = []
 
-    # 限制返回行数
+    # 排序
+    if sort_by is not None:
+        if sort_by not in filtered.columns:
+            return json.dumps(
+                {"error": f"排序列 '{sort_by}' 不存在，可用列: {[str(c) for c in filtered.columns]}"},
+                ensure_ascii=False,
+                default=str,
+            )
+        # 对排序列做数值转换以支持文本型数值的正确排序
+        sort_key = _coerce_numeric(filtered[sort_by])
+        filtered = filtered.assign(**{"__sort_key__": sort_key}).sort_values(
+            by="__sort_key__", ascending=ascending, na_position="last", kind="mergesort"
+        ).drop(columns=["__sort_key__"])
+
+    # 排序后限制返回行数（limit）
     total_filtered = len(filtered)
+    if limit is not None and limit > 0:
+        filtered = filtered.head(limit)
+
+    # max_rows 兜底限制
     if max_rows is not None and max_rows > 0:
         filtered = filtered.head(max_rows)
 
@@ -832,7 +867,7 @@ def transform_data(
 
 
 
-# scan_excel_files 可用的 include 维度
+# inspect_excel_files 可用的 include 维度
 _SCAN_FILES_DIMENSIONS = (
     "freeze_panes",
     "charts",
@@ -842,7 +877,7 @@ _SCAN_FILES_DIMENSIONS = (
 )
 
 
-def scan_excel_files(
+def inspect_excel_files(
     directory: str = ".",
     max_files: int = 20,
     preview_rows: int = 3,
@@ -1950,7 +1985,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="filter_data",
-            description="根据条件过滤 Excel 数据行。支持单条件（column/operator/value）和多条件 AND/OR 组合（conditions 数组）。可通过 columns 参数只返回指定列，通过 max_rows 限制返回行数以减少数据量",
+            description="根据条件过滤 Excel 数据行并可选排序。支持单条件（column/operator/value）和多条件 AND/OR 组合（conditions 数组）。可通过 columns 参数只返回指定列，通过 sort_by 排序结果，通过 max_rows 限制返回行数以减少数据量。适用于排序、筛选、Top-N 等场景",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2010,6 +2045,19 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "最多返回的数据行数，默认返回全部匹配行。建议设置以控制返回数据量",
                     },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "排序列名。支持文本型数值列（如含千分位逗号、中文单位后缀）的正确排序",
+                    },
+                    "ascending": {
+                        "type": "boolean",
+                        "description": "排序方向，默认升序。设为 false 表示降序",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "排序后限制返回行数（用于 Top-N 场景），默认返回全部",
+                    },
                 },
                 "required": ["file_path"],
                 "additionalProperties": False,
@@ -2017,7 +2065,7 @@ def get_tools() -> list[ToolDef]:
             func=filter_data,
         ),
         ToolDef(
-            name="scan_excel_files",
+            name="inspect_excel_files",
             description=(
                 "批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
                 "通过 include 可按需附加：freeze_panes、charts、images、conditional_formatting、column_widths"
@@ -2063,7 +2111,7 @@ def get_tools() -> list[ToolDef]:
                 "required": [],
                 "additionalProperties": False,
             },
-            func=scan_excel_files,
+            func=inspect_excel_files,
             max_result_chars=0,
         ),
         ToolDef(
@@ -2078,14 +2126,38 @@ def get_tools() -> list[ToolDef]:
                     },
                     "operations": {
                         "type": "array",
-                        "description": "转换操作列表",
+                        "description": (
+                            "转换操作列表，每项包含 type 及对应参数：\n"
+                            "- sort: by（列名）+ ascending（布尔，默认 true）\n"
+                            "- rename: columns（字典，{\"旧名\": \"新名\"}）\n"
+                            "- add_column: name（列名）+ value（值或表达式）\n"
+                            "- drop_columns: columns（列名列表）"
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "type": {
                                     "type": "string",
                                     "enum": ["rename", "add_column", "drop_columns", "sort"],
-                                    "description": "操作类型",
+                                    "description": "操作类型：rename（重命名列）、add_column（添加列）、drop_columns（删除列）、sort（排序）",
+                                },
+                                "by": {
+                                    "type": "string",
+                                    "description": "sort 操作：排序依据的列名",
+                                },
+                                "ascending": {
+                                    "type": "boolean",
+                                    "description": "sort 操作：是否升序排列，默认 true",
+                                },
+                                "columns": {
+                                    "description": "rename 操作时为字典 {\"旧列名\": \"新列名\"}；drop_columns 操作时为要删除的列名列表",
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "add_column 操作：新列的列名",
+                                },
+                                "value": {
+                                    "description": "add_column 操作：新列的值（可以是常量或表达式）",
                                 },
                             },
                             "required": ["type"],
@@ -2111,7 +2183,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="group_aggregate",
-            description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等），支持排序和行数限制。适用于"统计每个X的Y总和/数量"类需求。自动处理含千分位逗号、中文单位后缀的文本型数值列。调用时必须提供 aggregations 参数，例如 aggregations={"销售额": "sum"}',
+            description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等）。仅适用于"统计每个X的Y总和/数量"类分组聚合需求，不适用于简单排序或筛选（请用 filter_data）。调用时必须提供 aggregations 参数，例如 aggregations={"销售额": "sum"}。自动处理含千分位逗号、中文单位后缀的文本型数值列',
             input_schema={
                 "type": "object",
                 "properties": {
