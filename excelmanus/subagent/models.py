@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 SubagentPermissionMode = Literal["default", "acceptEdits", "readOnly", "dontAsk"]
+SubagentCapabilityMode = Literal["restricted", "full"]
 SubagentMemoryScope = Literal["user", "project"]
 SubagentSource = Literal["builtin", "user", "project"]
 
@@ -27,6 +28,7 @@ class SubagentConfig:
     skills: list[str] = field(default_factory=list)
     memory_scope: SubagentMemoryScope | None = None
     source: SubagentSource = "builtin"
+    capability_mode: SubagentCapabilityMode = "restricted"
     system_prompt: str = ""
 
 
