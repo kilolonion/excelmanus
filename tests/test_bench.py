@@ -22,7 +22,13 @@ def _run(coro):
 
 def _make_config() -> SimpleNamespace:
     """创建最小配置对象。"""
-    return SimpleNamespace(log_level="INFO")
+    return SimpleNamespace(
+        log_level="INFO",
+        model="test-model",
+        base_url="http://localhost",
+        router_model=None,
+        router_base_url=None,
+    )
 
 
 def _make_result(

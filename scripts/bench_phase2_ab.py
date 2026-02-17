@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Phase 2 全量 A/B 测试脚本：对比 4 种预路由策略的 agent 表现。
+"""Phase 2 全量 A/B 测试脚本：对比 6 种预路由策略的 agent 表现。
 
 通过调用 excelmanus.bench.run_suite 运行完整 agent 循环，
-分别在 A_baseline / B_meta_only / C_deepseek / D_gemini 四组配置下
-执行指定 suite，收集 tokens、耗时、成功率、工具调用数等指标，
+分别在 A_baseline / B_meta_only / C_deepseek / D_gemini / E_qwen / F_hybrid
+六组配置下执行指定 suite，收集 tokens、耗时、成功率、工具调用数等指标，
 最终输出汇总对比表和 comparison.json。
 
 用法示例：
-    # 全部组 × 全部 suite × 3 次
+    # 全部组 × 全部 suite × 1 次（默认 codex 模型）
     python scripts/bench_phase2_ab.py
+
+    # 切换到 xhigh 模型
+    python scripts/bench_phase2_ab.py --model gpt-5.3-codex-xhigh
 
     # 只跑 A 和 C 组
     python scripts/bench_phase2_ab.py --groups A_baseline C_deepseek
@@ -65,10 +68,21 @@ GROUPS: dict[str, dict[str, Any]] = {
         "skill_preroute_base_url": "https://right.codes/gemini/v1beta",
         "skill_preroute_model": "gemini-3-flash-preview",
     },
+    "E_qwen": {
+        "skill_preroute_mode": "deepseek",  # 复用 deepseek 代码路径
+        "auto_activate_default_skill": False,
+        "skill_preroute_api_key": "***REMOVED_API_KEY***",
+        "skill_preroute_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "skill_preroute_model": "qwen3.5-plus",
+    },
+    "F_hybrid": {
+        "skill_preroute_mode": "hybrid",
+        "auto_activate_default_skill": False,
+    },
 }
 
 DEFAULT_SUITES = [
-    "bench/cases/suite_phase2_quick.json",
+    "bench/cases/suite_single_chart_format.json",
 ]
 
 # ── 工具函数 ──────────────────────────────────────────────
@@ -275,7 +289,7 @@ async def _run_group(
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Phase 2 A/B 测试：对比 4 种预路由策略",
+        description="Phase 2 A/B 测试：对比 6 种预路由策略",
     )
     parser.add_argument(
         "--groups",
@@ -288,13 +302,13 @@ async def main() -> None:
         "--suites",
         nargs="+",
         default=DEFAULT_SUITES,
-        help="suite JSON 路径列表（默认 3 个 phase2 suite）",
+        help="suite JSON 路径列表",
     )
     parser.add_argument(
         "--runs",
         type=int,
-        default=3,
-        help="每组每 suite 重复次数（默认 3）",
+        default=1,
+        help="每组每 suite 重复次数（默认 1）",
     )
     parser.add_argument(
         "--concurrency",
@@ -308,6 +322,16 @@ async def main() -> None:
         default=True,
         help="是否并行执行各组（默认 True，--no-parallel-groups 回退串行）",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="覆盖主模型名称（如 gpt-5.3-codex-xhigh），不指定则用 .env 默认值",
+    )
+    parser.add_argument(
+        "--output-tag",
+        default=None,
+        help="输出目录标签（如 codex / xhigh），不指定则从 model 名自动推断",
+    )
     args = parser.parse_args()
 
     # 配置 logging
@@ -316,12 +340,19 @@ async def main() -> None:
     # 加载主模型配置
     base_config = load_config()
 
+    # 覆盖主模型（用于 codex / xhigh 切换）
+    if args.model:
+        base_config = replace(base_config, model=args.model)
+
+    # 推断输出标签
+    output_tag = args.output_tag or base_config.model.split(".")[-1].replace("-", "_")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    base_output = PROJECT_ROOT / "outputs" / "phase2_ab" / timestamp
+    base_output = PROJECT_ROOT / "outputs" / "phase2_ab" / f"{output_tag}_{timestamp}"
 
     from rich.console import Console
     console = Console()
     console.print(f"\n[bold green]Phase 2 A/B 测试启动[/bold green]")
+    console.print(f"  主模型: {base_config.model}")
     console.print(f"  组: {args.groups}")
     console.print(f"  Suites: {[_suite_short_name(s) for s in args.suites]}")
     console.print(f"  每组重复: {args.runs} 次")
