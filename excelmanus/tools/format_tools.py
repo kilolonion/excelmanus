@@ -680,7 +680,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="format_cells",
-            description="对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名（如 '红色'）或十六进制码（如 'FF0000'）。设置 return_styles=true 可在格式化后直接返回样式快照，省去额外 read_cell_styles 验证",
+            description="对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名或十六进制码。内置颜色名：红/绿/蓝/黄/白/黑/橙/紫/粉/灰/浅蓝/浅绿/浅黄/浅灰/浅红/浅紫/深蓝/深绿/深红/深灰/天蓝/草绿/金/银/珊瑚。设置 return_styles=true 可在格式化后直接返回样式快照，省去额外 read_cell_styles 验证",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -704,7 +704,7 @@ def get_tools() -> list[ToolDef]:
                             "size": {"type": "number"},
                             "bold": {"type": "boolean"},
                             "italic": {"type": "boolean"},
-                            "color": {"type": "string", "description": "颜色码或颜色名（如 '红色'、'FF0000'）"},
+                            "color": {"type": "string", "description": "颜色名（如 '深蓝色'、'白色'）或十六进制码（如 'FF0000'），优先使用中文颜色名"},
                             "underline": {"type": "string", "enum": ["single", "double", "none"], "description": "下划线样式"},
                             "strikethrough": {"type": "boolean", "description": "是否添加删除线"},
                         },
@@ -713,7 +713,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "object",
                         "description": "填充设置：color + 可选 fill_type",
                         "properties": {
-                            "color": {"type": "string", "description": "颜色码或颜色名（如 '浅黄色'、'FFFF00'）"},
+                            "color": {"type": "string", "description": "颜色名（如 '深蓝'、'浅灰'）或十六进制码（如 'FFFF00'），优先使用中文颜色名"},
                             "fill_type": {"type": "string", "enum": ["solid", "none"], "default": "solid"},
                         },
                     },
