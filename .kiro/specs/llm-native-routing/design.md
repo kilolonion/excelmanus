@@ -243,7 +243,7 @@ _META_TOOL_NAMES = ("select_skill", "explore_data", "list_skills")
 # 只读工具集（子代理使用）
 _READ_ONLY_TOOLS = (
     "read_excel", "analyze_data", "filter_data", "list_sheets",
-    "get_file_info", "search_files", "list_directory",
+    "get_file_info", "find_files", "list_directory",
     "read_text_file", "read_cell_styles",
 )
 ```

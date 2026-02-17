@@ -646,7 +646,7 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
     config = _make_config(tmp_path)
     registry = ToolRegistry()
 
-    def scan_excel_files() -> str:
+    def inspect_excel_files() -> str:
         payload = {
             "files": [
                 {"path": f"./examples/huge/report_{i}.xlsx"}
@@ -657,10 +657,10 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
 
     registry.register_tool(
         ToolDef(
-            name="scan_excel_files",
+            name="inspect_excel_files",
             description="扫描 Excel",
             input_schema={"type": "object", "properties": {}},
-            func=scan_excel_files,
+            func=inspect_excel_files,
             max_result_chars=120,
         )
     )
@@ -673,7 +673,7 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
     sub_cfg = SubagentConfig(
         name="explorer",
         description="长结果路径提取测试",
-        allowed_tools=["scan_excel_files"],
+        allowed_tools=["inspect_excel_files"],
         permission_mode="readOnly",
         max_iterations=2,
         max_consecutive_failures=2,
@@ -684,7 +684,7 @@ async def test_observed_files_kept_when_tool_result_truncated(tmp_path: Path) ->
             completions=SimpleNamespace(
                 create=AsyncMock(
                     side_effect=[
-                        _response_from_message(_tool_call_message("scan_excel_files", {})),
+                        _response_from_message(_tool_call_message("inspect_excel_files", {})),
                         _response_from_message(_text_message("完成")),
                     ]
                 )

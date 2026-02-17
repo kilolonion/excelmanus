@@ -31,7 +31,7 @@ allowed_tools:
   - set_page_header_footer
   - list_directory
   - get_file_info
-  - search_files
+  - find_files
   - read_text_file
   - copy_file
   - rename_file
@@ -57,7 +57,7 @@ user_invocable: false
 通用 Excel 助手，当用户需求不明确或跨多个领域时作为兜底技能包执行。
 
 任务分解策略：
-1. 先确认工作区中有哪些文件（list_directory / search_files），定位目标文件。
+1. 先确认工作区中有哪些文件（list_directory / find_files），定位目标文件。
 2. 读取目标文件（read_excel / read_text_file），了解数据结构和内容。
 3. 根据用户意图选择合适的工具组合执行操作。
 4. 每步操作后输出简明结果摘要，并给出下一步建议。
@@ -67,7 +67,7 @@ user_invocable: false
 - 涉及格式美化 → 优先用 format_cells、adjust_column_width、adjust_row_height。
 - 涉及样式感知 → 先用 read_cell_styles 了解现有样式，再决定修改方案。
 - 涉及合并单元格 → 使用 merge_cells / unmerge_cells。
-- 涉及图表生成 → 优先用 create_chart。
+- 涉及图表生成 → 生成独立图片用 create_chart，嵌入 Excel 原生图表用 create_excel_chart；数据源为 Excel 且用户未明确要求图片时默认用 create_excel_chart。
 - 涉及文件管理 → 优先用 copy_file、rename_file 等文件工具。
 - 涉及多工作表 → 先用 list_sheets 了解结构，再用 copy_range_between_sheets 跨表传输数据。
 - 需要新建/管理工作表 → 使用 create_sheet、copy_sheet、rename_sheet、delete_sheet。

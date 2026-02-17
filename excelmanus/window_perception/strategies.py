@@ -138,7 +138,7 @@ def _format_explorer_entries_ascii(result_json: dict[str, Any] | None) -> list[s
 
     lines: list[str] = []
 
-    # scan_excel_files 返回的 files 数组（含 sheet 详情）
+    # inspect_excel_files 返回的 files 数组（含 sheet 详情）
     files = result_json.get("files")
     if isinstance(files, list):
         for item in files[:12]:
@@ -189,7 +189,7 @@ def _format_explorer_entries_ascii(result_json: dict[str, Any] | None) -> list[s
                 lines.append(f"{tag} {name}")
         return lines
 
-    # search_files 返回的 matches 数组
+    # find_files 返回的 matches 数组
     if isinstance(result_json.get("matches"), list):
         for item in result_json["matches"][:20]:
             if not isinstance(item, dict):

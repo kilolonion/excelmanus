@@ -21,7 +21,9 @@ from excelmanus.subagent.models import SubagentConfig, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
 _SUMMARY_MAX_CHARS = 4000
+_FULL_MODE_SUMMARY_MAX_CHARS = 12000
 _SUBAGENT_BLOCKED_META_TOOLS = {"select_skill", "delegate_to_subagent", "list_subagents"}
+_FULL_MODE_BLOCKED_META_TOOLS = {"delegate_to_subagent", "list_subagents"}
 logger = get_logger("subagent.executor")
 
 ToolResultEnricher = Callable[[str, dict[str, Any], str, bool], str]
@@ -60,21 +62,31 @@ class SubagentExecutor:
         on_event: EventCallback | None = None,
         full_access_enabled: bool = False,
         tool_result_enricher: ToolResultEnricher | None = None,
+        enriched_contexts: list[str] | None = None,
     ) -> SubagentResult:
         """执行单次子代理任务。"""
         conversation_id = str(uuid4())
+        blocked = (
+            _FULL_MODE_BLOCKED_META_TOOLS
+            if config.capability_mode == "full"
+            else _SUBAGENT_BLOCKED_META_TOOLS
+        )
         available_tools = [
             name
             for name in (config.allowed_tools or self._registry.get_tool_names())
-            if name not in _SUBAGENT_BLOCKED_META_TOOLS
+            if name not in blocked
         ]
         filtered_registry = FilteredToolRegistry(
             parent=self._registry,
             allowed=available_tools if config.allowed_tools else None,
-            disallowed=[*config.disallowed_tools, *_SUBAGENT_BLOCKED_META_TOOLS],
+            disallowed=[*config.disallowed_tools, *blocked],
         )
         tool_scope = filtered_registry.get_tool_names()
-        system_prompt = self._build_system_prompt(config=config, parent_context=parent_context)
+        system_prompt = self._build_system_prompt(
+            config=config,
+            parent_context=parent_context,
+            enriched_contexts=enriched_contexts,
+        )
         persistent_memory, memory_extractor = self._create_memory_components(config=config)
         if persistent_memory is not None:
             core_memory = persistent_memory.load_core()
@@ -167,7 +179,12 @@ class SubagentExecutor:
                         persistent_memory=persistent_memory,
                         tool_result_enricher=tool_result_enricher,
                     )
-                    content = result.result[:_SUMMARY_MAX_CHARS]
+                    max_chars = (
+                        _FULL_MODE_SUMMARY_MAX_CHARS
+                        if config.capability_mode == "full"
+                        else _SUMMARY_MAX_CHARS
+                    )
+                    content = result.result[:max_chars]
                     memory.add_tool_result(call_id, content)
                     observed_source = result.raw_result if result.raw_result is not None else result.result
                     observed_files.update(
@@ -213,7 +230,12 @@ class SubagentExecutor:
             error = str(exc)
             last_summary = f"子代理执行失败：{exc}"
 
-        last_summary = self._truncate(last_summary)
+        summary_limit = (
+            _FULL_MODE_SUMMARY_MAX_CHARS
+            if config.capability_mode == "full"
+            else _SUMMARY_MAX_CHARS
+        )
+        last_summary = self._truncate(last_summary, max_chars=summary_limit)
         await self._persist_subagent_memory(
             subagent_name=config.name,
             memory=memory,
@@ -274,7 +296,13 @@ class SubagentExecutor:
         except Exception:  # noqa: BLE001
             logger.warning("子代理事件回调异常，已忽略。", exc_info=True)
 
-    def _build_system_prompt(self, *, config: SubagentConfig, parent_context: str) -> str:
+    def _build_system_prompt(
+        self,
+        *,
+        config: SubagentConfig,
+        parent_context: str,
+        enriched_contexts: list[str] | None = None,
+    ) -> str:
         """构建子代理系统提示。"""
         default_prompt = (
             f"你是子代理 `{config.name}`。\n"
@@ -288,6 +316,12 @@ class SubagentExecutor:
         parts = [config.system_prompt.strip() or default_prompt]
         if parent_context.strip():
             parts.append("## 主会话上下文\n" + parent_context.strip())
+        # full 模式：注入主代理级别的丰富上下文
+        if config.capability_mode == "full" and enriched_contexts:
+            for ctx in enriched_contexts:
+                stripped = ctx.strip()
+                if stripped:
+                    parts.append(stripped)
         return "\n\n".join(parts).strip()
 
     async def _execute_tool(
@@ -366,6 +400,15 @@ class SubagentExecutor:
                     error = f"工具执行错误: {exc}"
                     return _ExecResult(success=False, result=error, error=str(exc))
                 raw_text = str(raw_result)
+                # ── 检测 registry 层返回的结构化错误 JSON ──
+                if raw_text.startswith('{"status": "error"'):
+                    try:
+                        _err = json.loads(raw_text)
+                        if isinstance(_err, dict) and _err.get("status") == "error":
+                            _msg = _err.get("message") or raw_text
+                            return _ExecResult(success=False, result=raw_text, error=_msg)
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
                 enriched = self._apply_tool_result_enricher(
                     tool_name=tool_name,
                     arguments=arguments,
@@ -432,6 +475,15 @@ class SubagentExecutor:
                 tool_scope=tool_scope,
             )
             raw_text = str(raw_result)
+            # ── 检测 registry 层返回的结构化错误 JSON ──
+            if raw_text.startswith('{"status": "error"'):
+                try:
+                    _err = json.loads(raw_text)
+                    if isinstance(_err, dict) and _err.get("status") == "error":
+                        _msg = _err.get("message") or raw_text
+                        return _ExecResult(success=False, result=raw_text, error=_msg)
+                except (json.JSONDecodeError, AttributeError):
+                    pass
             text = self._truncate_tool_result(
                 registry=registry,
                 tool_name=tool_name,
@@ -545,10 +597,10 @@ class SubagentExecutor:
         return {"role": "assistant", "content": str(getattr(message, "content", "") or "")}
 
     @staticmethod
-    def _truncate(text: str) -> str:
-        if len(text) <= _SUMMARY_MAX_CHARS:
+    def _truncate(text: str, max_chars: int = _SUMMARY_MAX_CHARS) -> str:
+        if len(text) <= max_chars:
             return text
-        return f"{text[:_SUMMARY_MAX_CHARS]}\n[摘要已截断，原始长度: {len(text)} 字符]"
+        return f"{text[:max_chars]}\n[摘要已截断，原始长度: {len(text)} 字符]"
 
     def _truncate_tool_result(
         self,
@@ -632,7 +684,7 @@ class SubagentExecutor:
         paths: list[str] = []
         if isinstance(payload, dict):
             paths.extend(cls._collect_excel_paths_from_mapping(payload))
-            if tool_name == "scan_excel_files":
+            if tool_name == "inspect_excel_files":
                 files = payload.get("files")
                 if isinstance(files, list):
                     for item in files:

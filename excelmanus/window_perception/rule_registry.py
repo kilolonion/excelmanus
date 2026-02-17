@@ -17,8 +17,8 @@ _FORMULA_HINT_RE = re.compile(
 
 _EXPLORER_TOOLS = {
     "list_directory",
-    "search_files",
-    "scan_excel_files",
+    "find_files",
+    "inspect_excel_files",
 }
 
 _SHEET_TOOLS = {

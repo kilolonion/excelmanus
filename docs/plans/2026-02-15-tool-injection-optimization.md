@@ -14,8 +14,8 @@
 
 ```
 基础集（Discovery Set）— 无 skill 激活时可见：
-  数据探查：read_excel, scan_excel_files, analyze_data, filter_data, group_aggregate
-  结构探查：list_sheets, list_directory, get_file_info, search_files, read_text_file
+  数据探查：read_excel, inspect_excel_files, analyze_data, filter_data, group_aggregate
+  结构探查：list_sheets, list_directory, get_file_info, find_files, read_text_file
   样式感知：read_cell_styles
   窗口：focus_window
   合计 12 个只读工具
@@ -33,7 +33,7 @@ Always-Available — 始终可见：
 
 ```python
 TOOL_CATEGORIES = {
-    "data_read": ["read_excel", "scan_excel_files", "analyze_data", "filter_data",
+    "data_read": ["read_excel", "inspect_excel_files", "analyze_data", "filter_data",
                    "group_aggregate", "analyze_sheet_mapping"],
     "data_write": ["write_excel", "write_cells", "transform_data",
                     "insert_rows", "insert_columns"],
@@ -46,7 +46,7 @@ TOOL_CATEGORIES = {
     "chart": ["create_chart", "create_excel_chart"],
     "sheet": ["list_sheets", "create_sheet", "copy_sheet", "rename_sheet",
               "delete_sheet", "copy_range_between_sheets"],
-    "file": ["list_directory", "get_file_info", "search_files", "read_text_file",
+    "file": ["list_directory", "get_file_info", "find_files", "read_text_file",
              "copy_file", "rename_file", "delete_file"],
     "code": ["write_text_file", "run_code", "run_shell"],
 }
@@ -74,9 +74,9 @@ def test_discovery_tools_are_subset_of_read_only_safe() -> None:
 def test_discovery_tools_expected_members() -> None:
     from excelmanus.tools.policy import DISCOVERY_TOOLS
     expected = {
-        "read_excel", "scan_excel_files", "analyze_data", "filter_data",
+        "read_excel", "inspect_excel_files", "analyze_data", "filter_data",
         "group_aggregate", "list_sheets", "list_directory", "get_file_info",
-        "search_files", "read_text_file", "read_cell_styles", "focus_window",
+        "find_files", "read_text_file", "read_cell_styles", "focus_window",
     }
     assert DISCOVERY_TOOLS == expected
 
@@ -121,7 +121,7 @@ Expected: FAIL (ImportError: cannot import name 'DISCOVERY_TOOLS')
 DISCOVERY_TOOLS: frozenset[str] = frozenset({
     # 数据探查
     "read_excel",
-    "scan_excel_files",
+    "inspect_excel_files",
     "analyze_data",
     "filter_data",
     "group_aggregate",
@@ -129,7 +129,7 @@ DISCOVERY_TOOLS: frozenset[str] = frozenset({
     "list_sheets",
     "list_directory",
     "get_file_info",
-    "search_files",
+    "find_files",
     "read_text_file",
     # 样式感知
     "read_cell_styles",
@@ -142,7 +142,7 @@ DISCOVERY_TOOLS: frozenset[str] = frozenset({
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "data_read": (
-        "read_excel", "scan_excel_files", "analyze_data",
+        "read_excel", "inspect_excel_files", "analyze_data",
         "filter_data", "group_aggregate", "analyze_sheet_mapping",
     ),
     "data_write": (
@@ -165,7 +165,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "rename_sheet", "delete_sheet", "copy_range_between_sheets",
     ),
     "file": (
-        "list_directory", "get_file_info", "search_files",
+        "list_directory", "get_file_info", "find_files",
         "read_text_file", "copy_file", "rename_file", "delete_file",
     ),
     "code": ("write_text_file", "run_code", "run_shell"),
@@ -340,7 +340,7 @@ class TestDiscoverTools:
         engine = AgentEngine(config, registry)
         result = engine._handle_discover_tools(category="data_read")
         assert "read_excel" in result
-        assert "scan_excel_files" in result
+        assert "inspect_excel_files" in result
 
     def test_discover_tools_all_category(self) -> None:
         config = _make_config()
@@ -517,8 +517,8 @@ class TestToolIndexNotice:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         # 模拟基础发现工具集 scope
-        scope = ["read_excel", "scan_excel_files", "analyze_data",
-                 "filter_data", "list_directory", "search_files"]
+        scope = ["read_excel", "inspect_excel_files", "analyze_data",
+                 "filter_data", "list_directory", "find_files"]
         notice = engine._build_tool_index_notice(scope)
         assert "工具索引" in notice
         assert "read_excel" in notice
@@ -814,7 +814,7 @@ class TestToolInjectionOptimization:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        scope = ["read_excel", "scan_excel_files", "list_directory"]
+        scope = ["read_excel", "inspect_excel_files", "list_directory"]
         notice = engine._build_tool_index_notice(scope)
         assert "工具索引" in notice
         assert "discover_tools" in notice or "select_skill" in notice
