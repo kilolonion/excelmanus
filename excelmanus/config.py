@@ -97,7 +97,7 @@ class ExcelManusConfig:
     window_perception_background_after_idle: int = 1
     window_perception_suspend_after_idle: int = 3
     window_perception_terminate_after_idle: int = 5
-    window_perception_advisor_mode: str = "hybrid"
+    window_perception_advisor_mode: str = "rules"
     window_perception_advisor_timeout_ms: int = 800
     window_perception_advisor_trigger_window_count: int = 3
     window_perception_advisor_trigger_turn: int = 4
@@ -116,6 +116,10 @@ class ExcelManusConfig:
     auto_activate_default_skill: bool = True
     # 小模型预路由配置
     skill_preroute_mode: str = "hybrid"  # off / deepseek / gemini / meta_only / hybrid
+    # 窗口感知顾问独立小模型配置（可选，未配置时回退到 skill_preroute_*，再回退到主模型）
+    window_advisor_api_key: str | None = None
+    window_advisor_base_url: str | None = None
+    window_advisor_model: str | None = None
     skill_preroute_api_key: str | None = None
     skill_preroute_base_url: str | None = None
     skill_preroute_model: str | None = None
@@ -209,7 +213,7 @@ def _parse_system_message_mode(value: str | None) -> str:
 def _parse_window_perception_advisor_mode(value: str | None) -> str:
     """解析窗口感知顾问模式。"""
     if value is None:
-        return "hybrid"
+        return "rules"
     normalized = value.strip().lower()
     if normalized not in {"rules", "hybrid"}:
         raise ConfigError(
@@ -700,13 +704,13 @@ def load_config() -> ExcelManusConfig:
     )
 
     # 小模型预路由配置
-    skill_preroute_mode_raw = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODE", "off").strip().lower()
+    skill_preroute_mode_raw = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODE", "hybrid").strip().lower()
     if skill_preroute_mode_raw not in {"off", "deepseek", "gemini", "meta_only", "hybrid"}:
         logger.warning(
-            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 非法(%r)，已回退为 off",
+            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 非法(%r)，已回退为 hybrid",
             skill_preroute_mode_raw,
         )
-        skill_preroute_mode_raw = "off"
+        skill_preroute_mode_raw = "hybrid"
     skill_preroute_api_key = os.environ.get("EXCELMANUS_SKILL_PREROUTE_API_KEY") or None
     skill_preroute_base_url = os.environ.get("EXCELMANUS_SKILL_PREROUTE_BASE_URL") or None
     if skill_preroute_base_url:
@@ -717,6 +721,13 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS",
         10000,
     )
+
+    # 窗口感知顾问独立小模型配置（可选）
+    window_advisor_api_key = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_API_KEY") or None
+    window_advisor_base_url = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_BASE_URL") or None
+    if window_advisor_base_url:
+        _validate_base_url(window_advisor_base_url)
+    window_advisor_model = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL") or None
 
     auto_supplement_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_AUTO_SUPPLEMENT_ENABLED"),
@@ -810,6 +821,9 @@ def load_config() -> ExcelManusConfig:
         skill_preroute_base_url=skill_preroute_base_url,
         skill_preroute_model=skill_preroute_model,
         skill_preroute_timeout_ms=skill_preroute_timeout_ms,
+        window_advisor_api_key=window_advisor_api_key,
+        window_advisor_base_url=window_advisor_base_url,
+        window_advisor_model=window_advisor_model,
         auto_supplement_enabled=auto_supplement_enabled,
         auto_supplement_max_per_turn=auto_supplement_max_per_turn,
         models=models,

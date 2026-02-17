@@ -406,7 +406,7 @@ class TestModelSwitchConsistency:
         assert engine._router_client is not engine._client
 
     @pytest.mark.asyncio
-    async def test_window_perception_advisor_follows_router_model_after_switch(self) -> None:
+    async def test_window_perception_advisor_follows_active_model_after_switch(self) -> None:
         config = _make_config(
             model="main-a",
             models=(
@@ -422,7 +422,7 @@ class TestModelSwitchConsistency:
         )
         engine = AgentEngine(config, _make_registry_with_tools())
         engine.switch_model("alt")
-        engine._router_client.chat.completions.create = AsyncMock(
+        engine._advisor_client.chat.completions.create = AsyncMock(
             return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
         )
 
@@ -433,7 +433,7 @@ class TestModelSwitchConsistency:
             context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
         )
 
-        _, kwargs = engine._router_client.chat.completions.create.call_args
+        _, kwargs = engine._advisor_client.chat.completions.create.call_args
         assert kwargs["model"] == "main-b"
 
     @pytest.mark.asyncio
@@ -533,7 +533,7 @@ class TestModelSwitchConsistency:
                 _make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}'),
             ]
         )
-        engine._router_client.chat.completions.create = mocked_create
+        engine._advisor_client.chat.completions.create = mocked_create
         mocked_sleep = AsyncMock(return_value=None)
         monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
 
@@ -584,7 +584,7 @@ class TestModelSwitchConsistency:
                 _make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}'),
             ]
         )
-        engine._router_client.chat.completions.create = mocked_create
+        engine._advisor_client.chat.completions.create = mocked_create
         mocked_sleep = AsyncMock(return_value=None)
         monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
 
@@ -614,7 +614,7 @@ class TestModelSwitchConsistency:
         )
         engine = AgentEngine(config, _make_registry_with_tools())
         mocked_create = AsyncMock(side_effect=_slow_response)
-        engine._router_client.chat.completions.create = mocked_create
+        engine._advisor_client.chat.completions.create = mocked_create
 
         def _unexpected_retry_delay(_exc: Exception) -> float:
             raise AssertionError("不应进入重试分支")
@@ -1808,7 +1808,7 @@ class TestContextBudgetAndHardCap:
             window_perception_advisor_timeout_ms=1000,
         )
         engine = AgentEngine(config, registry)
-        engine._router_client.chat.completions.create = AsyncMock(side_effect=_slow_response)
+        engine._advisor_client.chat.completions.create = AsyncMock(side_effect=_slow_response)
 
         tc = SimpleNamespace(
             id="call_read_init",
@@ -1868,7 +1868,7 @@ class TestContextBudgetAndHardCap:
             window_perception_advisor_plan_ttl_turns=2,
         )
         engine = AgentEngine(config, registry)
-        engine._router_client.chat.completions.create = AsyncMock(
+        engine._advisor_client.chat.completions.create = AsyncMock(
             return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
         )
 
@@ -1896,7 +1896,7 @@ class TestContextBudgetAndHardCap:
         assert "catalog.xlsx / Q1" in first_notice
 
         plan_text = '{"task_type":"GENERAL_BROWSE","advices":[{"window_id":"sheet_1","tier":"suspended","reason":"done"}]}'
-        engine._router_client.chat.completions.create = AsyncMock(
+        engine._advisor_client.chat.completions.create = AsyncMock(
             return_value=_make_text_response(plan_text)
         )
 
@@ -1943,8 +1943,8 @@ class TestContextBudgetAndHardCap:
             window_perception_advisor_trigger_turn=1,
         )
         engine = AgentEngine(config, registry)
-        engine._router_client.chat.completions.create = AsyncMock(
-            side_effect=RuntimeError("router failed")
+        engine._advisor_client.chat.completions.create = AsyncMock(
+            side_effect=RuntimeError("advisor failed")
         )
 
         async def _read(file_path: str, iteration: int) -> None:
@@ -3342,10 +3342,11 @@ class TestMetaToolScopeUpdate:
 
 
 class TestPreRouteCompositeFallback:
-    """复合预路由命中时回退 general_excel。"""
+    """复合预路由命中时分层激活主技能+副技能（不再降级 general_excel）。"""
 
     @pytest.mark.asyncio
-    async def test_deepseek_preroute_multi_skill_falls_back_to_general_excel(self) -> None:
+    async def test_deepseek_preroute_multi_skill_activates_layered(self) -> None:
+        """复合技能预路由应分层激活主技能+副技能，不降级 general_excel。"""
         from excelmanus.skillpacks.pre_router import PreRouteResult
 
         config = _make_config(
@@ -3366,6 +3367,15 @@ class TestPreRouteCompositeFallback:
             source="system",
             root_dir="/tmp/chart_basic",
         )
+        format_skill = Skillpack(
+            name="format_basic",
+            description="格式化技能",
+            allowed_tools=["add_numbers"],
+            triggers=["格式"],
+            instructions="format",
+            source="system",
+            root_dir="/tmp/format_basic",
+        )
         general_skill = Skillpack(
             name="general_excel",
             description="通用兜底",
@@ -3377,6 +3387,7 @@ class TestPreRouteCompositeFallback:
         )
         skill_map = {
             "chart_basic": chart_skill,
+            "format_basic": format_skill,
             "general_excel": general_skill,
         }
 
@@ -3387,8 +3398,8 @@ class TestPreRouteCompositeFallback:
         mock_router._loader = mock_loader
         mock_router._find_skill_by_name = MagicMock(side_effect=lambda **kwargs: skill_map.get(kwargs["name"]))
         mock_router.build_skill_catalog.return_value = (
-            "可用技能：\n- chart_basic：图表技能\n- general_excel：通用兜底",
-            ["chart_basic", "general_excel"],
+            "可用技能：\n- chart_basic：图表技能\n- format_basic：格式化\n- general_excel：通用兜底",
+            ["chart_basic", "format_basic", "general_excel"],
         )
         engine._skill_router = mock_router
 
@@ -3417,8 +3428,14 @@ class TestPreRouteCompositeFallback:
 
         assert result == "ok"
         assert engine._active_skills
-        assert engine._active_skills[-1].name == "general_excel"
-        assert "general_excel" in engine.last_route_result.skills_used
+        # 主技能应为 chart_basic（第一个候选），不是 general_excel
+        activated_names = [s.name for s in engine._active_skills]
+        assert "chart_basic" in activated_names, f"主技能 chart_basic 未激活，实际: {activated_names}"
+        assert "format_basic" in activated_names, f"副技能 format_basic 未激活，实际: {activated_names}"
+        assert "general_excel" not in activated_names, f"不应降级到 general_excel，实际: {activated_names}"
+        # skills_used 应包含两个精准技能
+        assert "chart_basic" in engine.last_route_result.skills_used
+        assert "format_basic" in engine.last_route_result.skills_used
 
 
 class TestFallbackScopeGuard:

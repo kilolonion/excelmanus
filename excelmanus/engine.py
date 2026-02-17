@@ -448,6 +448,35 @@ class AgentEngine:
             self._router_client = self._client
             self._router_model = config.model
             self._router_follow_active_model = True
+        # 窗口感知顾问小模型：window_advisor_* → skill_preroute_* → 主模型
+        _adv_api_key = (
+            config.window_advisor_api_key
+            or config.skill_preroute_api_key
+            or config.api_key
+        )
+        _adv_base_url = (
+            config.window_advisor_base_url
+            or config.skill_preroute_base_url
+            or config.base_url
+        )
+        _adv_model = (
+            config.window_advisor_model
+            or config.skill_preroute_model
+            or config.model
+        )
+        if _adv_api_key == config.api_key and _adv_base_url == config.base_url:
+            self._advisor_client = self._client
+        else:
+            self._advisor_client = create_client(
+                api_key=_adv_api_key,
+                base_url=_adv_base_url,
+            )
+        self._advisor_model = _adv_model
+        # adviser 是否跟随主模型切换：仅当未配置任何独立小模型时
+        self._advisor_follow_active_model = (
+            not config.window_advisor_model
+            and not config.skill_preroute_model
+        )
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
@@ -1032,12 +1061,19 @@ class AgentEngine:
                         pre_route_result.model_used,
                         pre_route_result.reason,
                     )
-                    target_skill_name, skill_candidates = _resolve_preroute_target(pre_route_result)
+                    target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
                     if target_skill_name is not None:
                         auto_result = await self._handle_select_skill(target_skill_name)
                         if not auto_result.startswith("未找到技能:"):
                             auto_activated_skill_name = target_skill_name
-                            logger.info("预路由激活技能: %s", auto_activated_skill_name)
+                            logger.info("预路由激活主技能: %s", auto_activated_skill_name)
+                            # 副 skill：也激活（分层加载，与 hybrid 模式一致）
+                            for secondary_name in skill_candidates[1:]:
+                                if secondary_name == target_skill_name:
+                                    continue
+                                sec_result = await self._handle_select_skill(secondary_name)
+                                if not sec_result.startswith("未找到技能:"):
+                                    logger.info("预路由激活副技能: %s", secondary_name)
                         else:
                             logger.warning(
                                 "预路由选择的技能 %s 不存在（候选=%s），回退 general_excel",
@@ -1071,15 +1107,16 @@ class AgentEngine:
         # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
         effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
 
-        # 补全 skills_used 和 system_contexts
+        # 补全 skills_used 和 system_contexts（含主技能+副技能）
         final_skills_used = list(route_result.skills_used)
         final_system_contexts = list(route_result.system_contexts)
         if auto_activated_skill_name and self._active_skills:
-            if auto_activated_skill_name not in final_skills_used:
-                final_skills_used.append(auto_activated_skill_name)
-            skill_context = self._active_skills[-1].render_context()
-            if skill_context.strip():
-                final_system_contexts.append(skill_context)
+            for skill in self._active_skills:
+                if skill.name not in final_skills_used:
+                    final_skills_used.append(skill.name)
+                skill_context = skill.render_context()
+                if skill_context.strip() and skill_context not in final_system_contexts:
+                    final_system_contexts.append(skill_context)
 
         route_result = SkillMatchResult(
             skills_used=final_skills_used,
@@ -4539,6 +4576,10 @@ class AgentEngine:
             return
         self._router_client = self._client
         self._router_model = self._active_model
+        # adviser 也跟随主模型（仅当 adviser 未配置独立模型时）
+        if self._advisor_follow_active_model:
+            self._advisor_client = self._client
+            self._advisor_model = self._active_model
 
     async def _adapt_guidance_only_slash_route(
         self,
@@ -5894,8 +5935,8 @@ class AgentEngine:
 
         async def _invoke(timeout: float) -> Any:
             return await asyncio.wait_for(
-                self._router_client.chat.completions.create(
-                    model=self._router_model,
+                self._advisor_client.chat.completions.create(
+                    model=self._advisor_model,
                     messages=messages,
                 ),
                 timeout=timeout,

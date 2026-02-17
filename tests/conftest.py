@@ -72,5 +72,8 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE",
         "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW",
         "EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS",
+        "EXCELMANUS_WINDOW_ADVISOR_API_KEY",
+        "EXCELMANUS_WINDOW_ADVISOR_BASE_URL",
+        "EXCELMANUS_WINDOW_ADVISOR_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
