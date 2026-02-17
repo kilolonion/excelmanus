@@ -307,6 +307,7 @@ class SheetData:
     focus: SheetFocus = field(default_factory=SheetFocus)
     total_rows: int = 0
     total_cols: int = 0
+    sheet_dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -568,6 +569,14 @@ class SheetWindow(BaseWindow):
     @conditional_effects.setter
     def conditional_effects(self, value: list[str]) -> None:
         self.data.style.conditional_effects = [str(item) for item in value if str(item).strip()]
+
+    @property
+    def sheet_dimensions(self) -> dict[str, tuple[int, int]]:
+        return self.data.sheet_dimensions
+
+    @sheet_dimensions.setter
+    def sheet_dimensions(self, value: dict[str, tuple[int, int]]) -> None:
+        self.data.sheet_dimensions = dict(value) if isinstance(value, dict) else {}
 
 
 Window = ExplorerWindow | SheetWindow

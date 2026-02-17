@@ -90,6 +90,10 @@ def project_tool_payload(window: Window | None) -> ToolPayloadProjection | None:
             if isinstance(conditional_effects, list)
             else ()
         ),
+        sheet_dimensions=tuple(
+            (name, rows, cols)
+            for name, (rows, cols) in (window.sheet_dimensions or {}).items()
+        ),
     )
 
 
@@ -111,8 +115,19 @@ def project_confirmation(
     localized_hint = ""
     hint = ""
     if repeat_warning:
-        hint = f"intent[{intent}] data already in window {window.id}"
-        localized_hint = f"当前意图[{intent}]下此数据已在窗口 {window.id}"
+        hint = (
+            f"intent[{intent}] repeat read detected in {window.id}; "
+            "re-read only when scope changes"
+        )
+        localized_hint = (
+            f"当前意图[{intent}]检测到重复读取（{window.id}）；"
+            "仅在范围或工作表变化时再读取"
+        )
+
+    sheet_dims = tuple(
+        (name, r, c)
+        for name, (r, c) in (window.sheet_dimensions or {}).items()
+    ) if hasattr(window, 'sheet_dimensions') else ()
 
     return ConfirmationProjection(
         window_label=window_label,
@@ -124,6 +139,7 @@ def project_confirmation(
         intent=intent,
         hint=hint,
         localized_hint=localized_hint,
+        sheet_dimensions=sheet_dims,
     )
 
 
