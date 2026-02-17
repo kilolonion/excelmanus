@@ -4,7 +4,7 @@
 1. list_sheets + include
 2. format_cells + return_styles
 3. write_cells + return_preview
-4. scan_excel_files + include
+4. inspect_excel_files + include
 5. create_excel_chart 返回图表元信息
 """
 
@@ -262,29 +262,29 @@ class TestWriteCellsReturnPreview:
 
 
 # ════════════════════════════════════════════════════════════
-# 4. scan_excel_files + include
+# 4. inspect_excel_files + include
 # ════════════════════════════════════════════════════════════
 
 
-class TestScanExcelFilesInclude:
-    """scan_excel_files include 参数测试。"""
+class TestInspectExcelFilesInclude:
+    """inspect_excel_files include 参数测试。"""
 
     def test_no_include_regression(self, rich_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(data_tools.scan_excel_files(str(tmp_path)))
+        result = json.loads(data_tools.inspect_excel_files(str(tmp_path)))
         assert result["excel_files_found"] >= 1
         sheet0 = result["files"][0]["sheets"][0]
         assert "freeze_panes" not in sheet0
 
     def test_include_freeze_panes(self, rich_xlsx: Path, tmp_path: Path) -> None:
         result = json.loads(
-            data_tools.scan_excel_files(str(tmp_path), include=["freeze_panes"])
+            data_tools.inspect_excel_files(str(tmp_path), include=["freeze_panes"])
         )
         sheet0 = result["files"][0]["sheets"][0]
         assert sheet0["freeze_panes"] == "A2"
 
     def test_include_charts(self, rich_xlsx: Path, tmp_path: Path) -> None:
         result = json.loads(
-            data_tools.scan_excel_files(str(tmp_path), include=["charts"])
+            data_tools.inspect_excel_files(str(tmp_path), include=["charts"])
         )
         # 销售明细有 1 个图表
         sheets = result["files"][0]["sheets"]
@@ -293,7 +293,7 @@ class TestScanExcelFilesInclude:
 
     def test_include_column_widths(self, rich_xlsx: Path, tmp_path: Path) -> None:
         result = json.loads(
-            data_tools.scan_excel_files(str(tmp_path), include=["column_widths"])
+            data_tools.inspect_excel_files(str(tmp_path), include=["column_widths"])
         )
         sheet0 = result["files"][0]["sheets"][0]
         assert "column_widths" in sheet0
@@ -301,7 +301,7 @@ class TestScanExcelFilesInclude:
 
     def test_invalid_dimension_warning(self, simple_xlsx: Path, tmp_path: Path) -> None:
         result = json.loads(
-            data_tools.scan_excel_files(str(tmp_path), include=["nonexistent"])
+            data_tools.inspect_excel_files(str(tmp_path), include=["nonexistent"])
         )
         assert "include_warning" in result
 

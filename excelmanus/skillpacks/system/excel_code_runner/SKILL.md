@@ -10,7 +10,7 @@ allowed_tools:
   - transform_data
   - write_excel
   - read_text_file
-  - search_files
+  - find_files
   - get_file_info
   - list_directory
 triggers:

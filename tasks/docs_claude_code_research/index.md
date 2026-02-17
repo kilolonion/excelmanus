@@ -286,7 +286,7 @@ class SubagentExecutor:
 
 | 子代理 | 模型 | 工具 | 用途 |
 |--------|------|------|------|
-| **Explorer** | 小模型 | read_excel, list_sheets, get_file_info, search_files | 数据探索 |
+| **Explorer** | 小模型 | read_excel, list_sheets, get_file_info, find_files | 数据探索 |
 | **Analyst** | 主模型 | read_excel, analyze_data, filter_data | 数据分析 |
 | **Writer** | 主模型 | 全部工具 | 数据写入与格式化 |
 | **Coder** | 主模型 | execute_code, read_excel | 代码执行 |
@@ -345,7 +345,7 @@ class PermissionManager:
   "permissions": {
     "allow": [
       "read_excel", "list_sheets", "get_file_info",
-      "analyze_data", "filter_data", "search_files"
+      "analyze_data", "filter_data", "find_files"
     ],
     "deny": [
       "execute_code"

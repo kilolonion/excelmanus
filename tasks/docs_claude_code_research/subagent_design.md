@@ -495,7 +495,7 @@ from excelmanus.subagent.models import SubagentConfig
 _READ_ONLY_TOOLS = [
     "read_excel", "list_sheets", "get_file_info",
     "analyze_data", "filter_data",
-    "search_files", "list_directory", "read_text_file",
+    "find_files", "list_directory", "read_text_file",
     "read_cell_styles",
 ]
 

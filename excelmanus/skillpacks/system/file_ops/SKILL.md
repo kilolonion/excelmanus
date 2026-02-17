@@ -4,7 +4,7 @@ description: 工作区文件管理技能包（查看、搜索、读取、复制�
 allowed_tools:
   - list_directory
   - get_file_info
-  - search_files
+  - find_files
   - read_text_file
   - copy_file
   - rename_file

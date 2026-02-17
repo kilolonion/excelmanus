@@ -19,7 +19,7 @@ Bench 测试 #44628 暴露了一个问题：Agent 在 discovery 模式下（无�
 
 ```
 ## 工具索引
-- 当前可用（只读探查）：read_excel, scan_excel_files, analyze_data, filter_data, group_aggregate, list_sheets, list_directory, get_file_info, search_files, read_text_file, read_cell_styles
+- 当前可用（只读探查）：read_excel, inspect_excel_files, analyze_data, filter_data, group_aggregate, list_sheets, list_directory, get_file_info, find_files, read_text_file, read_cell_styles
 - 未激活（需 select_skill 激活）：
   · 数据写入：write_excel, write_cells, transform_data, insert_rows, insert_columns
   · 格式化：format_cells, adjust_column_width, adjust_row_height, merge_cells, unmerge_cells

@@ -38,7 +38,7 @@ _CODER_TOOLS = [
     "run_shell",
     "write_text_file",
     "read_text_file",
-    "search_files",
+    "find_files",
     "list_directory",
     "get_file_info",
     "read_excel",
@@ -83,7 +83,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         system_prompt=(
             "你是 ExcelManus 的只读探查子代理。\n\n"
             "## 工作流程（必须按顺序执行）\n"
-            "1. **第一步**：调用 `scan_excel_files` 批量获取工作区所有 Excel 文件概览"
+            "1. **第一步**：调用 `inspect_excel_files` 批量获取工作区所有 Excel 文件概览"
             "（sheet 列表、行列数、列名、预览行）。这是最高效的起步方式，"
             "一次调用即可了解全局，避免逐个文件调用 `read_excel` 或 `list_sheets`。\n"
             "2. **第二步**：根据概览结果，仅对需要深入了解的文件使用 "
@@ -158,6 +158,29 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
             "输出必须包含：执行的脚本摘要、关键结果数字、产物文件路径。\n\n"
             "## 失败策略\n"
             "脚本报错时先分析错误原因，修复后重试一次；仍失败则汇报错误和已有进展。"
+        ),
+    ),
+    "full": SubagentConfig(
+        name="full",
+        description="全能力子代理，工具域与主代理一致，适用于复杂研究与多步骤修改任务。",
+        allowed_tools=[],
+        permission_mode="acceptEdits",
+        max_iterations=120,
+        max_consecutive_failures=2,
+        capability_mode="full",
+        source="builtin",
+        system_prompt=(
+            "你是 ExcelManus 全能力子代理。\n\n"
+            "## 工作规范\n"
+            "- 你拥有与主代理一致的完整工具集，包括所有 Excel 操作、文件操作、代码执行和技能选择。\n"
+            "- 优先使用 select_skill 激活合适的技能包来获取领域知识和工具授权。\n"
+            "- 操作前先读取目标数据确认当前状态。\n"
+            "- 每次工具调用前简要说明目的。\n"
+            "- 完成后输出结构化结果摘要与关键证据。\n\n"
+            "## 完成标准\n"
+            "输出必须包含：执行步骤摘要、关键结果数据、修改的文件路径与影响范围。\n\n"
+            "## 失败策略\n"
+            "遇到错误时先分析原因，尝试替代方案；仍失败则汇报已有进展和阻塞原因。"
         ),
     ),
 }
