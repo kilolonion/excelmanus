@@ -287,3 +287,37 @@ class TestUnnamedFallback:
         # 列名不应包含 Unnamed
         unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed"))
         assert unnamed_count == 0, f"列名中仍有 Unnamed: {list(df.columns)}"
+
+class TestUnnamedWarning:
+    """read_excel 返回结果中应包含 Unnamed 列名警告。"""
+
+    def test_unnamed_warning_present(self, tmp_path: Path) -> None:
+        """当列名中仍有 Unnamed 时，summary 应包含警告字段。"""
+        wb = Workbook()
+        ws = wb.active
+        # 构造一个即使回退也无法消除 Unnamed 的场景：
+        # 表头行有 3 个非空 + 3 个空（Unnamed 占比 50%，不触发回退）
+        ws.append(["A", "B", "C", None, None, None])
+        ws.append([1, 2, 3, 4, 5, 6])
+        ws.append([7, 8, 9, 10, 11, 12])
+        fp = tmp_path / "all_unnamed.xlsx"
+        wb.save(fp)
+
+        data_tools.init_guard(str(tmp_path))
+        result_json = json.loads(data_tools.read_excel(str(fp)))
+        # 应该有 unnamed_columns_warning 字段
+        assert "unnamed_columns_warning" in result_json
+
+    def test_no_warning_when_clean(self, tmp_path: Path) -> None:
+        """列名正常时不应有警告。"""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["月份", "产品", "销售额"])
+        ws.append(["1月", "A", 10000])
+        fp = tmp_path / "clean.xlsx"
+        wb.save(fp)
+
+        data_tools.init_guard(str(tmp_path))
+        result_json = json.loads(data_tools.read_excel(str(fp)))
+        assert "unnamed_columns_warning" not in result_json
+
