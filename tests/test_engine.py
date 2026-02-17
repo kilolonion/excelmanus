@@ -3445,7 +3445,7 @@ class TestFallbackScopeGuard:
 
     @pytest.mark.asyncio
     async def test_fallback_blocks_tool_until_select_skill_then_allows(self) -> None:
-        config = _make_config()
+        config = _make_config(auto_supplement_enabled=False)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
@@ -5785,7 +5785,11 @@ class TestToolInjectionOptimizationE2E:
         assert error is None
         full_prompt = "\n".join(prompts)
         assert "## 工具索引" in full_prompt
-        assert "未激活（需 select_skill 激活对应技能后可用）" in full_prompt
+        # auto_supplement_enabled 默认为 True，使用新措辞
+        if config.auto_supplement_enabled:
+            assert "按需可用" in full_prompt
+        else:
+            assert "未激活（需 select_skill 激活对应技能后可用）" in full_prompt
         assert "format_cells" in full_prompt
 
     def test_discover_tools_category_enum_matches_tool_categories(self) -> None:
@@ -5857,3 +5861,470 @@ class TestToolInjectionOptimizationE2E:
         # 元工具也应在 scope 中
         assert "select_skill" in scope_set
         assert "discover_tools" in scope_set
+
+
+# ── Auto-Supplement 测试辅助 ──────────────────────────────────
+
+
+def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
+    """创建包含模拟 skillpacks 的 SkillRouter，用于自动补充测试。"""
+    from excelmanus.skillpacks.loader import SkillpackLoader
+    from excelmanus.skillpacks.router import SkillRouter
+
+    cfg = config or _make_config()
+    registry = _make_registry_with_tools()
+    loader = SkillpackLoader(cfg, registry)
+
+    # 注入模拟 skillpacks（不从磁盘加载）
+    loader._skillpacks = {
+        "format_basic": Skillpack(
+            name="format_basic",
+            description="基础格式化",
+            allowed_tools=["format_cells", "adjust_column_width", "adjust_row_height",
+                           "merge_cells", "unmerge_cells", "read_cell_styles"],
+            triggers=["格式", "format"],
+            instructions="格式化操作指引",
+            source="system",
+            root_dir="/tmp/format_basic",
+        ),
+        "data_basic": Skillpack(
+            name="data_basic",
+            description="数据分析",
+            allowed_tools=["read_excel", "write_excel", "analyze_data", "filter_data",
+                           "group_aggregate", "transform_data", "write_cells",
+                           "insert_rows", "insert_columns"],
+            triggers=["数据", "data"],
+            instructions="数据操作指引",
+            source="system",
+            root_dir="/tmp/data_basic",
+        ),
+        "chart_basic": Skillpack(
+            name="chart_basic",
+            description="图表",
+            allowed_tools=["create_chart", "create_excel_chart"],
+            triggers=["图表", "chart"],
+            instructions="图表操作指引",
+            source="system",
+            root_dir="/tmp/chart_basic",
+        ),
+        "general_excel": Skillpack(
+            name="general_excel",
+            description="通用 Excel",
+            allowed_tools=[
+                "read_excel", "write_excel", "analyze_data", "filter_data",
+                "group_aggregate", "transform_data", "write_cells",
+                "format_cells", "adjust_column_width", "adjust_row_height",
+                "merge_cells", "unmerge_cells", "read_cell_styles",
+                "create_chart", "create_excel_chart",
+                "list_sheets", "create_sheet", "copy_sheet", "rename_sheet",
+                "delete_sheet", "copy_range_between_sheets",
+                "insert_rows", "insert_columns",
+                "list_directory", "get_file_info", "find_files",
+                "read_text_file", "inspect_excel_files", "focus_window",
+                "apply_threshold_icon_format", "style_card_blocks",
+                "scale_range_unit", "apply_dashboard_dark_theme",
+                "add_color_scale", "add_data_bar", "add_conditional_rule",
+                "set_print_layout", "set_page_header_footer",
+                "copy_file",
+            ],
+            triggers=[],
+            instructions="通用 Excel 操作",
+            source="system",
+            root_dir="/tmp/general_excel",
+        ),
+        "excel_code_runner": Skillpack(
+            name="excel_code_runner",
+            description="代码执行",
+            allowed_tools=["run_code"],
+            triggers=["代码", "code"],
+            instructions="代码执行指引",
+            source="system",
+            root_dir="/tmp/excel_code_runner",
+        ),
+        "sheet_ops": Skillpack(
+            name="sheet_ops",
+            description="工作表操作",
+            allowed_tools=["list_sheets", "create_sheet", "copy_sheet",
+                           "rename_sheet", "delete_sheet", "copy_range_between_sheets"],
+            triggers=["工作表", "sheet"],
+            instructions="工作表操作指引",
+            source="system",
+            root_dir="/tmp/sheet_ops",
+        ),
+        "file_ops": Skillpack(
+            name="file_ops",
+            description="文件操作",
+            allowed_tools=["list_directory", "get_file_info", "find_files",
+                           "read_text_file", "copy_file"],
+            triggers=["文件", "file"],
+            instructions="文件操作指引",
+            source="system",
+            root_dir="/tmp/file_ops",
+        ),
+    }
+    return SkillRouter(cfg, loader)
+
+
+# ── Task 2: tool→skill 反向索引测试 ──────────────────────────
+
+
+class TestToolToSkillIndex:
+    """tool→skill 反向索引测试。"""
+
+    def test_build_tool_to_skill_index_returns_sorted_by_size(self) -> None:
+        """反向索引按 skill 工具数升序排列（最小覆盖优先）。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        index = engine._build_tool_to_skill_index()
+        # format_cells 应在 format_basic(6) 和 general_excel(很多) 中
+        assert "format_cells" in index
+        skills = index["format_cells"]
+        assert len(skills) >= 2
+        # 验证按工具数升序
+        loader = engine._skill_router._loader
+        skillpacks = loader.get_skillpacks() or loader.load_all()
+        sizes = []
+        for name in skills:
+            if name in skillpacks:
+                sizes.append(len(skillpacks[name].allowed_tools))
+        assert sizes == sorted(sizes), f"未按工具数升序: {list(zip(skills, sizes))}"
+
+    def test_build_tool_to_skill_index_covers_all_skill_tools(self) -> None:
+        """索引应覆盖所有 skillpack 的 allowed_tools（排除 disable_model_invocation）。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        index = engine._build_tool_to_skill_index()
+        loader = engine._skill_router._loader
+        skillpacks = loader.get_skillpacks() or loader.load_all()
+        for skill in skillpacks.values():
+            if getattr(skill, "disable_model_invocation", False):
+                continue
+            for tool in skill.allowed_tools:
+                assert tool in index, f"工具 {tool} 未在索引中"
+                assert skill.name in index[tool], f"skill {skill.name} 未在 {tool} 的索引中"
+
+    def test_build_tool_to_skill_index_empty_without_router(self) -> None:
+        """无 skill_router 时返回空索引。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry)
+        index = engine._build_tool_to_skill_index()
+        assert index == {}
+
+
+# ── Task 3: 自动补充核心方法测试 ──────────────────────────────
+
+
+class TestAutoSupplement:
+    """工具自动补充测试。"""
+
+    def test_auto_supplement_activates_minimal_skill(self) -> None:
+        """调用未授权工具时，自动激活最小覆盖 skillpack。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        assert not engine._active_skills
+
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is not None
+        assert result.skill_name == "format_basic"  # 最小覆盖（6 tools vs general_excel 很多）
+        assert any(s.name == "format_basic" for s in engine._active_skills)
+
+    def test_auto_supplement_skips_blocked_skill(self) -> None:
+        """被 blocked 的 skill 不应被自动补充激活。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        # run_code 仅在 excel_code_runner 中，该 skill 默认被 blocked
+        result = engine._try_auto_supplement_tool("run_code")
+        assert result is None
+
+    def test_auto_supplement_disabled_returns_none(self) -> None:
+        """auto_supplement_enabled=False 时始终返回 None。"""
+        config = _make_config(auto_supplement_enabled=False)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is None
+
+    def test_auto_supplement_respects_max_per_turn(self) -> None:
+        """超过每轮最大次数后返回 None。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=1)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._turn_supplement_count = 1  # 已用完配额
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is None
+
+    def test_auto_supplement_unknown_tool_returns_none(self) -> None:
+        """不存在于任何 skill 的工具返回 None。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        result = engine._try_auto_supplement_tool("nonexistent_tool_xyz")
+        assert result is None
+
+    def test_auto_supplement_skips_already_active_tool(self) -> None:
+        """工具已在当前 active_skills 的并集中时，不需要补充。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        # 手动激活 format_basic
+        loader = engine._skill_router._loader
+        skillpacks = loader.get_skillpacks()
+        engine._active_skills = [skillpacks["format_basic"]]
+        # format_cells 已在 scope 中
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is None
+
+
+# ── Task 6: write_hint 联动测试 ──────────────────────────────
+
+
+class TestAutoSupplementWriteHint:
+    """自动补充写入工具时升级 write_hint。"""
+
+    def test_auto_supplement_write_tool_upgrades_hint(self) -> None:
+        """自动补充激活包含写入工具的 skill 时，write_hint 升级为 may_write。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._current_write_hint = "read_only"
+
+        # format_cells 是写入工具（在 MUTATING_ALL_TOOLS 中）
+        result = engine._try_auto_supplement_tool("format_cells")
+        assert result is not None
+        assert engine._current_write_hint == "may_write"
+
+    def test_auto_supplement_read_tool_keeps_hint(self) -> None:
+        """自动补充只读工具时，write_hint 不变。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._current_write_hint = "read_only"
+
+        # read_cell_styles 不在 MUTATING_ALL_TOOLS 中
+        # 但它在 format_basic 中，先确认它不是写入工具
+        from excelmanus.tools.policy import MUTATING_ALL_TOOLS
+        assert "read_cell_styles" not in MUTATING_ALL_TOOLS
+
+        result = engine._try_auto_supplement_tool("read_cell_styles")
+        assert result is not None
+        assert engine._current_write_hint == "read_only"
+
+
+# ── Task 5: 每轮重置计数器测试 ──────────────────────────────
+
+
+class TestAutoSupplementTurnReset:
+    """每轮迭代重置自动补充计数器。"""
+
+    def test_supplement_count_initializes_to_zero(self) -> None:
+        """引擎初始化时 _turn_supplement_count 为 0。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        assert engine._turn_supplement_count == 0
+
+    def test_supplement_count_field_exists(self) -> None:
+        """_turn_supplement_count 字段可被设置和读取。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        engine._turn_supplement_count = 5
+        assert engine._turn_supplement_count == 5
+
+
+# ── Task 7: 工具索引措辞测试 ──────────────────────────────────
+
+
+class TestToolIndexWording:
+    """工具索引措辞更新。"""
+
+    def test_tool_index_uses_auto_supplement_wording_when_enabled(self) -> None:
+        """auto_supplement 开启时，工具索引使用"直接调用"措辞。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        assert "按需可用" in notice or "直接调用" in notice
+        assert "需 select_skill" not in notice
+
+    def test_tool_index_uses_select_skill_wording_when_disabled(self) -> None:
+        """auto_supplement 关闭时，保留原有"需 select_skill"措辞。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS
+        config = _make_config(auto_supplement_enabled=False)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        assert "select_skill" in notice
+
+    def test_tool_index_warning_text_auto_supplement(self) -> None:
+        """auto_supplement 开启时，警告文本不包含 select_skill。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        # 应包含"无需先调用 select_skill"
+        assert "无需先调用 select_skill" in notice
+
+
+# ── Task 8: 预路由分层加载测试 ──────────────────────────────
+
+
+class TestPreRouteLayeredLoading:
+    """预路由分层加载：复合意图加载多个 skill 而非降级 general_excel。"""
+
+    def test_compound_intent_returns_first_candidate(self) -> None:
+        """复合意图返回第一个候选作为主 skill。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        from types import SimpleNamespace
+        pre_result = SimpleNamespace(
+            skill_name="data_basic",
+            skill_names=["data_basic", "chart_basic"],
+            confidence=0.8,
+            reason="复合意图",
+            latency_ms=50.0,
+            model_used="test",
+        )
+
+        target, candidates = engine._resolve_preroute_target_layered(pre_result)
+        assert target == "data_basic"
+        assert candidates == ["data_basic", "chart_basic"]
+        assert target != "general_excel"
+
+    def test_single_intent_returns_single_candidate(self) -> None:
+        """单一意图返回单个候选。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        from types import SimpleNamespace
+        pre_result = SimpleNamespace(
+            skill_name="data_basic",
+            skill_names=["data_basic"],
+            confidence=0.9,
+            reason="单一意图",
+            latency_ms=30.0,
+            model_used="test",
+        )
+
+        target, candidates = engine._resolve_preroute_target_layered(pre_result)
+        assert target == "data_basic"
+        assert candidates == ["data_basic"]
+
+    def test_none_result_returns_none(self) -> None:
+        """None 输入返回 (None, [])。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        target, candidates = engine._resolve_preroute_target_layered(None)
+        assert target is None
+        assert candidates == []
+
+    def test_legacy_skill_name_fallback(self) -> None:
+        """仅有 skill_name 无 skill_names 时，使用 legacy 字段。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        from types import SimpleNamespace
+        pre_result = SimpleNamespace(
+            skill_name="format_basic",
+            confidence=0.7,
+            reason="legacy",
+            latency_ms=20.0,
+            model_used="test",
+        )
+
+        target, candidates = engine._resolve_preroute_target_layered(pre_result)
+        assert target == "format_basic"
+        assert candidates == ["format_basic"]
+
+    def test_deduplication(self) -> None:
+        """skill_names 和 skill_name 重复时去重。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        from types import SimpleNamespace
+        pre_result = SimpleNamespace(
+            skill_name="data_basic",
+            skill_names=["data_basic", "chart_basic"],
+            confidence=0.8,
+            reason="test",
+            latency_ms=10.0,
+            model_used="test",
+        )
+
+        target, candidates = engine._resolve_preroute_target_layered(pre_result)
+        assert candidates.count("data_basic") == 1
+
+
+# ── Task 9: 边界测试 ──────────────────────────────────────────
+
+
+class TestAutoSupplementEdgeCases:
+    """自动补充边界情况。"""
+
+    def test_auto_supplement_does_not_activate_same_skill_twice(self) -> None:
+        """同一 skill 不应被自动补充重复激活。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=5)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        # 第一次：激活 format_basic
+        r1 = engine._try_auto_supplement_tool("format_cells")
+        assert r1 is not None
+        assert r1.skill_name == "format_basic"
+
+        # 第二次：format_cells 已在 active_skills 并集中
+        r2 = engine._try_auto_supplement_tool("format_cells")
+        assert r2 is None
+
+    def test_auto_supplement_with_mcp_tool_returns_none(self) -> None:
+        """MCP 工具不在任何 skillpack 中，应返回 None。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        result = engine._try_auto_supplement_tool("mcp_some_server_some_tool")
+        assert result is None
+
+    def test_auto_supplement_multiple_skills_sequential(self) -> None:
+        """连续自动补充不同 skill。"""
+        config = _make_config(auto_supplement_enabled=True, auto_supplement_max_per_turn=5)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+
+        # 第一次：format_cells → format_basic
+        r1 = engine._try_auto_supplement_tool("format_cells")
+        assert r1 is not None
+        assert r1.skill_name == "format_basic"
+
+        # 第二次：create_chart → chart_basic（最小覆盖）
+        r2 = engine._try_auto_supplement_tool("create_chart")
+        assert r2 is not None
+        assert r2.skill_name == "chart_basic"
+
+        # 两个 skill 都应在 active_skills 中
+        active_names = {s.name for s in engine._active_skills}
+        assert "format_basic" in active_names
+        assert "chart_basic" in active_names
+
+    def test_auto_supplement_notice_field(self) -> None:
+        """_auto_supplement_notice 初始为空字符串。"""
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        assert engine._auto_supplement_notice == ""

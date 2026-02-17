@@ -49,7 +49,7 @@ from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResu
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
-from excelmanus.tools.policy import DISCOVERY_TOOLS
+from excelmanus.tools.policy import DISCOVERY_TOOLS, MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
     AdvisorContext,
@@ -411,6 +411,14 @@ class DelegateSubagentOutcome:
     subagent_result: SubagentResult | None = None
 
 
+@dataclass
+class AutoSupplementResult:
+    """自动补充结果。"""
+
+    skill_name: str
+    expanded_tools: list[str]
+
+
 class AgentEngine:
     """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
@@ -477,6 +485,9 @@ class AgentEngine:
         self._loaded_skill_names: set[str] = set()
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
+        # 工具自动补充：每轮计数器
+        self._turn_supplement_count: int = 0
+        self._auto_supplement_notice: str = ""
         # auto 模式系统消息回退缓存：None | "merge"
         self._system_mode_fallback: str | None = None
         # 执行统计（每次 chat 调用后更新）
@@ -973,12 +984,19 @@ class AgentEngine:
                         pre_route_result.confidence,
                         pre_route_result.latency_ms,
                     )
-                    target_skill_name, skill_candidates = _resolve_preroute_target(pre_route_result)
+                    target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
                     if target_skill_name is not None:
                         auto_result = await self._handle_select_skill(target_skill_name)
                         if not auto_result.startswith("未找到技能:"):
                             auto_activated_skill_name = target_skill_name
-                            logger.info("hybrid 预路由激活技能: %s", auto_activated_skill_name)
+                            logger.info("hybrid 预路由激活主技能: %s", auto_activated_skill_name)
+                            # 副 skill：也激活（分层加载）
+                            for secondary_name in skill_candidates[1:]:
+                                if secondary_name == target_skill_name:
+                                    continue
+                                sec_result = await self._handle_select_skill(secondary_name)
+                                if not sec_result.startswith("未找到技能:"):
+                                    logger.info("hybrid 预路由激活副技能: %s", secondary_name)
                         else:
                             # 预路由选择的技能不存在，回退 meta_only
                             logger.warning(
@@ -1390,6 +1408,127 @@ class AgentEngine:
                     seen.add(tool)
                     result.append(tool)
         return result
+
+    def _build_tool_to_skill_index(self) -> dict[str, list[str]]:
+        """构建 tool_name → [skill_name, ...] 反向索引，按 skill 工具数升序。"""
+        if self._skill_router is None:
+            return {}
+        loader = self._skill_router._loader
+        skillpacks = loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = loader.load_all()
+        if not skillpacks:
+            return {}
+
+        index: dict[str, list[str]] = {}
+        for skill in skillpacks.values():
+            if getattr(skill, "disable_model_invocation", False):
+                continue
+            for tool in skill.allowed_tools:
+                index.setdefault(tool, []).append(skill.name)
+
+        # 按 skill 工具数升序（最小覆盖优先）
+        for tool, skills in index.items():
+            skills.sort(
+                key=lambda name: len(skillpacks[name].allowed_tools)
+                if name in skillpacks
+                else 999
+            )
+
+        return index
+
+    def _resolve_preroute_target_layered(
+        self, result: "PreRouteResult | None",
+    ) -> tuple[str | None, list[str]]:
+        """解析预路由结果，支持分层加载。
+
+        返回 (主 skill 名, 全部候选列表)。
+        复合意图时返回第一个候选作为主 skill，不再降级到 general_excel。
+        """
+        if result is None:
+            return None, []
+        candidates: list[str] = []
+        raw_candidates = getattr(result, "skill_names", None)
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates:
+                if not isinstance(item, str):
+                    continue
+                name = item.strip()
+                if not name or name in candidates:
+                    continue
+                candidates.append(name)
+        legacy_name = getattr(result, "skill_name", None)
+        if isinstance(legacy_name, str) and legacy_name.strip():
+            normalized = legacy_name.strip()
+            if normalized not in candidates:
+                candidates.append(normalized)
+        if not candidates:
+            return None, candidates
+        # 分层加载：第一个候选为主 skill，其余为副 skill
+        return candidates[0], candidates
+
+    def _try_auto_supplement_tool(self, tool_name: str) -> AutoSupplementResult | None:
+        """预检-扩展：查找包含 tool_name 的最小覆盖 skillpack 并激活。
+
+        返回 AutoSupplementResult 或 None（不可补充）。
+        """
+        if not self._config.auto_supplement_enabled:
+            return None
+        if self._turn_supplement_count >= self._config.auto_supplement_max_per_turn:
+            return None
+
+        # 已在当前 active_skills 并集中 → 不需要补充
+        if self._active_skills:
+            union = set(self._active_skills_tool_union())
+            if tool_name in union:
+                return None
+
+        index = self._build_tool_to_skill_index()
+        candidates = index.get(tool_name)
+        if not candidates:
+            return None
+
+        blocked = self._blocked_skillpacks()
+        for skill_name in candidates:
+            if blocked and skill_name in blocked:
+                continue
+            # 跳过已激活的 skill
+            if any(s.name == skill_name for s in self._active_skills):
+                continue
+
+            loader = self._skill_router._loader
+            skillpacks = loader.get_skillpacks() or loader.load_all()
+            skill = skillpacks.get(skill_name)
+            if skill is None:
+                continue
+
+            # MCP 依赖检查
+            mcp_error = self._validate_skill_mcp_requirements(skill)
+            if mcp_error:
+                continue
+
+            # 激活 skill
+            self._active_skills = [
+                s for s in self._active_skills if s.name != skill.name
+            ] + [skill]
+            self._loaded_skill_names.add(skill.name)
+
+            # 如果触发工具是写入类，升级 write_hint
+            if tool_name in MUTATING_ALL_TOOLS:
+                self._current_write_hint = "may_write"
+
+            logger.info(
+                "自动补充激活技能 %s（触发工具: %s，工具数: %d）",
+                skill.name,
+                tool_name,
+                len(skill.allowed_tools),
+            )
+            return AutoSupplementResult(
+                skill_name=skill.name,
+                expanded_tools=list(skill.allowed_tools),
+            )
+
+        return None
 
     @staticmethod
     def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
@@ -3202,6 +3341,9 @@ class AgentEngine:
                 ),
             )
 
+            # 每轮重置自动补充计数器
+            self._turn_supplement_count = 0
+
             system_prompts, context_error = self._prepare_system_prompts_for_request(
                 current_route_result.system_contexts,
                 route_result=current_route_result,
@@ -3488,6 +3630,19 @@ class AgentEngine:
                         tool_scope = self._get_current_tool_scope(
                             route_result=current_route_result
                         )
+                    # 自动补充也可能激活了新 skill，需要刷新 scope
+                    elif self._turn_supplement_count > 0 and tc_result.success:
+                        current_scope_set = set(tool_scope) if tool_scope else set()
+                        new_union = set(self._active_skills_tool_union()) if self._active_skills else set()
+                        if not new_union.issubset(current_scope_set):
+                            current_route_result = self._refresh_route_after_skill_switch(
+                                current_route_result
+                            )
+                            write_hint = getattr(current_route_result, "write_hint", write_hint)
+                            self._current_write_hint = write_hint
+                            tool_scope = self._get_current_tool_scope(
+                                route_result=current_route_result
+                            )
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -3676,7 +3831,17 @@ class AgentEngine:
             else:
                 try:
                     if tool_scope is not None and tool_name not in set(tool_scope):
-                        raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+                        supplement = self._try_auto_supplement_tool(tool_name)
+                        if supplement is not None:
+                            # 扩展当前 scope（本次调用及后续同批次调用生效）
+                            tool_scope = list(set(tool_scope) | set(supplement.expanded_tools))
+                            self._turn_supplement_count += 1
+                            self._auto_supplement_notice = (
+                                f"\n[系统已自动激活技能 {supplement.skill_name}，"
+                                f"后续可直接使用该技能的工具]"
+                            )
+                        else:
+                            raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
 
                     skip_plan_once_for_task_create = False
                     if tool_name == "task_create" and self._suspend_task_create_plan_once:
@@ -4005,6 +4170,11 @@ class AgentEngine:
                     success = False
                     error = reason
                     result_str = f"{result_str}\n[Hook 拒绝] {reason}"
+
+        # 附加自动补充提示
+        if self._auto_supplement_notice:
+            result_str = result_str + self._auto_supplement_notice
+            self._auto_supplement_notice = ""
 
         result_str = self._enrich_tool_result_with_window_perception(
             tool_name=tool_name,
@@ -5540,14 +5710,22 @@ class AgentEngine:
             parts.append("当前可用：")
             parts.extend(active_lines)
         if inactive_lines:
-            parts.append("未激活（需 select_skill 激活对应技能后可用）：")
+            parts.append("未激活（需 select_skill 激活对应技能后可用）：" if not self._config.auto_supplement_enabled else "按需可用（直接调用即可，系统会自动激活对应技能）：")
             parts.extend(inactive_lines)
-        parts.append(
-            "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
-            "禁止向用户请求权限或声称无法完成。"
-            "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
-            "不得以文本建议替代实际写入操作。"
-        )
+        if self._config.auto_supplement_enabled:
+            parts.append(
+                "\n⚠️ 上述按需可用工具可直接调用，系统会自动激活对应技能。"
+                "无需先调用 select_skill。"
+                "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
+                "不得以文本建议替代实际写入操作。"
+            )
+        else:
+            parts.append(
+                "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
+                "禁止向用户请求权限或声称无法完成。"
+                "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
+                "不得以文本建议替代实际写入操作。"
+            )
         return "\n".join(parts)
 
 
