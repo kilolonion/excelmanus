@@ -65,7 +65,6 @@ from .models import (
     WindowRenderAction,
     WindowType,
 )
-from .projection_service import project_notice, project_tool_payload
 from .renderer import (
     build_tool_perception_payload,
     render_system_notice,
@@ -348,8 +347,7 @@ class WindowPerceptionManager:
             windows=active_windows,
             active_window_id=self._active_window_id,
             render_keep=lambda window: render_window_keep(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 detail_level=window.detail_level,
                 mode=effective_mode,
                 max_rows=full_rows,
@@ -357,13 +355,11 @@ class WindowPerceptionManager:
                 intent_profile=self._build_intent_profile(window, level="full"),
             ),
             render_background=lambda window: render_window_background(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 intent_profile=self._build_intent_profile(window, level="summary"),
             ),
             render_minimized=lambda window: render_window_minimized(
-                project_notice(window),
-                payload=project_tool_payload(window),
+                window,
                 intent_profile=self._build_intent_profile(window, level="icon"),
             ),
             lifecycle_plan=lifecycle_plan,
@@ -919,11 +915,18 @@ class WindowPerceptionManager:
         )
 
         if canonical_tool_name in {"filter_data"}:
-            filter_condition = {
-                "column": arguments.get("column"),
-                "operator": arguments.get("operator"),
-                "value": arguments.get("value"),
-            }
+            # 适配多条件模式：优先使用 conditions 数组
+            if arguments.get("conditions"):
+                filter_condition = {
+                    "conditions": arguments["conditions"],
+                    "logic": arguments.get("logic", "and"),
+                }
+            else:
+                filter_condition = {
+                    "column": arguments.get("column"),
+                    "operator": arguments.get("operator"),
+                    "value": arguments.get("value"),
+                }
             affected = ingest_filter_result(
                 window,
                 filter_condition=filter_condition,

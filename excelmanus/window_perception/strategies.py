@@ -399,11 +399,18 @@ class SheetStrategy:
         window.viewport_range = range_ref
 
         if tool_name in {"filter_data"}:
-            filter_condition = {
-                "column": arguments.get("column"),
-                "operator": arguments.get("operator"),
-                "value": arguments.get("value"),
-            }
+            # 适配多条件模式：优先使用 conditions 数组
+            if arguments.get("conditions"):
+                filter_condition = {
+                    "conditions": arguments["conditions"],
+                    "logic": arguments.get("logic", "and"),
+                }
+            else:
+                filter_condition = {
+                    "column": arguments.get("column"),
+                    "operator": arguments.get("operator"),
+                    "value": arguments.get("value"),
+                }
             affected = ingest_filter_result(
                 window,
                 filter_condition=filter_condition,
