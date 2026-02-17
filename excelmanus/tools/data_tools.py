@@ -513,6 +513,14 @@ def read_excel(
     if header_row is None and effective_header != 0:
         summary["detected_header_row"] = effective_header
 
+    # Unnamed 列名警告：提醒 LLM 列名不可靠，建议指定 header_row
+    unnamed_cols = [str(c) for c in df.columns if str(c).startswith("Unnamed")]
+    if unnamed_cols:
+        summary["unnamed_columns_warning"] = (
+            f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
+            f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
+        )
+
     # 向后兼容：include_style_summary=True 映射为 include=["styles"]
     include_set: set[str] = set()
     if include:
