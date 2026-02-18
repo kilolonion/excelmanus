@@ -564,6 +564,8 @@ class AgentEngine:
         # 工具自动补充：每轮计数器
         self._turn_supplement_count: int = 0
         self._auto_supplement_notice: str = ""
+        # v5: session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
+        self._expanded_categories: set[str] = set()
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
         self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
@@ -1907,9 +1909,13 @@ class AgentEngine:
         return result
 
     def _build_meta_tools(self) -> list[dict[str, Any]]:
-        """构建 LLM-Native 元工具定义。"""
-        from excelmanus.tools.policy import TOOL_CATEGORIES
+        """v5: 构建 LLM-Native 元工具定义。
 
+        activate_skill + expand_tools 替代旧的 select_skill + discover_tools + list_skills。
+        """
+        from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS
+
+        # ── 构建 skill catalog ──
         skill_catalog = "当前无可用技能。"
         skill_names: list[str] = []
         if self._skill_router is not None:
@@ -1926,7 +1932,6 @@ class AgentEngine:
                 if isinstance(names, list):
                     skill_names = [str(name) for name in names]
 
-            # 兼容单测 mock router：无 build_skill_catalog 或返回值异常时，从 loader 兜底。
             if not skill_names:
                 loader = getattr(self._skill_router, "_loader", None)
                 get_skillpacks = getattr(loader, "get_skillpacks", None)
@@ -1962,16 +1967,25 @@ class AgentEngine:
                                 lines.append(f"- {name}{suffix}")
                         skill_catalog = "\n".join(lines)
 
-        select_skill_description = (
-            "激活技能包获取写入/格式化/图表等执行工具。"
-            "当前仅有只读探查工具可用，需要修改数据时必须先激活对应技能。\n"
-            "不确定该激活哪个技能时，先调用 discover_tools 查看工具分类。\n"
-            "⚠️ 当你发现当前工具无法完成任务时，必须调用本工具激活技能，"
-            "不要向用户请求权限或声称缺少能力。\n"
+        # ── 构建 tool category catalog ──
+        category_lines = []
+        for cat in sorted(EXTENDED_CATEGORIES):
+            desc = CATEGORY_DESCRIPTIONS.get(cat, cat)
+            category_lines.append(f"- {cat}: {desc}")
+        category_catalog = "\n".join(category_lines)
+
+        activate_skill_description = (
+            "激活技能获取专业操作指引。技能提供特定领域的最佳实践和步骤指导。\n"
+            "当你需要执行复杂任务、不确定最佳方案时，激活对应技能获取指引。\n"
             "⚠️ 不要向用户提及技能名称或工具名称等内部概念。\n"
             "调用后立即执行任务，不要仅输出计划。\n\n"
-            "Skill_Catalog:\n"
             f"{skill_catalog}"
+        )
+        expand_tools_description = (
+            "按类别展开工具的完整参数说明。\n"
+            "当你需要调用某个类别的工具但只看到了名称和简短描述时，"
+            "先调用此工具获取完整的参数定义。\n\n"
+            f"可用类别：\n{category_catalog}"
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
@@ -2028,8 +2042,8 @@ class AgentEngine:
             {
                 "type": "function",
                 "function": {
-                    "name": "select_skill",
-                    "description": select_skill_description,
+                    "name": "activate_skill",
+                    "description": activate_skill_description,
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -2038,12 +2052,27 @@ class AgentEngine:
                                 "description": "要激活的技能名称",
                                 **({"enum": skill_names} if skill_names else {}),
                             },
-                            "reason": {
-                                "type": "string",
-                                "description": "选择该技能的原因（可选，一句话）",
-                            },
                         },
                         "required": ["skill_name"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "expand_tools",
+                    "description": expand_tools_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "description": "要展开的工具类别",
+                                "enum": sorted(EXTENDED_CATEGORIES),
+                            },
+                        },
+                        "required": ["category"],
                         "additionalProperties": False,
                     },
                 },
@@ -2174,30 +2203,6 @@ class AgentEngine:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "discover_tools",
-                    "description": (
-                        "按类别查询可用工具及其功能说明。"
-                        "当你不确定该用哪个工具、或需要了解某类操作有哪些工具时调用。"
-                        "返回该类别下所有工具的名称和描述。"
-                        "注意：查询到的写入类工具需要先通过 select_skill 激活对应技能后才能使用。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "category": {
-                                "type": "string",
-                                "description": "工具类别",
-                                "enum": list(TOOL_CATEGORIES.keys()) + ["all"],
-                            },
-                        },
-                        "required": ["category"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
         ]
         if finish_task_tool is not None:
             tools.append(finish_task_tool)
@@ -2252,6 +2257,39 @@ class AgentEngine:
         if not any(line.startswith("- ") for line in lines):
             lines.append("(该分类下无已注册工具)")
         return "\n".join(lines)
+
+    def _handle_expand_tools(self, category: str) -> str:
+        """v5: 处理 expand_tools 元工具调用，将指定类别工具从摘要升级为完整 schema。"""
+        from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS, get_tools_in_category
+
+        if category not in EXTENDED_CATEGORIES:
+            valid = ", ".join(sorted(EXTENDED_CATEGORIES))
+            return f"无效类别 '{category}'。可用类别：{valid}"
+
+        self._expanded_categories.add(category)
+        tools = get_tools_in_category(category)
+        registered = set(self._all_tool_names())
+        available = [t for t in tools if t in registered]
+        desc = CATEGORY_DESCRIPTIONS.get(category, category)
+        tool_list = ", ".join(available) if available else "(无)"
+        return (
+            f"已展开类别 [{category}]: {desc}\n"
+            f"包含工具：{tool_list}\n"
+            f"这些工具的完整参数定义已在下一轮对话中可见。"
+        )
+
+    def _build_v5_tools(self) -> list[dict[str, Any]]:
+        """v5: 构建分层工具 schema（core=完整, extended=摘要/已展开=完整）+ 元工具。"""
+        domain_schemas = self._registry.get_tiered_schemas(
+            expanded_categories=self._expanded_categories,
+            mode="chat_completions",
+        )
+        meta_schemas = self._build_meta_tools()
+        # 去除与 domain 重复的元工具（元工具优先）
+        domain_names = {s.get("function", {}).get("name") for s in domain_schemas}
+        meta_names = {s.get("function", {}).get("name") for s in meta_schemas}
+        filtered_domain = [s for s in domain_schemas if s.get("function", {}).get("name") not in meta_names]
+        return meta_schemas + filtered_domain
 
     @staticmethod
     def _is_select_skill_ok(result: str) -> bool:
