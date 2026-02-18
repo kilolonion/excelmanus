@@ -81,7 +81,7 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     skills_used: list[str]
-    tool_scope: list[str]
+    tool_scope: list[str] = Field(default_factory=list, deprecated="v5: 始终为空，保留向后兼容")
     route_mode: str
     iterations: int = 0
     truncated: bool = False

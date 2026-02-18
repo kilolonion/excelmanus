@@ -6,71 +6,132 @@
       "id": "p2v_bar_chart",
       "name": "[chart_basic] 柱状图-部门销售对比",
       "message": "用 examples/bench/stress_test_comprehensive.xlsx 销售明细的数据，按城市汇总销售额画一个柱状图",
-      "tags": ["chart_basic", "bar_chart", "aggregation"],
-      "expected": {"skill": "chart_basic"}
+      "tags": [
+        "chart_basic",
+        "bar_chart",
+        "aggregation"
+      ],
+      "expected": {
+        "skill": "chart_basic"
+      }
     },
     {
       "id": "p2v_line_chart",
       "name": "[chart_basic] 折线图-月度趋势",
       "message": "根据 examples/bench/stress_test_comprehensive.xlsx 销售明细，按月汇总销售额画折线图展示趋势",
-      "tags": ["chart_basic", "line_chart", "trend"],
-      "expected": {"skill": "chart_basic"}
+      "tags": [
+        "chart_basic",
+        "line_chart",
+        "trend"
+      ],
+      "expected": {
+        "skill": "chart_basic"
+      }
     },
     {
       "id": "p2v_pie_chart",
       "name": "[chart_basic] 饼图-部门人数占比",
       "message": "用 examples/bench/stress_test_comprehensive.xlsx 员工花名册各部门人数画一个饼图，显示占比",
-      "tags": ["chart_basic", "pie_chart", "proportion"],
-      "expected": {"skill": "chart_basic"}
+      "tags": [
+        "chart_basic",
+        "pie_chart",
+        "proportion"
+      ],
+      "expected": {
+        "skill": "chart_basic"
+      }
     },
     {
       "id": "p2v_scatter_chart",
       "name": "[chart_basic] 散点图-数量与金额关系",
       "message": "用 examples/bench/stress_test_comprehensive.xlsx 销售明细的数量和销售额两列画散点图，看看相关性",
-      "tags": ["chart_basic", "scatter_chart", "correlation"],
-      "expected": {"skill": "chart_basic"}
+      "tags": [
+        "chart_basic",
+        "scatter_chart",
+        "correlation"
+      ],
+      "expected": {
+        "skill": "chart_basic"
+      }
     },
     {
       "id": "p2v_header_style",
       "name": "[format_basic] 表头美化",
       "message": "把 examples/bench/stress_test_comprehensive.xlsx 销售明细的表头设置为白色加粗字体、深蓝色背景",
-      "tags": ["format_basic", "header", "font_color", "background"],
-      "expected": {"skill": "format_basic"}
+      "tags": [
+        "format_basic",
+        "header",
+        "font_color",
+        "background"
+      ],
+      "expected": {
+        "skill": "format_basic"
+      }
     },
     {
       "id": "p2v_conditional_format",
       "name": "[format_basic] 条件格式高亮",
       "message": "给 examples/bench/stress_test_comprehensive.xlsx 销售明细中销售额低于1000的单元格设置红色背景警告",
-      "tags": ["format_basic", "conditional_format", "highlight"],
-      "expected": {"skill": "format_basic"}
+      "tags": [
+        "format_basic",
+        "conditional_format",
+        "highlight"
+      ],
+      "expected": {
+        "skill": "format_basic"
+      }
     },
     {
       "id": "p2v_merge_cells",
       "name": "[format_basic] 合并单元格标题",
       "message": "在 examples/bench/stress_test_comprehensive.xlsx 销售明细的第一行上方插入一行，合并 A1:F1 作为大标题「销售数据汇总表」",
-      "tags": ["format_basic", "merge_cells", "title"],
-      "expected": {"skill": "format_basic"}
+      "tags": [
+        "format_basic",
+        "merge_cells",
+        "title"
+      ],
+      "expected": {
+        "skill": "format_basic"
+      }
     },
     {
       "id": "p2v_col_width_border",
       "name": "[format_basic] 列宽调整与边框",
       "message": "自动调整 examples/bench/stress_test_comprehensive.xlsx 员工花名册所有列的宽度，并给数据区域加上细边框",
-      "tags": ["format_basic", "column_width", "border"],
-      "expected": {"skill": "format_basic"}
+      "tags": [
+        "format_basic",
+        "column_width",
+        "border"
+      ],
+      "expected": {
+        "skill": "format_basic"
+      }
     },
     {
       "id": "p2v_chart_then_format",
-      "name": "[general_excel] 画图后美化表格",
+      "name": "[data_basic] 画图后美化表格",
       "message": "先用 examples/bench/stress_test_comprehensive.xlsx 销售明细画一个柱状图，然后把表头美化一下",
-      "tags": ["general_excel", "composite", "chart_and_format"],
-      "expected": {"skill": "general_excel"}
+      "tags": [
+        "data_basic",
+        "composite",
+        "chart_and_format"
+      ],
+      "expected": {
+        "skill": "data_basic"
+      }
     },
     {
       "id": "p2v_print_layout",
       "name": "[format_basic] 打印布局设置",
       "message": "把 examples/bench/stress_test_comprehensive.xlsx 员工花名册设置为横向打印、A3纸张、居中对齐，适合打印输出",
-      "tags": ["format_basic", "print_layout", "page_setup"],
-      "expected": {"skill": "format_basic"}
+      "tags": [
+        "format_basic",
+        "print_layout",
+        "page_setup"
+      ],
+      "expected": {
+        "skill": "format_basic"
+      }
     }
   ]
 }
