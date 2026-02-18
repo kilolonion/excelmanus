@@ -4,10 +4,16 @@
   "cases": [
     {
       "id": "p2v_chart_then_format",
-      "name": "[general_excel] 画图后美化表格",
+      "name": "[data_basic] 画图后美化表格",
       "message": "先用 examples/bench/stress_test_comprehensive.xlsx 销售明细画一个柱状图，然后把表头美化一下",
-      "tags": ["general_excel", "composite", "chart_and_format"],
-      "expected": {"skill": "general_excel"}
+      "tags": [
+        "data_basic",
+        "composite",
+        "chart_and_format"
+      ],
+      "expected": {
+        "skill": "data_basic"
+      }
     }
   ]
 }

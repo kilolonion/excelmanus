@@ -1,6 +1,6 @@
 # Skillpack 协议规范（SSOT）
 
-> 最后更新：2026-02-14  
+> 最后更新：2026-02-19 (v5)  
 > 适用范围：`excelmanus/skillpacks`、README、测试与任务文档
 
 ## 1. 目标
@@ -26,11 +26,10 @@
 
 ## 4. 路由语义
 - 斜杠命令：`/<skill_name> args...` 直连技能（`slash_direct`）。
-- 非斜杠消息：进入 `fallback`，注入 `list_skills` 与只读发现工具。
-- 兜底模式不注入技能目录正文到 `system_contexts`，目录通过 `select_skill` 元工具描述传递。
+- 非斜杠消息：进入 `fallback`，所有工具始终可见（core 完整 schema，extended 摘要 schema）。
+- LLM 通过 `activate_skill` 注入领域知识，通过 `expand_tools` 展开指定类别的扩展工具获取完整参数。
 
 ## 5. 内置 system Skillpacks（权威清单）
-- `general_excel`
 - `data_basic`
 - `chart_basic`
 - `format_basic`
@@ -51,7 +50,7 @@
 - `matcher` 使用 glob 语法匹配工具名（`fnmatch`）。
 - 多 handler 合并决策优先级：`DENY > ASK > ALLOW > CONTINUE`。
 - `ASK` 仅在 `PreToolUse` 事件生效，其它事件自动降级为 `CONTINUE`。
-- `ALLOW` 在 `PreToolUse` 语义为“跳过确认门禁”，但不绕过 `tool_scope` 与审计约束。
+- `ALLOW` 在 `PreToolUse` 语义为“跳过确认门禁”，但不绕过 ToolPolicy 审计约束。
 
 ### 7.1 command handler
 - `EXCELMANUS_HOOKS_COMMAND_ENABLED=false` 时，无条件跳过 command hook。

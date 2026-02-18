@@ -1,9 +1,9 @@
-# ExcelManus v4
+# ExcelManus v5
 
 基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
 
-- `Tools`：基础能力执行层（工具函数 + schema + 安全边界）
-- `Skillpacks`：策略编排层（`SKILL.md` 元数据 + 路由 + `allowed-tools` 授权）
+- `Tools`：基础能力执行层（工具函数 + schema + 安全边界 + 分层披露）
+- `Skillpacks`：纯知识注入层（`SKILL.md` 元数据 + 路由 + 领域指引）
 
 支持两种运行模式：
 
@@ -70,17 +70,11 @@ pip install -e ".[dev]"
 | `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
 | `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
 
-### Skill 预激活（adaptive）
+### v5 路由行为
 
-| 环境变量 | 说明 | 默认值 |
-|---|---|---|
-| `EXCELMANUS_SKILL_PREROUTE_MODE` | 预激活策略，仅支持 `adaptive` | `adaptive` |
-| `EXCELMANUS_SKILL_PREROUTE_API_KEY` | 预激活小模型 API Key（未设置时回退主配置） | — |
-| `EXCELMANUS_SKILL_PREROUTE_BASE_URL` | 预激活小模型 Base URL（未设置时回退主配置） | — |
-| `EXCELMANUS_SKILL_PREROUTE_MODEL` | 预激活小模型名称（未设置时回退主模型） | — |
-| `EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS` | 预激活小模型超时（毫秒） | `10000` |
+v5 已移除 Skill 预激活（pre-route）模块，相关环境变量不再生效。
 
-v5 路由行为：
+路由行为：
 - 所有工具始终可见（core 工具完整 schema，extended 工具摘要 schema）。
 - LLM 通过 `expand_tools` 展开指定类别获取完整参数后即可调用。
 - `activate_skill` 用于注入领域知识指引（纯知识注入，不控制工具可见性）。
@@ -116,8 +110,7 @@ v5 路由行为：
 - Plan 目录不再自动从 `outputs/plans/` 迁移到 `.excelmanus/plans/`，旧目录需手工迁移一次。
 - 会话统计接口移除 `active_count` 旧属性，请统一使用 `await get_active_count()`。
 - MCP 管理器已移除 legacy `npx` 直连兜底逻辑，需使用当前 `mcp.json` 配置链路。
-- `EXCELMANUS_SKILL_PREROUTE_MODE` 仅支持 `adaptive`；`off/meta_only/deepseek/gemini/hybrid` 旧值将启动即报错。
-- `EXCELMANUS_SKILL_PREROUTE_FALLBACK` 已移除，不再支持自定义 pre-route 回退模式。
+- `EXCELMANUS_SKILL_PREROUTE_*` 系列环境变量已在 v5 中全部移除。
 
 最小可运行 `.env` 示例：
 
@@ -128,9 +121,10 @@ EXCELMANUS_MODEL=your-model-id
 # 可选：EXCELMANUS_MODELS=[{"name":"default","model":"your-model-id","api_key":"...","base_url":"..."}]
 ```
 
-v4 路由简化迁移说明：
-- 以下旧变量在 v4 已不生效，现已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
-- 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心，运行时工具权限由 `tool_scope` 严格约束。
+v5 路由简化说明：
+- 以下旧变量已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
+- 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心。
+- v5 不再有运行时 `tool_scope` 过滤——所有工具始终可见，安全由 ToolPolicy 层独立管控。
 
 `EXCELMANUS_SYSTEM_MESSAGE_MODE` 语义：
 - `replace`：多条 system 分段注入。
@@ -175,7 +169,7 @@ CLI `/mcp` 状态语义：
 > 破坏性变更（MCP/Skills 解耦）：
 > 启动时不再自动将 MCP Server 生成并注入为临时 Skillpack。  
 > MCP 仅负责注册 `mcp_*` 工具；Skillpack 仅负责策略与授权。  
-> 若 Skillpack 需要 MCP，请在 `SKILL.md` 中显式声明 `allowed-tools`（如 `mcp:context7:*`），可选声明 `required-mcp-servers` / `required-mcp-tools`。
+> 若 Skillpack 需要 MCP，请在 `SKILL.md` 中声明 `required-mcp-servers` / `required-mcp-tools`。
 
 MCP 安全扫描（pre-commit/CI）：
 - 本地：`scripts/security/scan_secrets.sh`
@@ -220,7 +214,7 @@ Plan 草案文件保存于 `.excelmanus/plans/`。
 ```bash
 /skills list
 /skills get data_basic
-/skills create api_skill --json '{"description":"api 创建","allowed-tools":["read_excel"],"triggers":[],"instructions":"说明"}'
+/skills create api_skill --json '{"description":"api 创建","instructions":"说明"}'
 /skills patch api_skill --json '{"description":"api 更新"}'
 /skills delete api_skill --yes
 ```
@@ -249,12 +243,12 @@ excelmanus-api
 
 - `POST /api/v1/chat`
   - 请求：`message`、`session_id?`
-  - 响应：`session_id`、`reply`、`skills_used`、`tool_scope`、`route_mode`
+  - 响应：`session_id`、`reply`、`skills_used`、`route_mode`
   - 错误：`409`（同会话并发冲突）、`429`（会话数超限）
 - `GET /api/v1/skills`
   - 响应：Skillpack 摘要列表（`name`、`description`、`source`、`writable`、`argument-hint`）
 - `GET /api/v1/skills/{name}`
-  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情（标准字段：如 `allowed-tools`、`command-dispatch`、`hooks` 等）
+  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情（标准字段：如 `command-dispatch`、`hooks` 等）
 - `external_safe_mode=false` 时仍会对 `tool_calls.arguments` 与 SSE `tool_call_start.arguments` 进行脱敏处理（token/cookie/绝对路径）。
 - `POST /api/v1/skills`
   - 请求：`name` + `payload`
@@ -306,8 +300,8 @@ Skillpack 使用目录结构：
 
 可选字段（标准键）：
 
-- `allowed-tools`、`triggers`、`file-patterns`、`resources`
-- `priority`、`version`
+- `file-patterns`、`resources`
+- `version`
 - `disable-model-invocation`、`user-invocable`
 - `argument-hint`
 - `hooks`、`model`、`metadata`
@@ -318,7 +312,7 @@ Hook 配置要点：
 - 事件键支持三种写法：`PreToolUse` / `preToolUse` / `pre_tool_use`（其余事件同理）。
 - handler 决策优先级：`deny > ask > allow > continue`。
 - `ASK` 仅对 `PreToolUse` 生效，其他事件会自动降级为 `continue`。
-- `ALLOW` 在 `PreToolUse` 下会跳过确认门禁，但不会绕过 `tool_scope` 与审计约束。
+- `ALLOW` 在 `PreToolUse` 下会跳过确认门禁，但不会绕过 ToolPolicy 审计约束。
 - `command` hook 仅在 `EXCELMANUS_HOOKS_COMMAND_ENABLED=true` 时可执行；
   allowlist 仅允许单段命令，链式命令（`;`/`&&`/`||`/`|`）不会被放行。
 - `agent` hook 支持字段：`agent_name`、`task`、`on_failure`、`inject_summary_as_context`。
@@ -371,9 +365,7 @@ python scripts/migrate_skills_to_standard.py --workspace-root .
 - 路径穿越与符号链接越界会被拒绝
 - 代码 Skillpack 默认受限（`excel_code_runner`），仅可通过会话级 `/fullAccess` 临时解锁
 - `run_code` 始终使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制尽力应用）
-- `allowed_tools` 两阶段校验
-  - Loader 启动期软校验：未知工具仅告警
-  - Engine 运行期硬校验：未授权调用返回 `TOOL_NOT_ALLOWED`
+- v5 中 Skill 不再控制工具授权，安全边界由 ToolPolicy 层（Tier A/B 分层审批）统一管控
 
 ## 开发
 
