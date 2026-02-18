@@ -1,5 +1,7 @@
 """窗口感知预算分配测试。"""
 
+from unittest.mock import patch
+
 from excelmanus.window_perception.advisor import LifecyclePlan, WindowAdvice
 from excelmanus.window_perception.budget import WindowBudgetAllocator
 from excelmanus.window_perception.models import PerceptionBudget, WindowRenderAction, WindowType
@@ -105,3 +107,43 @@ class TestWindowBudget:
         assert allocator.compute_window_full_max_rows(1) == 50
         assert allocator.compute_window_full_max_rows(2) == 25
         assert allocator.compute_window_full_max_rows(3) == 15
+
+    def test_must_keep_suspended_respects_half_minimized_floor(self) -> None:
+        budget = PerceptionBudget(
+            system_budget_tokens=39,
+            minimized_tokens=80,
+            max_windows=1,
+        )
+        allocator = WindowBudgetAllocator(budget)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=10)
+
+        with patch.object(allocator, "_estimate_tokens", side_effect=[120, 60, 1]):
+            snapshots = allocator.allocate(
+                windows=[w1],
+                active_window_id="w1",
+                render_keep=lambda _: "ACTIVE",
+                render_background=lambda _: "BACKGROUND",
+                render_minimized=lambda _: "SUSPENDED",
+            )
+
+        assert snapshots[0].action == WindowRenderAction.CLOSE
+
+    def test_must_keep_suspended_allows_half_minimized_floor(self) -> None:
+        budget = PerceptionBudget(
+            system_budget_tokens=40,
+            minimized_tokens=80,
+            max_windows=1,
+        )
+        allocator = WindowBudgetAllocator(budget)
+        w1 = make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=10)
+
+        with patch.object(allocator, "_estimate_tokens", side_effect=[120, 60, 1]):
+            snapshots = allocator.allocate(
+                windows=[w1],
+                active_window_id="w1",
+                render_keep=lambda _: "ACTIVE",
+                render_background=lambda _: "BACKGROUND",
+                render_minimized=lambda _: "SUSPENDED",
+            )
+
+        assert snapshots[0].action == WindowRenderAction.MINIMIZE

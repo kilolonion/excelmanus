@@ -37,6 +37,28 @@ class SkillRouter:
     def __init__(self, config: ExcelManusConfig, loader: SkillpackLoader) -> None:
         self._config = config
         self._loader = loader
+        self._router_client: Any = None
+        self._fallback_client: Any = None
+
+    def _get_router_client(self) -> Any:
+        """懒加载 router 端点客户端，首次调用时创建并缓存。"""
+        if self._router_client is None:
+            from excelmanus.providers import create_client
+            self._router_client = create_client(
+                api_key=self._config.router_api_key or self._config.api_key,
+                base_url=self._config.router_base_url or self._config.base_url,
+            )
+        return self._router_client
+
+    def _get_fallback_client(self) -> Any:
+        """懒加载主模型降级客户端，首次调用时创建并缓存。"""
+        if self._fallback_client is None:
+            from excelmanus.providers import create_client
+            self._fallback_client = create_client(
+                api_key=self._config.api_key,
+                base_url=self._config.base_url,
+            )
+        return self._fallback_client
 
     async def route(
         self,
@@ -46,6 +68,7 @@ class SkillRouter:
         raw_args: str | None = None,
         file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
+        write_hint: str | None = None,
     ) -> SkillMatchResult:
         """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
         skillpacks = self._loader.get_skillpacks()
@@ -78,6 +101,14 @@ class SkillRouter:
             raw_args=raw_args or "",
         )
         if slash_command and slash_command.strip():
+            # 斜杠路径同步词法分类 write_hint，避免 LLM 调用延迟
+            # 分类文本优先用 raw_args（任务描述），其次 user_message
+            _hint_text = (raw_args or "").strip() or user_message
+            slash_write_hint: str = (
+                write_hint
+                or self._classify_write_hint_lexical(_hint_text)
+                or "unknown"
+            )
             direct_skill = self._find_skill_by_name(
                 skillpacks=available_skillpacks,
                 name=slash_command.strip(),
@@ -90,6 +121,7 @@ class SkillRouter:
                     user_message=user_message,
                     candidate_file_paths=candidate_file_paths,
                     blocked_skillpacks=blocked_skillpacks,
+                    write_hint=slash_write_hint,
                 )
             if not direct_skill.user_invocable:
                 return self._build_fallback_result(
@@ -99,17 +131,19 @@ class SkillRouter:
                     user_message=user_message,
                     candidate_file_paths=candidate_file_paths,
                     blocked_skillpacks=blocked_skillpacks,
+                    write_hint=slash_write_hint,
                 )
             return self._build_parameterized_result(
                 skill=direct_skill,
                 raw_args=raw_args or "",
                 user_message=user_message,
                 candidate_file_paths=candidate_file_paths,
+                write_hint=slash_write_hint,
             )
 
         # ── 1. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
         # 并行调用小模型判断 write_hint
-        write_hint = await self._classify_write_hint(user_message)
+        write_hint = write_hint or await self._classify_write_hint(user_message)
         return self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
@@ -165,6 +199,7 @@ class SkillRouter:
         route_mode: str,
         *,
         parameterized: bool = False,
+        write_hint: str = "unknown",
     ) -> SkillMatchResult:
         """构建路由结果。"""
         skills_used = [skill.name for skill in selected]
@@ -185,6 +220,7 @@ class SkillRouter:
             route_mode=route_mode,
             system_contexts=contexts,
             parameterized=parameterized,
+            write_hint=write_hint,
         )
 
     def _build_fallback_result(
@@ -196,6 +232,7 @@ class SkillRouter:
         user_message: str = "",
         candidate_file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
+        write_hint: str = "unknown",
     ) -> SkillMatchResult:
         """构建 fallback 路由结果：注入 list_skills 工具。
 
@@ -205,6 +242,7 @@ class SkillRouter:
         result = self._build_result(
             selected=selected,
             route_mode=route_mode,
+            write_hint=write_hint,
         )
 
         # 将 list_skills 和只读发现工具加入 tool_scope
@@ -234,6 +272,7 @@ class SkillRouter:
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
+            write_hint=result.write_hint,
         )
 
     def _build_all_tools_result(
@@ -283,8 +322,6 @@ class SkillRouter:
         if not self._config.router_model:
             return lexical_hint or "unknown"
 
-        from excelmanus.providers import create_client
-
         system_prompt = (
             "你是任务分类器。判断用户请求是否涉及文件写入或修改表格操作。"
             '只输出 JSON: {"write_hint": "may_write"} 或 {"write_hint": "read_only"}\n'
@@ -302,9 +339,8 @@ class SkillRouter:
             {"role": "user", "content": user_message[:500]},
         ]
 
-        async def _try_classify(api_key: str, base_url: str, model: str, timeout: float) -> str | None:
+        async def _try_classify(client: Any, model: str, timeout: float) -> str | None:
             """尝试用指定端点分类，成功返回 hint，失败返回 None。"""
-            client = create_client(api_key=api_key, base_url=base_url)
             try:
                 response = await asyncio.wait_for(
                     client.chat.completions.create(
@@ -316,38 +352,39 @@ class SkillRouter:
                     timeout=timeout,
                 )
                 text = (response.choices[0].message.content or "").strip()
-                for candidate in [text]:
-                    left = candidate.find("{")
-                    right = candidate.rfind("}")
-                    if left >= 0 and right > left:
-                        candidate = candidate[left:right + 1]
-                    try:
-                        data = _json.loads(candidate)
-                        hint = str(data.get("write_hint", "")).strip().lower()
-                        if hint in ("may_write", "read_only"):
-                            return hint
-                    except (_json.JSONDecodeError, TypeError, AttributeError):
-                        pass
+                candidate = text
+                left = candidate.find("{")
+                right = candidate.rfind("}")
+                if left >= 0 and right > left:
+                    candidate = candidate[left:right + 1]
+                try:
+                    data = _json.loads(candidate)
+                    hint = str(data.get("write_hint", "")).strip().lower()
+                    if hint in ("may_write", "read_only"):
+                        return hint
+                except (_json.JSONDecodeError, TypeError, AttributeError):
+                    pass
                 return lexical_hint
             except Exception:
-                return lexical_hint
+                # 端点异常时返回 None，让外层继续走主模型降级链。
+                return None
+
+        timeout_seconds = self._config.skill_preroute_timeout_ms / 1000
 
         # 1) 先尝试 router 端点
         result = await _try_classify(
-            api_key=self._config.router_api_key or self._config.api_key,
-            base_url=self._config.router_base_url or self._config.base_url,
+            client=self._get_router_client(),
             model=self._config.router_model,
-            timeout=20,
+            timeout=timeout_seconds,
         )
         if result is not None:
             return result
 
         # 2) 降级：使用主模型
         result = await _try_classify(
-            api_key=self._config.api_key,
-            base_url=self._config.base_url,
+            client=self._get_fallback_client(),
             model=self._config.model,
-            timeout=20,
+            timeout=timeout_seconds,
         )
         if result is not None:
             return result
@@ -398,6 +435,7 @@ class SkillRouter:
         raw_args: str,
         user_message: str = "",
         candidate_file_paths: list[str] | None = None,
+        write_hint: str = "unknown",
     ) -> SkillMatchResult:
         args = parse_arguments(raw_args)
         rendered_instructions = substitute(skill.instructions, args)
@@ -406,6 +444,7 @@ class SkillRouter:
             selected=[parameterized_skill],
             route_mode="slash_direct",
             parameterized=True,
+            write_hint=write_hint,
         )
         system_contexts = list(result.system_contexts)
         large_file_context = self._build_large_file_context(
@@ -420,6 +459,7 @@ class SkillRouter:
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
+            write_hint=result.write_hint,
         )
 
     def _collect_candidate_file_paths(

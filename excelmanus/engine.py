@@ -5652,9 +5652,13 @@ class AgentEngine:
 
         # 所有模式均注入工具索引，确保模型在 active skill 场景下也感知可扩展能力。
         _tool_scope = self._get_current_tool_scope(route_result=route_result)
+        # auto_supplement 模式下不使用 compact，让 LLM 看到完整可扩展能力图谱；
+        # 否则 compact 模式会过滤掉非关键类别的 inactive 工具，导致 LLM 不知道
+        # 可以通过 auto_supplement 获取 sheet/file/code 等类别的工具。
+        _compact = bool(self._active_skills) and not self._config.auto_supplement_enabled
         _tool_index = self._build_tool_index_notice(
             _tool_scope,
-            compact=bool(self._active_skills),
+            compact=_compact,
         )
         if _tool_index:
             base_prompt = base_prompt + "\n\n" + _tool_index
@@ -5957,12 +5961,15 @@ class AgentEngine:
             parts.append("当前可用：")
             parts.extend(active_lines)
         if inactive_lines:
-            parts.append("未激活（需 select_skill 激活对应技能后可用）：" if not self._config.auto_supplement_enabled else "按需可用（直接调用即可，系统会自动激活对应技能）：")
+            parts.append("按需可用（直接调用即可，系统会自动激活对应技能）：" if self._config.auto_supplement_enabled else "未激活（需 select_skill 激活对应技能后可用）：")
             parts.extend(inactive_lines)
         if self._config.auto_supplement_enabled:
+            if inactive_lines:
+                parts.append(
+                    "\n⚠️ 上述按需可用工具可直接调用，系统会自动激活对应技能。"
+                    "无需先调用 select_skill。"
+                )
             parts.append(
-                "\n⚠️ 上述按需可用工具可直接调用，系统会自动激活对应技能。"
-                "无需先调用 select_skill。"
                 "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
                 "不得以文本建议替代实际写入操作。"
             )

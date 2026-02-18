@@ -5,43 +5,31 @@ from __future__ import annotations
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools.registry import ToolDef
 
-# 模块级 TaskStore 引用，由 init_store() 注入
-_store: TaskStore | None = None
 
+def get_tools(store: TaskStore) -> list[ToolDef]:
+    """返回绑定到指定 TaskStore 实例的工具定义（闭包注入，无全局状态）。"""
 
-def init_store(store: TaskStore) -> None:
-    """注入 TaskStore 实例。"""
-    global _store
-    _store = store
+    def task_create(
+        title: str,
+        subtasks: list[str],
+        replace_existing: bool = False,
+    ) -> str:
+        """创建任务清单。"""
+        if not isinstance(replace_existing, bool):
+            raise ValueError("replace_existing 必须为布尔值。")
+        task_list = store.create(title, subtasks, replace_existing=replace_existing)
+        return f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
 
+    def task_update(task_index: int, status: str, result: str | None = None) -> str:
+        """更新任务项状态。"""
+        try:
+            new_status = TaskStatus(status)
+        except ValueError:
+            valid = ", ".join(s.value for s in TaskStatus)
+            raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
+        item = store.update_item(task_index, new_status, result)
+        return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
 
-def _get_store() -> TaskStore:
-    if _store is None:
-        raise RuntimeError("TaskStore 未初始化")
-    return _store
-
-
-def task_create(title: str, subtasks: list[str]) -> str:
-    """创建任务清单。"""
-    store = _get_store()
-    task_list = store.create(title, subtasks)
-    return f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
-
-
-def task_update(task_index: int, status: str, result: str | None = None) -> str:
-    """更新任务项状态。"""
-    store = _get_store()
-    try:
-        new_status = TaskStatus(status)
-    except ValueError:
-        valid = ", ".join(s.value for s in TaskStatus)
-        raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
-    item = store.update_item(task_index, new_status, result)
-    return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
-
-
-def get_tools() -> list[ToolDef]:
-    """返回任务清单工具定义。"""
     return [
         ToolDef(
             name="task_create",
@@ -66,6 +54,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "子任务标题列表",
+                    },
+                    "replace_existing": {
+                        "type": "boolean",
+                        "description": "是否允许覆盖当前已存在任务清单，默认 false",
                     },
                 },
                 "required": ["title", "subtasks"],

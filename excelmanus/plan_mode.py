@@ -58,9 +58,10 @@ def utc_now_iso() -> str:
 
 
 def plan_filename(plan_id: str) -> str:
-    """根据计划 ID 生成落盘文件名。"""
-    token = plan_id.rsplit("_", 1)[-1]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    """根据计划 ID 生成落盘文件名。时间戳直接从 plan_id 中提取，保证一致性。"""
+    parts = plan_id.split("_", 2)  # ["pln", "20240101T120000Z", "abc123"]
+    stamp = parts[1] if len(parts) >= 3 else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    token = parts[-1]
     return f"plan_{stamp}_{token}.md"
 
 

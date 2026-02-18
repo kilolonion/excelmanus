@@ -20,13 +20,24 @@ _ABS_PATH_PATTERN = re.compile(
     r"(?<!\w)[A-Za-z]:\\(?:[\w.\-]+\\)+[\w.\-]+"
 )
 
+# URL 整体匹配，用于保护 URL 内路径不被脱敏
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
-def _mask_path(match: re.Match[str]) -> str:
-    path = match.group(0)
-    sep = "\\" if "\\" in path else "/"
-    parts = path.split(sep)
-    filename = parts[-1] if parts else path
-    return f"<path>/{filename}"
+
+def _build_url_spans(text: str) -> list[tuple[int, int]]:
+    """返回文本中所有 URL 的 (start, end) 区间列表。"""
+    return [m.span() for m in _URL_PATTERN.finditer(text)]
+
+
+def _make_path_replacer(url_spans: list[tuple[int, int]]):
+    """生成路径脱敏回调，跳过 URL 内部的路径匹配。"""
+    def _replacer(match: re.Match[str]) -> str:
+        start = match.start()
+        for span_start, span_end in url_spans:
+            if span_start <= start < span_end:
+                return match.group(0)  # 在 URL 内，保留原文
+        return "<path>"
+    return _replacer
 
 
 def sanitize_sensitive_text(text: str) -> str:
@@ -45,5 +56,6 @@ def sanitize_sensitive_text(text: str) -> str:
     value = _BEARER_PATTERN.sub(r"\1***", value)
     value = _AUTH_HEADER_PATTERN.sub(r"\1***", value)
     value = _COOKIE_PATTERN.sub(r"\1***", value)
-    value = _ABS_PATH_PATTERN.sub(_mask_path, value)
+    url_spans = _build_url_spans(value)
+    value = _ABS_PATH_PATTERN.sub(_make_path_replacer(url_spans), value)
     return value

@@ -202,6 +202,8 @@ class HybridAdvisor:
             applied += 1
 
         if applied == 0:
+            # small_model_plan 未成功覆盖任何已知窗口时，merged 与 base_plan 等价。
+            # 此时 active window 已由 RuleBasedAdvisor 保证为 active，无需额外强制。
             return base_plan
 
         if active_window_id and active_window_id in merged:
@@ -214,18 +216,7 @@ class HybridAdvisor:
                 custom_summary=active_advice.custom_summary,
             )
 
-        ordered_advices = [
-            merged.get(
-                advice.window_id,
-                WindowAdvice(
-                    window_id=advice.window_id,
-                    tier=advice.tier,
-                    reason=advice.reason,
-                    reason_code=advice.reason_code,
-                ),
-            )
-            for advice in base_plan.advices
-        ]
+        ordered_advices = [merged[advice.window_id] for advice in base_plan.advices]
         return LifecyclePlan(
             advices=ordered_advices,
             source="hybrid",

@@ -374,9 +374,12 @@ class WindowPerceptionManager:
         self._evict_dormant_windows()
 
         self._last_notice_operation_seq = self._operation_seq
-        self._last_window_count = len([item for item in self._windows.values() if not item.dormant])
+        final_active_windows = [item for item in self._windows.values() if not item.dormant]
+        # 用 evict 后的最终窗口数修正 window_count_changed，保持与 active_windows 一致
+        context.window_count_changed = len(final_active_windows) != self._last_window_count
+        self._last_window_count = len(final_active_windows)
         self._schedule_async_advisor(
-            active_windows=[item for item in self._windows.values() if not item.dormant],
+            active_windows=final_active_windows,
             context=context,
         )
 
@@ -465,6 +468,7 @@ class WindowPerceptionManager:
         repeat_warning = False
         canonical_name = classification.canonical_name or tool_name
         intent_tag = IntentTag.GENERAL
+        payload: dict[str, Any] | None = None
 
         try:
             payload = self.update_from_tool_call(
@@ -568,7 +572,7 @@ class WindowPerceptionManager:
                 arguments=arguments,
                 result_text=result_text,
                 success=success,
-                payload=payload if "payload" in locals() else None,
+                payload=payload,
             )
 
     def update_from_tool_call(
@@ -1177,7 +1181,10 @@ class WindowPerceptionManager:
                     self._set_window_field(window, "schema", list(inferred_columns))
         self._sync_window_schema_columns(window)
 
-        status_bar = extract_status_bar(window.preview_rows)
+        status_bar = extract_status_bar(
+            window.preview_rows,
+            columns=window.columns or window.schema or None,
+        )
         if status_bar:
             self._set_window_field(window, "status_bar", status_bar)
 
@@ -2028,6 +2035,9 @@ class WindowPerceptionManager:
             return
         if plan.generated_turn <= 0:
             plan.generated_turn = context.turn_number
+        # 安全性说明：此赋值发生在 asyncio 协程中，与读取方（build_system_notice 等）
+        # 同处于单线程事件循环，切换仅在 await 点发生，赋值本身是原子操作，无竞态风险。
+        # 若未来引入 ThreadPoolExecutor 执行此协程，需改用 asyncio.Lock 保护。
         self._cached_small_model_plan = plan
 
     def _on_advisor_task_done(self, task: asyncio.Task[None]) -> None:

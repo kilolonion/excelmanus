@@ -81,6 +81,29 @@ class TestTaskStoreUpdateItemErrors:
             store.update_item(0, TaskStatus.IN_PROGRESS)
 
 
+class TestTaskStoreCreateReplaceGuard:
+    """测试 TaskStore.create 的覆盖保护。"""
+
+    def test_create_with_existing_list_requires_explicit_replace(self) -> None:
+        store = TaskStore()
+        store.create("清单A", ["任务1"])
+
+        with pytest.raises(ValueError, match="已有任务清单"):
+            store.create("清单B", ["任务2"])
+
+        assert store.current is not None
+        assert store.current.title == "清单A"
+
+    def test_create_with_replace_existing_true_overwrites(self) -> None:
+        store = TaskStore()
+        store.create("清单A", ["任务1"])
+
+        created = store.create("清单B", ["任务2"], replace_existing=True)
+        assert store.current is created
+        assert store.current is not None
+        assert store.current.title == "清单B"
+
+
 # ---------------------------------------------------------------------------
 # 任务 2.2: 工具部分单元测试
 # _Requirements: 2.4, 2.5, 2.6_
@@ -163,6 +186,18 @@ class TestTaskCreateEmptySubtasks:
         task_tools.task_create("空清单", [])
         assert self.store.current is not None
         assert len(self.store.current.items) == 0
+
+    def test_create_existing_list_requires_explicit_replace(self) -> None:
+        task_tools.task_create("旧清单", ["任务1"])
+        with pytest.raises(ValueError, match="已有任务清单"):
+            task_tools.task_create("新清单", ["任务2"])
+
+    def test_create_existing_list_with_replace_existing_true(self) -> None:
+        task_tools.task_create("旧清单", ["任务1"])
+        result = task_tools.task_create("新清单", ["任务2"], replace_existing=True)
+        assert "已创建任务清单" in result
+        assert self.store.current is not None
+        assert self.store.current.title == "新清单"
 
 
 # ---------------------------------------------------------------------------

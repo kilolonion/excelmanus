@@ -127,3 +127,29 @@ class TestHybridAdvisor:
         )
         assert plan.source == "rules"
         assert plan.advices[0].tier == "background"
+
+    def test_valid_plan_with_only_unknown_windows_keeps_base_active_window(self) -> None:
+        advisor = HybridAdvisor()
+        budget = PerceptionBudget()
+        windows = [
+            make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=999),
+            make_window(id="w2", type=WindowType.SHEET, title="B", idle_turns=999),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id="w1",
+            budget=budget,
+            context=AdvisorContext(turn_number=8, task_type="GENERAL_BROWSE"),
+            small_model_plan=LifecyclePlan(
+                advices=[WindowAdvice(window_id="unknown", tier="terminated")],
+                source="small_model",
+                task_type="GENERAL_BROWSE",
+                generated_turn=7,
+            ),
+            plan_ttl_turns=2,
+        )
+
+        tiers = {item.window_id: item.tier for item in plan.advices}
+        assert plan.source == "rules"
+        assert tiers["w1"] == "active"

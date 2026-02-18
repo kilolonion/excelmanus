@@ -101,11 +101,28 @@ _SKILL_TOOLS: dict[str, tuple[str, list[str]]] = {
 }
 
 
-def _build_skill_catalog() -> str:
+
+
+
+_cached_system_prompt: str | None = None
+
+
+def invalidate_pre_route_cache() -> None:
+    """使预路由 system prompt 全局缓存失效。
+
+    在 skillpack 发生 CRUD 变更后调用，确保下次预路由使用最新的 skillpack 信息。
+    """
+    global _cached_system_prompt
+    _cached_system_prompt = None
+
+
+def _build_skill_catalog(
+    runtime_skillpacks: dict[str, Any] | None = None,
+) -> str:
     """构建带工具详情的技能目录，供小模型预选使用。
 
-    从 policy.TOOL_SHORT_DESCRIPTIONS 获取工具描述（SSOT），
-    让小模型了解每个 skill 下具体有哪些工具及其能力。
+    优先使用运行时动态加载的 skillpack（含自定义 skillpack），
+    对于不在 _SKILL_TOOLS 中的 skillpack，从其 allowed_tools 字段读取工具列表。
     """
     from excelmanus.tools.policy import TOOL_SHORT_DESCRIPTIONS
 
@@ -117,7 +134,21 @@ def _build_skill_catalog() -> str:
         "仅当任务跨越 3 个以上领域或无法归入下列专项技能时选择。"
     )
 
-    for skill_name, (description, tools) in _SKILL_TOOLS.items():
+    # 合并内置 _SKILL_TOOLS 与运行时 skillpack
+    # 运行时 skillpack 优先（允许覆盖内置描述）
+    merged: dict[str, tuple[str, list[str]]] = dict(_SKILL_TOOLS)
+    if runtime_skillpacks:
+        for sp_name, sp in runtime_skillpacks.items():
+            if sp_name == "general_excel":
+                continue
+            # Skillpack 对象有 description 和 allowed_tools 属性
+            desc = getattr(sp, "description", "") or sp_name
+            tools = list(getattr(sp, "allowed_tools", []) or [])
+            # 过滤掉通配符选择器，只保留具体工具名
+            tools = [t for t in tools if "*" not in t and ":" not in t]
+            merged[sp_name] = (desc, tools)
+
+    for skill_name, (description, tools) in merged.items():
         tool_parts = []
         for t in tools:
             desc = TOOL_SHORT_DESCRIPTIONS.get(t)
@@ -126,31 +157,43 @@ def _build_skill_catalog() -> str:
             else:
                 tool_parts.append(t)
         lines.append(f"- {skill_name}: {description}")
-        lines.append(f"  工具: {', '.join(tool_parts)}")
+        if tool_parts:
+            lines.append(f"  工具: {', '.join(tool_parts)}")
 
     return "\n".join(lines)
 
 
-_cached_system_prompt: str | None = None
+def _get_system_prompt(
+    runtime_skillpacks: dict[str, Any] | None = None,
+) -> str:
+    """构建预路由 system prompt（含工具级别详情）。
 
-
-def _get_system_prompt() -> str:
-    """构建并缓存预路由 system prompt（含工具级别详情）。"""
+    当传入 runtime_skillpacks 时，动态构建（不使用缓存），
+    以确保自定义 skillpack 的工具信息被包含在内。
+    无 runtime_skillpacks 时使用全局缓存（向后兼容）。
+    """
     global _cached_system_prompt
-    if _cached_system_prompt is not None:
+    if runtime_skillpacks is None:
+        if _cached_system_prompt is not None:
+            return _cached_system_prompt
+        catalog = _build_skill_catalog()
+        _cached_system_prompt = _PROMPT_TEMPLATE.format(catalog=catalog)
         return _cached_system_prompt
-    catalog = _build_skill_catalog()
-    _cached_system_prompt = (
-        "你是技能路由器。根据用户消息选择最匹配的技能包。\n"
-        "规则：\n"
-        "1. 如果用户消息是闲聊/问候/帮助请求，返回 skill_name 为 null\n"
-        "2. 如果涉及多个领域，返回最多 2 个技能名（按主次排序）\n"
-        "3. 根据用户需要的具体工具能力选择技能，而非仅凭关键词\n"
-        "4. 如果不确定，选 general_excel\n"
-        "5. 只输出 JSON，不要输出其他内容\n\n"
-        f"{catalog}"
-    )
-    return _cached_system_prompt
+
+    catalog = _build_skill_catalog(runtime_skillpacks)
+    return _PROMPT_TEMPLATE.format(catalog=catalog)
+
+
+_PROMPT_TEMPLATE = (
+    "你是技能路由器。根据用户消息选择最匹配的技能包。\n"
+    "规则：\n"
+    "1. 如果用户消息是闲聊/问候/帮助请求，返回 skill_name 为 null\n"
+    "2. 如果涉及多个领域，返回最多 2 个技能名（按主次排序）\n"
+    "3. 根据用户需要的具体工具能力选择技能，而非仅凭关键词\n"
+    "4. 如果不确定，选 general_excel\n"
+    "5. 只输出 JSON，不要输出其他内容\n\n"
+    "{catalog}"
+)
 
 _USER_PROMPT_TEMPLATE = (
     '用户消息: "{user_message}"\n\n'
@@ -191,8 +234,14 @@ def _parse_json_from_text(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_pre_route_response(text: str, model_used: str, latency_ms: float) -> PreRouteResult:
+def _parse_pre_route_response(
+    text: str,
+    model_used: str,
+    latency_ms: float,
+    valid_skill_names: frozenset[str] | None = None,
+) -> PreRouteResult:
     """解析小模型响应为 PreRouteResult。"""
+    _valid = valid_skill_names if valid_skill_names is not None else VALID_SKILL_NAMES
     parsed = _parse_json_from_text(text)
     if parsed is None:
         return PreRouteResult(
@@ -216,7 +265,7 @@ def _parse_pre_route_response(text: str, model_used: str, latency_ms: float) -> 
                 continue
             if normalized.lower() == "null":
                 continue
-            if normalized not in VALID_SKILL_NAMES:
+            if normalized not in _valid:
                 continue
             if normalized not in skill_names:
                 skill_names.append(normalized)
@@ -230,7 +279,7 @@ def _parse_pre_route_response(text: str, model_used: str, latency_ms: float) -> 
         isinstance(raw_skill, str) and raw_skill.strip().lower() == "null"
     ):
         skill_name = None
-    elif isinstance(raw_skill, str) and raw_skill.strip() in VALID_SKILL_NAMES:
+    elif isinstance(raw_skill, str) and raw_skill.strip() in _valid:
         skill_name = raw_skill.strip()
         skill_names = [skill_name]
     else:
@@ -269,6 +318,7 @@ async def _call_gemini_native(
     base_url: str,
     model: str,
     timeout_ms: int,
+    runtime_skillpacks: dict[str, Any] | None = None,
 ) -> tuple[str, float]:
     """调用 Gemini 原生 API，返回 (response_text, latency_ms)。"""
     url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
@@ -280,7 +330,7 @@ async def _call_gemini_native(
             }
         ],
         "systemInstruction": {
-            "parts": [{"text": _get_system_prompt()}]
+            "parts": [{"text": _get_system_prompt(runtime_skillpacks)}]
         },
         "generationConfig": {
             "temperature": 0.0,
@@ -295,7 +345,6 @@ async def _call_gemini_native(
             url,
             headers={
                 "x-goog-api-key": api_key,
-                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json=body,
@@ -320,10 +369,11 @@ async def _call_openai_compatible(
     base_url: str,
     model: str,
     timeout_ms: int,
+    runtime_skillpacks: dict[str, Any] | None = None,
 ) -> tuple[str, float]:
     """调用 OpenAI 兼容 API，返回 (response_text, latency_ms)。"""
     messages = [
-        {"role": "system", "content": _get_system_prompt()},
+        {"role": "system", "content": _get_system_prompt(runtime_skillpacks)},
         {"role": "user", "content": _USER_PROMPT_TEMPLATE.format(user_message=user_message[:500])},
     ]
 
@@ -362,6 +412,8 @@ async def pre_route_skill(
     base_url: str,
     model: str,
     timeout_ms: int = 10000,
+    valid_skill_names: frozenset[str] | None = None,
+    runtime_skillpacks: dict[str, Any] | None = None,
 ) -> PreRouteResult:
     """调用小模型预判最佳 skillpack。
 
@@ -374,6 +426,10 @@ async def pre_route_skill(
         base_url: 小模型 base URL
         model: 小模型名称
         timeout_ms: 超时毫秒数
+        valid_skill_names: 运行时已加载的技能名集合；None 时使用内置 VALID_SKILL_NAMES。
+            由调用方（engine.py）在运行时传入，以支持用户自定义 Skillpack。
+        runtime_skillpacks: 运行时已加载的 Skillpack 对象字典（name -> Skillpack）。
+            用于动态构建 skill catalog，使自定义 skillpack 的工具信息对小模型可见。
 
     Returns:
         PreRouteResult
@@ -409,6 +465,7 @@ async def pre_route_skill(
                 base_url=base_url,
                 model=model,
                 timeout_ms=timeout_ms,
+                runtime_skillpacks=runtime_skillpacks,
             )
         else:
             text, latency_ms = await _call_openai_compatible(
@@ -417,6 +474,7 @@ async def pre_route_skill(
                 base_url=base_url,
                 model=model,
                 timeout_ms=timeout_ms,
+                runtime_skillpacks=runtime_skillpacks,
             )
     except Exception as exc:
         latency_ms = (time.monotonic() - start) * 1000
@@ -431,4 +489,4 @@ async def pre_route_skill(
             raw_response=str(exc),
         )
 
-    return _parse_pre_route_response(text, model_used=model, latency_ms=latency_ms)
+    return _parse_pre_route_response(text, model_used=model, latency_ms=latency_ms, valid_skill_names=valid_skill_names)

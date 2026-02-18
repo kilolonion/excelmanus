@@ -24,12 +24,13 @@ def build_contexts_with_budget(skills: list[Skillpack], budget: int) -> list[str
         if len(full) <= remaining:
             result.append(full)
             used += len(full)
-        elif remaining >= len(skill.render_context_minimal()) + 50:
-            truncated = skill.render_context_truncated(remaining)
-            result.append(truncated)
-            used += len(truncated)
         else:
             minimal = skill.render_context_minimal()
-            result.append(minimal)
-            used += len(minimal)
+            if remaining >= len(minimal) + 50:
+                truncated = skill.render_context_truncated(remaining)
+                result.append(truncated)
+                used += len(truncated)
+            else:
+                result.append(minimal)
+                used += len(minimal)
     return result

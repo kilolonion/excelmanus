@@ -452,6 +452,19 @@ def _render_sheet(window: SheetWindow) -> str:
             f"（总列数: {viewport.total_cols}）"
         )
 
+    # 数据充分性警告：聚合意图下样本不足时提醒
+    preview_len = len(preview) if isinstance(preview, list) else 0
+    sheet_total_rows = viewport.total_rows if viewport is not None else 0
+    if (
+        window.intent_tag == IntentTag.AGGREGATE
+        and sheet_total_rows > preview_len * 2
+        and preview_len > 0
+    ):
+        lines.append(
+            f"⚠️ 当前仅显示 {preview_len} 行样本（共 {sheet_total_rows} 行），"
+            f"分组统计需调用 group_aggregate"
+        )
+
     if window.style_summary:
         lines.append("style:")
         lines.append(f"  {window.style_summary}")
@@ -611,6 +624,13 @@ def render_window_wurm_full(
     if total_cols > visible_cols > 0:
         lines.append(f"⚠️ 还有 {total_cols - visible_cols} 列未在视口中显示（总列数: {total_cols}）")
 
+    # 数据充分性警告：当 total_rows 远大于预览行数且意图为聚合时，提醒 LLM 样本不足
+    if profile["intent"] == IntentTag.AGGREGATE.value and total_rows > render_max_rows * 2:
+        lines.append(
+            f"⚠️ 当前仅显示 {render_max_rows} 行样本（共 {total_rows} 行），"
+            f"分组统计需调用 group_aggregate"
+        )
+
     status_bar = window.status_bar
     if status_bar:
         lines.append(
@@ -619,6 +639,15 @@ def render_window_wurm_full(
             f"COUNT={_format_int(status_bar.get('count'))} | "
             f"AVG={_format_number(status_bar.get('average'))}"
         )
+        # intent=aggregate 时输出分类列 top-N 分布
+        if profile["intent"] == IntentTag.AGGREGATE.value:
+            cat = status_bar.get("categorical")
+            if isinstance(cat, dict) and cat:
+                for col_name, ranked in cat.items():
+                    if not ranked:
+                        continue
+                    pairs = ", ".join(f"{v}({c})" for v, c in ranked)
+                    lines.append(f"  分布·{col_name}: {pairs}")
     return "\n".join(lines)
 
 

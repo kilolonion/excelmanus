@@ -176,12 +176,18 @@ class MemoryExtractor:
         if self._count_tokens(text) <= token_budget:
             return text
 
-        keep_chars = max(1, len(text) // 2)
-        trimmed = text[-keep_chars:]
-        while self._count_tokens(trimmed) > token_budget and keep_chars > 1:
-            keep_chars = max(1, int(keep_chars * 0.75))
-            trimmed = text[-keep_chars:]
-        return trimmed
+        # 二分查找可保留的最大尾部字符数，O(log n) 次 tiktoken 调用
+        left, right = 1, len(text)
+        best = ""
+        while left <= right:
+            mid = (left + right) // 2
+            candidate = text[-mid:]
+            if self._count_tokens(candidate) <= token_budget:
+                best = candidate
+                left = mid + 1
+            else:
+                right = mid - 1
+        return best
 
     @staticmethod
     def _format_conversation(messages: list[tuple[str, str]]) -> str:

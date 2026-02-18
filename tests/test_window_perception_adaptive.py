@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from excelmanus.window_perception.adaptive import AdaptiveModeSelector
 from excelmanus.window_perception.manager import WindowPerceptionManager
@@ -142,3 +143,50 @@ def test_manager_adaptive_ingest_failures_downgrade() -> None:
         manager._apply_ingest = original_apply  # type: ignore[assignment]
 
     assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "anchored"
+
+
+def test_manager_ingest_exception_preserves_payload_without_locals_dependency() -> None:
+    manager = WindowPerceptionManager(
+        enabled=True,
+        budget=PerceptionBudget(),
+    )
+    payload_text = json.dumps(
+        {
+            "file": "sales.xlsx",
+            "sheet": "Q1",
+            "shape": {"rows": 20, "columns": 5},
+            "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+        },
+        ensure_ascii=False,
+    )
+    arguments = {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"}
+
+    original_locate = manager._locate_window_by_identity
+    original_fallback = manager._enriched_fallback
+    captured: dict[str, object] = {}
+
+    def _raise_locate(*_args, **_kwargs):
+        raise RuntimeError("locate boom")
+
+    def _capture_fallback(*, tool_name, arguments, result_text, success, payload):  # type: ignore[no-untyped-def]
+        captured["payload"] = payload
+        return "fallback"
+
+    manager._locate_window_by_identity = _raise_locate  # type: ignore[assignment]
+    manager._enriched_fallback = _capture_fallback  # type: ignore[assignment]
+    try:
+        with patch("builtins.locals", return_value={}):
+            result = manager.ingest_and_confirm(
+                tool_name="read_excel",
+                arguments=arguments,
+                result_text=payload_text,
+                success=True,
+                mode="anchored",
+                requested_mode="anchored",
+            )
+    finally:
+        manager._locate_window_by_identity = original_locate  # type: ignore[assignment]
+        manager._enriched_fallback = original_fallback  # type: ignore[assignment]
+
+    assert result == "fallback"
+    assert captured["payload"] is not None

@@ -102,8 +102,23 @@ class TaskStore:
     def current(self) -> TaskList | None:
         return self._task_list
 
-    def create(self, title: str, subtask_titles: list[str]) -> TaskList:
-        """创建新任务清单，替换已有的。"""
+    def create(
+        self,
+        title: str,
+        subtask_titles: list[str],
+        *,
+        replace_existing: bool = False,
+    ) -> TaskList:
+        """创建新任务清单。
+
+        当已存在活跃任务清单时，默认拒绝隐式覆盖；
+        仅在 replace_existing=True 时允许替换。
+        """
+        if self._task_list is not None and not replace_existing:
+            raise ValueError(
+                f"已有任务清单「{self._task_list.title}」，"
+                "如需覆盖请显式传入 replace_existing=True。"
+            )
         items = [TaskItem(title=t) for t in subtask_titles]
         self._task_list = TaskList(title=title, items=items)
         return self._task_list

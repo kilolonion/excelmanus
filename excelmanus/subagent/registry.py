@@ -205,7 +205,10 @@ class SubagentRegistry:
     def _as_int(value: Any, *, default: int) -> int:
         if value is None:
             return default
-        if isinstance(value, int):
+        # YAML 可能将 120.0 解析为 float，若是整数值则直接转换
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if isinstance(value, int) and not isinstance(value, bool):
             if value <= 0:
                 raise SkillpackValidationError("整数配置必须大于 0")
             return value

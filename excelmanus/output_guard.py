@@ -21,16 +21,31 @@ _TRACEBACK_LINE_PATTERN = re.compile(
     r"[A-Za-z_][\w.]*Exception:)"
 )
 
-# 内部细节关键词
-_INTERNAL_DISCLOSURE_PATTERN = re.compile(
+# 直接泄露系统级指令/思维链的高风险词，命中即拦截。
+_HARD_DISCLOSURE_PATTERN = re.compile(
     r"(系统提示词|提示词模板|开发者指令|内部指令|"
     r"system prompt|developer message|hidden prompt|"
     r"chain[- ]?of[- ]?thought|reasoning_content|"
-    r"内部路由策略|route_mode|tool_scope|skillpack|"
-    r"工具参数[：:]|参数结构|工具定义|tool.?schema|"
-    r"multiSelect|permission_mode|allowed_tools|"
-    r"subagent.?config|system_prompt\s*[=:(]|"
-    r"max_iterations|tool_calls_count)",
+    r"system_prompt\s*[=:(])",
+    re.IGNORECASE,
+)
+
+# 内部运行态字段：单词提及不一定构成泄露，需结合上下文判定。
+_INTERNAL_CONFIG_TOKEN_PATTERN = re.compile(
+    r"(内部路由策略|route_mode|tool_scope|permission_mode|"
+    r"subagent.?config|max_iterations|tool_calls_count)",
+    re.IGNORECASE,
+)
+
+# 疑似在“输出/暴露”内部信息的动作词。
+_DISCLOSURE_ACTION_PATTERN = re.compile(
+    r"(输出|展示|暴露|泄露|原文|全文|打印|show|reveal|dump|expose)",
+    re.IGNORECASE,
+)
+
+# 调试字段赋值（如 route_mode=hidden）通常是内部运行态回显。
+_INTERNAL_ASSIGNMENT_PATTERN = re.compile(
+    r"(route_mode|tool_scope|permission_mode|max_iterations|tool_calls_count)\s*[:=]",
     re.IGNORECASE,
 )
 
@@ -81,7 +96,15 @@ def guard_public_reply(reply: str) -> str:
     safe = sanitize_external_text(reply)
     if not safe:
         return _EMPTY_FALLBACK
-    if _INTERNAL_DISCLOSURE_PATTERN.search(safe):
+    if _HARD_DISCLOSURE_PATTERN.search(safe):
+        return _DISCLOSURE_FALLBACK
+    # 对内部字段采用“组合命中”而非“单词即拦截”，降低误报率。
+    config_hits = {m.group(1).lower() for m in _INTERNAL_CONFIG_TOKEN_PATTERN.finditer(safe)}
+    if _INTERNAL_ASSIGNMENT_PATTERN.search(safe):
+        return _DISCLOSURE_FALLBACK
+    if len(config_hits) >= 2:
+        return _DISCLOSURE_FALLBACK
+    if config_hits and _DISCLOSURE_ACTION_PATTERN.search(safe):
         return _DISCLOSURE_FALLBACK
     # 拦截疑似展示工具 JSON schema 的输出（>=3 个字段匹配视为泄露）
     if len(_TOOL_SCHEMA_PATTERN.findall(safe)) >= 3:
