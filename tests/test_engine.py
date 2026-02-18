@@ -2344,7 +2344,8 @@ class TestManualSkillSlashCommand:
             slash_command="data_basic",
             raw_args='"sales data.xlsx" bar',
         )
-        _, kwargs = mock_router.route.call_args
+        first_call = mock_router.route.call_args_list[0]
+        _, kwargs = first_call
         assert kwargs["slash_command"] == "data_basic"
         assert kwargs["raw_args"] == '"sales data.xlsx" bar'
 
