@@ -65,10 +65,10 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("select_skill", "delegate_to_subagent", "list_subagents", "ask_user", "discover_tools")
+_META_TOOL_NAMES = ("activate_skill", "expand_tools", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
-    "memory_save", "memory_read_topic", "list_skills",
+    "memory_save", "memory_read_topic",
 )
 _PLAN_CONTEXT_MAX_CHARS = 6000
 _MAX_PLAN_AUTO_CONTINUE = 3  # 计划审批后自动续跑最大次数
@@ -3600,8 +3600,9 @@ class AgentEngine:
                 max_context_tokens=self._config.max_context_tokens,
             )
 
-            tool_scope = self._get_current_tool_scope(route_result=current_route_result)
-            tools = self._build_tools_for_scope(tool_scope=tool_scope)
+            # v5: 分层 schema（core=完整, extended=摘要/已展开=完整）
+            tools = self._build_v5_tools()
+            tool_scope = None  # v5 不再使用 tool_scope 限制
 
             kwargs: dict[str, Any] = {
                 "model": self._active_model,
@@ -3675,7 +3676,7 @@ class AgentEngine:
                     self._execution_guard_fired = True
                     guard_msg = (
                         "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
-                        "请立即调用 select_skill 激活 general_excel 技能，"
+                        "请立即调用 expand_tools 展开 data_write 类别，"
                         "然后使用 write_cells 将公式写入对应单元格。"
                         "禁止仅给出文本建议。"
                     )
@@ -3689,7 +3690,7 @@ class AgentEngine:
                     if consecutive_text_only < 2 and iteration < max_iter:
                         guard_msg = (
                             "你尚未调用任何写入工具完成实际操作。"
-                            "请先调用 select_skill 激活可写技能，"
+                            "请先调用 expand_tools 展开对应类别获取工具参数，"
                             "再立即调用对应写入/格式化/图表工具执行。"
                             "禁止以“先确认后再做”等文本收尾替代执行。"
                             "完成后再调用 finish_task 并在 summary 中说明结果。"
@@ -3860,39 +3861,9 @@ class AgentEngine:
                             write_hint = "may_write"
                         if self._current_write_hint != "may_write":
                             self._current_write_hint = "may_write"
-                    if tc_result.tool_name == "select_skill":
-                        current_route_result = self._refresh_route_after_skill_switch(
-                            current_route_result
-                        )
-                        write_hint = _merge_write_hint_with_override(
-                            getattr(current_route_result, "write_hint", None),
-                            self._current_write_hint,
-                        )
-                        self._current_write_hint = write_hint
-                        tool_scope = self._get_current_tool_scope(
-                            route_result=current_route_result
-                        )
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
-
-                # 自动补充可能在当前调用中激活新 skill（即使调用本身失败），
-                # 需要立刻刷新外层 scope，保证同批次后续工具可见。
-                if self._turn_supplement_count > 0:
-                    current_scope_set = set(tool_scope) if tool_scope else set()
-                    new_union = set(self._active_skills_tool_union()) if self._active_skills else set()
-                    if new_union and not new_union.issubset(current_scope_set):
-                        current_route_result = self._refresh_route_after_skill_switch(
-                            current_route_result
-                        )
-                        write_hint = _merge_write_hint_with_override(
-                            getattr(current_route_result, "write_hint", None),
-                            self._current_write_hint,
-                        )
-                        self._current_write_hint = write_hint
-                        tool_scope = self._get_current_tool_scope(
-                            route_result=current_route_result
-                        )
 
                 # 熔断检测
                 if (not breaker_triggered) and consecutive_failures >= max_failures:
@@ -4078,43 +4049,40 @@ class AgentEngine:
                     log_tool_call(logger, tool_name, arguments, error=error)
             else:
                 try:
-                    if tool_scope is not None and tool_name not in set(tool_scope):
-                        supplement = self._try_auto_supplement_tool(tool_name)
-                        if supplement is not None:
-                            # 扩展当前 scope（本次调用及后续同批次调用生效）
-                            tool_scope = list(set(tool_scope) | set(supplement.expanded_tools))
-                            self._turn_supplement_count += 1
-                            self._auto_supplement_notice = (
-                                f"\n[系统已自动激活技能 {supplement.skill_name}，"
-                                f"后续可直接使用该技能的工具]"
-                            )
-                        else:
-                            raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
-
                     skip_plan_once_for_task_create = False
                     if tool_name == "task_create" and self._suspend_task_create_plan_once:
                         skip_plan_once_for_task_create = True
                         self._suspend_task_create_plan_once = False
 
-                    if tool_name == "select_skill":
+                    if tool_name in ("activate_skill", "select_skill"):
                         selected_name = arguments.get("skill_name")
                         if not isinstance(selected_name, str) or not selected_name.strip():
                             result_str = "工具参数错误: skill_name 必须为非空字符串。"
                             success = False
                             error = result_str
                         else:
-                            reason_value = arguments.get("reason", "")
-                            reason_text = (
-                                reason_value
-                                if isinstance(reason_value, str)
-                                else str(reason_value)
-                            )
                             result_str = await self._handle_select_skill(
                                 selected_name.strip(),
-                                reason=reason_text,
                             )
                             success = result_str.startswith("OK")
                             error = None if success else result_str
+                        log_tool_call(
+                            logger,
+                            tool_name,
+                            arguments,
+                            result=result_str if success else None,
+                            error=error if not success else None,
+                        )
+                    elif tool_name == "expand_tools":
+                        category_value = arguments.get("category", "")
+                        if not isinstance(category_value, str):
+                            result_str = "工具参数错误: category 必须为字符串。"
+                            success = False
+                            error = result_str
+                        else:
+                            result_str = self._handle_expand_tools(category=category_value)
+                            success = True
+                            error = None
                         log_tool_call(
                             logger,
                             tool_name,
@@ -4184,23 +4152,6 @@ class AgentEngine:
                                         defer_tool_result = True
                                         success = True
                                         error = None
-                        log_tool_call(
-                            logger,
-                            tool_name,
-                            arguments,
-                            result=result_str if success else None,
-                            error=error if not success else None,
-                        )
-                    elif tool_name == "discover_tools":
-                        category_value = arguments.get("category", "all")
-                        if not isinstance(category_value, str):
-                            result_str = "工具参数错误: category 必须为字符串。"
-                            success = False
-                            error = result_str
-                        else:
-                            result_str = self._handle_discover_tools(category=category_value)
-                            success = True
-                            error = None
                         log_tool_call(
                             logger,
                             tool_name,
