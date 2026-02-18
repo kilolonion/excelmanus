@@ -1917,8 +1917,8 @@ class AgentEngine:
         return meta_schemas + filtered_domain
 
     @staticmethod
-    def _is_select_skill_ok(result: str) -> bool:
-        """判断 _handle_select_skill 返回值是否表示成功。
+    def _is_activate_skill_ok(result: str) -> bool:
+        """判断 _handle_activate_skill 返回值是否表示成功。
 
         成功时返回值以 "OK" 开头；失败情形包括：
         - "未找到技能: ..." — 技能不存在
@@ -1927,8 +1927,8 @@ class AgentEngine:
         """
         return result.startswith("OK")
 
-    async def _handle_select_skill(self, skill_name: str, reason: str = "") -> str:
-        """处理 select_skill 调用：激活技能并返回技能上下文。"""
+    async def _handle_activate_skill(self, skill_name: str, reason: str = "") -> str:
+        """处理 activate_skill 调用：激活技能并返回技能上下文。"""
         if self._skill_router is None:
             return f"未找到技能: {skill_name}"
 
@@ -3331,7 +3331,7 @@ class AgentEngine:
     async def _execute_tool_call(
         self,
         tc: Any,
-        tool_scope: Sequence[str],
+        tool_scope: Sequence[str] | None,
         on_event: EventCallback | None,
         iteration: int,
         route_result: SkillMatchResult | None = None,
@@ -3465,7 +3465,7 @@ class AgentEngine:
                             success = False
                             error = result_str
                         else:
-                            result_str = await self._handle_select_skill(
+                            result_str = await self._handle_activate_skill(
                                 selected_name.strip(),
                             )
                             success = result_str.startswith("OK")
@@ -3747,7 +3747,7 @@ class AgentEngine:
                     permission_error = {
                         "error_code": "TOOL_NOT_ALLOWED",
                         "tool": tool_name,
-                        "allowed_tools": list(tool_scope),
+                        "allowed_tools": list(tool_scope) if tool_scope else [],
                         "message": f"工具 '{tool_name}' 不在当前 Skillpack 授权范围内。",
                     }
                     result_str = json.dumps(permission_error, ensure_ascii=False)
@@ -3979,7 +3979,7 @@ class AgentEngine:
         *,
         tool_name: str,
         arguments: dict[str, Any],
-        tool_scope: Sequence[str],
+        tool_scope: Sequence[str] | None = None,
     ) -> Any:
         """在线程池中调用工具，并绑定当前会话的记忆上下文。"""
         from excelmanus.tools import memory_tools
