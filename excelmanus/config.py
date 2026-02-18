@@ -116,6 +116,8 @@ class ExcelManusConfig:
     auto_activate_default_skill: bool = True
     # 小模型预路由配置
     skill_preroute_mode: str = "hybrid"  # off / deepseek / gemini / meta_only / hybrid
+    # 预路由失败后的回退策略：auto 按 mode 兼容映射（hybrid->meta_only, deepseek/gemini->general_excel）
+    skill_preroute_fallback: str = "auto"  # auto / meta_only / general_excel
     # 窗口感知顾问独立小模型配置（可选，未配置时回退到 skill_preroute_*，再回退到主模型）
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
@@ -225,17 +227,17 @@ def _parse_window_perception_advisor_mode(value: str | None) -> str:
 
 
 def _parse_window_return_mode(value: str | None) -> str:
-    """解析工具返回模式，非法值自动回退 enriched。"""
+    """解析工具返回模式，非法值自动回退 adaptive（与默认值一致）。"""
     if value is None:
         return "adaptive"
     normalized = value.strip().lower()
     if normalized in _ALLOWED_WINDOW_RETURN_MODES:
         return normalized
     logger.warning(
-        "配置项 EXCELMANUS_WINDOW_RETURN_MODE 非法(%r)，已回退为 enriched",
+        "配置项 EXCELMANUS_WINDOW_RETURN_MODE 非法(%r)，已回退为 adaptive",
         value,
     )
-    return "enriched"
+    return "adaptive"
 
 
 def _parse_window_rule_engine_version(value: str | None) -> str:
@@ -362,13 +364,21 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
     return tuple(profiles)
 
 
-def load_cors_allow_origins() -> tuple[str, ...]:
-    """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。"""
-    load_runtime_env()
+def _parse_cors_allow_origins() -> tuple[str, ...]:
+    """从已加载的环境变量中解析 CORS 允许来源列表（不触发 .env 加载）。"""
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
     if cors_raw is not None:
         return tuple(o.strip() for o in cors_raw.split(",") if o.strip())
     return ("http://localhost:5173",)
+
+
+def load_cors_allow_origins() -> tuple[str, ...]:
+    """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。
+
+    可独立调用（如 api.py 模块级），内部确保 .env 已加载。
+    """
+    load_runtime_env()
+    return _parse_cors_allow_origins()
 
 
 def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
@@ -504,7 +514,7 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_EXTERNAL_SAFE_MODE",
         True,
     )
-    cors_allow_origins = load_cors_allow_origins()
+    cors_allow_origins = _parse_cors_allow_origins()
     mcp_shared_manager = _parse_bool(
         os.environ.get("EXCELMANUS_MCP_SHARED_MANAGER"),
         "EXCELMANUS_MCP_SHARED_MANAGER",
@@ -711,6 +721,13 @@ def load_config() -> ExcelManusConfig:
             skill_preroute_mode_raw,
         )
         skill_preroute_mode_raw = "hybrid"
+    skill_preroute_fallback = os.environ.get("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "auto").strip().lower()
+    if skill_preroute_fallback not in {"auto", "meta_only", "general_excel"}:
+        logger.warning(
+            "配置项 EXCELMANUS_SKILL_PREROUTE_FALLBACK 非法(%r)，已回退为 auto",
+            skill_preroute_fallback,
+        )
+        skill_preroute_fallback = "auto"
     skill_preroute_api_key = os.environ.get("EXCELMANUS_SKILL_PREROUTE_API_KEY") or None
     skill_preroute_base_url = os.environ.get("EXCELMANUS_SKILL_PREROUTE_BASE_URL") or None
     if skill_preroute_base_url:
@@ -817,6 +834,7 @@ def load_config() -> ExcelManusConfig:
         window_rule_engine_version=window_rule_engine_version,
         auto_activate_default_skill=auto_activate_default_skill,
         skill_preroute_mode=skill_preroute_mode_raw,
+        skill_preroute_fallback=skill_preroute_fallback,
         skill_preroute_api_key=skill_preroute_api_key,
         skill_preroute_base_url=skill_preroute_base_url,
         skill_preroute_model=skill_preroute_model,

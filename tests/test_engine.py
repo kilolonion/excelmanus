@@ -139,7 +139,9 @@ class TestAgentEngineInit:
         engine = AgentEngine(config, registry)
         assert engine._client is not None
         assert engine._config is config
-        assert engine._registry is registry
+        # fork 后是独立实例，但包含相同的基础工具集
+        assert engine._registry is not registry
+        assert set(engine._registry.get_tool_names()) >= set(registry.get_tool_names())
 
 
 class TestControlCommandFullAccess:
@@ -644,17 +646,17 @@ class TestSystemMessageMode:
         engine = AgentEngine(config, _make_registry_with_tools())
         assert engine._effective_system_mode() == "replace"
 
-    def test_build_system_prompts_replace_mode_splits_system_messages(self) -> None:
+    def test_prepare_system_prompts_replace_mode_splits_system_messages(self) -> None:
         config = _make_config(system_message_mode="replace")
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts = engine._build_system_prompts(["[Skillpack] data_basic\n描述：测试"])
+        prompts, _ = engine._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
         assert len(prompts) == 2
         assert "[Skillpack] data_basic" in prompts[1]
 
-    def test_build_system_prompts_merge_mode_merges_into_single_message(self) -> None:
+    def test_prepare_system_prompts_merge_mode_merges_into_single_message(self) -> None:
         config = _make_config(system_message_mode="merge")
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts = engine._build_system_prompts(["[Skillpack] data_basic\n描述：测试"])
+        prompts, _ = engine._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
         assert len(prompts) == 1
         assert "[Skillpack] data_basic" in prompts[0]
 
@@ -1978,7 +1980,6 @@ class TestTaskUpdateFailureSemantics:
     async def test_invalid_transition_returns_failure_and_no_task_item_updated_event(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
-        registry.register_tools(task_tools.get_tools())
         engine = AgentEngine(config, registry)
         engine._task_store.create("测试任务", ["子任务A"])
 
@@ -2253,16 +2254,15 @@ class TestPlanModeControl:
         assert "已拒绝计划" in rejected.reply
         assert engine._pending_plan is None
 
-    def test_build_system_prompts_includes_approved_plan_context(self) -> None:
+    def test_prepare_system_prompts_includes_approved_plan_context(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._approved_plan_context = "来源: .excelmanus/plans/plan_x.md\n# 计划"
 
-        prompts = engine._build_system_prompts([])
-        assert len(prompts) == 1
-        assert "## 已批准计划上下文" in prompts[0]
-        assert "plan_x.md" in prompts[0]
+        prompts, _ = engine._prepare_system_prompts_for_request([])
+        assert any("## 已批准计划上下文" in p for p in prompts)
+        assert any("plan_x.md" in p for p in prompts)
 
 
 class TestManualSkillSlashCommand:
@@ -2709,9 +2709,9 @@ class TestDelegateSubagent:
         notice = engine._build_window_perception_notice()
         assert "examples/bench/stress_test_comprehensive.xlsx" in notice
 
-        prompts = engine._build_system_prompts([])
-        assert len(prompts) == 1
-        assert "examples/bench/stress_test_comprehensive.xlsx" in prompts[0]
+        prompts, _ = engine._prepare_system_prompts_for_request([])
+        assert len(prompts) >= 1
+        assert any("examples/bench/stress_test_comprehensive.xlsx" in p for p in prompts)
 
     @pytest.mark.asyncio
     async def test_run_subagent_passes_window_context_and_enricher(self) -> None:
@@ -3340,6 +3340,63 @@ class TestMetaToolScopeUpdate:
         assert "[Skillpack] chart_basic" not in system_text
         assert "文件结构预览" in system_text
 
+    @pytest.mark.asyncio
+    async def test_auto_supplement_updates_scope_within_same_iteration_after_failed_call(self) -> None:
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        calc_skill = Skillpack(
+            name="calc_ops",
+            description="计算技能",
+            allowed_tools=["fail_tool", "add_numbers"],
+            triggers=["计算"],
+            instructions="先失败后计算。",
+            source="system",
+            root_dir="/tmp/calc_ops",
+        )
+
+        mock_loader = MagicMock()
+        mock_loader.get_skillpacks.return_value = {"calc_ops": calc_skill}
+        mock_loader.load_all.return_value = {"calc_ops": calc_skill}
+        mock_loader.get_skillpack.return_value = calc_skill
+
+        mock_router = MagicMock()
+        mock_router._loader = mock_loader
+        mock_router.build_skill_catalog.return_value = (
+            "可用技能：\n- calc_ops：计算技能",
+            ["calc_ops"],
+        )
+        engine._skill_router = mock_router
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=["list_skills"],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        engine._route_skills = AsyncMock(return_value=route_result)
+
+        first_resp = _make_tool_call_response(
+            [
+                ("call_1", "fail_tool", "{}"),
+                ("call_2", "add_numbers", json.dumps({"a": 1, "b": 2})),
+            ]
+        )
+        second_resp = _make_text_response("done")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[first_resp, second_resp]
+        )
+
+        result = await engine.chat("测试自动补充同轮刷新")
+        assert result == "done"
+
+        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
+        fail_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_1")
+        add_msg = next(m for m in tool_msgs if m.get("tool_call_id") == "call_2")
+        assert "TOOL_EXECUTION_ERROR" in fail_msg.get("content", "")
+        assert add_msg.get("content", "") == "3"
+
 
 class TestPreRouteCompositeFallback:
     """复合预路由命中时分层激活主技能+副技能（不再降级 general_excel）。"""
@@ -3436,6 +3493,93 @@ class TestPreRouteCompositeFallback:
         # skills_used 应包含两个精准技能
         assert "chart_basic" in engine.last_route_result.skills_used
         assert "format_basic" in engine.last_route_result.skills_used
+
+
+class TestPreRouteFallbackPolicy:
+    """预路由失败分支的回退策略应由配置统一控制。"""
+
+    @staticmethod
+    def _build_engine_for_missing_skill(
+        *,
+        mode: str,
+        fallback: str,
+        auto_activate_default_skill: bool,
+    ) -> AgentEngine:
+        config = _make_config(
+            skill_preroute_mode=mode,
+            skill_preroute_fallback=fallback,
+            auto_activate_default_skill=auto_activate_default_skill,
+            skill_preroute_model="router-model",
+            skill_preroute_api_key="router-key",
+            skill_preroute_base_url="https://router.example.com/v1",
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry, skill_router=_make_skill_router(config))
+        engine._route_skills = AsyncMock(
+            return_value=SkillMatchResult(
+                skills_used=[],
+                tool_scope=[],
+                route_mode="all_tools",
+                system_contexts=[],
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response("ok"))
+        return engine
+
+    @staticmethod
+    def _missing_skill_preroute_result():
+        from excelmanus.skillpacks.pre_router import PreRouteResult
+
+        return PreRouteResult(
+            skill_name="missing_skill",
+            skill_names=["missing_skill"],
+            confidence=0.2,
+            reason="mock missing",
+            latency_ms=2.0,
+            model_used="router-model",
+        )
+
+    @pytest.mark.asyncio
+    async def test_deepseek_auto_fallback_respects_auto_activate_flag(self) -> None:
+        engine = self._build_engine_for_missing_skill(
+            mode="deepseek",
+            fallback="auto",
+            auto_activate_default_skill=False,
+        )
+        pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
+        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
+            result = await engine.chat("分析这个表")
+
+        assert result == "ok"
+        assert all(s.name != "general_excel" for s in engine._active_skills)
+
+    @pytest.mark.asyncio
+    async def test_deepseek_can_override_to_meta_only(self) -> None:
+        engine = self._build_engine_for_missing_skill(
+            mode="deepseek",
+            fallback="meta_only",
+            auto_activate_default_skill=True,
+        )
+        pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
+        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
+            result = await engine.chat("分析这个表")
+
+        assert result == "ok"
+        assert all(s.name != "general_excel" for s in engine._active_skills)
+
+    @pytest.mark.asyncio
+    async def test_hybrid_can_override_to_general_excel(self) -> None:
+        engine = self._build_engine_for_missing_skill(
+            mode="hybrid",
+            fallback="general_excel",
+            auto_activate_default_skill=True,
+        )
+        pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
+        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
+            result = await engine.chat("分析这个表")
+
+        assert result == "ok"
+        assert any(s.name == "general_excel" for s in engine._active_skills)
 
 
 class TestFallbackScopeGuard:
@@ -4657,6 +4801,7 @@ class TestDataModels:
         )
         assert r.error is None
         assert r.success is True
+        assert r.finish_accepted is False
 
     def test_chat_result_defaults(self) -> None:
         """ChatResult 默认值正确。"""
@@ -5201,6 +5346,31 @@ class TestApprovalFlow:
         ])
         return registry
 
+    def _make_registry_with_failing_audit_tool(self, workspace: Path) -> ToolRegistry:
+        registry = ToolRegistry()
+
+        def create_chart(output_path: str) -> str:
+            target = workspace / output_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("chart", encoding="utf-8")
+            raise RuntimeError("intentional_audit_failure")
+
+        registry.register_tools([
+            ToolDef(
+                name="create_chart",
+                description="生成图表后抛错",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "output_path": {"type": "string"},
+                    },
+                    "required": ["output_path"],
+                },
+                func=create_chart,
+            ),
+        ])
+        return registry
+
     def _make_registry_with_custom_tool(self) -> ToolRegistry:
         registry = ToolRegistry()
 
@@ -5370,6 +5540,34 @@ class TestApprovalFlow:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert manifest["execution"]["status"] == "failed"
         assert manifest["execution"]["error_type"] == "ToolExecutionError"
+
+    @pytest.mark.asyncio
+    async def test_audit_tool_failure_still_returns_failed_audit_record(self, tmp_path: Path) -> None:
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_failing_audit_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+        _activate_test_tools(engine, ["create_chart"])
+
+        tc = SimpleNamespace(
+            id="call_audit_fail",
+            function=SimpleNamespace(
+                name="create_chart",
+                arguments=json.dumps({"output_path": "failed_chart.txt"}, ensure_ascii=False),
+            ),
+        )
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["create_chart"],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is False
+        assert "intentional_audit_failure" in result.result
+        assert result.audit_record is not None
+        assert result.audit_record.execution_status == "failed"
+        assert result.audit_record.error_type == "ToolExecutionError"
 
     @pytest.mark.asyncio
     async def test_undo_after_restart_loads_manifest(self, tmp_path: Path) -> None:
