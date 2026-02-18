@@ -142,6 +142,8 @@ def test_property_4_invalid_yaml_raises_validation_error(
     if kind == "unclosed_list":
         frontmatter_text = f"{key}: [{suffix}"
     elif kind == "unclosed_map":
+        # suffix 中的 } 会意外关闭 map，使 YAML 合法 → 排除
+        assume("}" not in suffix)
         frontmatter_text = f"{key}: {{x: {suffix}"
     elif kind == "unclosed_dquote":
         frontmatter_text = f'{key}: "{suffix}'
