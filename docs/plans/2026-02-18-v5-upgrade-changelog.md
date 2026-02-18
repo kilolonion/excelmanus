@@ -245,8 +245,49 @@ ToolProfile 层核心定义：
 
 ---
 
+## Phase 5: 深度清理 + 窗口感知顾问隔离 + v4 残余扫净（终结）
+
+> 里程碑 commits: `64a5149` → `573b5b3`
+
+### 窗口感知顾问独立 client
+
+`engine.py` 中 `_advisor_client` 原来在凭证相同时与 `_client` 共享同一对象，导致测试 mock 互相干扰。改为始终创建独立 client。
+
+### 版本标识 v4→v5
+
+- `excelmanus/__init__.py` — docstring + `__version__ = "5.0.0"`
+- `excelmanus/tools/__init__.py` — docstring
+- `excelmanus/skillpacks/__init__.py` — docstring
+- `excelmanus/config.py` — 移除注释中的 `（v4）` 标记
+
+### 过时注释清理
+
+- `engine.py` — 移除 10 处 `# v5:` 过渡注释前缀（保留描述本体）
+- `router.py` — 移除 3 处 v5 过渡注释
+- `engine.py` — `ToolNotAllowedError` 错误 JSON 移除 `allowed_tools` 字段
+
+### 测试术语全面对齐
+
+- `test_engine.py` — `select_skill` → `activate_skill`（3 个测试方法重命名 + 内部引用）
+- `test_pbt_llm_routing.py` — `select_skill` → `activate_skill`（全文替换）
+- `test_write_guard.py` — `select_skill` → `activate_skill`
+- `test_bench_validator.py` — `general_excel` → `other_skill`（修复 mismatch 测试逻辑）
+- `test_bench_reporter.py` — `general_excel` → `data_basic`
+- `test_skillpacks.py` — `general_excel` → `test_fallback`（测试 fixture 重命名）
+- `test_tool_policy.py` — 移除 `list_skills`（已从 `READ_ONLY_SAFE_TOOLS` 删除）
+- `test_pbt_unauthorized_tool.py` — 错误响应 JSON 必需键移除 `allowed_tools`
+
+### 损坏脚本修复/归档
+
+| 脚本 | 处理 |
+|---|---|
+| `scripts/dump_token_budget.py` | 修复：`_build_v5_tools()` 替代已删除方法 |
+| `scripts/dump_agent_prompt.py` | 修复：同上 |
+| `scripts/bench_phase2_ab.py` | 归档至 `scripts/archive/`（引用已删除的 preroute 配置 + 硬编码 API key） |
+| `scripts/bench_skill_preroute.py` | 归档至 `scripts/archive/` |
+
+---
+
 ## 后续工作
 
-| 任务 | 优先级 | 说明 |
-|---|---|---|
-| 窗口感知顾问独立 mock | Low | 解决 advisor 共享 `_client` 的测试隔离问题 |
+> **v5 架构升级已全部完成，无已知遗留项。**
