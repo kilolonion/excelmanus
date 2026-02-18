@@ -364,7 +364,7 @@ class SkillRouter:
                 # 端点异常时返回 None，让外层继续走主模型降级链。
                 return None
 
-        timeout_seconds = self._config.skill_preroute_timeout_ms / 1000
+        timeout_seconds = 10.0  # v5: hardcoded timeout (preroute config removed)
 
         # 1) 先尝试 router 端点
         result = await _try_classify(
