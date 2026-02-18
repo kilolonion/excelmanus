@@ -468,6 +468,120 @@ class TestDiscoverTools:
 
         await client.close()
 
+    @pytest.mark.asyncio
+    async def test_discover_tools_uses_cache_within_ttl(self):
+        """在 TTL 窗口内重复 discover_tools() 应命中缓存。"""
+        config = _stdio_config()
+        client = MCPClientWrapper(config)
+        mock_session = _make_mock_session()
+
+        tool_a = MagicMock(name="tool_a")
+        list_result = MagicMock()
+        list_result.tools = [tool_a]
+        mock_session.list_tools = AsyncMock(return_value=list_result)
+
+        with (
+            patch(
+                "excelmanus.mcp.client.stdio_client",
+                return_value=_FakeAsyncCM(),
+            ),
+            patch(
+                "excelmanus.mcp.client.ClientSession",
+                return_value=_FakeSessionCM(mock_session),
+            ),
+        ):
+            await client.connect()
+
+        first = await client.discover_tools(cache_ttl_seconds=60)
+        second = await client.discover_tools(cache_ttl_seconds=60)
+
+        assert first[0] is tool_a
+        assert second[0] is tool_a
+        mock_session.list_tools.assert_awaited_once()
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_discover_tools_refreshes_after_ttl_expired(self):
+        """TTL 过期后应重新调用 session.list_tools()。"""
+        config = _stdio_config()
+        client = MCPClientWrapper(config)
+        mock_session = _make_mock_session()
+
+        tool_a = MagicMock(name="tool_a")
+        tool_b = MagicMock(name="tool_b")
+        list_result_a = MagicMock()
+        list_result_a.tools = [tool_a]
+        list_result_b = MagicMock()
+        list_result_b.tools = [tool_b]
+        mock_session.list_tools = AsyncMock(side_effect=[list_result_a, list_result_b])
+
+        with (
+            patch(
+                "excelmanus.mcp.client.stdio_client",
+                return_value=_FakeAsyncCM(),
+            ),
+            patch(
+                "excelmanus.mcp.client.ClientSession",
+                return_value=_FakeSessionCM(mock_session),
+            ),
+        ):
+            await client.connect()
+
+        with patch(
+            "excelmanus.mcp.client.time.monotonic",
+            side_effect=[100.0, 103.0, 120.0],
+        ):
+            first = await client.discover_tools(cache_ttl_seconds=10)
+            second = await client.discover_tools(cache_ttl_seconds=10)
+            third = await client.discover_tools(cache_ttl_seconds=10)
+
+        assert first[0] is tool_a
+        assert second[0] is tool_a
+        assert third[0] is tool_b
+        assert mock_session.list_tools.await_count == 2
+
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_discover_tools_force_refresh_bypasses_cache(self):
+        """force_refresh=True 时应跳过缓存直接刷新。"""
+        config = _stdio_config()
+        client = MCPClientWrapper(config)
+        mock_session = _make_mock_session()
+
+        tool_a = MagicMock(name="tool_a")
+        tool_b = MagicMock(name="tool_b")
+        list_result_a = MagicMock()
+        list_result_a.tools = [tool_a]
+        list_result_b = MagicMock()
+        list_result_b.tools = [tool_b]
+        mock_session.list_tools = AsyncMock(side_effect=[list_result_a, list_result_b])
+
+        with (
+            patch(
+                "excelmanus.mcp.client.stdio_client",
+                return_value=_FakeAsyncCM(),
+            ),
+            patch(
+                "excelmanus.mcp.client.ClientSession",
+                return_value=_FakeSessionCM(mock_session),
+            ),
+        ):
+            await client.connect()
+
+        first = await client.discover_tools(cache_ttl_seconds=60)
+        second = await client.discover_tools(
+            cache_ttl_seconds=60,
+            force_refresh=True,
+        )
+
+        assert first[0] is tool_a
+        assert second[0] is tool_b
+        assert mock_session.list_tools.await_count == 2
+
+        await client.close()
+
 
 # ── SSE 传输方式连接测试 ─────────────────────────────────────────
 

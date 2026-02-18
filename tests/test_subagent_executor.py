@@ -12,6 +12,7 @@ import pytest
 
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
+from excelmanus.memory import ConversationMemory
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 from excelmanus.subagent import SubagentConfig, SubagentExecutor
 from excelmanus.tools import ToolDef, ToolRegistry
@@ -41,6 +42,21 @@ def _tool_call_message(tool_name: str, arguments: dict, call_id: str = "call_1")
             )
         ],
     )
+
+
+def _multi_tool_call_message(calls: list[tuple[str, str, dict[str, object]]]):
+    tool_calls = []
+    for call_id, tool_name, arguments in calls:
+        tool_calls.append(
+            SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(
+                    name=tool_name,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                ),
+            )
+        )
+    return SimpleNamespace(content=None, tool_calls=tool_calls)
 
 
 def _text_message(content: str):
@@ -218,6 +234,60 @@ async def test_default_mode_creates_pending_and_stops(tmp_path: Path) -> None:
     assert result.success is False
     assert result.pending_approval_id is not None
     assert approval.pending is not None
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_backfills_remaining_tool_results(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="writer",
+        description="pending 回填测试",
+        allowed_tools=["write_text_file", "read_excel"],
+        permission_mode="default",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _multi_tool_call_message([
+                                ("call_1", "write_text_file", {"file_path": "a.txt", "content": "x"}),
+                                ("call_2", "read_excel", {}),
+                            ])
+                        )
+                    ]
+                )
+            )
+        )
+    )
+
+    captured: list[tuple[str, str]] = []
+    original_add = ConversationMemory.add_tool_result
+
+    def _spy_add_tool_result(self, tool_call_id: str, content: str) -> None:
+        captured.append((tool_call_id, content))
+        original_add(self, tool_call_id, content)
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client), \
+         patch.object(ConversationMemory, "add_tool_result", _spy_add_tool_result):
+        result = await executor.run(config=sub_cfg, prompt="测试 pending 回填")
+
+    assert result.success is False
+    assert result.pending_approval_id is not None
+    assert approval.pending is not None
+    assert [call_id for call_id, _ in captured] == ["call_1", "call_2"]
+    assert "工具未执行" in captured[1][1]
 
 
 @pytest.mark.asyncio

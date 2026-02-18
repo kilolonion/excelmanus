@@ -102,12 +102,11 @@ class _FileSnapshot:
 class ApprovalManager:
     """审批状态与审计管理器。"""
 
-    # 默认策略（不可变常量）
-    READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(READ_ONLY_SAFE_TOOLS)
-    CONFIRM_TOOLS: frozenset[str] = frozenset(MUTATING_CONFIRM_TOOLS)
-    AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(MUTATING_AUDIT_ONLY_TOOLS)
-    HIGH_RISK_TOOLS: frozenset[str] = frozenset(MUTATING_CONFIRM_TOOLS)
-    MUTATING_TOOLS: frozenset[str] = frozenset(MUTATING_ALL_TOOLS)
+    # 默认策略（私有类常量，仅作为实例初始化模板）
+    _READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(READ_ONLY_SAFE_TOOLS)
+    _CONFIRM_TOOLS: frozenset[str] = frozenset(MUTATING_CONFIRM_TOOLS)
+    _AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(MUTATING_AUDIT_ONLY_TOOLS)
+    _MUTATING_TOOLS: frozenset[str] = frozenset(MUTATING_ALL_TOOLS)
 
     def __init__(self, workspace_root: str, audit_root: str = "outputs/approvals") -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
@@ -118,10 +117,10 @@ class ApprovalManager:
         self._mcp_auto_approved: set[str] = set()
 
         # 会话实例级副本，避免类级可变状态污染。
-        self._read_only_safe_tools: set[str] = set(self.READ_ONLY_SAFE_TOOLS)
-        self._confirm_tools: set[str] = set(self.CONFIRM_TOOLS)
-        self._audit_only_tools: set[str] = set(self.AUDIT_ONLY_TOOLS)
-        self._mutating_tools: set[str] = set(self.MUTATING_TOOLS)
+        self._read_only_safe_tools: set[str] = set(self._READ_ONLY_SAFE_TOOLS)
+        self._confirm_tools: set[str] = set(self._CONFIRM_TOOLS)
+        self._audit_only_tools: set[str] = set(self._AUDIT_ONLY_TOOLS)
+        self._mutating_tools: set[str] = set(self._MUTATING_TOOLS)
 
     def register_mcp_auto_approve(self, prefixed_names: Sequence[str]) -> None:
         """注册 MCP 工具白名单（自动批准，无需用户确认）。"""

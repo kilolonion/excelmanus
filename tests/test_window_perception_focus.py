@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import excelmanus.window_perception.manager as manager_module
 from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.focus import FocusService
 from excelmanus.window_perception.manager import WindowPerceptionManager
@@ -55,6 +56,71 @@ def _build_manager_and_window() -> tuple[WindowPerceptionManager, Window]:
     manager._register_window_identity(window)
     manager._active_window_id = window.id
     return manager, window
+
+
+def test_build_system_notice_skips_windows_recycled_by_idle_before_allocate(
+    monkeypatch,
+) -> None:
+    manager = WindowPerceptionManager(
+        enabled=True,
+        budget=PerceptionBudget(
+            background_after_idle=1,
+            suspend_after_idle=3,
+            terminate_after_idle=2,
+        ),
+        advisor_mode="rules",
+    )
+
+    recycled = make_window(
+        id="sheet_recycled",
+        type=WindowType.SHEET,
+        title="old.xlsx/Q1",
+        file_path="old.xlsx",
+        sheet_name="Q1",
+        idle_turns=1,
+        last_access_seq=0,
+    )
+    survivor = make_window(
+        id="sheet_survivor",
+        type=WindowType.SHEET,
+        title="new.xlsx/Q1",
+        file_path="new.xlsx",
+        sheet_name="Q1",
+        idle_turns=0,
+        last_access_seq=0,
+    )
+    manager._windows[recycled.id] = recycled
+    manager._windows[survivor.id] = survivor
+
+    rendered_keep: list[str] = []
+    rendered_bg: list[str] = []
+    rendered_min: list[str] = []
+
+    def _spy_keep(window: Window, *args: Any, **kwargs: Any) -> str:
+        rendered_keep.append(window.id)
+        return f"[KEEP {window.id}]"
+
+    def _spy_bg(window: Window, *args: Any, **kwargs: Any) -> str:
+        rendered_bg.append(window.id)
+        return f"[BG {window.id}]"
+
+    def _spy_min(window: Window, *args: Any, **kwargs: Any) -> str:
+        rendered_min.append(window.id)
+        return f"[MIN {window.id}]"
+
+    monkeypatch.setattr(manager_module, "render_window_keep", _spy_keep)
+    monkeypatch.setattr(manager_module, "render_window_background", _spy_bg)
+    monkeypatch.setattr(manager_module, "render_window_minimized", _spy_min)
+
+    _ = manager.build_system_notice(mode="enriched")
+
+    assert manager._windows[recycled.id].dormant is True
+    assert recycled.id not in rendered_keep
+    assert recycled.id not in rendered_bg
+    assert recycled.id not in rendered_min
+    assert rendered_keep == [survivor.id]
+    assert rendered_bg == [survivor.id]
+    assert rendered_min == [survivor.id]
 
 
 def test_focus_scroll_cache_hit_without_refill() -> None:

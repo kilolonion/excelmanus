@@ -376,11 +376,21 @@ class ConversationMemory:
                 ]
 
             # 如果最早的消息是孤立的 tool result（对应的 tool_call 已不存在），
-            # 继续移除以保持消息一致性
-            while (
-                self._messages
-                and self._messages[0].get("role") == "tool"
-            ):
+            # 继续移除以保持消息一致性。
+            # 注意：必须检查 tool_call_id 是否真的孤立，避免误删有效的 tool result。
+            while self._messages and self._messages[0].get("role") == "tool":
+                # 收集剩余消息中所有有效的 tool_call id
+                valid_call_ids: set[str] = {
+                    tc["id"]
+                    for m in self._messages
+                    if m.get("tool_calls")
+                    for tc in m["tool_calls"]
+                    if "id" in tc
+                }
+                head_call_id = self._messages[0].get("tool_call_id")
+                if head_call_id in valid_call_ids:
+                    # 对应的 tool_call 仍存在，不是孤立消息，停止清理
+                    break
                 self._messages.pop(0)
 
     def _shrink_last_message_for_threshold(

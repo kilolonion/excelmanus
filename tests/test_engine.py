@@ -5863,7 +5863,10 @@ class TestToolIndexNotice:
         notice = engine._build_tool_index_notice(scope)
         assert "工具索引" in notice
         assert "read_excel" in notice
-        assert "discover_tools" in notice or "select_skill" in notice
+        # registry 中未注册写入类工具，inactive 为空，
+        # 因此不会出现 select_skill / discover_tools 提示。
+        # 仅验证 active 分类正确生成。
+        assert "数据读取" in notice
 
     def test_build_tool_index_notice_empty_scope(self) -> None:
         config = _make_config()
@@ -6363,6 +6366,14 @@ class TestToolIndexWording:
         from excelmanus.tools.policy import DISCOVERY_TOOLS
         config = _make_config(auto_supplement_enabled=True)
         registry = _make_registry_with_tools()
+        # 注册写入类工具使 inactive_lines 非空，触发 auto_supplement 措辞
+        _noop = lambda **_: "ok"
+        from excelmanus.tools.registry import ToolDef
+        for name in ("write_excel", "format_cells", "create_chart"):
+            registry.register_tools([ToolDef(
+                name=name, description=name, func=_noop,
+                input_schema={"type": "object", "properties": {}},
+            )])
         engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
         scope = list(DISCOVERY_TOOLS)
         notice = engine._build_tool_index_notice(scope)
@@ -6374,21 +6385,49 @@ class TestToolIndexWording:
         from excelmanus.tools.policy import DISCOVERY_TOOLS
         config = _make_config(auto_supplement_enabled=False)
         registry = _make_registry_with_tools()
+        # 注册写入类工具使 inactive_lines 非空
+        _noop = lambda **_: "ok"
+        from excelmanus.tools.registry import ToolDef
+        for name in ("write_excel", "format_cells", "create_chart"):
+            registry.register_tools([ToolDef(
+                name=name, description=name, func=_noop,
+                input_schema={"type": "object", "properties": {}},
+            )])
         engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
         scope = list(DISCOVERY_TOOLS)
         notice = engine._build_tool_index_notice(scope)
         assert "select_skill" in notice
 
     def test_tool_index_warning_text_auto_supplement(self) -> None:
-        """auto_supplement 开启时，警告文本不包含 select_skill。"""
+        """auto_supplement 开启时，有 inactive 工具才出现"无需先调用 select_skill"。"""
+        from excelmanus.tools.policy import DISCOVERY_TOOLS
+        config = _make_config(auto_supplement_enabled=True)
+        registry = _make_registry_with_tools()
+        # 注册写入类工具使 inactive_lines 非空
+        _noop = lambda **_: "ok"
+        from excelmanus.tools.registry import ToolDef
+        for name in ("write_excel", "format_cells", "create_chart"):
+            registry.register_tools([ToolDef(
+                name=name, description=name, func=_noop,
+                input_schema={"type": "object", "properties": {}},
+            )])
+        engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
+        scope = list(DISCOVERY_TOOLS)
+        notice = engine._build_tool_index_notice(scope)
+        # 应包含"无需先调用 select_skill"
+        assert "无需先调用 select_skill" in notice
+
+    def test_tool_index_no_dangling_warning_when_no_inactive(self) -> None:
+        """auto_supplement 开启但无 inactive 工具时，不输出悬空的按需可用提示。"""
         from excelmanus.tools.policy import DISCOVERY_TOOLS
         config = _make_config(auto_supplement_enabled=True)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config=config, registry=registry, skill_router=_make_skill_router(config))
         scope = list(DISCOVERY_TOOLS)
         notice = engine._build_tool_index_notice(scope)
-        # 应包含"无需先调用 select_skill"
-        assert "无需先调用 select_skill" in notice
+        # registry 中无分类工具注册，inactive 为空，不应出现按需可用相关文本
+        assert "按需可用" not in notice
+        assert "无需先调用 select_skill" not in notice
 
 
 # ── Task 8: 预路由分层加载测试 ──────────────────────────────

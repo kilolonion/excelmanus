@@ -209,6 +209,42 @@ class TestSkillpackLoader:
         loaded = loader.load_all()
         assert loaded["team/data-cleaner"].description == "ancestor-near"
 
+    def test_discovery_agents_skips_ancestors_when_cwd_outside_workspace(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        outside_root = tmp_path / "outside"
+        outside_nested = outside_root / "deep" / "module"
+        system_dir = workspace / "system"
+        user_dir = workspace / "user"
+        project_dir = workspace / "project"
+        for d in (workspace, outside_nested, system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.chdir(outside_nested)
+
+        _write_skillpack(
+            outside_root / ".agents" / "skills",
+            "outside/poison",
+            description="outside-ancestor",
+            allowed_tools=["read_excel"],
+            triggers=["污染"],
+        )
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            workspace_root=str(workspace),
+            skills_discovery_include_claude=False,
+            skills_discovery_include_openclaw=False,
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loaded = loader.load_all()
+        assert "outside/poison" not in loaded
+
     def test_discovery_workspace_openclaw_overrides_user_openclaw(
         self,
         tmp_path: Path,
@@ -863,7 +899,7 @@ class TestSkillRouter:
         assert hint == "may_write"
 
     @pytest.mark.asyncio
-    async def test_classify_write_hint_model_error_falls_back_to_read_only_lexical(
+    async def test_classify_write_hint_model_error_returns_unknown_when_both_endpoints_fail(
         self,
         tmp_path: Path,
     ) -> None:
@@ -884,9 +920,53 @@ class TestSkillRouter:
 
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
-        with patch("excelmanus.providers.create_client", return_value=mock_client):
+        with patch("excelmanus.providers.create_client", return_value=mock_client) as mock_create_client:
             hint = await router._classify_write_hint("请读取这个文件并做统计分析")
-        assert hint == "read_only"
+        assert hint == "unknown"
+        assert mock_create_client.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_classify_write_hint_router_error_falls_back_to_main_model(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            router_model="router-model",
+            model="main-model",
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        router = SkillRouter(config, loader)
+
+        router_client = MagicMock()
+        router_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("router down"))
+        main_client = MagicMock()
+        main_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"write_hint":"may_write"}'),
+                    )
+                ]
+            )
+        )
+
+        with patch(
+            "excelmanus.providers.create_client",
+            side_effect=[router_client, main_client],
+        ) as mock_create_client:
+            hint = await router._classify_write_hint("请读取这个文件并做统计分析")
+
+        assert hint == "may_write"
+        assert mock_create_client.call_count == 2
 
     @pytest.mark.asyncio
     async def test_non_slash_injects_large_file_context(self, tmp_path: Path) -> None:

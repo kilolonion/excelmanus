@@ -400,6 +400,7 @@ class MCPManager:
     def __init__(self, workspace_root: str = ".") -> None:
         self._workspace_root = workspace_root
         self._clients: dict[str, MCPClientWrapper] = {}
+        self._leaked_clients: list[MCPClientWrapper] = []  # discover 失败且 close 异常的僵尸连接
         self._managed_workspace_pids: set[int] = set()
         self._managed_workspace_pids_by_state_dir: dict[str | None, set[int]] = {}
         self._server_states: dict[str, _ServerRuntimeState] = {}
@@ -429,6 +430,7 @@ class MCPManager:
             from excelmanus.mcp.config import MCPConfigLoader
 
             self._clients.clear()
+            self._leaked_clients.clear()
             self._managed_workspace_pids.clear()
             self._managed_workspace_pids_by_state_dir.clear()
             self._auto_approved_tools = []
@@ -504,10 +506,11 @@ class MCPManager:
                         await client.close()
                     except BaseException:
                         logger.debug(
-                            "discover 失败后关闭 MCP Server '%s' 时异常",
+                            "discover 失败后关闭 MCP Server '%s' 时异常，加入待清理列表",
                             cfg.name,
                             exc_info=True,
                         )
+                        self._leaked_clients.append(client)
                     continue
 
                 if cfg.transport == "stdio":
@@ -620,67 +623,76 @@ class MCPManager:
 
         逐个调用 client.close()，关闭失败时记录 WARNING 但不抛异常。
         """
-        grouped_managed_pids: dict[str | None, set[int]] = {
-            key: set(value)
-            for key, value in self._managed_workspace_pids_by_state_dir.items()
-        }
-        if self._managed_workspace_pids:
-            grouped_managed_pids.setdefault(None, set()).update(
-                self._managed_workspace_pids
-            )
-
-        for name, client in self._clients.items():
-            state_dir = getattr(getattr(client, "_config", None), "state_dir", None)
-            raw_pids = getattr(client, "managed_pids", set())
-            if isinstance(raw_pids, (set, list, tuple)):
-                bucket = grouped_managed_pids.setdefault(state_dir, set())
-                for pid in raw_pids:
-                    try:
-                        parsed = int(pid)
-                    except (TypeError, ValueError):
-                        continue
-                    if parsed > 0:
-                        bucket.add(parsed)
-            try:
-                await client.close()
-            except BaseException as exc:
-                logger.warning(
-                    "关闭 MCP Server '%s' 连接失败: %s", name, exc
+        async with self._initialize_lock:
+            grouped_managed_pids: dict[str | None, set[int]] = {
+                key: set(value)
+                for key, value in self._managed_workspace_pids_by_state_dir.items()
+            }
+            if self._managed_workspace_pids:
+                grouped_managed_pids.setdefault(None, set()).update(
+                    self._managed_workspace_pids
                 )
-        self._clients.clear()
-        self._managed_workspace_pids.clear()
-        self._managed_workspace_pids_by_state_dir.clear()
-        self._server_states.clear()
 
-        total_candidates = 0
-        total_remaining = 0
-        for state_dir, managed_pids in grouped_managed_pids.items():
-            if not managed_pids:
-                continue
-            total_candidates += len(managed_pids)
-            remaining = terminate_workspace_mcp_processes(
-                workspace_root=self._workspace_root,
-                candidate_pids=managed_pids,
-                state_dir=state_dir,
-            )
-            if remaining:
-                total_remaining += len(remaining)
-                logger.warning(
-                    "MCP 兜底清理后仍有进程存活(state_dir=%s): %s",
-                    state_dir or "<default>",
-                    sorted(remaining),
+            for name, client in list(self._clients.items()):
+                state_dir = getattr(getattr(client, "_config", None), "state_dir", None)
+                raw_pids = getattr(client, "managed_pids", set())
+                if isinstance(raw_pids, (set, list, tuple)):
+                    bucket = grouped_managed_pids.setdefault(state_dir, set())
+                    for pid in raw_pids:
+                        try:
+                            parsed = int(pid)
+                        except (TypeError, ValueError):
+                            continue
+                        if parsed > 0:
+                            bucket.add(parsed)
+                try:
+                    await client.close()
+                except BaseException as exc:
+                    logger.warning(
+                        "关闭 MCP Server '%s' 连接失败: %s", name, exc
+                    )
+            self._clients.clear()
+            self._managed_workspace_pids.clear()
+            self._managed_workspace_pids_by_state_dir.clear()
+            self._server_states.clear()
+
+            # 清理 discover 失败时未能关闭的僵尸连接
+            for client in self._leaked_clients:
+                try:
+                    await client.close()
+                except BaseException:
+                    logger.debug("关闭僵尸 MCP 连接失败", exc_info=True)
+            self._leaked_clients.clear()
+
+            total_candidates = 0
+            total_remaining = 0
+            for state_dir, managed_pids in grouped_managed_pids.items():
+                if not managed_pids:
+                    continue
+                total_candidates += len(managed_pids)
+                remaining = terminate_workspace_mcp_processes(
+                    workspace_root=self._workspace_root,
+                    candidate_pids=managed_pids,
+                    state_dir=state_dir,
                 )
-        if total_candidates:
-            recovered_count = max(0, total_candidates - total_remaining)
-            logger.info(
-                "MCP 进程回收结果: pid_count=%d recovered_count=%d remaining_count=%d",
-                total_candidates,
-                recovered_count,
-                total_remaining,
-            )
+                if remaining:
+                    total_remaining += len(remaining)
+                    logger.warning(
+                        "MCP 兜底清理后仍有进程存活(state_dir=%s): %s",
+                        state_dir or "<default>",
+                        sorted(remaining),
+                    )
+            if total_candidates:
+                recovered_count = max(0, total_candidates - total_remaining)
+                logger.info(
+                    "MCP 进程回收结果: pid_count=%d recovered_count=%d remaining_count=%d",
+                    total_candidates,
+                    recovered_count,
+                    total_remaining,
+                )
 
-        self._initialized = False
-        logger.debug("所有 MCP Server 连接已关闭")
+            self._initialized = False
+            logger.debug("所有 MCP Server 连接已关闭")
 
     @property
     def connected_servers(self) -> list[str]:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -28,6 +29,7 @@ except Exception:  # pragma: no cover - 兼容旧版 MCP SDK
 from excelmanus.mcp.config import MCPServerConfig
 
 logger = logging.getLogger("excelmanus.mcp.client")
+_DEFAULT_TOOL_CACHE_TTL_SECONDS = 30.0
 
 
 class MCPClientWrapper:
@@ -48,7 +50,8 @@ class MCPClientWrapper:
         self._config = config
         self._session: ClientSession | None = None
         self._exit_stack: AsyncExitStack | None = None
-        self._tools: list[dict] = []  # 原始工具列表缓存
+        self._tools: list[dict] = []  # 最近一次 tools/list 结果快照
+        self._tools_cached_at: float | None = None
         self._managed_pids: set[int] = set()
 
     async def connect(self) -> None:
@@ -130,11 +133,21 @@ class MCPClientWrapper:
         )
         return read_stream, write_stream
 
-    async def discover_tools(self) -> list[dict]:
+    async def discover_tools(
+        self,
+        *,
+        cache_ttl_seconds: float = _DEFAULT_TOOL_CACHE_TTL_SECONDS,
+        force_refresh: bool = False,
+    ) -> list[dict]:
         """调用 tools/list 获取远程工具定义。
 
         返回 MCP 协议格式的工具列表（每个元素为 MCP Tool 对象）。
-        结果会被缓存，后续调用直接返回缓存。
+        结果默认缓存 ``cache_ttl_seconds`` 秒；缓存有效期内命中缓存，
+        超时或 ``force_refresh=True`` 时重新请求远程 server。
+
+        Args:
+            cache_ttl_seconds: 缓存 TTL（秒），<= 0 表示禁用缓存。
+            force_refresh: 是否强制跳过缓存并刷新。
 
         Returns:
             MCP Tool 对象列表。
@@ -147,15 +160,33 @@ class MCPClientWrapper:
                 f"MCP Server '{self._config.name}' 未连接，请先调用 connect()"
             )
 
+        ttl = max(0.0, float(cache_ttl_seconds))
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and ttl > 0.0
+            and self._tools
+            and self._tools_cached_at is not None
+            and (now - self._tools_cached_at) <= ttl
+        ):
+            logger.debug(
+                "MCP Server '%s' 命中工具缓存 (age=%.2fs, ttl=%.2fs)",
+                self._config.name,
+                now - self._tools_cached_at,
+                ttl,
+            )
+            return list(self._tools)
+
         result = await self._session.list_tools()
-        # 缓存原始工具列表（Tool 对象）
-        self._tools = result.tools
+        # 更新原始工具列表快照（Tool 对象）
+        self._tools = list(result.tools)
+        self._tools_cached_at = now
         logger.debug(
             "MCP Server '%s' 发现 %d 个工具",
             self._config.name,
             len(self._tools),
         )
-        return self._tools
+        return list(self._tools)
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any]
@@ -211,6 +242,7 @@ class MCPClientWrapper:
         """
         self._session = None
         self._tools = []
+        self._tools_cached_at = None
         await self._cleanup_exit_stack()
         self._managed_pids.clear()
         logger.debug("已关闭 MCP Server '%s' 连接", self._config.name)

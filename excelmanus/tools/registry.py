@@ -69,6 +69,8 @@ class ToolDef:
 
         策略：找到 dict 中最大的 list 字段，逐步减半其元素数量，
         直到序列化后长度 <= limit。如果缩减到 0 个元素仍超限，返回 None 回退字符截断。
+
+        注意：操作副本，不修改原始 data 对象。
         """
         # 找到所有 list 类型的字段及其大小
         list_fields = {
@@ -85,34 +87,30 @@ class ToolDef:
         original_list = data[target_field]
         original_len = len(original_list)
 
+        # 在副本上操作，完全避免修改原始 data
+        working = dict(data)
+
         # 二分搜索合适的截断长度
         lo, hi = 0, original_len
         best_result: str | None = None
 
         while lo <= hi:
             mid = (lo + hi) // 2
-            if mid == 0:
-                # 尝试空列表
-                data[target_field] = []
-            else:
-                data[target_field] = original_list[:mid]
+            working[target_field] = original_list[:mid] if mid > 0 else []
 
-            # 添加截断提示到 dict 中
+            # 添加截断提示到副本中
             if mid < original_len:
-                data[f"_{target_field}_truncated"] = True
-                data[f"_{target_field}_note"] = (
+                working[f"_{target_field}_truncated"] = True
+                working[f"_{target_field}_note"] = (
                     f"[{target_field} 已截断: 显示 {mid}/{original_len} 条]"
                 )
             else:
-                data.pop(f"_{target_field}_truncated", None)
-                data.pop(f"_{target_field}_note", None)
+                working.pop(f"_{target_field}_truncated", None)
+                working.pop(f"_{target_field}_note", None)
 
             try:
-                candidate = json.dumps(data, ensure_ascii=False, default=str)
+                candidate = json.dumps(working, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
-                data[target_field] = original_list
-                data.pop(f"_{target_field}_truncated", None)
-                data.pop(f"_{target_field}_note", None)
                 return None
 
             if len(candidate) <= limit:
@@ -120,11 +118,6 @@ class ToolDef:
                 lo = mid + 1  # 尝试保留更多元素
             else:
                 hi = mid - 1
-
-        # 恢复原始数据（避免副作用）
-        data[target_field] = original_list
-        data.pop(f"_{target_field}_truncated", None)
-        data.pop(f"_{target_field}_note", None)
 
         return best_result
 
@@ -156,6 +149,17 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDef] = {}
+
+    def fork(self) -> "ToolRegistry":
+        """创建一个 per-session 的 overlay registry。
+
+        新实例持有当前所有工具的浅拷贝，后续注册互不影响。
+        用于 API 多会话场景：每个 AgentEngine 持有独立 registry，
+        避免会话级工具（task_tools / skill_tools）重复注册冲突。
+        """
+        child = ToolRegistry()
+        child._tools = dict(self._tools)  # 浅拷贝：ToolDef 不可变，安全
+        return child
 
     def register_tool(self, tool: ToolDef) -> None:
         """注册单个工具。"""
@@ -350,8 +354,7 @@ class ToolRegistry:
         self.register_tools(worksheet_tools.get_tools())
         self.register_tools(focus_tools.get_tools())
 
-        from excelmanus.tools import memory_tools, skill_tools, task_tools
+        from excelmanus.tools import memory_tools
 
-        self.register_tools(task_tools.get_tools())
-        self.register_tools(skill_tools.get_tools())
+        # task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册
         self.register_tools(memory_tools.get_tools())

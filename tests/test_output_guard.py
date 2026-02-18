@@ -42,6 +42,22 @@ def test_guard_public_reply_blocks_internal_disclosure() -> None:
     assert "不能提供系统提示词或内部工程细节" in got
 
 
+def test_guard_public_reply_allows_legit_help_terms() -> None:
+    raw = (
+        "你可以通过 skillpack 组织任务，"
+        "在配置里设置 allowed_tools，"
+        "并参考 tool schema 示例来填写参数。"
+    )
+    got = guard_public_reply(raw)
+    assert got == raw
+
+
+def test_guard_public_reply_blocks_route_mode_tool_scope_disclosure() -> None:
+    raw = "调试信息：route_mode=hidden，tool_scope=['write_excel']。"
+    got = guard_public_reply(raw)
+    assert "不能提供系统提示词或内部工程细节" in got
+
+
 def test_sanitize_external_text_masks_entire_cookie_line() -> None:
     raw = "Cookie: session=abc; csrftoken=def\n"
     got = sanitize_external_text(raw)

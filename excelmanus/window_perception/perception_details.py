@@ -97,8 +97,17 @@ def compute_scroll_position(
     }
 
 
-def extract_status_bar(preview_rows: list[Any]) -> dict[str, float | int]:
-    """从预览数据近似计算状态栏 SUM/COUNT/AVERAGE。"""
+def extract_status_bar(
+    preview_rows: list[Any],
+    *,
+    columns: list[Any] | None = None,
+    top_n: int = 5,
+) -> dict[str, float | int]:
+    """从预览数据近似计算状态栏 SUM/COUNT/AVERAGE。
+
+    当提供 *columns* 时，对 text/object/unknown 类型列额外计算 top-N value_counts，
+    结果存入 ``categorical`` 字段（dict[col_name, list[tuple[value, count]]]）。
+    """
     numeric_values: list[float] = []
     for row in preview_rows:
         if isinstance(row, dict):
@@ -112,17 +121,42 @@ def extract_status_bar(preview_rows: list[Any]) -> dict[str, float | int]:
             if parsed is not None:
                 numeric_values.append(parsed)
 
-    if not numeric_values:
-        return {}
+    result: dict[str, Any] = {}
+    if numeric_values:
+        total = sum(numeric_values)
+        count = len(numeric_values)
+        average = total / max(1, count)
+        result["sum"] = round(total, 4)
+        result["count"] = count
+        result["average"] = round(average, 4)
 
-    total = sum(numeric_values)
-    count = len(numeric_values)
-    average = total / max(1, count)
-    return {
-        "sum": round(total, 4),
-        "count": count,
-        "average": round(average, 4),
-    }
+    # 分类列 top-N 分布
+    if columns and preview_rows:
+        categorical_types = {"text", "object", "unknown"}
+        cat_cols = [
+            col for col in columns
+            if getattr(col, "inferred_type", "unknown") in categorical_types
+        ]
+        if cat_cols:
+            cat_stats: dict[str, list[list[Any]]] = {}
+            for col in cat_cols:
+                counter: dict[str, int] = {}
+                for row in preview_rows:
+                    if isinstance(row, dict):
+                        val = row.get(col.name)
+                    else:
+                        continue
+                    if val is None or (isinstance(val, str) and not val.strip()):
+                        continue
+                    key = str(val)
+                    counter[key] = counter.get(key, 0) + 1
+                if counter:
+                    ranked = sorted(counter.items(), key=lambda x: x[1], reverse=True)[:top_n]
+                    cat_stats[col.name] = [[v, c] for v, c in ranked]
+            if cat_stats:
+                result["categorical"] = cat_stats
+
+    return result
 
 
 def extract_column_widths(

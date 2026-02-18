@@ -79,6 +79,20 @@ class TestResolveAndValidate:
         with pytest.raises(SecurityViolationError, match="路径穿越特征被拒绝"):
             guard.resolve_and_validate("a/b/../ok.txt")
 
+    def test_url_encoded_dot_dot_rejected(
+        self, guard: FileAccessGuard
+    ) -> None:
+        """URL 编码的 ../ 也应识别并拒绝。"""
+        with pytest.raises(SecurityViolationError, match="路径穿越特征被拒绝"):
+            guard.resolve_and_validate("foo/%2e%2e/bar.txt")
+
+    def test_url_encoded_slash_in_dot_dot_segment_rejected(
+        self, guard: FileAccessGuard
+    ) -> None:
+        """..%2F 形式的编码穿越片段应拒绝。"""
+        with pytest.raises(SecurityViolationError, match="路径穿越特征被拒绝"):
+            guard.resolve_and_validate("foo/..%2Fbar.txt")
+
     def test_symlink_inside_workspace_allowed(
         self, guard: FileAccessGuard, workspace: Path
     ) -> None:
@@ -108,6 +122,24 @@ class TestResolveAndValidate:
         link.symlink_to(evil_file)
         with pytest.raises(SecurityViolationError, match="路径越界"):
             guard.resolve_and_validate("escape_link.xlsx")
+
+    def test_dangling_symlink_rejected(
+        self, workspace: Path
+    ) -> None:
+        """悬空符号链接应被拒绝，避免 strict=False 导致的目标判断不准确。"""
+        target = workspace / "missing.xlsx"
+        link = workspace / "dangling_link.xlsx"
+        link.symlink_to(target)
+        with pytest.raises(SecurityViolationError, match="符号链接|不存在"):
+            guard = FileAccessGuard(str(workspace))
+            guard.resolve_and_validate("dangling_link.xlsx")
+
+    def test_nonexistent_regular_path_inside_workspace_allowed(
+        self, guard: FileAccessGuard, workspace: Path
+    ) -> None:
+        """不存在的常规目标文件（用于新建）在工作目录内应允许。"""
+        result = guard.resolve_and_validate("new_dir/new_file.xlsx")
+        assert result == workspace / "new_dir" / "new_file.xlsx"
 
     def test_workspace_root_property(self, workspace: Path) -> None:
         """workspace_root 属性应返回规范化后的路径。"""

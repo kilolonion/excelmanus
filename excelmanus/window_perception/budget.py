@@ -140,27 +140,26 @@ class WindowBudgetAllocator:
                 )
 
             if tier == "suspended":
-                if (
-                    suspended_tokens > 0
-                    and suspended_tokens <= remaining
-                    and remaining >= self._budget.minimized_tokens
-                ):
-                    item.detail_level = DetailLevel.ICON
-                    return WindowSnapshot(
-                        window_id=item.id,
-                        action=WindowRenderAction.MINIMIZE,
-                        rendered_text=suspended_text,
-                        estimated_tokens=suspended_tokens,
-                    )
-                if must_keep and suspended_tokens > 0 and suspended_tokens <= remaining:
-                    # 兜底分支：活跃窗口在预算紧张时仍尽量保留摘要。
-                    item.detail_level = DetailLevel.ICON
-                    return WindowSnapshot(
-                        window_id=item.id,
-                        action=WindowRenderAction.MINIMIZE,
-                        rendered_text=suspended_text,
-                        estimated_tokens=suspended_tokens,
-                    )
+                can_render_suspended = suspended_tokens > 0 and suspended_tokens <= remaining
+                if not can_render_suspended:
+                    continue
+
+                has_minimized_budget = remaining >= self._budget.minimized_tokens
+                must_keep_floor = max(1, int(self._budget.minimized_tokens) // 2)
+                can_use_must_keep_fallback = must_keep and remaining >= must_keep_floor
+
+                if not (has_minimized_budget or can_use_must_keep_fallback):
+                    continue
+
+                # must_keep 兜底语义：
+                # 预算不足 minimized_tokens 时，活跃窗口可在更低硬下限（minimized_tokens//2）内保留。
+                item.detail_level = DetailLevel.ICON
+                return WindowSnapshot(
+                    window_id=item.id,
+                    action=WindowRenderAction.MINIMIZE,
+                    rendered_text=suspended_text,
+                    estimated_tokens=suspended_tokens,
+                )
 
         item.detail_level = DetailLevel.NONE
         return WindowSnapshot(

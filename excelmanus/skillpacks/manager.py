@@ -14,6 +14,7 @@ from typing import Any
 from excelmanus.config import ExcelManusConfig
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import Skillpack
+from excelmanus.skillpacks.pre_router import invalidate_pre_route_cache
 
 _SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _REQUIRED_CREATE_FIELDS = {"description"}
@@ -146,6 +147,7 @@ class SkillpackManager:
             skill_dir.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(skill_file, content)
             self._loader.load_all()
+            invalidate_pre_route_cache()
         return self.get_skillpack(normalized_name)
 
     def patch_skillpack(
@@ -181,6 +183,7 @@ class SkillpackManager:
                 )
             self._atomic_write_text(skill_file, content)
             self._loader.load_all()
+            invalidate_pre_route_cache()
         return self.get_skillpack(skill.name)
 
     def delete_skillpack(
@@ -232,6 +235,7 @@ class SkillpackManager:
                 encoding="utf-8",
             )
             self._loader.load_all()
+            invalidate_pre_route_cache()
 
         return {
             "name": skill.name,
@@ -523,8 +527,15 @@ class SkillpackManager:
     def _atomic_write_text(self, target: Path, content: str) -> None:
         tmp_name = f".{target.name}.{secrets.token_hex(4)}.tmp"
         tmp_path = target.with_name(tmp_name)
-        tmp_path.write_text(content, encoding="utf-8")
-        tmp_path.replace(target)
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            tmp_path.replace(target)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
 
     @staticmethod
     def _validate_skill_name(name: str) -> str:

@@ -133,6 +133,28 @@ class TestGetOrCreate:
         sid, engine = await _create_session(manager, sids[0])
         assert sid == sids[0]
 
+    @pytest.mark.asyncio
+    async def test_multiple_sessions_do_not_crash_on_shared_registry(
+        self, manager: SessionManager
+    ) -> None:
+        """Bug 修复回归：共享 ToolRegistry 时第二个会话不应因工具重复注册而崩溃。
+
+        AgentEngine 在 __init__ 中会注册会话级工具（task_tools / skill_tools）。
+        若多个会话共享同一 ToolRegistry 实例，第二个会话必定抛出 ToolRegistryError。
+        修复方案：AgentEngine 通过 registry.fork() 获得 per-session 独立副本。
+        """
+        sid1, engine1 = await _create_session(manager)
+        # 第二个会话不应抛出任何异常
+        sid2, engine2 = await _create_session(manager)
+
+        assert sid1 != sid2
+        assert engine1 is not engine2
+        # 两个会话的 registry 是独立实例（fork 出来的）
+        assert engine1._registry is not engine2._registry
+        # 但都包含会话级工具
+        assert "task_create" in engine1._registry.get_tool_names()
+        assert "task_create" in engine2._registry.get_tool_names()
+
 
 class TestAcquireForChat:
     """acquire_for_chat / release_for_chat 方法测试。"""

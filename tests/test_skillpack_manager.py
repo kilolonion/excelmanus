@@ -295,3 +295,50 @@ def test_resources_path_traversal_rejected(tmp_path: Path) -> None:
             },
             actor="api",
         )
+
+
+def test_atomic_write_text_cleans_tmp_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, manager, workspace = _setup(tmp_path)
+    target = workspace / "project" / "atomic_replace_fail.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+
+    def _raise_replace(self: Path, target_path: Path) -> Path:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", _raise_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        manager._atomic_write_text(target, "new")
+
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_atomic_write_text_cleans_tmp_when_write_text_fails_after_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, manager, workspace = _setup(tmp_path)
+    target = workspace / "project" / "atomic_write_fail.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("old", encoding="utf-8")
+
+    original_write_text = Path.write_text
+
+    def _write_then_raise(self: Path, *args, **kwargs) -> int:
+        if self.parent == target.parent and self.name.startswith(f".{target.name}.") and self.suffix == ".tmp":
+            original_write_text(self, *args, **kwargs)
+            raise OSError("write failed")
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _write_then_raise)
+
+    with pytest.raises(OSError, match="write failed"):
+        manager._atomic_write_text(target, "new")
+
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+    assert target.read_text(encoding="utf-8") == "old"

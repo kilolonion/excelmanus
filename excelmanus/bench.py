@@ -784,9 +784,22 @@ def _create_engine(config: ExcelManusConfig) -> AgentEngine:
     return engine
 
 
-def _dump_conversation_messages(engine: AgentEngine) -> list[dict[str, Any]]:
-    """从 engine 的 memory 中导出完整对话消息快照。"""
+def _dump_conversation_messages(
+    engine: AgentEngine,
+    interceptor: _LLMCallInterceptor | None = None,
+) -> list[dict[str, Any]]:
+    """导出完整对话消息快照，反映实际发送给 LLM 的请求内容。
+
+    当 interceptor 有调用记录时，使用最后一次请求的 messages（完全准确，
+    包含所有动态注入的 system prompts：file_structure_preview、
+    skill_context、window_perception 等）。
+    否则回退到 memory.get_messages()（仅含静态 base system prompt）。
+    """
     try:
+        if interceptor is not None and interceptor.calls:
+            last_messages = interceptor.calls[-1]["request"].get("messages", [])
+            if last_messages:
+                return list(last_messages)
         messages = engine._memory.get_messages()
         return [_serialize_message(m) for m in messages]
     except Exception:
@@ -969,7 +982,9 @@ async def run_case(
                         "type": type(exc).__name__,
                         "message": str(exc),
                     },
-                    engine_trace=tracer.snapshot_and_reset() if tracer else [],
+                    engine_trace=(
+                        tracer.snapshot_and_reset() if tracer else []
+                    ) if is_multi_turn else [],
                     active_model=engine.current_model,
                     task_events=snap["task_events"],
                     question_events=snap["question_events"],
@@ -1051,7 +1066,9 @@ async def run_case(
                 prompt_tokens=chat_result.prompt_tokens,
                 completion_tokens=chat_result.completion_tokens,
                 total_tokens=chat_result.total_tokens,
-                engine_trace=tracer.snapshot_and_reset() if tracer else [],
+                engine_trace=(
+                    tracer.snapshot_and_reset() if tracer else []
+                ) if is_multi_turn else [],
                 active_model=engine.current_model,
                 task_events=snap["task_events"],
                 question_events=snap["question_events"],
@@ -1125,7 +1142,7 @@ async def run_case(
         total_tokens=total_total_tokens,
         subagent_events=all_subagent_events,
         llm_calls=interceptor.calls,
-        conversation_messages=_dump_conversation_messages(engine),
+        conversation_messages=_dump_conversation_messages(engine, interceptor),
         turns=all_turns if is_multi_turn else [],
         status=case_status,
         error=case_error,

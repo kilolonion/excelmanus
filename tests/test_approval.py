@@ -11,6 +11,19 @@ import pytest
 from excelmanus.approval import ApprovalManager
 
 
+def test_policy_defaults_not_exposed_as_public_class_constants() -> None:
+    assert hasattr(ApprovalManager, "_READ_ONLY_SAFE_TOOLS")
+    assert hasattr(ApprovalManager, "_CONFIRM_TOOLS")
+    assert hasattr(ApprovalManager, "_AUDIT_ONLY_TOOLS")
+    assert hasattr(ApprovalManager, "_MUTATING_TOOLS")
+
+    assert not hasattr(ApprovalManager, "READ_ONLY_SAFE_TOOLS")
+    assert not hasattr(ApprovalManager, "CONFIRM_TOOLS")
+    assert not hasattr(ApprovalManager, "AUDIT_ONLY_TOOLS")
+    assert not hasattr(ApprovalManager, "HIGH_RISK_TOOLS")
+    assert not hasattr(ApprovalManager, "MUTATING_TOOLS")
+
+
 def test_text_file_audit_and_undo(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     target = tmp_path / "demo.txt"

@@ -61,9 +61,20 @@ class FilteredToolRegistry:
         *,
         tool_scope: Sequence[str] | None = None,
     ) -> Any:
-        """执行工具，超出过滤范围时抛错。"""
+        """执行工具，超出过滤范围时抛错。
+
+        两层检查语义：
+        1. is_tool_available：子代理静态授权（allowed/disallowed 列表）
+        2. tool_scope：调用时动态范围（调用方传入的临时限制）
+        两层均通过后，透传给 parent 执行（parent 会再做一次 tool_scope 检查，
+        但此时 tool_name 必然在 scope 内，不会重复拦截）。
+        """
         if not self.is_tool_available(tool_name):
-            raise ToolNotAllowedError(f"工具 '{tool_name}' 不在子代理授权范围内。")
+            raise ToolNotAllowedError(
+                f"工具 '{tool_name}' 不在子代理授权范围内（allowed/disallowed 限制）。"
+            )
         if tool_scope is not None and tool_name not in set(tool_scope):
-            raise ToolNotAllowedError(f"工具 '{tool_name}' 不在当前调用授权范围内。")
+            raise ToolNotAllowedError(
+                f"工具 '{tool_name}' 不在本次调用的动态 tool_scope 范围内。"
+            )
         return self._parent.call_tool(tool_name, arguments, tool_scope=tool_scope)

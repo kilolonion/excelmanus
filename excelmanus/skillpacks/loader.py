@@ -84,7 +84,11 @@ class SkillpackLoader:
         return {skill.name: skill for skill in self.list_skillpacks()}
 
     def load_all(self) -> dict[str, Skillpack]:
-        """加载所有兼容目录下的 Skillpack，冲突按优先级覆盖。"""
+        """加载所有兼容目录下的 Skillpack，冲突按优先级覆盖。
+
+        并发安全性说明：load_all 是同步方法，在 asyncio 单线程事件循环中
+        不会被并发抢占，无需加锁。若未来改为 run_in_executor 执行，需补充锁保护。
+        """
         self._warnings.clear()
         merged: dict[str, Skillpack] = {}
 
@@ -130,24 +134,34 @@ class SkillpackLoader:
         if self._config.skills_discovery_include_openclaw:
             _append("user", Path("~/.openclaw/skills"))
 
-        # ancestor .agents/skills：越靠近 cwd 优先级越高（从远到近追加）。
-        # 祖先链上限为 workspace_root（若 cwd 在其内），避免扫描到文件系统根目录。
+        # ancestor .agents/skills：
+        # - roots 采用“低优先级先追加，高优先级后追加”顺序；
+        # - load_all 中后者会覆盖前者，因此“从远到近追加”意味着近目录优先级更高。
+        # - 仅当 cwd 位于 workspace_root 内时扫描祖先链，避免越界扫描到无关目录。
         if (
             self._config.skills_discovery_include_agents
             and self._config.skills_discovery_scan_workspace_ancestors
         ):
-            chain: list[Path] = []
             cursor = Path.cwd().resolve()
-            while True:
-                chain.append(cursor)
-                if cursor == workspace_root:
-                    break
-                if cursor == cursor.parent:
-                    break
-                cursor = cursor.parent
-            chain.reverse()
-            for parent in chain:
-                _append("project", parent / ".agents" / "skills")
+            in_workspace = False
+            try:
+                cursor.relative_to(workspace_root)
+                in_workspace = True
+            except ValueError:
+                in_workspace = False
+
+            if in_workspace:
+                chain: list[Path] = []
+                while True:
+                    chain.append(cursor)
+                    if cursor == workspace_root:
+                        break
+                    if cursor == cursor.parent:
+                        break
+                    cursor = cursor.parent
+                chain.reverse()
+                for parent in chain:
+                    _append("project", parent / ".agents" / "skills")
 
         # project 显式目录（workspace 下），优先级最高
         _append("project", Path(self._config.skills_project_dir))

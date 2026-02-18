@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import patch
 
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.models import Skillpack
@@ -135,3 +136,23 @@ class TestBuildContextsWithBudget:
         assert "b" in out[0]
         assert "c" in out[1]
         assert "a" in out[2]
+
+    def test_minimal_context_called_once_when_minimal_branch_selected(self) -> None:
+        skill = _make_skillpack("only_minimal", instructions="x" * 500, priority=1)
+        minimal_text = skill.render_context_minimal()
+        original = Skillpack.render_context_minimal
+        call_count = 0
+
+        def _spy(this: Skillpack) -> str:
+            nonlocal call_count
+            if this is skill:
+                call_count += 1
+            return original(this)
+
+        # remaining < len(minimal)+50，触发 minimal 分支
+        budget = len(minimal_text) + 10
+        with patch.object(Skillpack, "render_context_minimal", autospec=True, side_effect=_spy):
+            out = build_contexts_with_budget([skill], budget)
+
+        assert out == [minimal_text]
+        assert call_count == 1

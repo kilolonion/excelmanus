@@ -527,6 +527,7 @@ def read_excel(
             print_settings — 打印设置
             column_widths — 非默认列宽
             formulas — 含公式的单元格
+            categorical_summary — 分类列的 value_counts（unique 值 < 阈值的列）
         max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
 
     Returns:
@@ -590,6 +591,11 @@ def read_excel(
     if invalid_dims:
         summary["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
         include_set -= invalid_dims
+
+    # 分发基于 DataFrame 的 include 维度（不需要 openpyxl）
+    if "categorical_summary" in include_set:
+        summary["categorical_summary"] = _collect_categorical_summary(df)
+        include_set.discard("categorical_summary")
 
     # 分发 include 维度采集（需要用 openpyxl 打开，非 data_only 以获取公式）
     if include_set:
@@ -1220,7 +1226,32 @@ INCLUDE_DIMENSIONS = (
     "print_settings",
     "column_widths",
     "formulas",
+    "categorical_summary",
 )
+
+# categorical_summary 默认阈值：unique 值数量低于此值的列视为分类列
+_CATEGORICAL_UNIQUE_THRESHOLD = 20
+
+
+def _collect_categorical_summary(
+    df: "pd.DataFrame",
+    threshold: int = _CATEGORICAL_UNIQUE_THRESHOLD,
+) -> dict[str, Any]:
+    """对分类列（unique 值 < threshold）计算 value_counts，返回摘要字典。
+
+    Returns:
+        {"threshold": int, "columns": {col: {val: count, ...}, ...}}
+    """
+    result: dict[str, dict[str, int]] = {}
+    for col in df.columns:
+        series = df[col].dropna()
+        if series.empty:
+            continue
+        n_unique = series.nunique()
+        if 0 < n_unique <= threshold:
+            vc = series.value_counts(dropna=True)
+            result[str(col)] = {str(k): int(v) for k, v in vc.items()}
+    return {"threshold": threshold, "columns": result}
 
 
 def _color_to_hex_short(color: Any) -> str | None:
@@ -1974,7 +2005,8 @@ def get_tools() -> list[ToolDef]:
                 "通过 include 参数可按需附加额外维度：styles（压缩样式类）、"
                 "charts（图表检测）、images（图片检测）、freeze_panes（冻结窗格）、"
                 "conditional_formatting（条件格式）、data_validation（数据验证）、"
-                "print_settings（打印设置）、column_widths（列宽）、formulas（公式）"
+                "print_settings（打印设置）、column_widths（列宽）、formulas（公式）、"
+                "categorical_summary（分类列频次分布）"
             ),
             input_schema={
                 "type": "object",
@@ -2014,6 +2046,7 @@ def get_tools() -> list[ToolDef]:
                                 "print_settings",
                                 "column_widths",
                                 "formulas",
+                                "categorical_summary",
                             ],
                         },
                         "description": (
@@ -2025,7 +2058,8 @@ def get_tools() -> list[ToolDef]:
                             "data_validation: 数据验证规则；"
                             "print_settings: 打印设置；"
                             "column_widths: 非默认列宽；"
-                            "formulas: 含公式的单元格"
+                            "formulas: 含公式的单元格；"
+                            "categorical_summary: 分类列的 value_counts（unique 值 < 阈值的列自动统计频次分布）"
                         ),
                     },
                     "max_style_scan_rows": {

@@ -502,3 +502,89 @@ class TestMCPManagerShutdown:
         kwargs = mock_cleanup.call_args.kwargs
         assert kwargs["workspace_root"] == "/tmp/workspace"
         assert kwargs["candidate_pids"] == {100, 101, 102}
+
+    @pytest.mark.asyncio
+    async def test_shutdown_is_serialized_under_concurrent_calls(self):
+        """并发调用 shutdown() 时，每个 client.close() 只应执行一次。"""
+
+        class _SlowCloseClient:
+            def __init__(self):
+                self._config = _make_config(name="srv")
+                self.managed_pids = set()
+                self.close_calls = 0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def close(self):
+                self.close_calls += 1
+                self.started.set()
+                await self.release.wait()
+
+        manager = MCPManager()
+        client = _SlowCloseClient()
+        manager._clients = {"srv": client}
+        manager._initialized = True
+
+        task1 = asyncio.create_task(manager.shutdown())
+        await client.started.wait()
+
+        task2 = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        client.release.set()
+        await asyncio.gather(task1, task2)
+
+        assert client.close_calls == 1
+        assert manager.connected_servers == []
+        assert manager.is_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_shutdown_waits_for_initialize_lock_under_concurrency(self):
+        """initialize 持锁期间触发 shutdown()，shutdown 应等待初始化完成后再执行。"""
+
+        class _BlockingDiscoverClient:
+            def __init__(self):
+                self._config = _make_config(name="srv")
+                self.managed_pids = set()
+                self.discover_started = asyncio.Event()
+                self.release_discover = asyncio.Event()
+                self.close_calls = 0
+
+            async def connect(self):
+                return None
+
+            async def discover_tools(self):
+                self.discover_started.set()
+                await self.release_discover.wait()
+                return []
+
+            async def close(self):
+                self.close_calls += 1
+
+        registry = ToolRegistry()
+        cfg = _make_config(name="srv")
+        manager = MCPManager()
+        client = _BlockingDiscoverClient()
+
+        with (
+            patch("excelmanus.mcp.config.MCPConfigLoader") as mock_loader_cls,
+            patch("excelmanus.mcp.manager.MCPClientWrapper", return_value=client),
+            patch(
+                "excelmanus.mcp.manager.terminate_workspace_mcp_processes",
+                return_value=set(),
+            ),
+        ):
+            mock_loader_cls.load.return_value = [cfg]
+            init_task = asyncio.create_task(manager.initialize(registry))
+            await client.discover_started.wait()
+
+            shutdown_task = asyncio.create_task(manager.shutdown())
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(shutdown_task), timeout=0.05)
+
+            client.release_discover.set()
+            await asyncio.gather(init_task, shutdown_task)
+
+        assert client.close_calls == 1
+        assert manager.connected_servers == []
+        assert manager.is_initialized is False

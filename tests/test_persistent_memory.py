@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import excelmanus.persistent_memory as persistent_memory_module
 from excelmanus.persistent_memory import CORE_MEMORY_FILE, PersistentMemory
 
 
@@ -547,6 +548,31 @@ class TestSaveEntries:
         ])
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0
+
+    def test_atomic_write_fsyncs_temp_file_before_replace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """原子写入在替换前 fsync 临时文件，降低崩溃时损坏风险。"""
+        pm = PersistentMemory(str(tmp_path))
+        target = tmp_path / "sync_target.md"
+        events: list[str] = []
+        original_replace = persistent_memory_module.os.replace
+
+        def _spy_fsync(fd: int) -> None:
+            assert fd >= 0
+            events.append("fsync")
+
+        def _spy_replace(src: str, dst: str) -> None:
+            events.append("replace")
+            original_replace(src, dst)
+
+        monkeypatch.setattr(persistent_memory_module.os, "fsync", _spy_fsync)
+        monkeypatch.setattr(persistent_memory_module.os, "replace", _spy_replace)
+
+        pm._atomic_write(target, "sync-check")
+
+        assert events == ["fsync", "replace"]
+        assert target.read_text(encoding="utf-8") == "sync-check"
 
 
 class TestEnforceCapacity:

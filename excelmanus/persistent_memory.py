@@ -180,7 +180,14 @@ class PersistentMemory:
             return ""
 
     def save_entries(self, entries: list[MemoryEntry]) -> None:
-        """将记忆条目按类别分发写入对应文件，并同步写入核心 MEMORY.md。"""
+        """将记忆条目按类别分发写入对应文件，并同步写入核心 MEMORY.md。
+
+        设计说明（双写）：
+        - 每条记忆同时写入对应主题文件（file_patterns.md 等）和 MEMORY.md。
+        - MEMORY.md 作为核心文件，支持自动加载全量记忆；主题文件支持按需加载。
+        - 为防止两个文件内容漂移后重复积累，写入前先收集所有目标文件的现有
+          content key，作为跨文件去重基准（global_seen_keys）传入每次写入。
+        """
         if not entries:
             return
         if self._read_only_mode:
@@ -196,13 +203,28 @@ class PersistentMemory:
             if filename is not None:
                 grouped[filename].append(entry)
 
-        # 核心记忆文件保留所有类别，便于自动加载
+        # 核心记忆文件保留所有类别，便于自动加载（双写设计）
         grouped[CORE_MEMORY_FILE].extend(entries)
+
+        # 跨文件去重：预先收集所有目标文件的现有 content key，
+        # 避免同一条目因文件漂移而在多个文件中重复写入。
+        global_seen_keys: set[tuple[str, str]] = set()
+        for filename in grouped:
+            filepath = self._memory_dir / filename
+            if filepath.exists():
+                try:
+                    existing_text = filepath.read_text(encoding="utf-8")
+                    for e in self._parse_entries(existing_text)[-_RECENT_DEDUPE_WINDOW:]:
+                        normalized = self._normalize_content_key(e.content)
+                        if normalized:
+                            global_seen_keys.add((e.category.value, normalized))
+                except OSError:
+                    pass  # 读取失败时降级为文件内去重
 
         for filename, file_entries in grouped.items():
             filepath = self._memory_dir / filename
             try:
-                self._append_entries(filepath, file_entries)
+                self._append_entries(filepath, file_entries, global_seen_keys)
             except OSError:
                 logger.warning("写入记忆文件失败: %s", filepath, exc_info=True)
                 continue
@@ -212,13 +234,20 @@ class PersistentMemory:
             except OSError:
                 logger.warning("容量管理写回失败: %s", filepath, exc_info=True)
 
-    def _append_entries(self, filepath: Path, new_entries: list[MemoryEntry]) -> None:
+    def _append_entries(
+        self,
+        filepath: Path,
+        new_entries: list[MemoryEntry],
+        global_seen_keys: set[tuple[str, str]] | None = None,
+    ) -> None:
         existing = ""
         if filepath.exists():
             existing = filepath.read_text(encoding="utf-8")
 
         existing_entries = self._parse_entries(existing)
-        filtered_entries = self._dedupe_new_entries(existing_entries, new_entries)
+        filtered_entries = self._dedupe_new_entries(
+            existing_entries, new_entries, global_seen_keys
+        )
         if not filtered_entries:
             return
 
@@ -238,12 +267,16 @@ class PersistentMemory:
         self,
         existing_entries: list[MemoryEntry],
         new_entries: list[MemoryEntry],
+        global_seen_keys: set[tuple[str, str]] | None = None,
     ) -> list[MemoryEntry]:
         existing_keys = {
             (entry.category.value, self._normalize_content_key(entry.content))
             for entry in existing_entries[-_RECENT_DEDUPE_WINDOW:]
             if self._normalize_content_key(entry.content)
         }
+        # 合并跨文件已知 keys（来自 save_entries 的全局去重基准）
+        if global_seen_keys:
+            existing_keys |= global_seen_keys
 
         batch_keys: set[tuple[str, str]] = set()
         result: list[MemoryEntry] = []
@@ -263,6 +296,8 @@ class PersistentMemory:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as tmp_f:
                 tmp_f.write(content)
+                tmp_f.flush()
+                os.fsync(tmp_f.fileno())
             os.replace(tmp_path, str(filepath))
         except BaseException:
             try:
@@ -299,22 +334,31 @@ class PersistentMemory:
                 filepath.name, len(all_lines), removed_count,
             )
         else:
-            kept_start = entry_starts[-1]
-            for idx in reversed(entry_starts):
-                line_count = len(all_lines) - idx
-                if line_count <= 400:
-                    kept_start = idx
-                else:
-                    break
+            # 边界情况：最后一个条目本身就超过 400 行，无法按条目边界裁剪，直接截断行
+            if len(all_lines) - entry_starts[-1] > 400:
+                kept_lines = all_lines[-400:]
+                removed_count = len(all_lines) - len(kept_lines)
+                logger.info(
+                    "容量管理：%s 超过 500 行（%d 行），最后一个条目本身超过 400 行，强制保留最后 400 行，移除 %d 行",
+                    filepath.name, len(all_lines), removed_count,
+                )
+            else:
+                kept_start = entry_starts[-1]
+                for idx in reversed(entry_starts):
+                    line_count = len(all_lines) - idx
+                    if line_count <= 400:
+                        kept_start = idx
+                    else:
+                        break
 
-            kept_lines = all_lines[kept_start:]
-            total_entries = len(entry_starts)
-            kept_entries = sum(1 for s in entry_starts if s >= kept_start)
-            removed_entries = total_entries - kept_entries
-            logger.info(
-                "容量管理：%s 超过 500 行（%d 行），保留最近 %d 条条目（%d 行），移除 %d 条旧条目",
-                filepath.name, len(all_lines), kept_entries, len(kept_lines), removed_entries,
-            )
+                kept_lines = all_lines[kept_start:]
+                total_entries = len(entry_starts)
+                kept_entries = sum(1 for s in entry_starts if s >= kept_start)
+                removed_entries = total_entries - kept_entries
+                logger.info(
+                    "容量管理：%s 超过 500 行（%d 行），保留最近 %d 条条目（%d 行），移除 %d 条旧条目",
+                    filepath.name, len(all_lines), kept_entries, len(kept_lines), removed_entries,
+                )
 
         self._atomic_write(filepath, "\n".join(kept_lines))
 

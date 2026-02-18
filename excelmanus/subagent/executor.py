@@ -87,7 +87,9 @@ class SubagentExecutor:
             parent_context=parent_context,
             enriched_contexts=enriched_contexts,
         )
-        persistent_memory, memory_extractor = self._create_memory_components(config=config)
+        persistent_memory, memory_extractor, memory_client = self._create_memory_components(
+            config=config
+        )
         if persistent_memory is not None:
             core_memory = persistent_memory.load_core()
             if core_memory:
@@ -146,7 +148,12 @@ class SubagentExecutor:
 
                 memory.add_assistant_tool_message(self._assistant_message_to_dict(message))
 
-                for tc in message_tool_calls:
+                breaker_skip_msg = (
+                    f"工具未执行：连续 {config.max_consecutive_failures} 次工具调用失败，已触发熔断。"
+                )
+                pending_skip_msg = "工具未执行：子代理命中待确认操作，当前轮次已终止。"
+
+                for index, tc in enumerate(message_tool_calls):
                     tool_calls += 1
                     call_id = getattr(tc, "id", "")
                     tool_name = getattr(getattr(tc, "function", None), "name", "")
@@ -164,6 +171,12 @@ class SubagentExecutor:
                         if consecutive_failures >= config.max_consecutive_failures:
                             last_summary = (
                                 f"子代理连续 {config.max_consecutive_failures} 次失败，已终止。"
+                            )
+                            success = False
+                            tool_calls += self._backfill_tool_results_for_remaining_calls(
+                                memory=memory,
+                                remaining_calls=message_tool_calls[index + 1:],
+                                content=breaker_skip_msg,
                             )
                             break
                         continue
@@ -202,6 +215,11 @@ class SubagentExecutor:
                         success = False
                         error = result.result
                         last_summary = result.result
+                        tool_calls += self._backfill_tool_results_for_remaining_calls(
+                            memory=memory,
+                            remaining_calls=message_tool_calls[index + 1:],
+                            content=pending_skip_msg,
+                        )
                         break
 
                     if result.success:
@@ -214,6 +232,12 @@ class SubagentExecutor:
                     if consecutive_failures >= config.max_consecutive_failures:
                         last_summary = (
                             f"子代理连续 {config.max_consecutive_failures} 次工具调用失败，已终止。"
+                        )
+                        success = False
+                        tool_calls += self._backfill_tool_results_for_remaining_calls(
+                            memory=memory,
+                            remaining_calls=message_tool_calls[index + 1:],
+                            content=breaker_skip_msg,
                         )
                         break
 
@@ -229,6 +253,15 @@ class SubagentExecutor:
             success = False
             error = str(exc)
             last_summary = f"子代理执行失败：{exc}"
+        finally:
+            # 确保 HTTP 连接池在任何退出路径下都被释放
+            _close = getattr(client, "close", None)
+            if callable(_close):
+                await _close()
+            if memory_client is not None:
+                _mc_close = getattr(memory_client, "close", None)
+                if callable(_mc_close):
+                    await _mc_close()
 
         summary_limit = (
             _FULL_MODE_SUMMARY_MAX_CHARS
@@ -523,17 +556,20 @@ class SubagentExecutor:
         self,
         *,
         config: SubagentConfig,
-    ) -> tuple["PersistentMemory | None", "MemoryExtractor | None"]:
-        """根据 memory_scope 创建子代理持久记忆组件。"""
+    ) -> "tuple[PersistentMemory | None, MemoryExtractor | None, openai.AsyncOpenAI | None]":
+        """根据 memory_scope 创建子代理持久记忆组件。
+
+        返回 (persistent_memory, memory_extractor, client)，调用方负责关闭 client。
+        """
         if config.memory_scope is None:
-            return None, None
+            return None, None, None
         if not self._parent_config.memory_enabled:
             logger.info(
                 "子代理 %s 配置 memory_scope=%s，但全局记忆已禁用，已降级跳过。",
                 config.name,
                 config.memory_scope,
             )
-            return None, None
+            return None, None, None
 
         from excelmanus.memory_extractor import MemoryExtractor
         from excelmanus.persistent_memory import PersistentMemory
@@ -560,7 +596,7 @@ class SubagentExecutor:
             base_url=config.base_url or self._parent_config.base_url,
         )
         memory_extractor = MemoryExtractor(client=client, model=model)
-        return persistent_memory, memory_extractor
+        return persistent_memory, memory_extractor, client
 
     async def _persist_subagent_memory(
         self,
@@ -595,6 +631,22 @@ class SubagentExecutor:
                 data["role"] = "assistant"
                 return data
         return {"role": "assistant", "content": str(getattr(message, "content", "") or "")}
+
+    @staticmethod
+    def _backfill_tool_results_for_remaining_calls(
+        *,
+        memory: ConversationMemory,
+        remaining_calls: list[Any],
+        content: str,
+    ) -> int:
+        backfilled = 0
+        for tc in remaining_calls:
+            call_id = str(getattr(tc, "id", "") or "")
+            if not call_id:
+                continue
+            memory.add_tool_result(call_id, content)
+            backfilled += 1
+        return backfilled
 
     @staticmethod
     def _truncate(text: str, max_chars: int = _SUMMARY_MAX_CHARS) -> str:
