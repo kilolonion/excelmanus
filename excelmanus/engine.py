@@ -520,10 +520,7 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
-        # 注入 SkillpackLoader 供 list_skills 工具使用，同样闭包注入
-        if self._skill_router is not None:
-            from excelmanus.tools import skill_tools
-            self._registry.register_tools(skill_tools.get_tools(self._skill_router._loader))
+        # v5: skill_tools (list_skills) 已删除，由 activate_skill 元工具替代
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
