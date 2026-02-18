@@ -26,7 +26,6 @@ engine = AgentEngine(config, registry, skill_router=router)
 
 route_result = SkillMatchResult(
     skills_used=[],
-    tool_scope=[],
     route_mode="fallback",
     system_contexts=[],
 )
@@ -47,11 +46,11 @@ with open(out, "w", encoding="utf-8") as f:
         f.write(p)
         f.write("\n```\n\n")
 
-    # ── 2. Tool scope ──
-    tool_scope = engine._get_current_tool_scope(route_result=route_result)
-    tools = engine._build_tools_for_scope(tool_scope=tool_scope)
-    f.write(f"## Tool Scope ({len(tool_scope)} 个工具)\n\n")
-    for name in sorted(tool_scope):
+    # ── 2. Tools ──
+    tools = engine._build_v5_tools()
+    tool_names = [t["function"]["name"] for t in tools]
+    f.write(f"## Tools ({len(tools)} 个工具)\n\n")
+    for name in sorted(tool_names):
         f.write(f"- `{name}`\n")
 
     f.write(f"\n## Tools Schema ({len(tools)} 条)\n\n")
