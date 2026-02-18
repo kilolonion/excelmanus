@@ -529,7 +529,7 @@ class AgentEngine:
         self._session_turn: int = 0
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # v5: session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
+        # session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
         self._expanded_categories: set[str] = set()
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
@@ -958,7 +958,7 @@ class AgentEngine:
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
-        # ── v5: 直接路由（仅处理斜杠命令 + write_hint 分类，不做 PreRouter） ──
+        # ── 路由（斜杠命令 + write_hint 分类） ──
         route_result = await self._route_skills(
             user_message,
             slash_command=effective_slash_command,
@@ -1579,7 +1579,7 @@ class AgentEngine:
         return result
 
     def _build_meta_tools(self) -> list[dict[str, Any]]:
-        """v5: 构建 LLM-Native 元工具定义。
+        """构建 LLM-Native 元工具定义。
 
         构建 activate_skill + expand_tools + finish_task + delegate_to_subagent + list_subagents + ask_user。
         """
@@ -1879,7 +1879,7 @@ class AgentEngine:
         return tools
 
     def _handle_expand_tools(self, category: str) -> str:
-        """v5: 处理 expand_tools 元工具调用，将指定类别工具从摘要升级为完整 schema。"""
+        """处理 expand_tools 元工具调用，将指定类别工具从摘要升级为完整 schema。"""
         from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS, get_tools_in_category
 
         if category not in EXTENDED_CATEGORIES:
@@ -1899,7 +1899,7 @@ class AgentEngine:
         )
 
     def _build_v5_tools(self) -> list[dict[str, Any]]:
-        """v5: 构建分层工具 schema（core=完整, extended=摘要/已展开=完整）+ 元工具。"""
+        """构建分层工具 schema（core=完整, extended=摘要/已展开=完整）+ 元工具。"""
         domain_schemas = self._registry.get_tiered_schemas(
             expanded_categories=self._expanded_categories,
             mode="chat_completions",
@@ -2999,9 +2999,9 @@ class AgentEngine:
                 max_context_tokens=self._config.max_context_tokens,
             )
 
-            # v5: 分层 schema（core=完整, extended=摘要/已展开=完整）
+            # 分层 schema（core=完整, extended=摘要/已展开=完整）
             tools = self._build_v5_tools()
-            tool_scope = None  # v5 不再使用 tool_scope 限制
+            tool_scope = None
 
             kwargs: dict[str, Any] = {
                 "model": self._active_model,
@@ -3738,12 +3738,10 @@ class AgentEngine:
                     error = result_str
                     log_tool_call(logger, tool_name, arguments, error=error)
                 except ToolNotAllowedError:
-                    # 格式化为与原有逻辑一致的 JSON 错误结构
                     permission_error = {
                         "error_code": "TOOL_NOT_ALLOWED",
                         "tool": tool_name,
-                        "allowed_tools": list(tool_scope) if tool_scope else [],
-                        "message": f"工具 '{tool_name}' 不在当前 Skillpack 授权范围内。",
+                        "message": f"工具 '{tool_name}' 不在当前授权范围内。",
                     }
                     result_str = json.dumps(permission_error, ensure_ascii=False)
                     success = False
@@ -4535,7 +4533,7 @@ class AgentEngine:
             _, record = await self._execute_tool_with_audit(
                 tool_name=pending.tool_name,
                 arguments=pending.arguments,
-                tool_scope=None,  # v5: no scope restriction
+                tool_scope=None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
                 undoable=pending.tool_name not in {"run_code", "run_shell"},
@@ -4933,7 +4931,7 @@ class AgentEngine:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # v5: 注入工具索引，使用全量已注册工具（不再按 scope 过滤）
+        # 注入工具索引
         _all_tools = self._all_tool_names()
         _tool_index = self._build_tool_index_notice(
             _all_tools,
@@ -5174,7 +5172,7 @@ class AgentEngine:
         compact: bool = False,
         max_tools_per_category: int = 8,
     ) -> str:
-        """v5: 生成工具分类索引，注入 system prompt。
+        """生成工具分类索引，注入 system prompt。
 
         所有工具均已注册可见。core 工具完整展示 schema，
         extended 工具需先调用 expand_tools 获取完整参数。

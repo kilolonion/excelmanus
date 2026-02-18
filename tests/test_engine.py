@@ -2550,7 +2550,7 @@ class TestForkPathRemoved:
         engine._client.chat.completions.create.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_select_skill_success_no_longer_triggers_auto_delegate(self) -> None:
+    async def test_activate_skill_success_no_longer_triggers_auto_delegate(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -2566,7 +2566,7 @@ class TestForkPathRemoved:
                 root_dir="/tmp/skill",
             )]
             return ToolCallResult(
-                tool_name="select_skill",
+                tool_name="activate_skill",
                 arguments={"skill_name": "team/analyst"},
                 result="OK",
                 success=True,
@@ -2576,7 +2576,7 @@ class TestForkPathRemoved:
         engine._client.chat.completions.create = AsyncMock(
             side_effect=[
                 _make_tool_call_response(
-                    [("call_1", "select_skill", json.dumps({"skill_name": "team/analyst"}))]
+                    [("call_1", "activate_skill", json.dumps({"skill_name": "team/analyst"}))]
                 ),
                 _make_text_response("主代理继续执行。"),
             ]
@@ -2584,7 +2584,6 @@ class TestForkPathRemoved:
 
         route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=["select_skill"],
             route_mode="fallback",
             system_contexts=[],
         )
@@ -3161,7 +3160,7 @@ class TestSkillMCPRequirements:
     """Skill 的 MCP 依赖校验。"""
 
     @pytest.mark.asyncio
-    async def test_select_skill_rejects_when_required_mcp_server_missing(self) -> None:
+    async def test_activate_skill_rejects_when_required_mcp_server_missing(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -3187,7 +3186,7 @@ class TestSkillMCPRequirements:
         assert not engine._active_skills
 
     @pytest.mark.asyncio
-    async def test_select_skill_accepts_when_required_mcp_server_and_tool_ready(self) -> None:
+    async def test_activate_skill_accepts_when_required_mcp_server_and_tool_ready(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         mcp_tool = add_tool_prefix("context7", "query_docs")
@@ -4891,7 +4890,7 @@ class TestToolInjectionOptimizationE2E:
         full_prompt = "\n".join(prompts)
         # 由于 registry 中只有 add_numbers 和 fail_tool，不在 TOOL_CATEGORIES 中
         # 所以工具索引可能为空。这是正确行为。
-        # 但如果 registry 注册了 DISCOVERY_TOOLS 中的工具，则应包含索引。
+        # 工具索引应包含已注册的工具。
 
 
 # ── Auto-Supplement 测试辅助 ──────────────────────────────────
@@ -4929,12 +4928,12 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
             source="system",
             root_dir="/tmp/chart_basic",
         ),
-        "general_excel": Skillpack(
-            name="general_excel",
+        "data_basic": Skillpack(
+            name="data_basic",
             description="通用 Excel",
             instructions="通用 Excel 操作",
             source="system",
-            root_dir="/tmp/general_excel",
+            root_dir="/tmp/data_basic",
         ),
         "excel_code_runner": Skillpack(
             name="excel_code_runner",

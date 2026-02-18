@@ -159,7 +159,7 @@ class TestGenerateSuiteReport:
                     "rule": "expected_skill",
                     "passed": False,
                     "expected": "data_basic",
-                    "actual": "general_excel",
+                    "actual": "data_basic",
                     "message": "路由未命中期望技能",
                 },
             ],

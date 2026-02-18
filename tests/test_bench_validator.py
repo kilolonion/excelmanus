@@ -162,7 +162,7 @@ class TestValidateMaxTokens:
 
 class TestValidateExpectedSkill:
     def test_skill_in_skills_used(self):
-        r = _make_result_dict(skills_used=["data_basic", "general_excel"])
+        r = _make_result_dict(skills_used=["data_basic", "data_basic"])
         v = validate_case(r, {"expected_skill": "data_basic"})
         assert v.passed == 1
 
@@ -172,7 +172,7 @@ class TestValidateExpectedSkill:
         assert v.passed == 1
 
     def test_skill_mismatch(self):
-        r = _make_result_dict(skills_used=["general_excel"], route_mode="fallback")
+        r = _make_result_dict(skills_used=["other_skill"], route_mode="fallback")
         v = validate_case(r, {"expected_skill": "data_basic"})
         assert v.failed == 1
         assert "路由未命中" in v.results[0].message
@@ -201,17 +201,17 @@ class TestValidateForbiddenTools:
         r = _make_result_dict(tool_calls=[
             {"tool_name": "read_excel", "success": True},
         ])
-        v = validate_case(r, {"forbidden_tools": ["select_skill"]})
+        v = validate_case(r, {"forbidden_tools": ["activate_skill"]})
         assert v.passed == 1
 
     def test_violation_detected(self):
         r = _make_result_dict(tool_calls=[
             {"tool_name": "read_excel", "success": True},
-            {"tool_name": "select_skill", "success": True},
+            {"tool_name": "activate_skill", "success": True},
         ])
-        v = validate_case(r, {"forbidden_tools": ["select_skill"]})
+        v = validate_case(r, {"forbidden_tools": ["activate_skill"]})
         assert v.failed == 1
-        assert "select_skill" in v.results[0].message
+        assert "activate_skill" in v.results[0].message
 
 
 class TestValidateNoEmptyPromise:
@@ -301,7 +301,7 @@ class TestValidateMultipleRules:
             status="ok",
             iterations=8,
             total_tokens=10000,
-            skills_used=["general_excel"],
+            skills_used=["other_skill"],
         )
         v = validate_case(r, {
             "status": "ok",

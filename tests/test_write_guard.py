@@ -148,7 +148,7 @@ class TestFinishTaskInjection:
 
 class TestWriteGuardPrompt:
     @pytest.mark.asyncio
-    async def test_write_guard_prompt_requires_select_skill_then_execute(self):
+    async def test_write_guard_prompt_requires_activate_skill_then_execute(self):
         engine = _make_engine(max_iterations=2)
         route_result = _make_route_result(write_hint="may_write")
         engine._route_skills = AsyncMock(return_value=route_result)
