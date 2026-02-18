@@ -199,7 +199,6 @@ class TestControlCommandFullAccess:
 
         route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="llm_confirm",
             system_contexts=[],
         )
@@ -747,7 +746,6 @@ class TestContextBudgetAndHardCap:
 
         route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="fallback",
             system_contexts=[],
         )
@@ -2262,7 +2260,6 @@ class TestManualSkillSlashCommand:
 
         route_result = SkillMatchResult(
             skills_used=["data_basic"],
-            tool_scope=[],
             route_mode="hint_direct",
             system_contexts=[],
         )
@@ -2291,7 +2288,6 @@ class TestManualSkillSlashCommand:
 
         route_result = SkillMatchResult(
             skills_used=["verification-before-completion"],
-            tool_scope=[],
             route_mode="hint_direct",
             system_contexts=[],
         )
@@ -2324,7 +2320,6 @@ class TestManualSkillSlashCommand:
 
         route_result = SkillMatchResult(
             skills_used=["data_basic"],
-            tool_scope=[],
             route_mode="slash_direct",
             system_contexts=[],
             parameterized=True,
@@ -2445,7 +2440,6 @@ class TestManualSkillSlashCommand:
         engine._route_skills = AsyncMock(
             return_value=SkillMatchResult(
                 skills_used=[],
-                tool_scope=[],
                 route_mode="slash_not_user_invocable",
                 system_contexts=[],
             )
@@ -2482,7 +2476,6 @@ class TestManualSkillSlashCommand:
 
         slash_route = SkillMatchResult(
             skills_used=["guidance_only"],
-            tool_scope=[],
             route_mode="slash_direct",
             system_contexts=["[Skillpack] guidance_only"],
             parameterized=True,

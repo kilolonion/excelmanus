@@ -344,7 +344,6 @@ def test_run_case_exception_returns_structured_error() -> None:
             self.last_route_result = SimpleNamespace(
                 route_mode="fallback",
                 skills_used=[],
-                tool_scope=[],
             )
 
         @property
