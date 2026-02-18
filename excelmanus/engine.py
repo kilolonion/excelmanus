@@ -994,60 +994,12 @@ class AgentEngine:
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
-        # ── Phase 1: 技能预激活 ──
-        # adaptive 预激活策略：
-        # 非 slash、无已激活 skill 且路由为 all_tools 时并行执行 pre-route，
-        # 优先激活预判命中的主/副技能；异常/缺失/无效时统一回退 general_excel。
-        auto_activated_skill_name: str | None = None
-        pre_route_result: "PreRouteResult | None" = None
-        preroute_mode = self._config.skill_preroute_mode
-
-        # 判断是否需要并行启动 pre_route（条件 route_mode 除外，等 route_result 后再验证）
-        _can_preroute = (
-            not self._active_skills
-            and effective_slash_command is None
-            and self._skill_router is not None
-            and preroute_mode == "adaptive"
+        # ── v5: 直接路由（仅处理斜杠命令 + write_hint 分类，不做 PreRouter） ──
+        route_result = await self._route_skills(
+            user_message,
+            slash_command=effective_slash_command,
+            raw_args=effective_raw_args if effective_slash_command else None,
         )
-
-        if _can_preroute:
-            # 并行：_route_skills（含 write_hint 小模型调用）与 pre_route_skill 同时发起
-            from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
-            _api_key = self._config.skill_preroute_api_key or self._config.api_key
-            _base_url = self._config.skill_preroute_base_url or self._config.base_url
-            _model_name = self._config.skill_preroute_model or self._config.model
-
-            route_result, _pre_route_result_or_exc = await asyncio.gather(
-                self._route_skills(
-                    user_message,
-                    slash_command=effective_slash_command,
-                    raw_args=effective_raw_args if effective_slash_command else None,
-                ),
-                pre_route_skill(
-                    user_message,
-                    api_key=_api_key,
-                    base_url=_base_url,
-                    model=_model_name,
-                    timeout_ms=self._config.skill_preroute_timeout_ms,
-                    valid_skill_names=frozenset(self._list_loaded_skill_names()),
-                    runtime_skillpacks=self._get_loaded_skillpacks(),
-                ),
-                return_exceptions=True,
-            )
-            # 仅当 route_mode == "all_tools" 时才使用 pre_route 结果
-            if (
-                route_result.route_mode == "all_tools"
-                and not isinstance(_pre_route_result_or_exc, BaseException)
-            ):
-                pre_route_result = _pre_route_result_or_exc
-            elif isinstance(_pre_route_result_or_exc, BaseException):
-                logger.warning("并行预路由异常: %s", _pre_route_result_or_exc)
-        else:
-            route_result = await self._route_skills(
-                user_message,
-                slash_command=effective_slash_command,
-                raw_args=effective_raw_args if effective_slash_command else None,
-            )
 
         route_result, user_message = await self._adapt_guidance_only_slash_route(
             route_result=route_result,
@@ -1055,51 +1007,11 @@ class AgentEngine:
             slash_command=effective_slash_command,
             raw_args=effective_raw_args,
         )
-        route_result = self._merge_with_loaded_skills(route_result)
 
-        if (
-            route_result.route_mode == "all_tools"
-            and not self._active_skills
-            and effective_slash_command is None
-            and self._skill_router is not None
-        ):
-            if preroute_mode == "adaptive":
-                if pre_route_result is not None:
-                    try:
-                        (
-                            auto_activated_skill_name,
-                            missing_target_skill,
-                            skill_candidates,
-                        ) = await self._activate_preroute_candidates(
-                            pre_route_result=pre_route_result,
-                            mode_label=preroute_mode,
-                        )
-                        if missing_target_skill is not None:
-                            auto_activated_skill_name = await self._apply_preroute_fallback(
-                                mode_label=preroute_mode,
-                                reason=(
-                                    f"{preroute_mode} 预路由技能 {missing_target_skill} 不存在"
-                                    f"（候选={skill_candidates}）"
-                                ),
-                            )
-                    except Exception as exc:
-                        auto_activated_skill_name = await self._apply_preroute_fallback(
-                            mode_label=preroute_mode,
-                            reason=f"{preroute_mode} 预路由处理异常: {exc}",
-                        )
-                else:
-                    auto_activated_skill_name = await self._apply_preroute_fallback(
-                        mode_label=preroute_mode,
-                        reason=f"{preroute_mode} 预路由结果缺失",
-                    )
-
-        # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
-        effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
-
-        # 补全 skills_used 和 system_contexts（含主技能+副技能）
+        # 合并已激活 skill 的 system_contexts
         final_skills_used = list(route_result.skills_used)
         final_system_contexts = list(route_result.system_contexts)
-        if auto_activated_skill_name and self._active_skills:
+        if self._active_skills:
             for skill in self._active_skills:
                 if skill.name not in final_skills_used:
                     final_skills_used.append(skill.name)
@@ -1109,8 +1021,8 @@ class AgentEngine:
 
         route_result = SkillMatchResult(
             skills_used=final_skills_used,
-            tool_scope=effective_tool_scope,
-            route_mode=route_result.route_mode,
+            tool_scope=getattr(route_result, "tool_scope", []),
+            route_mode=getattr(route_result, "route_mode", "all_tools"),
             system_contexts=final_system_contexts,
             parameterized=route_result.parameterized,
             write_hint=_merge_write_hint(
