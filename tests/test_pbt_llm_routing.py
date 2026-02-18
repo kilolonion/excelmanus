@@ -349,7 +349,7 @@ class TestSelectSkillCalls:
                 for name in skill_names
             ]
             engine = _setup_engine_in(Path(tmp), skills)
-            result = asyncio.run(engine._handle_select_skill(selected))
+            result = asyncio.run(engine._handle_activate_skill(selected))
 
             skill = engine._skill_router._loader.get_skillpack(selected)  # type: ignore[union-attr]
             assert skill is not None
@@ -380,7 +380,7 @@ class TestSelectSkillCalls:
                 for name in skill_names
             ]
             engine = _setup_engine_in(Path(tmp), skills)
-            result = asyncio.run(engine._handle_select_skill(invalid_name))
+            result = asyncio.run(engine._handle_activate_skill(invalid_name))
 
             assert f"未找到技能: {invalid_name}" == result
             assert not engine._active_skills
@@ -409,7 +409,7 @@ class TestSelectSkillCalls:
                 for name in skill_names
             ]
             engine = _setup_engine_in(Path(tmp), skills)
-            asyncio.run(engine._handle_select_skill(selected))
+            asyncio.run(engine._handle_activate_skill(selected))
 
             assert selected in engine._loaded_skill_names
 

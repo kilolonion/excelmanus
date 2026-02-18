@@ -3201,7 +3201,7 @@ class TestSkillMCPRequirements:
         mock_router._find_skill_by_name = MagicMock(return_value=skill)
         engine._skill_router = mock_router
 
-        result = await engine._handle_select_skill("need_mcp")
+        result = await engine._handle_activate_skill("need_mcp")
 
         assert "MCP 依赖未满足" in result
         assert not engine._active_skills
@@ -3240,7 +3240,7 @@ class TestSkillMCPRequirements:
         mock_router._find_skill_by_name = MagicMock(return_value=skill)
         engine._skill_router = mock_router
 
-        result = await engine._handle_select_skill("need_mcp")
+        result = await engine._handle_activate_skill("need_mcp")
 
         assert result.startswith("OK")
         assert engine._active_skills
