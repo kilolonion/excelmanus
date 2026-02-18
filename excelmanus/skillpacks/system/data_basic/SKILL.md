@@ -1,35 +1,8 @@
 ---
 name: data_basic
 description: 数据读取、分析、筛选与转换
-allowed_tools:
-  - read_excel
-  - write_excel
-  - analyze_data
-  - filter_data
-  - transform_data
-  - group_aggregate
-  - analyze_sheet_mapping
-  - list_sheets
-  - inspect_excel_files
-  - write_cells
-  - insert_rows
-  - insert_columns
-  - focus_window
-triggers:
-  - 读取
-  - 分析
-  - 筛选
-  - 转换
-  - 排序
-  - 打开
-  - 查看
-  - 统计
-  - 分组
-  - 汇总
-  - 聚合
 file_patterns:
   - "*.xlsx"
-priority: 5
 version: "1.0.0"
 ---
 优先使用结构化方式处理数据：
