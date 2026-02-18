@@ -1,37 +1,8 @@
 ---
 name: file_ops
 description: 工作区文件管理技能包（查看、搜索、读取、复制、重命名、删除）
-allowed_tools:
-  - list_directory
-  - get_file_info
-  - find_files
-  - read_text_file
-  - copy_file
-  - rename_file
-  - delete_file
-  - read_excel
-triggers:
-  - 文件
-  - 目录
-  - 列出
-  - 查看文件
-  - 打开
-  - 搜索
-  - 查找文件
-  - 文件信息
-  - 文件详情
-  - 读取文本
-  - CSV
-  - TXT
-  - 复制
-  - 备份
-  - 重命名
-  - 移动
-  - 删除
-  - 移除
 file_patterns:
   - "*"
-priority: 4
 version: "2.0.0"
 ---
 文件操作只允许在工作区内进行，所有路径经安全校验：

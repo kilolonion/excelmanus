@@ -1,26 +1,8 @@
 ---
 name: chart_basic
 description: 图表生成技能包
-allowed_tools:
-  - create_chart
-  - create_excel_chart
-  - read_excel
-  - group_aggregate
-  - list_sheets
-triggers:
-  - 图表
-  - 可视化
-  - 折线图
-  - 柱状图
-  - 饼图
-  - 雷达图
-  - 散点图
-  - 画图
-  - 绘制
-  - 生成图
 file_patterns:
   - "*.xlsx"
-priority: 6
 version: "1.0.0"
 ---
 图表工具选择（必须先判断）：

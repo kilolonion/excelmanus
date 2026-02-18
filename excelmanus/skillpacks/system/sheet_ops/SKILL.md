@@ -1,38 +1,9 @@
 ---
 name: sheet_ops
 description: 工作表管理与跨表操作技能包，覆盖工作表查看、创建、复制、重命名、删除和跨表数据传输
-allowed_tools:
-  - list_sheets
-  - create_sheet
-  - copy_sheet
-  - rename_sheet
-  - delete_sheet
-  - copy_range_between_sheets
-  - read_excel
-  - write_excel
-triggers:
-  - 工作表
-  - sheet
-  - 跨表
-  - 合并表
-  - 拆分表
-  - 复制表
-  - 多表
-  - 多个表
-  - 所有表
-  - 表名
-  - 重命名表
-  - 删除表
-  - 新建表
-  - 添加表
-  - 移动数据
-  - 跨sheet
-  - 工作簿
-  - workbook
 file_patterns:
   - "*.xlsx"
   - "*.xlsm"
-priority: 7
 version: "1.0.0"
 ---
 工作表管理与跨表操作的标准流程：
