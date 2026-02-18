@@ -14,7 +14,6 @@ from typing import Any
 from excelmanus.config import ExcelManusConfig
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import Skillpack
-from excelmanus.skillpacks.pre_router import invalidate_pre_route_cache
 
 _SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _REQUIRED_CREATE_FIELDS = {"description"}
@@ -147,7 +146,6 @@ class SkillpackManager:
             skill_dir.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(skill_file, content)
             self._loader.load_all()
-            invalidate_pre_route_cache()
         return self.get_skillpack(normalized_name)
 
     def patch_skillpack(
@@ -183,7 +181,6 @@ class SkillpackManager:
                 )
             self._atomic_write_text(skill_file, content)
             self._loader.load_all()
-            invalidate_pre_route_cache()
         return self.get_skillpack(skill.name)
 
     def delete_skillpack(
@@ -235,7 +232,6 @@ class SkillpackManager:
                 encoding="utf-8",
             )
             self._loader.load_all()
-            invalidate_pre_route_cache()
 
         return {
             "name": skill.name,
