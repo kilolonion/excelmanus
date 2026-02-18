@@ -632,7 +632,6 @@ class _EngineTracer:
     通过 monkey-patch 以下方法实现：
     - ``_prepare_system_prompts_for_request`` → 记录每轮注入的系统提示（分解各组件）
     - ``_enrich_tool_result_with_window_perception`` → 记录窗口感知增强前后对比
-    - ``_get_current_tool_scope`` → 记录每轮工具范围决策
 
     通过环境变量 ``EXCELMANUS_BENCH_TRACE=0`` 或 CLI ``--no-trace`` 禁用。
     """
@@ -645,12 +644,10 @@ class _EngineTracer:
         # 保存原始方法
         self._orig_prepare = engine._prepare_system_prompts_for_request
         self._orig_enrich = engine._enrich_tool_result_with_window_perception
-        self._orig_scope = engine._get_current_tool_scope
 
         # monkey-patch
         engine._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
         engine._enrich_tool_result_with_window_perception = self._traced_enrich  # type: ignore[assignment]
-        engine._get_current_tool_scope = self._traced_scope  # type: ignore[assignment]
 
     def _traced_prepare(
         self, skill_contexts: list[str], **kwargs: Any,
@@ -730,23 +727,6 @@ class _EngineTracer:
             })
         return enriched
 
-    def _traced_scope(
-        self,
-        route_result: Any = None,
-    ) -> list[str]:
-        """拦截工具范围决策，记录可用工具列表。"""
-        scope = self._orig_scope(route_result=route_result)
-        self.entries.append({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": "tool_scope_resolved",
-            "iteration": self._iteration,
-            "data": {
-                "tool_count": len(scope),
-                "tools": list(scope),
-            },
-        })
-        return scope
-
     def snapshot_and_reset(self) -> list[dict[str, Any]]:
         """快照当前 trace 数据并重置，用于多轮分轮记录。"""
         snapshot = list(self.entries)
@@ -758,7 +738,6 @@ class _EngineTracer:
         """恢复原始方法。"""
         self._engine._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
         self._engine._enrich_tool_result_with_window_perception = self._orig_enrich  # type: ignore[assignment]
-        self._engine._get_current_tool_scope = self._orig_scope  # type: ignore[assignment]
 
 
 # ── 执行器 ────────────────────────────────────────────────
