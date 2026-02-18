@@ -4215,7 +4215,7 @@ class AgentEngine:
         skill = self._pick_route_skill(route_result)
         if skill is None:
             return route_result, user_message
-        if skill.command_dispatch == "tool" or skill.allowed_tools:
+        if skill.command_dispatch == "tool":
             return route_result, user_message
 
         # 先尝试词法分类，避免重复触发 write_hint LLM 调用
