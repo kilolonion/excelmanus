@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.engine import AgentEngine, ChatResult, _WRITE_TOOL_NAMES
+from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult, _WRITE_TOOL_NAMES
 from excelmanus.skillpacks.models import SkillMatchResult
 from excelmanus.tools.policy import MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolRegistry
@@ -252,6 +252,54 @@ class TestExecutionGuardState:
         assert guard_count == 2
 
 
+class TestWriteHintSyncOnWriteCall:
+    @pytest.mark.asyncio
+    async def test_write_hint_upgrades_after_successful_write_tool_call(self):
+        engine = _make_engine(max_iterations=2)
+        route_result = _make_route_result(write_hint="read_only")
+        engine._current_write_hint = "read_only"
+
+        first = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "call_write_1",
+                                "function": {
+                                    "name": "write_excel",
+                                    "arguments": '{"file_path":"demo.xlsx","sheet_name":"Sheet1","rows":[]}',
+                                },
+                            }
+                        ],
+                    )
+                )
+            ]
+        )
+        second = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="done", tool_calls=None)
+                )
+            ]
+        )
+        engine._client.chat.completions.create = AsyncMock(side_effect=[first, second])
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="write_excel",
+                arguments={"file_path": "demo.xlsx"},
+                result="ok",
+                success=True,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == "done"
+        assert engine._current_write_hint == "may_write"
+
+
 class TestFinishTaskAcceptance:
     @pytest.mark.asyncio
     async def test_finish_task_warning_should_not_exit_when_result_contains_checkmark(self):
@@ -341,3 +389,73 @@ class TestFinishTaskAcceptance:
         assert with_write.success is True
         assert with_write.finish_accepted is True
         assert with_write.result.startswith("✓ 任务完成。")
+
+    @pytest.mark.asyncio
+    async def test_finish_task_blocked_when_may_write_without_actual_write(self):
+        """write_hint=may_write 时，任意次调用 finish_task 均应被强拒，不邀请重试。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+
+        # 第一次调用：立即强拒，不设 _finish_task_warned，不邀请重试
+        first = await engine._execute_tool_call(
+            self._finish_task_call("first"),
+            tool_scope=["finish_task"],
+            on_event=None,
+            iteration=1,
+        )
+        assert first.success is True
+        assert first.finish_accepted is False
+        assert "write_hint=may_write" in first.result
+        assert "不接受无写入的完成声明" in first.result
+        assert not getattr(engine, "_finish_task_warned", False)
+
+        # 第二次调用：走同一路径，继续强拒（不因 warned 而放行）
+        second = await engine._execute_tool_call(
+            self._finish_task_call("second"),
+            tool_scope=["finish_task"],
+            on_event=None,
+            iteration=2,
+        )
+        assert second.success is True
+        assert second.finish_accepted is False
+        assert "write_hint=may_write" in second.result
+
+    @pytest.mark.asyncio
+    async def test_finish_task_accepted_when_may_write_with_actual_write(self):
+        """write_hint=may_write 且有实际写入时，finish_task 应被接受。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = True
+
+        result = await engine._execute_tool_call(
+            self._finish_task_call("done"),
+            tool_scope=["finish_task"],
+            on_event=None,
+            iteration=1,
+        )
+        assert result.success is True
+        assert result.finish_accepted is True
+        assert result.result.startswith("✓ 任务完成。")
+
+    @pytest.mark.asyncio
+    async def test_finish_task_double_call_accepted_when_not_may_write(self):
+        """write_hint != may_write 时，二次调用 finish_task 应被接受（只读任务）。"""
+        engine = _make_engine()
+        engine._current_write_hint = "read_only"
+
+        first = await engine._execute_tool_call(
+            self._finish_task_call("first"),
+            tool_scope=["finish_task"],
+            on_event=None,
+            iteration=1,
+        )
+        assert first.finish_accepted is False
+
+        second = await engine._execute_tool_call(
+            self._finish_task_call("second"),
+            tool_scope=["finish_task"],
+            on_event=None,
+            iteration=2,
+        )
+        assert second.finish_accepted is True
+        assert second.result.startswith("✓ 任务完成（无写入）。")

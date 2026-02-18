@@ -115,7 +115,7 @@ def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
 def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
     """合并 write_hint，但 override_hint == 'may_write' 时强制覆盖 route_hint。
 
-    用于 auto_supplement 激活写入工具后的场景：self._current_write_hint 已被
+    用于写入工具成功后的场景：self._current_write_hint 已被
     升级为 'may_write'，不应被原始 route_hint（如 'read_only'）压制。
     """
     normalized_override = _normalize_write_hint(override_hint)
@@ -481,22 +481,10 @@ class AgentEngine:
             self._router_client = self._client
             self._router_model = config.model
             self._router_follow_active_model = True
-        # 窗口感知顾问小模型：window_advisor_* → skill_preroute_* → 主模型
-        _adv_api_key = (
-            config.window_advisor_api_key
-            or config.skill_preroute_api_key
-            or config.api_key
-        )
-        _adv_base_url = (
-            config.window_advisor_base_url
-            or config.skill_preroute_base_url
-            or config.base_url
-        )
-        _adv_model = (
-            config.window_advisor_model
-            or config.skill_preroute_model
-            or config.model
-        )
+        # 窗口感知顾问小模型：window_advisor_* → 主模型
+        _adv_api_key = config.window_advisor_api_key or config.api_key
+        _adv_base_url = config.window_advisor_base_url or config.base_url
+        _adv_model = config.window_advisor_model or config.model
         if _adv_api_key == config.api_key and _adv_base_url == config.base_url:
             self._advisor_client = self._client
         else:
@@ -506,10 +494,7 @@ class AgentEngine:
             )
         self._advisor_model = _adv_model
         # adviser 是否跟随主模型切换：仅当未配置任何独立小模型时
-        self._advisor_follow_active_model = (
-            not config.window_advisor_model
-            and not config.skill_preroute_model
-        )
+        self._advisor_follow_active_model = not config.window_advisor_model
         self._config = config
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError

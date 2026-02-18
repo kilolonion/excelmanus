@@ -112,21 +112,10 @@ class ExcelManusConfig:
     window_intent_repeat_warn_threshold: int = 2
     window_intent_repeat_trip_threshold: int = 3
     window_rule_engine_version: str = "v1"
-    # 默认技能预激活：非斜杠路由时自动激活 general_excel
-    auto_activate_default_skill: bool = True
-    # 小模型预路由配置（单一策略）
-    skill_preroute_mode: str = "adaptive"  # adaptive
-    # 窗口感知顾问独立小模型配置（可选，未配置时回退到 skill_preroute_*，再回退到主模型）
+    # 窗口感知顾问独立小模型配置（可选，未配置时回退到主模型）
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
     window_advisor_model: str | None = None
-    skill_preroute_api_key: str | None = None
-    skill_preroute_base_url: str | None = None
-    skill_preroute_model: str | None = None
-    skill_preroute_timeout_ms: int = 10000
-    # 工具自动补充：LLM 调用未授权工具时自动激活对应 skillpack
-    auto_supplement_enabled: bool = True
-    auto_supplement_max_per_turn: int = 3
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -705,55 +694,12 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION")
     )
 
-    auto_activate_default_skill = _parse_bool(
-        os.environ.get("EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL"),
-        "EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL",
-        True,
-    )
-
-    # 小模型预路由配置（仅支持 adaptive）
-    skill_preroute_mode_raw = os.environ.get(
-        "EXCELMANUS_SKILL_PREROUTE_MODE", "adaptive"
-    ).strip().lower()
-    legacy_preroute_modes = {"off", "deepseek", "gemini", "meta_only", "hybrid"}
-    if skill_preroute_mode_raw in legacy_preroute_modes:
-        raise ConfigError(
-            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 旧值"
-            f" {skill_preroute_mode_raw!r} 已移除，请迁移为 'adaptive'。"
-        )
-    if skill_preroute_mode_raw != "adaptive":
-        raise ConfigError(
-            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 仅支持 'adaptive'，"
-            f"当前值: {skill_preroute_mode_raw!r}"
-        )
-    skill_preroute_api_key = os.environ.get("EXCELMANUS_SKILL_PREROUTE_API_KEY") or None
-    skill_preroute_base_url = os.environ.get("EXCELMANUS_SKILL_PREROUTE_BASE_URL") or None
-    if skill_preroute_base_url:
-        _validate_base_url(skill_preroute_base_url)
-    skill_preroute_model = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODEL") or None
-    skill_preroute_timeout_ms = _parse_int(
-        os.environ.get("EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS"),
-        "EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS",
-        10000,
-    )
-
     # 窗口感知顾问独立小模型配置（可选）
     window_advisor_api_key = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_API_KEY") or None
     window_advisor_base_url = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_BASE_URL") or None
     if window_advisor_base_url:
         _validate_base_url(window_advisor_base_url)
     window_advisor_model = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL") or None
-
-    auto_supplement_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_AUTO_SUPPLEMENT_ENABLED"),
-        "EXCELMANUS_AUTO_SUPPLEMENT_ENABLED",
-        True,
-    )
-    auto_supplement_max_per_turn = _parse_int(
-        os.environ.get("EXCELMANUS_AUTO_SUPPLEMENT_MAX_PER_TURN"),
-        "EXCELMANUS_AUTO_SUPPLEMENT_MAX_PER_TURN",
-        3,
-    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -830,16 +776,8 @@ def load_config() -> ExcelManusConfig:
         window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
         window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
         window_rule_engine_version=window_rule_engine_version,
-        auto_activate_default_skill=auto_activate_default_skill,
-        skill_preroute_mode=skill_preroute_mode_raw,
-        skill_preroute_api_key=skill_preroute_api_key,
-        skill_preroute_base_url=skill_preroute_base_url,
-        skill_preroute_model=skill_preroute_model,
-        skill_preroute_timeout_ms=skill_preroute_timeout_ms,
         window_advisor_api_key=window_advisor_api_key,
         window_advisor_base_url=window_advisor_base_url,
         window_advisor_model=window_advisor_model,
-        auto_supplement_enabled=auto_supplement_enabled,
-        auto_supplement_max_per_turn=auto_supplement_max_per_turn,
         models=models,
     )
