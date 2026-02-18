@@ -246,6 +246,20 @@ class SkillpackLoader:
                 "frontmatter 字段 'context' 仅支持 normal。"
             )
 
+        _DEPRECATED_FIELDS = {
+            "allowed_tools": "allowed-tools",
+            "allowed-tools": "allowed-tools",
+            "triggers": "triggers",
+            "priority": "priority",
+        }
+        for raw_key, display_key in _DEPRECATED_FIELDS.items():
+            if raw_key in frontmatter:
+                self._append_warning(
+                    f"{skill_file}: frontmatter 字段 '{display_key}' 已在 v5 中移除"
+                    "（Skill 不再控制工具授权），该字段将被忽略。"
+                )
+                frontmatter.pop(raw_key, None)
+
         hooks = self._get_optional_dict(frontmatter, "hooks")
         model = self._get_optional_str_or_none(frontmatter, "model")
         metadata = self._get_optional_dict(frontmatter, "metadata")
