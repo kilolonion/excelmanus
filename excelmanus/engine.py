@@ -485,13 +485,11 @@ class AgentEngine:
         _adv_api_key = config.window_advisor_api_key or config.api_key
         _adv_base_url = config.window_advisor_base_url or config.base_url
         _adv_model = config.window_advisor_model or config.model
-        if _adv_api_key == config.api_key and _adv_base_url == config.base_url:
-            self._advisor_client = self._client
-        else:
-            self._advisor_client = create_client(
-                api_key=_adv_api_key,
-                base_url=_adv_base_url,
-            )
+        # 始终创建独立 client，避免与 _client 共享对象导致测试 mock 互相干扰
+        self._advisor_client = create_client(
+            api_key=_adv_api_key,
+            base_url=_adv_base_url,
+        )
         self._advisor_model = _adv_model
         # adviser 是否跟随主模型切换：仅当未配置任何独立小模型时
         self._advisor_follow_active_model = not config.window_advisor_model
