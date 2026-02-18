@@ -85,12 +85,31 @@ _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
 _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
+_VALID_WRITE_HINTS = {"may_write", "read_only", "unknown"}
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "planner",
     "general-purpose": "analyst",
     "generalpurpose": "analyst",
 }
+
+
+def _normalize_write_hint(value: Any) -> str:
+    """规范化 write_hint，仅返回 may_write/read_only/unknown。"""
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    if normalized in _VALID_WRITE_HINTS:
+        return normalized
+    return "unknown"
+
+
+def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
+    """优先使用路由 write_hint；无效时回退到当前状态。"""
+    normalized_route = _normalize_write_hint(route_hint)
+    if normalized_route != "unknown":
+        return normalized_route
+    return _normalize_write_hint(fallback_hint)
 
 
 def _to_plain(value: Any) -> Any:
@@ -311,12 +330,8 @@ def _detect_write_intent(text: str) -> bool:
     return has_file and has_action
 
 
-# 写入类工具名称集合，用于执行守卫判断是否有实际写入操作
-_WRITE_TOOL_NAMES = frozenset({
-    "write_cells", "write_excel", "format_cells",
-    "create_chart", "set_column_width", "merge_cells",
-    "write_text_file", "filter_data",
-})
+# 写入类工具集合统一复用策略层 SSOT，避免与 policy 漂移
+_WRITE_TOOL_NAMES = MUTATING_ALL_TOOLS
 
 
 def _summarize_text(text: str, max_len: int = 120) -> str:
@@ -346,6 +361,16 @@ class ToolCallResult:
     pending_plan: bool = False
     plan_id: str | None = None
     defer_tool_result: bool = False
+    finish_accepted: bool = False
+
+
+class _AuditedExecutionError(Exception):
+    """携带审计记录的工具执行异常。"""
+
+    def __init__(self, *, cause: Exception, record: AppliedApprovalRecord) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.record = record
 
 
 @dataclass
@@ -478,7 +503,9 @@ class AgentEngine:
             and not config.skill_preroute_model
         )
         self._config = config
-        self._registry = registry
+        # fork 出 per-session registry，避免多会话共享同一实例时
+        # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
+        self._registry = registry.fork() if hasattr(registry, "fork") else registry
         self._skill_router = skill_router
         self._skillpack_manager = (
             SkillpackManager(config, skill_router._loader)
@@ -497,13 +524,13 @@ class AgentEngine:
             route_mode="all_tools",
             system_contexts=[],
         )
-        # 任务清单存储：单会话内存级
+        # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
-        task_tools.init_store(self._task_store)
-        # 注入 SkillpackLoader 供 list_skills 工具使用
+        self._registry.register_tools(task_tools.get_tools(self._task_store))
+        # 注入 SkillpackLoader 供 list_skills 工具使用，同样闭包注入
         if self._skill_router is not None:
             from excelmanus.tools import skill_tools
-            skill_tools.init_loader(self._skill_router._loader)
+            self._registry.register_tools(skill_tools.get_tools(self._skill_router._loader))
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
@@ -524,6 +551,9 @@ class AgentEngine:
         self._last_tool_call_count: int = 0
         self._last_success_count: int = 0
         self._last_failure_count: int = 0
+        self._current_write_hint: str = "unknown"
+        # 执行守卫状态：新任务重置，续跑路径复用。
+        self._execution_guard_fired: bool = False
         self._approval = ApprovalManager(config.workspace_root)
         self._subagent_executor = SubagentExecutor(
             parent_config=config,
@@ -919,6 +949,8 @@ class AgentEngine:
             )
 
         chat_start = time.monotonic()
+        # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
+        self._current_write_hint = "unknown"
 
         # 发出路由开始事件
         self._emit(
@@ -958,34 +990,6 @@ class AgentEngine:
         pre_route_result: "PreRouteResult | None" = None
         preroute_mode = self._config.skill_preroute_mode
 
-        def _resolve_preroute_target(result: "PreRouteResult | None") -> tuple[str | None, list[str]]:
-            if result is None:
-                return None, []
-            candidates: list[str] = []
-            raw_candidates = getattr(result, "skill_names", None)
-            if isinstance(raw_candidates, list):
-                for item in raw_candidates:
-                    if not isinstance(item, str):
-                        continue
-                    name = item.strip()
-                    if not name or name in candidates:
-                        continue
-                    candidates.append(name)
-            legacy_name = getattr(result, "skill_name", None)
-            if isinstance(legacy_name, str) and legacy_name.strip():
-                normalized = legacy_name.strip()
-                if normalized not in candidates:
-                    candidates.append(normalized)
-            if len(candidates) >= 2:
-                logger.info(
-                    "预路由命中复合技能 skill_names=%s，降级激活 general_excel",
-                    candidates,
-                )
-                return "general_excel", candidates
-            if len(candidates) == 1:
-                return candidates[0], candidates
-            return None, candidates
-
         if (
             route_result.route_mode == "all_tools"
             and not self._active_skills
@@ -1005,6 +1009,8 @@ class AgentEngine:
                         base_url=base_url,
                         model=model_name,
                         timeout_ms=self._config.skill_preroute_timeout_ms,
+                        valid_skill_names=frozenset(self._list_loaded_skill_names()),
+                        runtime_skillpacks=self._get_loaded_skillpacks(),
                     )
                     logger.info(
                         "hybrid 预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms",
@@ -1051,6 +1057,8 @@ class AgentEngine:
                         base_url=base_url,
                         model=model_name,
                         timeout_ms=self._config.skill_preroute_timeout_ms,
+                        valid_skill_names=frozenset(self._list_loaded_skill_names()),
+                        runtime_skillpacks=self._get_loaded_skillpacks(),
                     )
                     logger.info(
                         "预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
@@ -1124,7 +1132,10 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=final_system_contexts,
             parameterized=route_result.parameterized,
-            write_hint=getattr(route_result, "write_hint", "unknown"),
+            write_hint=_merge_write_hint(
+                getattr(route_result, "write_hint", None),
+                self._current_write_hint,
+            ),
         )
         self._last_route_result = route_result
 
@@ -1269,6 +1280,8 @@ class AgentEngine:
             user_message=user_message,
             is_new_task=True,
         )
+        # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
+        self._execution_guard_fired = False
         chat_result = await self._tool_calling_loop(route_result, on_event)
 
         # 发出执行摘要事件
@@ -1375,6 +1388,15 @@ class AgentEngine:
         if not skillpacks:
             skillpacks = self._skill_router._loader.load_all()
         return list(skillpacks.keys())
+
+    def _get_loaded_skillpacks(self) -> dict | None:
+        """获取运行时已加载的 Skillpack 对象字典，供预路由 catalog 构建使用。"""
+        if self._skill_router is None:
+            return None
+        skillpacks = self._skill_router._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._skill_router._loader.load_all()
+        return skillpacks or None
 
     def _list_manual_invocable_skill_names(self) -> list[str]:
         """获取可手动调用的技能名（user_invocable=true）。"""
@@ -1882,7 +1904,7 @@ class AgentEngine:
         )
         # 写入门禁：仅当 write_hint == "may_write" 时注入 finish_task
         finish_task_tool = None
-        if getattr(self, "_current_write_hint", "unknown") == "may_write":
+        if _normalize_write_hint(getattr(self, "_current_write_hint", "unknown")) == "may_write":
             finish_task_tool = {
                 "type": "function",
                 "function": {
@@ -1917,7 +1939,7 @@ class AgentEngine:
                             "skill_name": {
                                 "type": "string",
                                 "description": "要激活的技能名称",
-                                "enum": skill_names,
+                                **({"enum": skill_names} if skill_names else {}),
                             },
                             "reason": {
                                 "type": "string",
@@ -1975,7 +1997,7 @@ class AgentEngine:
                             "agent_name": {
                                 "type": "string",
                                 "description": "可选，指定子代理名称；不传则自动选择",
-                                "enum": subagent_names,
+                                **({"enum": subagent_names} if subagent_names else {}),
                             },
                             "file_paths": {
                                 "type": "array",
@@ -2215,7 +2237,10 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=refreshed_contexts,
             parameterized=route_result.parameterized,
-            write_hint=getattr(route_result, "write_hint", "unknown"),
+            write_hint=_merge_write_hint(
+                getattr(route_result, "write_hint", None),
+                self._current_write_hint,
+            ),
         )
         refreshed_scope = self._get_current_tool_scope(route_result=base_result)
         refreshed = SkillMatchResult(
@@ -2316,10 +2341,9 @@ class AgentEngine:
             if route_result is not None
             else None
         )
-        write_hint = (
-            route_hint
-            if isinstance(route_hint, str) and route_hint
-            else str(getattr(self, "_current_write_hint", "unknown"))
+        write_hint = _merge_write_hint(
+            route_hint,
+            getattr(self, "_current_write_hint", "unknown"),
         )
 
         def _append_finish_task(scope: list[str]) -> list[str]:
@@ -3252,12 +3276,16 @@ class AgentEngine:
             return ChatResult(reply="当前没有待回答问题。")
 
         if text.startswith("/"):
-            return ChatResult(
-                reply=(
-                    "当前有待回答问题，请先回答后再使用命令。\n\n"
-                    f"{self._question_flow.format_prompt(current)}"
+            # 允许审批/权限相关命令在问题待回答时穿透执行
+            _lower = text.lower().replace("_", "")
+            _passthrough = ("/fullaccess", "/accept", "/reject")
+            if not any(_lower.startswith(p) for p in _passthrough):
+                return ChatResult(
+                    reply=(
+                        "当前有待回答问题，请先回答后再使用命令。\n\n"
+                        f"{self._question_flow.format_prompt(current)}"
+                    )
                 )
-            )
 
         try:
             parsed = self._question_flow.parse_answer(user_message, question=current)
@@ -3356,13 +3384,14 @@ class AgentEngine:
             self._last_tool_call_count = 0
             self._last_success_count = 0
             self._last_failure_count = 0
-        # 执行守卫标记重置
-        self._execution_guard_fired = False  # type: ignore[attr-defined]
         has_write_tool_call = False
         self._has_write_tool_call = False
         consecutive_text_only: int = 0
         self._finish_task_warned = False
-        write_hint = getattr(current_route_result, "write_hint", "unknown")
+        write_hint = _merge_write_hint(
+            getattr(current_route_result, "write_hint", None),
+            self._current_write_hint,
+        )
         # 设置实例属性供 _build_meta_tools 读取
         self._current_write_hint = write_hint
         # token 使用累计
@@ -3472,9 +3501,9 @@ class AgentEngine:
                     not self._active_skills
                     and iteration < max_iter - 1
                     and _contains_formula_advice(reply_text)
-                    and not getattr(self, "_execution_guard_fired", False)
+                    and not self._execution_guard_fired
                 ):
-                    self._execution_guard_fired = True  # type: ignore[attr-defined]
+                    self._execution_guard_fired = True
                     guard_msg = (
                         "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
                         "请立即调用 select_skill 激活 general_excel 技能，"
@@ -3589,7 +3618,7 @@ class AgentEngine:
                 if (
                     tc_result.tool_name == "finish_task"
                     and tc_result.success
-                    and "✓" in tc_result.result
+                    and tc_result.finish_accepted
                 ):
                     if tool_call_id:
                         self._memory.add_tool_result(tool_call_id, tc_result.result)
@@ -3662,27 +3691,35 @@ class AgentEngine:
                         current_route_result = self._refresh_route_after_skill_switch(
                             current_route_result
                         )
-                        write_hint = getattr(current_route_result, "write_hint", write_hint)
+                        write_hint = _merge_write_hint(
+                            getattr(current_route_result, "write_hint", None),
+                            write_hint,
+                        )
                         self._current_write_hint = write_hint
                         tool_scope = self._get_current_tool_scope(
                             route_result=current_route_result
                         )
-                    # 自动补充也可能激活了新 skill，需要刷新 scope
-                    elif self._turn_supplement_count > 0 and tc_result.success:
-                        current_scope_set = set(tool_scope) if tool_scope else set()
-                        new_union = set(self._active_skills_tool_union()) if self._active_skills else set()
-                        if not new_union.issubset(current_scope_set):
-                            current_route_result = self._refresh_route_after_skill_switch(
-                                current_route_result
-                            )
-                            write_hint = getattr(current_route_result, "write_hint", write_hint)
-                            self._current_write_hint = write_hint
-                            tool_scope = self._get_current_tool_scope(
-                                route_result=current_route_result
-                            )
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
+
+                # 自动补充可能在当前调用中激活新 skill（即使调用本身失败），
+                # 需要立刻刷新外层 scope，保证同批次后续工具可见。
+                if self._turn_supplement_count > 0:
+                    current_scope_set = set(tool_scope) if tool_scope else set()
+                    new_union = set(self._active_skills_tool_union()) if self._active_skills else set()
+                    if new_union and not new_union.issubset(current_scope_set):
+                        current_route_result = self._refresh_route_after_skill_switch(
+                            current_route_result
+                        )
+                        write_hint = _merge_write_hint(
+                            getattr(current_route_result, "write_hint", None),
+                            write_hint,
+                        )
+                        self._current_write_hint = write_hint
+                        tool_scope = self._get_current_tool_scope(
+                            route_result=current_route_result
+                        )
 
                 # 熔断检测
                 if (not breaker_triggered) and consecutive_failures >= max_failures:
@@ -3797,6 +3834,7 @@ class AgentEngine:
         pending_plan = False
         plan_id: str | None = None
         defer_tool_result = False
+        finish_accepted = False
 
         # 执行工具调用
         hook_skill = self._pick_route_skill(route_result)
@@ -4014,10 +4052,12 @@ class AgentEngine:
                             result_str = f"✓ 任务完成。{summary}"
                             success = True
                             error = None
+                            finish_accepted = True
                         elif getattr(self, "_finish_task_warned", False):
                             result_str = f"✓ 任务完成（无写入）。{summary}"
                             success = True
                             error = None
+                            finish_accepted = True
                         else:
                             result_str = (
                                 "⚠️ 未检测到写入类工具的成功调用。"
@@ -4027,6 +4067,7 @@ class AgentEngine:
                             self._finish_task_warned = True
                             success = True
                             error = None
+                            finish_accepted = False
                         log_tool_call(
                             logger,
                             tool_name,
@@ -4166,9 +4207,13 @@ class AgentEngine:
                     error = result_str
                     log_tool_call(logger, tool_name, arguments, error=error)
                 except Exception as exc:
-                    result_str = f"工具执行错误: {exc}"
+                    root_exc: Exception = exc
+                    if isinstance(exc, _AuditedExecutionError):
+                        audit_record = exc.record
+                        root_exc = exc.cause
+                    result_str = f"工具执行错误: {root_exc}"
                     success = False
-                    error = str(exc)
+                    error = str(root_exc)
                     log_tool_call(logger, tool_name, arguments, error=error)
 
             # ── 检测 registry 层返回的结构化错误 JSON ──
@@ -4276,6 +4321,7 @@ class AgentEngine:
             pending_plan=pending_plan,
             plan_id=plan_id,
             defer_tool_result=defer_tool_result,
+            finish_accepted=finish_accepted,
         )
 
     def _enrich_tool_result_with_window_perception(
@@ -4433,16 +4479,24 @@ class AgentEngine:
             with memory_tools.bind_memory_context(self._persistent_memory):
                 return self._registry.call_tool(name, args, tool_scope=scope)
 
-        return await asyncio.to_thread(
-            self._approval.execute_and_audit,
-            approval_id=approval_id,
-            tool_name=tool_name,
-            arguments=audited_arguments,
-            tool_scope=list(tool_scope),
-            execute=_execute,
-            undoable=undoable,
-            created_at_utc=created_at_utc,
-        )
+        try:
+            return await asyncio.to_thread(
+                self._approval.execute_and_audit,
+                approval_id=approval_id,
+                tool_name=tool_name,
+                arguments=audited_arguments,
+                tool_scope=list(tool_scope),
+                execute=_execute,
+                undoable=undoable,
+                created_at_utc=created_at_utc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # execute_and_audit 在失败时会先写入 manifest 与 _applied，再抛异常。
+            # 这里将失败记录带回调用方，避免上层丢失审计上下文。
+            record = self._approval.get_applied(approval_id)
+            if record is None:
+                raise
+            raise _AuditedExecutionError(cause=exc, record=record) from exc
 
     def clear_memory(self) -> None:
         """清除对话历史。"""
@@ -4471,6 +4525,17 @@ class AgentEngine:
         self._task_store.clear()
         self._approval.clear_pending()
         self._window_perception.reset()
+        # 重置轮级状态变量，防止跨对话污染
+        self._current_write_hint = "unknown"
+        self._execution_guard_fired = False
+        self._finish_task_warned = False
+        self._has_write_tool_call = False
+        self._system_mode_fallback = None
+        self._last_route_result = SkillMatchResult(
+            skills_used=[],
+            tool_scope=[],
+            route_mode="fallback",
+        )
 
     # ── 多模型切换 ──────────────────────────────────
 
@@ -4623,6 +4688,7 @@ class AgentEngine:
             route_mode=fallback.route_mode,
             system_contexts=fallback_contexts,
             parameterized=fallback.parameterized,
+            write_hint=fallback.write_hint,
         )
         logger.info(
             "斜杠技能 %s 为 guidance-only，已回落到任务路由: %s",
@@ -4679,10 +4745,11 @@ class AgentEngine:
                 used_chars = sum(len(ctx) for ctx in merged_contexts)
                 remaining_budget = budget - used_chars
 
-            if remaining_budget != 0:
+            # remaining_budget == -1：无限制；> 0：有剩余预算；<= 0（非-1）：已耗尽，跳过
+            if remaining_budget == -1 or remaining_budget > 0:
                 history_contexts = build_contexts_with_budget(
                     history_skills,
-                    remaining_budget if remaining_budget > 0 else -1,
+                    remaining_budget,  # -1 → 无限制，> 0 → 剩余预算
                 )
                 merged_contexts.extend(history_contexts)
         else:
@@ -4714,6 +4781,7 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=merged_contexts,
             parameterized=route_result.parameterized,
+            write_hint=route_result.write_hint,
         )
 
     async def _route_skills(
@@ -5135,7 +5203,11 @@ class AgentEngine:
             return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
 
         draft = pending.draft
-        task_list = self._task_store.create(draft.title, draft.subtasks)
+        task_list = self._task_store.create(
+            draft.title,
+            draft.subtasks,
+            replace_existing=True,
+        )
         self._approved_plan_context = (
             f"来源: {draft.file_path}\n"
             f"{draft.markdown.strip()}"
