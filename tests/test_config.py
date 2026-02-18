@@ -247,12 +247,12 @@ class TestDefaultValues:
         assert cfg.max_iterations == 20
 
     def test_default_max_consecutive_failures(self, monkeypatch) -> None:
-        """默认最大连续失败次数为 3。（需求 6.6）"""
+        """默认最大连续失败次数为 6。（需求 6.6）"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
-        assert cfg.max_consecutive_failures == 3
+        assert cfg.max_consecutive_failures == 6
 
     def test_default_session_ttl(self, monkeypatch) -> None:
         """默认会话 TTL 为 1800 秒。（需求 6.7）"""
@@ -365,7 +365,7 @@ class TestDefaultValues:
         assert cfg.subagent_enabled is True
         assert cfg.subagent_model is None
         assert cfg.subagent_max_iterations == 120
-        assert cfg.subagent_max_consecutive_failures == 2
+        assert cfg.subagent_max_consecutive_failures == 6
         assert cfg.subagent_user_dir == "~/.excelmanus/agents"
         assert cfg.subagent_project_dir == ".excelmanus/agents"
 
@@ -744,12 +744,12 @@ class TestWindowPerceptionConfig:
         with pytest.raises(ConfigError, match="EXCELMANUS_WINDOW_INTENT_STICKY_TURNS"):
             load_config()
 
-    def test_window_return_mode_invalid_fallback_to_enriched(self, monkeypatch) -> None:
-        """window_return_mode 非法值应回退 enriched，而非抛错。"""
+    def test_window_return_mode_invalid_fallback_to_adaptive(self, monkeypatch) -> None:
+        """window_return_mode 非法值应回退 adaptive，而非抛错。"""
         self._set_required_env(monkeypatch)
         monkeypatch.setenv("EXCELMANUS_WINDOW_RETURN_MODE", "invalid-mode")
         cfg = load_config()
-        assert cfg.window_return_mode == "enriched"
+        assert cfg.window_return_mode == "adaptive"
 
     def test_window_return_mode_unified_is_accepted(self, monkeypatch) -> None:
         """window_return_mode=unified 应被正确解析。"""
@@ -949,36 +949,39 @@ class TestAutoActivateDefaultSkill:
             load_config()
 
 
-class TestSkillPrerouteFallbackConfig:
-    """预路由回退策略配置项测试。"""
+class TestSkillPrerouteModeConfig:
+    """预路由模式配置项测试。"""
 
     def _set_required_env(self, monkeypatch) -> None:
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
 
-    def test_default_is_auto(self, monkeypatch) -> None:
+    def test_default_is_adaptive(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)
         cfg = load_config()
-        assert cfg.skill_preroute_fallback == "auto"
+        assert cfg.skill_preroute_mode == "adaptive"
 
-    def test_env_meta_only(self, monkeypatch) -> None:
+    def test_env_adaptive(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)
-        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "meta_only")
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_MODE", "adaptive")
         cfg = load_config()
-        assert cfg.skill_preroute_fallback == "meta_only"
+        assert cfg.skill_preroute_mode == "adaptive"
 
-    def test_env_general_excel(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("legacy_mode", ["off", "meta_only", "deepseek", "gemini", "hybrid"])
+    def test_legacy_mode_raises_config_error(self, monkeypatch, legacy_mode: str) -> None:
         self._set_required_env(monkeypatch)
-        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "general_excel")
-        cfg = load_config()
-        assert cfg.skill_preroute_fallback == "general_excel"
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_MODE", legacy_mode)
+        with pytest.raises(ConfigError, match="EXCELMANUS_SKILL_PREROUTE_MODE") as exc_info:
+            load_config()
+        assert legacy_mode in str(exc_info.value)
+        assert "adaptive" in str(exc_info.value)
 
-    def test_invalid_falls_back_to_auto(self, monkeypatch) -> None:
+    def test_invalid_mode_raises_config_error(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)
-        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "invalid-value")
-        cfg = load_config()
-        assert cfg.skill_preroute_fallback == "auto"
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_MODE", "random-mode")
+        with pytest.raises(ConfigError, match="EXCELMANUS_SKILL_PREROUTE_MODE"):
+            load_config()
 
 class TestAutoSupplementConfig:
     """auto_supplement 配置项测试。"""

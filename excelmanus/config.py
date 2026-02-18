@@ -114,10 +114,8 @@ class ExcelManusConfig:
     window_rule_engine_version: str = "v1"
     # 默认技能预激活：非斜杠路由时自动激活 general_excel
     auto_activate_default_skill: bool = True
-    # 小模型预路由配置
-    skill_preroute_mode: str = "hybrid"  # off / deepseek / gemini / meta_only / hybrid
-    # 预路由失败后的回退策略：auto 按 mode 兼容映射（hybrid->meta_only, deepseek/gemini->general_excel）
-    skill_preroute_fallback: str = "auto"  # auto / meta_only / general_excel
+    # 小模型预路由配置（单一策略）
+    skill_preroute_mode: str = "adaptive"  # adaptive
     # 窗口感知顾问独立小模型配置（可选，未配置时回退到 skill_preroute_*，再回退到主模型）
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
@@ -713,21 +711,21 @@ def load_config() -> ExcelManusConfig:
         True,
     )
 
-    # 小模型预路由配置
-    skill_preroute_mode_raw = os.environ.get("EXCELMANUS_SKILL_PREROUTE_MODE", "hybrid").strip().lower()
-    if skill_preroute_mode_raw not in {"off", "deepseek", "gemini", "meta_only", "hybrid"}:
-        logger.warning(
-            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 非法(%r)，已回退为 hybrid",
-            skill_preroute_mode_raw,
+    # 小模型预路由配置（仅支持 adaptive）
+    skill_preroute_mode_raw = os.environ.get(
+        "EXCELMANUS_SKILL_PREROUTE_MODE", "adaptive"
+    ).strip().lower()
+    legacy_preroute_modes = {"off", "deepseek", "gemini", "meta_only", "hybrid"}
+    if skill_preroute_mode_raw in legacy_preroute_modes:
+        raise ConfigError(
+            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 旧值"
+            f" {skill_preroute_mode_raw!r} 已移除，请迁移为 'adaptive'。"
         )
-        skill_preroute_mode_raw = "hybrid"
-    skill_preroute_fallback = os.environ.get("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "auto").strip().lower()
-    if skill_preroute_fallback not in {"auto", "meta_only", "general_excel"}:
-        logger.warning(
-            "配置项 EXCELMANUS_SKILL_PREROUTE_FALLBACK 非法(%r)，已回退为 auto",
-            skill_preroute_fallback,
+    if skill_preroute_mode_raw != "adaptive":
+        raise ConfigError(
+            "配置项 EXCELMANUS_SKILL_PREROUTE_MODE 仅支持 'adaptive'，"
+            f"当前值: {skill_preroute_mode_raw!r}"
         )
-        skill_preroute_fallback = "auto"
     skill_preroute_api_key = os.environ.get("EXCELMANUS_SKILL_PREROUTE_API_KEY") or None
     skill_preroute_base_url = os.environ.get("EXCELMANUS_SKILL_PREROUTE_BASE_URL") or None
     if skill_preroute_base_url:
@@ -834,7 +832,6 @@ def load_config() -> ExcelManusConfig:
         window_rule_engine_version=window_rule_engine_version,
         auto_activate_default_skill=auto_activate_default_skill,
         skill_preroute_mode=skill_preroute_mode_raw,
-        skill_preroute_fallback=skill_preroute_fallback,
         skill_preroute_api_key=skill_preroute_api_key,
         skill_preroute_base_url=skill_preroute_base_url,
         skill_preroute_model=skill_preroute_model,
