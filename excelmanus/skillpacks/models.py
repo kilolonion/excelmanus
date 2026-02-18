@@ -15,14 +15,11 @@ class Skillpack:
 
     name: str
     description: str
-    allowed_tools: list[str]
-    triggers: list[str]
     instructions: str
     source: SkillpackSource
     root_dir: str
     file_patterns: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
-    priority: int = 0
     version: str = "1.0.0"
     disable_model_invocation: bool = False
     user_invocable: bool = True

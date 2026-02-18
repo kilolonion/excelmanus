@@ -182,7 +182,6 @@ def _to_standard_skill_detail(detail: dict) -> dict:
 
     normalized = dict(detail)
     alias_pairs = (
-        ("allowed_tools", "allowed-tools"),
         ("file_patterns", "file-patterns"),
         ("disable_model_invocation", "disable-model-invocation"),
         ("user_invocable", "user-invocable"),
