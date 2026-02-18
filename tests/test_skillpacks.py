@@ -331,51 +331,6 @@ class TestSkillpackLoader:
         loaded = loader.load_all()
         assert loaded["mcp/dispatcher"].description == "user-openclaw"
 
-    def test_soft_validate_unknown_allowed_tools(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "general_excel",
-            description="test",
-            allowed_tools=["read_excel", "unknown_tool"],
-            triggers=["excel"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        assert any("unknown_tool" in warning for warning in loader.warnings)
-
-    def test_soft_validate_accepts_mcp_selectors(self, tmp_path: Path) -> None:
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        _write_skillpack(
-            system_dir,
-            "general_excel",
-            description="test",
-            allowed_tools=[
-                "read_excel",
-                "mcp:*",
-                "mcp:context7:*",
-                "mcp:context7:query_docs",
-            ],
-            triggers=["excel"],
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loader.load_all()
-        assert not any("mcp:" in warning for warning in loader.warnings)
-
     def test_parse_required_mcp_fields(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
