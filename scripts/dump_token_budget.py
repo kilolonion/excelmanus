@@ -25,11 +25,10 @@ router = SkillRouter(config, loader)
 engine = AgentEngine(config, registry, skill_router=router)
 
 route_result = SkillMatchResult(
-    skills_used=[], tool_scope=[], route_mode="fallback", system_contexts=[],
+    skills_used=[], route_mode="fallback", system_contexts=[],
 )
 
-tool_scope = engine._get_current_tool_scope(route_result=route_result)
-tools = engine._build_tools_for_scope(tool_scope=tool_scope)
+tools = engine._build_v5_tools()
 
 # 逐个工具统计 token 数
 total_tools_tokens = 0

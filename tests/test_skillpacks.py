@@ -398,7 +398,7 @@ class TestSkillpackLoader:
 
         _write_skillpack(
             system_dir,
-            "general_excel",
+            "test_fallback",
             description="测试",
             user_invocable=False,
         )
@@ -407,7 +407,7 @@ class TestSkillpackLoader:
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
 
-        assert loaded["general_excel"].user_invocable is False
+        assert loaded["test_fallback"].user_invocable is False
 
     def test_argument_hint_defaults_to_empty_string(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
@@ -861,7 +861,7 @@ class TestSkillRouter:
         )
         _write_skillpack(
             system_dir,
-            "general_excel",
+            "test_fallback",
             description="通用兜底",
         )
 
@@ -895,7 +895,7 @@ class TestSkillRouter:
         )
         _write_skillpack(
             system_dir,
-            "general_excel",
+            "test_fallback",
             description="通用兜底",
         )
 
@@ -969,7 +969,7 @@ class TestSkillRouter:
         )
         _write_skillpack(
             system_dir,
-            "general_excel",
+            "test_fallback",
             description="通用兜底",
         )
 
