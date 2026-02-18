@@ -20,8 +20,6 @@ def _skill_with_hooks(hooks: dict) -> Skillpack:
     return Skillpack(
         name="hook/test",
         description="test",
-        allowed_tools=["add_numbers"],
-        triggers=[],
         instructions="",
         source="project",
         root_dir="/tmp/hook",

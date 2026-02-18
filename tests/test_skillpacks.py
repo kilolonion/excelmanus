@@ -37,8 +37,6 @@ def _write_skillpack(
     name: str,
     *,
     description: str,
-    allowed_tools: list[str],
-    triggers: list[str],
     disable_model_invocation: bool | None = None,
     user_invocable: bool | None = None,
     argument_hint: str | None = None,
@@ -50,10 +48,6 @@ def _write_skillpack(
         "---",
         f"name: {name}",
         f"description: {description}",
-        "allowed_tools:",
-        *[f"  - {item}" for item in allowed_tools],
-        "triggers:",
-        *[f"  - {item}" for item in triggers],
     ]
     if disable_model_invocation is not None:
         flag = "true" if disable_model_invocation else "false"
@@ -101,22 +95,16 @@ class TestSkillpackLoader:
             system_dir,
             "data_basic",
             description="system",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             user_dir,
             "data_basic",
             description="user",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             project_dir,
             "data_basic",
             description="project",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -144,15 +132,11 @@ class TestSkillpackLoader:
             home_dir / ".claude" / "skills",
             "data_basic",
             description="user-claude",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             workspace / ".claude" / "skills",
             "data_basic",
             description="workspace-claude",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
 
         config = _make_config(
@@ -186,15 +170,11 @@ class TestSkillpackLoader:
             workspace / ".agents" / "skills",
             "team/data-cleaner",
             description="ancestor-far",
-            allowed_tools=["read_excel"],
-            triggers=["清洗"],
         )
         _write_skillpack(
             workspace / "src" / ".agents" / "skills",
             "team/data-cleaner",
             description="ancestor-near",
-            allowed_tools=["read_excel"],
-            triggers=["清洗"],
         )
 
         config = _make_config(
@@ -229,8 +209,6 @@ class TestSkillpackLoader:
             outside_root / ".agents" / "skills",
             "outside/poison",
             description="outside-ancestor",
-            allowed_tools=["read_excel"],
-            triggers=["污染"],
         )
 
         config = _make_config(
@@ -265,15 +243,11 @@ class TestSkillpackLoader:
             home_dir / ".openclaw" / "skills",
             "mcp/dispatcher",
             description="user-openclaw",
-            allowed_tools=["read_excel"],
-            triggers=["调度"],
         )
         _write_skillpack(
             workspace / ".openclaw" / "skills",
             "mcp/dispatcher",
             description="workspace-openclaw",
-            allowed_tools=["read_excel"],
-            triggers=["调度"],
         )
 
         config = _make_config(
@@ -308,15 +282,11 @@ class TestSkillpackLoader:
             home_dir / ".openclaw" / "skills",
             "mcp/dispatcher",
             description="user-openclaw",
-            allowed_tools=["read_excel"],
-            triggers=["调度"],
         )
         _write_skillpack(
             workspace / "skills",
             "mcp/dispatcher",
             description="workspace-legacy-skills",
-            allowed_tools=["read_excel"],
-            triggers=["调度"],
         )
 
         config = _make_config(
@@ -411,8 +381,6 @@ class TestSkillpackLoader:
             system_dir,
             "data_basic",
             description="测试",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -432,8 +400,6 @@ class TestSkillpackLoader:
             system_dir,
             "general_excel",
             description="测试",
-            allowed_tools=["read_excel"],
-            triggers=["excel"],
             user_invocable=False,
         )
 
@@ -454,8 +420,6 @@ class TestSkillpackLoader:
             system_dir,
             "data_basic",
             description="测试",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -474,8 +438,6 @@ class TestSkillpackLoader:
             system_dir,
             "chart_basic",
             description="图表",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
             argument_hint="<file> <chart_type> <x_col> <y_col>",
         )
 
@@ -521,74 +483,7 @@ class TestSkillpackLoader:
                 skill_file=skill_file,
             )
 
-    def test_triggers_allows_empty_list(self, tmp_path: Path) -> None:
-        """triggers 允许为空列表（兜底技能场景）。"""
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
 
-        skill_dir = system_dir / "general_excel"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_file = skill_dir / "SKILL.md"
-        skill_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "name: general_excel",
-                    "description: 兜底技能",
-                    "allowed_tools:",
-                    "  - read_excel",
-                    "triggers: []",
-                    "user_invocable: false",
-                    "---",
-                    "测试说明",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        loaded = loader.load_all()
-        assert "general_excel" in loaded
-        assert loaded["general_excel"].triggers == []
-
-    def test_allowed_tools_empty_list_is_allowed(self, tmp_path: Path) -> None:
-        """allowed_tools 允许为空列表（仅注入上下文，不自动追加工具权限）。"""
-        system_dir = tmp_path / "system"
-        user_dir = tmp_path / "user"
-        project_dir = tmp_path / "project"
-        for d in (system_dir, user_dir, project_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-        skill_dir = system_dir / "broken_skill"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_file = skill_dir / "SKILL.md"
-        skill_file.write_text(
-            "\n".join(
-                [
-                    "---",
-                    "name: broken_skill",
-                    "description: 非法技能",
-                    "allowed_tools: []",
-                    "triggers: []",
-                    "---",
-                    "测试说明",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        config = _make_config(system_dir, user_dir, project_dir)
-        loader = SkillpackLoader(config, _tool_registry())
-        parsed = loader._parse_skillpack_file(
-            source="system",
-            skill_dir=skill_dir,
-            skill_file=skill_file,
-        )
-        assert parsed.allowed_tools == []
 
     def test_context_fork_is_rejected_with_migration_hint(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
@@ -601,8 +496,6 @@ class TestSkillpackLoader:
             system_dir,
             "excel_code_runner",
             description="大文件代码处理",
-            allowed_tools=["read_excel"],
-            triggers=["大文件"],
             instructions="测试",
         )
         # 注入已废弃的 fork 上下文配置
@@ -629,8 +522,6 @@ class TestSkillpackLoader:
             system_dir,
             "excel_code_runner",
             description="大文件代码处理",
-            allowed_tools=["read_excel"],
-            triggers=["大文件"],
             instructions="测试",
         )
         skill_file = system_dir / "excel_code_runner" / "SKILL.md"
@@ -703,8 +594,6 @@ class TestSkillRouter:
             system_dir,
             "chart_basic",
             description="图表",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
             instructions=(
                 "文件：$0\n"
                 "类型：$ARGUMENTS[1]\n"
@@ -748,8 +637,6 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -780,15 +667,11 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             system_dir,
             "chart_basic",
             description="图表",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -936,8 +819,6 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         large_file = tmp_path / "big.xlsx"
         large_file.write_bytes(b"x" * 64)
@@ -977,15 +858,11 @@ class TestSkillRouter:
             system_dir,
             "format_basic",
             description="格式化",
-            allowed_tools=["format_cells", "read_excel"],
-            triggers=["格式", "字体", "红色"],
         )
         _write_skillpack(
             system_dir,
             "general_excel",
             description="通用兜底",
-            allowed_tools=["write_excel", "read_excel"],
-            triggers=[],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -1015,15 +892,11 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="数据分析",
-            allowed_tools=["read_excel", "analyze_data"],
-            triggers=["分析"],
         )
         _write_skillpack(
             system_dir,
             "general_excel",
             description="通用兜底",
-            allowed_tools=["write_excel", "read_excel"],
-            triggers=[],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -1053,8 +926,6 @@ class TestSkillRouter:
             system_dir,
             "chart_basic",
             description="图表",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
             instructions="文件：$0\n类型：$1",
         )
         large_file = tmp_path / "sales.xlsx"
@@ -1095,15 +966,11 @@ class TestSkillRouter:
             system_dir,
             "excel_code_runner",
             description="代码执行",
-            allowed_tools=["read_excel"],
-            triggers=["代码"],
         )
         _write_skillpack(
             system_dir,
             "general_excel",
             description="通用兜底",
-            allowed_tools=["read_excel"],
-            triggers=["excel"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -1139,15 +1006,11 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="数据分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             system_dir,
             "chart_basic",
             description="图表生成",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)
@@ -1175,15 +1038,11 @@ class TestSkillRouter:
             system_dir,
             "data_basic",
             description="数据分析",
-            allowed_tools=["read_excel"],
-            triggers=["分析"],
         )
         _write_skillpack(
             system_dir,
             "chart_basic",
             description="图表生成",
-            allowed_tools=["create_chart"],
-            triggers=["图表"],
         )
 
         config = _make_config(system_dir, user_dir, project_dir)

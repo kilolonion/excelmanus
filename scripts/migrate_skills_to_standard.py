@@ -52,16 +52,10 @@ def _build_frontmatter(skill, *, inject_defaults: bool) -> dict[str, Any]:
         "description": skill.description,
     }
 
-    if inject_defaults or skill.allowed_tools:
-        frontmatter["allowed-tools"] = list(skill.allowed_tools)
-    if inject_defaults or skill.triggers:
-        frontmatter["triggers"] = list(skill.triggers)
     if inject_defaults or skill.file_patterns:
         frontmatter["file-patterns"] = list(skill.file_patterns)
     if inject_defaults or skill.resources:
         frontmatter["resources"] = list(skill.resources)
-    if inject_defaults or int(skill.priority) != 0:
-        frontmatter["priority"] = int(skill.priority)
     if inject_defaults or skill.version != "1.0.0":
         frontmatter["version"] = skill.version
     if inject_defaults or skill.disable_model_invocation:

@@ -113,12 +113,11 @@ def _setup_engine_in(
     for d in (system_dir, user_dir, project_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    for name, description, allowed_tools in skills:
+    for name, description, _tools in skills:
         _write_skillpack(
             system_dir,
             name,
             description=description,
-            allowed_tools=allowed_tools,
         )
 
     config = _make_config(system_dir, user_dir, project_dir)

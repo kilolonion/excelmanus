@@ -865,7 +865,6 @@ class TestSkillsSubcommands:
         engine.get_skillpack_detail.return_value = {
             "name": "data_basic",
             "description": "分析",
-            "allowed_tools": ["read_excel"],
             "required_mcp_servers": ["context7"],
             "required_mcp_tools": ["context7:query_docs"],
         }
@@ -878,7 +877,7 @@ class TestSkillsSubcommands:
                 for call in mock_console.print.call_args_list
                 if call.args
             )
-            assert "allowed-tools" in rendered
+            assert "name" in rendered
             assert "required-mcp-servers" in rendered
             assert "required-mcp-tools" in rendered
 
@@ -888,7 +887,7 @@ class TestSkillsSubcommands:
         with patch("excelmanus.cli.console") as mock_console, \
              patch("excelmanus.cli._sync_skill_command_suggestions") as sync_mock:
             mock_console.input.side_effect = [
-                '/skills create api_skill --json \'{"description":"d","allowed_tools":["read_excel"],"triggers":["分析"],"instructions":"说明"}\'',
+                '/skills create api_skill --json \'{"description":"d","instructions":"说明"}\'',
                 "exit",
             ]
             _run(_repl_loop(engine))

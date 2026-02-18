@@ -882,8 +882,6 @@ class TestSkillpackCrudEndpoints:
                 "name": "api_skill",
                 "payload": {
                     "description": "api 创建",
-                    "allowed_tools": ["read_excel"],
-                    "triggers": ["分析"],
                     "instructions": "说明",
                 },
             },
@@ -930,16 +928,12 @@ class TestSkillpackCrudEndpoints:
                         "name": "api_skill",
                         "payload": {
                             "description": "api 创建",
-                            "allowed-tools": ["read_excel"],
-                            "triggers": ["分析"],
                             "instructions": "说明",
                         },
                     },
                 )
                 assert create_resp.status_code == 201
                 created_detail = create_resp.json()["detail"]
-                assert "allowed-tools" in created_detail
-                assert "allowed_tools" not in created_detail
 
                 patch_resp = await c.patch(
                     "/api/v1/skills/api_skill",
@@ -980,12 +974,10 @@ class TestSkillpackCrudEndpoints:
                         "name": "api_skill",
                         "payload": {
                             "description": "api 创建",
-                            "allowed_tools": ["read_excel"],
                             "command-dispatch": "tool",
                             "command-tool": "read_excel",
                             "required-mcp-servers": ["context7"],
                             "required-mcp-tools": ["context7:query_docs"],
-                            "triggers": [],
                             "instructions": "说明正文",
                         },
                     },
@@ -997,8 +989,6 @@ class TestSkillpackCrudEndpoints:
                 detail = detail_resp.json()
                 assert detail["name"] == "api_skill"
                 assert detail["instructions"] == "说明正文"
-                assert detail["triggers"] == []
-                assert detail["allowed-tools"] == ["read_excel"]
                 assert detail["command-dispatch"] == "tool"
                 assert detail["command-tool"] == "read_excel"
                 assert detail["required-mcp-servers"] == ["context7"]
@@ -1023,9 +1013,7 @@ class TestSkillpackCrudEndpoints:
                     "---",
                     "name: data_basic",
                     "description: 系统版",
-                    "allowed_tools:",
                     "  - read_excel",
-                    "triggers:",
                     "  - 分析",
                     "---",
                     "说明",
@@ -1077,8 +1065,6 @@ class TestSkillpackCrudEndpoints:
                     json={
                         "name": "bad_skill",
                         "payload": {
-                            "allowed_tools": ["read_excel"],
-                            "triggers": ["分析"],
                             "instructions": "缺少 description",
                         },
                     },
@@ -1161,8 +1147,6 @@ class TestSkillpackCrudEndpoints:
                         "name": "dup_skill",
                         "payload": {
                             "description": "第一次创建",
-                            "allowed_tools": ["read_excel"],
-                            "triggers": ["分析"],
                             "instructions": "说明",
                         },
                     },
@@ -1175,8 +1159,6 @@ class TestSkillpackCrudEndpoints:
                         "name": "dup_skill",
                         "payload": {
                             "description": "第二次创建",
-                            "allowed_tools": ["read_excel"],
-                            "triggers": ["分析"],
                             "instructions": "说明",
                         },
                     },
@@ -1239,8 +1221,6 @@ class TestSkillpackCrudEndpoints:
                         "name": "api_skill",
                         "payload": {
                             "description": "api 创建",
-                            "allowed_tools": ["read_excel"],
-                            "triggers": ["分析"],
                             "instructions": "说明",
                         },
                     },
@@ -1281,7 +1261,6 @@ class TestSkillpackCrudEndpoints:
                         "name": "api_skill",
                         "payload": {
                             "description": "api 创建",
-                            "allowed_tools": ["read_excel"],
                             "instructions": "说明",
                         },
                     },
@@ -1342,9 +1321,7 @@ class TestSkillpackCrudEndpoints:
                     "---",
                     "name: data_basic",
                     "description: 系统版",
-                    "allowed_tools:",
                     "  - read_excel",
-                    "triggers:",
                     "  - 分析",
                     "---",
                     "说明",
