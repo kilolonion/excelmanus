@@ -991,8 +991,8 @@ def _render_skills(engine: AgentEngine) -> None:
         if route.skills_used
         else "[dim white]无[/dim white]",
     )
-    tool_count = len(route.tool_scope) if route.tool_scope else 0
-    table.add_row("工具范围", f"{tool_count} 个工具")
+    tool_count = len(engine._all_tool_names()) if hasattr(engine, "_all_tool_names") else 0
+    table.add_row("可用工具", f"{tool_count} 个工具")
     permission = "full_access" if engine.full_access_enabled else "restricted"
     table.add_row("代码技能权限", permission)
     table.add_row(
