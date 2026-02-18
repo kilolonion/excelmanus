@@ -4379,10 +4379,9 @@ class AgentEngine:
                 arguments=json.dumps(arguments, ensure_ascii=False),
             ),
         )
-        tool_scope = self._get_current_tool_scope(route_result=route_result)
         tc_result = await self._execute_tool_call(
             tc,
-            tool_scope,
+            None,
             on_event,
             iteration=1,
             route_result=route_result,
@@ -4960,15 +4959,11 @@ class AgentEngine:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # 所有模式均注入工具索引，确保模型在 active skill 场景下也感知可扩展能力。
-        _tool_scope = self._get_current_tool_scope(route_result=route_result)
-        # auto_supplement 模式下不使用 compact，让 LLM 看到完整可扩展能力图谱；
-        # 否则 compact 模式会过滤掉非关键类别的 inactive 工具，导致 LLM 不知道
-        # 可以通过 auto_supplement 获取 sheet/file/code 等类别的工具。
-        _compact = bool(self._active_skills) and not self._config.auto_supplement_enabled
+        # v5: 注入工具索引，使用全量已注册工具（不再按 scope 过滤）
+        _all_tools = self._all_tool_names()
         _tool_index = self._build_tool_index_notice(
-            _tool_scope,
-            compact=_compact,
+            _all_tools,
+            compact=False,
         )
         if _tool_index:
             base_prompt = base_prompt + "\n\n" + _tool_index
@@ -5205,12 +5200,13 @@ class AgentEngine:
         compact: bool = False,
         max_tools_per_category: int = 8,
     ) -> str:
-        """生成当前可用工具的分类索引，注入 system prompt。
+        """v5: 生成工具分类索引，注入 system prompt。
 
-        同时列出未激活但可通过 select_skill 获取的工具，
-        让 LLM 了解完整能力图谱并主动激活技能。
+        所有工具均已注册可见。core 工具完整展示 schema，
+        extended 工具需先调用 expand_tools 获取完整参数。
         """
         from excelmanus.tools.policy import TOOL_CATEGORIES, TOOL_SHORT_DESCRIPTIONS
+        from excelmanus.tools.profile import CORE_TOOLS
 
         _CATEGORY_LABELS: dict[str, str] = {
             "data_read": "数据读取",
@@ -5224,11 +5220,9 @@ class AgentEngine:
         }
 
         limit = max(1, int(max_tools_per_category))
-        scope_set = set(tool_scope)
-        active_lines: list[str] = []
-        inactive_lines: list[str] = []
         registered = set(self._all_tool_names())
-        key_inactive_categories = {"data_write", "format", "chart"}
+        core_lines: list[str] = []
+        extended_lines: list[str] = []
 
         def _format_tool_list(tools: Sequence[str], *, with_desc: bool = False) -> str:
             visible = list(tools[:limit])
@@ -5249,47 +5243,37 @@ class AgentEngine:
 
         for cat, tools in TOOL_CATEGORIES.items():
             label = _CATEGORY_LABELS.get(cat, cat)
-            available = [t for t in tools if t in scope_set]
-            inactive = [t for t in tools if t not in scope_set and t in registered]
-            if available:
-                line = _format_tool_list(available)
+            available = [t for t in tools if t in registered]
+            if not available:
+                continue
+            core = [t for t in available if t in CORE_TOOLS]
+            extended = [t for t in available if t not in CORE_TOOLS]
+            if core:
+                line = _format_tool_list(core)
                 if line:
-                    active_lines.append(f"- {label}：{line}")
-            if inactive:
-                if compact and cat not in key_inactive_categories:
-                    continue
-                suffix = " [需 fullAccess]" if cat == "code" else ""
-                line = _format_tool_list(inactive, with_desc=True)
+                    core_lines.append(f"- {label}：{line}")
+            if extended:
+                expanded = cat in self._expanded_categories
+                suffix = "" if expanded else " [需 expand_tools]"
+                code_suffix = " [需 fullAccess]" if cat == "code" else ""
+                line = _format_tool_list(extended, with_desc=True)
                 if line:
-                    inactive_lines.append(f"  · {label}：{line}{suffix}")
+                    extended_lines.append(f"  · {label}：{line}{suffix}{code_suffix}")
 
-        if not active_lines and not inactive_lines:
+        if not core_lines and not extended_lines:
             return ""
 
         parts: list[str] = ["## 工具索引"]
-        if active_lines:
-            parts.append("当前可用：")
-            parts.extend(active_lines)
-        if inactive_lines:
-            parts.append("按需可用（直接调用即可，系统会自动激活对应技能）：" if self._config.auto_supplement_enabled else "未激活（需 select_skill 激活对应技能后可用）：")
-            parts.extend(inactive_lines)
-        if self._config.auto_supplement_enabled:
-            if inactive_lines:
-                parts.append(
-                    "\n⚠️ 上述按需可用工具可直接调用，系统会自动激活对应技能。"
-                    "无需先调用 select_skill。"
-                )
-            parts.append(
-                "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
-                "不得以文本建议替代实际写入操作。"
-            )
-        else:
-            parts.append(
-                "\n⚠️ 当任务需要未激活工具时，立即调用 select_skill 激活技能，"
-                "禁止向用户请求权限或声称无法完成。"
-                "\n⚠️ 特别是写入类任务（公式、数据、格式），必须激活技能后调用工具执行，"
-                "不得以文本建议替代实际写入操作。"
-            )
+        if core_lines:
+            parts.append("核心工具（直接可用）：")
+            parts.extend(core_lines)
+        if extended_lines:
+            parts.append("扩展工具（调用 expand_tools 展开对应类别后可用）：")
+            parts.extend(extended_lines)
+        parts.append(
+            "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
+            "不得以文本建议替代实际写入操作。"
+        )
         return "\n".join(parts)
 
 
