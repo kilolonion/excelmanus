@@ -1,7 +1,7 @@
 # v5 架构升级变更记录
 
 > 日期：2026-02-18
-> 状态：**Phase 1 + Phase 2 均已完成**，全量回归 1446 passed / 0 failed
+> 状态：**Phase 1 + Phase 2 + Phase 3 均已完成**，全量回归 1446 passed / 0 failed
 
 ## 概述
 
@@ -186,10 +186,38 @@ ToolProfile 层核心定义：
 
 ---
 
+## Phase 3: Bench Tracer 修复 + SkillMatchResult.tool_scope 清理
+
+> 里程碑 commit: `c423a05`
+
+### 修复 bench.py `_EngineTracer` 运行时崩溃
+
+`_EngineTracer` 通过 monkey-patch 拦截 engine 方法记录 trace 数据。Phase 1 删除了 `_get_current_tool_scope`，但 tracer 仍引用该方法，导致 bench 跑测时 `AttributeError` 崩溃。
+
+- 删除 `_traced_scope` 方法及相关 monkey-patch（`__init__` 和 `restore()`）
+- 更新 docstring 移除对已删除方法的引用
+
+### `SkillMatchResult.tool_scope` 改为可选默认空列表
+
+- `models.py`：`tool_scope` 从必填字段改为 `field(default_factory=list)`，字段顺序调整到 `route_mode` 之后
+- 全代码库 22 处 `tool_scope=[]` 冗余传参批量清理（engine.py ×5、router.py ×2、bench.py ×2、test_engine.py ×7、test_write_guard.py ×4、test_bench.py ×1、test_cli.py ×1）
+
+### `tool_scope` 残留位置（保留不动）
+
+| 位置 | 原因 |
+|---|---|
+| `api.py` ChatResponse | 公共 API 向后兼容，始终返回 `[]` |
+| `events.py` ToolCallEvent | 可观测性 |
+| `bench.py` TurnResult/CaseResult | bench 指标记录 |
+| `subagent/executor.py` + `tool_filter.py` | 子代理运行期工具隔离（不同概念） |
+| `approval.py` PendingApproval/AppliedApprovalRecord | 审计记录（已兼容 None） |
+| `cli.py` `/status` 显示 | 显示工具数量（v5 中始终为 0） |
+
+---
+
 ## 后续工作
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| `SkillMatchResult.tool_scope` 字段移除 | Low | 当前始终为空列表，可在下一版本中从 dataclass 移除 |
 | Skillpack model `allowed_tools`/`triggers`/`priority` 字段移除 | Low | 当前保留空默认值供 user/project 层向后兼容，后续可移除 |
 | 窗口感知顾问独立 mock | Low | 解决 advisor 共享 `_client` 的测试隔离问题 |
