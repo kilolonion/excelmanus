@@ -1,7 +1,7 @@
 # v5 架构升级变更记录
 
 > 日期：2026-02-18
-> 状态：Phase 1 已完成，全量回归 1448 passed / 0 failed
+> 状态：**Phase 1 + Phase 2 均已完成**，全量回归 1446 passed / 0 failed
 
 ## 概述
 
@@ -146,11 +146,50 @@ ToolProfile 层核心定义：
 - 删除 `TestToolScopeTransitions`：tool_scope 状态转换概念已移除
 - 修复 `TestApprovalFlow`：`tool_scope=None` 兼容
 
+---
+
+## Phase 2: 废弃字段清理 + 全链路术语对齐
+
+> 里程碑 commit: `b9b1c27`
+
+### WI-1: SKILL.md 格式迁移
+
+- 从 6 个系统 SKILL.md（data_basic / chart_basic / format_basic / excel_code_runner / file_ops / sheet_ops）中移除 `allowed_tools`、`triggers`、`priority` frontmatter 字段（-172 行）
+- 删除 `general_excel/` 整个 skillpack 目录（无代码引用、`user_invocable: false`）
+- 更新 `README.md`：移除预路由行为描述，更新系统 skillpack 列表
+
+### WI-2: Model / Loader / Router 瘦身
+
+| 文件 | 改动 |
+|---|---|
+| `skillpacks/router.py` | `_build_result()` 不再从 `skill.allowed_tools` 构建 `tool_scope`（始终返回空列表）；更新 `_build_fallback_result` docstring |
+| `skillpacks/loader.py` | 删除 `_validate_allowed_tools_soft()` 和 `_is_allowed_tool_selector()`（-75 行） |
+| `engine.py` | `_adapt_guidance_only_slash_route()` 中 `skill.allowed_tools` 判断替换为 `skill.command_dispatch == "tool"` |
+
+### WI-3: tool_scope + 旧术语全链路清理
+
+| 文件 | 改动 |
+|---|---|
+| `engine.py` | `_execute_tool_call` / `_call_registry_tool` 的 `tool_scope` 参数改为 `Sequence[str] \| None`；`ToolNotAllowedError` 分支兼容 None |
+| `engine.py` | `_handle_select_skill` → `_handle_activate_skill`；`_is_select_skill_ok` → `_is_activate_skill_ok` |
+| `subagent/executor.py` | `_SUBAGENT_BLOCKED_META_TOOLS` 更新为 `activate_skill` + `expand_tools` |
+| `subagent/builtin.py` | full 子代理系统提示：`select_skill` → `activate_skill` |
+| `renderer.py` | `_META_TOOL_DISPLAY` 映射更新为 `activate_skill` + `expand_tools`；`_meta_tool_hint` 适配 |
+| `memory.py` | 系统提示工具策略段：`select_skill` → `activate_skill` / `expand_tools` |
+
+### Phase 2 测试适配
+
+- `test_pbt_llm_routing.py`：`_handle_select_skill` → `_handle_activate_skill`（3 处）
+- `test_engine.py`：MCP 依赖测试适配（2 处）；slash pass-through 测试检查 `call_args_list[0]`
+- `test_skillpacks.py`：`tool_scope == ["create_chart"]` → `tool_scope == []`；删除 2 个 `_validate_allowed_tools_soft` 测试
+- `test_system_skill_reachability.py`：重写为 v5 兼容断言（不再检查 `allowed_tools` 内容，确认 `general_excel` 不存在）
+
+---
+
 ## 后续工作
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| SKILL.md 格式迁移 | Medium | 移除 `allowed_tools`、`triggers`、`priority` frontmatter 字段 |
-| SkillMatchResult 简化 | Medium | `tool_scope` 字段可选化或移除 |
-| general_excel skillpack 删除 | Low | 不再需要 fallback 默认技能 |
-| 窗口感知顾问独立 mock | Low | 解决 advisor 共享 _client 的测试隔离问题 |
+| `SkillMatchResult.tool_scope` 字段移除 | Low | 当前始终为空列表，可在下一版本中从 dataclass 移除 |
+| Skillpack model `allowed_tools`/`triggers`/`priority` 字段移除 | Low | 当前保留空默认值供 user/project 层向后兼容，后续可移除 |
+| 窗口感知顾问独立 mock | Low | 解决 advisor 共享 `_client` 的测试隔离问题 |
