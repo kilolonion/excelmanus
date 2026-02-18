@@ -31,10 +31,10 @@ _SUBAGENT_SUMMARY_PREVIEW = 300
 
 # 元工具：对用户隐藏内部细节，使用友好名称和描述
 _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
-    "select_skill": ("⚙️", "准备工具"),
+    "activate_skill": ("⚙️", "激活技能指引"),
+    "expand_tools": ("🔧", "展开工具参数"),
     "delegate_to_subagent": ("🧵", "委派子任务"),
     "list_subagents": ("📋", "查询可用助手"),
-    "list_skills": ("📋", "查询可用能力"),
 }
 
 # 工具名称到图标的映射
@@ -534,7 +534,7 @@ class StreamRenderer:
     @staticmethod
     def _meta_tool_hint(tool_name: str, arguments: Dict[str, Any]) -> str:
         """从元工具参数中提取用户可理解的简短描述，隐藏内部名称。"""
-        if tool_name == "select_skill":
+        if tool_name == "activate_skill":
             reason = arguments.get("reason", "")
             if isinstance(reason, str) and reason.strip():
                 return reason.strip()
