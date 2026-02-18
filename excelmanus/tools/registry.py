@@ -143,6 +143,41 @@ class ToolDef:
             }
         raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
 
+    def to_summary_schema(
+        self, mode: OpenAISchemaMode = "responses"
+    ) -> dict[str, Any]:
+        """生成摘要 schema：仅 name + description，无参数细节。
+
+        用于 ToolProfile extended 工具的默认呈现。
+        LLM 看到工具存在但不知道如何调用，需先 expand_tools 获取完整 schema。
+        """
+        hint = "（调用 expand_tools 展开此类别获取完整参数）"
+        desc = self.description
+        if hint not in desc:
+            desc = f"{desc}\n{hint}"
+        empty_params = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+        if mode == "responses":
+            return {
+                "type": "function",
+                "name": self.name,
+                "description": desc,
+                "parameters": empty_params,
+            }
+        if mode == "chat_completions":
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": desc,
+                    "parameters": empty_params,
+                },
+            }
+        raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
+
 
 class ToolRegistry:
     """工具注册中心。"""
@@ -207,6 +242,33 @@ class ToolRegistry:
             scope = set(tool_scope)
             tools = [tool for name, tool in self._tools.items() if name in scope]
         return [tool.to_openai_schema(mode=mode) for tool in tools]
+
+    def get_tiered_schemas(
+        self,
+        expanded_categories: set[str],
+        mode: OpenAISchemaMode = "responses",
+    ) -> list[dict[str, Any]]:
+        """根据 ToolProfile 生成分层 tool schemas。
+
+        core 工具始终返回完整 schema。
+        extended 工具默认返回摘要 schema，除非其 category 在 expanded_categories 中。
+        不在 TOOL_PROFILES 中的工具（如 MCP 动态注册）始终返回完整 schema。
+        """
+        from excelmanus.tools.profile import TOOL_PROFILES
+
+        schemas: list[dict[str, Any]] = []
+        for name, tool in self._tools.items():
+            profile = TOOL_PROFILES.get(name)
+            if profile is None:
+                schemas.append(tool.to_openai_schema(mode=mode))
+                continue
+            if profile["tier"] == "core":
+                schemas.append(tool.to_openai_schema(mode=mode))
+            elif profile.get("category") in expanded_categories:
+                schemas.append(tool.to_openai_schema(mode=mode))
+            else:
+                schemas.append(tool.to_summary_schema(mode=mode))
+        return schemas
 
     def call_tool(
         self,
