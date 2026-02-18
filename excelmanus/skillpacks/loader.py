@@ -277,8 +277,6 @@ class SkillpackLoader:
             skill_dir=skill_dir,
             skill_name=name,
         )
-        self._validate_allowed_tools_soft(name=name, allowed_tools=allowed_tools)
-
         known_keys = set(_CANONICAL_FIELD_ALIASES.keys())
         extensions = {
             key: value
@@ -346,34 +344,6 @@ class SkillpackLoader:
                     "[a-z0-9][a-z0-9._-]{0,63}"
                 )
 
-    def _validate_allowed_tools_soft(self, name: str, allowed_tools: list[str]) -> None:
-        if not allowed_tools:
-            return
-        known_tools = set(self._tool_registry.get_tool_names())
-        unknown_tools = sorted(
-            tool
-            for tool in allowed_tools
-            if tool not in known_tools and not self._is_allowed_tool_selector(tool)
-        )
-        if unknown_tools:
-            self._append_warning(
-                f"Skillpack '{name}' 引用了未注册工具（软校验告警）: {', '.join(unknown_tools)}"
-            )
-
-    @staticmethod
-    def _is_allowed_tool_selector(tool: str) -> bool:
-        """判断是否为运行期可展开的工具选择器。"""
-        normalized = tool.strip()
-        if normalized == "mcp:*":
-            return True
-        if not normalized.startswith("mcp:"):
-            return False
-        parts = normalized.split(":", 2)
-        if len(parts) != 3:
-            return False
-        server_name = parts[1].strip()
-        tool_name = parts[2].strip()
-        return bool(server_name and tool_name)
 
     @staticmethod
     def _normalize_required_mcp_servers(servers: list[str]) -> list[str]:
