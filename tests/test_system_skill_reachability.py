@@ -30,17 +30,16 @@ def _make_loader(tmp_path: Path) -> SkillpackLoader:
     return SkillpackLoader(config, ToolRegistry())
 
 
-def test_system_skill_data_basic_exposes_sheet_mapping(tmp_path: Path) -> None:
+def test_system_skill_data_basic_loads_successfully(tmp_path: Path) -> None:
     loader = _make_loader(tmp_path)
     skillpacks = loader.load_all()
     assert "data_basic" in skillpacks
-    assert "analyze_sheet_mapping" in skillpacks["data_basic"].allowed_tools
+    assert skillpacks["data_basic"].description
 
 
-def test_system_skill_general_excel_exposes_memory_and_sheet_mapping(tmp_path: Path) -> None:
+def test_system_skills_no_general_excel(tmp_path: Path) -> None:
+    """v5: general_excel fallback skillpack has been deleted."""
     loader = _make_loader(tmp_path)
     skillpacks = loader.load_all()
-    assert "general_excel" in skillpacks
-    tools = set(skillpacks["general_excel"].allowed_tools)
-    assert {"analyze_sheet_mapping", "memory_read_topic"}.issubset(tools)
+    assert "general_excel" not in skillpacks
 
