@@ -513,7 +513,6 @@ class AgentEngine:
         )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="all_tools",
             system_contexts=[],
         )
@@ -921,7 +920,6 @@ class AgentEngine:
         if self._approval.has_pending():
             self._last_route_result = SkillMatchResult(
                 skills_used=[],
-                tool_scope=[],
                 route_mode="control_command",
                 system_contexts=[],
             )
@@ -4077,7 +4075,6 @@ class AgentEngine:
         self._system_mode_fallback = type(self)._system_mode_fallback_cache
         self._last_route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="fallback",
         )
 
@@ -4256,7 +4253,6 @@ class AgentEngine:
         if self._skill_router is None:
             return SkillMatchResult(
                 skills_used=[],
-                tool_scope=[],
                 route_mode="all_tools",
                 system_contexts=[],
             )
@@ -4416,7 +4412,6 @@ class AgentEngine:
 
         self._last_route_result = SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="control_command",
             system_contexts=[],
         )

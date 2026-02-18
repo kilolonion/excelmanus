@@ -207,8 +207,7 @@ class SkillRouter:
             selected, self._config.skills_context_char_budget
         )
         return SkillMatchResult(
-            skills_used=skills_used,
-            tool_scope=[],  # v5: engine 使用 _build_v5_tools()，不再依赖 router tool_scope
+            skills_used=skills_used, # v5: engine 使用 _build_v5_tools()，不再依赖 router tool_scope
             route_mode=route_mode,
             system_contexts=contexts,
             parameterized=parameterized,
@@ -285,7 +284,6 @@ class SkillRouter:
 
         return SkillMatchResult(
             skills_used=[],
-            tool_scope=[],
             route_mode="all_tools",
             system_contexts=system_contexts,
             parameterized=False,

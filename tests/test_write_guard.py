@@ -41,7 +41,6 @@ def _make_engine(**overrides) -> AgentEngine:
 def _make_route_result(write_hint: str = "unknown", **kwargs) -> SkillMatchResult:
     defaults = dict(
         skills_used=[],
-        tool_scope=[],
         route_mode="all_tools",
         system_contexts=[],
     )
@@ -55,20 +54,20 @@ def _make_route_result(write_hint: str = "unknown", **kwargs) -> SkillMatchResul
 class TestWriteHintField:
     def test_default_is_unknown(self):
         result = SkillMatchResult(
-            skills_used=[], tool_scope=[], route_mode="test",
+            skills_used=[], route_mode="test",
         )
         assert result.write_hint == "unknown"
 
     def test_explicit_may_write(self):
         result = SkillMatchResult(
-            skills_used=[], tool_scope=[], route_mode="test",
+            skills_used=[], route_mode="test",
             write_hint="may_write",
         )
         assert result.write_hint == "may_write"
 
     def test_explicit_read_only(self):
         result = SkillMatchResult(
-            skills_used=[], tool_scope=[], route_mode="test",
+            skills_used=[], route_mode="test",
             write_hint="read_only",
         )
         assert result.write_hint == "read_only"
