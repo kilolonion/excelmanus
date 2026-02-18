@@ -80,11 +80,10 @@ pip install -e ".[dev]"
 | `EXCELMANUS_SKILL_PREROUTE_MODEL` | 预激活小模型名称（未设置时回退主模型） | — |
 | `EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS` | 预激活小模型超时（毫秒） | `10000` |
 
-预激活行为：
-- 非 slash、无已激活 skill 且路由为 `all_tools` 时触发 pre-route（并行于常规路由）。
-- pre-route 命中有效 skill 时按主/副 skill 分层激活。
-- pre-route 异常、缺失或命中不存在 skill 时统一回退 `general_excel`（遵守 `EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL`）。
-- 一旦存在激活 skill，工具范围始终保留 `discover_tools` 以支持纠偏。
+v5 路由行为：
+- 所有工具始终可见（core 工具完整 schema，extended 工具摘要 schema）。
+- LLM 通过 `expand_tools` 展开指定类别获取完整参数后即可调用。
+- `activate_skill` 用于注入领域知识指引（纯知识注入，不控制工具可见性）。
 
 ### 窗口感知层配置
 
@@ -359,7 +358,6 @@ python scripts/migrate_skills_to_standard.py --workspace-root .
 ```
 
 当前内置（system）Skillpacks：
-- `general_excel`：通用兜底
 - `data_basic`：读取/分析/筛选/转换
 - `chart_basic`：图表生成
 - `format_basic`：样式调整
