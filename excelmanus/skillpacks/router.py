@@ -235,7 +235,6 @@ class SkillRouter:
             write_hint=write_hint,
         )
 
-        tool_scope = list(result.tool_scope)
         system_contexts = list(result.system_contexts)
         large_file_context = self._build_large_file_context(
             user_message=user_message,
@@ -252,7 +251,6 @@ class SkillRouter:
 
         return SkillMatchResult(
             skills_used=result.skills_used,
-            tool_scope=tool_scope,
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
@@ -438,7 +436,6 @@ class SkillRouter:
             system_contexts.append(large_file_context)
         return SkillMatchResult(
             skills_used=result.skills_used,
-            tool_scope=result.tool_scope,
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
