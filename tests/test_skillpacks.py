@@ -772,7 +772,7 @@ class TestSkillRouter:
         assert result.route_mode == "slash_direct"
         assert result.parameterized is True
         assert result.skills_used == ["chart_basic"]
-        assert result.tool_scope == ["create_chart"]
+        assert result.tool_scope == []  # v5: router no longer builds tool_scope
         assert result.system_contexts
         context = result.system_contexts[0]
         assert "文件：销售 数据.xlsx" in context

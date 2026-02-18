@@ -203,20 +203,12 @@ class SkillRouter:
     ) -> SkillMatchResult:
         """构建路由结果。"""
         skills_used = [skill.name for skill in selected]
-        tool_scope: list[str] = []
-        seen_tools: set[str] = set()
-        for skill in selected:
-            for tool in skill.allowed_tools:
-                if tool in seen_tools:
-                    continue
-                seen_tools.add(tool)
-                tool_scope.append(tool)
         contexts = build_contexts_with_budget(
             selected, self._config.skills_context_char_budget
         )
         return SkillMatchResult(
             skills_used=skills_used,
-            tool_scope=tool_scope,
+            tool_scope=[],  # v5: engine 使用 _build_v5_tools()，不再依赖 router tool_scope
             route_mode=route_mode,
             system_contexts=contexts,
             parameterized=parameterized,
@@ -234,10 +226,9 @@ class SkillRouter:
         blocked_skillpacks: set[str] | None = None,
         write_hint: str = "unknown",
     ) -> SkillMatchResult:
-        """构建 fallback 路由结果：注入 list_skills 工具。
+        """构建 fallback 路由结果。
 
-        技能目录不再注入 system_contexts（已通过 select_skill
-        元工具的 description 传递，避免双重注入浪费 token）。
+        技能目录通过 activate_skill 元工具的 description 传递。
         """
         result = self._build_result(
             selected=selected,
