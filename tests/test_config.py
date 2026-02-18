@@ -948,6 +948,38 @@ class TestAutoActivateDefaultSkill:
         with pytest.raises(ConfigError, match="EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL"):
             load_config()
 
+
+class TestSkillPrerouteFallbackConfig:
+    """预路由回退策略配置项测试。"""
+
+    def _set_required_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+
+    def test_default_is_auto(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        cfg = load_config()
+        assert cfg.skill_preroute_fallback == "auto"
+
+    def test_env_meta_only(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "meta_only")
+        cfg = load_config()
+        assert cfg.skill_preroute_fallback == "meta_only"
+
+    def test_env_general_excel(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "general_excel")
+        cfg = load_config()
+        assert cfg.skill_preroute_fallback == "general_excel"
+
+    def test_invalid_falls_back_to_auto(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_SKILL_PREROUTE_FALLBACK", "invalid-value")
+        cfg = load_config()
+        assert cfg.skill_preroute_fallback == "auto"
+
 class TestAutoSupplementConfig:
     """auto_supplement 配置项测试。"""
 

@@ -112,6 +112,18 @@ def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
     return _normalize_write_hint(fallback_hint)
 
 
+def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
+    """合并 write_hint，但 override_hint == 'may_write' 时强制覆盖 route_hint。
+
+    用于 auto_supplement 激活写入工具后的场景：self._current_write_hint 已被
+    升级为 'may_write'，不应被原始 route_hint（如 'read_only'）压制。
+    """
+    normalized_override = _normalize_write_hint(override_hint)
+    if normalized_override == "may_write":
+        return "may_write"
+    return _merge_write_hint(route_hint, override_hint)
+
+
 def _to_plain(value: Any) -> Any:
     """将 SDK 对象/命名空间对象转换为纯 Python 结构。"""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -537,10 +549,14 @@ class AgentEngine:
         self._subagent_enabled: bool = config.subagent_enabled
         self._subagent_registry = SubagentRegistry(config)
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
-        # 会话级 skill 累积：记录本会话已加载过的所有 skill 名称
-        self._loaded_skill_names: set[str] = set()
+        # 会话级 skill 累积：记录本会话已加载过的 skill 名称及其最后激活轮次
+        self._loaded_skill_names: dict[str, int] = {}
+        # 当前会话轮次计数器（每次 chat 调用递增）
+        self._session_turn: int = 0
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
+        # tool → skill 反向索引缓存（None 表示未构建，会话重置时清除）
+        self._tool_to_skill_index_cache: dict[str, list[str]] | None = None
         # 工具自动补充：每轮计数器
         self._turn_supplement_count: int = 0
         self._auto_supplement_notice: str = ""
@@ -902,23 +918,24 @@ class AgentEngine:
                 user_message=user_message,
                 on_event=on_event,
             )
-            if pending_result.iterations > 0:
-                elapsed = time.monotonic() - pending_chat_start
-                self._emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.CHAT_SUMMARY,
-                        total_iterations=self._last_iteration_count,
-                        total_tool_calls=self._last_tool_call_count,
-                        success_count=self._last_success_count,
-                        failure_count=self._last_failure_count,
-                        elapsed_seconds=round(elapsed, 2),
-                        prompt_tokens=pending_result.prompt_tokens,
-                        completion_tokens=pending_result.completion_tokens,
-                        total_tokens=pending_result.total_tokens,
-                    ),
-                )
-            return pending_result
+            if pending_result is not None:
+                if pending_result.iterations > 0:
+                    elapsed = time.monotonic() - pending_chat_start
+                    self._emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.CHAT_SUMMARY,
+                            total_iterations=self._last_iteration_count,
+                            total_tool_calls=self._last_tool_call_count,
+                            success_count=self._last_success_count,
+                            failure_count=self._last_failure_count,
+                            elapsed_seconds=round(elapsed, 2),
+                            prompt_tokens=pending_result.prompt_tokens,
+                            completion_tokens=pending_result.completion_tokens,
+                            total_tokens=pending_result.total_tokens,
+                        ),
+                    )
+                return pending_result
 
         control_reply = await self._handle_control_command(user_message, on_event=on_event)
         if control_reply is not None:
@@ -949,6 +966,8 @@ class AgentEngine:
             )
 
         chat_start = time.monotonic()
+        # 每次真正的 chat 调用递增轮次计数器
+        self._session_turn += 1
         # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
         self._current_write_hint = "unknown"
 
@@ -968,11 +987,62 @@ class AgentEngine:
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
-        route_result = await self._route_skills(
-            user_message,
-            slash_command=effective_slash_command,
-            raw_args=effective_raw_args if effective_slash_command else None,
+        # ── Phase 1: 技能预激活 ──
+        # 根据 skill_preroute_mode 决定预激活策略：
+        # - off: 确定性激活 general_excel（当前默认行为）
+        # - meta_only: 不预激活，仅保留元工具 + DISCOVERY_TOOLS
+        # - deepseek / gemini / hybrid: 小模型预判后精准激活
+        auto_activated_skill_name: str | None = None
+        pre_route_result: "PreRouteResult | None" = None
+        preroute_mode = self._config.skill_preroute_mode
+
+        # 判断是否需要并行启动 pre_route（条件 route_mode 除外，等 route_result 后再验证）
+        _can_preroute = (
+            not self._active_skills
+            and effective_slash_command is None
+            and self._skill_router is not None
+            and preroute_mode in ("hybrid", "deepseek", "gemini")
         )
+
+        if _can_preroute:
+            # 并行：_route_skills（含 write_hint 小模型调用）与 pre_route_skill 同时发起
+            from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
+            _api_key = self._config.skill_preroute_api_key or self._config.api_key
+            _base_url = self._config.skill_preroute_base_url or self._config.base_url
+            _model_name = self._config.skill_preroute_model or self._config.model
+
+            route_result, _pre_route_result_or_exc = await asyncio.gather(
+                self._route_skills(
+                    user_message,
+                    slash_command=effective_slash_command,
+                    raw_args=effective_raw_args if effective_slash_command else None,
+                ),
+                pre_route_skill(
+                    user_message,
+                    api_key=_api_key,
+                    base_url=_base_url,
+                    model=_model_name,
+                    timeout_ms=self._config.skill_preroute_timeout_ms,
+                    valid_skill_names=frozenset(self._list_loaded_skill_names()),
+                    runtime_skillpacks=self._get_loaded_skillpacks(),
+                ),
+                return_exceptions=True,
+            )
+            # 仅当 route_mode == "all_tools" 时才使用 pre_route 结果
+            if (
+                route_result.route_mode == "all_tools"
+                and not isinstance(_pre_route_result_or_exc, BaseException)
+            ):
+                pre_route_result = _pre_route_result_or_exc
+            elif isinstance(_pre_route_result_or_exc, BaseException):
+                logger.warning("并行预路由异常: %s", _pre_route_result_or_exc)
+        else:
+            route_result = await self._route_skills(
+                user_message,
+                slash_command=effective_slash_command,
+                raw_args=effective_raw_args if effective_slash_command else None,
+            )
+
         route_result, user_message = await self._adapt_guidance_only_slash_route(
             route_result=route_result,
             user_message=user_message,
@@ -981,122 +1051,45 @@ class AgentEngine:
         )
         route_result = self._merge_with_loaded_skills(route_result)
 
-        # ── Phase 1: 技能预激活 ──
-        # 根据 skill_preroute_mode 决定预激活策略：
-        # - off: 确定性激活 general_excel（当前默认行为）
-        # - meta_only: 不预激活，仅保留元工具 + DISCOVERY_TOOLS
-        # - deepseek / gemini: 小模型预判后精准激活
-        auto_activated_skill_name: str | None = None
-        pre_route_result: "PreRouteResult | None" = None
-        preroute_mode = self._config.skill_preroute_mode
-
         if (
             route_result.route_mode == "all_tools"
             and not self._active_skills
             and effective_slash_command is None
             and self._skill_router is not None
         ):
-            if preroute_mode == "hybrid":
-                # 混合策略：小模型预路由 + 元工具动态扩展
-                from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
-                api_key = self._config.skill_preroute_api_key or self._config.api_key
-                base_url = self._config.skill_preroute_base_url or self._config.base_url
-                model_name = self._config.skill_preroute_model or self._config.model
-                try:
-                    pre_route_result = await pre_route_skill(
-                        user_message,
-                        api_key=api_key,
-                        base_url=base_url,
-                        model=model_name,
-                        timeout_ms=self._config.skill_preroute_timeout_ms,
-                        valid_skill_names=frozenset(self._list_loaded_skill_names()),
-                        runtime_skillpacks=self._get_loaded_skillpacks(),
-                    )
-                    logger.info(
-                        "hybrid 预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms",
-                        pre_route_result.skill_name,
-                        getattr(pre_route_result, "skill_names", []),
-                        pre_route_result.confidence,
-                        pre_route_result.latency_ms,
-                    )
-                    target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
-                    if target_skill_name is not None:
-                        auto_result = await self._handle_select_skill(target_skill_name)
-                        if not auto_result.startswith("未找到技能:"):
-                            auto_activated_skill_name = target_skill_name
-                            logger.info("hybrid 预路由激活主技能: %s", auto_activated_skill_name)
-                            # 副 skill：也激活（分层加载）
-                            for secondary_name in skill_candidates[1:]:
-                                if secondary_name == target_skill_name:
-                                    continue
-                                sec_result = await self._handle_select_skill(secondary_name)
-                                if not sec_result.startswith("未找到技能:"):
-                                    logger.info("hybrid 预路由激活副技能: %s", secondary_name)
-                        else:
-                            # 预路由选择的技能不存在，回退 meta_only
-                            logger.warning(
-                                "hybrid 预路由技能 %s 不存在（候选=%s），回退 meta_only 模式",
-                                target_skill_name,
-                                skill_candidates,
+            if preroute_mode in ("hybrid", "deepseek", "gemini"):
+                fallback_mode = self._resolve_preroute_fallback_mode(preroute_mode)
+                if pre_route_result is not None:
+                    try:
+                        (
+                            auto_activated_skill_name,
+                            missing_target_skill,
+                            skill_candidates,
+                        ) = await self._activate_preroute_candidates(
+                            pre_route_result=pre_route_result,
+                            mode_label=preroute_mode,
+                        )
+                        if missing_target_skill is not None:
+                            auto_activated_skill_name = await self._apply_preroute_fallback(
+                                mode_label=preroute_mode,
+                                fallback_mode=fallback_mode,
+                                reason=(
+                                    f"{preroute_mode} 预路由技能 {missing_target_skill} 不存在"
+                                    f"（候选={skill_candidates}）"
+                                ),
                             )
-                    # else: 闲聊场景，不激活任何技能，走 meta_only 路径
-                except Exception as exc:
-                    logger.warning("hybrid 预路由异常: %s，回退 meta_only 模式", exc)
-                    # 不回退到 general_excel，保持 meta_only 的精简工具集
-
-            elif preroute_mode in ("deepseek", "gemini"):
-                # 小模型预路由
-                from excelmanus.skillpacks.pre_router import pre_route_skill, PreRouteResult
-                api_key = self._config.skill_preroute_api_key or self._config.api_key
-                base_url = self._config.skill_preroute_base_url or self._config.base_url
-                model_name = self._config.skill_preroute_model or self._config.model
-                try:
-                    pre_route_result = await pre_route_skill(
-                        user_message,
-                        api_key=api_key,
-                        base_url=base_url,
-                        model=model_name,
-                        timeout_ms=self._config.skill_preroute_timeout_ms,
-                        valid_skill_names=frozenset(self._list_loaded_skill_names()),
-                        runtime_skillpacks=self._get_loaded_skillpacks(),
+                    except Exception as exc:
+                        auto_activated_skill_name = await self._apply_preroute_fallback(
+                            mode_label=preroute_mode,
+                            fallback_mode=fallback_mode,
+                            reason=f"{preroute_mode} 预路由处理异常: {exc}",
+                        )
+                else:
+                    auto_activated_skill_name = await self._apply_preroute_fallback(
+                        mode_label=preroute_mode,
+                        fallback_mode=fallback_mode,
+                        reason=f"{preroute_mode} 预路由结果缺失",
                     )
-                    logger.info(
-                        "预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
-                        pre_route_result.skill_name,
-                        getattr(pre_route_result, "skill_names", []),
-                        pre_route_result.confidence,
-                        pre_route_result.latency_ms,
-                        pre_route_result.model_used,
-                        pre_route_result.reason,
-                    )
-                    target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
-                    if target_skill_name is not None:
-                        auto_result = await self._handle_select_skill(target_skill_name)
-                        if not auto_result.startswith("未找到技能:"):
-                            auto_activated_skill_name = target_skill_name
-                            logger.info("预路由激活主技能: %s", auto_activated_skill_name)
-                            # 副 skill：也激活（分层加载，与 hybrid 模式一致）
-                            for secondary_name in skill_candidates[1:]:
-                                if secondary_name == target_skill_name:
-                                    continue
-                                sec_result = await self._handle_select_skill(secondary_name)
-                                if not sec_result.startswith("未找到技能:"):
-                                    logger.info("预路由激活副技能: %s", secondary_name)
-                        else:
-                            logger.warning(
-                                "预路由选择的技能 %s 不存在（候选=%s），回退 general_excel",
-                                target_skill_name,
-                                skill_candidates,
-                            )
-                            auto_result = await self._handle_select_skill("general_excel")
-                            if not auto_result.startswith("未找到技能:"):
-                                auto_activated_skill_name = "general_excel"
-                except Exception as exc:
-                    logger.warning("预路由调用异常: %s，回退 general_excel", exc)
-                    if self._config.auto_activate_default_skill:
-                        auto_result = await self._handle_select_skill("general_excel")
-                        if not auto_result.startswith("未找到技能:"):
-                            auto_activated_skill_name = "general_excel"
 
             elif preroute_mode == "meta_only":
                 # 仅元工具模式：不预激活任何 skill，让 LLM 自己 select_skill
@@ -1106,7 +1099,7 @@ class AgentEngine:
                 # off 模式：确定性激活 general_excel（当前默认行为）
                 if self._config.auto_activate_default_skill:
                     auto_result = await self._handle_select_skill("general_excel")
-                    if not auto_result.startswith("未找到技能:"):
+                    if self._is_select_skill_ok(auto_result):
                         logger.info("自动预激活技能: general_excel")
                         auto_activated_skill_name = "general_excel"
                     else:
@@ -1152,6 +1145,45 @@ class AgentEngine:
 
         if effective_slash_command and route_result.route_mode == "slash_not_user_invocable":
             reply = f"技能 `{effective_slash_command}` 不允许手动调用。"
+            self._memory.add_user_message(user_message)
+            self._memory.add_assistant_message(reply)
+            self._last_iteration_count = 1
+            self._last_tool_call_count = 0
+            self._last_success_count = 0
+            self._last_failure_count = 1
+            elapsed = time.monotonic() - chat_start
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.CHAT_SUMMARY,
+                    total_iterations=self._last_iteration_count,
+                    total_tool_calls=self._last_tool_call_count,
+                    success_count=self._last_success_count,
+                    failure_count=self._last_failure_count,
+                    elapsed_seconds=round(elapsed, 2),
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                ),
+            )
+            return ChatResult(
+                reply=reply,
+                tool_calls=[],
+                iterations=1,
+                truncated=False,
+            )
+
+        if effective_slash_command and route_result.route_mode == "slash_not_found":
+            # 区分"技能被权限限制"与"技能真的不存在"，给出精确反馈
+            normalized_cmd = self._normalize_skill_command_name(effective_slash_command)
+            blocked = self._blocked_skillpacks()
+            if blocked and normalized_cmd in blocked:
+                reply = (
+                    f"技能 `{effective_slash_command}` 当前受访问限制，"
+                    f"请先执行 `/fullAccess on` 解除限制后再试。"
+                )
+            else:
+                reply = f"未找到技能 `{effective_slash_command}`，请通过 `/skills` 查看可用技能列表。"
             self._memory.add_user_message(user_message)
             self._memory.add_assistant_message(reply)
             self._last_iteration_count = 1
@@ -1427,6 +1459,11 @@ class AgentEngine:
             return None
         return resolved[0]
 
+    @staticmethod
+    def _normalize_skill_name(name: str) -> str:
+        """归一化技能名：小写、去除连字符和下划线，与 router 保持一致。"""
+        return name.strip().lower().replace("-", "").replace("_", "")
+
     def _blocked_skillpacks(self) -> set[str] | None:
         """返回当前会话被限制的技能包集合。"""
         if self._full_access_enabled:
@@ -1458,10 +1495,17 @@ class AgentEngine:
         return self._active_skills[-1] if self._active_skills else None
 
     def _active_skills_tool_union(self) -> list[str]:
-        """所有激活 skill 的 allowed_tools 并集（保序去重）。"""
+        """所有激活 skill 的 allowed_tools 并集（保序去重）。
+
+        受限 skill（blocked_skillpacks）的工具不纳入并集，
+        确保 /fullAccess off 后其工具立即从 scope 中消失。
+        """
+        blocked = self._blocked_skillpacks()
         seen: set[str] = set()
         result: list[str] = []
         for skill in self._active_skills:
+            if blocked and skill.name in blocked:
+                continue
             for tool in skill.allowed_tools:
                 if tool not in seen:
                     seen.add(tool)
@@ -1469,7 +1513,13 @@ class AgentEngine:
         return result
 
     def _build_tool_to_skill_index(self) -> dict[str, list[str]]:
-        """构建 tool_name → [skill_name, ...] 反向索引，按 skill 工具数升序。"""
+        """构建 tool_name → [skill_name, ...] 反向索引，按 skill 工具数升序。
+
+        结果缓存在 _tool_to_skill_index_cache，会话重置时失效。
+        """
+        if self._tool_to_skill_index_cache is not None:
+            return self._tool_to_skill_index_cache
+
         if self._skill_router is None:
             return {}
         loader = self._skill_router._loader
@@ -1494,6 +1544,7 @@ class AgentEngine:
                 else 999
             )
 
+        self._tool_to_skill_index_cache = index
         return index
 
     def _resolve_preroute_target_layered(
@@ -1525,6 +1576,83 @@ class AgentEngine:
             return None, candidates
         # 分层加载：第一个候选为主 skill，其余为副 skill
         return candidates[0], candidates
+
+    def _resolve_preroute_fallback_mode(self, preroute_mode: str) -> str:
+        """解析预路由失败回退策略。"""
+        configured = str(
+            getattr(self._config, "skill_preroute_fallback", "auto") or "auto"
+        ).strip().lower()
+        if configured in {"meta_only", "general_excel"}:
+            return configured
+        # auto：兼容原行为
+        if preroute_mode == "hybrid":
+            return "meta_only"
+        return "general_excel"
+
+    async def _activate_preroute_candidates(
+        self,
+        *,
+        pre_route_result: "PreRouteResult",
+        mode_label: str,
+    ) -> tuple[str | None, str | None, list[str]]:
+        """根据预路由候选激活主/副技能。
+
+        Returns:
+            (activated_skill_name, missing_target_skill_name, candidates)
+        """
+        logger.info(
+            "%s 预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
+            mode_label,
+            pre_route_result.skill_name,
+            getattr(pre_route_result, "skill_names", []),
+            pre_route_result.confidence,
+            pre_route_result.latency_ms,
+            pre_route_result.model_used,
+            pre_route_result.reason,
+        )
+        target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
+        if target_skill_name is None:
+            # 闲聊场景：保持不激活 skill，不触发 fallback。
+            return None, None, skill_candidates
+
+        auto_result = await self._handle_select_skill(target_skill_name)
+        if not self._is_select_skill_ok(auto_result):
+            return None, target_skill_name, skill_candidates
+
+        logger.info("%s 预路由激活主技能: %s", mode_label, target_skill_name)
+        for secondary_name in skill_candidates[1:]:
+            if secondary_name == target_skill_name:
+                continue
+            sec_result = await self._handle_select_skill(secondary_name)
+            if self._is_select_skill_ok(sec_result):
+                logger.info("%s 预路由激活副技能: %s", mode_label, secondary_name)
+
+        return target_skill_name, None, skill_candidates
+
+    async def _apply_preroute_fallback(
+        self,
+        *,
+        mode_label: str,
+        fallback_mode: str,
+        reason: str,
+    ) -> str | None:
+        """执行预路由失败回退。"""
+        if fallback_mode == "general_excel":
+            logger.warning("%s，回退 general_excel", reason)
+            if not self._config.auto_activate_default_skill:
+                logger.info(
+                    "%s 回退 general_excel 已禁用（auto_activate_default_skill=false）",
+                    mode_label,
+                )
+                return None
+            auto_result = await self._handle_select_skill("general_excel")
+            if self._is_select_skill_ok(auto_result):
+                return "general_excel"
+            logger.debug("回退 general_excel 失败（技能不存在），继续使用全量工具")
+            return None
+
+        logger.warning("%s，回退 meta_only 模式", reason)
+        return None
 
     def _try_auto_supplement_tool(self, tool_name: str) -> AutoSupplementResult | None:
         """预检-扩展：查找包含 tool_name 的最小覆盖 skillpack 并激活。
@@ -1570,7 +1698,7 @@ class AgentEngine:
             self._active_skills = [
                 s for s in self._active_skills if s.name != skill.name
             ] + [skill]
-            self._loaded_skill_names.add(skill.name)
+            self._loaded_skill_names[skill.name] = self._session_turn
 
             # 如果触发工具是写入类，升级 write_hint
             if tool_name in MUTATING_ALL_TOOLS:
@@ -2156,6 +2284,17 @@ class AgentEngine:
             lines.append("(该分类下无已注册工具)")
         return "\n".join(lines)
 
+    @staticmethod
+    def _is_select_skill_ok(result: str) -> bool:
+        """判断 _handle_select_skill 返回值是否表示成功。
+
+        成功时返回值以 "OK" 开头；失败情形包括：
+        - "未找到技能: ..." — 技能不存在
+        - "⚠️ ..." — 权限拒绝或 MCP 依赖未满足
+        任何非 "OK" 开头的返回均视为失败。
+        """
+        return result.startswith("OK")
+
     async def _handle_select_skill(self, skill_name: str, reason: str = "") -> str:
         """处理 select_skill 调用：激活技能并返回技能上下文。"""
         if self._skill_router is None:
@@ -2167,17 +2306,28 @@ class AgentEngine:
             skillpacks = loader.load_all()
 
         # 检查是否尝试激活被限制的技能
+        # 注意：必须对输入名称做归一化后再比较，防止通过大小写/连字符变体绕过限制
+        # 例如 "Excel-Code-Runner" 归一化后与 "excel_code_runner" 相同
         blocked = self._blocked_skillpacks()
-        if blocked and skill_name in blocked:
-            # 从全量技能包中获取描述
-            desc = ""
-            skill_obj = skillpacks.get(skill_name)
-            if skill_obj is not None:
-                desc = f"\n该技能用于：{skill_obj.description}"
-            return (
-                f"⚠️ 技能 '{skill_name}' 需要 fullAccess 权限才能使用。{desc}\n"
-                f"请告知用户使用 /fullAccess on 命令开启完全访问权限后重试。"
-            )
+        if blocked:
+            normalized_input = self._normalize_skill_name(skill_name)
+            normalized_blocked = {self._normalize_skill_name(b) for b in blocked}
+            if normalized_input in normalized_blocked:
+                # 从全量技能包中获取描述（尝试精确名和归一化名）
+                desc = ""
+                skill_obj = skillpacks.get(skill_name)
+                if skill_obj is None:
+                    # 尝试通过归一化名找到实际技能对象
+                    skill_obj = next(
+                        (s for k, s in skillpacks.items() if self._normalize_skill_name(k) == normalized_input),
+                        None,
+                    )
+                if skill_obj is not None:
+                    desc = f"\n该技能用于：{skill_obj.description}"
+                return (
+                    f"⚠️ 技能 '{skill_name}' 需要 fullAccess 权限才能使用。{desc}\n"
+                    f"请告知用户使用 /fullAccess on 命令开启完全访问权限后重试。"
+                )
 
         if not skillpacks:
             return f"未找到技能: {skill_name}"
@@ -2195,7 +2345,7 @@ class AgentEngine:
         self._active_skills = [
             s for s in self._active_skills if s.name != selected.name
         ] + [selected]
-        self._loaded_skill_names.add(selected.name)
+        self._loaded_skill_names[selected.name] = self._session_turn
 
         context_text = selected.render_context()
         return f"OK\n{context_text}"
@@ -2237,7 +2387,7 @@ class AgentEngine:
             route_mode=route_result.route_mode,
             system_contexts=refreshed_contexts,
             parameterized=route_result.parameterized,
-            write_hint=_merge_write_hint(
+            write_hint=_merge_write_hint_with_override(
                 getattr(route_result, "write_hint", None),
                 self._current_write_hint,
             ),
@@ -2353,6 +2503,14 @@ class AgentEngine:
 
         if self._active_skills:
             scope = self._expand_tool_scope_patterns(self._active_skills_tool_union())
+            # 将 route_result.tool_scope（含 _merge_with_loaded_skills 历史合并结果）
+            # 追加进来，避免合并计算被静默丢弃。
+            if route_result is not None and route_result.tool_scope:
+                scope_set = set(scope)
+                for t in route_result.tool_scope:
+                    if t not in scope_set:
+                        scope_set.add(t)
+                        scope.append(t)
             if "select_skill" not in scope:
                 scope.append("select_skill")
             # hybrid 模式下保留 discover_tools，让 LLM 能查询其他类别工具
@@ -3268,7 +3426,7 @@ class AgentEngine:
         *,
         user_message: str,
         on_event: EventCallback | None,
-    ) -> ChatResult:
+    ) -> ChatResult | None:
         text = user_message.strip()
         current = self._question_flow.current()
         if current is None:
@@ -3279,13 +3437,15 @@ class AgentEngine:
             # 允许审批/权限相关命令在问题待回答时穿透执行
             _lower = text.lower().replace("_", "")
             _passthrough = ("/fullaccess", "/accept", "/reject")
-            if not any(_lower.startswith(p) for p in _passthrough):
-                return ChatResult(
-                    reply=(
-                        "当前有待回答问题，请先回答后再使用命令。\n\n"
-                        f"{self._question_flow.format_prompt(current)}"
-                    )
+            if any(_lower.startswith(p) for p in _passthrough):
+                # 返回 None 表示本方法不处理，由 chat() 继续走控制命令路径
+                return None
+            return ChatResult(
+                reply=(
+                    "当前有待回答问题，请先回答后再使用命令。\n\n"
+                    f"{self._question_flow.format_prompt(current)}"
                 )
+            )
 
         try:
             parsed = self._question_flow.parse_answer(user_message, question=current)
@@ -3691,9 +3851,9 @@ class AgentEngine:
                         current_route_result = self._refresh_route_after_skill_switch(
                             current_route_result
                         )
-                        write_hint = _merge_write_hint(
+                        write_hint = _merge_write_hint_with_override(
                             getattr(current_route_result, "write_hint", None),
-                            write_hint,
+                            self._current_write_hint,
                         )
                         self._current_write_hint = write_hint
                         tool_scope = self._get_current_tool_scope(
@@ -3712,9 +3872,9 @@ class AgentEngine:
                         current_route_result = self._refresh_route_after_skill_switch(
                             current_route_result
                         )
-                        write_hint = _merge_write_hint(
+                        write_hint = _merge_write_hint_with_override(
                             getattr(current_route_result, "write_hint", None),
-                            write_hint,
+                            self._current_write_hint,
                         )
                         self._current_write_hint = write_hint
                         tool_scope = self._get_current_tool_scope(
@@ -3940,7 +4100,7 @@ class AgentEngine:
                                 selected_name.strip(),
                                 reason=reason_text,
                             )
-                            success = not result_str.startswith("未找到技能:")
+                            success = result_str.startswith("OK")
                             error = None if success else result_str
                         log_tool_call(
                             logger,
@@ -4516,6 +4676,7 @@ class AgentEngine:
         self._loaded_skill_names.clear()
         self._hook_started_skills.clear()
         self._active_skills.clear()
+        self._tool_to_skill_index_cache = None
         self._question_flow.clear()
         self._system_question_actions.clear()
         self._pending_question_route_result = None
@@ -4674,7 +4835,11 @@ class AgentEngine:
         if skill.command_dispatch == "tool" or skill.allowed_tools:
             return route_result, user_message
 
-        fallback = await self._route_skills(task_text)
+        # 先尝试词法分类，避免重复触发 write_hint LLM 调用
+        pre_hint: str | None = None
+        if self._skill_router is not None:
+            pre_hint = self._skill_router._classify_write_hint_lexical(task_text) or None
+        fallback = await self._route_skills(task_text, write_hint=pre_hint)
         guidance_context = (
             f"[Slash Guidance] 已启用技能 `{skill.name}` 的方法论约束。\n"
             "该技能仅用于补充执行规范，不改变用户任务目标。\n"
@@ -4708,19 +4873,26 @@ class AgentEngine:
 
         # 更新累积记录
         new_names = set(route_result.skills_used)
-        self._loaded_skill_names.update(new_names)
+        for name in new_names:
+            self._loaded_skill_names[name] = self._session_turn
 
-        # 找出历史已加载但本轮未匹配的 skill
-        history_only = self._loaded_skill_names - new_names
+        # 找出历史已加载但本轮未匹配的 skill（仅保留最近 3 轮内激活过的）
+        _decay_turns = 3
+        history_only = {
+            name for name, last_turn in self._loaded_skill_names.items()
+            if name not in new_names and (self._session_turn - last_turn) <= _decay_turns
+        }
         if not history_only:
             return route_result
 
-        # 查找历史 skill 对象并合并
+        # 查找历史 skill 对象并合并（跳过当前被限制的 skill）
+        blocked = self._blocked_skillpacks()
         loader = self._skill_router._loader
         history_skills = [
             loader.get_skillpack(name)
             for name in sorted(history_only)
             if loader.get_skillpack(name) is not None
+            and not (blocked and name in blocked)
         ]
         if not history_skills:
             return route_result
@@ -4790,6 +4962,7 @@ class AgentEngine:
         *,
         slash_command: str | None = None,
         raw_args: str | None = None,
+        write_hint: str | None = None,
     ) -> SkillMatchResult:
         if self._skill_router is None:
             return SkillMatchResult(
@@ -4809,6 +4982,7 @@ class AgentEngine:
             slash_command=slash_command,
             raw_args=raw_args,
             blocked_skillpacks=blocked_skillpacks,
+            write_hint=write_hint,
         )
 
     @staticmethod
@@ -4968,6 +5142,11 @@ class AgentEngine:
                 return "已开启 fullAccess。当前代码技能权限：full_access。"
             if action == "off" and not too_many_args:
                 self._full_access_enabled = False
+                # 将受限 skill 从 _active_skills 中驱逐，避免下一轮 scope 泄漏
+                blocked = set(self._restricted_code_skillpacks)
+                self._active_skills = [
+                    s for s in self._active_skills if s.name not in blocked
+                ]
                 return "已关闭 fullAccess。当前代码技能权限：restricted。"
             if action == "status" and not too_many_args:
                 status = "full_access" if self._full_access_enabled else "restricted"
@@ -5565,51 +5744,6 @@ class AgentEngine:
             )
         return prompts, None
 
-
-    def _build_system_prompts(self, skill_contexts: list[str]) -> list[str]:
-        base_prompt = self._memory.system_prompt
-
-        # 注入权限状态说明，让 LLM 明确知道代码执行能力受限
-        access_notice = self._build_access_notice()
-        if access_notice:
-            base_prompt = base_prompt + "\n\n" + access_notice
-
-        approved_plan_context = self._build_approved_plan_context_notice()
-        if approved_plan_context:
-            base_prompt = base_prompt + "\n\n" + approved_plan_context
-
-        window_perception_context = self._build_window_perception_notice()
-        window_at_tail = self._effective_window_return_mode() != "enriched"
-        if window_perception_context and not window_at_tail:
-            base_prompt = base_prompt + "\n\n" + window_perception_context
-
-        # 注入 MCP 服务器概要，让 LLM 感知已连接的外部能力
-        mcp_context = self._build_mcp_context_notice()
-        if mcp_context:
-            base_prompt = base_prompt + "\n\n" + mcp_context
-
-        if self._transient_hook_contexts:
-            hook_context = "\n".join(self._transient_hook_contexts).strip()
-            self._transient_hook_contexts.clear()
-            if hook_context:
-                base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
-
-        if not skill_contexts:
-            if window_perception_context and window_at_tail:
-                base_prompt = base_prompt + "\n\n" + window_perception_context
-            return [base_prompt]
-
-        mode = self._effective_system_mode()
-        if mode == "merge":
-            parts = [base_prompt, *skill_contexts]
-            if window_perception_context and window_at_tail:
-                parts.append(window_perception_context)
-            merged = "\n\n".join(parts)
-            return [merged]
-
-        if window_perception_context and window_at_tail:
-            return [base_prompt, *skill_contexts, window_perception_context]
-        return [base_prompt, *skill_contexts]
 
     def _build_approved_plan_context_notice(self) -> str:
         """注入已批准计划上下文 + 任务清单状态 + 自主执行指令。"""
