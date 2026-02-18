@@ -12,8 +12,6 @@ def test_build_frontmatter_does_not_emit_removed_context_fields() -> None:
     skill = Skillpack(
         name="demo",
         description="测试",
-        allowed_tools=["read_excel"],
-        triggers=["分析"],
         instructions="说明",
         source="project",
         root_dir="/tmp/demo",

@@ -82,12 +82,10 @@ def _make_registry_with_tools() -> ToolRegistry:
 
 
 def _activate_test_tools(engine: AgentEngine, tools: list[str] | None = None) -> None:
-    """为测试激活一个包含指定工具的 Skillpack，使工具进入 scope。"""
+    """为测试激活一个 Skillpack，注入 skill context。"""
     engine._active_skills = [Skillpack(
         name="_test_scope",
         description="test scope",
-        allowed_tools=tools or ["add_numbers", "fail_tool"],
-        triggers=[],
         instructions="test",
         source="system",
         root_dir="/tmp/_test_scope",
@@ -2417,8 +2415,6 @@ class TestManualSkillSlashCommand:
             "private_skill": Skillpack(
                 name="private_skill",
                 description="private",
-                allowed_tools=["add_numbers"],
-                triggers=[],
                 instructions="",
                 source="project",
                 root_dir="/tmp/private",
@@ -2461,8 +2457,6 @@ class TestManualSkillSlashCommand:
         guidance_skill = Skillpack(
             name="guidance_only",
             description="仅方法论约束",
-            allowed_tools=[],
-            triggers=[],
             instructions="只提供规范，不直接绑定工具",
             source="project",
             root_dir="/tmp/guidance_only",
@@ -2529,8 +2523,6 @@ class TestForkPathRemoved:
         engine._active_skills = [Skillpack(
             name="excel_code_runner",
             description="代码处理",
-            allowed_tools=[],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/skill",
@@ -2569,8 +2561,6 @@ class TestForkPathRemoved:
             engine._active_skills = [Skillpack(
                 name="team/analyst",
                 description="普通技能",
-                allowed_tools=["add_numbers"],
-                triggers=[],
                 instructions="",
                 source="project",
                 root_dir="/tmp/skill",
@@ -2689,7 +2679,6 @@ class TestDelegateSubagent:
         engine._subagent_registry.get.return_value = SubagentConfig(
             name="explorer",
             description="测试",
-            allowed_tools=["read_excel"],
             permission_mode="readOnly",
         )
         engine._subagent_executor.run = AsyncMock(
@@ -3180,8 +3169,6 @@ class TestSkillMCPRequirements:
         skill = Skillpack(
             name="need_mcp",
             description="依赖外部 MCP",
-            allowed_tools=["mcp:context7:*"],
-            triggers=[],
             instructions="调用 context7",
             source="project",
             root_dir="/tmp/need_mcp",
@@ -3218,8 +3205,6 @@ class TestSkillMCPRequirements:
         skill = Skillpack(
             name="need_mcp",
             description="依赖外部 MCP",
-            allowed_tools=["mcp:context7:*"],
-            triggers=[],
             instructions="调用 context7",
             source="project",
             root_dir="/tmp/need_mcp",
@@ -3262,8 +3247,6 @@ class TestCommandDispatchAndHooks:
         skill = Skillpack(
             name="echo",
             description="命令分发",
-            allowed_tools=["echo_tool"],
-            triggers=[],
             instructions="回显输入",
             source="project",
             root_dir="/tmp/echo",
@@ -3295,8 +3278,6 @@ class TestCommandDispatchAndHooks:
         engine._active_skills = [Skillpack(
             name="hook/deny",
             description="deny hook",
-            allowed_tools=["add_numbers"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -3331,8 +3312,6 @@ class TestCommandDispatchAndHooks:
         engine._active_skills = [Skillpack(
             name="hook/ask",
             description="ask hook",
-            allowed_tools=["add_numbers"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -3368,8 +3347,6 @@ class TestCommandDispatchAndHooks:
         engine._active_skills = [Skillpack(
             name="hook/update",
             description="update input hook",
-            allowed_tools=["add_numbers"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -3433,8 +3410,6 @@ class TestCommandDispatchAndHooks:
         engine._active_skills = [Skillpack(
             name="hook/allow",
             description="allow hook",
-            allowed_tools=["write_text_file"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -3473,8 +3448,6 @@ class TestCommandDispatchAndHooks:
         skill = Skillpack(
             name="hook/ask_scope",
             description="ask scope",
-            allowed_tools=["add_numbers"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -3513,8 +3486,6 @@ class TestCommandDispatchAndHooks:
         engine._active_skills = [Skillpack(
             name="hook/agent",
             description="agent hook",
-            allowed_tools=["add_numbers"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir="/tmp/hook",
@@ -4822,8 +4793,6 @@ class TestApprovalFlow:
         engine._active_skills = [Skillpack(
             name="test/custom",
             description="test",
-            allowed_tools=["custom_tool"],
-            triggers=[],
             instructions="",
             source="project",
             root_dir=str(tmp_path),
@@ -4942,9 +4911,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "format_basic": Skillpack(
             name="format_basic",
             description="基础格式化",
-            allowed_tools=["format_cells", "adjust_column_width", "adjust_row_height",
-                           "merge_cells", "unmerge_cells", "read_cell_styles"],
-            triggers=["格式", "format"],
             instructions="格式化操作指引",
             source="system",
             root_dir="/tmp/format_basic",
@@ -4952,10 +4918,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "data_basic": Skillpack(
             name="data_basic",
             description="数据分析",
-            allowed_tools=["read_excel", "write_excel", "analyze_data", "filter_data",
-                           "group_aggregate", "transform_data", "write_cells",
-                           "insert_rows", "insert_columns"],
-            triggers=["数据", "data"],
             instructions="数据操作指引",
             source="system",
             root_dir="/tmp/data_basic",
@@ -4963,8 +4925,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "chart_basic": Skillpack(
             name="chart_basic",
             description="图表",
-            allowed_tools=["create_chart", "create_excel_chart"],
-            triggers=["图表", "chart"],
             instructions="图表操作指引",
             source="system",
             root_dir="/tmp/chart_basic",
@@ -4972,24 +4932,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "general_excel": Skillpack(
             name="general_excel",
             description="通用 Excel",
-            allowed_tools=[
-                "read_excel", "write_excel", "analyze_data", "filter_data",
-                "group_aggregate", "transform_data", "write_cells",
-                "format_cells", "adjust_column_width", "adjust_row_height",
-                "merge_cells", "unmerge_cells", "read_cell_styles",
-                "create_chart", "create_excel_chart",
-                "list_sheets", "create_sheet", "copy_sheet", "rename_sheet",
-                "delete_sheet", "copy_range_between_sheets",
-                "insert_rows", "insert_columns",
-                "list_directory", "get_file_info", "find_files",
-                "read_text_file", "inspect_excel_files", "focus_window",
-                "apply_threshold_icon_format", "style_card_blocks",
-                "scale_range_unit", "apply_dashboard_dark_theme",
-                "add_color_scale", "add_data_bar", "add_conditional_rule",
-                "set_print_layout", "set_page_header_footer",
-                "copy_file",
-            ],
-            triggers=[],
             instructions="通用 Excel 操作",
             source="system",
             root_dir="/tmp/general_excel",
@@ -4997,8 +4939,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "excel_code_runner": Skillpack(
             name="excel_code_runner",
             description="代码执行",
-            allowed_tools=["run_code"],
-            triggers=["代码", "code"],
             instructions="代码执行指引",
             source="system",
             root_dir="/tmp/excel_code_runner",
@@ -5006,9 +4946,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "sheet_ops": Skillpack(
             name="sheet_ops",
             description="工作表操作",
-            allowed_tools=["list_sheets", "create_sheet", "copy_sheet",
-                           "rename_sheet", "delete_sheet", "copy_range_between_sheets"],
-            triggers=["工作表", "sheet"],
             instructions="工作表操作指引",
             source="system",
             root_dir="/tmp/sheet_ops",
@@ -5016,9 +4953,6 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         "file_ops": Skillpack(
             name="file_ops",
             description="文件操作",
-            allowed_tools=["list_directory", "get_file_info", "find_files",
-                           "read_text_file", "copy_file"],
-            triggers=["文件", "file"],
             instructions="文件操作指引",
             source="system",
             root_dir="/tmp/file_ops",

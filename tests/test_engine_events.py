@@ -247,8 +247,6 @@ async def test_property_3_tool_call_end_event_status(
     engine._active_skills = [Skillpack(
         name="_events_scope",
         description="events scope",
-        allowed_tools=[tool_name],
-        triggers=[],
         instructions="events scope",
         source="system",
         root_dir="/tmp/_events_scope",

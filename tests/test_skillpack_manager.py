@@ -60,8 +60,6 @@ def _write_skillpack(
     name: str,
     *,
     description: str = "测试",
-    allowed_tools: list[str] | None = None,
-    triggers: list[str] | None = None,
     instructions: str = "测试说明",
 ) -> None:
     skill_dir = root_dir / name
@@ -70,10 +68,6 @@ def _write_skillpack(
         "---",
         f"name: {name}",
         f"description: {description}",
-        "allowed_tools:",
-        *[f"  - {item}" for item in (allowed_tools or ["read_excel"])],
-        "triggers:",
-        *[f"  - {item}" for item in (triggers or ["分析"])],
         "---",
         instructions,
     ]
@@ -102,8 +96,6 @@ def test_create_skillpack_success(tmp_path: Path) -> None:
         name="reporter",
         payload={
             "description": "报表生成",
-            "allowed_tools": ["read_excel", "create_chart"],
-            "triggers": ["报表"],
             "instructions": "先读后画图",
         },
         actor="cli",
@@ -113,63 +105,6 @@ def test_create_skillpack_success(tmp_path: Path) -> None:
     assert created["source"] == "project"
     assert created["writable"] is True
     assert "reporter" in loader.get_skillpacks()
-
-
-def test_create_skillpack_allows_empty_triggers(tmp_path: Path) -> None:
-    loader, manager, _ = _setup(tmp_path)
-
-    created = manager.create_skillpack(
-        name="general_excel",
-        payload={
-            "description": "通用兜底",
-            "allowed_tools": ["read_excel"],
-            "triggers": [],
-            "instructions": "兜底说明",
-            "user_invocable": False,
-        },
-        actor="cli",
-    )
-    assert created["name"] == "general_excel"
-    assert created["triggers"] == []
-    assert created["user_invocable"] is False
-    assert "general_excel" in loader.get_skillpacks()
-
-
-def test_patch_skillpack_allows_empty_triggers(tmp_path: Path) -> None:
-    _, manager, _ = _setup(tmp_path)
-    manager.create_skillpack(
-        name="route_only",
-        payload={
-            "description": "路由技能",
-            "allowed_tools": ["read_excel"],
-            "triggers": ["分析"],
-            "instructions": "说明",
-        },
-        actor="cli",
-    )
-
-    updated = manager.patch_skillpack(
-        name="route_only",
-        payload={"triggers": []},
-        actor="api",
-    )
-    assert updated["triggers"] == []
-
-
-def test_create_skillpack_allows_empty_allowed_tools(tmp_path: Path) -> None:
-    _, manager, _ = _setup(tmp_path)
-
-    created = manager.create_skillpack(
-        name="invalid_tools",
-        payload={
-            "description": "允许空工具",
-            "allowed_tools": [],
-            "triggers": [],
-            "instructions": "说明",
-        },
-        actor="api",
-    )
-    assert created["allowed_tools"] == []
 
 
 def test_create_can_override_system_by_project(tmp_path: Path) -> None:
@@ -182,8 +117,6 @@ def test_create_can_override_system_by_project(tmp_path: Path) -> None:
         name="data_basic",
         payload={
             "description": "项目覆盖版",
-            "allowed_tools": ["read_excel"],
-            "triggers": ["分析"],
             "instructions": "项目优先",
         },
         actor="api",
@@ -199,8 +132,6 @@ def test_patch_project_skillpack_success(tmp_path: Path) -> None:
         name="chart_basic",
         payload={
             "description": "图表",
-            "allowed_tools": ["create_chart"],
-            "triggers": ["图表"],
             "instructions": "默认说明",
         },
         actor="cli",
@@ -225,8 +156,6 @@ def test_create_skillpack_with_mcp_requirements(tmp_path: Path) -> None:
         name="mcp_reader",
         payload={
             "description": "MCP 读取",
-            "allowed_tools": ["mcp:context7:*"],
-            "triggers": ["外部查询"],
             "required-mcp-servers": ["context7"],
             "required-mcp-tools": ["context7:query_docs"],
             "instructions": "先检索，再整理。",
@@ -258,8 +187,6 @@ def test_delete_project_skillpack_archives_and_unloads(tmp_path: Path) -> None:
         name="temp_skill",
         payload={
             "description": "临时",
-            "allowed_tools": ["read_excel"],
-            "triggers": ["临时"],
             "instructions": "临时说明",
         },
         actor="cli",
@@ -288,8 +215,6 @@ def test_resources_path_traversal_rejected(tmp_path: Path) -> None:
             name="invalid_resources",
             payload={
                 "description": "测试",
-                "allowed_tools": ["read_excel"],
-                "triggers": ["分析"],
                 "resources": ["../secret.txt"],
                 "instructions": "说明",
             },

@@ -14,17 +14,13 @@ def _make_skillpack(
     *,
     description: str = "测试描述",
     instructions: str = "测试指引",
-    priority: int = 0,
 ) -> Skillpack:
     return Skillpack(
         name=name,
         description=description,
-        allowed_tools=["read_excel"],
-        triggers=["测试"],
         instructions=instructions,
         source="system",
         root_dir="/tmp",
-        priority=priority,
     )
 
 
@@ -92,8 +88,8 @@ class TestBuildContextsWithBudget:
 
     def test_sufficient_budget_all_full(self) -> None:
         skills = [
-            _make_skillpack("a", instructions="short", priority=1),
-            _make_skillpack("b", instructions="short", priority=0),
+            _make_skillpack("a", instructions="short"),
+            _make_skillpack("b", instructions="short"),
         ]
         total_len = sum(len(s.render_context()) for s in skills)
         out = build_contexts_with_budget(skills, total_len + 100)
@@ -103,8 +99,8 @@ class TestBuildContextsWithBudget:
 
     def test_insufficient_budget_truncates_low_priority(self) -> None:
         long_instructions = "line\n" * 100
-        high = _make_skillpack("high", instructions="short", priority=10)
-        low = _make_skillpack("low", instructions=long_instructions, priority=0)
+        high = _make_skillpack("high", instructions="short")
+        low = _make_skillpack("low", instructions=long_instructions)
         budget = len(high.render_context()) + 150
         out = build_contexts_with_budget([high, low], budget)
         assert len(out) == 2
@@ -114,8 +110,8 @@ class TestBuildContextsWithBudget:
 
     def test_very_small_budget_uses_minimal(self) -> None:
         skills = [
-            _make_skillpack("a", instructions="x" * 500, priority=1),
-            _make_skillpack("b", instructions="y" * 500, priority=0),
+            _make_skillpack("a", instructions="x" * 500),
+            _make_skillpack("b", instructions="y" * 500),
         ]
         budget = 70
         out = build_contexts_with_budget(skills, budget)
@@ -127,18 +123,19 @@ class TestBuildContextsWithBudget:
         total = sum(len(c) for c in out)
         assert total <= budget, f"total {total} > budget {budget}"
 
-    def test_sorted_by_priority(self) -> None:
-        a = _make_skillpack("a", instructions="a", priority=0)
-        b = _make_skillpack("b", instructions="b", priority=5)
-        c = _make_skillpack("c", instructions="c", priority=3)
-        out = build_contexts_with_budget([a, b, c], 500)
+    def test_sorted_by_name(self) -> None:
+        """v5: skills sorted alphabetically by name (priority removed)."""
+        c = _make_skillpack("c_skill", instructions="c")
+        a = _make_skillpack("a_skill", instructions="a")
+        b = _make_skillpack("b_skill", instructions="b")
+        out = build_contexts_with_budget([c, a, b], 500)
         assert len(out) == 3
-        assert "b" in out[0]
-        assert "c" in out[1]
-        assert "a" in out[2]
+        assert "a_skill" in out[0]
+        assert "b_skill" in out[1]
+        assert "c_skill" in out[2]
 
     def test_minimal_context_called_once_when_minimal_branch_selected(self) -> None:
-        skill = _make_skillpack("only_minimal", instructions="x" * 500, priority=1)
+        skill = _make_skillpack("only_minimal", instructions="x" * 500)
         minimal_text = skill.render_context_minimal()
         original = Skillpack.render_context_minimal
         call_count = 0
