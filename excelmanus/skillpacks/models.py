@@ -99,8 +99,8 @@ class SkillMatchResult:
     """Skill 路由结果。"""
 
     skills_used: list[str]
-    tool_scope: list[str]
     route_mode: str
     system_contexts: list[str] = field(default_factory=list)
+    tool_scope: list[str] = field(default_factory=list)  # v5: 始终为空，保留向后兼容
     parameterized: bool = False
     write_hint: str = "unknown"  # "may_write" | "read_only" | "unknown"
