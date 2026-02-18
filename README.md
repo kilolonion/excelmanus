@@ -70,6 +70,22 @@ pip install -e ".[dev]"
 | `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
 | `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
 
+### Skill 预激活（adaptive）
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_SKILL_PREROUTE_MODE` | 预激活策略，仅支持 `adaptive` | `adaptive` |
+| `EXCELMANUS_SKILL_PREROUTE_API_KEY` | 预激活小模型 API Key（未设置时回退主配置） | — |
+| `EXCELMANUS_SKILL_PREROUTE_BASE_URL` | 预激活小模型 Base URL（未设置时回退主配置） | — |
+| `EXCELMANUS_SKILL_PREROUTE_MODEL` | 预激活小模型名称（未设置时回退主模型） | — |
+| `EXCELMANUS_SKILL_PREROUTE_TIMEOUT_MS` | 预激活小模型超时（毫秒） | `10000` |
+
+预激活行为：
+- 非 slash、无已激活 skill 且路由为 `all_tools` 时触发 pre-route（并行于常规路由）。
+- pre-route 命中有效 skill 时按主/副 skill 分层激活。
+- pre-route 异常、缺失或命中不存在 skill 时统一回退 `general_excel`（遵守 `EXCELMANUS_AUTO_ACTIVATE_DEFAULT_SKILL`）。
+- 一旦存在激活 skill，工具范围始终保留 `discover_tools` 以支持纠偏。
+
 ### 窗口感知层配置
 
 | 环境变量 | 说明 | 默认值 |
@@ -101,6 +117,8 @@ pip install -e ".[dev]"
 - Plan 目录不再自动从 `outputs/plans/` 迁移到 `.excelmanus/plans/`，旧目录需手工迁移一次。
 - 会话统计接口移除 `active_count` 旧属性，请统一使用 `await get_active_count()`。
 - MCP 管理器已移除 legacy `npx` 直连兜底逻辑，需使用当前 `mcp.json` 配置链路。
+- `EXCELMANUS_SKILL_PREROUTE_MODE` 仅支持 `adaptive`；`off/meta_only/deepseek/gemini/hybrid` 旧值将启动即报错。
+- `EXCELMANUS_SKILL_PREROUTE_FALLBACK` 已移除，不再支持自定义 pre-route 回退模式。
 
 最小可运行 `.env` 示例：
 

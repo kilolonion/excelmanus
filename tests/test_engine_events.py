@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.skillpacks import Skillpack
 from excelmanus.tools import ToolRegistry
 from excelmanus.tools.registry import ToolDef
 
@@ -242,6 +243,16 @@ async def test_property_3_tool_call_end_event_status(
     registry = _make_registry_with_named_tool(tool_name, tool_func)
     config = _make_config(max_consecutive_failures=10)
     engine = AgentEngine(config, registry)
+    # 激活包含目标工具的技能，避免 scope 收敛导致工具被拒绝。
+    engine._active_skills = [Skillpack(
+        name="_events_scope",
+        description="events scope",
+        allowed_tools=[tool_name],
+        triggers=[],
+        instructions="events scope",
+        source="system",
+        root_dir="/tmp/_events_scope",
+    )]
 
     collector = EventCollector()
 

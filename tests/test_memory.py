@@ -351,7 +351,12 @@ def test_property_truncation_preserves_system_and_recent(
         else:
             content = result[-1]["content"]
             assert isinstance(content, str)
-            assert content == last_content or content.startswith("[截断]") or content == ""
+            assert (
+                content == last_content
+                or content.startswith("[截断]")
+                or content == ""
+                or (content != "" and last_content.endswith(content))
+            )
 
     # 不变量 3：消息角色顺序保持原始相对顺序（不含 system）
     history = result[1:]

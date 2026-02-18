@@ -899,7 +899,12 @@ async def run_case(
     engine = _create_engine(config)
     collector = _EventCollector(render_enabled=render_enabled)
     interceptor = _LLMCallInterceptor(engine)
-    tracer = _EngineTracer(engine) if trace_enabled else None
+    tracer: _EngineTracer | None = None
+    if trace_enabled:
+        try:
+            tracer = _EngineTracer(engine)
+        except AttributeError as exc:
+            logger.debug("trace 已降级：engine 不支持完整 tracer 钩子（%s）", exc)
     timestamp = datetime.now(timezone.utc).isoformat()
 
     # 文件隔离：将源文件复制到工作目录，替换 messages 中的路径
@@ -1827,14 +1832,26 @@ async def _run_suites(
             prog.status = "🔄 执行中"
             prog.start_time = time.monotonic()
             try:
-                results = await run_suite(
-                    suite_path,
-                    config,
-                    output_dir,
-                    concurrency=concurrency,
-                    trace_enabled=trace_enabled,
-                    on_progress=_make_progress_cb(name),
-                )
+                try:
+                    results = await run_suite(
+                        suite_path,
+                        config,
+                        output_dir,
+                        concurrency=concurrency,
+                        trace_enabled=trace_enabled,
+                        on_progress=_make_progress_cb(name),
+                    )
+                except TypeError as exc:
+                    if "on_progress" not in str(exc):
+                        raise
+                    # 兼容旧测试桩 / 自定义 wrapper：不支持 on_progress 时退化调用。
+                    results = await run_suite(
+                        suite_path,
+                        config,
+                        output_dir,
+                        concurrency=concurrency,
+                        trace_enabled=trace_enabled,
+                    )
                 ok_count = sum(1 for r in results if r.status == "ok")
                 fail_count = len(results) - ok_count
                 if fail_count:

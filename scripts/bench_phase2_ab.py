@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Phase 2 全量 A/B 测试脚本：对比 6 种预路由策略的 agent 表现。
+"""Phase 2 全量 A/B 测试脚本：对比 adaptive 策略下不同预路由模型的 agent 表现。
 
 通过调用 excelmanus.bench.run_suite 运行完整 agent 循环，
-分别在 A_baseline / B_meta_only / C_deepseek / D_gemini / E_qwen / F_hybrid
-六组配置下执行指定 suite，收集 tokens、耗时、成功率、工具调用数等指标，
+分别在 A_adaptive_default / B_adaptive_deepseek / C_adaptive_gemini / D_adaptive_qwen
+多组配置下执行指定 suite，收集 tokens、耗时、成功率、工具调用数等指标，
 最终输出汇总对比表和 comparison.json。
 
 用法示例：
@@ -13,8 +13,8 @@
     # 切换到 xhigh 模型
     python scripts/bench_phase2_ab.py --model gpt-5.3-codex-xhigh
 
-    # 只跑 A 和 C 组
-    python scripts/bench_phase2_ab.py --groups A_baseline C_deepseek
+    # 只跑 A 和 B 组
+    python scripts/bench_phase2_ab.py --groups A_adaptive_default B_adaptive_deepseek
 
     # 自定义 suite 和重复次数
     python scripts/bench_phase2_ab.py --suites bench/cases/suite_phase2_data.json --runs 5
@@ -46,38 +46,30 @@ from excelmanus.config import ExcelManusConfig, load_config  # noqa: E402
 # ── 实验组定义 ────────────────────────────────────────────
 
 GROUPS: dict[str, dict[str, Any]] = {
-    "A_baseline": {
-        "skill_preroute_mode": "off",
+    "A_adaptive_default": {
+        "skill_preroute_mode": "adaptive",
         "auto_activate_default_skill": True,
     },
-    "B_meta_only": {
-        "skill_preroute_mode": "meta_only",
-        "auto_activate_default_skill": False,
-    },
-    "C_deepseek": {
-        "skill_preroute_mode": "deepseek",
-        "auto_activate_default_skill": False,
+    "B_adaptive_deepseek": {
+        "skill_preroute_mode": "adaptive",
+        "auto_activate_default_skill": True,
         "skill_preroute_api_key": "sk-da37ceb79edd499cbf72cd538eba87e0",
         "skill_preroute_base_url": "https://api.deepseek.com/v1",
         "skill_preroute_model": "deepseek-chat",
     },
-    "D_gemini": {
-        "skill_preroute_mode": "gemini",
-        "auto_activate_default_skill": False,
+    "C_adaptive_gemini": {
+        "skill_preroute_mode": "adaptive",
+        "auto_activate_default_skill": True,
         "skill_preroute_api_key": "sk-30f732d2a12943caaf73355f158b698f",
         "skill_preroute_base_url": "https://right.codes/gemini/v1beta",
         "skill_preroute_model": "gemini-3-flash-preview",
     },
-    "E_qwen": {
-        "skill_preroute_mode": "deepseek",  # 复用 deepseek 代码路径
-        "auto_activate_default_skill": False,
+    "D_adaptive_qwen": {
+        "skill_preroute_mode": "adaptive",
+        "auto_activate_default_skill": True,
         "skill_preroute_api_key": "***REMOVED_API_KEY***",
         "skill_preroute_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "skill_preroute_model": "qwen3.5-plus",
-    },
-    "F_hybrid": {
-        "skill_preroute_mode": "hybrid",
-        "auto_activate_default_skill": False,
     },
 }
 
@@ -289,7 +281,7 @@ async def _run_group(
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Phase 2 A/B 测试：对比 6 种预路由策略",
+        description="Phase 2 A/B 测试：对比 adaptive 下多路由模型",
     )
     parser.add_argument(
         "--groups",

@@ -6,29 +6,82 @@ from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools.registry import ToolDef
 
 
-def get_tools(store: TaskStore) -> list[ToolDef]:
-    """返回绑定到指定 TaskStore 实例的工具定义（闭包注入，无全局状态）。"""
+_store: TaskStore | None = None
+
+
+def init_store(store: TaskStore) -> None:
+    """兼容旧接口：设置模块级 TaskStore。"""
+    global _store
+    _store = store
+
+
+def _resolve_store(store: TaskStore | None = None) -> TaskStore:
+    """解析可用的 TaskStore（优先显式注入，其次模块级实例）。"""
+    global _store
+    if store is not None:
+        _store = store
+        return store
+    if _store is None:
+        _store = TaskStore()
+    return _store
+
+
+def task_create(
+    title: str,
+    subtasks: list[str],
+    replace_existing: bool = False,
+    *,
+    store: TaskStore | None = None,
+) -> str:
+    """创建任务清单（兼容旧接口，同时支持显式 store 注入）。"""
+    active_store = _resolve_store(store)
+    if not isinstance(replace_existing, bool):
+        raise ValueError("replace_existing 必须为布尔值。")
+    task_list = active_store.create(title, subtasks, replace_existing=replace_existing)
+    return f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
+
+
+def task_update(
+    task_index: int,
+    status: str,
+    result: str | None = None,
+    *,
+    store: TaskStore | None = None,
+) -> str:
+    """更新任务项状态（兼容旧接口，同时支持显式 store 注入）。"""
+    active_store = _resolve_store(store)
+    try:
+        new_status = TaskStatus(status)
+    except ValueError:
+        valid = ", ".join(s.value for s in TaskStatus)
+        raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
+    item = active_store.update_item(task_index, new_status, result)
+    return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
+
+
+def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
+    """返回绑定到指定 TaskStore 实例的工具定义。"""
+    active_store = _resolve_store(store)
 
     def task_create(
         title: str,
         subtasks: list[str],
         replace_existing: bool = False,
     ) -> str:
-        """创建任务清单。"""
-        if not isinstance(replace_existing, bool):
-            raise ValueError("replace_existing 必须为布尔值。")
-        task_list = store.create(title, subtasks, replace_existing=replace_existing)
-        return f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
+        return globals()["task_create"](
+            title=title,
+            subtasks=subtasks,
+            replace_existing=replace_existing,
+            store=active_store,
+        )
 
     def task_update(task_index: int, status: str, result: str | None = None) -> str:
-        """更新任务项状态。"""
-        try:
-            new_status = TaskStatus(status)
-        except ValueError:
-            valid = ", ".join(s.value for s in TaskStatus)
-            raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
-        item = store.update_item(task_index, new_status, result)
-        return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
+        return globals()["task_update"](
+            task_index=task_index,
+            status=status,
+            result=result,
+            store=active_store,
+        )
 
     return [
         ToolDef(

@@ -642,6 +642,7 @@ class TestSystemMessageMode:
     """system_message_mode 行为测试。"""
 
     def test_auto_mode_defaults_to_replace(self) -> None:
+        AgentEngine._system_mode_fallback_cache = None  # 确保干净状态
         config = _make_config(system_message_mode="auto")
         engine = AgentEngine(config, _make_registry_with_tools())
         assert engine._effective_system_mode() == "replace"
@@ -662,6 +663,7 @@ class TestSystemMessageMode:
 
     @pytest.mark.asyncio
     async def test_auto_mode_fallback_merges_messages_after_provider_compat_error(self) -> None:
+        AgentEngine._system_mode_fallback_cache = None  # 确保干净状态
         config = _make_config(system_message_mode="auto")
         engine = AgentEngine(config, _make_registry_with_tools())
         mocked_create = AsyncMock(
@@ -691,6 +693,19 @@ class TestSystemMessageMode:
         assert "S2" in retry_messages[0]["content"]
         assert sum(1 for msg in retry_messages if msg.get("role") == "system") == 1
         assert engine._system_mode_fallback == "merge"
+        assert AgentEngine._system_mode_fallback_cache == "merge"
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_fallback_persists_across_sessions(self) -> None:
+        """类级缓存确保新会话不再重复试错。"""
+        # 先确保类缓存被设置为 merge（由上一个测试或手动设置）
+        AgentEngine._system_mode_fallback_cache = "merge"
+        config = _make_config(system_message_mode="auto")
+        engine = AgentEngine(config, _make_registry_with_tools())
+        # 新实例应直接读取类缓存，无需试错
+        assert engine._effective_system_mode() == "merge"
+        # 清理类状态，避免污染其他测试
+        AgentEngine._system_mode_fallback_cache = None
 
 
 class TestContextBudgetAndHardCap:
@@ -2154,6 +2169,7 @@ class TestPlanModeControl:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
+        engine._plan_intercept_task_create = True  # 显式开启拦截（默认关闭）
 
         draft = PlanDraft(
             plan_id="pln_task_create_hook",
@@ -3402,12 +3418,12 @@ class TestPreRouteCompositeFallback:
     """复合预路由命中时分层激活主技能+副技能（不再降级 general_excel）。"""
 
     @pytest.mark.asyncio
-    async def test_deepseek_preroute_multi_skill_activates_layered(self) -> None:
+    async def test_adaptive_preroute_multi_skill_activates_layered(self) -> None:
         """复合技能预路由应分层激活主技能+副技能，不降级 general_excel。"""
         from excelmanus.skillpacks.pre_router import PreRouteResult
 
         config = _make_config(
-            skill_preroute_mode="deepseek",
+            skill_preroute_mode="adaptive",
             skill_preroute_model="router-model",
             skill_preroute_api_key="router-key",
             skill_preroute_base_url="https://router.example.com/v1",
@@ -3495,19 +3511,16 @@ class TestPreRouteCompositeFallback:
         assert "format_basic" in engine.last_route_result.skills_used
 
 
-class TestPreRouteFallbackPolicy:
-    """预路由失败分支的回退策略应由配置统一控制。"""
+class TestAdaptivePrerouteFallback:
+    """adaptive 预路由失败分支应统一回退到 general_excel。"""
 
     @staticmethod
     def _build_engine_for_missing_skill(
         *,
-        mode: str,
-        fallback: str,
         auto_activate_default_skill: bool,
     ) -> AgentEngine:
         config = _make_config(
-            skill_preroute_mode=mode,
-            skill_preroute_fallback=fallback,
+            skill_preroute_mode="adaptive",
             auto_activate_default_skill=auto_activate_default_skill,
             skill_preroute_model="router-model",
             skill_preroute_api_key="router-key",
@@ -3540,10 +3553,8 @@ class TestPreRouteFallbackPolicy:
         )
 
     @pytest.mark.asyncio
-    async def test_deepseek_auto_fallback_respects_auto_activate_flag(self) -> None:
+    async def test_adaptive_fallback_respects_auto_activate_flag(self) -> None:
         engine = self._build_engine_for_missing_skill(
-            mode="deepseek",
-            fallback="auto",
             auto_activate_default_skill=False,
         )
         pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
@@ -3554,24 +3565,8 @@ class TestPreRouteFallbackPolicy:
         assert all(s.name != "general_excel" for s in engine._active_skills)
 
     @pytest.mark.asyncio
-    async def test_deepseek_can_override_to_meta_only(self) -> None:
+    async def test_adaptive_fallback_activates_general_excel_when_enabled(self) -> None:
         engine = self._build_engine_for_missing_skill(
-            mode="deepseek",
-            fallback="meta_only",
-            auto_activate_default_skill=True,
-        )
-        pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
-        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
-            result = await engine.chat("分析这个表")
-
-        assert result == "ok"
-        assert all(s.name != "general_excel" for s in engine._active_skills)
-
-    @pytest.mark.asyncio
-    async def test_hybrid_can_override_to_general_excel(self) -> None:
-        engine = self._build_engine_for_missing_skill(
-            mode="hybrid",
-            fallback="general_excel",
             auto_activate_default_skill=True,
         )
         pre_route_mock = AsyncMock(return_value=self._missing_skill_preroute_result())
@@ -3580,6 +3575,45 @@ class TestPreRouteFallbackPolicy:
 
         assert result == "ok"
         assert any(s.name == "general_excel" for s in engine._active_skills)
+
+    @pytest.mark.asyncio
+    async def test_adaptive_preroute_skill_name_none_does_not_trigger_fallback(self) -> None:
+        from excelmanus.skillpacks.pre_router import PreRouteResult
+
+        config = _make_config(
+            skill_preroute_mode="adaptive",
+            auto_activate_default_skill=True,
+            skill_preroute_model="router-model",
+            skill_preroute_api_key="router-key",
+            skill_preroute_base_url="https://router.example.com/v1",
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry, skill_router=_make_skill_router(config))
+        engine._route_skills = AsyncMock(
+            return_value=SkillMatchResult(
+                skills_used=[],
+                tool_scope=[],
+                route_mode="all_tools",
+                system_contexts=[],
+            )
+        )
+        engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response("ok"))
+
+        pre_route_mock = AsyncMock(
+            return_value=PreRouteResult(
+                skill_name=None,
+                skill_names=[],
+                confidence=0.6,
+                reason="闲聊",
+                latency_ms=2.0,
+                model_used="router-model",
+            )
+        )
+        with patch("excelmanus.skillpacks.pre_router.pre_route_skill", pre_route_mock):
+            result = await engine.chat("分析这个表")
+
+        assert result == "ok"
+        assert all(s.name != "general_excel" for s in engine._active_skills)
 
 
 class TestFallbackScopeGuard:
@@ -5752,6 +5786,7 @@ class TestDiscoveryToolScope:
         )]
         scope = engine._get_current_tool_scope(route_result=None)
         assert "add_numbers" in scope
+        assert "discover_tools" in scope
 
 
 class TestDiscoverTools:
@@ -5982,10 +6017,9 @@ class TestToolInjectionOptimizationE2E:
         # 所以工具索引可能为空。这是正确行为。
         # 但如果 registry 注册了 DISCOVERY_TOOLS 中的工具，则应包含索引。
 
-    @pytest.mark.parametrize("mode", ["off", "deepseek", "gemini", "meta_only", "hybrid"])
-    def test_tool_index_in_system_prompt_when_skill_active_all_modes(self, mode: str) -> None:
-        """skill 激活时所有模式都应注入工具索引（紧凑版）。"""
-        config = _make_config(skill_preroute_mode=mode)
+    def test_tool_index_in_system_prompt_when_skill_active_adaptive(self) -> None:
+        """skill 激活时 adaptive 模式应注入工具索引（紧凑版）。"""
+        config = _make_config(skill_preroute_mode="adaptive")
         registry = self._make_registry_with_categorized_tools()
         engine = AgentEngine(config, registry)
         engine._active_skills = [Skillpack(

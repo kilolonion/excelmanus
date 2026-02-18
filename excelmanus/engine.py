@@ -459,6 +459,10 @@ class AutoSupplementResult:
 class AgentEngine:
     """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
+    # auto 模式系统消息兼容性探测结果（类级缓存，跨会话复用）
+    # None = 尚未探测；"merge" = 已确认需要合并
+    _system_mode_fallback_cache: str | None = None
+
     def __init__(
         self,
         config: ExcelManusConfig,
@@ -560,8 +564,9 @@ class AgentEngine:
         # 工具自动补充：每轮计数器
         self._turn_supplement_count: int = 0
         self._auto_supplement_notice: str = ""
-        # auto 模式系统消息回退缓存：None | "merge"
-        self._system_mode_fallback: str | None = None
+        # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
+        # 保留实例属性作为向后兼容别名
+        self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
         # 执行统计（每次 chat 调用后更新）
         self._last_iteration_count: int = 0
         self._last_tool_call_count: int = 0
@@ -585,7 +590,7 @@ class AgentEngine:
         self._pending_question_route_result: SkillMatchResult | None = None
         self._pending_approval_route_result: SkillMatchResult | None = None
         self._plan_mode_enabled: bool = False
-        self._plan_intercept_task_create: bool = True
+        self._plan_intercept_task_create: bool = False
         self._pending_plan: PendingPlanState | None = None
         self._approved_plan_context: str | None = None
         self._suspend_task_create_plan_once: bool = False
@@ -988,10 +993,9 @@ class AgentEngine:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
         # ── Phase 1: 技能预激活 ──
-        # 根据 skill_preroute_mode 决定预激活策略：
-        # - off: 确定性激活 general_excel（当前默认行为）
-        # - meta_only: 不预激活，仅保留元工具 + DISCOVERY_TOOLS
-        # - deepseek / gemini / hybrid: 小模型预判后精准激活
+        # adaptive 预激活策略：
+        # 非 slash、无已激活 skill 且路由为 all_tools 时并行执行 pre-route，
+        # 优先激活预判命中的主/副技能；异常/缺失/无效时统一回退 general_excel。
         auto_activated_skill_name: str | None = None
         pre_route_result: "PreRouteResult | None" = None
         preroute_mode = self._config.skill_preroute_mode
@@ -1001,7 +1005,7 @@ class AgentEngine:
             not self._active_skills
             and effective_slash_command is None
             and self._skill_router is not None
-            and preroute_mode in ("hybrid", "deepseek", "gemini")
+            and preroute_mode == "adaptive"
         )
 
         if _can_preroute:
@@ -1057,8 +1061,7 @@ class AgentEngine:
             and effective_slash_command is None
             and self._skill_router is not None
         ):
-            if preroute_mode in ("hybrid", "deepseek", "gemini"):
-                fallback_mode = self._resolve_preroute_fallback_mode(preroute_mode)
+            if preroute_mode == "adaptive":
                 if pre_route_result is not None:
                     try:
                         (
@@ -1072,7 +1075,6 @@ class AgentEngine:
                         if missing_target_skill is not None:
                             auto_activated_skill_name = await self._apply_preroute_fallback(
                                 mode_label=preroute_mode,
-                                fallback_mode=fallback_mode,
                                 reason=(
                                     f"{preroute_mode} 预路由技能 {missing_target_skill} 不存在"
                                     f"（候选={skill_candidates}）"
@@ -1081,29 +1083,13 @@ class AgentEngine:
                     except Exception as exc:
                         auto_activated_skill_name = await self._apply_preroute_fallback(
                             mode_label=preroute_mode,
-                            fallback_mode=fallback_mode,
                             reason=f"{preroute_mode} 预路由处理异常: {exc}",
                         )
                 else:
                     auto_activated_skill_name = await self._apply_preroute_fallback(
                         mode_label=preroute_mode,
-                        fallback_mode=fallback_mode,
                         reason=f"{preroute_mode} 预路由结果缺失",
                     )
-
-            elif preroute_mode == "meta_only":
-                # 仅元工具模式：不预激活任何 skill，让 LLM 自己 select_skill
-                logger.info("meta_only 模式：跳过预激活，仅保留元工具")
-
-            else:
-                # off 模式：确定性激活 general_excel（当前默认行为）
-                if self._config.auto_activate_default_skill:
-                    auto_result = await self._handle_select_skill("general_excel")
-                    if self._is_select_skill_ok(auto_result):
-                        logger.info("自动预激活技能: general_excel")
-                        auto_activated_skill_name = "general_excel"
-                    else:
-                        logger.debug("自动预激活 general_excel 失败（技能不存在），继续使用全量工具")
 
         # 将路由结果中的 tool_scope 与实际可调用范围对齐（含元工具）。
         effective_tool_scope = self._get_current_tool_scope(route_result=route_result)
@@ -1577,18 +1563,6 @@ class AgentEngine:
         # 分层加载：第一个候选为主 skill，其余为副 skill
         return candidates[0], candidates
 
-    def _resolve_preroute_fallback_mode(self, preroute_mode: str) -> str:
-        """解析预路由失败回退策略。"""
-        configured = str(
-            getattr(self._config, "skill_preroute_fallback", "auto") or "auto"
-        ).strip().lower()
-        if configured in {"meta_only", "general_excel"}:
-            return configured
-        # auto：兼容原行为
-        if preroute_mode == "hybrid":
-            return "meta_only"
-        return "general_excel"
-
     async def _activate_preroute_candidates(
         self,
         *,
@@ -1633,25 +1607,20 @@ class AgentEngine:
         self,
         *,
         mode_label: str,
-        fallback_mode: str,
         reason: str,
     ) -> str | None:
-        """执行预路由失败回退。"""
-        if fallback_mode == "general_excel":
-            logger.warning("%s，回退 general_excel", reason)
-            if not self._config.auto_activate_default_skill:
-                logger.info(
-                    "%s 回退 general_excel 已禁用（auto_activate_default_skill=false）",
-                    mode_label,
-                )
-                return None
-            auto_result = await self._handle_select_skill("general_excel")
-            if self._is_select_skill_ok(auto_result):
-                return "general_excel"
-            logger.debug("回退 general_excel 失败（技能不存在），继续使用全量工具")
+        """执行预路由失败回退（统一回退到 general_excel）。"""
+        logger.warning("%s，回退 general_excel", reason)
+        if not self._config.auto_activate_default_skill:
+            logger.info(
+                "%s 回退 general_excel 已禁用（auto_activate_default_skill=false）",
+                mode_label,
+            )
             return None
-
-        logger.warning("%s，回退 meta_only 模式", reason)
+        auto_result = await self._handle_select_skill("general_excel")
+        if self._is_select_skill_ok(auto_result):
+            return "general_excel"
+        logger.debug("回退 general_excel 失败（技能不存在），继续使用全量工具")
         return None
 
     def _try_auto_supplement_tool(self, tool_name: str) -> AutoSupplementResult | None:
@@ -2513,10 +2482,9 @@ class AgentEngine:
                         scope.append(t)
             if "select_skill" not in scope:
                 scope.append("select_skill")
-            # hybrid 模式下保留 discover_tools，让 LLM 能查询其他类别工具
-            if self._config.skill_preroute_mode == "hybrid":
-                if "discover_tools" not in scope:
-                    scope.append("discover_tools")
+            # active skill 时始终保留 discover_tools，支持查询其他类别工具并纠偏。
+            if "discover_tools" not in scope:
+                scope.append("discover_tools")
             merged_scope = self._append_global_mcp_tools(
                 self._ensure_always_available(_append_finish_task(scope))
             )
@@ -3657,8 +3625,11 @@ class AgentEngine:
                 self._memory.add_assistant_message(reply_text)
 
                 # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
+                # 当 write_hint=="may_write" 时，由下方 write_guard 统一处理，
+                # 避免两个 guard 连续触发注入语义重叠的提示（P2 修复）。
                 if (
-                    not self._active_skills
+                    write_hint != "may_write"
+                    and not self._active_skills
                     and iteration < max_iter - 1
                     and _contains_formula_advice(reply_text)
                     and not self._execution_guard_fired
@@ -3847,6 +3818,10 @@ class AgentEngine:
                     if tc_result.tool_name in _WRITE_TOOL_NAMES:
                         has_write_tool_call = True
                         self._has_write_tool_call = True
+                        if write_hint != "may_write":
+                            write_hint = "may_write"
+                        if self._current_write_hint != "may_write":
+                            self._current_write_hint = "may_write"
                     if tc_result.tool_name == "select_skill":
                         current_route_result = self._refresh_route_after_skill_switch(
                             current_route_result
@@ -4208,23 +4183,43 @@ class AgentEngine:
                     elif tool_name == "finish_task":
                         summary = arguments.get("summary", "")
                         _has_write = getattr(self, "_has_write_tool_call", False)
+                        _hint = getattr(self, "_current_write_hint", "unknown")
                         if _has_write:
                             result_str = f"✓ 任务完成。{summary}"
                             success = True
                             error = None
                             finish_accepted = True
                         elif getattr(self, "_finish_task_warned", False):
-                            result_str = f"✓ 任务完成（无写入）。{summary}"
-                            success = True
-                            error = None
-                            finish_accepted = True
+                            if _hint == "may_write":
+                                # write_hint 为 may_write 但无实际写入，不允许绕过
+                                result_str = (
+                                    "⚠️ 当前任务被判定为需要写入（write_hint=may_write），"
+                                    "但未检测到任何写入类工具的成功调用。"
+                                    "请先执行写入操作，再调用 finish_task。"
+                                )
+                                success = True
+                                error = None
+                                finish_accepted = False
+                            else:
+                                result_str = f"✓ 任务完成（无写入）。{summary}"
+                                success = True
+                                error = None
+                                finish_accepted = True
                         else:
-                            result_str = (
-                                "⚠️ 未检测到写入类工具的成功调用。"
-                                "如果经分析确实不需要写入，请再次调用 finish_task 并在 summary 中说明原因。"
-                                "否则请先执行写入操作。"
-                            )
-                            self._finish_task_warned = True
+                            if _hint == "may_write":
+                                result_str = (
+                                    "⚠️ 当前任务被判定为需要写入（write_hint=may_write），"
+                                    "但未检测到任何写入类工具的成功调用。"
+                                    "请先调用写入工具完成实际操作，再调用 finish_task。"
+                                    "不接受无写入的完成声明。"
+                                )
+                            else:
+                                result_str = (
+                                    "⚠️ 未检测到写入类工具的成功调用。"
+                                    "如果经分析确实不需要写入，请再次调用 finish_task 并在 summary 中说明原因。"
+                                    "否则请先执行写入操作。"
+                                )
+                                self._finish_task_warned = True
                             success = True
                             error = None
                             finish_accepted = False
@@ -4691,7 +4686,8 @@ class AgentEngine:
         self._execution_guard_fired = False
         self._finish_task_warned = False
         self._has_write_tool_call = False
-        self._system_mode_fallback = None
+        # _system_mode_fallback 同步类缓存（不重置，跨会话复用探测结果）
+        self._system_mode_fallback = type(self)._system_mode_fallback_cache
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             tool_scope=[],
@@ -5338,10 +5334,12 @@ class AgentEngine:
 
         if action == "on" and len(parts) == 2:
             self._plan_mode_enabled = True
+            self._plan_intercept_task_create = True
             return "已开启 plan mode。后续普通对话将仅生成计划草案。"
 
         if action == "off" and len(parts) == 2:
             self._plan_mode_enabled = False
+            self._plan_intercept_task_create = False
             return "已关闭 plan mode。"
 
         if action == "approve":
@@ -5393,6 +5391,7 @@ class AgentEngine:
         )
         self._pending_plan = None
         self._plan_mode_enabled = False
+        self._plan_intercept_task_create = False
 
         self._emit(
             on_event,
@@ -6197,7 +6196,7 @@ class AgentEngine:
         configured = self._config.system_message_mode
         if configured != "auto":
             return configured
-        if self._system_mode_fallback == "merge":
+        if type(self)._system_mode_fallback_cache == "merge":
             return "merge"
         return "replace"
 
@@ -6226,6 +6225,7 @@ class AgentEngine:
                 and self._is_system_compatibility_error(exc)
             ):
                 logger.warning("检测到 replace(system 分段) 兼容性错误，自动回退到 merge 模式")
+                type(self)._system_mode_fallback_cache = "merge"
                 self._system_mode_fallback = "merge"
                 source_messages = kwargs.get("messages")
                 if not isinstance(source_messages, list):

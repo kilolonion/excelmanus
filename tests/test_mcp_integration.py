@@ -244,7 +244,8 @@ class TestAgentEngineMCPIntegration:
 
         await engine.initialize_mcp()
 
-        mock_manager.initialize.assert_awaited_once_with(registry)
+        # AgentEngine 初始化时会 fork registry，initialize_mcp 应使用会话内 registry。
+        mock_manager.initialize.assert_awaited_once_with(engine._registry)
 
     @pytest.mark.asyncio
     async def test_shutdown_mcp_calls_manager(self):

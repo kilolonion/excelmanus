@@ -29,6 +29,18 @@ def _build_url_spans(text: str) -> list[tuple[int, int]]:
     return [m.span() for m in _URL_PATTERN.finditer(text)]
 
 
+def _mask_path_keep_basename(path_text: str) -> str:
+    """将绝对路径脱敏为 <path>/basename。"""
+    raw = path_text.rstrip("/\\")
+    if not raw:
+        return "<path>"
+    parts = re.split(r"[\\/]+", raw)
+    basename = parts[-1] if parts else ""
+    if not basename:
+        return "<path>"
+    return f"<path>/{basename}"
+
+
 def _make_path_replacer(url_spans: list[tuple[int, int]]):
     """生成路径脱敏回调，跳过 URL 内部的路径匹配。"""
     def _replacer(match: re.Match[str]) -> str:
@@ -36,7 +48,7 @@ def _make_path_replacer(url_spans: list[tuple[int, int]]):
         for span_start, span_end in url_spans:
             if span_start <= start < span_end:
                 return match.group(0)  # 在 URL 内，保留原文
-        return "<path>"
+        return _mask_path_keep_basename(match.group(0))
     return _replacer
 
 
