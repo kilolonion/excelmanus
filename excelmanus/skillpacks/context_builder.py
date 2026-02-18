@@ -6,7 +6,7 @@ from excelmanus.skillpacks.models import Skillpack
 
 
 def build_contexts_with_budget(skills: list[Skillpack], budget: int) -> list[str]:
-    """按 priority 降序，在 budget 内构建 contexts。
+    """在 budget 内构建 contexts。
 
     降级顺序：完整正文 → 截断正文 → 仅 name+description。
     budget <= 0 时不限制。
@@ -15,7 +15,7 @@ def build_contexts_with_budget(skills: list[Skillpack], budget: int) -> list[str
         return []
     if budget <= 0:
         return [s.render_context() for s in skills]
-    ordered = sorted(skills, key=lambda s: (-s.priority, s.name))
+    ordered = sorted(skills, key=lambda s: s.name)
     result: list[str] = []
     used = 0
     for skill in ordered:

@@ -118,19 +118,12 @@ class SkillpackSummaryResponse(BaseModel):
 class SkillpackDetailResponse(SkillpackSummaryResponse):
     """Skillpack 详情响应。"""
 
-    allowed_tools: list[str] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("allowed_tools", "allowed-tools"),
-        serialization_alias="allowed-tools",
-    )
-    triggers: list[str]
     file_patterns: list[str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("file_patterns", "file-patterns"),
         serialization_alias="file-patterns",
     )
     resources: list[str]
-    priority: int
     version: str
     disable_model_invocation: bool = Field(
         default=False,
@@ -271,15 +264,10 @@ def _to_skill_detail(detail: dict[str, Any]) -> SkillpackDetailResponse:
         argument_hint=str(
             detail.get("argument-hint", detail.get("argument_hint", "")) or ""
         ),
-        allowed_tools=list(
-            detail.get("allowed-tools", detail.get("allowed_tools", [])) or []
-        ),
-        triggers=list(detail.get("triggers", []) or []),
         file_patterns=list(
             detail.get("file-patterns", detail.get("file_patterns", [])) or []
         ),
         resources=list(detail.get("resources", []) or []),
-        priority=int(detail.get("priority", 0)),
         version=str(detail.get("version", "1.0.0")),
         disable_model_invocation=bool(
             detail.get(

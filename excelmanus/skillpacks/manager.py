@@ -19,12 +19,9 @@ _SEGMENT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _REQUIRED_CREATE_FIELDS = {"description"}
 _SUPPORTED_FIELDS = {
     "description",
-    "allowed_tools",
-    "triggers",
     "instructions",
     "file_patterns",
     "resources",
-    "priority",
     "version",
     "disable_model_invocation",
     "user_invocable",
@@ -39,7 +36,6 @@ _SUPPORTED_FIELDS = {
 }
 
 _FIELD_ALIASES = {
-    "allowed-tools": "allowed_tools",
     "file-patterns": "file_patterns",
     "disable-model-invocation": "disable_model_invocation",
     "user-invocable": "user_invocable",
@@ -51,11 +47,8 @@ _FIELD_ALIASES = {
 }
 
 _DEFAULTS: dict[str, Any] = {
-    "allowed_tools": [],
-    "triggers": [],
     "file_patterns": [],
     "resources": [],
-    "priority": 0,
     "version": "1.0.0",
     "disable_model_invocation": False,
     "user_invocable": True,
@@ -289,12 +282,9 @@ class SkillpackManager:
             }
         return {
             "description": base.description,
-            "allowed_tools": list(base.allowed_tools),
-            "triggers": list(base.triggers),
             "instructions": base.instructions,
             "file_patterns": list(base.file_patterns),
             "resources": list(base.resources),
-            "priority": base.priority,
             "version": base.version,
             "disable_model_invocation": base.disable_model_invocation,
             "user_invocable": base.user_invocable,
@@ -313,20 +303,10 @@ class SkillpackManager:
             "name": name,
             "description": payload["description"],
         }
-        allowed_tools = list(payload.get("allowed_tools", []) or [])
-        triggers = list(payload.get("triggers", []) or [])
-        if allowed_tools:
-            frontmatter["allowed-tools"] = allowed_tools
-        if triggers:
-            frontmatter["triggers"] = triggers
-
         if payload.get("file_patterns"):
             frontmatter["file-patterns"] = payload["file_patterns"]
         if payload.get("resources"):
             frontmatter["resources"] = payload["resources"]
-        if int(payload.get("priority", 0)) != 0:
-            frontmatter["priority"] = int(payload["priority"])
-
         version = str(payload.get("version", "1.0.0") or "").strip()
         if version and version != "1.0.0":
             frontmatter["version"] = version
@@ -419,8 +399,6 @@ class SkillpackManager:
             elif key in {"model", "command_tool"}:
                 normalized[key] = self._normalize_optional_str(key, value)
             elif key in {
-                "allowed_tools",
-                "triggers",
                 "file_patterns",
                 "resources",
                 "required_mcp_servers",
@@ -432,8 +410,6 @@ class SkillpackManager:
                 normalized[key] = values
             elif key in {"disable_model_invocation", "user_invocable"}:
                 normalized[key] = self._normalize_bool(key, value)
-            elif key == "priority":
-                normalized[key] = self._normalize_int(key, value)
             elif key == "command_dispatch":
                 mode = self._normalize_str(key, value, allow_empty=False).lower()
                 if mode not in {"none", "tool"}:
@@ -552,14 +528,11 @@ class SkillpackManager:
         detail = {
             "name": skill.name,
             "description": skill.description,
-            "allowed_tools": list(skill.allowed_tools),
-            "triggers": list(skill.triggers),
             "instructions": skill.instructions,
             "source": skill.source,
             "writable": skill.source == "project",
             "file_patterns": list(skill.file_patterns),
             "resources": list(skill.resources),
-            "priority": skill.priority,
             "version": skill.version,
             "disable_model_invocation": skill.disable_model_invocation,
             "user_invocable": skill.user_invocable,
@@ -575,7 +548,6 @@ class SkillpackManager:
             "resource_contents": dict(skill.resource_contents),
         }
         # 对外补充标准别名键
-        detail["allowed-tools"] = detail["allowed_tools"]
         detail["file-patterns"] = detail["file_patterns"]
         detail["disable-model-invocation"] = detail["disable_model_invocation"]
         detail["user-invocable"] = detail["user_invocable"]

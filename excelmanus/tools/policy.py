@@ -27,7 +27,6 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "read_text_file",
         "read_cell_styles",
         "inspect_excel_files",
-        "list_skills",
         "memory_read_topic",
         # 任务工具仅修改会话内存态，不触达工作区文件。
         "task_create",

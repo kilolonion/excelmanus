@@ -33,11 +33,8 @@ class SkillpackValidationError(SkillpackLoaderError):
 _CANONICAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "name": ("name",),
     "description": ("description",),
-    "allowed_tools": ("allowed_tools", "allowed-tools"),
-    "triggers": ("triggers",),
     "file_patterns": ("file_patterns", "file-patterns"),
     "resources": ("resources",),
-    "priority": ("priority",),
     "version": ("version",),
     "disable_model_invocation": (
         "disable_model_invocation",
@@ -221,12 +218,9 @@ class SkillpackLoader:
         self._validate_skill_name(name)
         description = self._get_required_str(frontmatter, "description")
 
-        allowed_tools = self._get_optional_str_list(frontmatter, "allowed_tools")
-        triggers = self._get_optional_str_list(frontmatter, "triggers")
         file_patterns = self._get_optional_str_list(frontmatter, "file_patterns")
         resources = self._get_optional_str_list(frontmatter, "resources")
 
-        priority = self._get_optional_int(frontmatter, "priority", default=0)
         version = self._get_optional_str(frontmatter, "version", default="1.0.0")
         disable_model_invocation = self._get_optional_bool(
             frontmatter,
@@ -287,14 +281,11 @@ class SkillpackLoader:
         return Skillpack(
             name=name,
             description=description,
-            allowed_tools=allowed_tools,
-            triggers=triggers,
             instructions=body.strip(),
             source=source,
             root_dir=str(skill_dir),
             file_patterns=file_patterns,
             resources=resources,
-            priority=priority,
             version=version,
             disable_model_invocation=disable_model_invocation,
             user_invocable=user_invocable,

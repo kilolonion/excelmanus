@@ -519,7 +519,6 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
-        # v5: skill_tools (list_skills) 已删除，由 activate_skill 元工具替代
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
@@ -1584,7 +1583,7 @@ class AgentEngine:
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """v5: 构建 LLM-Native 元工具定义。
 
-        activate_skill + expand_tools 替代旧的 select_skill + discover_tools + list_skills。
+        构建 activate_skill + expand_tools + finish_task + delegate_to_subagent + list_subagents + ask_user。
         """
         from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS
 
@@ -3456,7 +3455,7 @@ class AgentEngine:
                         skip_plan_once_for_task_create = True
                         self._suspend_task_create_plan_once = False
 
-                    if tool_name in ("activate_skill", "select_skill"):
+                    if tool_name == "activate_skill":
                         selected_name = arguments.get("skill_name")
                         if not isinstance(selected_name, str) or not selected_name.strip():
                             result_str = "工具参数错误: skill_name 必须为非空字符串。"
@@ -4199,7 +4198,7 @@ class AgentEngine:
 
         触发条件：
         - 手动 slash 命令命中（route_mode=slash_direct）
-        - 命中的 skill 无 allowed_tools，且不是 command_dispatch=tool
+        - 命中的 skill 不是 command_dispatch=tool
         - slash 参数中包含可执行任务文本
         """
         if not slash_command or route_result.route_mode != "slash_direct":
