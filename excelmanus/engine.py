@@ -2182,9 +2182,8 @@ class AgentEngine:
         if mcp_notice:
             contexts.append(mcp_notice)
 
-        # 2. 工具分类索引（使用全量工具域）
-        all_tools = list(self._all_tool_names())
-        tool_index = self._build_tool_index_notice(all_tools)
+        # 2. 工具分类索引
+        tool_index = self._build_tool_index_notice()
         if tool_index:
             contexts.append(tool_index)
 
@@ -4224,7 +4223,6 @@ class AgentEngine:
         fallback_contexts.append(guidance_context)
         adapted = SkillMatchResult(
             skills_used=list(fallback.skills_used),
-            tool_scope=list(fallback.tool_scope),
             route_mode=fallback.route_mode,
             system_contexts=fallback_contexts,
             parameterized=fallback.parameterized,
@@ -4809,7 +4807,6 @@ class AgentEngine:
             return {"success": False, "error": "缺少 file_path/sheet_name/range 参数"}
 
         all_tools = self._all_tool_names()
-        full_scope = list(all_tools)
         read_sheet_tools: list[str] = []
         for tool_name in all_tools:
             if not tool_name.startswith("mcp_"):
@@ -4832,7 +4829,6 @@ class AgentEngine:
                     self._registry.call_tool(
                         tool_name,
                         arguments,
-                        tool_scope=full_scope,
                     )
                 )
                 return {
@@ -4858,7 +4854,6 @@ class AgentEngine:
                     self._registry.call_tool(
                         "read_excel",
                         arguments,
-                        tool_scope=full_scope,
                     )
                 )
                 return {
@@ -4872,14 +4867,6 @@ class AgentEngine:
 
         return {"success": False, "error": "未找到可用读取工具（read_sheet/read_excel）"}
 
-    def _get_openai_tools(self, tool_scope: Sequence[str] | None) -> list[dict[str, Any]]:
-        get_openai_schemas = getattr(self._registry, "get_openai_schemas", None)
-        if not callable(get_openai_schemas):
-            return []
-        try:
-            return get_openai_schemas(mode="chat_completions", tool_scope=tool_scope)
-        except TypeError:
-            return get_openai_schemas(mode="chat_completions")
 
     @staticmethod
     def _system_prompts_token_count(system_prompts: Sequence[str]) -> int:
@@ -4932,9 +4919,7 @@ class AgentEngine:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
         # 注入工具索引
-        _all_tools = self._all_tool_names()
         _tool_index = self._build_tool_index_notice(
-            _all_tools,
             compact=False,
         )
         if _tool_index:
@@ -5167,7 +5152,6 @@ class AgentEngine:
         )
     def _build_tool_index_notice(
         self,
-        tool_scope: Sequence[str],
         *,
         compact: bool = False,
         max_tools_per_category: int = 8,

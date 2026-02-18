@@ -4838,7 +4838,7 @@ class TestToolIndexNotice:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        notice = engine._build_tool_index_notice([])
+        notice = engine._build_tool_index_notice()
         assert notice == ""
 
     def test_tool_index_not_in_notice_when_no_categorized_tools(self) -> None:
@@ -4846,7 +4846,7 @@ class TestToolIndexNotice:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         # add_numbers 不在任何分类中
-        notice = engine._build_tool_index_notice(["add_numbers"])
+        notice = engine._build_tool_index_notice()
         assert notice == ""
 
 
