@@ -49,7 +49,7 @@ from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResu
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
-from excelmanus.tools.policy import DISCOVERY_TOOLS, MUTATING_ALL_TOOLS
+from excelmanus.tools.policy import MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
     AdvisorContext,
@@ -448,14 +448,6 @@ class DelegateSubagentOutcome:
     subagent_result: SubagentResult | None = None
 
 
-@dataclass
-class AutoSupplementResult:
-    """自动补充结果。"""
-
-    skill_name: str
-    expanded_tools: list[str]
-
-
 class AgentEngine:
     """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
@@ -559,11 +551,6 @@ class AgentEngine:
         self._session_turn: int = 0
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # tool → skill 反向索引缓存（None 表示未构建，会话重置时清除）
-        self._tool_to_skill_index_cache: dict[str, list[str]] | None = None
-        # 工具自动补充：每轮计数器
-        self._turn_supplement_count: int = 0
-        self._auto_supplement_notice: str = ""
         # v5: session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
         self._expanded_categories: set[str] = set()
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
@@ -1394,212 +1381,6 @@ class AgentEngine:
         """当前主 skill（列表末尾），无激活时返回 None。"""
         return self._active_skills[-1] if self._active_skills else None
 
-    def _active_skills_tool_union(self) -> list[str]:
-        """所有激活 skill 的 allowed_tools 并集（保序去重）。
-
-        受限 skill（blocked_skillpacks）的工具不纳入并集，
-        确保 /fullAccess off 后其工具立即从 scope 中消失。
-        """
-        blocked = self._blocked_skillpacks()
-        seen: set[str] = set()
-        result: list[str] = []
-        for skill in self._active_skills:
-            if blocked and skill.name in blocked:
-                continue
-            for tool in skill.allowed_tools:
-                if tool not in seen:
-                    seen.add(tool)
-                    result.append(tool)
-        return result
-
-    def _build_tool_to_skill_index(self) -> dict[str, list[str]]:
-        """构建 tool_name → [skill_name, ...] 反向索引，按 skill 工具数升序。
-
-        结果缓存在 _tool_to_skill_index_cache，会话重置时失效。
-        """
-        if self._tool_to_skill_index_cache is not None:
-            return self._tool_to_skill_index_cache
-
-        if self._skill_router is None:
-            return {}
-        loader = self._skill_router._loader
-        skillpacks = loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = loader.load_all()
-        if not skillpacks:
-            return {}
-
-        index: dict[str, list[str]] = {}
-        for skill in skillpacks.values():
-            if getattr(skill, "disable_model_invocation", False):
-                continue
-            for tool in skill.allowed_tools:
-                index.setdefault(tool, []).append(skill.name)
-
-        # 按 skill 工具数升序（最小覆盖优先）
-        for tool, skills in index.items():
-            skills.sort(
-                key=lambda name: len(skillpacks[name].allowed_tools)
-                if name in skillpacks
-                else 999
-            )
-
-        self._tool_to_skill_index_cache = index
-        return index
-
-    def _resolve_preroute_target_layered(
-        self, result: "PreRouteResult | None",
-    ) -> tuple[str | None, list[str]]:
-        """解析预路由结果，支持分层加载。
-
-        返回 (主 skill 名, 全部候选列表)。
-        复合意图时返回第一个候选作为主 skill，不再降级到 general_excel。
-        """
-        if result is None:
-            return None, []
-        candidates: list[str] = []
-        raw_candidates = getattr(result, "skill_names", None)
-        if isinstance(raw_candidates, list):
-            for item in raw_candidates:
-                if not isinstance(item, str):
-                    continue
-                name = item.strip()
-                if not name or name in candidates:
-                    continue
-                candidates.append(name)
-        legacy_name = getattr(result, "skill_name", None)
-        if isinstance(legacy_name, str) and legacy_name.strip():
-            normalized = legacy_name.strip()
-            if normalized not in candidates:
-                candidates.append(normalized)
-        if not candidates:
-            return None, candidates
-        # 分层加载：第一个候选为主 skill，其余为副 skill
-        return candidates[0], candidates
-
-    async def _activate_preroute_candidates(
-        self,
-        *,
-        pre_route_result: "PreRouteResult",
-        mode_label: str,
-    ) -> tuple[str | None, str | None, list[str]]:
-        """根据预路由候选激活主/副技能。
-
-        Returns:
-            (activated_skill_name, missing_target_skill_name, candidates)
-        """
-        logger.info(
-            "%s 预路由结果: skill=%s skill_names=%s confidence=%.2f latency=%.0fms model=%s reason=%s",
-            mode_label,
-            pre_route_result.skill_name,
-            getattr(pre_route_result, "skill_names", []),
-            pre_route_result.confidence,
-            pre_route_result.latency_ms,
-            pre_route_result.model_used,
-            pre_route_result.reason,
-        )
-        target_skill_name, skill_candidates = self._resolve_preroute_target_layered(pre_route_result)
-        if target_skill_name is None:
-            # 闲聊场景：保持不激活 skill，不触发 fallback。
-            return None, None, skill_candidates
-
-        auto_result = await self._handle_select_skill(target_skill_name)
-        if not self._is_select_skill_ok(auto_result):
-            return None, target_skill_name, skill_candidates
-
-        logger.info("%s 预路由激活主技能: %s", mode_label, target_skill_name)
-        for secondary_name in skill_candidates[1:]:
-            if secondary_name == target_skill_name:
-                continue
-            sec_result = await self._handle_select_skill(secondary_name)
-            if self._is_select_skill_ok(sec_result):
-                logger.info("%s 预路由激活副技能: %s", mode_label, secondary_name)
-
-        return target_skill_name, None, skill_candidates
-
-    async def _apply_preroute_fallback(
-        self,
-        *,
-        mode_label: str,
-        reason: str,
-    ) -> str | None:
-        """执行预路由失败回退（统一回退到 general_excel）。"""
-        logger.warning("%s，回退 general_excel", reason)
-        if not self._config.auto_activate_default_skill:
-            logger.info(
-                "%s 回退 general_excel 已禁用（auto_activate_default_skill=false）",
-                mode_label,
-            )
-            return None
-        auto_result = await self._handle_select_skill("general_excel")
-        if self._is_select_skill_ok(auto_result):
-            return "general_excel"
-        logger.debug("回退 general_excel 失败（技能不存在），继续使用全量工具")
-        return None
-
-    def _try_auto_supplement_tool(self, tool_name: str) -> AutoSupplementResult | None:
-        """预检-扩展：查找包含 tool_name 的最小覆盖 skillpack 并激活。
-
-        返回 AutoSupplementResult 或 None（不可补充）。
-        """
-        if not self._config.auto_supplement_enabled:
-            return None
-        if self._turn_supplement_count >= self._config.auto_supplement_max_per_turn:
-            return None
-
-        # 已在当前 active_skills 并集中 → 不需要补充
-        if self._active_skills:
-            union = set(self._active_skills_tool_union())
-            if tool_name in union:
-                return None
-
-        index = self._build_tool_to_skill_index()
-        candidates = index.get(tool_name)
-        if not candidates:
-            return None
-
-        blocked = self._blocked_skillpacks()
-        for skill_name in candidates:
-            if blocked and skill_name in blocked:
-                continue
-            # 跳过已激活的 skill
-            if any(s.name == skill_name for s in self._active_skills):
-                continue
-
-            loader = self._skill_router._loader
-            skillpacks = loader.get_skillpacks() or loader.load_all()
-            skill = skillpacks.get(skill_name)
-            if skill is None:
-                continue
-
-            # MCP 依赖检查
-            mcp_error = self._validate_skill_mcp_requirements(skill)
-            if mcp_error:
-                continue
-
-            # 激活 skill
-            self._active_skills = [
-                s for s in self._active_skills if s.name != skill.name
-            ] + [skill]
-            self._loaded_skill_names[skill.name] = self._session_turn
-
-            # 如果触发工具是写入类，升级 write_hint
-            if tool_name in MUTATING_ALL_TOOLS:
-                self._current_write_hint = "may_write"
-
-            logger.info(
-                "自动补充激活技能 %s（触发工具: %s，工具数: %d）",
-                skill.name,
-                tool_name,
-                len(skill.allowed_tools),
-            )
-            return AutoSupplementResult(
-                skill_name=skill.name,
-                expanded_tools=list(skill.allowed_tools),
-            )
-
-        return None
-
     @staticmethod
     def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
         if not agent_name:
@@ -2120,56 +1901,6 @@ class AgentEngine:
             tools.append(finish_task_tool)
         return tools
 
-    def _handle_discover_tools(self, category: str) -> str:
-        """处理 discover_tools 元工具调用，返回指定类别的工具列表。"""
-        from excelmanus.tools.policy import TOOL_CATEGORIES
-
-        _CATEGORY_LABELS: dict[str, str] = {
-            "data_read": "数据读取",
-            "data_write": "数据写入",
-            "format": "格式化",
-            "advanced_format": "高级格式",
-            "chart": "图表",
-            "sheet": "工作表操作",
-            "file": "文件操作",
-            "code": "代码执行",
-        }
-
-        registered = set(self._all_tool_names())
-
-        if category == "all":
-            lines = ["## 全部工具分类\n"]
-            for cat, tools in TOOL_CATEGORIES.items():
-                label = _CATEGORY_LABELS.get(cat, cat)
-                available = [t for t in tools if t in registered]
-                if available:
-                    tool_descs: list[str] = []
-                    for t in available:
-                        tool_def = self._registry.get_tool(t)
-                        desc = (tool_def.description.split("。")[0] + "。") if tool_def and tool_def.description else ""
-                        tool_descs.append(f"  - {t}：{desc}")
-                    lines.append(f"### {label}")
-                    lines.extend(tool_descs)
-            lines.append("\n使用 select_skill 激活对应技能后即可调用写入类工具。")
-            return "\n".join(lines)
-
-        if category not in TOOL_CATEGORIES:
-            available_cats = ", ".join(sorted(TOOL_CATEGORIES.keys()))
-            return f"未知分类 '{category}'。可用分类：{available_cats}, all"
-
-        tools = TOOL_CATEGORIES[category]
-        label = _CATEGORY_LABELS.get(category, category)
-        lines = [f"## {label} 工具\n"]
-        for t in tools:
-            if t not in registered:
-                continue
-            tool_def = self._registry.get_tool(t)
-            desc = tool_def.description if tool_def and tool_def.description else "(无描述)"
-            lines.append(f"- {t}：{desc}")
-        if not any(line.startswith("- ") for line in lines):
-            lines.append("(该分类下无已注册工具)")
-        return "\n".join(lines)
-
     def _handle_expand_tools(self, category: str) -> str:
         """v5: 处理 expand_tools 元工具调用，将指定类别工具从摘要升级为完整 schema。"""
         from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS, get_tools_in_category
@@ -2270,60 +2001,6 @@ class AgentEngine:
         return f"OK\n{context_text}"
 
     @staticmethod
-    def _is_skill_context_text(context: str) -> bool:
-        return str(context or "").lstrip().startswith("[Skillpack]")
-
-    def _refresh_route_after_skill_switch(
-        self,
-        route_result: SkillMatchResult,
-    ) -> SkillMatchResult:
-        """select_skill 成功后同步刷新 route 状态，避免继续使用旧 skill 上下文。"""
-        active_name = self._active_skills[-1].name if self._active_skills else ""
-        merged_skills: list[str] = []
-        if active_name:
-            merged_skills.append(active_name)
-
-        for name in list(route_result.skills_used) + sorted(self._loaded_skill_names):
-            normalized = str(name or "").strip()
-            if not normalized or normalized in merged_skills:
-                continue
-            merged_skills.append(normalized)
-
-        non_skill_contexts = [
-            ctx
-            for ctx in route_result.system_contexts
-            if not self._is_skill_context_text(ctx)
-        ]
-        refreshed_contexts = list(non_skill_contexts)
-        if self._active_skills:
-            active_context = self._active_skills[-1].render_context().strip()
-            if active_context:
-                refreshed_contexts.append(active_context)
-
-        base_result = SkillMatchResult(
-            skills_used=merged_skills,
-            tool_scope=[],
-            route_mode=route_result.route_mode,
-            system_contexts=refreshed_contexts,
-            parameterized=route_result.parameterized,
-            write_hint=_merge_write_hint_with_override(
-                getattr(route_result, "write_hint", None),
-                self._current_write_hint,
-            ),
-        )
-        refreshed_scope = self._get_current_tool_scope(route_result=base_result)
-        refreshed = SkillMatchResult(
-            skills_used=base_result.skills_used,
-            tool_scope=refreshed_scope,
-            route_mode=base_result.route_mode,
-            system_contexts=base_result.system_contexts,
-            parameterized=base_result.parameterized,
-            write_hint=base_result.write_hint,
-        )
-        self._last_route_result = refreshed
-        return refreshed
-
-    @staticmethod
     def _normalize_mcp_identifier(name: str) -> str:
         return name.strip().replace("-", "_").lower()
 
@@ -2399,170 +2076,6 @@ class AgentEngine:
             lines.append(f"- 缺少 MCP 工具：{', '.join(missing_tools)}")
         lines.append("请先配置并连接对应 MCP（mcp.json）后重试该技能。")
         return "\n".join(lines)
-
-    def _get_current_tool_scope(
-        self,
-        route_result: SkillMatchResult | None = None,
-    ) -> list[str]:
-        """根据当前状态返回主代理可用工具范围。"""
-        route_hint = (
-            getattr(route_result, "write_hint", None)
-            if route_result is not None
-            else None
-        )
-        write_hint = _merge_write_hint(
-            route_hint,
-            getattr(self, "_current_write_hint", "unknown"),
-        )
-
-        def _append_finish_task(scope: list[str]) -> list[str]:
-            if write_hint == "may_write" and "finish_task" not in scope:
-                scope.append("finish_task")
-            return scope
-
-        if self._active_skills:
-            scope = self._expand_tool_scope_patterns(self._active_skills_tool_union())
-            # 将 route_result.tool_scope（含 _merge_with_loaded_skills 历史合并结果）
-            # 追加进来，避免合并计算被静默丢弃。
-            if route_result is not None and route_result.tool_scope:
-                scope_set = set(scope)
-                for t in route_result.tool_scope:
-                    if t not in scope_set:
-                        scope_set.add(t)
-                        scope.append(t)
-            if "select_skill" not in scope:
-                scope.append("select_skill")
-            # active skill 时始终保留 discover_tools，支持查询其他类别工具并纠偏。
-            if "discover_tools" not in scope:
-                scope.append("discover_tools")
-            merged_scope = self._append_global_mcp_tools(
-                self._ensure_always_available(_append_finish_task(scope))
-            )
-            return self._apply_window_mode_tool_filter(merged_scope)
-
-        # 兼容斜杠直连：路由已指定技能范围时，将 select_skill 追加到限定范围。
-        if (
-            route_result is not None
-            and route_result.route_mode == "slash_direct"
-            and route_result.tool_scope
-        ):
-            scope = self._expand_tool_scope_patterns(route_result.tool_scope)
-            if "select_skill" not in scope:
-                scope.append("select_skill")
-            merged_scope = self._append_global_mcp_tools(
-                self._ensure_always_available(_append_finish_task(scope))
-            )
-            return self._apply_window_mode_tool_filter(merged_scope)
-
-        # 严格收敛：fallback / slash_not_found / no_skillpack 等非直连路由
-        # 仅使用路由授权工具，并追加必要元工具。
-        if route_result is not None and route_result.tool_scope:
-            scope = self._expand_tool_scope_patterns(route_result.tool_scope)
-            for tool_name in _META_TOOL_NAMES:
-                if tool_name not in scope:
-                    scope.append(tool_name)
-            merged_scope = self._append_global_mcp_tools(
-                self._ensure_always_available(_append_finish_task(scope))
-            )
-            return self._apply_window_mode_tool_filter(merged_scope)
-
-        # 无 skill 激活、无路由指定 scope：使用基础发现工具集
-        registered = set(self._all_tool_names())
-        scope = [t for t in DISCOVERY_TOOLS if t in registered]
-        for tool_name in _META_TOOL_NAMES:
-            if tool_name not in scope:
-                scope.append(tool_name)
-        merged_scope = self._append_global_mcp_tools(
-            self._ensure_always_available(_append_finish_task(scope))
-        )
-        return self._apply_window_mode_tool_filter(merged_scope)
-
-    def _apply_window_mode_tool_filter(self, scope: list[str]) -> list[str]:
-        """按 window_return_mode 过滤工具可见性。"""
-        if self._effective_window_return_mode() != "enriched":
-            return scope
-        return [tool for tool in scope if tool != "focus_window"]
-
-    @staticmethod
-    def _ensure_always_available(scope: list[str]) -> list[str]:
-        """确保任务管理工具始终在 scope 中可用。"""
-        for tool_name in _ALWAYS_AVAILABLE_TOOLS:
-            if tool_name not in scope:
-                scope.append(tool_name)
-        return scope
-
-    def _append_global_mcp_tools(self, scope: list[str]) -> list[str]:
-        """将全局 MCP 工具追加到当前 scope（去重）。"""
-        for tool_name in self._all_tool_names():
-            if tool_name.startswith("mcp_") and tool_name not in scope:
-                scope.append(tool_name)
-        return scope
-
-    def _expand_tool_scope_patterns(self, scope: Sequence[str]) -> list[str]:
-        """展开工具授权中的 MCP 选择器。
-
-        支持三种写法：
-        - `mcp:*`：允许所有已注册 MCP 工具
-        - `mcp:{server}:*`：允许指定 server 的全部 MCP 工具
-        - `mcp:{server}:{tool}`：允许指定 server 的指定工具
-        """
-        all_tools = self._all_tool_names()
-        if not all_tools:
-            return list(scope)
-
-        mcp_tools = [name for name in all_tools if name.startswith("mcp_")]
-        expanded: list[str] = []
-        seen: set[str] = set()
-
-        def _append(name: str) -> None:
-            if name not in seen:
-                seen.add(name)
-                expanded.append(name)
-
-        for token in scope:
-            if not isinstance(token, str):
-                continue
-            selector = token.strip()
-            if not selector:
-                continue
-            if selector == "mcp:*":
-                for tool_name in mcp_tools:
-                    _append(tool_name)
-                continue
-            if selector.startswith("mcp:"):
-                parts = selector.split(":", 2)
-                if len(parts) != 3:
-                    continue
-                server_name = parts[1].strip().replace("-", "_")
-                tool_name = parts[2].strip()
-                if not server_name or not tool_name:
-                    continue
-
-                for mcp_name in mcp_tools:
-                    try:
-                        normalized_server, original_tool = parse_tool_prefix(mcp_name)
-                    except ValueError:
-                        continue
-                    if normalized_server != server_name:
-                        continue
-                    if tool_name == "*" or original_tool == tool_name:
-                        _append(mcp_name)
-                continue
-
-            _append(selector)
-
-        return expanded
-
-    def _build_tools_for_scope(self, tool_scope: Sequence[str]) -> list[dict[str, Any]]:
-        """按当前 scope 组合常规工具和元工具定义。"""
-        schemas = self._get_openai_tools(tool_scope=tool_scope)
-        allowed = set(tool_scope)
-        for tool in self._build_meta_tools():
-            function = tool.get("function", {})
-            name = function.get("name")
-            if name in allowed:
-                schemas.append(tool)
-        return schemas
 
     @staticmethod
     def _normalize_subagent_file_paths(file_paths: list[Any] | None) -> list[str]:
@@ -3485,9 +2998,6 @@ class AgentEngine:
                 ),
             )
 
-            # 每轮重置自动补充计数器
-            self._turn_supplement_count = 0
-
             system_prompts, context_error = self._prepare_system_prompts_for_request(
                 current_route_result.system_contexts,
                 route_result=current_route_result,
@@ -4309,11 +3819,6 @@ class AgentEngine:
                     error = reason
                     result_str = f"{result_str}\n[Hook 拒绝] {reason}"
 
-        # 附加自动补充提示
-        if self._auto_supplement_notice:
-            result_str = result_str + self._auto_supplement_notice
-            self._auto_supplement_notice = ""
-
         result_str = self._enrich_tool_result_with_window_perception(
             tool_name=tool_name,
             arguments=arguments,
@@ -4572,7 +4077,6 @@ class AgentEngine:
         self._loaded_skill_names.clear()
         self._hook_started_skills.clear()
         self._active_skills.clear()
-        self._tool_to_skill_index_cache = None
         self._question_flow.clear()
         self._system_question_actions.clear()
         self._pending_question_route_result = None
@@ -4758,100 +4262,6 @@ class AgentEngine:
             _summarize_text(task_text),
         )
         return adapted, task_text
-
-    def _merge_with_loaded_skills(self, route_result: SkillMatchResult) -> SkillMatchResult:
-        """将本轮路由结果与会话内历史已加载的 skill 合并。"""
-        if self._skill_router is None:
-            return route_result
-
-        # 手动 slash 技能仅作用于当前轮，避免跨轮污染会话上下文。
-        if route_result.route_mode == "slash_direct":
-            return route_result
-
-        # 更新累积记录
-        new_names = set(route_result.skills_used)
-        for name in new_names:
-            self._loaded_skill_names[name] = self._session_turn
-
-        # 找出历史已加载但本轮未匹配的 skill（仅保留最近 3 轮内激活过的）
-        _decay_turns = 3
-        history_only = {
-            name for name, last_turn in self._loaded_skill_names.items()
-            if name not in new_names and (self._session_turn - last_turn) <= _decay_turns
-        }
-        if not history_only:
-            return route_result
-
-        # 查找历史 skill 对象并合并（跳过当前被限制的 skill）
-        blocked = self._blocked_skillpacks()
-        loader = self._skill_router._loader
-        history_skills = [
-            loader.get_skillpack(name)
-            for name in sorted(history_only)
-            if loader.get_skillpack(name) is not None
-            and not (blocked and name in blocked)
-        ]
-        if not history_skills:
-            return route_result
-
-        # 合并 tool_scope（去重，保持顺序：本轮优先）
-        merged_tools = list(route_result.tool_scope)
-        seen_tools = set(merged_tools)
-        for skill in history_skills:
-            for tool in skill.allowed_tools:
-                if tool not in seen_tools:
-                    seen_tools.add(tool)
-                    merged_tools.append(tool)
-
-        # 合并 skills 对象并统一应用预算
-        if route_result.parameterized:
-            merged_contexts = list(route_result.system_contexts)
-            budget = self._config.skills_context_char_budget
-            if budget <= 0:
-                # budget <= 0 表示无限制，全量加载历史上下文
-                remaining_budget = -1
-            else:
-                used_chars = sum(len(ctx) for ctx in merged_contexts)
-                remaining_budget = budget - used_chars
-
-            # remaining_budget == -1：无限制；> 0：有剩余预算；<= 0（非-1）：已耗尽，跳过
-            if remaining_budget == -1 or remaining_budget > 0:
-                history_contexts = build_contexts_with_budget(
-                    history_skills,
-                    remaining_budget,  # -1 → 无限制，> 0 → 剩余预算
-                )
-                merged_contexts.extend(history_contexts)
-        else:
-            route_skills = [
-                loader.get_skillpack(name)
-                for name in route_result.skills_used
-                if loader.get_skillpack(name) is not None
-            ]
-            merged_skill_objects = route_skills + history_skills
-            merged_contexts = build_contexts_with_budget(
-                merged_skill_objects, self._config.skills_context_char_budget
-            )
-
-        # 合并 skills_used
-        merged_skills = list(route_result.skills_used)
-        for skill in history_skills:
-            if skill.name not in new_names:
-                merged_skills.append(skill.name)
-
-        logger.info(
-            "skill 累积合并：本轮=%s，历史追加=%s",
-            list(new_names),
-            [s.name for s in history_skills],
-        )
-
-        return SkillMatchResult(
-            skills_used=merged_skills,
-            tool_scope=merged_tools,
-            route_mode=route_result.route_mode,
-            system_contexts=merged_contexts,
-            parameterized=route_result.parameterized,
-            write_hint=route_result.write_hint,
-        )
 
     async def _route_skills(
         self,
