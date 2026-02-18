@@ -172,7 +172,7 @@ class ApprovalManager:
         self,
         tool_name: str,
         arguments: dict[str, Any],
-        tool_scope: Sequence[str],
+        tool_scope: Sequence[str] | None = None,
     ) -> PendingApproval:
         if self._pending is not None:
             raise ValueError("存在待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`。")
@@ -180,7 +180,7 @@ class ApprovalManager:
             approval_id=self._new_approval_id(),
             tool_name=tool_name,
             arguments=dict(arguments),
-            tool_scope=list(tool_scope),
+            tool_scope=list(tool_scope) if tool_scope is not None else [],
             created_at_utc=self._utc_now(),
         )
         self._pending = pending
@@ -323,7 +323,7 @@ class ApprovalManager:
             approval_id=approval_id,
             tool_name=tool_name,
             arguments=dict(arguments),
-            tool_scope=list(tool_scope),
+            tool_scope=list(tool_scope) if tool_scope is not None else [],
             created_at_utc=created_at_utc or self._utc_now(),
             applied_at_utc=self._utc_now(),
             undoable=undoable,

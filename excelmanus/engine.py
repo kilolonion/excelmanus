@@ -3999,7 +3999,7 @@ class AgentEngine:
         *,
         tool_name: str,
         arguments: dict[str, Any],
-        tool_scope: Sequence[str],
+        tool_scope: Sequence[str] | None = None,
         approval_id: str,
         created_at_utc: str,
         undoable: bool,
@@ -4028,7 +4028,7 @@ class AgentEngine:
                 approval_id=approval_id,
                 tool_name=tool_name,
                 arguments=audited_arguments,
-                tool_scope=list(tool_scope),
+                tool_scope=list(tool_scope) if tool_scope else None,
                 execute=_execute,
                 undoable=undoable,
                 created_at_utc=created_at_utc,
@@ -4543,7 +4543,7 @@ class AgentEngine:
             _, record = await self._execute_tool_with_audit(
                 tool_name=pending.tool_name,
                 arguments=pending.arguments,
-                tool_scope=pending.tool_scope,
+                tool_scope=None,  # v5: no scope restriction
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
                 undoable=pending.tool_name not in {"run_code", "run_shell"},
