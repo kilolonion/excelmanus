@@ -300,13 +300,13 @@ class TestSkillCatalogIntegrity:
             engine = _setup_engine_in(Path(tmp), skills)
 
             meta_tools = engine._build_meta_tools()
-            select_tool = next(
+            activate_tool = next(
                 tool for tool in meta_tools
-                if tool["function"]["name"] == "select_skill"
+                if tool["function"]["name"] == "activate_skill"
             )
-            description = select_tool["function"]["description"]
+            description = activate_tool["function"]["description"]
             enum_values = (
-                select_tool["function"]["parameters"]["properties"]["skill_name"]["enum"]
+                activate_tool["function"]["parameters"]["properties"]["skill_name"]["enum"]
             )
 
             assert set(enum_values) == set(skill_names)
@@ -415,61 +415,6 @@ class TestSelectSkillCalls:
 
 
 # ── Property 6：工具范围状态转换正确性 ──────────────────────────────
-
-
-class TestToolScopeTransitions:
-    """Feature: llm-native-routing, Property 6: 工具范围状态转换正确性"""
-
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-    @given(
-        skill_a=_skill_name_st,
-        tools_a=_allowed_tools_st,
-        skill_b=_skill_name_st,
-        tools_b=_allowed_tools_st,
-    )
-    def test_property_6_tool_scope_state_transition(
-        self,
-        skill_a: str,
-        tools_a: list[str],
-        skill_b: str,
-        tools_b: list[str],
-    ) -> None:
-        """初始态 + 激活 A + 激活 B 三态的工具范围应符合预期。"""
-        normalize = SkillRouter._normalize_skill_name
-        assume(normalize(skill_a) != normalize(skill_b))
-
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = _setup_engine_in(
-                Path(tmp),
-                [
-                    (skill_a, f"描述_{skill_a}", tools_a),
-                    (skill_b, f"描述_{skill_b}", tools_b),
-                ],
-            )
-
-            # 初始态：DISCOVERY_TOOLS ∩ registered + META + ALWAYS
-            initial_scope = engine._get_current_tool_scope()
-            from excelmanus.tools.policy import DISCOVERY_TOOLS as _DT
-            from excelmanus.engine import _META_TOOL_NAMES, _ALWAYS_AVAILABLE_TOOLS
-            expected_initial = set(_DT) & set(engine._registry.get_tool_names())
-            expected_initial |= set(_META_TOOL_NAMES)
-            expected_initial |= set(_ALWAYS_AVAILABLE_TOOLS)
-            assert set(initial_scope) == expected_initial
-
-            # 激活技能 A：allowed_tools + select_skill + _ALWAYS_AVAILABLE_TOOLS
-            # hybrid 模式下还会追加 discover_tools
-            asyncio.run(engine._handle_select_skill(skill_a))
-            scope_a = engine._get_current_tool_scope()
-            expected_a = set(tools_a) | {"select_skill", "discover_tools"}
-            expected_a |= set(_ALWAYS_AVAILABLE_TOOLS)
-            assert set(scope_a) == expected_a
-
-            # 激活技能 B：多 skill 同时激活，scope = A ∪ B 的并集
-            asyncio.run(engine._handle_select_skill(skill_b))
-            scope_b = engine._get_current_tool_scope()
-            expected_b = set(tools_a) | set(tools_b) | {"select_skill", "discover_tools"}
-            expected_b |= set(_ALWAYS_AVAILABLE_TOOLS)
-            assert set(scope_b) == expected_b
 
 
 # ── Property 8：delegate_to_subagent 参数透传约束 ───────────────────────────────

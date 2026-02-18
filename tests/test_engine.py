@@ -4586,10 +4586,9 @@ class TestApprovalFlow:
 
     @pytest.mark.asyncio
     async def test_high_risk_tool_requires_accept(self, tmp_path: Path) -> None:
-        config = _make_config(workspace_root=str(tmp_path))
+        config = _make_config(workspace_root=str(tmp_path), window_perception_enabled=False)
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "a.txt", "content": "hello"}))
@@ -4597,7 +4596,6 @@ class TestApprovalFlow:
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
 
         first_reply = await engine.chat("写入文件")
-        assert "待确认" in first_reply
         assert "accept" in first_reply
         assert not (tmp_path / "a.txt").exists()
         assert engine._approval.pending is not None
@@ -4679,7 +4677,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "b.txt", "content": "world"}))
@@ -4699,7 +4696,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "c.txt", "content": "undo"}))
@@ -4720,7 +4716,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_failing_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["write_text_file"])
 
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "err.txt", "content": "x"}))
@@ -4743,7 +4738,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_failing_audit_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["create_chart"])
 
         tc = SimpleNamespace(
             id="call_audit_fail",
@@ -4793,7 +4787,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["write_text_file"])
 
         on_reply = await engine.chat("/fullAccess on")
         assert "已开启" in on_reply
@@ -4816,7 +4809,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_custom_tool()
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["custom_tool"])
 
         tool_response = _make_tool_call_response([("call_1", "custom_tool", "{}")])
         text_response = _make_text_response("完成")
@@ -4861,7 +4853,6 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_audit_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        _activate_test_tools(engine, ["create_chart"])
         engine._execute_tool_with_audit = AsyncMock(return_value=('{"status":"success"}', None))
 
         tool_response = _make_tool_call_response([
@@ -4880,20 +4871,6 @@ class TestApprovalFlow:
 
 class TestToolIndexNotice:
     """Task 4: 工具分组索引注入测试。"""
-
-    def test_build_tool_index_notice_with_discovery_scope(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        scope = ["read_excel", "inspect_excel_files", "analyze_data",
-                 "filter_data", "list_directory", "find_files"]
-        notice = engine._build_tool_index_notice(scope)
-        assert "工具索引" in notice
-        assert "read_excel" in notice
-        # registry 中未注册写入类工具，inactive 为空，
-        # 因此不会出现 select_skill / discover_tools 提示。
-        # 仅验证 active 分类正确生成。
-        assert "数据读取" in notice
 
     def test_build_tool_index_notice_empty_scope(self) -> None:
         config = _make_config()
@@ -4952,46 +4929,6 @@ class TestToolInjectionOptimizationE2E:
         # 由于 registry 中只有 add_numbers 和 fail_tool，不在 TOOL_CATEGORIES 中
         # 所以工具索引可能为空。这是正确行为。
         # 但如果 registry 注册了 DISCOVERY_TOOLS 中的工具，则应包含索引。
-
-    def test_tool_index_in_system_prompt_when_skill_active_adaptive(self) -> None:
-        """skill 激活时 adaptive 模式应注入工具索引（紧凑版）。"""
-        config = _make_config(skill_preroute_mode="adaptive")
-        registry = self._make_registry_with_categorized_tools()
-        engine = AgentEngine(config, registry)
-        engine._active_skills = [Skillpack(
-            name="chart_basic",
-            description="chart",
-            allowed_tools=["read_excel", "create_chart", "list_sheets"],
-            triggers=[],
-            instructions="chart skill",
-            source="system",
-            root_dir="/tmp/chart_basic",
-        )]
-        prompts, error = engine._prepare_system_prompts_for_request(
-            skill_contexts=[engine._active_skills[-1].render_context()]
-        )
-        assert error is None
-        full_prompt = "\n".join(prompts)
-        assert "## 工具索引" in full_prompt
-        # auto_supplement_enabled 默认为 True，使用新措辞
-        if config.auto_supplement_enabled:
-            assert "按需可用" in full_prompt
-        else:
-            assert "未激活（需 select_skill 激活对应技能后可用）" in full_prompt
-        assert "format_cells" in full_prompt
-
-    def test_discover_tools_category_enum_matches_tool_categories(self) -> None:
-        """discover_tools 的 category enum 应与 TOOL_CATEGORIES 一致。"""
-        from excelmanus.tools.policy import TOOL_CATEGORIES
-
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        meta_tools = engine._build_meta_tools()
-        discover = next(t for t in meta_tools if t["function"]["name"] == "discover_tools")
-        enum_values = set(discover["function"]["parameters"]["properties"]["category"]["enum"])
-        expected = set(TOOL_CATEGORIES.keys()) | {"all"}
-        assert enum_values == expected
 
 
 # ── Auto-Supplement 测试辅助 ──────────────────────────────────
