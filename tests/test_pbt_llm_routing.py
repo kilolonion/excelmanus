@@ -263,7 +263,7 @@ class TestSlashNameNormalization:
 class TestSkillCatalogIntegrity:
     """Feature: llm-native-routing, Property 3: Skill_Catalog 完整性
 
-    对于任意一组已加载的技能包，_build_meta_tools 生成的 select_skill 工具定义中，
+    对于任意一组已加载的技能包，_build_meta_tools 生成的 activate_skill 工具定义中，
     描述文本应包含每个技能的 name 和 description，且 skill_name 参数的 enum 值
     应等于所有技能名称的集合。
 
@@ -314,11 +314,11 @@ class TestSkillCatalogIntegrity:
                 assert f"描述_{name}" in description
 
 
-# ── Property 4/5/7：select_skill 调用正确性 ────────────────────────
+# ── Property 4/5/7：activate_skill 调用正确性 ────────────────────────
 
 
 class TestSelectSkillCalls:
-    """Feature: llm-native-routing, Property 4/5/7: select_skill 调用正确性"""
+    """Feature: llm-native-routing, Property 4/5/7: activate_skill 调用正确性"""
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
@@ -330,7 +330,7 @@ class TestSelectSkillCalls:
         ),
         data=st.data(),
     )
-    def test_property_4_valid_select_skill_returns_context(
+    def test_property_4_valid_activate_skill_returns_context(
         self,
         skill_names: list[str],
         data,
@@ -364,7 +364,7 @@ class TestSelectSkillCalls:
         ),
         invalid_name=_skill_name_st,
     )
-    def test_property_5_invalid_select_skill_returns_error(
+    def test_property_5_invalid_activate_skill_returns_error(
         self,
         skill_names: list[str],
         invalid_name: str,
@@ -394,12 +394,12 @@ class TestSelectSkillCalls:
         ),
         data=st.data(),
     )
-    def test_property_7_valid_select_skill_recorded_to_loaded_set(
+    def test_property_7_valid_activate_skill_recorded_to_loaded_set(
         self,
         skill_names: list[str],
         data,
     ) -> None:
-        """有效 select_skill 调用后，技能名应进入已加载集合。"""
+        """有效 activate_skill 调用后，技能名应进入已加载集合。"""
         selected = data.draw(st.sampled_from(skill_names))
 
         with tempfile.TemporaryDirectory() as tmp:

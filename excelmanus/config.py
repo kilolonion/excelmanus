@@ -86,7 +86,7 @@ class ExcelManusConfig:
     hooks_command_allowlist: tuple[str, ...] = ()
     hooks_command_timeout_seconds: int = 10
     hooks_output_max_chars: int = 32000
-    # 窗口感知层配置（v4）
+    # 窗口感知层配置
     window_perception_enabled: bool = True
     window_perception_system_budget_tokens: int = 3000
     window_perception_tool_append_tokens: int = 500

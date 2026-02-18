@@ -652,7 +652,7 @@ class TestSkillRouter:
 
         assert result.route_mode == "slash_not_found"
         assert result.parameterized is False
-        assert result.tool_scope == [] or "list_skills" not in result.tool_scope
+        assert result.tool_scope == []
 
     @pytest.mark.asyncio
     async def test_non_slash_returns_all_tools(self, tmp_path: Path) -> None:

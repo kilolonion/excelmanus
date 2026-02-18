@@ -146,7 +146,7 @@ def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
     registry.register_builtin_tools(str(tmp_path))
     registered = set(registry.get_tool_names())
     meta_tools = {"memory_save", "memory_read_topic", "task_create", "task_update",
-                  "list_skills", "focus_window", "inspect_excel_files"}
+                  "focus_window", "inspect_excel_files"}
     uncategorized = registered - categorized - meta_tools
     assert not uncategorized, f"未分类工具: {sorted(uncategorized)}"
 

@@ -135,7 +135,7 @@ async def test_property_2_unauthorized_tool_error_response_format(
     对于任意未授权的工具调用，_execute_tool_call() 返回的 ToolCallResult 应满足：
     - success == False
     - error 字段包含 JSON 字符串
-    - JSON 中包含 error_code、tool、allowed_tools、message 四个键
+    - JSON 中包含 error_code、tool、message 三个键
 
     **Validates: Requirements 2.3, 2.4**
     """
@@ -179,7 +179,7 @@ async def test_property_2_unauthorized_tool_error_response_format(
         pytest.fail(f"error 字段不是合法 JSON: {result.error!r}, 异常: {exc}")
 
     # 验证 JSON 包含必需的四个键
-    required_keys = {"error_code", "tool", "allowed_tools", "message"}
+    required_keys = {"error_code", "tool", "message"}
     missing_keys = required_keys - set(error_data.keys())
     assert not missing_keys, (
         f"错误响应 JSON 缺少必需键: {missing_keys}，实际键: {set(error_data.keys())}"
@@ -195,7 +195,3 @@ async def test_property_2_unauthorized_tool_error_response_format(
         f"tool 应为 {tool_name!r}，实际: {error_data['tool']!r}"
     )
 
-    # 验证 allowed_tools 与传入的 tool_scope 一致
-    assert error_data["allowed_tools"] == list(tool_scope), (
-        f"allowed_tools 应为 {tool_scope!r}，实际: {error_data['allowed_tools']!r}"
-    )
