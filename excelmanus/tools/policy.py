@@ -211,29 +211,7 @@ SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = (
 )
 
 
-# ── 基础发现工具集（无 skill 激活时的默认 scope） ──────────
-
-DISCOVERY_TOOLS: frozenset[str] = frozenset({
-    # 数据探查
-    "read_excel",
-    "inspect_excel_files",
-    "analyze_data",
-    "filter_data",
-    "group_aggregate",
-    # 结构探查
-    "list_sheets",
-    "list_directory",
-    "get_file_info",
-    "find_files",
-    "read_text_file",
-    # 样式感知
-    "read_cell_styles",
-    # 窗口
-    "focus_window",
-})
-
-
-# ── 工具分类映射（用于 discover_tools 元工具和工具索引） ────
+# ── 工具分类映射（用于工具索引和 expand_tools 元工具） ────
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "data_read": (
@@ -323,8 +301,3 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "run_code": "执行 Python 代码或脚本，仅在专用工具无法完成时使用",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
 }
-
-
-# ── fallback 路由只读发现工具（已废弃，使用 DISCOVERY_TOOLS 替代） ──
-# 保留以兼容外部引用，内容与 DISCOVERY_TOOLS 同步
-FALLBACK_DISCOVERY_TOOLS: tuple[str, ...] = tuple(sorted(DISCOVERY_TOOLS))
