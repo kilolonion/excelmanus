@@ -1,7 +1,7 @@
 # v5 架构升级变更记录
 
 > 日期：2026-02-18
-> 状态：**Phase 1 + Phase 2 + Phase 3 均已完成**，全量回归 1446 passed / 0 failed
+> 状态：**Phase 1–4 全部完成（v5 升级终结）**，全量回归 1441 passed / 0 failed
 
 ## 概述
 
@@ -215,9 +215,38 @@ ToolProfile 层核心定义：
 
 ---
 
+## Phase 4: Skillpack Model 字段移除 + 全链路破坏性清理（终结）
+
+> 里程碑 commit: `2933421` | **-454 行**
+
+### Skillpack dataclass 字段移除
+
+从 `models.py` 的 `Skillpack` 中删除 `allowed_tools: list[str]`、`triggers: list[str]`、`priority: int` 三个字段。
+
+### 全链路适配
+
+| 文件 | 改动 |
+|---|---|
+| `skillpacks/loader.py` | 停止解析 `allowed_tools`/`triggers`/`priority`；移除 `_CANONICAL_FIELD_ALIASES` 中对应别名 |
+| `skillpacks/manager.py` | `_SUPPORTED_FIELDS`/`_FIELD_ALIASES`/`_DEFAULTS` 中移除；`_base_payload`/`_to_frontmatter_dict`/`_normalize_patch_payload`/`_skill_to_detail` 中移除 |
+| `skillpacks/context_builder.py` | 排序由 `(-priority, name)` 改为 `name`（按名称字母序） |
+| `tools/policy.py` | `READ_ONLY_SAFE_TOOLS` 移除 `list_skills` |
+| `api.py` | `SkillpackDetailResponse` 移除 `allowed_tools`/`triggers`/`priority` 字段；`_to_skill_detail` 构造移除 |
+| `cli.py` | `_to_standard_skill_detail` 移除 `allowed_tools` 别名 |
+| `engine.py` | dispatch 分支移除 `select_skill` 兼容（仅保留 `activate_skill`）；清理注释 |
+| `scripts/migrate_skills_to_standard.py` | `_build_frontmatter` 移除 `allowed_tools`/`triggers`/`priority` |
+
+### Phase 4 测试适配
+
+- 删除 3 个废弃测试（`test_create_skillpack_allows_empty_triggers`/`_allowed_tools`/`_patch_allows_empty_triggers`）
+- 删除 2 个废弃测试（`test_triggers_allows_empty_list`/`test_allowed_tools_empty_list_is_allowed`）
+- 重写 `test_sorted_by_priority` → `test_sorted_by_name`
+- 批量移除 11 个测试文件中的 `allowed_tools=`/`triggers=`/`priority=` 参数传递（~100 处）
+
+---
+
 ## 后续工作
 
 | 任务 | 优先级 | 说明 |
 |---|---|---|
-| Skillpack model `allowed_tools`/`triggers`/`priority` 字段移除 | Low | 当前保留空默认值供 user/project 层向后兼容，后续可移除 |
 | 窗口感知顾问独立 mock | Low | 解决 advisor 共享 `_client` 的测试隔离问题 |
