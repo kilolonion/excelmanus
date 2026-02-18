@@ -13,7 +13,7 @@ from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import SkillMatchResult, Skillpack
-from excelmanus.tools.policy import DISCOVERY_TOOLS, FALLBACK_DISCOVERY_TOOLS
+from excelmanus.tools.policy import TOOL_CATEGORIES
 
 logger = get_logger("skillpacks.router")
 
@@ -245,13 +245,8 @@ class SkillRouter:
             write_hint=write_hint,
         )
 
-        # 将 list_skills 和只读发现工具加入 tool_scope
+        # v5: 不再注入 DISCOVERY_TOOLS / list_skills 到 tool_scope
         tool_scope = list(result.tool_scope)
-        if "list_skills" not in tool_scope:
-            tool_scope.append("list_skills")
-        for tool_name in DISCOVERY_TOOLS:
-            if tool_name not in tool_scope:
-                tool_scope.append(tool_name)
         system_contexts = list(result.system_contexts)
         large_file_context = self._build_large_file_context(
             user_message=user_message,

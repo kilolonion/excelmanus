@@ -9,7 +9,6 @@ from excelmanus.tools import ToolRegistry
 from excelmanus.tools.policy import (
     AUDIT_TARGET_ARG_RULES_ALL,
     AUDIT_TARGET_ARG_RULES_FIRST,
-    FALLBACK_DISCOVERY_TOOLS,
     MUTATING_ALL_TOOLS,
     MUTATING_AUDIT_ONLY_TOOLS,
     MUTATING_CONFIRM_TOOLS,
@@ -135,27 +134,6 @@ def test_subagent_tool_scope_is_synced_with_policy() -> None:
     assert set(writer.allowed_tools) == (
         set(SUBAGENT_READ_ONLY_TOOLS) | set(SUBAGENT_WRITE_EXTRA_TOOLS)
     )
-
-
-def test_fallback_discovery_excludes_memory_tool() -> None:
-    assert "memory_read_topic" not in FALLBACK_DISCOVERY_TOOLS
-
-
-def test_discovery_tools_are_read_only_or_focus() -> None:
-    """基础发现工具集必须全部是只读安全工具或 focus_window。"""
-    from excelmanus.tools.policy import DISCOVERY_TOOLS, READ_ONLY_SAFE_TOOLS
-    non_readonly = DISCOVERY_TOOLS - READ_ONLY_SAFE_TOOLS - {"focus_window"}
-    assert not non_readonly, f"非只读工具混入基础集: {sorted(non_readonly)}"
-
-
-def test_discovery_tools_expected_members() -> None:
-    from excelmanus.tools.policy import DISCOVERY_TOOLS
-    expected = {
-        "read_excel", "inspect_excel_files", "analyze_data", "filter_data",
-        "group_aggregate", "list_sheets", "list_directory", "get_file_info",
-        "find_files", "read_text_file", "read_cell_styles", "focus_window",
-    }
-    assert DISCOVERY_TOOLS == expected
 
 
 def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
