@@ -134,19 +134,15 @@ class TestFinishTaskInjection:
 
     def test_finish_task_reaches_model_tools_when_may_write(self):
         engine = _make_engine()
-        route_result = _make_route_result(write_hint="may_write")
         engine._current_write_hint = "may_write"
-        scope = engine._get_current_tool_scope(route_result=route_result)
-        tools = engine._build_tools_for_scope(scope)
+        tools = engine._build_v5_tools()
         names = [t["function"]["name"] for t in tools]
         assert "finish_task" in names
 
     def test_route_write_hint_blank_falls_back_to_current_state(self):
         engine = _make_engine()
-        route_result = _make_route_result(write_hint="   ")
         engine._current_write_hint = "may_write"
-        scope = engine._get_current_tool_scope(route_result=route_result)
-        tools = engine._build_tools_for_scope(scope)
+        tools = engine._build_v5_tools()
         names = [t["function"]["name"] for t in tools]
         assert "finish_task" in names
 
@@ -175,7 +171,7 @@ class TestWriteGuardPrompt:
             for m in engine.memory.get_messages()
             if m.get("role") == "user"
         ]
-        assert any("先调用 select_skill 激活可写技能" in msg for msg in user_messages)
+        assert any("expand_tools" in msg for msg in user_messages)
 
 
 class TestExecutionGuardState:
