@@ -1,11 +1,11 @@
-# ExcelManus v5
+# ExcelManus
 
 > ⚠️ **WIP (Work In Progress)** — 本项目仍在积极开发中，功能和 API 尚未稳定，可能随时发生破坏性变更。欢迎试用和反馈，但请勿用于生产环境。
 
 基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
 
-- `Tools`：基础能力执行层（工具函数 + schema + 安全边界 + 分层披露）
-- `Skillpacks`：纯知识注入层（`SKILL.md` 元数据 + 路由 + 领域指引）
+- **Tools**：基础能力执行层（工具函数 + schema + 安全边界 + 分层披露）
+- **Skillpacks**：纯知识注入层（`SKILL.md` 元数据 + 路由 + 领域指引）
 
 支持两种运行模式：
 
@@ -25,6 +25,15 @@ pip install -e ".[dev]"
 
 优先级：环境变量 > `.env` > 默认值。
 
+最小可运行 `.env` 示例：
+
+```dotenv
+EXCELMANUS_API_KEY=your-api-key
+EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
+EXCELMANUS_MODEL=your-model-id
+# 可选：EXCELMANUS_MODELS=[{"name":"default","model":"your-model-id","api_key":"...","base_url":"..."}]
+```
+
 ### 基础配置
 
 | 环境变量 | 说明 | 默认值 |
@@ -40,8 +49,9 @@ pip install -e ".[dev]"
 | `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EXCELMANUS_EXTERNAL_SAFE_MODE` | 对外安全模式（隐藏思考/工具细节与路由元信息） | `true` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔） | `http://localhost:5173` |
+| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 对话上下文 token 上限 | `128000` |
 
-### Skillpack 路由配置
+### Skillpack 与路由配置
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
@@ -54,32 +64,50 @@ pip install -e ".[dev]"
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE` | 是否发现 `.claude/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW` | 是否发现 `.openclaw/skills`/`~/.openclaw/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | 额外扫描目录（逗号分隔） | 空 |
-| `EXCELMANUS_SYSTEM_MESSAGE_MODE` | system 注入策略（`auto\|merge\|replace`） | `auto` |
-| `EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS` | 工具结果全局硬截断长度（0 表示不限制） | `12000` |
 | `EXCELMANUS_MODELS` | 可切换模型档案（JSON 数组，供 `/model` 使用） | 空 |
 | `EXCELMANUS_ROUTER_API_KEY` | 路由模型 API Key（未设置时回退主配置） | — |
 | `EXCELMANUS_ROUTER_BASE_URL` | 路由模型 Base URL（未设置时回退主配置） | — |
 | `EXCELMANUS_ROUTER_MODEL` | 路由模型名称（设置后与主模型解耦） | — |
-| `EXCELMANUS_MCP_SHARED_MANAGER` | API 会话是否复用共享 MCP 管理器 | `false` |
+| `EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS` | 工具结果全局硬截断长度（0 表示不限制） | `12000` |
+
+### Subagent 配置
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 subagent 委派提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 subagent 执行 | `true` |
 | `EXCELMANUS_SUBAGENT_MODEL` | subagent 模型（为空时回退主模型） | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `2` |
-| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 对话上下文 token 上限 | `128000` |
+
+### Hook 配置
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
 | `EXCELMANUS_HOOKS_COMMAND_ENABLED` | 是否允许 `command` hook 执行 | `false` |
 | `EXCELMANUS_HOOKS_COMMAND_ALLOWLIST` | `command` hook 白名单前缀（逗号分隔） | 空 |
 | `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
 | `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
 
-### v5 路由行为
+### 路由行为
 
-v5 已移除 Skill 预激活（pre-route）模块，相关环境变量不再生效。
-
-路由行为：
 - 所有工具始终可见（core 工具完整 schema，extended 工具摘要 schema）。
 - LLM 通过 `expand_tools` 展开指定类别获取完整参数后即可调用。
 - `activate_skill` 用于注入领域知识指引（纯知识注入，不控制工具可见性）。
+
+### System Message 模式
+
+`EXCELMANUS_SYSTEM_MESSAGE_MODE`（默认 `auto`）：
+
+- `replace`：多条 system 分段注入。
+- `merge`：合并为单条 system。
+- `auto`：默认先走 `replace`，遇到 provider 的多 system 兼容错误时自动回退到 `merge`。
+
+### 多模型与路由模型
+
+- `/model <name>` 切换主对话模型（`EXCELMANUS_MODELS` 中的 profile）。
+- 未设置 `EXCELMANUS_ROUTER_MODEL` 时，路由模型跟随 `/model` 切换。
+- 设置了 `EXCELMANUS_ROUTER_MODEL` 时，路由模型保持独立，不受 `/model` 影响。
 
 ### 窗口感知层配置
 
@@ -101,82 +129,35 @@ v5 已移除 Skill 预激活（pre-route）模块，相关环境变量不再生�
 | `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN` | 触发小模型的对话轮次阈值 | `4` |
 | `EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS` | 小模型计划有效轮数（TTL） | `2` |
 
-窗口感知顾问行为：
+顾问模式：
 - `rules`：仅使用确定性规则（无小模型调用）。
 - `hybrid`：规则兜底 + 异步小模型缓存，失败或超时自动回退规则，不阻塞主链路。
 
-### 破坏性升级迁移清单（本次单期整改）
+### MCP 配置
 
-- `EXCELMANUS_SYSTEM_MESSAGE_MODE=multi` 已移除，启动将直接报错；请改为 `auto` / `merge` / `replace`。
-- `EXCELMANUS_BASE_URL`、`EXCELMANUS_MODEL` 不再有隐式默认值；必须显式配置，或由 `EXCELMANUS_MODELS` 首项继承。
-- Plan 目录不再自动从 `outputs/plans/` 迁移到 `.excelmanus/plans/`，旧目录需手工迁移一次。
-- 会话统计接口移除 `active_count` 旧属性，请统一使用 `await get_active_count()`。
-- MCP 管理器已移除 legacy `npx` 直连兜底逻辑，需使用当前 `mcp.json` 配置链路。
-- `EXCELMANUS_SKILL_PREROUTE_*` 系列环境变量已在 v5 中全部移除。
-
-最小可运行 `.env` 示例：
-
-```dotenv
-EXCELMANUS_API_KEY=your-api-key
-EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
-EXCELMANUS_MODEL=your-model-id
-# 可选：EXCELMANUS_MODELS=[{"name":"default","model":"your-model-id","api_key":"...","base_url":"..."}]
-```
-
-v5 路由简化说明：
-- 以下旧变量已正式移除：`EXCELMANUS_SKILLS_PREFILTER_TOPK`、`EXCELMANUS_SKILLS_MAX_SELECTED`、`EXCELMANUS_SKILLS_SKIP_LLM_CONFIRM`、`EXCELMANUS_SKILLS_FASTPATH_MIN_SCORE`、`EXCELMANUS_SKILLS_FASTPATH_MIN_GAP`。
-- 当前路由行为以 `slash_direct` 与 `fallback/no_skillpack/slash_not_found` 两类主路径为核心。
-- v5 不再有运行时 `tool_scope` 过滤——所有工具始终可见，安全由 ToolPolicy 层独立管控。
-
-`EXCELMANUS_SYSTEM_MESSAGE_MODE` 语义：
-- `replace`：多条 system 分段注入。
-- `merge`：合并为单条 system。
-- `auto`：默认先走 `replace`，遇到 provider 的多 system 兼容错误时自动回退到 `merge`。
-
-多模型与路由模型规则：
-- `/model <name>` 仅切换主对话模型（`EXCELMANUS_MODELS` 中的 profile）。
-- 当未设置 `EXCELMANUS_ROUTER_MODEL` 时，路由模型会跟随 `/model` 切换。
-- 当设置了 `EXCELMANUS_ROUTER_MODEL` 时，路由模型保持独立，不受 `/model` 影响。
-
-### MCP 启动缓存（避免每次重装）
-
-项目根目录 `mcp.json` 已改为使用 `scripts/mcp/*.sh` 启动器：
+项目根目录 `mcp.json` 使用 `scripts/mcp/*.sh` 启动器：
 
 - 首次启动时按固定版本自动安装到 `./.excelmanus/mcp/`
-- 后续启动直接复用本地缓存，不再每次通过 `npx/uvx` 在线安装
+- 后续启动直接复用本地缓存
 - 如需强制重装，删除 `./.excelmanus/mcp/` 后重启即可
+- 可通过 `EXCELMANUS_MCP_STATE_DIR` 自定义缓存目录
 
-可通过环境变量 `EXCELMANUS_MCP_STATE_DIR` 自定义缓存目录。
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_MCP_SHARED_MANAGER` | API 会话是否复用共享 MCP 管理器 | `false` |
+| `EXCELMANUS_MCP_ENABLE_STREAMABLE_HTTP` | 是否启用 streamable_http transport | `false` |
+| `EXCELMANUS_MCP_UNDEFINED_ENV` | 未定义环境变量策略（`keep`/`empty`/`error`） | `keep` |
+| `EXCELMANUS_MCP_STRICT_SECRETS` | 明文敏感字段是否阻断加载 | `false` |
 
-MCP 配置能力（`mcp.json`）：
-- `transport` 支持 `stdio`、`sse`、`streamable_http`（可用 `EXCELMANUS_MCP_ENABLE_STREAMABLE_HTTP` 开关控制）。
-- 支持在 `args/env/url/headers` 中使用 `$VAR` / `${VAR}` 环境变量引用（默认开启展开）。
-- 未定义环境变量策略可通过 `EXCELMANUS_MCP_UNDEFINED_ENV` 设置为：
-  - `keep`（默认）：保留原 token
-  - `empty`：替换为空字符串
-  - `error`：该 server 跳过加载
-- 明文敏感字段默认仅告警；设置 `EXCELMANUS_MCP_STRICT_SECRETS=true` 后会阻断对应 server 加载。
-- 可选 `stateDir` / `state_dir` 字段可覆盖进程识别目录（用于回收时与脚本目录对齐）。
+`mcp.json` 能力：
+- `transport` 支持 `stdio`、`sse`、`streamable_http`。
+- 支持在 `args/env/url/headers` 中使用 `$VAR` / `${VAR}` 环境变量引用。
+- MCP 仅负责注册 `mcp_*` 工具；Skillpack 负责策略与授权。若 Skillpack 需要 MCP，在 `SKILL.md` 中声明 `required-mcp-servers` / `required-mcp-tools`。
 
-API 共享 MCP 生命周期（灰度开关）：
-- 设置 `EXCELMANUS_MCP_SHARED_MANAGER=true` 后，API 模式会共享单例 MCP 管理器，避免“每会话重复初始化 MCP”导致的进程/连接线性增长。
-- 在共享模式下，会话删除/过期不会触发 MCP 全量关闭，统一在服务生命周期结束时回收。
-
-CLI `/mcp` 状态语义：
-- `status=ready`：连接成功且工具发现成功
-- `status=connect_failed`：连接失败
-- `status=discover_failed`：工具发现失败
-- `last_error` 字段显示最近错误摘要，便于排障
-
-> 破坏性变更（MCP/Skills 解耦）：
-> 启动时不再自动将 MCP Server 生成并注入为临时 Skillpack。  
-> MCP 仅负责注册 `mcp_*` 工具；Skillpack 仅负责策略与授权。  
-> 若 Skillpack 需要 MCP，请在 `SKILL.md` 中声明 `required-mcp-servers` / `required-mcp-tools`。
-
-MCP 安全扫描（pre-commit/CI）：
+MCP 安全扫描：
 - 本地：`scripts/security/scan_secrets.sh`
-- pre-commit：`.pre-commit-config.yaml` 已内置 `excelmanus secret scan` 钩子
-- CI：`.github/workflows/secret-scan.yml` 会扫描 `mcp.json`、`.env*`、`*.toml` 中疑似明文凭证
+- pre-commit：`.pre-commit-config.yaml` 内置钩子
+- CI：`.github/workflows/secret-scan.yml`
 
 ## 使用方式
 
@@ -188,52 +169,49 @@ excelmanus
 python -m excelmanus
 ```
 
-可用命令：`/help`、`/history`、`/clear`、`/skills`、`/skills list`、`/skills get <name>`、`/skills create <name> --json ... | --json-file ...`、`/skills patch <name> --json ... | --json-file ...`、`/skills delete <name> [--yes]`、`/subagent [on|off|status|list]`、`/subagent run -- <task>`、`/subagent run <agent> -- <task>`、`/fullAccess [on|off|status]`、`/accept <id>`、`/reject <id>`、`/undo <id>`、`/plan [on|off|status]`、`/plan approve [plan_id]`、`/plan reject [plan_id]`、`/model`、`/model list`、`/model <name>`、`/<skill_name> [args...]`、`exit`。
-输入斜杠命令时支持灰色内联补全（例如输入 `/ful` 会提示补全为 `/fullAccess`，输入 `/subagent s` 会提示 `status`，输入 `/plan a` 会提示 `approve`）。
-`/planmode` 与 `/plan_mode` 旧命令别名已移除，请统一使用 `/plan ...`。
-Plan 草案文件保存于 `.excelmanus/plans/`。
-`subagent` 配置中的 `memory_scope` 已生效，支持 `user` / `project` 两种作用域：
+可用命令：
+
+| 命令 | 说明 |
+|---|---|
+| `/help` | 帮助 |
+| `/history` | 对话历史 |
+| `/clear` | 清空对话 |
+| `/skills [list\|get\|create\|patch\|delete]` | Skillpack 管理 |
+| `/subagent [on\|off\|status\|list\|run]` | Subagent 控制 |
+| `/fullAccess [on\|off\|status]` | 会话级代码权限 |
+| `/accept <id>` / `/reject <id>` / `/undo <id>` | 审批门禁 |
+| `/plan [on\|off\|status\|approve\|reject]` | Plan 模式 |
+| `/model [list\|<name>]` | 模型切换 |
+| `/<skill_name> [args...]` | 斜杠直接调用技能 |
+| `exit` | 退出 |
+
+输入斜杠命令时支持灰色内联补全。Plan 草案保存于 `.excelmanus/plans/`。
+
+Subagent `memory_scope` 支持 `user` / `project` 两种作用域：
 - `user`：`~/.excelmanus/agent-memory/{agent_name}/`
 - `project`：`{workspace_root}/.excelmanus/agent-memory/{agent_name}/`
-配置解析兼容 `memory_scope` / `memory-scope` / 历史 `memory` 三种写法（冲突配置会被拒绝）。
 
 ### 持久记忆
 
-- 全局记忆开关：`EXCELMANUS_MEMORY_ENABLED`（默认 `true`）
-- 记忆目录：`EXCELMANUS_MEMORY_DIR`（默认 `~/.excelmanus/memory`）
-- 自动加载行数：`EXCELMANUS_MEMORY_AUTO_LOAD_LINES`（默认 `200`，从 `MEMORY.md` 最近行加载）
-- 主题文件：
-  - `file_patterns.md`
-  - `user_prefs.md`
-  - `error_solutions.md`
-  - `general.md`
-- 核心文件 `MEMORY.md` 保留，保存时会与主题文件同步写入（用于会话启动自动加载）。
-- 首次启动会自动执行布局迁移并保留备份到 `migration_backups/`（幂等可重入）。
-- 若迁移失败，系统会回滚备份并降级为只读加载模式（记录告警日志，不中断主流程）。
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_MEMORY_ENABLED` | 全局记忆开关 | `true` |
+| `EXCELMANUS_MEMORY_DIR` | 记忆目录 | `~/.excelmanus/memory` |
+| `EXCELMANUS_MEMORY_AUTO_LOAD_LINES` | 自动加载行数 | `200` |
 
-`/skills` 子命令示例：
-
-```bash
-/skills list
-/skills get data_basic
-/skills create api_skill --json '{"description":"api 创建","instructions":"说明"}'
-/skills patch api_skill --json '{"description":"api 更新"}'
-/skills delete api_skill --yes
-```
+主题文件：`file_patterns.md`、`user_prefs.md`、`error_solutions.md`、`general.md`。
+核心文件 `MEMORY.md` 保存时会与主题文件同步写入，用于会话启动自动加载。
 
 ### Accept 门禁与审计
 
-- 审批策略采用破坏性分层：Tier A（破坏性写入）需 `/accept`，Tier B（可审计写入）默认直行并强制审计。
-- 非 `fullAccess` 状态下，Tier A 工具不会立即执行，而是先进入待确认队列。
-- MCP 工具仅在白名单内自动批准，非白名单 MCP 会进入待确认队列。
-- 使用 `/accept <id>` 执行待确认操作，`/reject <id>` 放弃操作。
-- 每次已执行的高风险操作都会在 `outputs/approvals/<id>/` 下保存审计产物（执行成功/失败都会落盘）：
-  - `manifest.json`（V2）：`version/approval/execution/artifacts/changes` 分层结构
-  - `changes.patch`：文本文件 unified diff（若有）
-  - `snapshots/`：回滚快照（按需）
-- `manifest.json` V2 为破坏性升级，不再兼容旧平铺字段。
-- 对支持回滚的记录可执行 `/undo <id>`，且支持进程重启后按 `approval_id` 回滚。
-- `run_code` 仍会进入 accept 流程并落盘审计，但默认不支持自动回滚代码执行副作用。
+- Tier A（破坏性写入）需 `/accept` 确认，Tier B（可审计写入）默认直行并强制审计。
+- 非 `fullAccess` 状态下，Tier A 工具先进入待确认队列。
+- MCP 工具仅在白名单内自动批准，非白名单进入待确认队列。
+- 已执行的高风险操作在 `outputs/approvals/<id>/` 下保存审计产物：
+  - `manifest.json`：`version/approval/execution/artifacts/changes` 分层结构
+  - `changes.patch`：文本文件 unified diff
+  - `snapshots/`：回滚快照
+- 支持回滚的记录可执行 `/undo <id>`，支持进程重启后回滚。
 
 ### API
 
@@ -241,41 +219,22 @@ Plan 草案文件保存于 `.excelmanus/plans/`。
 excelmanus-api
 ```
 
-接口：
-
-- `POST /api/v1/chat`
-  - 请求：`message`、`session_id?`
-  - 响应：`session_id`、`reply`、`skills_used`、`route_mode`
-  - 错误：`409`（同会话并发冲突）、`429`（会话数超限）
-- `GET /api/v1/skills`
-  - 响应：Skillpack 摘要列表（`name`、`description`、`source`、`writable`、`argument-hint`）
-- `GET /api/v1/skills/{name}`
-  - `external_safe_mode=true` 时返回摘要，关闭后返回完整详情（标准字段：如 `command-dispatch`、`hooks` 等）
-- `external_safe_mode=false` 时仍会对 `tool_calls.arguments` 与 SSE `tool_call_start.arguments` 进行脱敏处理（token/cookie/绝对路径）。
-- `POST /api/v1/skills`
-  - 请求：`name` + `payload`
-  - 错误：`403`（safe mode 开启）、`409`（冲突）、`422`（payload 非法）
-- `PATCH /api/v1/skills/{name}`
-  - 请求：`payload`（字段级更新）
-  - 错误：`403`（safe mode 开启）、`404`（不存在）、`409`（非 project 来源）、`422`（payload 非法）
-- `DELETE /api/v1/skills/{name}`
-  - 软删除并归档到 `.excelmanus/skillpacks_archive/`
-  - 错误：`403`（safe mode 开启）、`404`（不存在）、`409`（非 project 来源）
-- `DELETE /api/v1/sessions/{session_id}`
-  - 错误：`404`（会话不存在）、`409`（会话正在处理中）
-- `GET /api/v1/health`
-  - 响应：`status`、`version`、`tools`、`skillpacks`、`active_sessions`
+| 接口 | 说明 |
+|---|---|
+| `POST /api/v1/chat` | 发送消息（`message`、`session_id?`） |
+| `GET /api/v1/skills` | Skillpack 摘要列表 |
+| `GET /api/v1/skills/{name}` | Skillpack 详情（safe mode 下返回摘要） |
+| `POST /api/v1/skills` | 创建 Skillpack |
+| `PATCH /api/v1/skills/{name}` | 更新 Skillpack |
+| `DELETE /api/v1/skills/{name}` | 删除 Skillpack（软删除归档） |
+| `DELETE /api/v1/sessions/{session_id}` | 删除会话 |
+| `GET /api/v1/health` | 健康检查 |
 
 说明：
-- 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`POST/PATCH/DELETE /api/v1/skills*` 会返回 `403`。
-- 当 `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，`GET /api/v1/skills/{name}` 返回摘要；关闭后返回完整详情（含 `instructions` / `resource_contents` 等字段）。
-- `/api/v1/skills*` 的写入请求同时接受 `snake_case` 与 `kebab-case` 字段；响应统一使用标准别名字段（`kebab-case`）。
-- Skillpack 写操作仅允许 project 层，system/user 层仅可读取。
-- `SessionManager` 会在 API 生命周期内自动启动后台 TTL 清理任务；服务关闭时统一停止并回收会话资源。
-
-SSE 事件协议说明：
-- `TASK_LIST_CREATED` 与 `TASK_ITEM_UPDATED` 都统一映射为 `event: task_update`。
-- `safe_mode` 开启或关闭时，上述 `task_update` 映射保持不变，仅 payload 字段做安全过滤。
+- `EXCELMANUS_EXTERNAL_SAFE_MODE=true` 时，Skills 写操作返回 `403`，`tool_calls.arguments` 做脱敏处理。
+- Skills 写操作同时接受 `snake_case` 与 `kebab-case` 字段；响应统一使用 `kebab-case`。
+- Skillpack 写操作仅允许 project 层。
+- SSE `task_update` 事件统一映射 `TASK_LIST_CREATED` 与 `TASK_ITEM_UPDATED`。
 
 示例：
 
@@ -287,73 +246,37 @@ curl -X POST http://localhost:8000/api/v1/chat \
 
 ## Skillpack 扩展
 
-Skillpack 使用目录结构：
+> 协议 SSOT：以 `docs/skillpack_protocol.md` 为准。
 
-```text
-<dir>/<namespace_or_name>/SKILL.md
-```
+目录结构：`<dir>/<namespace_or_name>/SKILL.md`
 
-> 协议单一事实源（SSOT）：以 `docs/skillpack_protocol.md` 为准。README 仅保留摘要说明。
+`SKILL.md` frontmatter 必填字段：`name`、`description`
 
-`SKILL.md` frontmatter 必填字段：
-
-- `name`
-- `description`
-
-可选字段（标准键）：
-
-- `file-patterns`、`resources`
-- `version`
-- `disable-model-invocation`、`user-invocable`
-- `argument-hint`
+可选字段（标准 `kebab-case` 键）：
+- `file-patterns`、`resources`、`version`
+- `disable-model-invocation`、`user-invocable`、`argument-hint`
 - `hooks`、`model`、`metadata`
 - `command-dispatch`（`none`/`tool`）、`command-tool`
-- `required-mcp-servers`、`required-mcp-tools`（技能激活前的 MCP 依赖校验）
+- `required-mcp-servers`、`required-mcp-tools`
 
-Hook 配置要点：
-- 事件键支持三种写法：`PreToolUse` / `preToolUse` / `pre_tool_use`（其余事件同理）。
-- handler 决策优先级：`deny > ask > allow > continue`。
-- `ASK` 仅对 `PreToolUse` 生效，其他事件会自动降级为 `continue`。
-- `ALLOW` 在 `PreToolUse` 下会跳过确认门禁，但不会绕过 ToolPolicy 审计约束。
-- `command` hook 仅在 `EXCELMANUS_HOOKS_COMMAND_ENABLED=true` 时可执行；
-  allowlist 仅允许单段命令，链式命令（`;`/`&&`/`||`/`|`）不会被放行。
-- `agent` hook 支持字段：`agent_name`、`task`、`on_failure`、`inject_summary_as_context`。
+Hook 要点：
+- 事件键支持 `PreToolUse` / `preToolUse` / `pre_tool_use` 三种写法。
+- 决策优先级：`deny > ask > allow > continue`。
+- `command` hook 需 `EXCELMANUS_HOOKS_COMMAND_ENABLED=true`，仅允许单段命令。
+- `agent` hook 支持：`agent_name`、`task`、`on_failure`、`inject_summary_as_context`。
 
-已移除字段：
-- `context`、`agent` 不再支持。
-- API `create/patch` 传入上述字段会返回 `422`。
-- frontmatter 出现 `context: fork` 会加载失败，请改为常规技能并在执行阶段显式调用 `delegate_to_subagent(agent_name=...)`。
+命名规范：支持命名空间（如 `team/data-cleaner`），分段正则 `[a-z0-9][a-z0-9._-]{0,63}`，全名最大 255。
 
-命名规范：
+加载优先级（高→低）：
 
-- 支持命名空间（例如 `team/data-cleaner`）
-- 分段正则：`[a-z0-9][a-z0-9._-]{0,63}`
-- 全名长度最大 255
-
-目录发现与加载优先级（高→低）：
-
-1. workspace 显式目录：`.excelmanus/skillpacks`、`.agents/skills`、`.claude/skills`、`.openclaw/skills`
-2. 祖先链 `.agents/skills`（从 workspace 根到 cwd，越近越高）
+1. workspace 目录：`.excelmanus/skillpacks`、`.agents/skills`、`.claude/skills`、`.openclaw/skills`
+2. 祖先链 `.agents/skills`（越近越高）
 3. 用户目录：`~/.excelmanus/skillpacks`、`~/.claude/skills`、`~/.openclaw/skills`
 4. 系统目录：`excelmanus/skillpacks/system`
 
-同名技能按优先级覆盖，最终只保留一个生效版本。
+同名技能按优先级覆盖，最终只保留一个生效版本。frontmatter 兼容 `snake_case` 输入，推荐统一使用 `kebab-case`。
 
-OpenClaw 项目目录迁移：
-- 历史目录 `workspace/skills` 已停止作为 OpenClaw 项目级发现目录。
-- 如仍使用旧目录，请迁移到 `workspace/.openclaw/skills`。
-
-兼容说明：
-
-- 历史 `snake_case` frontmatter 仍可作为输入读取（兼容模式）
-- 产品行为按新协议执行，推荐统一使用标准 `kebab-case`
-- 可使用迁移脚本：
-
-```bash
-python scripts/migrate_skills_to_standard.py --workspace-root .
-```
-
-当前内置（system）Skillpacks：
+内置 Skillpacks：
 - `data_basic`：读取/分析/筛选/转换
 - `chart_basic`：图表生成
 - `format_basic`：样式调整
@@ -363,11 +286,10 @@ python scripts/migrate_skills_to_standard.py --workspace-root .
 
 ## 安全边界
 
-- 所有文件读写仍受 `WORKSPACE_ROOT` 限制
-- 路径穿越与符号链接越界会被拒绝
-- 代码 Skillpack 默认受限（`excel_code_runner`），仅可通过会话级 `/fullAccess` 临时解锁
-- `run_code` 始终使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制尽力应用）
-- v5 中 Skill 不再控制工具授权，安全边界由 ToolPolicy 层（Tier A/B 分层审批）统一管控
+- 所有文件读写受 `WORKSPACE_ROOT` 限制，路径穿越与符号链接越界会被拒绝
+- 代码执行默认受限（`excel_code_runner`），需通过 `/fullAccess` 临时解锁
+- `run_code` 使用软沙盒执行（最小环境变量白名单、`-I` 隔离、进程隔离、Unix 资源限制）
+- 安全边界由 ToolPolicy 层（Tier A/B 分层审批）统一管控
 
 ## 开发
 
