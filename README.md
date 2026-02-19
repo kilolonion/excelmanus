@@ -1,5 +1,7 @@
 # ExcelManus v5
 
+> ⚠️ **WIP (Work In Progress)** — 本项目仍在积极开发中，功能和 API 尚未稳定，可能随时发生破坏性变更。欢迎试用和反馈，但请勿用于生产环境。
+
 基于大语言模型的 Excel 智能代理框架（`Tools + Skillpacks` 双层架构）。
 
 - `Tools`：基础能力执行层（工具函数 + schema + 安全边界 + 分层披露）
