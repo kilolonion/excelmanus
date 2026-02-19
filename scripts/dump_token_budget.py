@@ -2,12 +2,16 @@
 
 import json
 import os
+import sys
+from pathlib import Path
 
-os.chdir("/Users/jiangwenxuan/Desktop/excelagent")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(PROJECT_ROOT)
 
 from dotenv import load_dotenv
 
-load_dotenv("/Users/jiangwenxuan/Desktop/excelagent/.env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 from excelmanus.config import load_config
 from excelmanus.engine import AgentEngine, SkillMatchResult
