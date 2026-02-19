@@ -2,12 +2,16 @@
 
 import json
 import os
+import sys
+from pathlib import Path
 
-os.chdir("/Users/jiangwenxuan/Desktop/excelagent")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(PROJECT_ROOT)
 
 from dotenv import load_dotenv
 
-load_dotenv("/Users/jiangwenxuan/Desktop/excelagent/.env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 from excelmanus.config import load_config
 from excelmanus.engine import AgentEngine, SkillMatchResult
@@ -33,7 +37,7 @@ route_result = SkillMatchResult(
 # ── 1. System prompts ──
 prompts, err = engine._prepare_system_prompts_for_request(route_result.system_contexts)
 
-out = "/Users/jiangwenxuan/Desktop/excelagent/outputs/agent_full_prompt_dump.md"
+out = str(PROJECT_ROOT / "outputs" / "agent_full_prompt_dump.md")
 os.makedirs(os.path.dirname(out), exist_ok=True)
 with open(out, "w", encoding="utf-8") as f:
     sep = "=" * 80
