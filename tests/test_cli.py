@@ -1118,3 +1118,100 @@ class TestCliEntryPoints:
 
         engine.extract_and_save_memory.assert_awaited_once()
         mock_logger.warning.assert_called()
+
+
+# ══════════════════════════════════════════════════════════
+# Task 1: Layout Mode 与 /ui 命令
+# ══════════════════════════════════════════════════════════
+
+
+class TestLayoutModeConfig:
+    """EXCELMANUS_CLI_LAYOUT_MODE 环境变量与配置字段。"""
+
+    def test_default_is_dashboard(self) -> None:
+        """默认布局模式应为 dashboard。"""
+        from excelmanus.config import ExcelManusConfig
+
+        # 使用最小必填参数创建
+        cfg = ExcelManusConfig(
+            api_key="test", base_url="https://x.com/v1", model="m"
+        )
+        assert cfg.cli_layout_mode == "dashboard"
+
+    def test_env_var_classic(self) -> None:
+        """环境变量设为 classic 时应反映到配置。"""
+        import os
+        env = {
+            "EXCELMANUS_API_KEY": "test",
+            "EXCELMANUS_BASE_URL": "https://x.com/v1",
+            "EXCELMANUS_MODEL": "m",
+            "EXCELMANUS_CLI_LAYOUT_MODE": "classic",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from excelmanus.config import load_config
+            cfg = load_config()
+            assert cfg.cli_layout_mode == "classic"
+
+    def test_invalid_value_falls_back_to_dashboard(self) -> None:
+        """非法值应回退为 dashboard。"""
+        import os
+        env = {
+            "EXCELMANUS_API_KEY": "test",
+            "EXCELMANUS_BASE_URL": "https://x.com/v1",
+            "EXCELMANUS_MODEL": "m",
+            "EXCELMANUS_CLI_LAYOUT_MODE": "fancy_invalid",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            from excelmanus.config import load_config
+            cfg = load_config()
+            assert cfg.cli_layout_mode == "dashboard"
+
+
+class TestUiCommand:
+    """/ui 命令路由测试。"""
+
+    def test_ui_status_shows_current_mode(self) -> None:
+        """/ui status 应显示当前布局模式。"""
+        from excelmanus.cli import _handle_ui_command
+        engine = _make_engine()
+        engine.config = MagicMock()
+        engine.config.cli_layout_mode = "dashboard"
+        with patch("excelmanus.cli.console") as mock_console:
+            result = _handle_ui_command("/ui status", engine)
+        assert result is True
+        printed = " ".join(str(c) for c in mock_console.print.call_args_list)
+        assert "dashboard" in printed
+
+    def test_ui_classic_switches_mode(self) -> None:
+        """/ui classic 应切换到 classic 模式。"""
+        from excelmanus.cli import _handle_ui_command, _current_layout_mode
+        engine = _make_engine()
+        with patch("excelmanus.cli.console"):
+            _handle_ui_command("/ui classic", engine)
+        from excelmanus.cli import _current_layout_mode as mode
+        assert mode == "classic"
+
+    def test_ui_dashboard_switches_mode(self) -> None:
+        """/ui dashboard 应切换到 dashboard 模式。"""
+        from excelmanus.cli import _handle_ui_command, _current_layout_mode
+        engine = _make_engine()
+        with patch("excelmanus.cli.console"):
+            _handle_ui_command("/ui classic", engine)
+            _handle_ui_command("/ui dashboard", engine)
+        from excelmanus.cli import _current_layout_mode as mode
+        assert mode == "dashboard"
+
+    def test_ui_bare_shows_status(self) -> None:
+        """/ui 不带参数应等同于 /ui status。"""
+        from excelmanus.cli import _handle_ui_command
+        engine = _make_engine()
+        engine.config = MagicMock()
+        engine.config.cli_layout_mode = "dashboard"
+        with patch("excelmanus.cli.console") as mock_console:
+            result = _handle_ui_command("/ui", engine)
+        assert result is True
+
+    def test_ui_registered_in_slash_commands(self) -> None:
+        """/ui 应出现在斜杠命令集合中。"""
+        from excelmanus.cli import _SLASH_COMMANDS
+        assert "/ui" in _SLASH_COMMANDS
