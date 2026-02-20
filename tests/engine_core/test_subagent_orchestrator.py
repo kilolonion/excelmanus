@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from excelmanus.engine import DelegateSubagentOutcome
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
-from excelmanus.subagent.models import SubagentResult
+from excelmanus.subagent.models import SubagentFileChange, SubagentResult
 
 
 def _make_orchestrator(
@@ -19,11 +19,11 @@ def _make_orchestrator(
     engine_mock._subagent_enabled = subagent_enabled
     engine_mock._active_skills = []
     engine_mock._normalize_skill_agent_name = MagicMock(
-        side_effect=lambda x: x or "explorer"
+        side_effect=lambda x: x or "subagent"
     )
     engine_mock._run_skill_hook = MagicMock(return_value=None)
     engine_mock._resolve_hook_result = AsyncMock(return_value=None)
-    engine_mock._auto_select_subagent = AsyncMock(return_value="explorer")
+    engine_mock._auto_select_subagent = AsyncMock(return_value="subagent")
     engine_mock.run_subagent = AsyncMock()
     engine_mock._window_perception = MagicMock()
     engine_mock._normalize_subagent_file_paths = MagicMock(return_value=[])
@@ -58,10 +58,10 @@ class TestSuccessfulDelegation:
         mock_result = SubagentResult(
             success=True,
             summary="任务完成",
-            subagent_name="explorer",
+            subagent_name="subagent",
             permission_mode="default",
             conversation_id="test-conv-1",
-            file_changes=["test.xlsx"],
+            structured_changes=[SubagentFileChange(path="test.xlsx", tool_name="write_excel")],
             observed_files=["test.xlsx"],
         )
         orch._engine.run_subagent = AsyncMock(return_value=mock_result)
@@ -70,7 +70,7 @@ class TestSuccessfulDelegation:
 
         assert outcome.success is True
         assert outcome.reply == "任务完成"
-        assert outcome.picked_agent == "explorer"
+        assert outcome.picked_agent == "subagent"
         assert outcome.subagent_result is mock_result
 
     async def test_failed_subagent_run(self):
@@ -78,7 +78,7 @@ class TestSuccessfulDelegation:
         mock_result = SubagentResult(
             success=False,
             summary="文件不存在",
-            subagent_name="explorer",
+            subagent_name="subagent",
             permission_mode="default",
             conversation_id="test-conv-2",
         )
@@ -99,7 +99,7 @@ class TestOutcomeStructure:
         mock_result = SubagentResult(
             success=True,
             summary="done",
-            subagent_name="explorer",
+            subagent_name="subagent",
             permission_mode="default",
             conversation_id="c1",
         )

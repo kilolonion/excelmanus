@@ -124,17 +124,11 @@ def test_workspace_scan_budget_constants_contract() -> None:
 
 
 def test_subagent_tool_scope_is_synced_with_policy() -> None:
-    explorer = BUILTIN_SUBAGENTS["explorer"]
-    analyst = BUILTIN_SUBAGENTS["analyst"]
-    writer = BUILTIN_SUBAGENTS["writer"]
-
-    assert set(explorer.allowed_tools) == set(SUBAGENT_READ_ONLY_TOOLS)
-    assert set(analyst.allowed_tools) == (
-        set(SUBAGENT_READ_ONLY_TOOLS) | set(SUBAGENT_ANALYSIS_EXTRA_TOOLS)
-    )
-    assert set(writer.allowed_tools) == (
-        set(SUBAGENT_READ_ONLY_TOOLS) | set(SUBAGENT_WRITE_EXTRA_TOOLS)
-    )
+    # v6: 唯一的内置 subagent 使用 full capability，allowed_tools 为空（继承全部）
+    subagent = BUILTIN_SUBAGENTS["subagent"]
+    assert subagent.allowed_tools == []
+    assert subagent.capability_mode == "full"
+    assert subagent.permission_mode == "acceptEdits"
 
 
 def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:

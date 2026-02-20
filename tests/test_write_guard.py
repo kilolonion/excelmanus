@@ -106,20 +106,24 @@ class TestDelegateSubagentWritePropagation:
     @staticmethod
     def _make_outcome(*, success: bool, file_changes: list[str]) -> "DelegateSubagentOutcome":
         from excelmanus.engine import DelegateSubagentOutcome
-        from excelmanus.subagent.models import SubagentResult
+        from excelmanus.subagent.models import SubagentFileChange, SubagentResult
 
+        structured = [
+            SubagentFileChange(path=p, tool_name="write_excel")
+            for p in file_changes
+        ]
         sub = SubagentResult(
             success=success,
             summary="test summary",
-            subagent_name="writer",
+            subagent_name="subagent",
             permission_mode="default",
             conversation_id="conv_test",
-            file_changes=file_changes,
+            structured_changes=structured,
         )
         return DelegateSubagentOutcome(
             reply="test reply",
             success=success,
-            picked_agent="writer",
+            picked_agent="subagent",
             task_text="test task",
             subagent_result=sub,
         )

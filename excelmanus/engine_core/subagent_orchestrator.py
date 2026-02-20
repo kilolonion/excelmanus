@@ -65,7 +65,7 @@ class SubagentOrchestrator:
                 task=task_text,
                 file_paths=normalized_paths,
             )
-        picked_agent = engine._normalize_skill_agent_name(picked_agent) or "explorer"
+        picked_agent = engine._normalize_skill_agent_name(picked_agent) or "subagent"
 
         # ── Pre-subagent Hook ──
         hook_skill = engine._active_skills[-1] if engine._active_skills else None
@@ -137,6 +137,13 @@ class SubagentOrchestrator:
                 subagent_name=picked_agent,
                 task=task_text,
             )
+            # 子代理有写入时，标记 window 为 stale 并清缓存
+            if result.structured_changes:
+                engine._window_perception.observe_subagent_writes(
+                    structured_changes=result.structured_changes,
+                    subagent_name=picked_agent,
+                    task=task_text,
+                )
             return DelegateSubagentOutcome(
                 reply=result.summary,
                 success=True,

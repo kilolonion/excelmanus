@@ -4,6 +4,7 @@ from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
 from excelmanus.subagent.executor import SubagentExecutor
 from excelmanus.subagent.models import (
     SubagentConfig,
+    SubagentFileChange,
     SubagentMemoryScope,
     SubagentPermissionMode,
     SubagentResult,
@@ -17,6 +18,7 @@ __all__ = [
     "FilteredToolRegistry",
     "SubagentConfig",
     "SubagentExecutor",
+    "SubagentFileChange",
     "SubagentMemoryScope",
     "SubagentPermissionMode",
     "SubagentRegistry",

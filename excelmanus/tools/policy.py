@@ -157,61 +157,12 @@ WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
 
 
 # ── Subagent 工具域 ───────────────────────────────────────
+# v6: 分角色工具集已废弃。唯一的内置 subagent 使用 capability_mode=full，
+# 继承主代理全部工具。以下常量保留仅为向后兼容外部引用。
 
-SUBAGENT_READ_ONLY_TOOLS: tuple[str, ...] = (
-    "read_excel",
-    "analyze_data",
-    "filter_data",
-    "group_aggregate",
-    "analyze_sheet_mapping",
-    "list_sheets",
-    "get_file_info",
-    "find_files",
-    "list_directory",
-    "read_text_file",
-    "read_cell_styles",
-    "inspect_excel_files",
-)
-
-SUBAGENT_ANALYSIS_EXTRA_TOOLS: tuple[str, ...] = (
-    "run_code",
-    "run_shell",
-    "write_text_file",
-)
-
-SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = (
-    "write_excel",
-    "transform_data",
-    "format_cells",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "create_chart",
-    "create_excel_chart",
-    "create_sheet",
-    "copy_sheet",
-    "rename_sheet",
-    "delete_sheet",
-    "copy_range_between_sheets",
-    "copy_file",
-    "rename_file",
-    "delete_file",
-    "write_text_file",
-    "run_code",
-    "write_cells",
-    "insert_rows",
-    "insert_columns",
-    "apply_threshold_icon_format",
-    "style_card_blocks",
-    "scale_range_unit",
-    "apply_dashboard_dark_theme",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
-    "set_print_layout",
-    "set_page_header_footer",
-)
+SUBAGENT_READ_ONLY_TOOLS: tuple[str, ...] = ()  # deprecated
+SUBAGENT_ANALYSIS_EXTRA_TOOLS: tuple[str, ...] = ()  # deprecated
+SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = ()  # deprecated
 
 
 # ── 工具分类映射（用于工具索引） ────
@@ -259,8 +210,8 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "group_aggregate": "按列分组聚合统计（SUM/COUNT/MEAN 等），适用于汇总报表",
     "analyze_sheet_mapping": "分析两个工作表键字段的映射覆盖率，跨表写回前做口径校验",
     # data_write
-    "write_excel": "将行数据批量写入 Excel 工作表，已有文件仅替换指定 sheet",
-    "write_cells": "向指定单元格或范围写入值/公式，不影响其他区域数据",
+    "write_excel": "将行数据批量写入 Excel 工作表，已有文件仅替换指定 sheet（>3行或复杂条件写入请用 run_code）",
+    "write_cells": "向指定单元格或范围写入值/公式，仅限极少数据（<=3行），否则必须用 run_code",
     "transform_data": "对 Excel 数据执行列级转换（重命名、增删列、排序）",
     "insert_rows": "在 Excel 指定行号前插入空行，已有数据自动下移",
     "insert_columns": "在 Excel 指定列前插入空列，已有数据自动右移",

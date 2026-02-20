@@ -302,6 +302,93 @@ class WindowPerceptionManager:
             self._set_window_field(window, "summary", summary)
             self._touch(window)
 
+    def observe_subagent_writes(
+        self,
+        *,
+        structured_changes: list[Any],
+        subagent_name: str,
+        task: str,
+        iteration: int = 0,
+    ) -> None:
+        """子代理写入后，将影响同步到 window 系统。
+
+        与 observe_code_execution 类似，标记 stale + 清缓存 + 追加 change_log。
+        structured_changes 为 SubagentFileChange 列表（duck-typed：需有 path/tool_name/change_type/sheets_affected）。
+        """
+        if not self._enabled or not structured_changes:
+            return
+        self._operation_seq += 1
+        clean_task = " ".join(task.strip().split()) if task else ""
+
+        affected_count = 0
+        for change in structured_changes:
+            raw_path = getattr(change, "path", "") or ""
+            normalized = normalize_path(raw_path)
+            if not normalized or not is_excel_path(normalized):
+                continue
+
+            tool_name = getattr(change, "tool_name", "") or "subagent"
+            change_type = getattr(change, "change_type", "write") or "write"
+
+            stale_reason = (
+                f"subagent({subagent_name}) 通过 {tool_name} 修改此文件，缓存已清空。"
+                "请调用 read_excel 刷新数据。"
+            )
+
+            window = self._find_sheet_window(file_path=normalized, sheet_name="")
+            if window is None:
+                for win in self._windows.values():
+                    if win.type != WindowType.SHEET:
+                        continue
+                    if normalize_path(win.file_path or "") == normalized:
+                        window = win
+                        break
+
+            if window is None:
+                window = SheetWindow.new(
+                    id=self._new_id("sheet"),
+                    title=normalized,
+                    file_path=normalized,
+                    sheet_name="",
+                )
+                self._windows[window.id] = window
+                self._register_window_identity(window)
+
+            # 标记 stale + 清空数据缓存
+            self._set_window_field(window, "stale_hint", stale_reason)
+            self._set_window_field(window, "data_buffer", [])
+            self._set_window_field(window, "preview_rows", [])
+            self._set_window_field(window, "cached_ranges", [])
+            self._set_window_field(window, "unfiltered_buffer", None)
+
+            # 追加 change_log
+            tool_summary = f"subagent({subagent_name}).{tool_name}"
+            if clean_task:
+                tool_summary = f"{tool_summary}: {clean_task}"
+            self._append_change(
+                window,
+                make_change_record(
+                    operation="subagent_write",
+                    tool_summary=tool_summary,
+                    affected_range="-",
+                    change_type=change_type,
+                    iteration=iteration,
+                ),
+            )
+
+            self._set_window_field(window, "summary", stale_reason)
+            self._repeat_detector.reset_for_file(normalized)
+            self._wake_window(window)
+            self._touch(window)
+            affected_count += 1
+
+        if affected_count:
+            logger.info(
+                "observe_subagent_writes: %d files affected by subagent %s",
+                affected_count,
+                subagent_name,
+            )
+
     def observe_code_execution(
         self,
         *,
