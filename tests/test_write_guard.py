@@ -299,7 +299,7 @@ class TestWriteGuardPrompt:
             for m in engine.memory.get_messages()
             if m.get("role") == "user"
         ]
-        assert any("expand_tools" in msg for msg in user_messages)
+        assert any("请立即调用" in msg for msg in user_messages)
 
 
 class TestExecutionGuardState:

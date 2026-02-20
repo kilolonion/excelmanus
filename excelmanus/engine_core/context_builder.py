@@ -504,12 +504,9 @@ class ContextBuilder:
     ) -> str:
         """生成工具分类索引，注入 system prompt。
 
-        所有工具均已注册可见。core 工具完整展示 schema，
-        extended 工具需先调用 expand_tools 获取完整参数。
+        v5.1: 所有工具始终暴露完整 schema，统一按类别展示。
         """
-        e = self._engine
         from excelmanus.tools.policy import TOOL_CATEGORIES, TOOL_SHORT_DESCRIPTIONS
-        from excelmanus.tools.profile import CORE_TOOLS
 
         _CATEGORY_LABELS: dict[str, str] = {
             "data_read": "数据读取",
@@ -524,8 +521,7 @@ class ContextBuilder:
 
         limit = max(1, int(max_tools_per_category))
         registered = set(self._all_tool_names())
-        core_lines: list[str] = []
-        extended_lines: list[str] = []
+        category_lines: list[str] = []
 
         def _format_tool_list(tools: Sequence[str], *, with_desc: bool = False) -> str:
             visible = list(tools[:limit])
@@ -549,30 +545,17 @@ class ContextBuilder:
             available = [t for t in tools if t in registered]
             if not available:
                 continue
-            core = [t for t in available if t in CORE_TOOLS]
-            extended = [t for t in available if t not in CORE_TOOLS]
-            if core:
-                line = _format_tool_list(core)
-                if line:
-                    core_lines.append(f"- {label}：{line}")
-            if extended:
-                expanded = cat in e._expanded_categories
-                suffix = "" if expanded else " [需 expand_tools]"
-                code_suffix = " [需 fullaccess]" if cat == "code" else ""
-                line = _format_tool_list(extended, with_desc=True)
-                if line:
-                    extended_lines.append(f"  · {label}：{line}{suffix}{code_suffix}")
+            code_suffix = " [需 fullaccess]" if cat == "code" else ""
+            line = _format_tool_list(available, with_desc=True)
+            if line:
+                category_lines.append(f"- {label}：{line}{code_suffix}")
 
-        if not core_lines and not extended_lines:
+        if not category_lines:
             return ""
 
         parts: list[str] = ["## 工具索引"]
-        if core_lines:
-            parts.append("核心工具（直接可用）：")
-            parts.extend(core_lines)
-        if extended_lines:
-            parts.append("扩展工具（调用 expand_tools 展开对应类别后可用）：")
-            parts.extend(extended_lines)
+        parts.append("可用工具（所有工具参数已完整可见，直接调用）：")
+        parts.extend(category_lines)
         parts.append(
             "\n⚠️ 写入类任务（公式、数据、格式）必须调用工具执行，"
             "不得以文本建议替代实际写入操作。"

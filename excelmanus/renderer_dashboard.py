@@ -42,7 +42,6 @@ _SUBAGENT_REASON_PREVIEW = 220
 # 元工具友好名称
 _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
     "activate_skill": ("⚙️", "激活技能指引"),
-    "expand_tools": ("🔧", "展开工具参数"),
     "delegate_to_subagent": ("🧵", "委派子任务"),
     "list_subagents": ("📋", "查询可用助手"),
     "ask_user": ("❓", "向用户提问"),
