@@ -1,10 +1,13 @@
-"""Dashboard 渲染器 — 三段布局的 CLI Dashboard 渲染引擎。
+"""Dashboard 渲染器 — Rich Live 驱动的三段布局 CLI Dashboard 渲染引擎。
 
-输入：ToolCallEvent
-输出：Rich 终端组件（header / timeline / footer）
+三段布局架构：
+- 顶部 header：回合开始时打印（模型名、回合号、徽章）
+- 中部 body：事件通过 live.console.print() 打印在 Live 上方
+- 底部 footer：Rich Live 驱动的动态状态条（思考中/工具执行/子代理/汇总中）
 
-提供 start_turn / handle_event / finish_turn / fail_turn 生命周期方法。
-在渲染异常时降级为纯文本输出，绝不中断会话。
+流式文本（text_delta / thinking_delta）时暂停 Live，直接流式输出，结束后恢复。
+回合结束后停止 Live，打印结构化执行摘要面板。
+渲染异常时降级为纯文本输出，绝不中断会话。
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import time
 from typing import Any, Dict
 
 from rich.console import Console
+from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
@@ -60,6 +64,15 @@ _TOOL_ICONS: dict[str, str] = {
     "conditional_format": "🌈",
 }
 
+# 状态到显示文本的映射
+_STATUS_DISPLAY: dict[str, tuple[str, str]] = {
+    "thinking": ("💭", "思考中"),
+    "tool_exec": ("⚙️", "执行工具"),
+    "subagent": ("🧵", "子代理运行中"),
+    "summarizing": ("📝", "汇总中"),
+    "idle": ("✓", "完成"),
+}
+
 
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
@@ -95,12 +108,12 @@ def _format_arguments(arguments: Dict[str, Any]) -> str:
 
 
 class DashboardRenderer:
-    """Dashboard 模式渲染器。
+    """Dashboard 模式渲染器 — Rich Live 驱动的三段布局。
 
     三段布局：
-    - 顶部 header：会话/回合状态
-    - 中部 body：事件时间线
-    - 底部 footer：动态状态条 + 完成摘要
+    - 顶部 header：回合开始时打印（模型名、回合号、徽章）
+    - 中部 body：事件打印在 Live 上方，自然滚动
+    - 底部 footer：Live 驱动的动态状态条，回合结束后替换为摘要面板
     """
 
     def __init__(self, console: Console) -> None:
@@ -111,6 +124,12 @@ class DashboardRenderer:
         # 流式输出状态（与 StreamRenderer 兼容）
         self._streaming_text = False
         self._streaming_thinking = False
+        # Rich Live 状态栏
+        self._live: Live | None = None
+        self._live_paused = False
+        self._start_time: float = 0.0
+        # 当前正在执行的工具名（用于状态栏展示）
+        self._current_tool_name: str = ""
 
     @property
     def state(self) -> DashboardTurnState:
@@ -119,6 +138,127 @@ class DashboardRenderer:
     @property
     def metrics(self) -> DashboardMetrics:
         return self._metrics
+
+    # ------------------------------------------------------------------
+    # 输出辅助：根据 Live 状态选择输出方式
+    # ------------------------------------------------------------------
+
+    def _print(self, *args: Any, **kwargs: Any) -> None:
+        """打印内容。Live 活跃时打印在 Live 上方，否则正常打印。"""
+        if self._live is not None and not self._live_paused:
+            try:
+                self._live.console.print(*args, **kwargs)
+            except Exception:
+                self._console.print(*args, **kwargs)
+        else:
+            self._console.print(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Live 状态栏管理
+    # ------------------------------------------------------------------
+
+    def _start_live(self) -> None:
+        """创建并启动 Live 状态栏。"""
+        if self._live is not None:
+            return
+        try:
+            # 检查是否真正的终端（StringIO 等测试环境下跳过 Live）
+            is_real_terminal = hasattr(self._console, "is_terminal") and self._console.is_terminal
+            if not is_real_terminal:
+                # 非终端环境：不启动 Live，改用静态模式
+                return
+            self._live = Live(
+                self._build_status_bar(),
+                console=self._console,
+                transient=True,
+                auto_refresh=False,
+            )
+            self._live.start()
+            self._live_paused = False
+        except Exception as exc:
+            logger.debug("Live 状态栏启动失败，降级为静态模式: %s", exc)
+            self._live = None
+
+    def _stop_live(self) -> None:
+        """停止并销毁 Live 状态栏。"""
+        if self._live is None:
+            return
+        try:
+            self._live.stop()
+        except Exception:
+            pass
+        self._live = None
+        self._live_paused = False
+
+    def _pause_live(self) -> None:
+        """暂停 Live（用于流式文本输出）。"""
+        if self._live is None or self._live_paused:
+            return
+        try:
+            self._live.stop()
+        except Exception:
+            pass
+        self._live_paused = True
+
+    def _resume_live(self) -> None:
+        """恢复 Live（流式文本结束后）。"""
+        if not self._live_paused:
+            return
+        self._live_paused = False
+        try:
+            self._live = Live(
+                self._build_status_bar(),
+                console=self._console,
+                transient=True,
+                auto_refresh=False,
+            )
+            self._live.start()
+        except Exception as exc:
+            logger.debug("Live 恢复失败: %s", exc)
+            self._live = None
+
+    def _refresh_status(self) -> None:
+        """刷新 Live 状态栏内容。"""
+        if self._live is None or self._live_paused:
+            return
+        try:
+            self._live.update(self._build_status_bar(), refresh=True)
+        except Exception:
+            pass
+
+    def _build_status_bar(self) -> Text:
+        """构建动态状态栏的 Rich Text 对象。"""
+        elapsed = time.monotonic() - self._start_time
+        elapsed_str = _format_elapsed(elapsed)
+
+        status = self._state.status
+        icon, label = _STATUS_DISPLAY.get(status, ("⏳", status))
+
+        # 增强状态信息
+        if status == "tool_exec" and self._current_tool_name:
+            label = f"执行 {self._current_tool_name}"
+        elif status == "subagent":
+            name = self._state.subagent_name or "subagent"
+            turn = self._state.subagent_turns
+            label = f"子代理 {name} 第 {turn} 轮"
+
+        parts: list[str] = [f" {icon} {label}"]
+
+        m = self._metrics
+        if m.total_tool_calls > 0:
+            parts.append(f"📋 {m.total_tool_calls} 调用")
+            if m.failure_count > 0:
+                parts.append(f"✅{m.success_count} ❌{m.failure_count}")
+
+        parts.append(f"⏱ {elapsed_str}")
+
+        bar_text = "  │  ".join(parts)
+
+        text = Text()
+        text.append("─" * 2, style="dim #5f87af")
+        text.append(f" {bar_text} ", style="#5f87af")
+        text.append("─" * max(2, 60 - len(bar_text)), style="dim #5f87af")
+        return text
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -131,12 +271,15 @@ class DashboardRenderer:
         *,
         badges: DashboardSessionBadges | None = None,
     ) -> None:
-        """开始新回合：重置状态，渲染 header。"""
+        """开始新回合：重置状态，渲染 header，启动 Live 状态栏。"""
         self._state.reset_for_new_turn(
             turn_number=turn_number, model_name=model_name
         )
         self._metrics = DashboardMetrics()
+        self._start_time = time.monotonic()
+        self._current_tool_name = ""
         self._render_header(badges)
+        self._start_live()
 
     def handle_event(self, event: ToolCallEvent) -> None:
         """事件分发入口。"""
@@ -152,24 +295,27 @@ class DashboardRenderer:
         elapsed_seconds: float = 0.0,
         total_tokens: int = 0,
     ) -> None:
-        """结束回合：渲染摘要 footer。"""
+        """结束回合：停止 Live，渲染摘要 footer。"""
         self._state.status = "idle"
         self._metrics.elapsed_seconds = elapsed_seconds
+        self._stop_live()
         self._render_footer_summary()
 
     def fail_turn(self, error: str) -> None:
-        """回合异常：渲染错误 footer。"""
+        """回合异常：停止 Live，渲染错误 footer。"""
         self._state.status = "idle"
+        self._stop_live()
         self._console.print(
             f"  [red]❌ 回合异常：{rich_escape(error)}[/red]"
         )
 
     def finish_streaming(self) -> None:
-        """流式输出结束时调用，确保换行。"""
+        """流式输出结束时调用，确保换行并恢复 Live。"""
         if self._streaming_text or self._streaming_thinking:
             self._console.print()
             self._streaming_text = False
             self._streaming_thinking = False
+            self._resume_live()
 
     # ------------------------------------------------------------------
     # Header 渲染
@@ -232,6 +378,7 @@ class DashboardRenderer:
 
     def _on_tool_start(self, event: ToolCallEvent) -> None:
         self._state.status = "tool_exec"
+        self._current_tool_name = event.tool_name or ""
         self._tool_start_times[event.tool_name] = time.monotonic()
 
         meta = _META_TOOL_DISPLAY.get(event.tool_name)
@@ -241,15 +388,15 @@ class DashboardRenderer:
             line = f"  {icon} [bold]{display_name}[/bold]"
             if hint:
                 line += f" [dim white]← {rich_escape(hint)}[/dim white]"
-            self._console.print(line)
+            self._print(line)
         else:
             icon = _tool_icon(event.tool_name)
             args_text = rich_escape(_format_arguments(event.arguments))
             if self._is_narrow():
-                self._console.print(f"  {icon} {rich_escape(event.tool_name)}")
-                self._console.print(f"     {args_text}", style="dim white")
+                self._print(f"  {icon} {rich_escape(event.tool_name)}")
+                self._print(f"     {args_text}", style="dim white")
             else:
-                self._console.print(
+                self._print(
                     f"  {icon} [bold]{rich_escape(event.tool_name)}[/bold] [dim white]← {args_text}[/dim white]"
                 )
 
@@ -259,6 +406,7 @@ class DashboardRenderer:
             detail=_format_arguments(event.arguments),
             category="tool",
         ))
+        self._refresh_status()
 
     def _on_tool_end(self, event: ToolCallEvent) -> None:
         start = self._tool_start_times.pop(event.tool_name, None)
@@ -272,51 +420,55 @@ class DashboardRenderer:
 
         if event.success:
             if is_meta:
-                self._console.print(f"     [green]✅[/green]{elapsed_str}")
+                self._print(f"     [green]✅[/green]{elapsed_str}")
             else:
                 detail = rich_escape(_truncate(event.result, _RESULT_MAX_LEN)) if event.result else ""
                 if self._is_narrow():
-                    self._console.print(f"     ✅ 成功{elapsed_str}")
+                    self._print(f"     ✅ 成功{elapsed_str}")
                     if detail:
-                        self._console.print(f"     {detail}", style="dim white")
+                        self._print(f"     {detail}", style="dim white")
                 else:
                     line = f"     [green]✅ 成功[/green]{elapsed_str}"
                     if detail:
                         line += f" [dim white]→ {detail}[/dim white]"
-                    self._console.print(line)
+                    self._print(line)
         else:
             error_msg = rich_escape(event.error or "未知错误")
             if is_meta:
-                self._console.print(f"     [red]❌[/red]{elapsed_str} [red]{error_msg}[/red]")
+                self._print(f"     [red]❌[/red]{elapsed_str} [red]{error_msg}[/red]")
             elif self._is_narrow():
-                self._console.print(f"     ❌ 失败{elapsed_str}")
-                self._console.print(f"     {error_msg}", style="red")
+                self._print(f"     ❌ 失败{elapsed_str}")
+                self._print(f"     {error_msg}", style="red")
             else:
-                self._console.print(
+                self._print(
                     f"     [red]❌ 失败[/red]{elapsed_str} [red]→ {error_msg}[/red]"
                 )
 
+        self._current_tool_name = ""
         self._state.status = "thinking"
+        self._refresh_status()
 
     # ------------------------------------------------------------------
-    # Thinking / text delta
+    # Thinking / text delta — 流式输出时暂停 Live
     # ------------------------------------------------------------------
 
     def _on_thinking(self, event: ToolCallEvent) -> None:
         if self._streaming_thinking:
             self._console.print()
             self._streaming_thinking = False
+            self._resume_live()
             return
         if not event.thinking:
             return
         summary = _truncate(event.thinking, _THINKING_SUMMARY_LEN)
-        self._console.print(f"  💭 [dim italic]{summary}[/dim italic]")
+        self._print(f"  💭 [dim italic]{summary}[/dim italic]")
 
     def _on_thinking_delta(self, event: ToolCallEvent) -> None:
         if not event.thinking_delta:
             return
         if not self._streaming_thinking:
             self._streaming_thinking = True
+            self._pause_live()
             self._console.print("  💭 ", end="", style="dim italic")
         self._console.print(event.thinking_delta, end="", style="dim italic")
 
@@ -328,6 +480,7 @@ class DashboardRenderer:
             self._streaming_thinking = False
         if not self._streaming_text:
             self._streaming_text = True
+            self._pause_live()
             self._console.print()
         self._console.print(event.text_delta, end="")
 
@@ -339,14 +492,14 @@ class DashboardRenderer:
         pass  # Dashboard 不需要额外的迭代分隔线
 
     def _on_route_start(self, event: ToolCallEvent) -> None:
-        self._console.print("  🔀 [dim white]正在匹配技能包…[/dim white]")
+        self._print("  🔀 [dim white]正在匹配技能包…[/dim white]")
 
     def _on_route_end(self, event: ToolCallEvent) -> None:
         self._state.route_mode = event.route_mode
         self._state.skills_used = list(event.skills_used) if event.skills_used else []
 
         if not event.skills_used:
-            self._console.print(
+            self._print(
                 "  🔀 [dim white]路由完成[/dim white] · [#f0c674]通用模式[/#f0c674]"
             )
         else:
@@ -354,7 +507,7 @@ class DashboardRenderer:
                 f"[bold #b294bb]{s}[/bold #b294bb]" for s in event.skills_used
             )
             mode_label = event.route_mode.replace("_", " ")
-            self._console.print(
+            self._print(
                 f"  🔀 [dim white]路由完成[/dim white] · {skills_str} [dim white]({mode_label})[/dim white]"
             )
 
@@ -377,17 +530,18 @@ class DashboardRenderer:
         tools_raw = event.subagent_tools or []
         tools_count = len(tools_raw)
 
-        self._console.print(
+        self._print(
             f"  🧵 [bold #81a2be]subagent 启动[/bold #81a2be] "
             f"[dim white]代理: {name} | 权限: {permission} | 会话: {conv_id}[/dim white]"
         )
-        self._console.print(f"     [dim white]任务: {reason}[/dim white]")
-        self._console.print(f"     [dim white]工具({tools_count})[/dim white]")
+        self._print(f"     [dim white]任务: {reason}[/dim white]")
+        self._print(f"     [dim white]工具({tools_count})[/dim white]")
 
         self._state.add_timeline_entry(DashboardTimelineEntry(
             icon="🧵", label=f"subagent:{self._state.subagent_name}",
             detail=reason, category="subagent",
         ))
+        self._refresh_status()
 
     def _on_subagent_iteration(self, event: ToolCallEvent) -> None:
         turn = event.subagent_iterations or event.iteration or 0
@@ -403,7 +557,8 @@ class DashboardRenderer:
             )
         else:
             text = f"  🧵 代理:{name} · 轮次 {turn} · 累计工具 {calls} 次"
-        self._console.print(text, style="dim #81a2be")
+        self._print(text, style="dim #81a2be")
+        self._refresh_status()
 
     def _on_subagent_end(self, event: ToolCallEvent) -> None:
         self._state.subagent_active = False
@@ -417,13 +572,15 @@ class DashboardRenderer:
         parts = f"  🧵 subagent [bold {color}]{status}[/bold {color}] · 代理: {name}"
         if stats:
             parts += f" [dim white]({stats})[/dim white]"
-        self._console.print(parts)
+        self._print(parts)
         self._state.status = "thinking"
+        self._refresh_status()
 
     def _on_subagent_summary(self, event: ToolCallEvent) -> None:
         self._state.status = "summarizing"
         summary = (event.subagent_summary or "").strip()
         if not summary:
+            self._refresh_status()
             return
         preview = _truncate(summary, _SUBAGENT_SUMMARY_PREVIEW)
         name = rich_escape((event.subagent_name or "subagent").strip() or "subagent")
@@ -436,12 +593,12 @@ class DashboardRenderer:
             panel_body = f"[dim]{rich_escape(meta)}[/dim]\n{panel_body}"
 
         if self._is_narrow():
-            self._console.print(f"  🧾 subagent 摘要 · 代理: {name}", style="#81a2be")
+            self._print(f"  🧾 subagent 摘要 · 代理: {name}", style="#81a2be")
             if meta:
-                self._console.print(f"     {rich_escape(meta)}", style="dim white")
-            self._console.print(f"     {rich_escape(preview)}", style="dim white")
+                self._print(f"     {rich_escape(meta)}", style="dim white")
+            self._print(f"     {rich_escape(preview)}", style="dim white")
         else:
-            self._console.print(
+            self._print(
                 Panel(
                     panel_body,
                     title=f"[bold #81a2be]🧾 subagent 摘要 · {name}[/bold #81a2be]",
@@ -451,6 +608,7 @@ class DashboardRenderer:
                     padding=(0, 1),
                 )
             )
+        self._refresh_status()
 
     # ------------------------------------------------------------------
     # Chat summary / task list / question / approval
@@ -472,7 +630,7 @@ class DashboardRenderer:
         for i, item in enumerate(items):
             icon = _STATUS_ICONS.get(item.get("status", ""), "⬜")
             lines.append(f"     {icon} {i}. {item.get('title', '')}")
-        self._console.print("\n".join(lines))
+        self._print("\n".join(lines))
 
     def _on_task_update(self, event: ToolCallEvent) -> None:
         _STATUS_ICONS = {"pending": "⬜", "in_progress": "🔄", "completed": "✅", "failed": "❌"}
@@ -482,18 +640,17 @@ class DashboardRenderer:
         data = event.task_list_data or {}
         items = data.get("items", [])
         title = items[idx]["title"] if idx is not None and 0 <= idx < len(items) else f"#{idx}"
-        self._console.print(f"     {icon} {idx}. {title}")
+        self._print(f"     {icon} {idx}. {title}")
 
     def _on_question(self, event: ToolCallEvent) -> None:
         header = (event.question_header or "").strip() or "待确认"
-        text = (event.question_text or "").strip()
         options = event.question_options or []
         # 仅输出简洁提示，完整问题由交互选择器渲染
         option_count = len(options) if isinstance(options, list) else 0
         hint = f"  [bold #f0c674]❓ {rich_escape(header)}[/bold #f0c674]"
         if option_count > 0:
             hint += f"  [dim white]({option_count} 个选项，请在下方选择)[/dim white]"
-        self._console.print(hint)
+        self._print(hint)
 
     def _on_approval(self, event: ToolCallEvent) -> None:
         # 仅输出简洁提示，完整审批信息由交互选择器渲染
@@ -505,7 +662,7 @@ class DashboardRenderer:
             if val is not None:
                 key_arg = f" [dim white]← {rich_escape(str(val)[:60])}[/dim white]"
                 break
-        self._console.print(
+        self._print(
             f"  [bold #f0c674]⚠️ 需要审批[/bold #f0c674]  "
             f"[dim white]{rich_escape(tool_name)}{key_arg}[/dim white]"
         )

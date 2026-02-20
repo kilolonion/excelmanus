@@ -755,10 +755,7 @@ class AgentEngine:
         self._active_model_name: str | None = None  # 当前激活的 profile name
 
         # ── 解耦组件延迟初始化 ──────────────────────────────
-        self._tool_dispatcher = ToolDispatcher(
-            registry=self._registry,
-            persistent_memory=persistent_memory,
-        )
+        self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
 
     # ── Property 代理：所有循环/会话级状态委托给 self._state ──────

@@ -680,7 +680,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="format_cells",
-            description="对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名或十六进制码。内置颜色名：红/绿/蓝/黄/白/黑/橙/紫/粉/灰/浅蓝/浅绿/浅黄/浅灰/浅红/浅紫/深蓝/深绿/深红/深灰/天蓝/草绿/金/银/珊瑚。设置 return_styles=true 可在格式化后直接返回样式快照，省去额外 read_cell_styles 验证",
+            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n对 Excel 单元格范围应用格式化样式（字体、填充、边框、对齐、数字格式）。颜色参数支持中文名或十六进制码。内置颜色名：红/绿/蓝/黄/白/黑/橙/紫/粉/灰/浅蓝/浅绿/浅黄/浅灰/浅红/浅紫/深蓝/深绿/深红/深灰/天蓝/草绿/金/银/珊瑚。设置 return_styles=true 可在格式化后直接返回样式快照，省去额外 read_cell_styles 验证",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -755,7 +755,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="adjust_column_width",
-            description="调整 Excel 列宽：支持手动指定宽度或自动适配内容",
+            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n调整 Excel 列宽：支持手动指定宽度或自动适配内容",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -814,7 +814,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="adjust_row_height",
-            description="调整 Excel 行高：支持手动指定高度或自动适配",
+            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n调整 Excel 行高：支持手动指定高度或自动适配",
             input_schema={
                 "type": "object",
                 "properties": {

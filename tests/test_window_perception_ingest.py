@@ -1,15 +1,12 @@
-"""WURM ingest 模块测试。"""
+"""WURM ingest 模块测试（Phase 2: write-through + read-replace）。"""
 
 from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.ingest import (
-    deduplicated_merge,
     extract_columns,
     extract_data_rows,
     ingest_filter_result,
     ingest_read_result,
     ingest_write_result,
-    is_adjacent_or_overlapping,
-    union_range,
 )
 from excelmanus.window_perception.models import CachedRange, ColumnDef, DetailLevel, WindowType
 from tests.window_factories import make_window
@@ -49,21 +46,8 @@ def test_extract_data_rows_and_columns() -> None:
     assert [c.name for c in columns] == ["日期", "产品", "金额"]
 
 
-def test_range_union_and_adjacency() -> None:
-    assert is_adjacent_or_overlapping("A1:C10", "A11:C20")
-    assert union_range("A1:C10", "A11:C20") == "A1:C20"
-
-
-def test_deduplicated_merge() -> None:
-    merged = deduplicated_merge(
-        [{"A": 1}, {"A": 2}],
-        [{"A": 2}, {"A": 3}],
-    )
-    # v2 语义：无几何/主键信息时不按“整行内容签名”去重。
-    assert merged == [{"A": 1}, {"A": 2}, {"A": 2}, {"A": 3}]
-
-
-def test_ingest_read_result_merges_and_limits_by_cached_range() -> None:
+def test_ingest_read_result_replaces_viewport() -> None:
+    """Phase 2: reads replace the entire viewport, no merging."""
     window = _build_window()
     new_rows = [{"A": i, "B": i + 1, "C": i + 2} for i in range(10, 20)]
     affected = ingest_read_result(
@@ -75,9 +59,13 @@ def test_ingest_read_result_merges_and_limits_by_cached_range() -> None:
     assert window.detail_level == DetailLevel.FULL
     assert window.viewport_range == "A3:C12"
     assert affected
+    # Phase 2: only new rows in buffer, no merge with old data
+    assert len(window.data_buffer) == len(new_rows)
+    assert len(window.cached_ranges) == 1
 
 
-def test_ingest_write_result_clears_stale_when_patchable() -> None:
+def test_ingest_write_result_wipes_cache() -> None:
+    """Phase 2: writes wipe all cached data, set stale_hint."""
     window = _build_window()
     affected = ingest_write_result(
         window,
@@ -85,9 +73,13 @@ def test_ingest_write_result_clears_stale_when_patchable() -> None:
         result_json={"preview_after": [[999]]},
         iteration=3,
     )
-    assert affected
-    assert window.stale_hint is None
-    assert window.data_buffer[0]["A"] == 999
+    # Phase 2: no updated rows — cache is wiped
+    assert affected == []
+    assert window.data_buffer == []
+    assert window.cached_ranges == []
+    assert window.preview_rows == []
+    assert window.stale_hint is not None
+    assert "read_excel" in window.stale_hint
 
 
 def test_ingest_filter_result_snapshots_unfiltered_buffer() -> None:
