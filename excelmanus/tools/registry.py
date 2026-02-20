@@ -143,41 +143,6 @@ class ToolDef:
             }
         raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
 
-    def to_summary_schema(
-        self, mode: OpenAISchemaMode = "responses"
-    ) -> dict[str, Any]:
-        """生成摘要 schema：仅 name + description，无参数细节。
-
-        .. deprecated:: v5.1
-            所有工具现在始终暴露完整 schema，此方法不再被调用。
-        """
-        hint = "（此方法已废弃，所有工具现在始终暴露完整 schema）"
-        desc = self.description
-        if hint not in desc:
-            desc = f"{desc}\n{hint}"
-        empty_params = {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        }
-        if mode == "responses":
-            return {
-                "type": "function",
-                "name": self.name,
-                "description": desc,
-                "parameters": empty_params,
-            }
-        if mode == "chat_completions":
-            return {
-                "type": "function",
-                "function": {
-                    "name": self.name,
-                    "description": desc,
-                    "parameters": empty_params,
-                },
-            }
-        raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
-
 
 class ToolRegistry:
     """工具注册中心。"""
@@ -245,14 +210,9 @@ class ToolRegistry:
 
     def get_tiered_schemas(
         self,
-        expanded_categories: set[str] | None = None,
         mode: OpenAISchemaMode = "responses",
     ) -> list[dict[str, Any]]:
-        """返回所有工具的完整 schema。
-
-        v5.1: 所有工具始终暴露完整 schema，不再区分 tier。
-        expanded_categories 参数保留仅为向后兼容，不影响行为。
-        """
+        """返回所有工具的完整 schema。"""
         return [tool.to_openai_schema(mode=mode) for tool in self._tools.values()]
 
     def call_tool(
