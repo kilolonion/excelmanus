@@ -50,6 +50,9 @@ from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
+from excelmanus.engine_core.session_state import SessionState
+from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
+from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.policy import MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
@@ -659,6 +662,10 @@ class AgentEngine:
         self._execution_guard_fired: bool = False
         # 用户主动请求 VBA 时豁免 execution_guard 的 VBA 检测
         self._vba_exempt: bool = False
+        # ── 解耦组件（Phase 3） ──────────────────────────────
+        self._state = SessionState()
+        self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
+        self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root)
         # ── 备份沙盒模式 ──────────────────────────────────
         self._backup_enabled: bool = config.backup_enabled
@@ -756,6 +763,13 @@ class AgentEngine:
         self._active_api_key: str = config.api_key
         self._active_base_url: str = config.base_url
         self._active_model_name: str | None = None  # 当前激活的 profile name
+
+        # ── 解耦组件延迟初始化 ──────────────────────────────
+        self._tool_dispatcher = ToolDispatcher(
+            registry=self._registry,
+            persistent_memory=persistent_memory,
+        )
+        self._subagent_orchestrator = SubagentOrchestrator(self)
 
     async def extract_and_save_memory(self) -> None:
         """会话结束时调用：从对话历史中提取记忆并持久化。
@@ -1091,7 +1105,8 @@ class AgentEngine:
 
         chat_start = time.monotonic()
         # 每次真正的 chat 调用递增轮次计数器
-        self._session_turn += 1
+        self._state.increment_turn()
+        self._session_turn = self._state.session_turn
         # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
         self._current_write_hint = "unknown"
 
@@ -2425,109 +2440,15 @@ class AgentEngine:
         file_paths: list[Any] | None = None,
         on_event: EventCallback | None = None,
     ) -> DelegateSubagentOutcome:
-        """执行 delegate_to_subagent 并返回结构化结果。"""
-        if not self._subagent_enabled:
-            return DelegateSubagentOutcome(
-                reply="subagent 当前处于关闭状态，请先执行 `/subagent on`。",
-                success=False,
-            )
+        """执行 delegate_to_subagent 并返回结构化结果。
 
-        task_text = task.strip()
-        if not task_text:
-            return DelegateSubagentOutcome(
-                reply="工具参数错误: task 必须为非空字符串。",
-                success=False,
-            )
-        normalized_paths = self._normalize_subagent_file_paths(file_paths)
-
-        picked_agent = (agent_name or "").strip()
-        if not picked_agent:
-            picked_agent = await self._auto_select_subagent(
-                task=task_text,
-                file_paths=normalized_paths,
-            )
-        picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
-
-        hook_skill = self._active_skills[-1] if self._active_skills else None
-        pre_subagent_hook_raw = self._run_skill_hook(
-            skill=hook_skill,
-            event=HookEvent.SUBAGENT_START,
-            payload={
-                "task": task_text,
-                "agent_name": picked_agent,
-                "file_paths": normalized_paths,
-            },
-        )
-        pre_subagent_hook = await self._resolve_hook_result(
-            event=HookEvent.SUBAGENT_START,
-            hook_result=pre_subagent_hook_raw,
+        委托给 SubagentOrchestrator 组件。
+        """
+        return await self._subagent_orchestrator.delegate(
+            task=task,
+            agent_name=agent_name,
+            file_paths=file_paths,
             on_event=on_event,
-        )
-        if pre_subagent_hook is not None and pre_subagent_hook.decision == HookDecision.DENY:
-            reason = pre_subagent_hook.reason or "Hook 拒绝了子代理执行。"
-            return DelegateSubagentOutcome(
-                reply=f"子代理执行已被 Hook 拦截：{reason}",
-                success=False,
-                picked_agent=picked_agent,
-                task_text=task_text,
-                normalized_paths=normalized_paths,
-            )
-
-        prompt = task_text
-        if normalized_paths:
-            prompt += f"\n\n相关文件：{', '.join(normalized_paths)}"
-
-        result = await self.run_subagent(
-            agent_name=picked_agent,
-            prompt=prompt,
-            on_event=on_event,
-        )
-        post_subagent_hook_raw = self._run_skill_hook(
-            skill=hook_skill,
-            event=HookEvent.SUBAGENT_STOP,
-            payload={
-                "task": task_text,
-                "agent_name": picked_agent,
-                "success": result.success,
-                "summary": result.summary,
-            },
-        )
-        post_subagent_hook = await self._resolve_hook_result(
-            event=HookEvent.SUBAGENT_STOP,
-            hook_result=post_subagent_hook_raw,
-            on_event=on_event,
-        )
-        if post_subagent_hook is not None and post_subagent_hook.decision == HookDecision.DENY:
-            reason = post_subagent_hook.reason or "Hook 拒绝了子代理结果。"
-            return DelegateSubagentOutcome(
-                reply=f"子代理执行结果已被 Hook 拦截：{reason}",
-                success=False,
-                picked_agent=picked_agent,
-                task_text=task_text,
-                normalized_paths=normalized_paths,
-                subagent_result=result,
-            )
-        if result.success:
-            self._window_perception.observe_subagent_context(
-                candidate_paths=[*normalized_paths, *result.observed_files],
-                subagent_name=picked_agent,
-                task=task_text,
-            )
-            return DelegateSubagentOutcome(
-                reply=result.summary,
-                success=True,
-                picked_agent=picked_agent,
-                task_text=task_text,
-                normalized_paths=normalized_paths,
-                subagent_result=result,
-            )
-        return DelegateSubagentOutcome(
-            reply=f"子代理执行失败（{picked_agent}）：{result.summary}",
-            success=False,
-            picked_agent=picked_agent,
-            task_text=task_text,
-            normalized_paths=normalized_paths,
-            subagent_result=result,
         )
 
     async def _handle_delegate_to_subagent(
@@ -3128,6 +3049,7 @@ class AgentEngine:
         current_route_result = route_result
         # 恢复执行时保留之前的统计，仅首次调用时重置
         if start_iteration <= 1:
+            self._state.reset_loop_stats()
             self._last_iteration_count = 0
             self._last_tool_call_count = 0
             self._last_success_count = 0
@@ -3598,26 +3520,8 @@ class AgentEngine:
         raw_args = getattr(function, "arguments", None)
         tool_call_id = getattr(tc, "id", "") or f"call_{int(time.time() * 1000)}"
 
-        # 参数解析
-        parse_error: str | None = None
-        try:
-            if raw_args is None or raw_args == "":
-                arguments: dict[str, Any] = {}
-            elif isinstance(raw_args, dict):
-                arguments = raw_args
-            elif isinstance(raw_args, str):
-                parsed = json.loads(raw_args)
-                if not isinstance(parsed, dict):
-                    parse_error = f"参数必须为 JSON 对象，当前类型: {type(parsed).__name__}"
-                    arguments = {}
-                else:
-                    arguments = parsed
-            else:
-                parse_error = f"参数类型无效: {type(raw_args).__name__}"
-                arguments = {}
-        except (json.JSONDecodeError, TypeError) as exc:
-            parse_error = f"JSON 解析失败: {exc}"
-            arguments = {}
+        # 参数解析（委托给 ToolDispatcher）
+        arguments, parse_error = self._tool_dispatcher.parse_arguments(raw_args)
 
         # 发射 TOOL_CALL_START 事件
         self._emit(
@@ -4333,18 +4237,15 @@ class AgentEngine:
         arguments: dict[str, Any],
         tool_scope: Sequence[str] | None = None,
     ) -> Any:
-        """在线程池中调用工具，并绑定当前会话的记忆上下文。"""
-        from excelmanus.tools import memory_tools
+        """在线程池中调用工具，并绑定当前会话的记忆上下文。
 
-        def _call() -> Any:
-            with memory_tools.bind_memory_context(self._persistent_memory):
-                return self._registry.call_tool(
-                    tool_name,
-                    arguments,
-                    tool_scope=tool_scope,
-                )
-
-        return await asyncio.to_thread(_call)
+        委托给 ToolDispatcher 组件。
+        """
+        return await self._tool_dispatcher.call_registry_tool(
+            tool_name=tool_name,
+            arguments=arguments,
+            tool_scope=tool_scope,
+        )
 
     async def _execute_tool_with_audit(
         self,
