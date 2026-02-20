@@ -66,10 +66,14 @@ class TestGreenSandbox:
         assert out.read_text() == "hello"
 
     def test_file_write_outside_workspace_blocked(self, workspace: Path) -> None:
-        import tempfile
-        outside = Path(tempfile.mkdtemp())
-        target = outside / "escape.txt"
-        code = f"with open(r'{target}', 'w') as f:\n    f.write('evil')"
+        # 写入一个不存在的路径（不在工作区内，也不在系统临时目录下）
+        target = Path("/tmp/_sandbox_test_should_not_exist/escape.txt")
+        code = (
+            "import os\n"
+            f"os.makedirs(os.path.dirname(r'{target}'), exist_ok=True)\n"
+            f"with open(r'{target}', 'w') as f:\n"
+            f"    f.write('evil')\n"
+        )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
         assert not target.exists()

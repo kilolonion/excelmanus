@@ -253,6 +253,53 @@ class TestRunCodeValidation:
             code_tools.run_code(code="   ", script_path="  ")
 
 
+class TestRecoveryHint:
+    """run_code 沙盒权限错误恢复提示测试。"""
+
+    def test_bench_protection_recovery_hint(self, workspace: Path) -> None:
+        """写入 bench 保护目录失败时应返回 recovery_hint。"""
+        bench_dir = workspace / "bench" / "external"
+        bench_dir.mkdir(parents=True)
+        target = bench_dir / "data.txt"
+        target.write_text("original", encoding="utf-8")
+        code = f"with open(r'{target}', 'w') as f:\n    f.write('bad')"
+        result = json.loads(
+            code_tools.run_code(
+                code=code,
+                python_command=sys.executable,
+                sandbox_tier="GREEN",
+            )
+        )
+        assert result["status"] == "failed"
+        assert "recovery_hint" in result
+        assert "bench/external" in result["recovery_hint"]
+        assert "mcp_excel" in result["recovery_hint"] or "delegate_to_subagent" in result["recovery_hint"]
+
+    def test_no_recovery_hint_on_success(self, workspace: Path) -> None:
+        """成功执行不应有 recovery_hint。"""
+        result = json.loads(
+            code_tools.run_code(
+                code="print('ok')",
+                python_command=sys.executable,
+                sandbox_tier="GREEN",
+            )
+        )
+        assert result["status"] == "success"
+        assert "recovery_hint" not in result
+
+    def test_no_recovery_hint_on_red_tier(self, workspace: Path) -> None:
+        """RED 模式失败不应有 recovery_hint（RED 无沙盒保护）。"""
+        result = json.loads(
+            code_tools.run_code(
+                code="raise ValueError('test')",
+                python_command=sys.executable,
+                sandbox_tier="RED",
+            )
+        )
+        assert result["status"] == "failed"
+        assert "recovery_hint" not in result
+
+
 class TestGetTools:
     def test_tool_names(self) -> None:
         names = {tool.name for tool in code_tools.get_tools()}
