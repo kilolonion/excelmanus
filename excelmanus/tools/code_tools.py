@@ -221,6 +221,7 @@ def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
 
     sandbox_env["PYTHONNOUSERSITE"] = "1"
     sandbox_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # TMPDIR/TMP/TEMP 由 _execute_script 注入工作区本地目录
     return sandbox_env, warnings
 
 
@@ -429,6 +430,13 @@ def _execute_script(
     sandbox_warnings = [*env_warnings, *limit_warnings]
     safe_args = [str(item) for item in (args or [])]
 
+    # ── 注入工作区本地临时目录（确保 et_xmlfile 等库的 temp 文件在工作区内） ──
+    sandbox_tmpdir = guard.workspace_root / ".tmp"
+    sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
+    sandbox_env["TMPDIR"] = str(sandbox_tmpdir)
+    sandbox_env["TMP"] = str(sandbox_tmpdir)
+    sandbox_env["TEMP"] = str(sandbox_tmpdir)
+
     # ── 沙盒 wrapper 注入（GREEN/YELLOW 模式） ──
     temp_wrapper: Path | None = None
     if sandbox_tier in ("GREEN", "YELLOW"):
@@ -535,6 +543,24 @@ def _execute_script(
             "warnings": sandbox_warnings,
         },
     }
+    # 检测沙盒权限错误，追加恢复提示
+    if status == "failed" and sandbox_tier in ("GREEN", "YELLOW"):
+        stderr_text = stderr or ""
+        if "安全策略禁止" in stderr_text:
+            hints: list[str] = []
+            if "路径不在工作区内" in stderr_text:
+                hints.append(
+                    "库内部临时文件写入被拦截。"
+                    "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
+                )
+            if "bench 保护目录" in stderr_text:
+                hints.append(
+                    "bench/external 目录受沙盒保护，run_code 无法写入。"
+                    "请使用 mcp_excel 工具或 delegate_to_subagent 完成写入。"
+                )
+            if hints:
+                result["recovery_hint"] = " ".join(hints)
+
     # 清理临时 wrapper
     if temp_wrapper is not None and temp_wrapper.exists():
         try:
