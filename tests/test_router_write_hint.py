@@ -1,0 +1,197 @@
+"""write_hint 正则扩充 + 小模型分类器提示词优化 测试。
+
+覆盖需求 2.1–2.4, 3.1–3.3。
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+from excelmanus.skillpacks.router import SkillRouter, _MAY_WRITE_HINT_RE, _CHITCHAT_RE
+
+
+# ── 1. 新增英文写入意图词匹配 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "fill column D with values",
+        "match invoice numbers from Sheet2",
+        "solve the equation in cell B3",
+        "compute the total revenue",
+        "populate the missing fields",
+        "replace all occurrences of X",
+        "insert a new row at the top",
+        "sort the data by date",
+        "merge cells A1:B2",
+        "fix the formula errors",
+        "address the missing values",
+        "apply conditional formatting",
+        "create a summary table",
+        "make a pivot table",
+        "generate a report",
+        "calculate the average",
+        "assign categories to each row",
+        "Please set the value of A1 to 100",
+        "put the result in column C",
+        "add a new column for totals",
+    ],
+)
+def test_new_english_write_words_match_may_write(message: str) -> None:
+    """新增英文写入意图词应返回 may_write。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"
+
+
+# ── 2. 纯分析消息不误判 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "analyze the data and check for errors",
+        "read the contents of Sheet1",
+        "scan the file for duplicates",
+        "inspect the column headers",
+        "list all sheet names",
+        "read and preview the first 10 rows",
+    ],
+)
+def test_pure_analysis_messages_return_read_only(message: str) -> None:
+    """纯分析/只读消息应返回 read_only，不被误判为 may_write。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "read_only", f"Expected 'read_only' for: {message!r}, got {result!r}"
+
+
+# ── 3. "dataset" 不因 "set" 子串误判 ──
+
+def test_dataset_not_false_positive() -> None:
+    """'load the dataset' 不应因 \\bset\\b 匹配为 may_write。"""
+    message = "load the dataset"
+    match = _MAY_WRITE_HINT_RE.search(message)
+    assert match is None, (
+        f"'dataset' should NOT trigger _MAY_WRITE_HINT_RE, "
+        f"but matched: {match.group()!r}"
+    )
+
+
+def test_offset_not_false_positive() -> None:
+    """'offset' 不应因 \\bset\\b 匹配。"""
+    message = "use the offset value"
+    match = _MAY_WRITE_HINT_RE.search(message)
+    assert match is None
+
+
+# ── 4. 中文关键词不受影响 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "请创建一个新的工作表",
+        "修改A1单元格的值",
+        "删除第三行",
+        "填充D列数据",
+        "格式化表头",
+        "生成图表",
+        "排序数据",
+        "合并单元格",
+    ],
+)
+def test_chinese_keywords_still_work(message: str) -> None:
+    """已有中文关键词应继续正常匹配 may_write。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"
+
+
+# ── 5. #82-38 完整消息返回 may_write ──
+
+def test_issue_82_38_full_message() -> None:
+    """模拟 #82-38 类型的完整消息应返回 may_write。"""
+    message = (
+        "Please fill column D by matching invoice numbers "
+        "from Sheet2 in file.xlsx"
+    )
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "may_write"
+
+
+# ── 6. 提示词包含新规则文本 ──
+
+def test_llm_prompt_contains_expanded_may_write_examples() -> None:
+    """_classify_task_llm 的提示词应包含扩充后的 may_write 示例。"""
+    source = inspect.getsource(SkillRouter._classify_task_llm)
+    # 新增的英文动词应出现在提示词中
+    for keyword in ["fill", "match", "solve", "compute", "calculate", "generate"]:
+        assert keyword in source, f"Prompt should contain '{keyword}'"
+
+
+def test_llm_prompt_contains_file_path_rule() -> None:
+    """提示词应包含文件路径+数据变更描述优先 may_write 的规则。"""
+    source = inspect.getsource(SkillRouter._classify_task_llm)
+    assert "文件路径" in source
+    assert "数据变更" in source
+    assert "优先 may_write" in source
+
+
+def test_llm_prompt_no_longer_defaults_read_only() -> None:
+    """提示词不应再包含'不确定时优先 read_only'。"""
+    source = inspect.getsource(SkillRouter._classify_task_llm)
+    assert "不确定时优先 read_only" not in source
+
+
+def test_llm_prompt_strict_read_only_condition() -> None:
+    """提示词应包含严格的 read_only 判定条件。"""
+    source = inspect.getsource(SkillRouter._classify_task_llm)
+    assert "仅当完全确定不涉及写入时才判定 read_only" in source
+
+
+# ── 7. Chitchat 短路检测 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "你好",
+        "您好！",
+        "hi",
+        "Hello!",
+        "hey",
+        "嗨",
+        "哈喽",
+        "早上好",
+        "下午好",
+        "晚上好",
+        "good morning",
+        "Good Afternoon",
+        "在吗",
+        "在不在",
+        "谢谢",
+        "thanks",
+        "Thank you!",
+        "好的",
+        "ok",
+        "okay",
+        "  你好  ",
+        "你好！！",
+    ],
+)
+def test_chitchat_regex_matches_greetings(message: str) -> None:
+    """纯问候/闲聊消息应被 _CHITCHAT_RE 匹配。"""
+    assert _CHITCHAT_RE.match(message.strip()), f"Expected match for: {message!r}"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "你好，帮我读取 data.xlsx",
+        "hello, please format the table",
+        "hi 帮我创建图表",
+        "读取销售明细前10行",
+        "请修改A1的值",
+        "帮我分析数据",
+        "你好你好你好",
+    ],
+)
+def test_chitchat_regex_does_not_match_task_messages(message: str) -> None:
+    """包含任务内容的消息不应被 _CHITCHAT_RE 匹配。"""
+    assert not _CHITCHAT_RE.match(message.strip()), f"Should NOT match: {message!r}"

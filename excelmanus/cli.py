@@ -1666,11 +1666,26 @@ class _LiveStatusTicker:
                 f"调用工具 {tool_name}" if tool_name else "调用工具"
             )
             return
-        if event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_SUMMARY):
-            self._status_label = "调用子代理"
+        if event.event_type == EventType.SUBAGENT_START:
+            name = (event.subagent_name or "").strip()
+            self._status_label = f"子代理 {name}" if name else "调用子代理"
+            return
+        if event.event_type == EventType.SUBAGENT_ITERATION:
+            name = (event.subagent_name or "").strip() or "subagent"
+            turn = event.subagent_iterations or event.iteration or 0
+            self._status_label = f"子代理 {name} 第 {turn} 轮"
+            return
+        if event.event_type == EventType.SUBAGENT_SUMMARY:
+            self._status_label = "汇总子代理结果"
+            return
+        if event.event_type == EventType.SUBAGENT_END:
+            self._status_label = "子代理收尾中"
             return
         if event.event_type == EventType.CHAT_SUMMARY:
             self._status_label = "整理结果"
+            return
+        if event.event_type in (EventType.TEXT_DELTA, EventType.THINKING_DELTA):
+            self._status_label = ""
             return
         # 默认回到思考态
         self._status_label = "思考中"
@@ -1688,8 +1703,8 @@ async def _chat_with_feedback(
     renderer: StreamRenderer,
     slash_command: str | None = None,
     raw_args: str | None = None,
-) -> str:
-    """统一封装 chat 调用，增加等待期动态状态反馈。"""
+) -> tuple[str, bool]:
+    """统一封装 chat 调用，增加等待期动态状态反馈。返回 (reply_text, streamed)。"""
     ticker = _LiveStatusTicker(console, enabled=_is_interactive_terminal())
     event_handler = ticker.wrap_handler(renderer.handle_event)
 
@@ -1700,7 +1715,10 @@ async def _chat_with_feedback(
             chat_kwargs["slash_command"] = slash_command
         if raw_args is not None:
             chat_kwargs["raw_args"] = raw_args
-        return _reply_text(await engine.chat(user_input, **chat_kwargs))
+        reply = _reply_text(await engine.chat(user_input, **chat_kwargs))
+        streamed = renderer._streaming_text or renderer._streaming_thinking
+        renderer.finish_streaming()
+        return reply, streamed
     finally:
         await ticker.stop()
 
@@ -1742,20 +1760,21 @@ async def _repl_loop(engine: AgentEngine) -> None:
                         try:
                             renderer = StreamRenderer(console)
                             console.print()
-                            reply = await _chat_with_feedback(
+                            reply, streamed = await _chat_with_feedback(
                                 engine,
                                 user_input=user_input,
                                 renderer=renderer,
                             )
-                            console.print()
-                            console.print(
-                                Panel(
-                                    Markdown(reply),
-                                    border_style="#5f875f",
-                                    padding=(1, 2),
-                                    expand=False,
+                            if not streamed:
+                                console.print()
+                                console.print(
+                                    Panel(
+                                        Markdown(reply),
+                                        border_style="#5f875f",
+                                        padding=(1, 2),
+                                        expand=False,
+                                    )
                                 )
-                            )
                         except KeyboardInterrupt:
                             _render_farewell()
                             return
@@ -1803,39 +1822,41 @@ async def _repl_loop(engine: AgentEngine) -> None:
                     try:
                         renderer = StreamRenderer(console)
                         console.print()
-                        reply = await _chat_with_feedback(
+                        reply, streamed = await _chat_with_feedback(
                             engine,
                             user_input=user_input,
                             renderer=renderer,
                         )
-                        console.print()
-                        console.print(
-                            Panel(
-                                Markdown(reply),
-                                border_style="#5f875f",
-                                padding=(1, 2),
-                                expand=False,
-                            )
-                        )
-                        # 全部授权模式：开启 fullaccess 后自动 accept
-                        if approval_choice == _APPROVAL_OPTION_FULLACCESS:
-                            accept_input = f"/accept {pending_apv.approval_id}"
-                            renderer2 = StreamRenderer(console)
-                            console.print()
-                            reply2 = await _chat_with_feedback(
-                                engine,
-                                user_input=accept_input,
-                                renderer=renderer2,
-                            )
+                        if not streamed:
                             console.print()
                             console.print(
                                 Panel(
-                                    Markdown(reply2),
+                                    Markdown(reply),
                                     border_style="#5f875f",
                                     padding=(1, 2),
                                     expand=False,
                                 )
                             )
+                        # 全部授权模式：开启 fullaccess 后自动 accept
+                        if approval_choice == _APPROVAL_OPTION_FULLACCESS:
+                            accept_input = f"/accept {pending_apv.approval_id}"
+                            renderer2 = StreamRenderer(console)
+                            console.print()
+                            reply2, streamed2 = await _chat_with_feedback(
+                                engine,
+                                user_input=accept_input,
+                                renderer=renderer2,
+                            )
+                            if not streamed2:
+                                console.print()
+                                console.print(
+                                    Panel(
+                                        Markdown(reply2),
+                                        border_style="#5f875f",
+                                        padding=(1, 2),
+                                        expand=False,
+                                    )
+                                )
                     except KeyboardInterrupt:
                         _render_farewell()
                         return
@@ -1879,20 +1900,21 @@ async def _repl_loop(engine: AgentEngine) -> None:
             try:
                 renderer = StreamRenderer(console)
                 console.print()
-                reply = await _chat_with_feedback(
+                reply, streamed = await _chat_with_feedback(
                     engine,
                     user_input=user_input,
                     renderer=renderer,
                 )
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(reply),
-                        border_style="#5f875f",
-                        padding=(1, 2),
-                        expand=False,
+                if not streamed:
+                    console.print()
+                    console.print(
+                        Panel(
+                            Markdown(reply),
+                            border_style="#5f875f",
+                            padding=(1, 2),
+                            expand=False,
+                        )
                     )
-                )
             except KeyboardInterrupt:
                 _render_farewell()
                 return
@@ -1970,8 +1992,34 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         # 会话控制命令统一走 engine.chat（与 API 行为一致）
         if lowered_cmd in _SESSION_CONTROL_COMMAND_ALIASES:
-            reply = _reply_text(await engine.chat(user_input))
-            console.print(f"  [#81a2be]{reply}[/#81a2be]")
+            if lowered_cmd in _SUBAGENT_COMMAND_ALIASES:
+                try:
+                    renderer = StreamRenderer(console)
+                    console.print()
+                    reply, streamed = await _chat_with_feedback(
+                        engine,
+                        user_input=user_input,
+                        renderer=renderer,
+                    )
+                    if not streamed:
+                        console.print()
+                        console.print(
+                            Panel(
+                                Markdown(reply),
+                                border_style="#5f875f",
+                                padding=(1, 2),
+                                expand=False,
+                            )
+                        )
+                except KeyboardInterrupt:
+                    _render_farewell()
+                    return
+                except Exception as exc:
+                    logger.error("处理请求时发生错误: %s", exc, exc_info=True)
+                    console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
+            else:
+                reply = _reply_text(await engine.chat(user_input))
+                console.print(f"  [#81a2be]{reply}[/#81a2be]")
             continue
 
         # Skill 斜杠命令：如 /data_basic ...（走手动 Skill 路由）
@@ -1993,7 +2041,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
             try:
                 renderer = StreamRenderer(console)
                 console.print()
-                reply = await _chat_with_feedback(
+                reply, streamed = await _chat_with_feedback(
                     engine,
                     user_input=user_input,
                     renderer=renderer,
@@ -2001,15 +2049,16 @@ async def _repl_loop(engine: AgentEngine) -> None:
                     raw_args=raw_args,
                 )
 
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(reply),
-                        border_style="#5f875f",
-                        padding=(1, 2),
-                        expand=False,
+                if not streamed:
+                    console.print()
+                    console.print(
+                        Panel(
+                            Markdown(reply),
+                            border_style="#5f875f",
+                            padding=(1, 2),
+                            expand=False,
+                        )
                     )
-                )
             except KeyboardInterrupt:
                 _render_farewell()
                 return
@@ -2031,22 +2080,23 @@ async def _repl_loop(engine: AgentEngine) -> None:
         try:
             renderer = StreamRenderer(console)
             console.print()  # 空行分隔
-            reply = await _chat_with_feedback(
+            reply, streamed = await _chat_with_feedback(
                 engine,
                 user_input=user_input,
                 renderer=renderer,
             )
 
-            # 使用 Rich Markdown 渲染最终回复
-            console.print()
-            console.print(
-                Panel(
-                    Markdown(reply),
-                    border_style="#5f875f",
-                    padding=(1, 2),
-                    expand=False,
+            # 使用 Rich Markdown 渲染最终回复（流式已输出则跳过）
+            if not streamed:
+                console.print()
+                console.print(
+                    Panel(
+                        Markdown(reply),
+                        border_style="#5f875f",
+                        padding=(1, 2),
+                        expand=False,
+                    )
                 )
-            )
 
         except KeyboardInterrupt:
             _render_farewell()

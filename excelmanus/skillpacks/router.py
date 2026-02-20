@@ -23,11 +23,21 @@ _EXCEL_PATH_PATTERN = re.compile(
 )
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
 _MAY_WRITE_HINT_RE = re.compile(
-    r"(创建|修改|写入|删除|替换|填充|插入|更新|设置|格式化|高亮|加粗|标红|美化|条件格式|画图|生成图表|柱状图|饼图|折线图|雷达图|散点图|排序|合并|转置|拆分|write|update|format|chart)",
+    r"(创建|修改|写入|删除|替换|填充|插入|更新|设置|格式化|高亮|加粗|标红|美化|条件格式|"
+    r"画图|生成图表|柱状图|饼图|折线图|雷达图|散点图|排序|合并|转置|拆分|"
+    r"write|update|format|chart|"
+    r"fill|match|replace|insert|sort|merge|solve|fix|address|apply|"
+    r"\bset\b|\bput\b|\badd\b|create|make|generate|compute|calculate|populate|assign)",
     re.IGNORECASE,
 )
 _READ_ONLY_HINT_RE = re.compile(
     r"(查看|列出|读取|扫描|分析|统计|对比|检查|预览|read|scan|analyz|inspect|list)",
+    re.IGNORECASE,
+)
+
+# 纯问候/闲聊检测：短消息且仅含问候词时跳过 LLM 分类
+_CHITCHAT_RE = re.compile(
+    r"^\s*(?:你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|good\s*(?:morning|afternoon|evening)|在吗|在不在|谢谢|thanks|thank\s*you|好的|ok|okay)[!！。.？?\s]*$",
     re.IGNORECASE,
 )
 
@@ -165,7 +175,17 @@ class SkillRouter:
                 write_hint=slash_write_hint,
             )
 
-        # ── 1. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
+        # ── 1. 纯问候/闲聊短路：跳过 LLM 分类，零延迟返回 ──
+        if _CHITCHAT_RE.match(user_message.strip()) and not candidate_file_paths:
+            logger.debug("chitchat 短路: %s", user_message[:30])
+            return self._build_all_tools_result(
+                user_message=user_message,
+                candidate_file_paths=candidate_file_paths,
+                write_hint="read_only",
+                task_tags=(),
+            )
+
+        # ── 2. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
         # 并行调用小模型判断 write_hint + task_tags
         classified_hint, classified_tags = await self._classify_task(
             user_message, write_hint=write_hint,
@@ -366,9 +386,11 @@ class SkillRouter:
             "你是任务分类器。判断用户请求的意图和任务类型。"
             '只输出 JSON: {"write_hint": "may_write"|"read_only", "task_tags": [...]}\n'
             "write_hint 判断：\n"
-            "- may_write：创建/修改/写入/删除/替换/填充/格式化/图表/排序/合并/转置\n"
-            "- read_only：查看/列出/读取/分析/统计/对比/检查/预览\n"
-            "- 不确定时优先 read_only\n\n"
+            "- may_write：创建/修改/写入/删除/替换/填充/格式化/图表/排序/合并/转置/"
+            "fill/match/replace/insert/sort/solve/fix/apply/set/add/create/generate/compute/calculate\n"
+            "- read_only：仅当消息明确只涉及查看/列出/读取/分析/统计/对比/检查/预览，且不涉及任何数据变更时\n"
+            "- 当消息中同时包含文件路径和数据变更描述（如 fill column D、match invoice numbers）时，优先 may_write\n"
+            "- 仅当完全确定不涉及写入时才判定 read_only\n\n"
             "task_tags 可选值（选择所有适用的）：\n"
             "- cross_sheet：涉及跨工作表查找或数据传输\n"
             "- formatting：涉及样式/颜色/字体/边框等格式化\n"

@@ -556,7 +556,8 @@ def _execute_script(
             if "bench 保护目录" in stderr_text:
                 hints.append(
                     "bench/external 目录受沙盒保护，run_code 无法写入。"
-                    "请使用 mcp_excel 工具或 delegate_to_subagent 完成写入。"
+                    "推荐：先用 copy_file 将文件复制到 outputs/ 目录，再对副本执行 run_code。"
+                    "或使用 delegate_to_subagent 完成写入。"
                 )
             if hints:
                 result["recovery_hint"] = " ".join(hints)

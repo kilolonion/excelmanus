@@ -320,16 +320,38 @@ _VBA_MACRO_ADVICE_PATTERN = _re.compile(
     _re.IGNORECASE,
 )
 
+# 用户主动请求 VBA 相关帮助的检测模式
+_USER_VBA_REQUEST_PATTERN = _re.compile(
+    r"(VBA|宏|macro|vbaProject"
+    r"|查看.*(?:宏|VBA|macro)|(?:宏|VBA|macro).*(?:代码|源码|内容|逻辑|模块)"
+    r"|解[释读析].*(?:宏|VBA|macro)|(?:宏|VBA|macro).*(?:什么|哪些|有没有|是否)"
+    r"|inspect.*vba|include.*vba"
+    r"|提取.*(?:宏|VBA)|(?:宏|VBA).*提取)",
+    _re.IGNORECASE,
+)
 
-def _contains_formula_advice(text: str) -> bool:
-    """检测回复文本中是否包含 Excel 公式或 VBA/宏代码建议（而非实际执行）。"""
+
+def _user_requests_vba(text: str) -> bool:
+    """检测用户消息是否主动请求 VBA/宏相关帮助（查看、解释、提取等）。"""
     if not text:
         return False
-    return bool(
-        _FORMULA_ADVICE_PATTERN.search(text)
-        or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text)
-        or _VBA_MACRO_ADVICE_PATTERN.search(text)
-    )
+    return bool(_USER_VBA_REQUEST_PATTERN.search(text))
+
+
+def _contains_formula_advice(text: str, *, vba_exempt: bool = False) -> bool:
+    """检测回复文本中是否包含 Excel 公式或 VBA/宏代码建议（而非实际执行）。
+
+    Args:
+        text: 回复文本。
+        vba_exempt: 若为 True，跳过 VBA 宏模式检测（用户主动请求 VBA 时）。
+    """
+    if not text:
+        return False
+    if _FORMULA_ADVICE_PATTERN.search(text) or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text):
+        return True
+    if not vba_exempt and _VBA_MACRO_ADVICE_PATTERN.search(text):
+        return True
+    return False
 
 
 _WRITE_ACTION_VERBS = _re.compile(
@@ -635,6 +657,8 @@ class AgentEngine:
         self._session_diagnostics: list[dict[str, Any]] = []
         # 执行守卫状态：新任务重置，续跑路径复用。
         self._execution_guard_fired: bool = False
+        # 用户主动请求 VBA 时豁免 execution_guard 的 VBA 检测
+        self._vba_exempt: bool = False
         self._approval = ApprovalManager(config.workspace_root)
         # ── 备份沙盒模式 ──────────────────────────────────
         self._backup_enabled: bool = config.backup_enabled
@@ -1307,6 +1331,7 @@ class AgentEngine:
         )
         # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
         self._execution_guard_fired = False
+        self._vba_exempt = _user_requests_vba(user_message)
         chat_result = await self._tool_calling_loop(route_result, on_event)
 
         # 注入路由诊断信息到 ChatResult
@@ -3167,8 +3192,28 @@ class AgentEngine:
             if tools:
                 kwargs["tools"] = tools
 
-            response = await self._create_chat_completion_with_system_fallback(kwargs)
-            message, usage = _extract_completion_message(response)
+            # 尝试流式调用
+            stream_kwargs = dict(kwargs)
+            stream_kwargs["stream"] = True
+            if isinstance(self._client, openai.AsyncOpenAI):
+                stream_kwargs["stream_options"] = {"include_usage": True}
+
+            try:
+                stream_or_response = await self._create_chat_completion_with_system_fallback(stream_kwargs)
+                # 检查返回值是否为异步迭代器（支持流式）
+                if hasattr(stream_or_response, "__aiter__"):
+                    message, usage = await self._consume_stream(
+                        stream_or_response, on_event, iteration,
+                    )
+                else:
+                    # provider 不支持 stream，返回了普通 response 对象
+                    message, usage = _extract_completion_message(stream_or_response)
+            except Exception as stream_exc:
+                # 流式调用失败时回退到非流式
+                logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
+                response = await self._create_chat_completion_with_system_fallback(kwargs)
+                message, usage = _extract_completion_message(response)
+
             tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
 
             # 累计 token 使用量
@@ -3176,13 +3221,8 @@ class AgentEngine:
                 total_prompt_tokens += _usage_token(usage, "prompt_tokens")
                 total_completion_tokens += _usage_token(usage, "completion_tokens")
 
-            # 提取 thinking / reasoning 内容
-            thinking_content = ""
-            for thinking_key in ("thinking", "reasoning", "reasoning_content"):
-                candidate = getattr(message, thinking_key, None)
-                if candidate:
-                    thinking_content = str(candidate)
-                    break
+            # 提取 thinking 内容（流式模式下已累积到 message.thinking）
+            thinking_content = getattr(message, "thinking", None) or ""
 
             if thinking_content:
                 self._emit(
@@ -3238,11 +3278,12 @@ class AgentEngine:
                 # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
                 # 当 write_hint=="may_write" 时，由下方 write_guard 统一处理，
                 # 避免两个 guard 连续触发注入语义重叠的提示（P2 修复）。
+                # 当用户主动请求 VBA 帮助时，豁免 VBA 代码模式检测。
                 if (
                     write_hint != "may_write"
                     and not self._active_skills
                     and iteration < max_iter - 1
-                    and _contains_formula_advice(reply_text)
+                    and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
                     and not self._execution_guard_fired
                 ):
                     self._execution_guard_fired = True
@@ -3251,7 +3292,8 @@ class AgentEngine:
                         "你拥有完整的 Excel 工具集可直接操作数据。"
                         "请立即调用 expand_tools 展开对应类别，"
                         "然后使用工具执行操作。"
-                        "禁止给出 VBA 宏代码或操作步骤替代执行。"
+                        "严禁给出 VBA 宏代码、AppleScript 或外部脚本替代执行。"
+                        "你的所有能力均可通过内置工具实现，无需用户离开本系统。"
                     )
                     self._memory.add_user_message(guard_msg)
                     if diag:
@@ -3268,7 +3310,8 @@ class AgentEngine:
                             "请先调用 expand_tools 展开对应类别获取工具参数，"
                             "再立即调用对应写入/格式化/图表工具执行。"
                             "注意：你拥有完整的 Excel 工具集可直接操作数据，"
-                            "不需要建议用户运行 VBA 宏或外部脚本。"
+                            "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
+                            "严禁在文本中输出 VBA 代码块作为操作方案。"
                             "禁止以文本建议替代工具执行。"
                             "完成后再调用 finish_task 并在 summary 中说明结果。"
                         )
@@ -3468,6 +3511,16 @@ class AgentEngine:
                                 write_hint = "may_write"
                             if self._current_write_hint != "may_write":
                                 self._current_write_hint = "may_write"
+                    # ── 同步 _execute_tool_call 内部的写入传播 ──
+                    # delegate_to_subagent 等工具在 _execute_tool_call 中直接
+                    # 设置 self._has_write_tool_call，需回写到循环局部变量。
+                    if (
+                        not has_write_tool_call
+                        and self._has_write_tool_call
+                    ):
+                        has_write_tool_call = True
+                        if write_hint != "may_write":
+                            write_hint = "may_write"
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -3733,7 +3786,19 @@ class AgentEngine:
                                     success = delegate_outcome.success
                                     error = None if success else result_str
 
+                                    # ── 写入传播：subagent 有文件变更时视为主 agent 写入 ──
                                     sub_result = delegate_outcome.subagent_result
+                                    if (
+                                        success
+                                        and sub_result is not None
+                                        and sub_result.file_changes
+                                    ):
+                                        self._has_write_tool_call = True
+                                        self._current_write_hint = "may_write"
+                                        logger.info(
+                                            "delegate_to_subagent 写入传播: file_changes=%s",
+                                            sub_result.file_changes,
+                                        )
                                     if (
                                         not success
                                         and sub_result is not None
@@ -4358,6 +4423,7 @@ class AgentEngine:
         # 重置轮级状态变量，防止跨对话污染
         self._current_write_hint = "unknown"
         self._execution_guard_fired = False
+        self._vba_exempt = False
         self._finish_task_warned = False
         self._has_write_tool_call = False
         # _system_mode_fallback 同步类缓存（不重置，跨会话复用探测结果）
@@ -5917,6 +5983,139 @@ class AgentEngine:
             "请改为可用的 API 端点（通常以 `/v1` 结尾），然后重试。\n"
             f"响应片段: {preview}"
         )
+
+    async def _consume_stream(
+        self,
+        stream: Any,
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> tuple[Any, Any]:
+        """消费流式响应，逐 chunk 发射 delta 事件，返回累积的 (message, usage)。
+
+        兼容两种 chunk 格式：
+        - openai.AsyncOpenAI: ChatCompletionChunk (choices[0].delta)
+        - 自定义 provider: _StreamDelta (content_delta / thinking_delta)
+        """
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls_accumulated: dict[int, dict] = {}
+        finish_reason: str | None = None
+        usage = None
+
+        async for chunk in stream:
+            # ── 自定义 provider 的 _StreamDelta ──
+            if hasattr(chunk, "content_delta"):
+                if chunk.content_delta:
+                    content_parts.append(chunk.content_delta)
+                    self._emit(on_event, ToolCallEvent(
+                        event_type=EventType.TEXT_DELTA,
+                        text_delta=chunk.content_delta,
+                        iteration=iteration,
+                    ))
+                if chunk.thinking_delta:
+                    thinking_parts.append(chunk.thinking_delta)
+                    self._emit(on_event, ToolCallEvent(
+                        event_type=EventType.THINKING_DELTA,
+                        thinking_delta=chunk.thinking_delta,
+                        iteration=iteration,
+                    ))
+                if chunk.tool_calls_delta:
+                    for tc in chunk.tool_calls_delta:
+                        idx = tc.get("index", 0)
+                        tool_calls_accumulated[idx] = tc
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
+                if chunk.usage:
+                    usage = chunk.usage
+                continue
+
+            # ── openai.AsyncOpenAI 的 ChatCompletionChunk ──
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage:
+                    usage = chunk_usage
+                continue
+
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            delta_content = getattr(delta, "content", None)
+            if delta_content:
+                content_parts.append(delta_content)
+                self._emit(on_event, ToolCallEvent(
+                    event_type=EventType.TEXT_DELTA,
+                    text_delta=delta_content,
+                    iteration=iteration,
+                ))
+
+            for thinking_key in ("thinking", "reasoning", "reasoning_content"):
+                thinking_val = getattr(delta, thinking_key, None)
+                if thinking_val:
+                    thinking_parts.append(str(thinking_val))
+                    self._emit(on_event, ToolCallEvent(
+                        event_type=EventType.THINKING_DELTA,
+                        thinking_delta=str(thinking_val),
+                        iteration=iteration,
+                    ))
+                    break
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                for tc_delta in delta_tool_calls:
+                    idx = getattr(tc_delta, "index", 0)
+                    if idx not in tool_calls_accumulated:
+                        tool_calls_accumulated[idx] = {
+                            "id": getattr(tc_delta, "id", None) or "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    fn = getattr(tc_delta, "function", None)
+                    if fn:
+                        name = getattr(fn, "name", None)
+                        if name:
+                            tool_calls_accumulated[idx]["name"] = name
+                        args = getattr(fn, "arguments", None)
+                        if args:
+                            tool_calls_accumulated[idx]["arguments"] += args
+                    tc_id = getattr(tc_delta, "id", None)
+                    if tc_id:
+                        tool_calls_accumulated[idx]["id"] = tc_id
+
+            chunk_finish = getattr(choices[0], "finish_reason", None)
+            if chunk_finish:
+                finish_reason = chunk_finish
+
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                usage = chunk_usage
+
+        # 组装为与非流式路径兼容的 message 对象
+        content = "".join(content_parts)
+        thinking = "".join(thinking_parts)
+
+        tool_calls_list = []
+        if tool_calls_accumulated:
+            for idx in sorted(tool_calls_accumulated.keys()):
+                tc = tool_calls_accumulated[idx]
+                tool_calls_list.append(SimpleNamespace(
+                    id=tc["id"],
+                    function=SimpleNamespace(
+                        name=tc["name"],
+                        arguments=tc["arguments"],
+                    ),
+                ))
+
+        message = SimpleNamespace(
+            content=content,
+            tool_calls=tool_calls_list or None,
+            thinking=thinking if thinking else None,
+            reasoning=None,
+            reasoning_content=None,
+        )
+
+        return message, usage
 
     async def _create_chat_completion_with_system_fallback(
         self,

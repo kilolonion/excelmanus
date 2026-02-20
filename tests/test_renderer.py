@@ -596,15 +596,21 @@ class TestStreamRendererUnit:
 
         event = ToolCallEvent(
             event_type=EventType.SUBAGENT_START,
+            subagent_name="analyst",
             subagent_reason="命中大文件",
             subagent_tools=["read_excel", "analyze_data"],
+            subagent_permission_mode="workspace-write",
+            subagent_conversation_id="conv_123",
         )
         renderer.handle_event(event)
         output = _get_output(console)
 
         assert "subagent 启动" in output
+        assert "analyst" in output
         assert "命中大文件" in output
         assert "read_excel" in output
+        assert "workspace-write" in output
+        assert "conv_123" in output
 
     def test_subagent_summary_rendered(self) -> None:
         console = _make_console(width=120)
@@ -612,12 +618,14 @@ class TestStreamRendererUnit:
 
         event = ToolCallEvent(
             event_type=EventType.SUBAGENT_SUMMARY,
+            subagent_name="analyst",
             subagent_summary="检测到关键列: 月份, 销售额",
         )
         renderer.handle_event(event)
         output = _get_output(console)
 
         assert "subagent 摘要" in output
+        assert "analyst" in output
         assert "关键列" in output
 
     def test_subagent_end_rendered(self) -> None:
@@ -633,6 +641,24 @@ class TestStreamRendererUnit:
 
         assert "subagent" in output
         assert "完成" in output
+
+    def test_subagent_iteration_escapes_name(self) -> None:
+        """subagent 名称包含 [] 时应原样渲染，不应被 Rich 当作 markup 吞掉。"""
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+
+        event = ToolCallEvent(
+            event_type=EventType.SUBAGENT_ITERATION,
+            subagent_name="analyst[v2]",
+            subagent_iterations=2,
+            subagent_tool_calls=3,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+
+        assert "analyst[v2]" in output
+        assert "2" in output
+        assert "3" in output
 
     def test_user_question_rendered_with_options(self) -> None:
         console = _make_console(width=120)

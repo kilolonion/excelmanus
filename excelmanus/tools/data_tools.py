@@ -528,6 +528,7 @@ def read_excel(
             column_widths — 非默认列宽
             formulas — 含公式的单元格
             categorical_summary — 分类列的 value_counts（unique 值 < 阈值的列）
+            vba — VBA 宏信息（仅 .xlsm 文件有效，含模块列表及可选源码）
         max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
 
     Returns:
@@ -597,6 +598,11 @@ def read_excel(
         summary["categorical_summary"] = _collect_categorical_summary(df)
         include_set.discard("categorical_summary")
 
+    # vba 维度：基于文件级别，不依赖 worksheet
+    if "vba" in include_set:
+        summary["vba"] = _collect_vba_info(safe_path)
+        include_set.discard("vba")
+
     # 分发 include 维度采集（需要用 openpyxl 打开，非 data_only 以获取公式）
     if include_set:
         from openpyxl import load_workbook
@@ -641,12 +647,14 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
 
     if safe_path.exists() and safe_path.suffix.lower() in (".xlsx", ".xlsm"):
         # 已有文件：使用 append 模式，仅替换指定 sheet，保留其他 sheet
-        with pd.ExcelWriter(
-            safe_path,
-            engine="openpyxl",
-            mode="a",
-            if_sheet_exists="replace",
-        ) as writer:
+        writer_kwargs: dict[str, Any] = {
+            "engine": "openpyxl",
+            "mode": "a",
+            "if_sheet_exists": "replace",
+        }
+        if safe_path.suffix.lower() == ".xlsm":
+            writer_kwargs["engine_kwargs"] = {"keep_vba": True}
+        with pd.ExcelWriter(safe_path, **writer_kwargs) as writer:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     else:
         # 新文件：直接写入
@@ -977,6 +985,7 @@ _SCAN_FILES_DIMENSIONS = (
     "images",
     "conditional_formatting",
     "column_widths",
+    "vba",
 )
 
 
@@ -1110,6 +1119,9 @@ def inspect_excel_files(
             file_info["error"] = f"无法读取: {exc}"
 
         file_info["sheets"] = sheets_info
+        # vba 维度：文件级别，不依赖 sheet
+        if "vba" in include_set:
+            file_info["vba"] = _collect_vba_info(fp, extract_source=False)
         files_summary.append(file_info)
 
     # 紧凑文件清单放在最前，即使详细信息被截断也能保留完整文件列表
@@ -1227,6 +1239,7 @@ INCLUDE_DIMENSIONS = (
     "column_widths",
     "formulas",
     "categorical_summary",
+    "vba",
 )
 
 # categorical_summary 默认阈值：unique 值数量低于此值的列视为分类列
@@ -1665,7 +1678,89 @@ def _dispatch_include_dimensions(
     if "formulas" in include_set:
         extra["formulas"] = _collect_formulas(ws_for_include, max_rows=max_style_scan_rows)
 
+    # vba 维度在调用方单独处理（需要 file path，不依赖 worksheet）
+
     return extra
+
+
+# ── VBA 信息提取 ──────────────────────────────────────────
+
+
+def _collect_vba_info(file_path: Any, *, extract_source: bool = True) -> dict[str, Any]:
+    """提取 .xlsm 文件中的 VBA 宏信息。
+
+    使用 zipfile 读取 vbaProject.bin 的存在性和模块列表。
+    当 oletools 可用且 extract_source=True 时，提取完整 VBA 源代码。
+
+    Args:
+        file_path: Excel 文件路径。
+        extract_source: 是否尝试提取 VBA 源代码（需要 oletools）。
+
+    Returns:
+        VBA 信息字典，包含 has_vba、modules 及可选的 source。
+    """
+    import zipfile
+    from pathlib import Path
+
+    path = Path(file_path) if not isinstance(file_path, Path) else file_path
+    result: dict[str, Any] = {"has_vba": False, "modules": []}
+
+    if path.suffix.lower() not in (".xlsm", ".xlsb"):
+        return result
+
+    # 从 ZIP 结构检测 VBA 项目
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            vba_names = [n for n in zf.namelist() if n.startswith("xl/vbaProject")]
+            if not vba_names:
+                return result
+            result["has_vba"] = True
+            # 提取模块名列表（从 ZIP 中的 VBA 相关条目）
+            macro_entries = [
+                n for n in zf.namelist()
+                if n.startswith("xl/") and (
+                    n.endswith(".bin") and "vba" in n.lower()
+                )
+            ]
+            result["vba_archive_entries"] = macro_entries
+    except (zipfile.BadZipFile, Exception):
+        result["error"] = "无法读取 ZIP 结构"
+        return result
+
+    # 尝试用 oletools 提取 VBA 源码
+    if extract_source:
+        try:
+            from oletools.olevba import VBA_Parser  # type: ignore[import-untyped]
+
+            vba_parser = VBA_Parser(str(path))
+            if vba_parser.detect_vba_macros():
+                modules: list[dict[str, str]] = []
+                for (_, _, vba_filename, vba_code) in vba_parser.extract_macros():
+                    modules.append({
+                        "name": vba_filename,
+                        "code": vba_code,
+                    })
+                result["modules"] = modules
+                result["module_count"] = len(modules)
+
+                # 安全分析摘要
+                analysis = list(vba_parser.analyze_macros())
+                if analysis:
+                    suspicious = [
+                        {"type": str(a[0]), "keyword": str(a[1]), "description": str(a[2])}
+                        for a in analysis
+                    ]
+                    result["security_analysis"] = suspicious
+            vba_parser.close()
+        except ImportError:
+            result["source_note"] = (
+                "VBA 宏已检测到，但未安装 oletools 库，无法提取源代码。"
+                "安装方式: pip install oletools"
+            )
+        except Exception as exc:
+            result["source_error"] = f"VBA 源码提取失败: {exc}"
+
+    return result
 
 
 # ── 数值强制转换辅助 ──────────────────────────────────────

@@ -86,6 +86,134 @@ class TestChatResultWriteGuard:
         assert result.write_guard_triggered is True
 
 
+class TestDelegateSubagentWritePropagation:
+    """delegate_to_subagent 成功且 subagent 有 file_changes 时应传播写入状态。
+
+    修复回归测试：conversation_20260220T104533 中 subagent 成功写入但
+    主 agent 的 write_guard 不认可，导致 finish_task 被拒、任务被重复执行 3 次。
+    """
+
+    @staticmethod
+    def _delegate_tc(task: str = "test", agent: str = "writer") -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            id="call_delegate",
+            function=types.SimpleNamespace(
+                name="delegate_to_subagent",
+                arguments=f'{{"task":"{task}","agent_name":"{agent}"}}',
+            ),
+        )
+
+    @staticmethod
+    def _make_outcome(*, success: bool, file_changes: list[str]) -> "DelegateSubagentOutcome":
+        from excelmanus.engine import DelegateSubagentOutcome
+        from excelmanus.subagent.models import SubagentResult
+
+        sub = SubagentResult(
+            success=success,
+            summary="test summary",
+            subagent_name="writer",
+            permission_mode="default",
+            conversation_id="conv_test",
+            file_changes=file_changes,
+        )
+        return DelegateSubagentOutcome(
+            reply="test reply",
+            success=success,
+            picked_agent="writer",
+            task_text="test task",
+            subagent_result=sub,
+        )
+
+    @pytest.mark.asyncio
+    async def test_subagent_with_file_changes_propagates_write_state(self):
+        """subagent 成功返回且有 file_changes → has_write_tool_call=True。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+
+        outcome = self._make_outcome(success=True, file_changes=["outputs/backups/test.xlsx"])
+        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+            result = await engine._execute_tool_call(
+                self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
+            )
+
+        assert result.success is True
+        assert engine._has_write_tool_call is True
+        assert engine._current_write_hint == "may_write"
+
+    @pytest.mark.asyncio
+    async def test_subagent_with_file_changes_then_finish_task_accepted(self):
+        """subagent 写入传播后，finish_task 应被接受。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+
+        outcome = self._make_outcome(success=True, file_changes=["outputs/backups/test.xlsx"])
+        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+            await engine._execute_tool_call(
+                self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
+            )
+
+        ft = types.SimpleNamespace(
+            id="call_finish",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary":"done via subagent"}',
+            ),
+        )
+        finish_result = await engine._execute_tool_call(
+            ft, tool_scope=None, on_event=None, iteration=2,
+        )
+        assert finish_result.finish_accepted is True
+        assert "✓ 任务完成。" in finish_result.result
+
+    @pytest.mark.asyncio
+    async def test_subagent_without_file_changes_does_not_propagate(self):
+        """subagent 成功但无 file_changes → has_write_tool_call 不变。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+
+        outcome = self._make_outcome(success=True, file_changes=[])
+        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+            await engine._execute_tool_call(
+                self._delegate_tc(agent="analyst"), tool_scope=None, on_event=None, iteration=1,
+            )
+
+        assert engine._has_write_tool_call is False
+
+    @pytest.mark.asyncio
+    async def test_failed_subagent_with_file_changes_does_not_propagate(self):
+        """subagent 失败 → 即使有 file_changes 也不传播写入。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+
+        outcome = self._make_outcome(success=False, file_changes=["outputs/backups/partial.xlsx"])
+        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+            await engine._execute_tool_call(
+                self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
+            )
+
+        assert engine._has_write_tool_call is False
+
+    @pytest.mark.asyncio
+    async def test_write_hint_upgraded_when_not_may_write(self):
+        """write_hint 非 may_write 时，subagent 写入应升级 hint。"""
+        engine = _make_engine()
+        engine._current_write_hint = "read_only"
+        engine._has_write_tool_call = False
+
+        outcome = self._make_outcome(success=True, file_changes=["outputs/test.xlsx"])
+        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+            await engine._execute_tool_call(
+                self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
+            )
+
+        assert engine._has_write_tool_call is True
+        assert engine._current_write_hint == "may_write"
+
+
 class TestWriteToolNamesSourceOfTruth:
     def test_write_tool_names_match_policy_mutating_all_tools(self):
         assert _WRITE_TOOL_NAMES == MUTATING_ALL_TOOLS

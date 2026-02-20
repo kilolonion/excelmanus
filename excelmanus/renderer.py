@@ -28,6 +28,9 @@ _THINKING_THRESHOLD = 500
 _THINKING_SUMMARY_LEN = 80
 _NARROW_TERMINAL_WIDTH = 60
 _SUBAGENT_SUMMARY_PREVIEW = 300
+_SUBAGENT_REASON_PREVIEW = 220
+_SUBAGENT_TOOL_PREVIEW = 180
+_SUBAGENT_TOOL_MAX_ITEMS = 8
 
 # 元工具：对用户隐藏内部细节，使用友好名称和描述
 _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
@@ -100,6 +103,19 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes}m{secs:.0f}s"
 
 
+def _format_subagent_tools(tools: list[str]) -> str:
+    """格式化 subagent 工具列表，避免超长输出。"""
+    if not tools:
+        return "(无)"
+
+    head = tools[:_SUBAGENT_TOOL_MAX_ITEMS]
+    rendered = ", ".join(head)
+    extra = len(tools) - len(head)
+    if extra > 0:
+        rendered = f"{rendered}, ... (+{extra})"
+    return _truncate(rendered, _SUBAGENT_TOOL_PREVIEW)
+
+
 class StreamRenderer:
     """流式事件渲染器。
 
@@ -111,6 +127,11 @@ class StreamRenderer:
         self._console = console
         # 记录每个工具调用的开始时间（用于计算单次耗时）
         self._tool_start_times: dict[str, float] = {}
+        # 记录 subagent 工具调用累计值，用于计算每轮增量
+        self._subagent_last_tool_calls: dict[str, int] = {}
+        # 流式输出状态
+        self._streaming_text = False
+        self._streaming_thinking = False
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -126,6 +147,7 @@ class StreamRenderer:
             EventType.ROUTE_START: self._render_route_start,
             EventType.ROUTE_END: self._render_route_end,
             EventType.SUBAGENT_START: self._render_subagent_start,
+            EventType.SUBAGENT_ITERATION: self._render_subagent_iteration,
             EventType.SUBAGENT_END: self._render_subagent_end,
             EventType.SUBAGENT_SUMMARY: self._render_subagent_summary,
             EventType.CHAT_SUMMARY: self._render_chat_summary,
@@ -133,6 +155,8 @@ class StreamRenderer:
             EventType.TASK_ITEM_UPDATED: self._render_task_item_updated,
             EventType.USER_QUESTION: self._render_user_question,
             EventType.PENDING_APPROVAL: self._render_pending_approval,
+            EventType.THINKING_DELTA: self._render_thinking_delta,
+            EventType.TEXT_DELTA: self._render_text_delta,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -183,7 +207,11 @@ class StreamRenderer:
             )
 
     def _render_thinking(self, event: ToolCallEvent) -> None:
-        """渲染 LLM 思考过程。"""
+        """渲染 LLM 思考过程。流式模式下已通过 delta 输出，跳过。"""
+        if self._streaming_thinking:
+            self._console.print()
+            self._streaming_thinking = False
+            return
         if not event.thinking:
             return
 
@@ -197,6 +225,33 @@ class StreamRenderer:
             self._console.print(f"  💭 {summary}")
         else:
             self._console.print(f"  💭 [dim italic]{summary}[/dim italic]")
+    def _render_thinking_delta(self, event: ToolCallEvent) -> None:
+        """渲染 thinking 增量文本。"""
+        if not event.thinking_delta:
+            return
+        if not self._streaming_thinking:
+            self._streaming_thinking = True
+            self._console.print("  💭 ", end="", style="dim italic")
+        self._console.print(event.thinking_delta, end="", style="dim italic")
+
+    def _render_text_delta(self, event: ToolCallEvent) -> None:
+        """渲染回复文本增量。"""
+        if not event.text_delta:
+            return
+        if self._streaming_thinking:
+            self._console.print()
+            self._streaming_thinking = False
+        if not self._streaming_text:
+            self._streaming_text = True
+            self._console.print()
+        self._console.print(event.text_delta, end="")
+
+    def finish_streaming(self) -> None:
+        """流式输出结束时调用，确保换行。"""
+        if self._streaming_text or self._streaming_thinking:
+            self._console.print()
+            self._streaming_text = False
+            self._streaming_thinking = False
 
     # ------------------------------------------------------------------
     # 工具调用渲染
@@ -418,17 +473,66 @@ class StreamRenderer:
 
     def _render_subagent_start(self, event: ToolCallEvent) -> None:
         """渲染 subagent 开始。"""
-        reason = rich_escape(event.subagent_reason or "触发子代理")
-        tools = ", ".join(event.subagent_tools) if event.subagent_tools else "(无)"
+        name_raw = (event.subagent_name or "subagent").strip() or "subagent"
+        name = rich_escape(name_raw)
+        reason_text = (event.subagent_reason or "触发子代理").strip() or "触发子代理"
+        reason = rich_escape(_truncate(reason_text, _SUBAGENT_REASON_PREVIEW))
+        tools_raw = event.subagent_tools or []
+        tools = rich_escape(_format_subagent_tools(tools_raw))
+        permission_mode = (
+            (event.subagent_permission_mode or "").strip() or "未声明"
+        )
+        conversation_id = (
+            (event.subagent_conversation_id or "").strip() or "未声明"
+        )
+        permission_mode_escaped = rich_escape(permission_mode)
+        conversation_id_escaped = rich_escape(conversation_id)
+        key = conversation_id if conversation_id != "未声明" else name_raw
+        self._subagent_last_tool_calls[key] = 0
+
         if self._is_narrow():
-            self._console.print("  🧵 subagent 启动")
-            self._console.print(f"     原因: {reason}", style="dim white")
-            self._console.print(f"     工具: {rich_escape(tools)}", style="dim white")
+            self._console.print(f"  🧵 subagent 启动 · 代理: {name}")
+            self._console.print(
+                f"     权限: {permission_mode_escaped} | 会话: {conversation_id_escaped}",
+                style="dim white",
+            )
+            self._console.print(f"     任务: {reason}", style="dim white")
+            self._console.print(
+                f"     工具({len(tools_raw)}): {tools}",
+                style="dim white",
+            )
         else:
             self._console.print(
                 f"  🧵 [bold #81a2be]subagent 启动[/bold #81a2be] "
-                f"[dim white]原因: {reason} | 工具: {rich_escape(tools)}[/dim white]"
+                f"[dim white]代理: {name} | 权限: {permission_mode_escaped} | 会话: {conversation_id_escaped}[/dim white]"
             )
+            self._console.print(f"     [dim white]任务: {reason}[/dim white]")
+            self._console.print(
+                f"     [dim white]工具({len(tools_raw)}): {tools}[/dim white]"
+            )
+
+    def _render_subagent_iteration(self, event: ToolCallEvent) -> None:
+        """渲染 subagent 对话轮次进度。"""
+        turn = event.subagent_iterations or event.iteration or 0
+        calls = event.subagent_tool_calls or 0
+        name_raw = (event.subagent_name or "subagent").strip() or "subagent"
+        name = rich_escape(name_raw)
+        conversation_id = (event.subagent_conversation_id or "").strip()
+        key = conversation_id or name_raw
+        last_calls = self._subagent_last_tool_calls.get(key, 0)
+        delta_calls = calls - last_calls if calls >= last_calls else calls
+        self._subagent_last_tool_calls[key] = calls
+
+        if calls > 0 and delta_calls > 0:
+            text = (
+                f"  🧵 代理:{name} · 轮次 {turn} · 累计工具 {calls} 次"
+                f"（本轮 +{delta_calls}）"
+            )
+        elif calls > 0:
+            text = f"  🧵 代理:{name} · 轮次 {turn} · 累计工具 {calls} 次"
+        else:
+            text = f"  🧵 代理:{name} · 轮次 {turn} · 累计工具 0 次"
+        self._console.print(text, style="dim #81a2be")
 
     def _render_subagent_summary(self, event: ToolCallEvent) -> None:
         """渲染 subagent 摘要。"""
@@ -436,16 +540,26 @@ class StreamRenderer:
         if not summary:
             return
         preview = _truncate(summary, _SUBAGENT_SUMMARY_PREVIEW)
+        name = rich_escape((event.subagent_name or "subagent").strip() or "subagent")
+        turns = event.subagent_iterations or 0
+        calls = event.subagent_tool_calls or 0
+        meta = f"轮次: {turns} · 工具: {calls}" if turns or calls else ""
 
         if self._is_narrow():
-            self._console.print("  🧾 subagent 摘要", style="#81a2be")
+            self._console.print(f"  🧾 subagent 摘要 · 代理: {name}", style="#81a2be")
+            if meta:
+                self._console.print(f"     {rich_escape(meta)}", style="dim white")
             self._console.print(f"     {rich_escape(preview)}", style="dim white")
             return
 
+        panel_body = rich_escape(preview)
+        if meta:
+            panel_body = f"[dim]{rich_escape(meta)}[/dim]\n{panel_body}"
+
         self._console.print(
             Panel(
-                rich_escape(preview),
-                title="[bold #81a2be]🧾 subagent 摘要[/bold #81a2be]",
+                panel_body,
+                title=f"[bold #81a2be]🧾 subagent 摘要 · {name}[/bold #81a2be]",
                 title_align="left",
                 border_style="dim #5f87af",
                 expand=False,
@@ -457,13 +571,38 @@ class StreamRenderer:
         """渲染 subagent 结束。"""
         status = "完成" if event.subagent_success else "失败"
         color = "green" if event.subagent_success else "red"
+        turns = event.subagent_iterations or 0
+        calls = event.subagent_tool_calls or 0
+        name_raw = (event.subagent_name or "subagent").strip() or "subagent"
+        name = rich_escape(name_raw)
+        permission_mode = (
+            (event.subagent_permission_mode or "").strip() or "未声明"
+        )
+        conversation_id = (
+            (event.subagent_conversation_id or "").strip() or "未声明"
+        )
+        permission_mode_escaped = rich_escape(permission_mode)
+        conversation_id_escaped = rich_escape(conversation_id)
+
+        stats = f"共 {turns} 轮对话, {calls} 次工具调用" if turns else ""
+        extra = (
+            f"权限: {permission_mode_escaped} | 会话: {conversation_id_escaped}"
+        )
+        key = conversation_id if conversation_id != "未声明" else name_raw
+        self._subagent_last_tool_calls.pop(key, None)
+
         if self._is_narrow():
             icon = "✅" if event.subagent_success else "❌"
-            self._console.print(f"  🧵 subagent {icon}{status}")
+            self._console.print(f"  🧵 subagent {icon}{status} · 代理: {name}")
+            if stats:
+                self._console.print(f"     {stats}", style="dim white")
+            self._console.print(f"     {extra}", style="dim white")
         else:
-            self._console.print(
-                f"  🧵 subagent [bold {color}]{status}[/bold {color}]"
-            )
+            parts = f"  🧵 subagent [bold {color}]{status}[/bold {color}] · 代理: {name}"
+            if stats:
+                parts += f" [dim white]({stats})[/dim white]"
+            self._console.print(parts)
+            self._console.print(f"     [dim white]{extra}[/dim white]")
 
     def _render_chat_summary(self, event: ToolCallEvent) -> None:
         """渲染执行摘要面板。"""
@@ -577,15 +716,22 @@ class StreamRenderer:
                 skills = ", ".join(event.skills_used) if event.skills_used else "通用"
                 self._console.print(f"🔀 路由: {skills}")
             elif event.event_type == EventType.SUBAGENT_START:
+                name = event.subagent_name or "subagent"
                 reason = event.subagent_reason or "触发子代理"
-                self._console.print(f"🧵 subagent 启动: {_truncate(reason, _THINKING_SUMMARY_LEN)}")
+                self._console.print(
+                    f"🧵 subagent 启动 · 代理:{name}: {_truncate(reason, _THINKING_SUMMARY_LEN)}"
+                )
             elif event.event_type == EventType.SUBAGENT_SUMMARY:
                 summary = event.subagent_summary or ""
                 if summary:
-                    self._console.print(f"🧾 subagent 摘要: {_truncate(summary, _THINKING_SUMMARY_LEN)}")
+                    name = event.subagent_name or "subagent"
+                    self._console.print(
+                        f"🧾 subagent 摘要 · 代理:{name}: {_truncate(summary, _THINKING_SUMMARY_LEN)}"
+                    )
             elif event.event_type == EventType.SUBAGENT_END:
+                name = event.subagent_name or "subagent"
                 status = "完成" if event.subagent_success else "失败"
-                self._console.print(f"🧵 subagent 结束: {status}")
+                self._console.print(f"🧵 subagent 结束 · 代理:{name}: {status}")
             elif event.event_type == EventType.CHAT_SUMMARY:
                 if event.total_tool_calls > 0:
                     self._console.print(
