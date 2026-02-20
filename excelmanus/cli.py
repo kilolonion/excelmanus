@@ -390,6 +390,88 @@ def _list_known_slash_commands() -> tuple[str, ...]:
     return tuple(dict.fromkeys(ordered))
 
 
+def _build_prompt_badges(
+    *,
+    model_hint: str = "",
+    turn_number: int = 0,
+    layout_mode: str = "dashboard",
+    subagent_active: bool = False,
+    plan_mode: bool = False,
+) -> str:
+    """构建 prompt 密集徽章字符串（纯文本，用于 ANSI prompt）。"""
+    parts: list[str] = []
+    if model_hint:
+        parts.append(model_hint)
+    if turn_number > 0:
+        parts.append(f"#{turn_number}")
+    parts.append(layout_mode)
+    if subagent_active:
+        parts.append("🧵subagent")
+    if plan_mode:
+        parts.append("plan")
+    return " ".join(parts)
+
+
+def _suggest_similar_commands(user_input: str, *, max_results: int = 3) -> list[str]:
+    """基于编辑距离返回最相似的已知命令（最多 max_results 个）。
+
+    使用简单的前缀+子序列匹配，无需外部依赖。
+    """
+    cmd = user_input.lower().split()[0] if user_input.strip() else ""
+    if not cmd:
+        return []
+    known = _list_known_slash_commands()
+    scored: list[tuple[float, str]] = []
+    for candidate in known:
+        score = _command_similarity(cmd, candidate.lower())
+        if score > 0:
+            scored.append((score, candidate))
+    scored.sort(key=lambda x: -x[0])
+    return [s[1] for s in scored[:max_results]]
+
+
+def _command_similarity(a: str, b: str) -> float:
+    """计算两个命令字符串的相似度分数（0~1）。
+
+    结合前缀匹配和编辑距离。
+    """
+    if a == b:
+        return 1.0
+    # 前缀匹配加分
+    prefix_len = 0
+    for ca, cb in zip(a, b):
+        if ca == cb:
+            prefix_len += 1
+        else:
+            break
+    prefix_score = prefix_len / max(len(a), len(b)) if max(len(a), len(b)) > 0 else 0
+
+    # 编辑距离
+    dist = _edit_distance(a, b)
+    max_len = max(len(a), len(b))
+    edit_score = 1.0 - (dist / max_len) if max_len > 0 else 0
+
+    # 阈值过滤：编辑距离太大的不推荐
+    if edit_score < 0.3:
+        return 0.0
+
+    return 0.4 * prefix_score + 0.6 * edit_score
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein 编辑距离。"""
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(a) + 1))
+    for j in range(1, len(b) + 1):
+        curr = [j] + [0] * len(a)
+        for i in range(1, len(a) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            curr[i] = min(curr[i - 1] + 1, prev[i] + 1, prev[i - 1] + cost)
+        prev = curr
+    return prev[len(a)]
+
+
 # ASCII Logo — 逐行渐变色渲染
 _LOGO_LINES = [
     r"  ______               _ __  __",
@@ -2086,13 +2168,18 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 return
             continue
 
-        # 未知斜杠命令提示
+        # 未知斜杠命令提示（近似推荐 Top3）
         if user_input.startswith("/"):
-            known_commands = _list_known_slash_commands()
-            suggestion = ", ".join(known_commands[:8]) if known_commands else "/help"
-            console.print(
-                f"  [#de935f]未知命令：{user_input}。可用命令示例：{suggestion}[/#de935f]"
-            )
+            similar = _suggest_similar_commands(user_input)
+            if similar:
+                suggestion = ", ".join(similar)
+                console.print(
+                    f"  [#de935f]未知命令：{user_input}。你是否想输入：{suggestion}[/#de935f]"
+                )
+            else:
+                console.print(
+                    f"  [#de935f]未知命令：{user_input}。使用 /help 查看可用命令。[/#de935f]"
+                )
             continue
 
         # 自然语言指令：调用 AgentEngine，使用事件流渲染
