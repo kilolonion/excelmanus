@@ -124,6 +124,8 @@ class ExcelManusConfig:
     code_policy_yellow_auto_approve: bool = True
     code_policy_extra_safe_modules: tuple[str, ...] = ()
     code_policy_extra_blocked_modules: tuple[str, ...] = ()
+    # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
+    cli_layout_mode: str = "dashboard"
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -247,6 +249,23 @@ def _parse_window_rule_engine_version(value: str | None) -> str:
         value,
     )
     return "v1"
+
+
+_ALLOWED_CLI_LAYOUT_MODES = {"dashboard", "classic"}
+
+
+def _parse_cli_layout_mode(value: str | None) -> str:
+    """解析 CLI 布局模式，非法值自动回退 dashboard。"""
+    if value is None:
+        return "dashboard"
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_CLI_LAYOUT_MODES:
+        return normalized
+    logger.warning(
+        "配置项 EXCELMANUS_CLI_LAYOUT_MODE 非法(%r)，已回退为 dashboard",
+        value,
+    )
+    return "dashboard"
 
 
 def _parse_adaptive_model_mode_overrides(value: str | None) -> dict[str, str]:
@@ -739,6 +758,11 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
     )
 
+    # CLI 布局模式
+    cli_layout_mode = _parse_cli_layout_mode(
+        os.environ.get("EXCELMANUS_CLI_LAYOUT_MODE")
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -823,5 +847,6 @@ def load_config() -> ExcelManusConfig:
         code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
         code_policy_extra_safe_modules=code_policy_extra_safe_modules,
         code_policy_extra_blocked_modules=code_policy_extra_blocked_modules,
+        cli_layout_mode=cli_layout_mode,
         models=models,
     )

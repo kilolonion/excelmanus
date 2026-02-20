@@ -76,10 +76,12 @@ _SLASH_COMMANDS = {
     "/model",
     "/config",
     "/backup",
+    "/ui",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
 _BACKUP_COMMAND_ALIASES = {"/backup"}
+_UI_COMMAND_ALIASES = {"/ui"}
 _SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
 _APPROVAL_COMMAND_ALIASES = {"/accept", "/reject", "/undo"}
 _PLAN_COMMAND_ALIASES = {"/plan"}
@@ -93,6 +95,7 @@ _SESSION_CONTROL_COMMAND_ALIASES = (
     | _MODEL_COMMAND_ALIASES
     | _BACKUP_COMMAND_ALIASES
 )
+_UI_ARGUMENTS = ("status", "dashboard", "classic")
 
 _SLASH_COMMAND_SUGGESTIONS = (
     "/help",
@@ -112,10 +115,12 @@ _SLASH_COMMAND_SUGGESTIONS = (
     "/plan",
     "/model",
     "/backup",
+    "/ui",
 )
 _CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
 _BACKUP_ARGUMENTS = ("status", "on", "off", "apply", "list")
+_UI_ARGUMENTS_TUPLE = ("status", "dashboard", "classic")
 _SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
 _PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
 _MODEL_ARGUMENTS: tuple[str, ...] = ("list",)  # 动态模型名称在运行时追加
@@ -123,6 +128,9 @@ _DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
 
 # --save 启动参数：退出时自动保存对话记录的路径（None 表示未启用）
 _AUTO_SAVE_PATH: str | None = None
+
+# 会话级布局模式（初始值从配置加载，可通过 /ui 切换）
+_current_layout_mode: str = "dashboard"
 
 
 def _resolve_skill_slash_command(engine: AgentEngine, user_input: str) -> str | None:
@@ -446,6 +454,9 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
     )
     command_arguments.update(
         {alias: _CONFIG_ARGUMENTS for alias in _CONFIG_COMMAND_ALIASES}
+    )
+    command_arguments.update(
+        {alias: _UI_ARGUMENTS_TUPLE for alias in _UI_COMMAND_ALIASES}
     )
     available_arguments = command_arguments.get(lowered_command)
     if available_arguments is None:
@@ -1489,6 +1500,42 @@ def _handle_config_command(user_input: str, workspace_root: str = ".") -> bool:
     return True
 
 
+def _handle_ui_command(user_input: str, engine: "AgentEngine") -> bool:
+    """处理 /ui 命令：查看/切换 CLI 显示模式。返回 True 表示已处理。"""
+    global _current_layout_mode
+
+    stripped = user_input.strip()
+    lowered = stripped.lower()
+
+    # /ui 或 /ui status — 显示当前模式
+    if lowered in ("/ui", "/ui status"):
+        console.print(
+            f"  [dim white]当前布局模式：[/dim white][bold #5fd7af]{_current_layout_mode}[/bold #5fd7af]"
+        )
+        return True
+
+    # /ui dashboard
+    if lowered == "/ui dashboard":
+        _current_layout_mode = "dashboard"
+        console.print(
+            "  [green]✓[/green] 已切换到 [bold #5fd7af]dashboard[/bold #5fd7af] 模式"
+        )
+        return True
+
+    # /ui classic
+    if lowered == "/ui classic":
+        _current_layout_mode = "classic"
+        console.print(
+            "  [green]✓[/green] 已切换到 [bold #f0c674]classic[/bold #f0c674] 模式"
+        )
+        return True
+
+    console.print(
+        "  [#de935f]未知 /ui 子命令。可用：status / dashboard / classic[/#de935f]"
+    )
+    return True
+
+
 def _is_interactive_terminal() -> bool:
     """判断当前是否交互式终端。"""
     try:
@@ -1955,6 +2002,10 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         if user_input.lower().startswith("/config"):
             _handle_config_command(user_input, engine.config.workspace_root)
+            continue
+
+        if user_input.lower().startswith("/ui"):
+            _handle_ui_command(user_input, engine)
             continue
 
         if user_input.startswith("/skills "):
