@@ -104,13 +104,13 @@ class TestPromptComposerLoad:
     def test_load_all(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         assert len(composer.core_segments) == 2
         assert len(composer.strategy_segments) == 2
 
     def test_load_empty_dir(self, tmp_path: Path) -> None:
         composer = PromptComposer(tmp_path)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         assert len(composer.core_segments) == 0
         assert len(composer.strategy_segments) == 0
 
@@ -123,7 +123,7 @@ class TestPromptComposerLoad:
         )
         (core / "bad.md").write_text("no frontmatter", encoding="utf-8")
         composer = PromptComposer(tmp_path)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         assert len(composer.core_segments) == 1
 
 
@@ -131,7 +131,7 @@ class TestPromptComposerCompose:
     def test_core_only_for_read(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="read_only")
         text = composer.compose_text(ctx)
         assert "身份。" in text
@@ -142,7 +142,7 @@ class TestPromptComposerCompose:
     def test_strategy_match_write_hint(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=1)
         text = composer.compose_text(ctx)
         assert "公式策略。" in text  # write_hint 满足
@@ -151,7 +151,7 @@ class TestPromptComposerCompose:
     def test_strategy_match_cross_sheet(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=3)
         text = composer.compose_text(ctx)
         assert "跨表策略。" in text
@@ -160,7 +160,7 @@ class TestPromptComposerCompose:
     def test_compose_strategies_text_only(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=3)
         text = composer.compose_strategies_text(ctx)
         assert "跨表策略。" in text
@@ -170,7 +170,7 @@ class TestPromptComposerCompose:
     def test_compose_strategies_empty_for_read(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="read_only")
         text = composer.compose_strategies_text(ctx)
         assert text == ""
@@ -178,7 +178,7 @@ class TestPromptComposerCompose:
     def test_priority_ordering(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=3)
         segments = composer.compose(ctx)
         priorities = [s.priority for s in segments]
@@ -189,7 +189,7 @@ class TestPromptComposerBudget:
     def test_budget_drops_low_priority_first(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=3)
         # 非常小的 budget 应该丢弃策略段但保留 core
         segments = composer.compose(ctx, token_budget=10)
@@ -201,7 +201,7 @@ class TestPromptComposerBudget:
     def test_large_budget_keeps_all(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
-        composer.load_all()
+        composer.load_all(auto_repair=False)
         ctx = PromptContext(write_hint="may_write", sheet_count=3)
         segments = composer.compose(ctx, token_budget=999999)
         assert len(segments) == 4  # 2 core + 2 strategies
