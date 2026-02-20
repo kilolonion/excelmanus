@@ -41,6 +41,7 @@ _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
     "expand_tools": ("🔧", "展开工具参数"),
     "delegate_to_subagent": ("🧵", "委派子任务"),
     "list_subagents": ("📋", "查询可用助手"),
+    "ask_user": ("❓", "向用户提问"),
 }
 
 _TOOL_ICONS: dict[str, str] = {
@@ -495,30 +496,18 @@ class DashboardRenderer:
         self._console.print(hint)
 
     def _on_approval(self, event: ToolCallEvent) -> None:
+        # 仅输出简洁提示，完整审批信息由交互选择器渲染
         tool_name = event.approval_tool_name or "未知工具"
-        approval_id = event.approval_id or ""
         args = event.approval_arguments or {}
-        args_parts: list[str] = []
+        key_arg = ""
         for key in ("file_path", "sheet_name", "script", "command"):
             val = args.get(key)
             if val is not None:
-                display = str(val)[:60]
-                args_parts.append(f"{key}={display}")
-        args_summary = ", ".join(args_parts) if args_parts else ""
-        lines = [f"工具: {tool_name}", f"ID: {approval_id}"]
-        if args_summary:
-            lines.append(f"参数: {args_summary}")
-        content = "\n".join(lines)
-        self._console.print()
+                key_arg = f" [dim white]← {rich_escape(str(val)[:60])}[/dim white]"
+                break
         self._console.print(
-            Panel(
-                rich_escape(content),
-                title="[bold #f0c674]⚠️ 检测到高风险操作[/bold #f0c674]",
-                title_align="left",
-                border_style="#de935f",
-                expand=False,
-                padding=(1, 2),
-            )
+            f"  [bold #f0c674]⚠️ 需要审批[/bold #f0c674]  "
+            f"[dim white]{rich_escape(tool_name)}{key_arg}[/dim white]"
         )
 
     # ------------------------------------------------------------------
@@ -596,6 +585,13 @@ class DashboardRenderer:
         if tool_name == "delegate_to_subagent":
             task = arguments.get("task", "")
             return _truncate(task.strip(), 60) if isinstance(task, str) else ""
+        if tool_name == "ask_user":
+            q = arguments.get("question", {})
+            if isinstance(q, dict):
+                header = q.get("header", "")
+                text = q.get("text", "")
+                return _truncate((header or text or "").strip(), 60)
+            return ""
         return ""
 
     def _fallback_render(self, event: ToolCallEvent) -> None:
