@@ -547,10 +547,16 @@ class DashboardRenderer:
     def _render_footer_summary(self) -> None:
         """渲染回合结束摘要。"""
         m = self._metrics
-        if m.total_tool_calls == 0:
-            return
-
         elapsed_str = _format_elapsed(m.elapsed_seconds)
+
+        if m.total_tool_calls == 0:
+            # 纯文本回复：简洁完成标记
+            self._console.print()
+            self._console.rule(
+                f"[dim white]✓ 回合完成  ⏱ {elapsed_str}[/dim white]",
+                style="dim #5f5f5f",
+            )
+            return
 
         if self._is_narrow():
             parts = [

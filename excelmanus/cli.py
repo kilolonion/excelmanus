@@ -399,17 +399,28 @@ def _build_prompt_badges(
     plan_mode: bool = False,
 ) -> str:
     """构建 prompt 密集徽章字符串（纯文本，用于 ANSI prompt）。"""
-    parts: list[str] = []
-    if model_hint:
-        parts.append(model_hint)
-    if turn_number > 0:
-        parts.append(f"#{turn_number}")
-    parts.append(layout_mode)
-    if subagent_active:
-        parts.append("🧵subagent")
-    if plan_mode:
-        parts.append("plan")
-    return " ".join(parts)
+    if layout_mode == "dashboard":
+        # Dashboard: 紧凑状态栏风格，用 │ 分隔
+        segments: list[str] = []
+        if model_hint:
+            segments.append(model_hint)
+        segments.append(f"T{turn_number}" if turn_number > 0 else "T0")
+        flags: list[str] = []
+        if subagent_active:
+            flags.append("🧵sub")
+        if plan_mode:
+            flags.append("📋plan")
+        if flags:
+            segments.append(" ".join(flags))
+        return " │ ".join(segments)
+    else:
+        # Classic: 简洁风格
+        parts: list[str] = []
+        if model_hint:
+            parts.append(model_hint)
+        if turn_number > 0:
+            parts.append(f"#{turn_number}")
+        return " ".join(parts)
 
 
 def _suggest_similar_commands(user_input: str, *, max_results: int = 3) -> list[str]:
@@ -999,8 +1010,12 @@ async def _read_user_input(
         subagent_active=subagent_active,
         plan_mode=plan_mode,
     )
-    if badges:
-        # ANSI: dim 白色徽章 + 粗体绿色箭头
+    if _current_layout_mode == "dashboard" and badges:
+        # Dashboard: 青色箭头 + dim 分隔符状态栏
+        ansi_prompt = f"\n \x1b[2;36m{badges}\x1b[0m \x1b[1;36m▶\x1b[0m "
+        rich_prompt = f"\n [dim cyan]{badges}[/dim cyan] [bold cyan]▶[/bold cyan] "
+    elif badges:
+        # Classic: 绿色箭头
         ansi_prompt = f"\n \x1b[2;37m{badges}\x1b[0m \x1b[1;32m❯\x1b[0m "
         rich_prompt = f"\n [dim white]{badges}[/dim white] [bold green]❯[/bold green] "
     else:
@@ -1951,6 +1966,9 @@ async def _run_chat_turn(
         else:
             renderer = StreamRenderer(console)
 
+        import time as _time
+        _t0 = _time.monotonic()
+
         console.print()
         reply, streamed = await _chat_with_feedback(
             engine,
@@ -1970,11 +1988,25 @@ async def _run_chat_turn(
                     expand=False,
                 )
             )
+
+        # Dashboard: 渲染回合 footer 摘要
+        if _current_layout_mode == "dashboard" and hasattr(renderer, "finish_turn"):
+            _elapsed = _time.monotonic() - _t0
+            renderer.finish_turn(elapsed_seconds=_elapsed)
+
         return reply, streamed
     except KeyboardInterrupt:
         raise
     except Exception as exc:
         logger.error("%s时发生错误: %s", error_label, exc, exc_info=True)
+        # Dashboard: 渲染失败 footer
+        if _current_layout_mode == "dashboard":
+            try:
+                from excelmanus.renderer_dashboard import DashboardRenderer as _DR
+                if isinstance(renderer, _DR):
+                    renderer.fail_turn(str(exc))
+            except Exception:
+                pass
         from excelmanus.cli_errors import render_error_panel
         render_error_panel(console, error=exc, error_label=error_label)
         return None
