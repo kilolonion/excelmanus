@@ -1,0 +1,25 @@
+---
+name: chart
+version: "1.0.0"
+priority: 48
+layer: strategy
+max_tokens: 200
+conditions:
+  task_tags:
+    - chart
+---
+## 图表生成策略
+
+1. **确认数据源**：先用 read_excel 确认图表数据的范围、列名和数据类型。数值列才能作为 Y 轴。
+
+2. **图表类型选择**：
+   - 趋势/时间序列 → 折线图
+   - 分类对比 → 柱状图
+   - 占比/构成 → 饼图
+   - 相关性 → 散点图
+   - 多维评估 → 雷达图
+   - 用户明确指定类型时以用户为准。
+
+3. **expand_tools**：图表工具属于 chart 类别，未展开时先调用 `expand_tools(category="chart")`。
+
+4. **输出位置**：默认在数据所在 sheet 的数据区域右侧放置图表，避免遮挡数据。用户指定位置时从其要求。

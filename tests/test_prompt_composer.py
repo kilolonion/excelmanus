@@ -360,7 +360,8 @@ class TestCoreSegmentsMatchLegacy:
         composer.load_all()
         if not composer.core_segments:
             pytest.skip("无 core 段可加载")
-        ctx = PromptContext(write_hint="read_only")
+        # write_hint="unknown" 与 _load_system_prompt 一致，只匹配 core 段
+        ctx = PromptContext(write_hint="unknown")
         core_text = composer.compose_text(ctx)
         assert core_text == _DEFAULT_SYSTEM_PROMPT, (
             "core/ 文件拼接结果与 _DEFAULT_SYSTEM_PROMPT 不一致！\n"
