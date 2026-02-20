@@ -28,6 +28,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "base_url": "https://test.example.com/v1",
         "model": "test-model",
         "workspace_root": ".",
+        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)

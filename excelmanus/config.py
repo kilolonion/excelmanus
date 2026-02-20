@@ -116,6 +116,8 @@ class ExcelManusConfig:
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
     window_advisor_model: str | None = None
+    # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
+    backup_enabled: bool = True
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -701,6 +703,13 @@ def load_config() -> ExcelManusConfig:
         _validate_base_url(window_advisor_base_url)
     window_advisor_model = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL") or None
 
+    # 备份沙盒模式
+    backup_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_BACKUP_ENABLED"),
+        "EXCELMANUS_BACKUP_ENABLED",
+        True,
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -779,5 +788,6 @@ def load_config() -> ExcelManusConfig:
         window_advisor_api_key=window_advisor_api_key,
         window_advisor_base_url=window_advisor_base_url,
         window_advisor_model=window_advisor_model,
+        backup_enabled=backup_enabled,
         models=models,
     )

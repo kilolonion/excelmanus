@@ -41,6 +41,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "max_iterations": 20,
         "max_consecutive_failures": 3,
         "workspace_root": ".",
+        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -143,7 +144,7 @@ class TestAgentEngineInit:
 
 
 class TestControlCommandFullAccess:
-    """会话级 /fullAccess 控制命令测试。"""
+    """会话级 /fullaccess 控制命令测试。"""
 
     @pytest.mark.asyncio
     async def test_status_defaults_to_restricted(self) -> None:
@@ -151,7 +152,7 @@ class TestControlCommandFullAccess:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
-        result = await engine.chat("/fullAccess status")
+        result = await engine.chat("/fullaccess status")
         assert isinstance(result, ChatResult)
         assert "restricted" in result
         assert engine.full_access_enabled is False
@@ -163,12 +164,12 @@ class TestControlCommandFullAccess:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
-        on_result = await engine.chat("/fullAccess")
+        on_result = await engine.chat("/fullaccess")
         assert "full_access" in on_result
         assert engine.full_access_enabled is True
         assert engine.last_route_result.route_mode == "control_command"
 
-        off_result = await engine.chat("/fullAccess off")
+        off_result = await engine.chat("/fullaccess off")
         assert "restricted" in off_result
         assert engine.full_access_enabled is False
         assert engine.last_route_result.route_mode == "control_command"
@@ -211,7 +212,7 @@ class TestControlCommandFullAccess:
         _, kwargs_default = mock_router.route.call_args
         assert kwargs_default["blocked_skillpacks"] == {"excel_code_runner"}
 
-        await engine.chat("/fullAccess on")
+        await engine.chat("/fullaccess on")
         mock_router.route.reset_mock()
         engine._client.chat.completions.create = AsyncMock(
             return_value=_make_text_response("ok2")
@@ -710,7 +711,7 @@ class TestContextBudgetAndHardCap:
 
     @pytest.mark.asyncio
     async def test_tool_loop_messages_fit_max_context_budget(self) -> None:
-        config = _make_config(max_context_tokens=3000)
+        config = _make_config(max_context_tokens=4000)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine.memory.add_user_message("测试上下文预算")
@@ -719,7 +720,7 @@ class TestContextBudgetAndHardCap:
             skills_used=[],
             tool_scope=["add_numbers"],
             route_mode="fallback",
-            system_contexts=["X" * 6000],
+            system_contexts=["X" * 8000],
         )
         mocked_create = AsyncMock(return_value=_make_text_response("ok"))
         engine._client.chat.completions.create = mocked_create
@@ -2763,11 +2764,11 @@ class TestDelegateSubagent:
         assert first.pending_question is True
         assert engine.has_pending_question() is True
         prompt = engine._question_flow.format_prompt()
-        assert "fullAccess" in prompt
+        assert "fullaccess" in prompt
         assert pending.approval_id in prompt
 
         resumed = await engine.chat("2")
-        assert "已开启 fullAccess" in resumed.reply
+        assert "已开启 fullaccess" in resumed.reply
         assert "已拒绝待确认操作" in resumed.reply
         assert "重试完成" in resumed.reply
         assert engine.full_access_enabled is True
@@ -4752,7 +4753,7 @@ class TestApprovalFlow:
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
-        on_reply = await engine.chat("/fullAccess on")
+        on_reply = await engine.chat("/fullaccess on")
         assert "已开启" in on_reply
 
         tool_response = _make_tool_call_response([
@@ -4797,7 +4798,7 @@ class TestApprovalFlow:
             root_dir=str(tmp_path),
         )]
 
-        on_reply = await engine.chat("/fullAccess on")
+        on_reply = await engine.chat("/fullaccess on")
         assert "已开启" in on_reply
 
         tool_response = _make_tool_call_response([("call_1", "custom_tool", "{}")])

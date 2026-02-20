@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import openai
 
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
+from excelmanus.backup import BackupManager
 from excelmanus.providers import create_client
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
@@ -77,7 +78,7 @@ _MIN_SYSTEM_CONTEXT_CHARS = 256
 _SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
-_SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullAccess 后重试（推荐）"
+_SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
 _SYSTEM_Q_PLAN_APPROVAL = "plan_approval"
 _PLAN_APPROVAL_OPTION_APPROVE = "批准执行"
@@ -313,14 +314,21 @@ _FORMULA_ADVICE_FALLBACK_PATTERN = _re.compile(
     r"(?<![<>=!])=(?![<>=])\s*[A-Z][A-Z0-9_]{2,}\s*\(",
 )
 
+_VBA_MACRO_ADVICE_PATTERN = _re.compile(
+    r"(```\s*vb|Sub\s+\w+\s*\(|End\s+Sub\b|\.Range\s*\(|\.Cells\s*\("
+    r"|Application\.\w+|Dim\s+\w+\s+As\s)",
+    _re.IGNORECASE,
+)
+
 
 def _contains_formula_advice(text: str) -> bool:
-    """检测回复文本中是否包含 Excel 公式建议（而非实际执行）。"""
+    """检测回复文本中是否包含 Excel 公式或 VBA/宏代码建议（而非实际执行）。"""
     if not text:
         return False
     return bool(
         _FORMULA_ADVICE_PATTERN.search(text)
         or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text)
+        or _VBA_MACRO_ADVICE_PATTERN.search(text)
     )
 
 
@@ -336,6 +344,26 @@ _FILE_REFERENCE_PATTERN = _re.compile(
     r"(\.\s*xlsx\b|\.\s*xls\b|\.\s*csv\b|[A-Za-z0-9_\-/\\]+\.(?:xlsx|xls|csv))",
     _re.IGNORECASE,
 )
+
+
+_ADVICE_WRITE_VALUE_RE = _re.compile(
+    r"(?:VBA|macro|Sub\s+\w+|End\s+Sub|宏|请.*(?:粘贴|运行|执行)"
+    r"|paste.*module|run\s+(?:the\s+)?(?:code|macro)"
+    r"|prior\s+response|prepared\b.*\b(?:run|paste|execute))",
+    _re.IGNORECASE,
+)
+
+
+def _is_advice_like_value(value: Any) -> bool:
+    """检测 write_cells 单元格模式写入的值是否为建议性文本而非业务数据。"""
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if len(stripped) < 30:
+        return False
+    if stripped.startswith("="):
+        return False
+    return bool(_ADVICE_WRITE_VALUE_RE.search(stripped))
 
 
 def _detect_write_intent(text: str) -> bool:
@@ -391,6 +419,36 @@ class _AuditedExecutionError(Exception):
 
 
 @dataclass
+class TurnDiagnostic:
+    """单次 LLM 迭代的诊断快照，用于事后分析。"""
+
+    iteration: int
+    # token 使用
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    # 模型 thinking/reasoning 内容
+    thinking_content: str = ""
+    # 该迭代暴露给模型的工具名列表
+    tool_names: list[str] = field(default_factory=list)
+    # 门禁事件
+    guard_events: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "iteration": self.iteration,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+        if self.thinking_content:
+            d["thinking_content"] = self.thinking_content
+        if self.tool_names:
+            d["tool_names"] = self.tool_names
+        if self.guard_events:
+            d["guard_events"] = self.guard_events
+        return d
+
+
+@dataclass
 class ChatResult:
     """一次 chat 调用的完整结果。"""
 
@@ -403,6 +461,13 @@ class ChatResult:
     completion_tokens: int = 0
     total_tokens: int = 0
     write_guard_triggered: bool = False
+    # 诊断数据：每轮迭代的快照
+    turn_diagnostics: list[TurnDiagnostic] = field(default_factory=list)
+    # 路由诊断
+    write_hint: str = ""
+    route_mode: str = ""
+    skills_used: list[str] = field(default_factory=list)
+    task_tags: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         """兼容旧调用方将 chat 结果当作字符串直接使用。"""
@@ -509,11 +574,15 @@ class AgentEngine:
             else None
         )
         self._memory = ConversationMemory(config)
-        # 将工作区绝对路径注入系统提示词，使 LLM 能识别工作区内的绝对路径
+        # 运行时变量注入系统提示词
         resolved_root = str(Path(config.workspace_root).resolve())
-        self._memory.system_prompt = self._memory.system_prompt.replace(
-            "{workspace_root}", resolved_root
-        )
+        _runtime_vars = {
+            "workspace_root": resolved_root,
+        }
+        for _var_key, _var_val in _runtime_vars.items():
+            self._memory.system_prompt = self._memory.system_prompt.replace(
+                f"{{{_var_key}}}", _var_val
+            )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             route_mode="all_tools",
@@ -522,7 +591,7 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
-        # 会话级权限控制：默认限制代码 Skillpack，显式 /fullAccess 后解锁
+        # 会话级权限控制：默认限制代码 Skillpack，显式 /fullaccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
         self._subagent_enabled: bool = config.subagent_enabled
@@ -545,9 +614,20 @@ class AgentEngine:
         self._last_success_count: int = 0
         self._last_failure_count: int = 0
         self._current_write_hint: str = "unknown"
+        # 每轮迭代诊断快照（供 /save 导出）
+        self._turn_diagnostics: list[TurnDiagnostic] = []
+        # 会话级诊断累积：每次 chat 调用的路由+迭代诊断
+        self._session_diagnostics: list[dict[str, Any]] = []
         # 执行守卫状态：新任务重置，续跑路径复用。
         self._execution_guard_fired: bool = False
         self._approval = ApprovalManager(config.workspace_root)
+        # ── 备份沙盒模式 ──────────────────────────────────
+        self._backup_enabled: bool = config.backup_enabled
+        self._backup_manager: BackupManager | None = (
+            BackupManager(workspace_root=config.workspace_root)
+            if config.backup_enabled
+            else None
+        )
         self._subagent_executor = SubagentExecutor(
             parent_config=config,
             parent_registry=registry,
@@ -725,8 +805,13 @@ class AgentEngine:
         return self._last_route_result
 
     @property
+    def session_diagnostics(self) -> list[dict[str, Any]]:
+        """会话级诊断累积数据，供 /save 导出。"""
+        return self._session_diagnostics
+
+    @property
     def full_access_enabled(self) -> bool:
-        """当前会话是否启用 fullAccess。"""
+        """当前会话是否启用 fullaccess。"""
         return self._full_access_enabled
 
     @property
@@ -739,10 +824,19 @@ class AgentEngine:
         """当前会话是否启用 plan mode。"""
         return self._plan_mode_enabled
 
+    @property
+    def backup_enabled(self) -> bool:
+        """当前会话是否启用备份沙盒模式。"""
+        return self._backup_enabled
+
+    @property
+    def backup_manager(self) -> BackupManager | None:
+        return self._backup_manager
+
     def enable_bench_sandbox(self) -> None:
         """启用 benchmark 沙盒模式：解除所有交互式阻塞。
 
-        - fullAccess = True：高风险工具直接执行，不弹确认
+        - fullaccess = True：高风险工具直接执行，不弹确认
         - plan 拦截关闭：task_create 直接执行，不生成待审批计划
         - plan mode 关闭：普通对话不进入仅规划路径
         - subagent 启用：允许委派子代理
@@ -1061,7 +1155,7 @@ class AgentEngine:
             if blocked and normalized_cmd in blocked:
                 reply = (
                     f"技能 `{effective_slash_command}` 当前受访问限制，"
-                    f"请先执行 `/fullAccess on` 解除限制后再试。"
+                    f"请先执行 `/fullaccess on` 解除限制后再试。"
                 )
             else:
                 reply = f"未找到技能 `{effective_slash_command}`，请通过 `/skills` 查看可用技能列表。"
@@ -1196,6 +1290,28 @@ class AgentEngine:
         # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
         self._execution_guard_fired = False
         chat_result = await self._tool_calling_loop(route_result, on_event)
+
+        # 注入路由诊断信息到 ChatResult
+        chat_result.write_hint = self._current_write_hint
+        chat_result.route_mode = route_result.route_mode
+        chat_result.skills_used = list(route_result.skills_used)
+        chat_result.task_tags = route_result.task_tags
+        chat_result.turn_diagnostics = list(self._turn_diagnostics)
+
+        # 累积到会话级诊断
+        self._session_diagnostics.append({
+            "session_turn": self._session_turn,
+            "write_hint": self._current_write_hint,
+            "route_mode": route_result.route_mode,
+            "skills_used": list(route_result.skills_used),
+            "task_tags": list(route_result.task_tags),
+            "iterations": chat_result.iterations,
+            "prompt_tokens": chat_result.prompt_tokens,
+            "completion_tokens": chat_result.completion_tokens,
+            "total_tokens": chat_result.total_tokens,
+            "write_guard_triggered": chat_result.write_guard_triggered,
+            "turn_diagnostics": [d.to_dict() for d in self._turn_diagnostics],
+        })
 
         # 发出执行摘要事件
         elapsed = time.monotonic() - chat_start
@@ -1645,7 +1761,7 @@ class AgentEngine:
                             skill = skillpacks[name]
                             description = str(getattr(skill, "description", "")).strip()
                             if blocked and name in blocked:
-                                suffix = " [⚠️ 需要 fullAccess 权限，使用 /fullAccess on 开启]"
+                                suffix = " [⚠️ 需要 fullaccess 权限，使用 /fullaccess on 开启]"
                             else:
                                 suffix = ""
                             if description:
@@ -1969,8 +2085,8 @@ class AgentEngine:
                 if skill_obj is not None:
                     desc = f"\n该技能用于：{skill_obj.description}"
                 return (
-                    f"⚠️ 技能 '{skill_name}' 需要 fullAccess 权限才能使用。{desc}\n"
-                    f"请告知用户使用 /fullAccess on 命令开启完全访问权限后重试。"
+                    f"⚠️ 技能 '{skill_name}' 需要 fullaccess 权限才能使用。{desc}\n"
+                    f"请告知用户使用 /fullaccess on 命令开启完全访问权限后重试。"
                 )
 
         if not skillpacks:
@@ -2208,6 +2324,11 @@ class AgentEngine:
         access_notice = self._build_access_notice()
         if access_notice:
             contexts.append(access_notice)
+
+        # 4. 备份模式说明
+        backup_notice = self._build_backup_notice()
+        if backup_notice:
+            contexts.append(backup_notice)
 
         return contexts
 
@@ -2697,7 +2818,7 @@ class AgentEngine:
                 },
                 {
                     "label": _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
-                    "description": "先开启 fullAccess，再重试子代理任务。",
+                    "description": "先开启 fullaccess，再重试子代理任务。",
                 },
                 {
                     "label": _SUBAGENT_APPROVAL_OPTION_REJECT,
@@ -2754,7 +2875,7 @@ class AgentEngine:
             )
             reply = (
                 f"{accept_reply}\n"
-                "若需要子代理自动继续执行，建议选择「开启 fullAccess 后重试（推荐）」。"
+                "若需要子代理自动继续执行，建议选择「开启 fullaccess 后重试（推荐）」。"
             )
             return ChatResult(reply=reply)
 
@@ -2762,9 +2883,9 @@ class AgentEngine:
             lines: list[str] = []
             if not self._full_access_enabled:
                 self._full_access_enabled = True
-                lines.append("已开启 fullAccess。当前代码技能权限：full_access。")
+                lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
             else:
-                lines.append("fullAccess 已开启。")
+                lines.append("fullaccess 已开启。")
 
             reject_reply = self._handle_reject_command(["/reject", approval_id])
             lines.append(reject_reply)
@@ -2783,7 +2904,7 @@ class AgentEngine:
             reject_reply = self._handle_reject_command(["/reject", approval_id])
             reply = (
                 f"{reject_reply}\n"
-                "如需自动执行高风险步骤，可先使用 `/fullAccess on` 后重新发起任务。"
+                "如需自动执行高风险步骤，可先使用 `/fullaccess on` 后重新发起任务。"
             )
             return ChatResult(reply=reply)
 
@@ -2792,7 +2913,7 @@ class AgentEngine:
             f"当前审批 ID: `{approval_id}`\n"
             "你可以手动执行以下命令：\n"
             f"- `/accept {approval_id}`\n"
-            "- `/fullAccess on`（可选）\n"
+            "- `/fullaccess on`（可选）\n"
             f"- `/reject {approval_id}`"
         )
         return ChatResult(reply=manual)
@@ -2981,6 +3102,8 @@ class AgentEngine:
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        # 诊断收集
+        self._turn_diagnostics = []
 
         for iteration in range(start_iteration, max_iter + 1):
             self._emit(
@@ -3053,6 +3176,22 @@ class AgentEngine:
                     ),
                 )
 
+            # ── 收集本轮迭代诊断快照 ──
+            iter_prompt = _usage_token(usage, "prompt_tokens") if usage else 0
+            iter_completion = _usage_token(usage, "completion_tokens") if usage else 0
+            diag = TurnDiagnostic(
+                iteration=iteration,
+                prompt_tokens=iter_prompt,
+                completion_tokens=iter_completion,
+                thinking_content=thinking_content,
+                tool_names=[
+                    s.get("function", {}).get("name", "")
+                    for s in tools
+                    if s.get("function", {}).get("name")
+                ] if tools else [],
+            )
+            self._turn_diagnostics.append(diag)
+
             # 无工具调用 → 返回文本回复
             if not tool_calls:
                 reply_text = _message_content_to_text(getattr(message, "content", None))
@@ -3090,12 +3229,15 @@ class AgentEngine:
                 ):
                     self._execution_guard_fired = True
                     guard_msg = (
-                        "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
-                        "请立即调用 expand_tools 展开 data_write 类别，"
-                        "然后使用 write_cells 将公式写入对应单元格。"
-                        "禁止仅给出文本建议。"
+                        "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
+                        "你拥有完整的 Excel 工具集可直接操作数据。"
+                        "请立即调用 expand_tools 展开对应类别，"
+                        "然后使用工具执行操作。"
+                        "禁止给出 VBA 宏代码或操作步骤替代执行。"
                     )
                     self._memory.add_user_message(guard_msg)
+                    if diag:
+                        diag.guard_events.append("execution_guard")
                     logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
                     continue
 
@@ -3107,15 +3249,21 @@ class AgentEngine:
                             "你尚未调用任何写入工具完成实际操作。"
                             "请先调用 expand_tools 展开对应类别获取工具参数，"
                             "再立即调用对应写入/格式化/图表工具执行。"
-                            "禁止以“先确认后再做”等文本收尾替代执行。"
+                            "注意：你拥有完整的 Excel 工具集可直接操作数据，"
+                            "不需要建议用户运行 VBA 宏或外部脚本。"
+                            "禁止以文本建议替代工具执行。"
                             "完成后再调用 finish_task 并在 summary 中说明结果。"
                         )
                         self._memory.add_user_message(guard_msg)
+                        if diag:
+                            diag.guard_events.append("write_guard")
                         logger.info("写入门禁触发：无写入工具调用，注入继续执行提示 (consecutive=%d)", consecutive_text_only)
                         continue
                     else:
                         # 连续两次纯文本或已接近迭代上限，强制退出
                         self._last_iteration_count = iteration
+                        if diag:
+                            diag.guard_events.append("write_guard_exit")
                         logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
                         return ChatResult(
                             reply=reply_text,
@@ -3270,12 +3418,38 @@ class AgentEngine:
                     self._last_success_count += 1
                     consecutive_failures = 0
                     if tc_result.tool_name in _WRITE_TOOL_NAMES:
-                        has_write_tool_call = True
-                        self._has_write_tool_call = True
-                        if write_hint != "may_write":
-                            write_hint = "may_write"
-                        if self._current_write_hint != "may_write":
-                            self._current_write_hint = "may_write"
+                        # 检测建议性写入（write_cells 写入建议文本而非业务数据）
+                        _advice_write = False
+                        if tc_result.tool_name == "write_cells":
+                            _raw_tc_args = getattr(
+                                getattr(tc, "function", None), "arguments", None,
+                            )
+                            try:
+                                _tc_args = (
+                                    json.loads(_raw_tc_args)
+                                    if isinstance(_raw_tc_args, str)
+                                    else (_raw_tc_args or {})
+                                )
+                            except Exception:
+                                _tc_args = {}
+                            _advice_write = (
+                                _tc_args.get("cell") is not None
+                                and _tc_args.get("values") is None
+                                and _is_advice_like_value(_tc_args.get("value"))
+                            )
+                        if _advice_write:
+                            logger.info(
+                                "检测到建议性写入（write_cells 写入建议文本），不计入实质写入",
+                            )
+                            if diag:
+                                diag.guard_events.append("advice_write_detected")
+                        else:
+                            has_write_tool_call = True
+                            self._has_write_tool_call = True
+                            if write_hint != "may_write":
+                                write_hint = "may_write"
+                            if self._current_write_hint != "may_write":
+                                self._current_write_hint = "may_write"
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -3408,6 +3582,9 @@ class AgentEngine:
                 error=error,
             )
         else:
+            # ── 备份沙盒模式：重定向文件路径 ──
+            arguments = self._redirect_backup_paths(tool_name, arguments)
+
             pre_hook_raw = self._run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.PRE_TOOL_USE,
@@ -3705,7 +3882,7 @@ class AgentEngine:
                             )
                             log_tool_call(logger, tool_name, arguments, result=result_str)
                         elif self._approval.is_mcp_tool(tool_name):
-                            # 非白名单 MCP 工具在 fullAccess 下可直接执行（不做文件审计）。
+                            # 非白名单 MCP 工具在 fullaccess 下可直接执行（不做文件审计）。
                             result_value = await self._call_registry_tool(
                                 tool_name=tool_name,
                                 arguments=arguments,
@@ -4417,7 +4594,7 @@ class AgentEngine:
             return "命令已移除，请使用 /plan ..."
 
         command = raw_command.replace("_", "")
-        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model"}:
+        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model", "/backup"}:
             return None
 
         self._last_route_result = SkillMatchResult(
@@ -4432,7 +4609,7 @@ class AgentEngine:
         if command == "/fullaccess":
             if (action in {"on", ""}) and not too_many_args:
                 self._full_access_enabled = True
-                return "已开启 fullAccess。当前代码技能权限：full_access。"
+                return "已开启 fullaccess。当前代码技能权限：full_access。"
             if action == "off" and not too_many_args:
                 self._full_access_enabled = False
                 # 将受限 skill 从 _active_skills 中驱逐，避免下一轮 scope 泄漏
@@ -4440,11 +4617,11 @@ class AgentEngine:
                 self._active_skills = [
                     s for s in self._active_skills if s.name not in blocked
                 ]
-                return "已关闭 fullAccess。当前代码技能权限：restricted。"
+                return "已关闭 fullaccess。当前代码技能权限：restricted。"
             if action == "status" and not too_many_args:
                 status = "full_access" if self._full_access_enabled else "restricted"
                 return f"当前代码技能权限：{status}。"
-            return "无效参数。用法：/fullAccess [on|off|status]。"
+            return "无效参数。用法：/fullaccess [on|off|status]。"
 
         if command == "/subagent":
             # /subagent 默认行为为查询状态，避免误触启停
@@ -4521,11 +4698,72 @@ class AgentEngine:
             model_arg = " ".join(parts[1:])
             return self.switch_model(model_arg)
 
+        if command == "/backup":
+            return self._handle_backup_command(parts)
+
         if command == "/accept":
             return await self._handle_accept_command(parts, on_event=on_event)
         if command == "/reject":
             return self._handle_reject_command(parts)
         return self._handle_undo_command(parts)
+
+    def _handle_backup_command(self, parts: list[str]) -> str:
+        """处理 /backup 会话控制命令。"""
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
+        too_many_args = len(parts) > 3
+
+        if action in {"status", ""} and not too_many_args:
+            if not self._backup_enabled:
+                return "备份沙盒模式：已关闭。"
+            mgr = self._backup_manager
+            count = len(mgr.list_backups()) if mgr else 0
+            scope = mgr.scope if mgr else "all"
+            return (
+                f"备份沙盒模式：已启用（scope={scope}）。\n"
+                f"当前管理 {count} 个备份文件。\n"
+                f"备份目录：{mgr.backup_dir if mgr else 'N/A'}"
+            )
+
+        if action == "on" and not too_many_args:
+            scope = "all"
+            if len(parts) == 3 and parts[2].strip().lower() == "--excel-only":
+                scope = "excel_only"
+            self._backup_enabled = True
+            self._backup_manager = BackupManager(
+                workspace_root=self._config.workspace_root,
+                scope=scope,
+            )
+            return f"已开启备份沙盒模式（scope={scope}）。所有文件操作将重定向到副本。"
+
+        if action == "off" and not too_many_args:
+            self._backup_enabled = False
+            self._backup_manager = None
+            return "已关闭备份沙盒模式。后续操作将直接修改原始文件。"
+
+        if action == "apply" and not too_many_args:
+            if not self._backup_enabled or self._backup_manager is None:
+                return "备份模式未启用，无需 apply。"
+            applied = self._backup_manager.apply_all()
+            if not applied:
+                return "没有需要应用的备份。"
+            lines = [f"已将 {len(applied)} 个备份文件应用到原始位置："]
+            for item in applied:
+                lines.append(f"  - {item['original']}")
+            return "\n".join(lines)
+
+        if action == "list" and not too_many_args:
+            if not self._backup_enabled or self._backup_manager is None:
+                return "备份模式未启用。"
+            backups = self._backup_manager.list_backups()
+            if not backups:
+                return "当前没有备份文件。"
+            lines = [f"当前 {len(backups)} 个备份文件："]
+            for item in backups:
+                exists = "✓" if item["exists"] == "True" else "✗"
+                lines.append(f"  [{exists}] {item['original']} → {item['backup']}")
+            return "\n".join(lines)
+
+        return "无效参数。用法：/backup [on|off|status|apply|list]"
 
     async def _handle_accept_command(
         self,
@@ -4931,6 +5169,10 @@ class AgentEngine:
         if access_notice:
             base_prompt = base_prompt + "\n\n" + access_notice
 
+        backup_notice = self._build_backup_notice()
+        if backup_notice:
+            base_prompt = base_prompt + "\n\n" + backup_notice
+
         mcp_context = self._build_mcp_context_notice()
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
@@ -5141,8 +5383,57 @@ class AgentEngine:
             )
         return result
 
+    def _redirect_backup_paths(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """备份模式下重定向工具参数中的文件路径到备份副本。"""
+        if not self._backup_enabled or self._backup_manager is None:
+            return arguments
+
+        from excelmanus.tools.policy import (
+            AUDIT_TARGET_ARG_RULES_ALL,
+            AUDIT_TARGET_ARG_RULES_FIRST,
+            READ_ONLY_SAFE_TOOLS,
+        )
+
+        path_fields: list[str] = []
+        all_fields = AUDIT_TARGET_ARG_RULES_ALL.get(tool_name)
+        if all_fields is not None:
+            path_fields.extend(all_fields)
+        else:
+            first_fields = AUDIT_TARGET_ARG_RULES_FIRST.get(tool_name)
+            if first_fields is not None:
+                path_fields.extend(first_fields)
+
+        if tool_name in READ_ONLY_SAFE_TOOLS:
+            for key in ("file_path", "path", "directory"):
+                if key in arguments and key not in path_fields:
+                    path_fields.append(key)
+
+        if not path_fields:
+            return arguments
+
+        redirected = dict(arguments)
+        for field_name in path_fields:
+            raw = arguments.get(field_name)
+            if raw is None:
+                continue
+            raw_str = str(raw).strip()
+            if not raw_str:
+                continue
+            try:
+                if tool_name in READ_ONLY_SAFE_TOOLS:
+                    redirected[field_name] = self._backup_manager.resolve_path(raw_str)
+                else:
+                    redirected[field_name] = self._backup_manager.ensure_backup(raw_str)
+            except ValueError:
+                pass  # 工作区外路径，不重定向
+        return redirected
+
     def _build_access_notice(self) -> str:
-        """当 fullAccess 关闭时，生成权限限制说明注入 system prompt。"""
+        """当 fullaccess 关闭时，生成权限限制说明注入 system prompt。"""
         if self._full_access_enabled:
             return ""
         restricted = self._restricted_code_skillpacks
@@ -5150,13 +5441,28 @@ class AgentEngine:
             return ""
         skill_list = "、".join(sorted(restricted))
         return (
-            f"【权限提示】当前 fullAccess 权限处于关闭状态。"
-            f"以下技能需要 fullAccess 权限才能激活：{skill_list}。"
+            f"【权限提示】当前 fullaccess 权限处于关闭状态。"
+            f"以下技能需要 fullaccess 权限才能激活：{skill_list}。"
             f"涉及代码执行的工具（如 write_text_file、run_code、run_shell）"
             f"在未激活对应技能时不应主动使用。"
             f"当用户询问是否能执行代码/脚本时，你应当告知用户：该能力存在但当前受限，"
-            f"需要先使用 /fullAccess on 命令开启权限。"
+            f"需要先使用 /fullaccess on 命令开启权限。"
         )
+
+    def _build_backup_notice(self) -> str:
+        """备份模式启用时，生成提示词注入。"""
+        if not self._backup_enabled or self._backup_manager is None:
+            return ""
+        backups = self._backup_manager.list_backups()
+        count = len(backups)
+        lines = [
+            "## ⚠️ 备份沙盒模式已启用",
+            "所有文件读写操作已自动重定向到 `outputs/backups/` 下的工作副本。",
+            "原始文件不会被修改。操作完成后用户可通过 `/backup apply` 将修改应用到原文件。",
+        ]
+        if count > 0:
+            lines.append(f"当前已管理 {count} 个备份文件。")
+        return "\n".join(lines)
 
     def _build_mcp_context_notice(self) -> str:
         """生成已连接 MCP Server 的概要信息，注入 system prompt。"""
@@ -5244,7 +5550,7 @@ class AgentEngine:
             if extended:
                 expanded = cat in self._expanded_categories
                 suffix = "" if expanded else " [需 expand_tools]"
-                code_suffix = " [需 fullAccess]" if cat == "code" else ""
+                code_suffix = " [需 fullaccess]" if cat == "code" else ""
                 line = _format_tool_list(extended, with_desc=True)
                 if line:
                     extended_lines.append(f"  · {label}：{line}{suffix}{code_suffix}")
