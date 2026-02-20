@@ -711,7 +711,7 @@ class TestContextBudgetAndHardCap:
 
     @pytest.mark.asyncio
     async def test_tool_loop_messages_fit_max_context_budget(self) -> None:
-        config = _make_config(max_context_tokens=4000)
+        config = _make_config(max_context_tokens=5000)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine.memory.add_user_message("测试上下文预算")

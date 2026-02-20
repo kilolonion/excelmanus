@@ -5515,10 +5515,9 @@ class AgentEngine:
         return (
             f"【权限提示】当前 fullaccess 权限处于关闭状态。"
             f"以下技能需要 fullaccess 权限才能激活：{skill_list}。"
-            f"涉及代码执行的工具（如 write_text_file、run_code、run_shell）"
-            f"在未激活对应技能时不应主动使用。"
-            f"当用户询问是否能执行代码/脚本时，你应当告知用户：该能力存在但当前受限，"
-            f"需要先使用 /fullaccess on 命令开启权限。"
+            f"注意：run_code 工具已配备代码策略引擎（自动风险分级 + 运行时沙盒），"
+            f"安全代码（GREEN/YELLOW 等级）可直接使用，无需 fullaccess 权限。"
+            f"仅涉及高风险操作（如 subprocess、exec）的代码需要用户确认。"
         )
 
     def _build_backup_notice(self) -> str:
