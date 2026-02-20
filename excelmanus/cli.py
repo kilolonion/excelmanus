@@ -1978,7 +1978,11 @@ async def _run_chat_turn(
             raw_args=raw_args,
         )
 
-        if not streamed:
+        # Dashboard 模式下若进入 pending question，跳过冗余 reply Panel（交互选择器会展示）
+        _has_pending = bool(
+            getattr(engine, "has_pending_question", lambda: False)()
+        )
+        if not streamed and not (_current_layout_mode == "dashboard" and _has_pending):
             console.print()
             console.print(
                 Panel(
