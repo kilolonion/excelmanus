@@ -99,6 +99,59 @@ class TestToolCallStats:
         assert state.last_failure_count == 1
 
 
+class TestFinishTaskWarned:
+    """finish_task_warned 状态追踪。"""
+
+    def test_default_false(self):
+        state = SessionState()
+        assert state.finish_task_warned is False
+
+    def test_set_and_read(self):
+        state = SessionState()
+        state.finish_task_warned = True
+        assert state.finish_task_warned is True
+
+    def test_reset_loop_stats_clears_finish_task_warned(self):
+        state = SessionState()
+        state.finish_task_warned = True
+        state.reset_loop_stats()
+        assert state.finish_task_warned is False
+
+
+class TestResetSession:
+    """reset_session 全量重置。"""
+
+    def test_resets_all_fields(self):
+        state = SessionState()
+        state.session_turn = 5
+        state.last_iteration_count = 10
+        state.last_tool_call_count = 20
+        state.last_success_count = 15
+        state.last_failure_count = 5
+        state.current_write_hint = "may_write"
+        state.has_write_tool_call = True
+        state.execution_guard_fired = True
+        state.vba_exempt = True
+        state.finish_task_warned = True
+        state.turn_diagnostics = [{"iteration": 1}]
+        state.session_diagnostics = [{"route": "test"}]
+
+        state.reset_session()
+
+        assert state.session_turn == 0
+        assert state.last_iteration_count == 0
+        assert state.last_tool_call_count == 0
+        assert state.last_success_count == 0
+        assert state.last_failure_count == 0
+        assert state.current_write_hint == "unknown"
+        assert state.has_write_tool_call is False
+        assert state.execution_guard_fired is False
+        assert state.vba_exempt is False
+        assert state.finish_task_warned is False
+        assert state.turn_diagnostics == []
+        assert state.session_diagnostics == []
+
+
 class TestDiagnostics:
     """诊断数据管理。"""
 

@@ -560,6 +560,8 @@ class AgentEngine:
         mcp_manager: MCPManager | None = None,
         own_mcp_manager: bool = True,
     ) -> None:
+        # ── 解耦组件（Phase 3）：必须在所有 property 代理字段赋值之前初始化 ──
+        self._state = SessionState()
         self._client = create_client(
             api_key=config.api_key,
             base_url=config.base_url,
@@ -639,8 +641,6 @@ class AgentEngine:
         self._restricted_code_skillpacks: set[str] = {"excel_code_runner"}
         # 会话级 skill 累积：记录本会话已加载过的 skill 名称及其最后激活轮次
         self._loaded_skill_names: dict[str, int] = {}
-        # 当前会话轮次计数器（每次 chat 调用递增）
-        self._session_turn: int = 0
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
         # session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
@@ -648,22 +648,12 @@ class AgentEngine:
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
         self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
-        # 执行统计（每次 chat 调用后更新）
-        self._last_iteration_count: int = 0
-        self._last_tool_call_count: int = 0
-        self._last_success_count: int = 0
-        self._last_failure_count: int = 0
-        self._current_write_hint: str = "unknown"
-        # 每轮迭代诊断快照（供 /save 导出）
-        self._turn_diagnostics: list[TurnDiagnostic] = []
-        # 会话级诊断累积：每次 chat 调用的路由+迭代诊断
-        self._session_diagnostics: list[dict[str, Any]] = []
-        # 执行守卫状态：新任务重置，续跑路径复用。
-        self._execution_guard_fired: bool = False
-        # 用户主动请求 VBA 时豁免 execution_guard 的 VBA 检测
-        self._vba_exempt: bool = False
-        # ── 解耦组件（Phase 3） ──────────────────────────────
-        self._state = SessionState()
+        # ── 解耦组件（Phase 3）：状态变量已由 self._state 管理 ──
+        # self._state 在 __init__ 顶部初始化，以下属性通过 @property 代理访问：
+        # _session_turn, _last_iteration_count, _last_tool_call_count,
+        # _last_success_count, _last_failure_count, _current_write_hint,
+        # _has_write_tool_call, _turn_diagnostics, _session_diagnostics,
+        # _execution_guard_fired, _vba_exempt, _finish_task_warned
         self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root)
@@ -770,6 +760,104 @@ class AgentEngine:
             persistent_memory=persistent_memory,
         )
         self._subagent_orchestrator = SubagentOrchestrator(self)
+
+    # ── Property 代理：所有循环/会话级状态委托给 self._state ──────
+
+    @property
+    def _session_turn(self) -> int:
+        return self._state.session_turn
+
+    @_session_turn.setter
+    def _session_turn(self, value: int) -> None:
+        self._state.session_turn = value
+
+    @property
+    def _last_iteration_count(self) -> int:
+        return self._state.last_iteration_count
+
+    @_last_iteration_count.setter
+    def _last_iteration_count(self, value: int) -> None:
+        self._state.last_iteration_count = value
+
+    @property
+    def _last_tool_call_count(self) -> int:
+        return self._state.last_tool_call_count
+
+    @_last_tool_call_count.setter
+    def _last_tool_call_count(self, value: int) -> None:
+        self._state.last_tool_call_count = value
+
+    @property
+    def _last_success_count(self) -> int:
+        return self._state.last_success_count
+
+    @_last_success_count.setter
+    def _last_success_count(self, value: int) -> None:
+        self._state.last_success_count = value
+
+    @property
+    def _last_failure_count(self) -> int:
+        return self._state.last_failure_count
+
+    @_last_failure_count.setter
+    def _last_failure_count(self, value: int) -> None:
+        self._state.last_failure_count = value
+
+    @property
+    def _current_write_hint(self) -> str:
+        return self._state.current_write_hint
+
+    @_current_write_hint.setter
+    def _current_write_hint(self, value: str) -> None:
+        self._state.current_write_hint = value
+
+    @property
+    def _has_write_tool_call(self) -> bool:
+        return self._state.has_write_tool_call
+
+    @_has_write_tool_call.setter
+    def _has_write_tool_call(self, value: bool) -> None:
+        self._state.has_write_tool_call = value
+
+    @property
+    def _turn_diagnostics(self) -> list:
+        return self._state.turn_diagnostics
+
+    @_turn_diagnostics.setter
+    def _turn_diagnostics(self, value: list) -> None:
+        self._state.turn_diagnostics = value
+
+    @property
+    def _session_diagnostics(self) -> list:
+        return self._state.session_diagnostics
+
+    @_session_diagnostics.setter
+    def _session_diagnostics(self, value: list) -> None:
+        self._state.session_diagnostics = value
+
+    @property
+    def _execution_guard_fired(self) -> bool:
+        return self._state.execution_guard_fired
+
+    @_execution_guard_fired.setter
+    def _execution_guard_fired(self, value: bool) -> None:
+        self._state.execution_guard_fired = value
+
+    @property
+    def _vba_exempt(self) -> bool:
+        return self._state.vba_exempt
+
+    @_vba_exempt.setter
+    def _vba_exempt(self, value: bool) -> None:
+        self._state.vba_exempt = value
+
+    @property
+    def _finish_task_warned(self) -> bool:
+        return self._state.finish_task_warned
+
+    @_finish_task_warned.setter
+    def _finish_task_warned(self, value: bool) -> None:
+        self._state.finish_task_warned = value
 
     async def extract_and_save_memory(self) -> None:
         """会话结束时调用：从对话历史中提取记忆并持久化。
@@ -1106,7 +1194,6 @@ class AgentEngine:
         chat_start = time.monotonic()
         # 每次真正的 chat 调用递增轮次计数器
         self._state.increment_turn()
-        self._session_turn = self._state.session_turn
         # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
         self._current_write_hint = "unknown"
 
@@ -3050,14 +3137,7 @@ class AgentEngine:
         # 恢复执行时保留之前的统计，仅首次调用时重置
         if start_iteration <= 1:
             self._state.reset_loop_stats()
-            self._last_iteration_count = 0
-            self._last_tool_call_count = 0
-            self._last_success_count = 0
-            self._last_failure_count = 0
-        has_write_tool_call = False
-        self._has_write_tool_call = False
         consecutive_text_only: int = 0
-        self._finish_task_warned = False
         write_hint = _merge_write_hint(
             getattr(current_route_result, "write_hint", None),
             self._current_write_hint,
@@ -3224,7 +3304,7 @@ class AgentEngine:
                     continue
 
                 # ── 写入门禁：write_hint == "may_write" 时检查是否有实际写入 ──
-                if write_hint == "may_write" and not has_write_tool_call:
+                if write_hint == "may_write" and not self._has_write_tool_call:
                     consecutive_text_only += 1
                     if consecutive_text_only < 2 and iteration < max_iter:
                         guard_msg = (
@@ -3427,22 +3507,14 @@ class AgentEngine:
                             if diag:
                                 diag.guard_events.append("advice_write_detected")
                         else:
-                            has_write_tool_call = True
-                            self._has_write_tool_call = True
+                            self._state.record_write_action()
                             if write_hint != "may_write":
                                 write_hint = "may_write"
-                            if self._current_write_hint != "may_write":
-                                self._current_write_hint = "may_write"
                     # ── 同步 _execute_tool_call 内部的写入传播 ──
                     # delegate_to_subagent 等工具在 _execute_tool_call 中直接
-                    # 设置 self._has_write_tool_call，需回写到循环局部变量。
-                    if (
-                        not has_write_tool_call
-                        and self._has_write_tool_call
-                    ):
-                        has_write_tool_call = True
-                        if write_hint != "may_write":
-                            write_hint = "may_write"
+                    # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
+                    if self._has_write_tool_call and write_hint != "may_write":
+                        write_hint = "may_write"
                 else:
                     self._last_failure_count += 1
                     consecutive_failures += 1
@@ -4322,11 +4394,7 @@ class AgentEngine:
         self._approval.clear_pending()
         self._window_perception.reset()
         # 重置轮级状态变量，防止跨对话污染
-        self._current_write_hint = "unknown"
-        self._execution_guard_fired = False
-        self._vba_exempt = False
-        self._finish_task_warned = False
-        self._has_write_tool_call = False
+        self._state.reset_session()
         # _system_mode_fallback 同步类缓存（不重置，跨会话复用探测结果）
         self._system_mode_fallback = type(self)._system_mode_fallback_cache
         self._last_route_result = SkillMatchResult(

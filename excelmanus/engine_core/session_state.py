@@ -39,6 +39,7 @@ class SessionState:
         # 执行守卫状态
         self.execution_guard_fired: bool = False
         self.vba_exempt: bool = False
+        self.finish_task_warned: bool = False
 
     def increment_turn(self) -> None:
         """递增会话轮次。"""
@@ -51,7 +52,23 @@ class SessionState:
         self.last_success_count = 0
         self.last_failure_count = 0
         self.has_write_tool_call = False
+        self.finish_task_warned = False
         self.turn_diagnostics = []
+
+    def reset_session(self) -> None:
+        """重置全部会话级状态（跨对话边界调用）。"""
+        self.session_turn = 0
+        self.current_write_hint = "unknown"
+        self.execution_guard_fired = False
+        self.vba_exempt = False
+        self.finish_task_warned = False
+        self.has_write_tool_call = False
+        self.last_iteration_count = 0
+        self.last_tool_call_count = 0
+        self.last_success_count = 0
+        self.last_failure_count = 0
+        self.turn_diagnostics = []
+        self.session_diagnostics = []
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
