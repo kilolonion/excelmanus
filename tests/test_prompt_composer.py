@@ -249,6 +249,106 @@ class TestMatchConditions:
 # ── 回归测试：core 文件与 legacy prompt 一致性 ───────────
 
 
+class TestComposeForSubagent:
+    """compose_for_subagent 子代理提示词组装测试。"""
+
+    def test_base_plus_specific(self, tmp_path: Path) -> None:
+        sa_dir = tmp_path / "subagent"
+        sa_dir.mkdir()
+        (sa_dir / "_base.md").write_text(
+            '---\nname: base\npriority: 0\nlayer: subagent\n---\n共享约束。',
+            encoding="utf-8",
+        )
+        (sa_dir / "explorer.md").write_text(
+            '---\nname: explorer\npriority: 10\nlayer: subagent\n---\n探查专用。',
+            encoding="utf-8",
+        )
+        composer = PromptComposer(tmp_path)
+        result = composer.compose_for_subagent("explorer")
+        assert result is not None
+        assert "共享约束。" in result
+        assert "探查专用。" in result
+
+    def test_specific_only_no_base(self, tmp_path: Path) -> None:
+        sa_dir = tmp_path / "subagent"
+        sa_dir.mkdir()
+        (sa_dir / "writer.md").write_text(
+            '---\nname: writer\npriority: 10\nlayer: subagent\n---\n写入专用。',
+            encoding="utf-8",
+        )
+        composer = PromptComposer(tmp_path)
+        result = composer.compose_for_subagent("writer")
+        assert result is not None
+        assert "写入专用。" in result
+
+    def test_nonexistent_subagent_returns_none(self, tmp_path: Path) -> None:
+        sa_dir = tmp_path / "subagent"
+        sa_dir.mkdir()
+        composer = PromptComposer(tmp_path)
+        assert composer.compose_for_subagent("nonexistent") is None
+
+    def test_no_subagent_dir_returns_none(self, tmp_path: Path) -> None:
+        composer = PromptComposer(tmp_path)
+        assert composer.compose_for_subagent("explorer") is None
+
+    def test_real_subagent_files(self) -> None:
+        """验证实际 prompts/subagent/ 文件可正确加载。"""
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not (prompts_dir / "subagent").is_dir():
+            pytest.skip("prompts/subagent/ 不存在")
+        composer = PromptComposer(prompts_dir)
+        for name in ("planner", "explorer", "analyst", "writer", "coder", "full"):
+            result = composer.compose_for_subagent(name)
+            assert result is not None, f"{name} 子代理提示词加载失败"
+            assert len(result) > 50, f"{name} 子代理提示词过短"
+            # 应包含 _base.md 的共享约束
+            assert "禁止空承诺" in result, f"{name} 缺少共享约束"
+
+
+class TestTaskTagsLexical:
+    """词法 task_tags 分类测试。"""
+
+    def test_cross_sheet_detected(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("从Sheet2查找数据填入Sheet1")
+        assert "cross_sheet" in tags
+
+    def test_formatting_detected(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("把A列加粗并标红")
+        assert "formatting" in tags
+
+    def test_chart_detected(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("生成一个柱状图")
+        assert "chart" in tags
+
+    def test_data_fill_detected(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("填充B列的空白单元格")
+        assert "data_fill" in tags
+
+    def test_large_data_detected(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("批量处理所有行的数据")
+        assert "large_data" in tags
+
+    def test_multiple_tags(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("从Sheet2批量填充数据到Sheet1")
+        assert "cross_sheet" in tags
+        assert "data_fill" in tags
+
+    def test_empty_message(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        assert SkillRouter._classify_task_tags_lexical("") == []
+
+    def test_no_tags(self) -> None:
+        from excelmanus.skillpacks.router import SkillRouter
+        tags = SkillRouter._classify_task_tags_lexical("读取A1单元格的值")
+        assert tags == []
+
+
 class TestCoreSegmentsMatchLegacy:
     def test_exact_match(self) -> None:
         from excelmanus.memory import _DEFAULT_SYSTEM_PROMPT

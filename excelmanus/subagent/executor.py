@@ -336,7 +336,10 @@ class SubagentExecutor:
         parent_context: str,
         enriched_contexts: list[str] | None = None,
     ) -> str:
-        """构建子代理系统提示。"""
+        """构建子代理系统提示。
+
+        优先级：PromptComposer 文件 > config.system_prompt > 默认模板。
+        """
         default_prompt = (
             f"你是子代理 `{config.name}`。\n"
             f"职责：{config.description}\n\n"
@@ -346,7 +349,18 @@ class SubagentExecutor:
             "- 完成后输出结果摘要与关键证据。\n"
             "- 不要输出冗长无关内容。"
         )
-        parts = [config.system_prompt.strip() or default_prompt]
+        # 优先从 PromptComposer 加载子代理提示词
+        composer_prompt: str | None = None
+        try:
+            from excelmanus.prompt_composer import PromptComposer
+            from pathlib import Path
+            prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+            if prompts_dir.is_dir():
+                composer = PromptComposer(prompts_dir)
+                composer_prompt = composer.compose_for_subagent(config.name)
+        except Exception:
+            pass
+        parts = [composer_prompt or config.system_prompt.strip() or default_prompt]
         if parent_context.strip():
             parts.append("## 主会话上下文\n" + parent_context.strip())
         # full 模式：注入主代理级别的丰富上下文

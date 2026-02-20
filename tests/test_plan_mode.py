@@ -80,4 +80,11 @@ def test_builtin_planner_exists() -> None:
     planner = BUILTIN_SUBAGENTS.get("planner")
     assert planner is not None
     assert planner.permission_mode == "readOnly"
-    assert "tasklist-json" in planner.system_prompt
+    # planner 提示词已迁移到 prompts/subagent/planner.md，通过 PromptComposer 加载
+    from pathlib import Path
+    from excelmanus.prompt_composer import PromptComposer
+    prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+    composer = PromptComposer(prompts_dir)
+    prompt = composer.compose_for_subagent("planner")
+    assert prompt is not None
+    assert "tasklist-json" in prompt

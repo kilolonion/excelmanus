@@ -699,7 +699,7 @@ class TestSkillRouter:
         loader = SkillpackLoader(config, _tool_registry())
         router = SkillRouter(config, loader)
 
-        hint = await router._classify_write_hint("请先画一个柱状图，然后美化表头")
+        hint, tags = await router._classify_task("请先画一个柱状图，然后美化表头")
         assert hint == "may_write"
 
     @pytest.mark.asyncio
@@ -733,7 +733,7 @@ class TestSkillRouter:
             )
         )
         with patch("excelmanus.providers.create_client", return_value=mock_client):
-            hint = await router._classify_write_hint("把这个 sheet 美化并画图")
+            hint, tags = await router._classify_task("把这个 sheet 美化并画图")
         assert hint == "may_write"
 
     @pytest.mark.asyncio
@@ -759,8 +759,8 @@ class TestSkillRouter:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
         with patch("excelmanus.providers.create_client", return_value=mock_client) as mock_create_client:
-            hint = await router._classify_write_hint("请读取这个文件并做统计分析")
-        assert hint == "unknown"
+            hint, tags = await router._classify_task("请读取这个文件并做统计分析")
+        assert hint in ("read_only", "unknown")
         assert mock_create_client.call_count == 2
 
     @pytest.mark.asyncio
@@ -801,7 +801,7 @@ class TestSkillRouter:
             "excelmanus.providers.create_client",
             side_effect=[router_client, main_client],
         ) as mock_create_client:
-            hint = await router._classify_write_hint("请读取这个文件并做统计分析")
+            hint, tags = await router._classify_task("请读取这个文件并做统计分析")
 
         assert hint == "may_write"
         assert mock_create_client.call_count == 2

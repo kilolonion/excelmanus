@@ -31,6 +31,30 @@ _READ_ONLY_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 任务标签词法规则：(tag_name, pattern)
+_TASK_TAG_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("cross_sheet", re.compile(
+        r"(跨[表页sheet]|从.*[表页sheet].*到|Sheet\s*\d.*Sheet\s*\d|VLOOKUP|INDEX.*MATCH|lookup|匹配.*填[入充])",
+        re.IGNORECASE,
+    )),
+    ("formatting", re.compile(
+        r"(格式化|高亮|加粗|标红|美化|条件格式|字体|颜色|边框|填充色|行高|列宽|对齐)",
+        re.IGNORECASE,
+    )),
+    ("chart", re.compile(
+        r"(图表|柱状图|折线图|饼图|散点图|雷达图|chart|画图|生成图)",
+        re.IGNORECASE,
+    )),
+    ("data_fill", re.compile(
+        r"(填[入充写]|补[充全齐]|populate|fill)",
+        re.IGNORECASE,
+    )),
+    ("large_data", re.compile(
+        r"(批量|全[部量表]|所有行|每一行|大量|bulk|batch)",
+        re.IGNORECASE,
+    )),
+]
+
 class SkillRouter:
     """简化后的技能路由器：仅负责斜杠直连路由和技能目录生成。"""
 
@@ -142,12 +166,15 @@ class SkillRouter:
             )
 
         # ── 1. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
-        # 并行调用小模型判断 write_hint
-        write_hint = write_hint or await self._classify_write_hint(user_message)
+        # 并行调用小模型判断 write_hint + task_tags
+        classified_hint, classified_tags = await self._classify_task(
+            user_message, write_hint=write_hint,
+        )
         return self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
-            write_hint=write_hint,
+            write_hint=classified_hint,
+            task_tags=classified_tags,
         )
 
     def build_skill_catalog(
@@ -265,6 +292,7 @@ class SkillRouter:
         user_message: str,
         candidate_file_paths: list[str] | None,
         write_hint: str = "unknown",
+        task_tags: tuple[str, ...] = (),
     ) -> SkillMatchResult:
         """构建非斜杠默认路由：tool_scope 为空表示由引擎放开全量工具。"""
         system_contexts: list[str] = []
@@ -289,94 +317,137 @@ class SkillRouter:
             write_hint=write_hint,
             sheet_count=sheet_count,
             max_total_rows=max_total_rows,
+            task_tags=task_tags,
         )
 
-    async def _classify_write_hint(self, user_message: str) -> str:
-        """调用小模型判断用户消息是否涉及写入操作。
+    async def _classify_task(
+        self,
+        user_message: str,
+        *,
+        write_hint: str | None = None,
+    ) -> tuple[str, tuple[str, ...]]:
+        """综合分类：write_hint + task_tags。
 
-        返回 "may_write" | "read_only" | "unknown"。
-        超时、解析失败、未配置 router_model 时均返回 "unknown"。
+        优先使用词法规则（零延迟），规则无法充分判断时调用小模型兜底。
 
-        降级策略：当 router 端点不可用时，自动降级使用主模型。
+        Returns:
+            (write_hint, task_tags)
+        """
+        lexical_hint = write_hint or self._classify_write_hint_lexical(user_message)
+        lexical_tags = self._classify_task_tags_lexical(user_message)
+
+        # 如果词法已能确定 write_hint，且有标签命中，跳过 LLM
+        if lexical_hint and lexical_tags:
+            return lexical_hint, tuple(lexical_tags)
+
+        # 无 router_model 时直接返回词法结果
+        if not self._config.router_model:
+            return lexical_hint or "unknown", tuple(lexical_tags)
+
+        # 调用 LLM 获取更精确的分类
+        llm_hint, llm_tags = await self._classify_task_llm(user_message)
+        final_hint = llm_hint or lexical_hint or "unknown"
+        # 合并：LLM 标签优先，词法标签补充
+        merged_tags = list(dict.fromkeys(llm_tags + lexical_tags))
+        return final_hint, tuple(merged_tags)
+
+    async def _classify_task_llm(
+        self,
+        user_message: str,
+    ) -> tuple[str | None, list[str]]:
+        """调用小模型判断 write_hint 和 task_tags。
+
+        返回 (write_hint | None, task_tags)。失败时返回 (None, [])。
         """
         import asyncio
         import json as _json
 
-        lexical_hint = self._classify_write_hint_lexical(user_message)
-
-        if not self._config.router_model:
-            return lexical_hint or "unknown"
-
         system_prompt = (
-            "你是任务分类器。判断用户请求是否涉及文件写入或修改表格操作。"
-            '只输出 JSON: {"write_hint": "may_write"} 或 {"write_hint": "read_only"}\n'
-            "判断为 may_write 的信号：\n"
-            "- 明确的写入动词：创建、修改、写入、删除、替换、填充、插入、更新、设置\n"
-            "- 明确的格式化动词：格式化、高亮、加粗、标红、美化、条件格式\n"
-            "- 明确的图表动词：画图、生成图表、柱状图、饼图\n"
-            "- 明确的结构操作：排序、合并、转置、拆分、复制到\n"
-            "判断为 read_only 的信号：\n"
-            "- 查看、列出、读取、扫描、分析、统计、对比、检查、预览\n"
-            "当不能完全确定有写入操作时请优先使用 read_only"
+            "你是任务分类器。判断用户请求的意图和任务类型。"
+            '只输出 JSON: {"write_hint": "may_write"|"read_only", "task_tags": [...]}\n'
+            "write_hint 判断：\n"
+            "- may_write：创建/修改/写入/删除/替换/填充/格式化/图表/排序/合并/转置\n"
+            "- read_only：查看/列出/读取/分析/统计/对比/检查/预览\n"
+            "- 不确定时优先 read_only\n\n"
+            "task_tags 可选值（选择所有适用的）：\n"
+            "- cross_sheet：涉及跨工作表查找或数据传输\n"
+            "- formatting：涉及样式/颜色/字体/边框等格式化\n"
+            "- chart：涉及图表生成\n"
+            "- data_fill：涉及数据填充或批量写入\n"
+            "- large_data：涉及大量数据处理（>100行）\n"
+            "- 无明确标签时返回空数组 []"
         )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message[:500]},
         ]
 
-        async def _try_classify(client: Any, model: str, timeout: float) -> str | None:
-            """尝试用指定端点分类，成功返回 hint，失败返回 None。"""
+        async def _try_classify(
+            client: Any, model: str, timeout: float,
+        ) -> tuple[str | None, list[str]] | None:
             try:
                 response = await asyncio.wait_for(
                     client.chat.completions.create(
                         model=model,
                         messages=messages,
-                        max_tokens=30,
+                        max_tokens=60,
                         temperature=0,
                     ),
                     timeout=timeout,
                 )
                 text = (response.choices[0].message.content or "").strip()
-                candidate = text
-                left = candidate.find("{")
-                right = candidate.rfind("}")
+                left = text.find("{")
+                right = text.rfind("}")
                 if left >= 0 and right > left:
-                    candidate = candidate[left:right + 1]
+                    text = text[left:right + 1]
                 try:
-                    data = _json.loads(candidate)
+                    data = _json.loads(text)
                     hint = str(data.get("write_hint", "")).strip().lower()
-                    if hint in ("may_write", "read_only"):
-                        return hint
+                    hint = hint if hint in ("may_write", "read_only") else None
+                    raw_tags = data.get("task_tags", [])
+                    tags = [
+                        str(t).strip().lower()
+                        for t in (raw_tags if isinstance(raw_tags, list) else [])
+                        if str(t).strip()
+                    ]
+                    return hint, tags
                 except (_json.JSONDecodeError, TypeError, AttributeError):
-                    pass
-                return lexical_hint
+                    return None
             except Exception:
-                # 端点异常时返回 None，让外层继续走主模型降级链。
                 return None
 
         timeout_seconds = 10.0
 
-        # 1) 先尝试 router 端点
+        # 1) router 端点
         result = await _try_classify(
-            client=self._get_router_client(),
-            model=self._config.router_model,
-            timeout=timeout_seconds,
+            self._get_router_client(), self._config.router_model, timeout_seconds,
         )
         if result is not None:
             return result
 
-        # 2) 降级：使用主模型
+        # 2) 降级到主模型
         result = await _try_classify(
-            client=self._get_fallback_client(),
-            model=self._config.model,
-            timeout=timeout_seconds,
+            self._get_fallback_client(), self._config.model, timeout_seconds,
         )
         if result is not None:
             return result
 
-        return "unknown"
+        return None, []
 
-    def _classify_write_hint_lexical(self, user_message: str) -> str | None:
+    @staticmethod
+    def _classify_task_tags_lexical(user_message: str) -> list[str]:
+        """词法快速推断 task_tags。"""
+        text = str(user_message or "").strip()
+        if not text:
+            return []
+        tags: list[str] = []
+        for tag_name, pattern in _TASK_TAG_PATTERNS:
+            if pattern.search(text):
+                tags.append(tag_name)
+        return tags
+
+    @staticmethod
+    def _classify_write_hint_lexical(user_message: str) -> str | None:
         """本地词法兜底：优先识别写入/格式化/图表等明确写意图。"""
         text = str(user_message or "").strip()
         if not text:

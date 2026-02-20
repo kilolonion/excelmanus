@@ -324,6 +324,46 @@ class PromptComposer:
         matched.sort(key=lambda s: s.priority)
         return "\n\n".join(seg.content for seg in matched)
 
+    def compose_for_subagent(self, subagent_name: str) -> str | None:
+        """组装子代理提示词 = _base.md 正文 + {name}.md 正文。
+
+        Args:
+            subagent_name: 子代理名称（如 "explorer"、"planner"）。
+
+        Returns:
+            拼接后的提示词文本，若对应文件不存在则返回 None。
+        """
+        subagent_dir = self._prompts_dir / "subagent"
+        if not subagent_dir.is_dir():
+            return None
+
+        specific_file = subagent_dir / f"{subagent_name}.md"
+        if not specific_file.exists():
+            return None
+
+        parts: list[str] = []
+
+        # 加载共享基础 _base.md（可选）
+        base_file = subagent_dir / "_base.md"
+        if base_file.exists():
+            try:
+                base_seg = parse_prompt_file(base_file)
+                if base_seg.content.strip():
+                    parts.append(base_seg.content)
+            except Exception as exc:
+                logger.warning("子代理 _base.md 解析失败: %s", exc)
+
+        # 加载专用文件
+        try:
+            specific_seg = parse_prompt_file(specific_file)
+            if specific_seg.content.strip():
+                parts.append(specific_seg.content)
+        except Exception as exc:
+            logger.warning("子代理 %s.md 解析失败: %s", subagent_name, exc)
+            return None
+
+        return "\n\n".join(parts) if parts else None
+
     @staticmethod
     def _match_conditions(conditions: dict[str, Any], ctx: PromptContext) -> bool:
         """检查策略的所有条件是否满足（AND 逻辑）。"""
