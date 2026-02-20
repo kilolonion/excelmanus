@@ -118,6 +118,12 @@ class ExcelManusConfig:
     window_advisor_model: str | None = None
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True
+    # 代码策略引擎配置
+    code_policy_enabled: bool = True
+    code_policy_green_auto_approve: bool = True
+    code_policy_yellow_auto_approve: bool = True
+    code_policy_extra_safe_modules: tuple[str, ...] = ()
+    code_policy_extra_blocked_modules: tuple[str, ...] = ()
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -710,6 +716,29 @@ def load_config() -> ExcelManusConfig:
         True,
     )
 
+    # 代码策略引擎配置
+    code_policy_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_CODE_POLICY_ENABLED"),
+        "EXCELMANUS_CODE_POLICY_ENABLED",
+        True,
+    )
+    code_policy_green_auto_approve = _parse_bool(
+        os.environ.get("EXCELMANUS_CODE_POLICY_GREEN_AUTO"),
+        "EXCELMANUS_CODE_POLICY_GREEN_AUTO",
+        True,
+    )
+    code_policy_yellow_auto_approve = _parse_bool(
+        os.environ.get("EXCELMANUS_CODE_POLICY_YELLOW_AUTO"),
+        "EXCELMANUS_CODE_POLICY_YELLOW_AUTO",
+        True,
+    )
+    code_policy_extra_safe_modules = _parse_csv_tuple(
+        os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_SAFE")
+    )
+    code_policy_extra_blocked_modules = _parse_csv_tuple(
+        os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
+    )
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -789,5 +818,10 @@ def load_config() -> ExcelManusConfig:
         window_advisor_base_url=window_advisor_base_url,
         window_advisor_model=window_advisor_model,
         backup_enabled=backup_enabled,
+        code_policy_enabled=code_policy_enabled,
+        code_policy_green_auto_approve=code_policy_green_auto_approve,
+        code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
+        code_policy_extra_safe_modules=code_policy_extra_safe_modules,
+        code_policy_extra_blocked_modules=code_policy_extra_blocked_modules,
         models=models,
     )

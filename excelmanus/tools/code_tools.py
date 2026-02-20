@@ -327,6 +327,7 @@ def run_code(
     require_excel_deps: bool = True,
     stdout_file: str | None = None,
     stderr_file: str | None = None,
+    sandbox_tier: str = "RED",
 ) -> str:
     """执行 Python 代码。支持内联代码片段或磁盘脚本文件。
 
@@ -388,6 +389,7 @@ def run_code(
             stdout_file=stdout_file,
             stderr_file=stderr_file,
             inline_mode=inline_mode,
+            sandbox_tier=sandbox_tier,
         )
     finally:
         # 内联模式清理临时文件
@@ -412,6 +414,7 @@ def _execute_script(
     stdout_file: str | None,
     stderr_file: str | None,
     inline_mode: bool,
+    sandbox_tier: str = "RED",
 ) -> str:
     """内部执行脚本核心逻辑（供 run_code 调用）。"""
     python_cmd, probes, mode = _resolve_python_command(
@@ -425,7 +428,19 @@ def _execute_script(
     )
     sandbox_warnings = [*env_warnings, *limit_warnings]
     safe_args = [str(item) for item in (args or [])]
-    command = [*sandbox_python_cmd, str(script_safe), *safe_args]
+
+    # ── 沙盒 wrapper 注入（GREEN/YELLOW 模式） ──
+    temp_wrapper: Path | None = None
+    if sandbox_tier in ("GREEN", "YELLOW"):
+        from excelmanus.security.sandbox_hook import generate_wrapper_script
+        wrapper_src = generate_wrapper_script(sandbox_tier, str(guard.workspace_root))
+        temp_dir = guard.workspace_root / "scripts" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
+        temp_wrapper.write_text(wrapper_src, encoding="utf-8")
+        command = [*sandbox_python_cmd, str(temp_wrapper), str(script_safe), *safe_args]
+    else:
+        command = [*sandbox_python_cmd, str(script_safe), *safe_args]
 
     started = time.time()
     timed_out = False
@@ -512,12 +527,21 @@ def _execute_script(
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
         "sandbox": {
-            "mode": "soft",
+            "mode": "soft" if sandbox_tier == "RED" else "policy_engine",
+            "tier": sandbox_tier,
+            "auto_approved": sandbox_tier in ("GREEN", "YELLOW"),
             "isolated_python": isolated_python,
             "limits_applied": limits_applied,
             "warnings": sandbox_warnings,
         },
     }
+    # 清理临时 wrapper
+    if temp_wrapper is not None and temp_wrapper.exists():
+        try:
+            temp_wrapper.unlink()
+        except OSError:
+            pass
+
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -550,7 +574,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="run_code",
-            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）。仅在专用 Excel 工具无法完成任务时使用；优先编写小步可验证脚本，执行后立即检查结果。",
+            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）。适用于复杂数据变换（透视、转置、分组聚合、跨表匹配填充、条件行删除等）、批量计算、以及专用工具难以一步完成的多步逻辑。优先编写小步可验证脚本，执行后立即检查结果。",
             input_schema={
                 "type": "object",
                 "properties": {
