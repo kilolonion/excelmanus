@@ -603,6 +603,15 @@ def _render_welcome(
     )
     info.append("  工作目录  ", style=label_style)
     info.append(f"{os.path.abspath(config.workspace_root)}\n", style="white")
+    # 布局模式
+    _mode = _current_layout_mode
+    info.append("  布局      ", style=label_style)
+    if _mode == "dashboard":
+        info.append("dashboard", style="bold #5fd7af")
+        info.append("  密集信息模式\n", style="dim white")
+    else:
+        info.append("classic", style="bold #f0c674")
+        info.append("  传统流式模式\n", style="dim white")
 
     # ── 分隔线 ──
     info.append("  " + "─" * 52 + "\n", style="dim #5f5f5f")
@@ -613,6 +622,7 @@ def _render_welcome(
         ("技能", ["/skills", "/model", "/mcp", "/config"]),
         ("控制", ["/subagent", "/fullaccess", "/backup", "/plan"]),
         ("审批", ["/accept", "/reject", "/undo"]),
+        ("显示", ["/ui dashboard", "/ui classic"]),
     ]
     for group_name, cmds in cmd_groups:
         info.append(f"  {group_name}  ", style="dim #888888")
@@ -977,24 +987,22 @@ async def _read_user_input(
     *,
     model_hint: str = "",
     turn_number: int = 0,
+    subagent_active: bool = False,
+    plan_mode: bool = False,
 ) -> str:
     """读取用户输入：优先使用 prompt_toolkit 的异步输入能力。"""
-    # 构建带上下文的提示符
-    if model_hint and turn_number > 0:
-        # ANSI: dim白色模型名 + dim白色轮次 + 粗体绿色箭头
-        ansi_prompt = (
-            f"\n \x1b[2;37m{model_hint}\x1b[0m"
-            f" \x1b[2;37m#{turn_number}\x1b[0m"
-            f" \x1b[1;32m❯\x1b[0m "
-        )
-        rich_prompt = (
-            f"\n [dim white]{model_hint}[/dim white]"
-            f" [dim white]#{turn_number}[/dim white]"
-            f" [bold green]❯[/bold green] "
-        )
-    elif model_hint:
-        ansi_prompt = f"\n \x1b[2;37m{model_hint}\x1b[0m \x1b[1;32m❯\x1b[0m "
-        rich_prompt = f"\n [dim white]{model_hint}[/dim white] [bold green]❯[/bold green] "
+    # 构建密集徽章提示符
+    badges = _build_prompt_badges(
+        model_hint=model_hint,
+        turn_number=turn_number,
+        layout_mode=_current_layout_mode,
+        subagent_active=subagent_active,
+        plan_mode=plan_mode,
+    )
+    if badges:
+        # ANSI: dim 白色徽章 + 粗体绿色箭头
+        ansi_prompt = f"\n \x1b[2;37m{badges}\x1b[0m \x1b[1;32m❯\x1b[0m "
+        rich_prompt = f"\n [dim white]{badges}[/dim white] [bold green]❯[/bold green] "
     else:
         ansi_prompt = "\n \x1b[1;32m❯\x1b[0m "
         rich_prompt = "\n [bold green]❯[/bold green] "
@@ -2084,9 +2092,13 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 if callable(_turn):
                     _turn = _turn()
                 _turn = _turn if isinstance(_turn, int) else 0
+                _subagent_on = bool(getattr(engine, "subagent_enabled", False))
+                _plan_on = bool(getattr(engine, "plan_mode", False))
                 user_input = (await _read_user_input(
                     model_hint=_model_hint if isinstance(_model_hint, str) else "",
                     turn_number=_turn if isinstance(_turn, int) else 0,
+                    subagent_active=_subagent_on,
+                    plan_mode=_plan_on,
                 )).strip()
         except (KeyboardInterrupt, EOFError):
             # Ctrl+C 或 Ctrl+D 优雅退出
@@ -2277,6 +2289,10 @@ async def _async_main() -> None:
         sys.exit(1)
 
     setup_logging(config.log_level)
+
+    # 初始化布局模式
+    global _current_layout_mode
+    _current_layout_mode = config.cli_layout_mode
     console.print("  [green]✓[/green] [dim white]配置已加载[/dim white]", highlight=False)
 
     # ── 2. 注册内置工具 ─────────────────────

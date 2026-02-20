@@ -1032,6 +1032,7 @@ class TestCliEntryPoints:
             memory_enabled=False,
             model="test-model",
             subagent_enabled=True,
+            cli_layout_mode="dashboard",
         )
         engine = _make_engine()
         engine.list_loaded_skillpacks.return_value = []
@@ -1064,6 +1065,7 @@ class TestCliEntryPoints:
             memory_enabled=False,
             model="test-model",
             subagent_enabled=True,
+            cli_layout_mode="dashboard",
         )
         engine = _make_engine()
         engine.extract_and_save_memory = AsyncMock(side_effect=RuntimeError("boom"))
