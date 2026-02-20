@@ -590,10 +590,16 @@ class DashboardRenderer:
     # ------------------------------------------------------------------
 
     def _is_narrow(self) -> bool:
-        explicit_width = getattr(self._console, "_width", None)
-        if isinstance(explicit_width, int) and explicit_width > 0:
-            return explicit_width < _NARROW_TERMINAL_WIDTH
-        return self._console.width < _NARROW_TERMINAL_WIDTH
+        try:
+            explicit_width = getattr(self._console, "_width", None)
+            if isinstance(explicit_width, int) and explicit_width > 0:
+                return explicit_width < _NARROW_TERMINAL_WIDTH
+            w = self._console.width
+            if isinstance(w, int):
+                return w < _NARROW_TERMINAL_WIDTH
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _meta_tool_hint(tool_name: str, arguments: Dict[str, Any]) -> str:

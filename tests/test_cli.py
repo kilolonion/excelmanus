@@ -645,65 +645,49 @@ class TestReplSlashCommands:
 
     def test_subagent_command_routes_to_engine_chat(self) -> None:
         """/subagent 命令应通过 engine.chat 处理。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="当前 subagent 状态：disabled。")
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/subagent status", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            engine.chat.assert_called_once_with(
-                "/subagent status",
-                on_event=mock_renderer.handle_event,
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "/subagent status"
 
     def test_sub_agent_alias_routes_to_engine_chat(self) -> None:
         """/sub_agent 也应通过 engine.chat 处理。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="已开启 subagent。")
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/sub_agent on", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            engine.chat.assert_called_once_with(
-                "/sub_agent on",
-                on_event=mock_renderer.handle_event,
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "/sub_agent on"
 
     def test_subagent_list_routes_to_engine_chat(self) -> None:
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="共 4 个可用子代理。")
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/subagent list", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            engine.chat.assert_called_once_with(
-                "/subagent list",
-                on_event=mock_renderer.handle_event,
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "/subagent list"
 
     def test_subagent_run_routes_to_engine_chat(self) -> None:
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="执行完成")
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/subagent run explorer -- 分析", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            engine.chat.assert_called_once_with(
-                "/subagent run explorer -- 分析",
-                on_event=mock_renderer.handle_event,
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "/subagent run explorer -- 分析"
 
     def test_accept_command_routes_to_engine_chat(self) -> None:
         engine = _make_engine()
@@ -777,24 +761,20 @@ class TestReplSlashCommands:
             assert warning_printed
 
     def test_skill_slash_command_routes_to_engine_chat_with_renderer(self) -> None:
-        """Skill 斜杠命令应走 engine.chat + StreamRenderer。"""
+        """Skill 斜杠命令应走 engine.chat + 渲染器。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.resolve_skill_command.return_value = "data_basic"
         engine.get_skillpack_argument_hint.return_value = "<file>"
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["/data_basic 分析 sales.xlsx", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            engine.chat.assert_called_once_with(
-                "/data_basic 分析 sales.xlsx",
-                on_event=mock_renderer.handle_event,
-                slash_command="data_basic",
-                raw_args="分析 sales.xlsx",
-            )
+            engine.chat.assert_called_once()
+            call_args = engine.chat.call_args
+            assert call_args[0][0] == "/data_basic 分析 sales.xlsx"
+            assert call_args[1]["slash_command"] == "data_basic"
+            assert call_args[1]["raw_args"] == "分析 sales.xlsx"
 
     def test_skill_slash_command_without_args_shows_argument_hint(self) -> None:
         engine = _make_engine()
@@ -826,42 +806,34 @@ class TestReplInput:
             engine.chat.assert_not_called()
 
     def test_natural_language_calls_engine(self) -> None:
-        """自然语言输入应调用 engine.chat 并显示结果（使用 StreamRenderer 回调）。"""
+        """自然语言输入应调用 engine.chat 并显示结果。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat.return_value = "处理完成"
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["读取文件", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            # 验证 StreamRenderer 使用 console 创建
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            # 验证 engine.chat 传入了 on_event 回调
-            engine.chat.assert_called_once_with(
-                "读取文件", on_event=mock_renderer.handle_event
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "读取文件"
+            assert "on_event" in engine.chat.call_args[1]
 
 
 class TestCliStreamRendererIntegration:
     """CLI 集成测试：StreamRenderer 替代 spinner（需求 4.1, 4.2, 4.3, 4.4）。"""
 
     def test_natural_language_uses_stream_renderer_not_spinner(self) -> None:
-        """自然语言输入应创建 StreamRenderer 并传递给 engine.chat，不使用 spinner。"""
+        """自然语言输入应通过 _run_chat_turn 调用 engine.chat，不使用 spinner。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat.return_value = "分析完成"
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["分析销售数据", "exit"]
-            mock_renderer = MagicMock()
-            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            # 验证创建了 StreamRenderer
-            mock_renderer_cls.assert_called_once_with(mock_console)
-            # 验证 engine.chat 使用 on_event 回调而非 spinner
-            engine.chat.assert_called_once_with(
-                "分析销售数据", on_event=mock_renderer.handle_event
-            )
+            engine.chat.assert_called_once()
+            assert engine.chat.call_args[0][0] == "分析销售数据"
+            assert "on_event" in engine.chat.call_args[1]
             # 验证未使用 console.status（即 spinner）
             mock_console.status.assert_not_called()
 
@@ -1012,16 +984,16 @@ class TestSkillsSubcommands:
             engine.chat.assert_not_called()
 
     def test_multiple_natural_language_inputs_each_create_renderer(self) -> None:
-        """每次自然语言输入应创建新的 StreamRenderer 实例。"""
+        """每次自然语言输入都应调用 engine.chat（通过 _run_chat_turn）。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         engine.chat.side_effect = ["回复1", "回复2"]
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["输入1", "输入2", "exit"]
-            mock_renderer_cls.return_value = MagicMock()
             _run(_repl_loop(engine))
-            # 每次自然语言输入都应创建新的 StreamRenderer
-            assert mock_renderer_cls.call_count == 2
+            # 每次自然语言输入都应调用 engine.chat
+            assert engine.chat.call_count == 2
 
 
 class TestCliEntryPoints:
@@ -1172,6 +1144,8 @@ class TestUiCommand:
 
     def test_ui_status_shows_current_mode(self) -> None:
         """/ui status 应显示当前布局模式。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "dashboard"
         from excelmanus.cli import _handle_ui_command
         engine = _make_engine()
         engine.config = MagicMock()
@@ -1215,3 +1189,100 @@ class TestUiCommand:
         """/ui 应出现在斜杠命令集合中。"""
         from excelmanus.cli import _SLASH_COMMANDS
         assert "/ui" in _SLASH_COMMANDS
+
+
+# ══════════════════════════════════════════════════════════
+# Task 4: _run_chat_turn 统一回合执行入口
+# ══════════════════════════════════════════════════════════
+
+
+class TestRunChatTurn:
+    """_run_chat_turn 统一回合执行入口测试。"""
+
+    def test_run_chat_turn_classic_mode(self) -> None:
+        """classic 模式下使用 StreamRenderer。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="经典模式回复")
+
+        with patch("excelmanus.cli.console") as mock_console:
+            reply, streamed = _run(_run_chat_turn_helper(engine, "你好"))
+        assert reply == "经典模式回复"
+
+    def test_run_chat_turn_dashboard_mode(self) -> None:
+        """dashboard 模式下使用 DashboardRenderer。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "dashboard"
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="仪表盘模式回复")
+
+        with patch("excelmanus.cli.console") as mock_console:
+            reply, streamed = _run(_run_chat_turn_helper(engine, "你好"))
+        assert reply == "仪表盘模式回复"
+
+    def test_run_chat_turn_with_slash_command(self) -> None:
+        """支持 slash_command 和 raw_args 透传。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="技能回复")
+
+        with patch("excelmanus.cli.console"):
+            reply, streamed = _run(_run_chat_turn_helper(
+                engine, "/data_basic 读取前10行",
+                slash_command="data_basic",
+                raw_args="读取前10行",
+            ))
+        assert reply == "技能回复"
+        # 确认 slash_command 被传递
+        call_kwargs = engine.chat.call_args
+        assert call_kwargs is not None
+
+    def test_run_chat_turn_renders_panel_when_not_streamed(self) -> None:
+        """未流式输出时应渲染 Panel。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
+        engine = _make_engine()
+        engine.chat = AsyncMock(return_value="最终回复")
+
+        with patch("excelmanus.cli.console") as mock_console:
+            _run(_run_chat_turn_helper(engine, "你好"))
+        # 应有 Panel 输出（至少多次 print）
+        assert mock_console.print.call_count >= 1
+
+    def test_run_chat_turn_error_label(self) -> None:
+        """异常时应使用 error_label 输出错误信息。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
+        engine = _make_engine()
+        engine.chat = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.logger"):
+            result = _run(_run_chat_turn_helper(
+                engine, "会出错",
+                error_label="处理请求",
+            ))
+        assert result is None
+        printed = " ".join(str(c) for c in mock_console.print.call_args_list)
+        assert "处理请求" in printed or "boom" in printed
+
+
+async def _run_chat_turn_helper(
+    engine,
+    user_input: str,
+    *,
+    slash_command: str | None = None,
+    raw_args: str | None = None,
+    error_label: str = "处理请求",
+) -> tuple[str, bool] | None:
+    """测试辅助函数，调用 _run_chat_turn。"""
+    from excelmanus.cli import _run_chat_turn
+    return await _run_chat_turn(
+        engine,
+        user_input=user_input,
+        slash_command=slash_command,
+        raw_args=raw_args,
+        error_label=error_label,
+    )

@@ -1770,6 +1770,62 @@ async def _chat_with_feedback(
         await ticker.stop()
 
 
+async def _run_chat_turn(
+    engine: AgentEngine,
+    *,
+    user_input: str,
+    slash_command: str | None = None,
+    raw_args: str | None = None,
+    error_label: str = "处理请求",
+) -> tuple[str, bool] | None:
+    """统一回合执行入口：根据 _current_layout_mode 选择渲染器，调用引擎，渲染结果。
+
+    返回 (reply_text, streamed)；异常时返回 None 并在终端输出错误。
+    """
+    try:
+        if _current_layout_mode == "dashboard":
+            from excelmanus.renderer_dashboard import DashboardRenderer
+            renderer = DashboardRenderer(console)
+            _turn = getattr(engine, "turn_count", 0)
+            if callable(_turn):
+                _turn = _turn()
+            _turn = _turn if isinstance(_turn, int) else 0
+            _model = getattr(engine, "current_model_name", None) or ""
+            renderer.start_turn(
+                turn_number=_turn if isinstance(_turn, int) else 0,
+                model_name=_model if isinstance(_model, str) else "",
+            )
+        else:
+            renderer = StreamRenderer(console)
+
+        console.print()
+        reply, streamed = await _chat_with_feedback(
+            engine,
+            user_input=user_input,
+            renderer=renderer,
+            slash_command=slash_command,
+            raw_args=raw_args,
+        )
+
+        if not streamed:
+            console.print()
+            console.print(
+                Panel(
+                    Markdown(reply),
+                    border_style="#5f875f",
+                    padding=(1, 2),
+                    expand=False,
+                )
+            )
+        return reply, streamed
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        logger.error("%s时发生错误: %s", error_label, exc, exc_info=True)
+        console.print(f"  [red]✗ {error_label}时发生错误：{exc}[/red]")
+        return None
+
+
 async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
     _sync_skill_command_suggestions(engine)
@@ -1805,29 +1861,14 @@ async def _repl_loop(engine: AgentEngine) -> None:
                     user_input = _build_answer_from_select(current_q, select_result)
                     if user_input:
                         try:
-                            renderer = StreamRenderer(console)
-                            console.print()
-                            reply, streamed = await _chat_with_feedback(
+                            await _run_chat_turn(
                                 engine,
                                 user_input=user_input,
-                                renderer=renderer,
+                                error_label="处理待回答问题",
                             )
-                            if not streamed:
-                                console.print()
-                                console.print(
-                                    Panel(
-                                        Markdown(reply),
-                                        border_style="#5f875f",
-                                        padding=(1, 2),
-                                        expand=False,
-                                    )
-                                )
                         except KeyboardInterrupt:
                             _render_farewell()
                             return
-                        except Exception as exc:
-                            logger.error("处理待回答问题时发生错误: %s", exc, exc_info=True)
-                            console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
                         continue
                     # user_input 为空（不应发生），回退到普通输入
                 # select_result 为 None（不支持）或 escaped（用户按 Esc）
@@ -1867,49 +1908,21 @@ async def _repl_loop(engine: AgentEngine) -> None:
                         user_input = f"/reject {pending_apv.approval_id}"
 
                     try:
-                        renderer = StreamRenderer(console)
-                        console.print()
-                        reply, streamed = await _chat_with_feedback(
+                        await _run_chat_turn(
                             engine,
                             user_input=user_input,
-                            renderer=renderer,
+                            error_label="处理审批操作",
                         )
-                        if not streamed:
-                            console.print()
-                            console.print(
-                                Panel(
-                                    Markdown(reply),
-                                    border_style="#5f875f",
-                                    padding=(1, 2),
-                                    expand=False,
-                                )
-                            )
                         # 全部授权模式：开启 fullaccess 后自动 accept
                         if approval_choice == _APPROVAL_OPTION_FULLACCESS:
-                            accept_input = f"/accept {pending_apv.approval_id}"
-                            renderer2 = StreamRenderer(console)
-                            console.print()
-                            reply2, streamed2 = await _chat_with_feedback(
+                            await _run_chat_turn(
                                 engine,
-                                user_input=accept_input,
-                                renderer=renderer2,
+                                user_input=f"/accept {pending_apv.approval_id}",
+                                error_label="处理审批操作",
                             )
-                            if not streamed2:
-                                console.print()
-                                console.print(
-                                    Panel(
-                                        Markdown(reply2),
-                                        border_style="#5f875f",
-                                        padding=(1, 2),
-                                        expand=False,
-                                    )
-                                )
                     except KeyboardInterrupt:
                         _render_farewell()
                         return
-                    except Exception as exc:
-                        logger.error("处理审批操作时发生错误: %s", exc, exc_info=True)
-                        console.print(f"  [red]✗ 处理审批操作时发生错误：{exc}[/red]")
                     continue
                 # approval_choice 为 None（不支持或 Esc），回退到普通输入
 
@@ -1945,29 +1958,14 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         if has_pending_question:
             try:
-                renderer = StreamRenderer(console)
-                console.print()
-                reply, streamed = await _chat_with_feedback(
+                await _run_chat_turn(
                     engine,
                     user_input=user_input,
-                    renderer=renderer,
+                    error_label="处理待回答问题",
                 )
-                if not streamed:
-                    console.print()
-                    console.print(
-                        Panel(
-                            Markdown(reply),
-                            border_style="#5f875f",
-                            padding=(1, 2),
-                            expand=False,
-                        )
-                    )
             except KeyboardInterrupt:
                 _render_farewell()
                 return
-            except Exception as exc:
-                logger.error("处理待回答问题时发生错误: %s", exc, exc_info=True)
-                console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
             continue
 
         # 斜杠命令处理
@@ -2045,29 +2043,14 @@ async def _repl_loop(engine: AgentEngine) -> None:
         if lowered_cmd in _SESSION_CONTROL_COMMAND_ALIASES:
             if lowered_cmd in _SUBAGENT_COMMAND_ALIASES:
                 try:
-                    renderer = StreamRenderer(console)
-                    console.print()
-                    reply, streamed = await _chat_with_feedback(
+                    await _run_chat_turn(
                         engine,
                         user_input=user_input,
-                        renderer=renderer,
+                        error_label="处理子代理命令",
                     )
-                    if not streamed:
-                        console.print()
-                        console.print(
-                            Panel(
-                                Markdown(reply),
-                                border_style="#5f875f",
-                                padding=(1, 2),
-                                expand=False,
-                            )
-                        )
                 except KeyboardInterrupt:
                     _render_farewell()
                     return
-                except Exception as exc:
-                    logger.error("处理请求时发生错误: %s", exc, exc_info=True)
-                    console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
             else:
                 reply = _reply_text(await engine.chat(user_input))
                 console.print(f"  [#81a2be]{reply}[/#81a2be]")
@@ -2090,32 +2073,16 @@ async def _repl_loop(engine: AgentEngine) -> None:
             if not raw_args and isinstance(argument_hint, str) and argument_hint.strip():
                 console.print(f"  [#de935f]参数提示：{argument_hint.strip()}[/#de935f]")
             try:
-                renderer = StreamRenderer(console)
-                console.print()
-                reply, streamed = await _chat_with_feedback(
+                await _run_chat_turn(
                     engine,
                     user_input=user_input,
-                    renderer=renderer,
                     slash_command=resolved_skill,
                     raw_args=raw_args,
+                    error_label="处理技能命令",
                 )
-
-                if not streamed:
-                    console.print()
-                    console.print(
-                        Panel(
-                            Markdown(reply),
-                            border_style="#5f875f",
-                            padding=(1, 2),
-                            expand=False,
-                        )
-                    )
             except KeyboardInterrupt:
                 _render_farewell()
                 return
-            except Exception as exc:
-                logger.error("处理请求时发生错误: %s", exc, exc_info=True)
-                console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
             continue
 
         # 未知斜杠命令提示
@@ -2129,32 +2096,14 @@ async def _repl_loop(engine: AgentEngine) -> None:
 
         # 自然语言指令：调用 AgentEngine，使用事件流渲染
         try:
-            renderer = StreamRenderer(console)
-            console.print()  # 空行分隔
-            reply, streamed = await _chat_with_feedback(
+            await _run_chat_turn(
                 engine,
                 user_input=user_input,
-                renderer=renderer,
+                error_label="处理请求",
             )
-
-            # 使用 Rich Markdown 渲染最终回复（流式已输出则跳过）
-            if not streamed:
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(reply),
-                        border_style="#5f875f",
-                        padding=(1, 2),
-                        expand=False,
-                    )
-                )
-
         except KeyboardInterrupt:
             _render_farewell()
             return
-        except Exception as exc:
-            logger.error("处理请求时发生错误: %s", exc, exc_info=True)
-            console.print(f"  [red]✗ 处理请求时发生错误：{exc}[/red]")
 
 
 async def _async_main() -> None:
