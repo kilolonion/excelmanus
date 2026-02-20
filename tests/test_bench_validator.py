@@ -394,3 +394,234 @@ class TestSerialization:
         d = sv.to_dict()
         assert d["pass_rate"] == 80.0
         assert d["failed_cases"] == ["case_x"]
+
+
+# ── golden_cells 断言 ────────────────────────────────────
+
+
+def _make_golden_pair(tmp_path, *, sheet_name="Sheet1", golden_data=None, output_data=None):
+    """创建一对 golden + output xlsx 文件用于测试。"""
+    from openpyxl import Workbook
+
+    # golden 文件
+    golden_path = tmp_path / "golden.xlsx"
+    wb_g = Workbook()
+    ws_g = wb_g.active
+    ws_g.title = sheet_name
+    for row_idx, row_data in enumerate(golden_data or [], 1):
+        for col_idx, val in enumerate(row_data, 1):
+            ws_g.cell(row=row_idx, column=col_idx, value=val)
+    wb_g.save(golden_path)
+    wb_g.close()
+
+    # output 文件
+    workdir = tmp_path / "workfiles"
+    workdir.mkdir()
+    output_path = workdir / "output.xlsx"
+    wb_o = Workbook()
+    ws_o = wb_o.active
+    ws_o.title = sheet_name
+    for row_idx, row_data in enumerate(output_data or [], 1):
+        for col_idx, val in enumerate(row_data, 1):
+            ws_o.cell(row=row_idx, column=col_idx, value=val)
+    wb_o.save(output_path)
+    wb_o.close()
+
+    return workdir, golden_path
+
+
+class TestGoldenCells:
+    """golden_cells 断言的单元测试。"""
+
+    def test_all_cells_match(self, tmp_path):
+        data = [["A", 1], ["B", 2], ["C", 3]]
+        workdir, golden = _make_golden_pair(
+            tmp_path, golden_data=data, output_data=data,
+        )
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden),
+                "answer_position": "'Sheet1'!A1:B3",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.total == 1
+        assert v.passed == 1
+        golden_result = v.results[0]
+        assert golden_result.rule == "golden_cells"
+        assert golden_result.passed is True
+        assert golden_result.actual["accuracy_pct"] == 100.0
+
+    def test_cells_mismatch(self, tmp_path):
+        golden_data = [["A", 1], ["B", 2]]
+        output_data = [["A", 99], ["X", 2]]
+        workdir, golden = _make_golden_pair(
+            tmp_path, golden_data=golden_data, output_data=output_data,
+        )
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden),
+                "answer_position": "'Sheet1'!A1:B2",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.failed == 1
+        golden_result = v.results[0]
+        assert golden_result.rule == "golden_cells"
+        assert golden_result.passed is False
+        assert golden_result.actual["matched"] == 2  # A1 and B2 match
+        assert golden_result.actual["total_cells"] == 4
+        assert len(golden_result.actual["mismatches_sample"]) == 2
+
+    def test_none_vs_empty_string_treated_equal(self, tmp_path):
+        golden_data = [[None, ""]]
+        output_data = [["", None]]
+        workdir, golden = _make_golden_pair(
+            tmp_path, golden_data=golden_data, output_data=output_data,
+        )
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden),
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.passed == 1
+
+    def test_float_int_tolerance(self, tmp_path):
+        golden_data = [[1, 2.0]]
+        output_data = [[1.0, 2]]
+        workdir, golden = _make_golden_pair(
+            tmp_path, golden_data=golden_data, output_data=output_data,
+        )
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden),
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.passed == 1
+
+    def test_missing_output_file(self, tmp_path):
+        golden_path = tmp_path / "golden.xlsx"
+        from openpyxl import Workbook
+        wb = Workbook(); wb.save(golden_path); wb.close()
+
+        empty_dir = tmp_path / "empty_workdir"
+        empty_dir.mkdir()
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden_path),
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=empty_dir,
+        )
+        assert v.failed == 1
+        assert "未找到" in v.results[0].message
+
+    def test_missing_golden_file(self, tmp_path):
+        workdir = tmp_path / "workfiles"
+        workdir.mkdir()
+        from openpyxl import Workbook
+        wb = Workbook(); wb.save(workdir / "out.xlsx"); wb.close()
+
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": "/nonexistent/golden.xlsx",
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.failed == 1
+        assert "不存在" in v.results[0].message
+
+    def test_no_workfile_dir_skips_golden(self):
+        """当 workfile_dir 为 None 时，跳过 golden 断言。"""
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": "some/golden.xlsx",
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=None,
+        )
+        # 没有 assertions 也没有可执行的 golden → 空结果
+        assert v.total == 0
+
+    def test_golden_combined_with_regular_assertions(self, tmp_path):
+        """golden_cells 与常规断言组合使用。"""
+        data = [["A", 1]]
+        workdir, golden = _make_golden_pair(
+            tmp_path, golden_data=data, output_data=data,
+        )
+        r = _make_result_dict(status="ok", iterations=3)
+        v = validate_case(
+            r, {"status": "ok", "max_iterations": 5},
+            expected={
+                "golden_file": str(golden),
+                "answer_position": "'Sheet1'!A1:B1",
+            },
+            workfile_dir=workdir,
+        )
+        # status + max_iterations + golden_cells = 3 assertions
+        assert v.total == 3
+        assert v.passed == 3
+
+    def test_formula_output_fails_golden(self, tmp_path):
+        """写入公式的输出文件（data_only=True 读取为 None）应当断言失败。"""
+        from openpyxl import Workbook
+
+        golden_data = [["(P)", 1], ["(O)", 2]]
+        workdir = tmp_path / "workfiles"
+        workdir.mkdir()
+
+        # golden 文件：有具体值
+        golden_path = tmp_path / "golden.xlsx"
+        wb_g = Workbook()
+        ws_g = wb_g.active
+        ws_g.title = "Sheet1"
+        for r, row in enumerate(golden_data, 1):
+            for c, val in enumerate(row, 1):
+                ws_g.cell(row=r, column=c, value=val)
+        wb_g.save(golden_path)
+        wb_g.close()
+
+        # output 文件：写入公式（无缓存值）
+        output_path = workdir / "output.xlsx"
+        wb_o = Workbook()
+        ws_o = wb_o.active
+        ws_o.title = "Sheet1"
+        ws_o["A1"] = '=INDEX(Sheet2!A:A,1)'
+        ws_o["B1"] = '=SUM(Sheet2!B:B)'
+        ws_o["A2"] = '=INDEX(Sheet2!A:A,2)'
+        ws_o["B2"] = '=SUM(Sheet2!C:C)'
+        wb_o.save(output_path)
+        wb_o.close()
+
+        r = _make_result_dict()
+        v = validate_case(
+            r, {},
+            expected={
+                "golden_file": str(golden_path),
+                "answer_position": "'Sheet1'!A1:B2",
+            },
+            workfile_dir=workdir,
+        )
+        assert v.failed == 1
+        golden_result = v.results[0]
+        assert golden_result.actual["matched"] == 0
+        assert golden_result.actual["total_cells"] == 4

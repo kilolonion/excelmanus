@@ -226,6 +226,21 @@ def write_cells(
     finally:
         wb.close()
 
+    # 检测是否写入了公式
+    has_formulas = False
+    if single_mode:
+        if isinstance(value, str) and str(value).strip().startswith("="):
+            has_formulas = True
+    elif values:
+        for row_data in values:
+            if isinstance(row_data, list):
+                for v in row_data:
+                    if isinstance(v, str) and v.strip().startswith("="):
+                        has_formulas = True
+                        break
+            if has_formulas:
+                break
+
     # 写入后返回受影响区域的预览
     if return_preview:
         from openpyxl import load_workbook as _lw
@@ -252,6 +267,13 @@ def write_cells(
                 result["preview_after"] = preview_rows
         finally:
             wb2.close()
+
+    # 公式写入警告: openpyxl 写入的公式无缓存计算值，外部读取时会显示为空
+    if has_formulas:
+        result["formula_warning"] = (
+            "写入的公式无缓存计算值，仅在 Excel 打开时才会计算。"
+            "若需确保值立即可读，建议改用计算后的具体值写入。"
+        )
 
     logger.info("write_cells: %s", result)
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)

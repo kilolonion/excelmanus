@@ -57,13 +57,15 @@ class TestBuildFileStructureContext:
     """_build_file_structure_context 测试。"""
 
     def test_no_paths_returns_empty(self, router: SkillRouter) -> None:
-        assert router._build_file_structure_context(candidate_file_paths=None) == ""
-        assert router._build_file_structure_context(candidate_file_paths=[]) == ""
+        text, sc, mr = router._build_file_structure_context(candidate_file_paths=None)
+        assert text == ""
+        text, sc, mr = router._build_file_structure_context(candidate_file_paths=[])
+        assert text == ""
 
     def test_title_row_file_suggests_header_1(
         self, router: SkillRouter, excel_with_title_row: Path
     ) -> None:
-        result = router._build_file_structure_context(
+        result, sc, mr = router._build_file_structure_context(
             candidate_file_paths=[str(excel_with_title_row)]
         )
         assert "[文件结构预览]" in result
@@ -73,7 +75,7 @@ class TestBuildFileStructureContext:
     def test_standard_header_suggests_header_0(
         self, router: SkillRouter, excel_standard_header: Path
     ) -> None:
-        result = router._build_file_structure_context(
+        result, sc, mr = router._build_file_structure_context(
             candidate_file_paths=[str(excel_standard_header)]
         )
         assert "[文件结构预览]" in result
@@ -82,7 +84,7 @@ class TestBuildFileStructureContext:
         assert "header_row=0" in result
 
     def test_nonexistent_file_skipped(self, router: SkillRouter, tmp_path: Path) -> None:
-        result = router._build_file_structure_context(
+        result, sc, mr = router._build_file_structure_context(
             candidate_file_paths=[str(tmp_path / "nonexistent.xlsx")]
         )
         assert result == ""
@@ -90,7 +92,7 @@ class TestBuildFileStructureContext:
     def test_non_excel_file_skipped(self, router: SkillRouter, tmp_path: Path) -> None:
         txt_file = tmp_path / "data.txt"
         txt_file.write_text("hello")
-        result = router._build_file_structure_context(
+        result, sc, mr = router._build_file_structure_context(
             candidate_file_paths=[str(txt_file)]
         )
         assert result == ""
@@ -109,7 +111,7 @@ class TestBuildFileStructureContext:
             wb.save(fp)
             paths.append(str(fp))
 
-        result = router._build_file_structure_context(
+        result, sc, mr = router._build_file_structure_context(
             candidate_file_paths=paths, max_files=2
         )
         # 应该只包含 2 个文件的信息

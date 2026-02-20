@@ -1220,10 +1220,14 @@ def _save_result(
     result: BenchResult,
     output_dir: Path,
     assertions: dict[str, Any] | None = None,
+    *,
+    expected: dict[str, Any] | None = None,
+    workfile_dir: Path | None = None,
 ) -> tuple[Path, ValidationSummary | None]:
     """保存单个用例结果到 JSON 文件。
 
     如果提供了 assertions，会自动执行断言校验并将结果嵌入输出 JSON。
+    当 expected 包含 golden_file / answer_position 时，自动追加 golden_cells 断言。
 
     Returns:
         (filepath, validation_summary) — validation_summary 仅在有 assertions 时非 None。
@@ -1238,8 +1242,17 @@ def _save_result(
 
     # 执行断言校验
     validation: ValidationSummary | None = None
-    if assertions:
-        validation = validate_case(result_dict, assertions)
+    # 当 expected 包含 golden 信息时，即使 assertions 为空也需要校验
+    has_golden = bool(
+        expected and expected.get("golden_file") and expected.get("answer_position")
+    )
+    if assertions or has_golden:
+        validation = validate_case(
+            result_dict,
+            assertions or {},
+            expected=expected,
+            workfile_dir=workfile_dir,
+        )
         result_dict["validation"] = validation.to_dict()
         if validation.failed > 0:
             logger.warning(
@@ -1393,10 +1406,14 @@ async def run_suite(
                     "message": str(exc),
                 },
             )
+        # 构建 workfile 目录路径（与 _isolate_source_files 一致）
+        workfile_dir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
         try:
             filepath, validation = _save_result(
                 result, output_dir,
                 assertions=case.assertions or None,
+                expected=case.expected or None,
+                workfile_dir=workfile_dir if workfile_dir.is_dir() else None,
             )
             if validation is not None:
                 async with _validations_lock:

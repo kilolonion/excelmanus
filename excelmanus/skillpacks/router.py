@@ -243,7 +243,7 @@ class SkillRouter:
         if large_file_context:
             system_contexts.append(large_file_context)
 
-        file_structure_context = self._build_file_structure_context(
+        file_structure_context, sheet_count, max_total_rows = self._build_file_structure_context(
             candidate_file_paths=candidate_file_paths,
         )
         if file_structure_context:
@@ -255,6 +255,8 @@ class SkillRouter:
             system_contexts=system_contexts,
             parameterized=result.parameterized,
             write_hint=result.write_hint,
+            sheet_count=sheet_count,
+            max_total_rows=max_total_rows,
         )
 
     def _build_all_tools_result(
@@ -273,7 +275,7 @@ class SkillRouter:
         if large_file_context:
             system_contexts.append(large_file_context)
 
-        file_structure_context = self._build_file_structure_context(
+        file_structure_context, sheet_count, max_total_rows = self._build_file_structure_context(
             candidate_file_paths=candidate_file_paths,
         )
         if file_structure_context:
@@ -285,6 +287,8 @@ class SkillRouter:
             system_contexts=system_contexts,
             parameterized=False,
             write_hint=write_hint,
+            sheet_count=sheet_count,
+            max_total_rows=max_total_rows,
         )
 
     async def _classify_write_hint(self, user_message: str) -> str:
@@ -434,12 +438,17 @@ class SkillRouter:
         )
         if large_file_context:
             system_contexts.append(large_file_context)
+        _, sheet_count, max_total_rows = self._build_file_structure_context(
+            candidate_file_paths=candidate_file_paths,
+        )
         return SkillMatchResult(
             skills_used=result.skills_used,
             route_mode=result.route_mode,
             system_contexts=system_contexts,
             parameterized=result.parameterized,
             write_hint=result.write_hint,
+            sheet_count=sheet_count,
+            max_total_rows=max_total_rows,
         )
 
     def _collect_candidate_file_paths(
@@ -470,18 +479,23 @@ class SkillRouter:
         max_files: int = 3,
         max_sheets: int = 5,
         scan_rows: int = 12,
-    ) -> str:
+    ) -> tuple[str, int, int]:
         """预读候选 Excel 文件的 sheet 结构，注入路由上下文。
 
         用 openpyxl 只读模式仅读前几行，帮助 LLM 确定 header_row
         和可用列名，避免盲猜导致的多轮重试。
+
+        Returns:
+            (context_text, sheet_count, max_total_rows)
         """
         if not candidate_file_paths:
-            return ""
+            return "", 0, 0
 
         file_sections: list[str] = []
         processed = 0
         seen: set[str] = set()
+        all_sheet_count = 0
+        all_max_total_rows = 0
 
         for raw_path in candidate_file_paths:
             if processed >= max_files:
@@ -518,12 +532,14 @@ class SkillRouter:
 
             sheet_lines: list[str] = []
             try:
+                all_sheet_count += len(wb.sheetnames)
                 for idx, sn in enumerate(wb.sheetnames):
                     ws = wb[sn]
                     if idx >= max_sheets:
                         # 超出详细预览数量的 sheet：仅输出摘要行（名称+行列数）
                         summary_rows = ws.max_row or 0
                         summary_cols = ws.max_column or 0
+                        all_max_total_rows = max(all_max_total_rows, summary_rows)
                         sheet_lines.append(f"  [{sn}] {summary_rows}行×{summary_cols}列")
                         continue
 
@@ -542,6 +558,7 @@ class SkillRouter:
 
                     total_rows = ws.max_row or 0
                     total_cols = ws.max_column or 0
+                    all_max_total_rows = max(all_max_total_rows, total_rows)
                     sheet_lines.append(f"  [{sn}] {total_rows}行×{total_cols}列")
 
                     for ri, row_vals in enumerate(rows_data):
@@ -564,13 +581,13 @@ class SkillRouter:
                 processed += 1
 
         if not file_sections:
-            return ""
+            return "", all_sheet_count, all_max_total_rows
 
         header = (
             "[文件结构预览] 以下是用户提及的 Excel 文件结构，请据此确定正确的 header_row 和列名。\n"
             "请基于以上预览直接调用工具执行用户请求，不要重复描述文件结构。"
         )
-        return header + "\n" + "\n".join(file_sections)
+        return header + "\n" + "\n".join(file_sections), all_sheet_count, all_max_total_rows
 
     @staticmethod
     def _guess_header_row(rows: list[list[Any]], max_scan: int = 12) -> int | None:
