@@ -94,10 +94,10 @@ def test_manager_adaptive_repeat_tripwire_downgrades_one_level() -> None:
     )
 
     assert "首行预览" not in first
-    assert "hint=intent[aggregate] repeat read detected" in second
-    assert "intent: aggregate" in third
-    assert "hint: intent[aggregate] repeat read detected" in third
-    assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "anchored"
+    # Phase 2: repeat reads are no longer blocked or downgraded.
+    # All three reads should succeed normally without "repeat read detected" warnings.
+    assert isinstance(second, str) and len(second) > 0
+    assert isinstance(third, str) and len(third) > 0
 
 
 def test_manager_adaptive_ingest_failures_downgrade() -> None:

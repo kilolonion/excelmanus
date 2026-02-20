@@ -1920,7 +1920,9 @@ async def _chat_with_feedback(
     raw_args: str | None = None,
 ) -> tuple[str, bool]:
     """统一封装 chat 调用，增加等待期动态状态反馈。返回 (reply_text, streamed)。"""
-    ticker = _LiveStatusTicker(console, enabled=_is_interactive_terminal())
+    # Dashboard 模式自带 Live 状态栏，禁用 ticker 避免冲突
+    is_dashboard = _current_layout_mode == "dashboard"
+    ticker = _LiveStatusTicker(console, enabled=_is_interactive_terminal() and not is_dashboard)
     event_handler = ticker.wrap_handler(renderer.handle_event)
 
     await ticker.start()

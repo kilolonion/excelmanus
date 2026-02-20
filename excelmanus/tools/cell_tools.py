@@ -410,6 +410,7 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="write_cells",
             description=(
+                "【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n"
                 "向 Excel 指定单元格或范围写入值/公式，不影响其他区域数据。"
                 "两种模式：(1) cell+value 写单个单元格；"
                 "(2) cell_range+values 批量写入二维数据。"
@@ -459,7 +460,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="insert_rows",
-            description="在 Excel 指定行号前插入空行，已有数据自动下移",
+            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n在 Excel 指定行号前插入空行，已有数据自动下移",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -488,7 +489,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="insert_columns",
-            description="在 Excel 指定列前插入空列，已有数据自动右移。列可以用字母（如 'C'）或数字（如 3）指定",
+            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n在 Excel 指定列前插入空列，已有数据自动右移。列可以用字母（如 'C'）或数字（如 3）指定",
             input_schema={
                 "type": "object",
                 "properties": {

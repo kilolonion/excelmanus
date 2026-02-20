@@ -544,10 +544,10 @@ def _execute_script(
         },
     }
     # 检测沙盒权限错误，追加恢复提示
-    if status == "failed" and sandbox_tier in ("GREEN", "YELLOW"):
+    if status == "failed":
         stderr_text = stderr or ""
-        if "安全策略禁止" in stderr_text:
-            hints: list[str] = []
+        hints: list[str] = []
+        if sandbox_tier in ("GREEN", "YELLOW") and "安全策略禁止" in stderr_text:
             if "路径不在工作区内" in stderr_text:
                 hints.append(
                     "库内部临时文件写入被拦截。"
@@ -555,12 +555,18 @@ def _execute_script(
                 )
             if "bench 保护目录" in stderr_text:
                 hints.append(
-                    "bench/external 目录受沙盒保护，run_code 无法写入。"
-                    "推荐：先用 copy_file 将文件复制到 outputs/ 目录，再对副本执行 run_code。"
-                    "或使用 delegate_to_subagent 完成写入。"
+                    "【高优先级】bench/external 目录受沙盒保护，run_code 无法直接写入其中文件。"
+                    "先调用 copy_file 工具将文件复制到 outputs/ 目录下，再对 outputs/ 下的副本使用 run_code 进行操作。"
                 )
-            if hints:
-                result["recovery_hint"] = " ".join(hints)
+        
+        if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
+            if any(m in stderr_text for m in ["requests", "urllib", "http", "socket", "os", "sys", "subprocess", "No module named"]):
+                hints.append(
+                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。请放弃尝试网络请求，或仅使用安全的数据处理库（pandas/numpy）。"
+                )
+
+        if hints:
+            result["recovery_hint"] = " ".join(hints)
 
     # 清理临时 wrapper
     if temp_wrapper is not None and temp_wrapper.exists():

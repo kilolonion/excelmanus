@@ -353,7 +353,10 @@ class WindowPerceptionManager:
 
         for file_path in affected_files:
             in_audit = file_path in audit_excel_files
-            stale_reason = "run_code 已修改此文件" if in_audit else "run_code 可能修改此文件"
+            stale_reason = (
+                f"run_code {'已' if in_audit else '可能'}修改此文件，缓存已清空。"
+                "请调用 read_excel 刷新数据。"
+            )
             if execution_summary:
                 stale_reason = f"{stale_reason}（{execution_summary}）"
 
@@ -641,31 +644,9 @@ class WindowPerceptionManager:
                         )
                 except Exception:
                     repeat_count = 0
-
-                warn_threshold, trip_threshold = self._repeat_thresholds_for_intent(intent_tag)
-                if repeat_count >= trip_threshold:
-                    requested_mode_normalized = str(requested_mode or "").strip().lower()
-                    if requested_mode_normalized != "adaptive":
-                        return self._enriched_fallback(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            result_text=result_text,
-                            success=success,
-                            payload=payload,
-                        )
-                    downgraded_mode = self._adaptive_selector.mark_repeat_tripwire()
-                    if downgraded_mode == "enriched":
-                        return self._enriched_fallback(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            result_text=result_text,
-                            success=success,
-                            payload=payload,
-                        )
-                    mode = downgraded_mode
-                    repeat_warning = True
-                elif repeat_count >= warn_threshold:
-                    repeat_warning = True
+                # Phase 2: record for audit only, never block or downgrade.
+                # Re-reading is the agent's primary mechanism to verify writes
+                # and eliminate hallucinations. Never interfere with it.
 
             self._apply_delta_pipeline(
                 window=window,

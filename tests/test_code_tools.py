@@ -273,7 +273,7 @@ class TestRecoveryHint:
         assert result["status"] == "failed"
         assert "recovery_hint" in result
         assert "bench/external" in result["recovery_hint"]
-        assert "mcp_excel" in result["recovery_hint"] or "delegate_to_subagent" in result["recovery_hint"]
+        assert "copy_file" in result["recovery_hint"] or "delegate_to_subagent" in result["recovery_hint"] or "outputs/" in result["recovery_hint"]
 
     def test_no_recovery_hint_on_success(self, workspace: Path) -> None:
         """成功执行不应有 recovery_hint。"""
