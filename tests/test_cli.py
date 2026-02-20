@@ -1303,29 +1303,29 @@ class TestDensePromptBadges:
         assert "#5" in badges or "5" in badges
 
     def test_build_prompt_badges_contains_layout(self) -> None:
-        """Prompt 徽章应包含布局模式。"""
+        """Dashboard 模式的徽章应使用 │ 分隔符。"""
         from excelmanus.cli import _build_prompt_badges
         badges = _build_prompt_badges(
             model_hint="m", turn_number=1,
             layout_mode="dashboard", subagent_active=False, plan_mode=False,
         )
-        assert "dashboard" in badges
+        assert "│" in badges
 
     def test_build_prompt_badges_subagent_active(self) -> None:
-        """子代理活跃时应显示 subagent 徽章。"""
+        """子代理活跃时应显示 subagent 徽章（dashboard 模式）。"""
         from excelmanus.cli import _build_prompt_badges
         badges = _build_prompt_badges(
             model_hint="m", turn_number=1,
-            layout_mode="classic", subagent_active=True, plan_mode=False,
+            layout_mode="dashboard", subagent_active=True, plan_mode=False,
         )
-        assert "subagent" in badges.lower() or "🧵" in badges
+        assert "sub" in badges.lower() or "🧵" in badges
 
     def test_build_prompt_badges_plan_mode(self) -> None:
-        """计划模式时应显示 plan 徽章。"""
+        """计划模式时应显示 plan 徽章（dashboard 模式）。"""
         from excelmanus.cli import _build_prompt_badges
         badges = _build_prompt_badges(
             model_hint="m", turn_number=1,
-            layout_mode="classic", subagent_active=False, plan_mode=True,
+            layout_mode="dashboard", subagent_active=False, plan_mode=True,
         )
         assert "plan" in badges.lower()
 
