@@ -487,31 +487,12 @@ class DashboardRenderer:
         header = (event.question_header or "").strip() or "待确认"
         text = (event.question_text or "").strip()
         options = event.question_options or []
-        lines: list[str] = []
-        if text:
-            lines.append(text)
-            lines.append("")
-        for i, option in enumerate(options, start=1):
-            if not isinstance(option, dict):
-                continue
-            label = str(option.get("label", "")).strip()
-            description = str(option.get("description", "")).strip()
-            if label and description:
-                lines.append(f"{i}. {label} - {description}")
-            elif label:
-                lines.append(f"{i}. {label}")
-        content = "\n".join(lines) if lines else "请先回答当前问题。"
-        self._console.print()
-        self._console.print(
-            Panel(
-                rich_escape(content),
-                title=f"[bold #f0c674]❓ {rich_escape(header)}[/bold #f0c674]",
-                title_align="left",
-                border_style="#de935f",
-                expand=False,
-                padding=(1, 2),
-            )
-        )
+        # 仅输出简洁提示，完整问题由交互选择器渲染
+        option_count = len(options) if isinstance(options, list) else 0
+        hint = f"  [bold #f0c674]❓ {rich_escape(header)}[/bold #f0c674]"
+        if option_count > 0:
+            hint += f"  [dim white]({option_count} 个选项，请在下方选择)[/dim white]"
+        self._console.print(hint)
 
     def _on_approval(self, event: ToolCallEvent) -> None:
         tool_name = event.approval_tool_name or "未知工具"
