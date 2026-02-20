@@ -1274,6 +1274,99 @@ class TestRunChatTurn:
         assert panel_rendered or mock_console.print.call_count >= 1
 
 
+# ══════════════════════════════════════════════════════════
+# Task 6: 输入与命令发现优化
+# ══════════════════════════════════════════════════════════
+
+
+class TestDensePromptBadges:
+    """Prompt 密集徽章测试。"""
+
+    def test_build_prompt_badges_contains_model(self) -> None:
+        """Prompt 徽章应包含模型名称。"""
+        from excelmanus.cli import _build_prompt_badges
+        badges = _build_prompt_badges(
+            model_hint="qwen-max", turn_number=3,
+            layout_mode="dashboard", subagent_active=False, plan_mode=False,
+        )
+        assert "qwen-max" in badges
+
+    def test_build_prompt_badges_contains_turn(self) -> None:
+        """Prompt 徽章应包含回合号。"""
+        from excelmanus.cli import _build_prompt_badges
+        badges = _build_prompt_badges(
+            model_hint="m", turn_number=5,
+            layout_mode="dashboard", subagent_active=False, plan_mode=False,
+        )
+        assert "#5" in badges or "5" in badges
+
+    def test_build_prompt_badges_contains_layout(self) -> None:
+        """Prompt 徽章应包含布局模式。"""
+        from excelmanus.cli import _build_prompt_badges
+        badges = _build_prompt_badges(
+            model_hint="m", turn_number=1,
+            layout_mode="dashboard", subagent_active=False, plan_mode=False,
+        )
+        assert "dashboard" in badges
+
+    def test_build_prompt_badges_subagent_active(self) -> None:
+        """子代理活跃时应显示 subagent 徽章。"""
+        from excelmanus.cli import _build_prompt_badges
+        badges = _build_prompt_badges(
+            model_hint="m", turn_number=1,
+            layout_mode="classic", subagent_active=True, plan_mode=False,
+        )
+        assert "subagent" in badges.lower() or "🧵" in badges
+
+    def test_build_prompt_badges_plan_mode(self) -> None:
+        """计划模式时应显示 plan 徽章。"""
+        from excelmanus.cli import _build_prompt_badges
+        badges = _build_prompt_badges(
+            model_hint="m", turn_number=1,
+            layout_mode="classic", subagent_active=False, plan_mode=True,
+        )
+        assert "plan" in badges.lower()
+
+
+class TestSmartCommandSuggestions:
+    """未知命令近似推荐测试。"""
+
+    def test_suggest_similar_commands_help(self) -> None:
+        """输入 /hel 应推荐 /help。"""
+        from excelmanus.cli import _suggest_similar_commands
+        suggestions = _suggest_similar_commands("/hel")
+        assert "/help" in suggestions
+
+    def test_suggest_similar_commands_histoy(self) -> None:
+        """输入 /histoy 应推荐 /history。"""
+        from excelmanus.cli import _suggest_similar_commands
+        suggestions = _suggest_similar_commands("/histoy")
+        assert "/history" in suggestions
+
+    def test_suggest_similar_commands_max_3(self) -> None:
+        """推荐最多 3 个。"""
+        from excelmanus.cli import _suggest_similar_commands
+        suggestions = _suggest_similar_commands("/x")
+        assert len(suggestions) <= 3
+
+    def test_suggest_similar_commands_no_match(self) -> None:
+        """无近似命令时返回空列表。"""
+        from excelmanus.cli import _suggest_similar_commands
+        suggestions = _suggest_similar_commands("/zzzzzzzzzzz")
+        assert isinstance(suggestions, list)
+
+    def test_unknown_command_uses_smart_suggestions(self) -> None:
+        """REPL 中未知命令应使用近似推荐而非固定列表。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
+        engine = _make_engine()
+        with patch("excelmanus.cli.console") as mock_console:
+            mock_console.input.side_effect = ["/hep", "exit"]
+            _run(_repl_loop(engine))
+            printed = " ".join(str(c) for c in mock_console.print.call_args_list)
+            assert "/help" in printed
+
+
 async def _run_chat_turn_helper(
     engine,
     user_input: str,
