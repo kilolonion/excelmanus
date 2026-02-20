@@ -299,6 +299,6 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",
     # code
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
-    "run_code": "执行 Python 代码或脚本，仅在专用工具无法完成时使用",
+    "run_code": "执行 Python 代码或脚本，适用于批量数据处理、复杂变换、跨表操作等场景（已配备安全沙盒）",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
 }

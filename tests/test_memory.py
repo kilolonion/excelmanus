@@ -187,7 +187,7 @@ class TestTruncation:
     def test_truncation_removes_oldest_first(self, config: ExcelManusConfig) -> None:
         """截断时移除最早的消息，保留最近的。"""
         mem = ConversationMemory(config)
-        mem._truncation_threshold = 2500
+        mem._truncation_threshold = 5000
 
         mem.add_user_message("第一条消息")
         mem.add_assistant_message("第一条回复")
