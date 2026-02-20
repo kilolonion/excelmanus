@@ -63,6 +63,7 @@ _SLASH_COMMANDS = {
     "/help",
     "/history",
     "/clear",
+    "/save",
     "/skills",
     "/subagent",
     "/sub_agent",
@@ -74,9 +75,11 @@ _SLASH_COMMANDS = {
     "/plan",
     "/model",
     "/config",
+    "/backup",
 }
 
 _FULL_ACCESS_COMMAND_ALIASES = {"/fullaccess", "/full_access"}
+_BACKUP_COMMAND_ALIASES = {"/backup"}
 _SUBAGENT_COMMAND_ALIASES = {"/subagent", "/sub_agent"}
 _APPROVAL_COMMAND_ALIASES = {"/accept", "/reject", "/undo"}
 _PLAN_COMMAND_ALIASES = {"/plan"}
@@ -88,32 +91,38 @@ _SESSION_CONTROL_COMMAND_ALIASES = (
     | _APPROVAL_COMMAND_ALIASES
     | _PLAN_COMMAND_ALIASES
     | _MODEL_COMMAND_ALIASES
+    | _BACKUP_COMMAND_ALIASES
 )
 
 _SLASH_COMMAND_SUGGESTIONS = (
     "/help",
     "/history",
     "/clear",
+    "/save",
     "/skills",
     "/subagent",
     "/sub_agent",
     "/mcp",
     "/config",
-    "/fullAccess",
-    "/full_access",
     "/fullaccess",
+    "/full_access",
     "/accept",
     "/reject",
     "/undo",
     "/plan",
     "/model",
+    "/backup",
 )
 _CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
 _FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
+_BACKUP_ARGUMENTS = ("status", "on", "off", "apply", "list")
 _SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
 _PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
 _MODEL_ARGUMENTS: tuple[str, ...] = ("list",)  # 动态模型名称在运行时追加
 _DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
+
+# --save 启动参数：退出时自动保存对话记录的路径（None 表示未启用）
+_AUTO_SAVE_PATH: str | None = None
 
 
 def _resolve_skill_slash_command(engine: AgentEngine, user_input: str) -> str | None:
@@ -373,15 +382,33 @@ def _list_known_slash_commands() -> tuple[str, ...]:
     return tuple(dict.fromkeys(ordered))
 
 
-# ASCII Logo
-_LOGO = r"""
-  ______               _ __  __
- |  ____|             | |  \/  |
- | |__  __  _____ ___ | | \  / | __ _ _ __  _   _ ___
- |  __| \ \/ / __/ _ \| | |\/| |/ _` | '_ \| | | / __|
- | |____ >  < (_|  __/| | |  | | (_| | | | | |_| \__ \
- |______/_/\_\___\___||_|_|  |_|\__,_|_| |_|\__,_|___/
-"""
+# ASCII Logo — 逐行渐变色渲染
+_LOGO_LINES = [
+    r"  ______               _ __  __",
+    r" |  ____|             | |  \/  |",
+    r" | |__  __  _____ ___ | | \  / | __ _ _ __  _   _ ___",
+    " |  __| \\ \\/ / __/ _ \\| | |\\/| |/ _` | '_ \\| | | / __|",
+    " | |____ >  < (_|  __/| | |  | | (_| | | | | |_| \\__ \\",
+    " |______/_/\\_\\___\\___||_|_|  |_|\\__,_|_| |_|\\__,_|___/",
+]
+
+# 绿色→青色渐变色带
+_LOGO_GRADIENT = [
+    "#5fff87",  # 亮绿
+    "#5fd7af",  # 绿青
+    "#5fd7d7",  # 青
+    "#5fafd7",  # 青蓝
+    "#5f87d7",  # 蓝
+    "#8787d7",  # 紫蓝
+]
+
+
+def _render_gradient_logo() -> None:
+    """渲染渐变色 ASCII Logo。"""
+    for i, line in enumerate(_LOGO_LINES):
+        color = _LOGO_GRADIENT[i % len(_LOGO_GRADIENT)]
+        console.print(Text(line, style=f"bold {color}"), highlight=False)
+    console.print()
 
 
 def _compute_inline_suggestion(user_input: str) -> str | None:
@@ -392,7 +419,7 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
     command, separator, remainder = user_input.partition(" ")
     lowered_command = command.lower()
 
-    # 先补全命令本体：如 /ful -> /fullAccess
+    # 先补全命令本体：如 /ful -> /fullaccess
     if not separator:
         for suggestion in _list_known_slash_commands():
             if suggestion.lower() == lowered_command:
@@ -401,7 +428,7 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
                 return suggestion[len(user_input) :]
         return None
 
-    # 再补全控制命令参数：如 /fullAccess s -> /fullAccess status
+    # 再补全控制命令参数：如 /fullaccess s -> /fullaccess status
     command_arguments: dict[str, tuple[str, ...]] = {
         alias: _FULL_ACCESS_ARGUMENTS for alias in _FULL_ACCESS_COMMAND_ALIASES
     }
@@ -410,6 +437,9 @@ def _compute_inline_suggestion(user_input: str) -> str | None:
     )
     command_arguments.update(
         {alias: _PLAN_ARGUMENTS for alias in _PLAN_COMMAND_ALIASES}
+    )
+    command_arguments.update(
+        {alias: _BACKUP_ARGUMENTS for alias in _BACKUP_COMMAND_ALIASES}
     )
     command_arguments.update(
         {alias: _MODEL_ARGUMENTS for alias in _MODEL_COMMAND_ALIASES}
@@ -469,34 +499,40 @@ def _render_welcome(
 
     info = Text()
 
-    # 环境信息
-    model_display = config.model
-    info.append("  模型    ", style="dim white")
-    info.append(f"{model_display}\n", style="bold #f0c674")
-    info.append("  子代理  ", style="dim white")
+    # ── 环境信息区 ──
+    label_style = "dim white"
+    info.append("  模型      ", style=label_style)
+    info.append(f"{config.model}\n", style="bold #f0c674")
+    info.append("  子代理    ", style=label_style)
     info.append(
         ("已启用" if config.subagent_enabled else "已禁用") + "\n",
-        style="bold #81a2be" if config.subagent_enabled else "bold #cc6666",
+        style="bold #81a2be" if config.subagent_enabled else "dim #cc6666",
     )
-    info.append("  目录    ", style="dim white")
-    info.append(f"{os.path.abspath(config.workspace_root)}\n\n", style="white")
+    info.append("  工作目录  ", style=label_style)
+    info.append(f"{os.path.abspath(config.workspace_root)}\n", style="white")
 
-    # 快捷命令
-    info.append("  命令    ", style="dim white")
-    cmds = [
-        "/help", "/history", "/clear", "/skills", "/subagent",
-        "/mcp", "/config", "/fullAccess", "/accept <id>",
-        "/reject <id>", "/undo <id>", "/plan", "/model",
-        "/<skill_name>", "exit",
+    # ── 分隔线 ──
+    info.append("  " + "─" * 52 + "\n", style="dim #5f5f5f")
+
+    # ── 快捷命令区（按类别分组）──
+    cmd_groups: list[tuple[str, list[str]]] = [
+        ("对话", ["/help", "/history", "/clear", "exit"]),
+        ("技能", ["/skills", "/model", "/mcp", "/config"]),
+        ("控制", ["/subagent", "/fullaccess", "/backup", "/plan"]),
+        ("审批", ["/accept", "/reject", "/undo"]),
     ]
-    info.append("  ".join(cmds), style="#b5bd68")
-    info.append("\n")
+    for group_name, cmds in cmd_groups:
+        info.append(f"  {group_name}  ", style="dim #888888")
+        info.append("  ".join(cmds), style="#b5bd68")
+        info.append("\n")
 
     console.print(
         Panel(
             info,
             border_style="#5f875f",
             padding=(0, 1),
+            title="[bold #5fd7af]ExcelManus[/bold #5fd7af]",
+            title_align="left",
         )
     )
 
@@ -742,7 +778,7 @@ _APPROVAL_OPTION_FULLACCESS = "全部授权"
 _APPROVAL_OPTIONS: list[tuple[str, str, str]] = [
     ("✅ 执行", "确认并执行此操作", _APPROVAL_OPTION_ACCEPT),
     ("❌ 拒绝", "取消此操作", _APPROVAL_OPTION_REJECT),
-    ("🔓 全部授权", "开启 fullAccess 后自动执行", _APPROVAL_OPTION_FULLACCESS),
+    ("🔓 全部授权", "开启 fullaccess 后自动执行", _APPROVAL_OPTION_FULLACCESS),
 ]
 
 
@@ -844,8 +880,32 @@ async def _interactive_approval_select(
     return result_holder[0]
 
 
-async def _read_user_input() -> str:
+async def _read_user_input(
+    *,
+    model_hint: str = "",
+    turn_number: int = 0,
+) -> str:
     """读取用户输入：优先使用 prompt_toolkit 的异步输入能力。"""
+    # 构建带上下文的提示符
+    if model_hint and turn_number > 0:
+        # ANSI: dim白色模型名 + dim白色轮次 + 粗体绿色箭头
+        ansi_prompt = (
+            f"\n \x1b[2;37m{model_hint}\x1b[0m"
+            f" \x1b[2;37m#{turn_number}\x1b[0m"
+            f" \x1b[1;32m❯\x1b[0m "
+        )
+        rich_prompt = (
+            f"\n [dim white]{model_hint}[/dim white]"
+            f" [dim white]#{turn_number}[/dim white]"
+            f" [bold green]❯[/bold green] "
+        )
+    elif model_hint:
+        ansi_prompt = f"\n \x1b[2;37m{model_hint}\x1b[0m \x1b[1;32m❯\x1b[0m "
+        rich_prompt = f"\n [dim white]{model_hint}[/dim white] [bold green]❯[/bold green] "
+    else:
+        ansi_prompt = "\n \x1b[1;32m❯\x1b[0m "
+        rich_prompt = "\n [bold green]❯[/bold green] "
+
     if (
         _PROMPT_TOOLKIT_ENABLED
         and _PROMPT_SESSION is not None
@@ -853,13 +913,13 @@ async def _read_user_input() -> str:
         and sys.stdout.isatty()
     ):
         try:
-            return await _PROMPT_SESSION.prompt_async(ANSI("\n \x1b[1;32m❯\x1b[0m "))
+            return await _PROMPT_SESSION.prompt_async(ANSI(ansi_prompt))
         except (KeyboardInterrupt, EOFError):
             raise
         except Exception as exc:  # pragma: no cover - 仅保护交互式边界
             logger.warning("prompt_toolkit 输入失败，回退到基础输入：%s", exc)
 
-    return console.input("\n [bold green]❯[/bold green] ")
+    return console.input(rich_prompt)
 
 
 async def _read_multiline_user_input() -> str:
@@ -874,52 +934,82 @@ async def _read_multiline_user_input() -> str:
 
 
 def _render_help(engine: AgentEngine | None = None) -> None:
-    """渲染帮助信息。"""
-    table = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
-    table.add_column("命令", style="#b5bd68", min_width=14)
-    table.add_column("说明")
+    """渲染帮助信息（按分类分区展示）。"""
 
-    table.add_row("/help", "显示此帮助信息")
-    table.add_row("/history", "显示当前会话的对话历史摘要")
-    table.add_row("/clear", "清除当前对话历史")
-    table.add_row("/skills", "查看已加载 Skillpacks 与本轮路由结果")
-    table.add_row("/skills list", "列出全部 Skillpack 摘要")
-    table.add_row("/skills get <name>", "查看单个 Skillpack 详情")
-    table.add_row("/skills create <name> --json/--json-file", "创建 project Skillpack")
-    table.add_row("/skills patch <name> --json/--json-file", "更新 project Skillpack")
-    table.add_row("/skills delete <name> [--yes]", "软删除 project Skillpack")
-    table.add_row("/subagent [on|off|status|list]", "会话级 subagent 开关与列表")
-    table.add_row("/subagent run -- <task>", "自动选择 subagent 执行任务")
-    table.add_row("/subagent run <agent> -- <task>", "指定 subagent 执行任务")
-    table.add_row("/mcp", "查看 MCP Server 连接状态与工具列表")
-    table.add_row("/config", "列出 MCP 引用的环境变量配置（脱敏）")
-    table.add_row("/config set <KEY> <VALUE>", "设置环境变量到 .env 文件")
-    table.add_row("/config get <KEY>", "查看某个环境变量的值（脱敏）")
-    table.add_row("/config delete <KEY>", "从 .env 文件删除某个环境变量")
-    table.add_row("/fullAccess [on|off|status]", "会话级代码技能权限控制")
-    table.add_row("/accept <id>", "执行待确认高风险操作")
-    table.add_row("/reject <id>", "拒绝待确认高风险操作")
-    table.add_row("/undo <id>", "回滚已确认且可回滚的操作")
-    table.add_row("/plan [on|off|status]", "会话级 plan mode 开关与状态")
-    table.add_row("/plan approve [plan_id]", "批准待审批计划并自动继续执行")
-    table.add_row("/plan reject [plan_id]", "拒绝待审批计划")
-    table.add_row("/model", "查看当前模型")
-    table.add_row("/model list", "列出所有可用模型")
-    table.add_row("/model <name>", "切换模型（支持智能补全）")
-    table.add_row("/<skill_name> [args...]", "手动调用指定 Skillpack（如 /data_basic）")
-    table.add_row("多选回答", "待回答问题为多选时：每行一个选项，空行提交")
+    def _section_table() -> Table:
+        t = Table(show_header=False, show_edge=False, pad_edge=False, expand=False)
+        t.add_column("命令", style="#b5bd68", min_width=20)
+        t.add_column("说明", style="white")
+        return t
+
+    # ── 对话与导航 ──
+    t1 = _section_table()
+    t1.add_row("/help", "显示此帮助信息")
+    t1.add_row("/history", "显示当前会话的对话历史摘要")
+    t1.add_row("/clear", "清除当前对话历史")
+    t1.add_row("/save [路径]", "保存完整对话记录（含工具调用）到 JSON")
+    t1.add_row("exit / quit / Ctrl+C", "退出程序")
+
+    # ── 技能与工具 ──
+    t2 = _section_table()
+    t2.add_row("/skills", "查看已加载 Skillpacks 与路由结果")
+    t2.add_row("/skills list", "列出全部 Skillpack 摘要")
+    t2.add_row("/skills get <name>", "查看单个 Skillpack 详情")
+    t2.add_row("/skills create/patch/delete", "管理 project Skillpack")
+    t2.add_row("/<skill_name> [args...]", "手动调用 Skillpack")
+    t2.add_row("/model [list|<name>]", "查看/切换模型（支持补全）")
+    t2.add_row("/mcp", "查看 MCP Server 连接状态")
+    t2.add_row("/config [list|set|get|delete]", "MCP 环境变量配置管理")
+
+    # ── 会话控制 ──
+    t3 = _section_table()
+    t3.add_row("/subagent [on|off|status|list]", "会话级 subagent 开关与列表")
+    t3.add_row("/subagent run [agent] -- <task>", "指定/自动选择 subagent 执行任务")
+    t3.add_row("/fullaccess [on|off|status]", "会话级代码技能权限控制")
+    t3.add_row("/backup [on|off|status|apply|list]", "备份沙盒模式控制")
+    t3.add_row("/plan [on|off|status]", "plan mode 开关与状态")
+    t3.add_row("/plan approve/reject [id]", "批准或拒绝待审批计划")
+
+    # ── 审批操作 ──
+    t4 = _section_table()
+    t4.add_row("/accept <id>", "执行待确认高风险操作")
+    t4.add_row("/reject <id>", "拒绝待确认高风险操作")
+    t4.add_row("/undo <id>", "回滚已确认且可回滚的操作")
+    t4.add_row("多选回答", "每行一个选项，空行提交")
+
+    # 技能命令
     skill_rows = _load_skill_command_rows(engine) if engine is not None else []
-    for name, argument_hint in skill_rows:
-        hint_text = argument_hint if argument_hint else "(无参数提示)"
-        table.add_row(f"/{name}", f"Skillpack 参数：{hint_text}")
-    table.add_row("exit / quit", "退出程序")
-    table.add_row("Ctrl+C", "退出程序")
+    t5: Table | None = None
+    if skill_rows:
+        t5 = _section_table()
+        for name, argument_hint in skill_rows:
+            hint_text = argument_hint if argument_hint else "(无参数提示)"
+            t5.add_row(f"/{name}", hint_text)
+
+    # 组装渲染
+    sections: list[tuple[str, Table]] = [
+        ("💬 对话与导航", t1),
+        ("🧩 技能与工具", t2),
+        ("⚙️  会话控制", t3),
+        ("🔐 审批操作", t4),
+    ]
+    if t5:
+        sections.append(("📦 已加载技能", t5))
+
+    parts: list[str | Table] = []
+    for i, (title, tbl) in enumerate(sections):
+        if i > 0:
+            parts.append("")
+        parts.append(f"  [bold #5fd7af]{title}[/bold #5fd7af]")
+        parts.append(tbl)
+
+    from rich.console import Group
 
     console.print()
     console.print(
         Panel(
-            table,
-            title="[bold]帮助[/bold]",
+            Group(*parts),
+            title="[bold]📖 帮助[/bold]",
             title_align="left",
             border_style="#5f87af",
             expand=False,
@@ -966,9 +1056,104 @@ def _render_history(engine: AgentEngine) -> None:
     console.print()
 
 
+def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
+    """处理 /save 命令：保存完整对话记录（含工具调用）到 JSON 文件。
+
+    用法:
+        /save              — 保存到 outputs/conversations/ 下自动命名
+        /save <路径>       — 保存到指定路径
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    parts = user_input.split(maxsplit=1)
+    output_path_str = parts[1].strip() if len(parts) > 1 else ""
+
+    # 获取完整对话消息
+    messages = engine.memory.get_messages()
+
+    # 序列化消息（确保所有值可 JSON 化）
+    serialized_messages: list[dict] = []
+    for msg in messages:
+        entry: dict = {}
+        for key, value in msg.items():
+            if value is None:
+                entry[key] = None
+            elif isinstance(value, (str, int, float, bool)):
+                entry[key] = value
+            elif isinstance(value, (list, dict)):
+                entry[key] = value
+            else:
+                entry[key] = str(value)
+        serialized_messages.append(entry)
+
+    # 统计信息
+    user_count = sum(1 for m in serialized_messages if m.get("role") == "user")
+    assistant_count = sum(1 for m in serialized_messages if m.get("role") == "assistant")
+    tool_msg_count = sum(1 for m in serialized_messages if m.get("role") == "tool")
+    tool_call_count = sum(
+        len(m.get("tool_calls") or [])
+        for m in serialized_messages
+        if m.get("tool_calls")
+    )
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    model_name = getattr(engine, "current_model_name", None) or getattr(engine, "current_model", "unknown")
+
+    save_data = {
+        "schema_version": 2,
+        "kind": "conversation_export",
+        "timestamp": timestamp,
+        "meta": {
+            "active_model": model_name if isinstance(model_name, str) else str(model_name),
+            "session_turn": getattr(engine, "_session_turn", 0),
+        },
+        "stats": {
+            "message_count": len(serialized_messages),
+            "user_messages": user_count,
+            "assistant_messages": assistant_count,
+            "tool_messages": tool_msg_count,
+            "tool_call_count": tool_call_count,
+        },
+        "diagnostics": getattr(engine, "session_diagnostics", []),
+        "messages": serialized_messages,
+    }
+
+    # 确定输出路径
+    if output_path_str:
+        filepath = Path(output_path_str)
+    else:
+        output_dir = Path("outputs") / "conversations"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        short_id = uuid.uuid4().hex[:6]
+        filepath = output_dir / f"conversation_{ts}_{short_id}.json"
+
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(save_data, f, ensure_ascii=False, indent=2)
+
+    console.print(f"  [green]✓ 对话已保存到：{filepath}[/green]")
+    console.print(
+        f"  [dim white]共 {len(serialized_messages)} 条消息"
+        f"（用户 {user_count} / 助手 {assistant_count}"
+        f" / 工具调用 {tool_call_count} / 工具结果 {tool_msg_count}）[/dim white]"
+    )
+
+
 def _render_farewell() -> None:
     """渲染告别信息。"""
-    console.print("\n  [#81a2be]感谢使用 ExcelManus，再见！[/#81a2be] 👋\n")
+    farewell = Text()
+    farewell.append("\n  ")
+    farewell.append("─" * 40, style="dim #5f5f5f")
+    farewell.append("\n  ")
+    farewell.append("感谢使用 ", style="#81a2be")
+    farewell.append("ExcelManus", style="bold #5fd7af")
+    farewell.append("，再见！", style="#81a2be")
+    farewell.append(" 👋")
+    farewell.append("\n")
+    console.print(farewell)
 
 
 def _render_skills(engine: AgentEngine) -> None:
@@ -1002,6 +1187,10 @@ def _render_skills(engine: AgentEngine) -> None:
     table.add_row(
         "计划模式",
         "enabled" if engine.plan_mode_enabled else "disabled",
+    )
+    table.add_row(
+        "备份模式",
+        "enabled" if engine.backup_enabled else "disabled",
     )
 
     console.print()
@@ -1412,11 +1601,11 @@ async def _interactive_model_select(engine: AgentEngine) -> str | None:
 
 
 class _LiveStatusTicker:
-    """CLI 动态状态提示：在等待回复期间输出灰色滚动文本。"""
+    """CLI 动态状态提示：在等待回复期间输出 spinner 动画。"""
 
-    _FRAMES = ("...", "..", ".")
+    _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
-    def __init__(self, console: Console, *, enabled: bool, interval: float = 0.3) -> None:
+    def __init__(self, console: Console, *, enabled: bool, interval: float = 0.12) -> None:
         self._console = console
         self._enabled = enabled
         self._interval = interval
@@ -1606,8 +1795,8 @@ async def _repl_loop(engine: AgentEngine) -> None:
                     elif approval_choice == _APPROVAL_OPTION_REJECT:
                         user_input = f"/reject {pending_apv.approval_id}"
                     elif approval_choice == _APPROVAL_OPTION_FULLACCESS:
-                        # 先开启 fullAccess，再 accept
-                        user_input = f"/fullAccess on"
+                        # 先开启 fullaccess，再 accept
+                        user_input = f"/fullaccess on"
                     else:
                         user_input = f"/reject {pending_apv.approval_id}"
 
@@ -1628,7 +1817,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
                                 expand=False,
                             )
                         )
-                        # 全部授权模式：开启 fullAccess 后自动 accept
+                        # 全部授权模式：开启 fullaccess 后自动 accept
                         if approval_choice == _APPROVAL_OPTION_FULLACCESS:
                             accept_input = f"/accept {pending_apv.approval_id}"
                             renderer2 = StreamRenderer(console)
@@ -1663,7 +1852,15 @@ async def _repl_loop(engine: AgentEngine) -> None:
                 )
                 user_input = (await _read_multiline_user_input()).strip()
             else:
-                user_input = (await _read_user_input()).strip()
+                _model_hint = getattr(engine, "current_model_name", None) or ""
+                _turn = getattr(engine, "turn_count", 0)
+                if callable(_turn):
+                    _turn = _turn()
+                _turn = _turn if isinstance(_turn, int) else 0
+                user_input = (await _read_user_input(
+                    model_hint=_model_hint if isinstance(_model_hint, str) else "",
+                    turn_number=_turn if isinstance(_turn, int) else 0,
+                )).strip()
         except (KeyboardInterrupt, EOFError):
             # Ctrl+C 或 Ctrl+D 优雅退出
             _render_farewell()
@@ -1716,6 +1913,14 @@ async def _repl_loop(engine: AgentEngine) -> None:
         if user_input.lower() == "/clear":
             engine.clear_memory()
             console.print("  [green]✓ 对话历史已清除。[/green]")
+            continue
+
+        if user_input.lower().startswith("/save"):
+            try:
+                _handle_save_command(engine, user_input)
+            except Exception as exc:
+                logger.error("处理 /save 命令失败: %s", exc, exc_info=True)
+                console.print(f"  [red]✗ /save 命令执行失败：{exc}[/red]")
             continue
 
         if user_input.lower() == "/skills":
@@ -1856,7 +2061,8 @@ async def _async_main() -> None:
     import time as _time
 
     # ── 打印 Logo ──────────────────────────────────
-    console.print(Text(_LOGO, style="bold green"), highlight=False)
+    console.print()
+    _render_gradient_logo()
     console.print(
         f"  v{__version__}  ·  基于大语言模型的 Excel 智能代理\n",
         style="dim white",
@@ -1870,24 +2076,24 @@ async def _async_main() -> None:
         sys.exit(1)
 
     setup_logging(config.log_level)
-    console.print("  [green]✓[/green] 配置已加载", highlight=False)
+    console.print("  [green]✓[/green] [dim white]配置已加载[/dim white]", highlight=False)
 
-    # ── 2. 注册内置工具 ─────────────────────────────
+    # ── 2. 注册内置工具 ─────────────────────
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
     builtin_count = len(registry.get_tool_names())
     console.print(
-        f"  [green]✓[/green] [bold]{builtin_count}[/bold] 个内置工具已注册",
+        f"  [green]✓[/green] [dim white]内置工具[/dim white] [bold #5fd7af]{builtin_count}[/bold #5fd7af]",
         highlight=False,
     )
 
-    # ── 3. 加载 Skillpacks ──────────────────────────
+    # ── 3. 加载 Skillpacks ────────────────────
     loader = SkillpackLoader(config, registry)
     loader.load_all()
     router = SkillRouter(config, loader)
     skill_count = len(loader.list_skillpacks())
     console.print(
-        f"  [green]✓[/green] [bold]{skill_count}[/bold] 个 Skillpack 已加载",
+        f"  [green]✓[/green] [dim white]Skillpacks[/dim white] [bold #5fd7af]{skill_count}[/bold #5fd7af]",
         highlight=False,
     )
 
@@ -1909,12 +2115,12 @@ async def _async_main() -> None:
         )
         memory_extractor = MemoryExtractor(client=_client, model=config.model)
         console.print(
-            "  [green]✓[/green] 持久记忆已启用",
+            "  [green]✓[/green] [dim white]持久记忆[/dim white] [bold #5fd7af]已启用[/bold #5fd7af]",
             highlight=False,
         )
     else:
         console.print(
-            "  [dim]○ 持久记忆已禁用[/dim]",
+            "  [dim #5f5f5f]○ 持久记忆已禁用[/dim #5f5f5f]",
             highlight=False,
         )
 
@@ -1933,9 +2139,9 @@ async def _async_main() -> None:
     mcp_count = 0
     mcp_tool_count = 0
     with console.status(
-        "  [dim]⟳ 正在连接 MCP Server…[/dim]",
+        "  [dim white]⟳ 正在连接 MCP Server…[/dim white]",
         spinner="dots",
-        spinner_style="cyan",
+        spinner_style="#5fd7af",
     ):
         t0 = _time.monotonic()
         try:
@@ -1951,24 +2157,37 @@ async def _async_main() -> None:
             if info.get("status") == "ready":
                 mcp_tool_count += info.get("tool_count", 0)
         console.print(
-            f"  [green]✓[/green] [bold]{mcp_count}[/bold] 个 MCP Server 已连接"
-            f"  [dim]({mcp_tool_count} 个远程工具, {elapsed_ms}ms)[/dim]",
+            f"  [green]✓[/green] [dim white]MCP Server[/dim white] [bold #5fd7af]{mcp_count}[/bold #5fd7af]"
+            f"  [dim #888888]({mcp_tool_count} 工具, {elapsed_ms}ms)[/dim #888888]",
             highlight=False,
         )
     else:
         console.print(
-            f"  [dim]○ 无 MCP Server[/dim]  [dim]({elapsed_ms}ms)[/dim]",
+            f"  [dim #5f5f5f]○ 无 MCP Server[/dim #5f5f5f]  [dim #5f5f5f]({elapsed_ms}ms)[/dim #5f5f5f]",
             highlight=False,
         )
 
     # ── 启动信息面板 ────────────────────────────────
     console.print()  # 启动序列与面板之间留白
+    if _AUTO_SAVE_PATH is not None:
+        save_hint = _AUTO_SAVE_PATH if _AUTO_SAVE_PATH else "outputs/conversations/ (自动)"
+        console.print(
+            f"  [green]✓[/green] [dim white]对话自动保存[/dim white] [bold #5fd7af]{save_hint}[/bold #5fd7af]",
+            highlight=False,
+        )
     _render_welcome(config, skill_count, mcp_count)
 
     # 启动 REPL 循环
     try:
         await _repl_loop(engine)
     finally:
+        # --save 自动保存
+        if _AUTO_SAVE_PATH is not None:
+            try:
+                save_input = f"/save {_AUTO_SAVE_PATH}".strip() if _AUTO_SAVE_PATH else "/save"
+                _handle_save_command(engine, save_input)
+            except Exception:
+                logger.warning("CLI 退出时自动保存对话失败，已跳过", exc_info=True)
         try:
             await engine.extract_and_save_memory()
         except Exception:
@@ -1981,6 +2200,26 @@ async def _async_main() -> None:
 
 def main() -> None:
     """CLI 入口函数。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="excelmanus",
+        description="ExcelManus — 基于大语言模型的 Excel 智能代理",
+        add_help=False,  # 避免与 /help 冲突
+    )
+    parser.add_argument(
+        "--save",
+        metavar="PATH",
+        nargs="?",
+        const="",  # --save 不带路径时为空字符串，表示自动生成路径
+        default=None,
+        help="退出时自动保存对话记录到 JSON（不指定路径则自动生成）",
+    )
+    args, _unknown = parser.parse_known_args()
+
+    global _AUTO_SAVE_PATH
+    _AUTO_SAVE_PATH = args.save  # None=未启用, ""=自动路径, "xxx"=指定路径
+
     try:
         asyncio.run(_async_main())
     except KeyboardInterrupt:

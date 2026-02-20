@@ -25,6 +25,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "max_iterations": 20,
         "max_consecutive_failures": 3,
         "workspace_root": ".",
+        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -200,7 +201,7 @@ class TestExecutionGuardState:
         _ = await engine._tool_calling_loop(route_result, on_event=None)
         second = await engine._tool_calling_loop(route_result, on_event=None)
 
-        guard_msg = "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
+        guard_msg = "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
         user_messages = [
             str(m.get("content", ""))
             for m in engine.memory.get_messages()
@@ -237,7 +238,7 @@ class TestExecutionGuardState:
         _ = await engine.chat("任务一")
         _ = await engine.chat("任务二")
 
-        guard_msg = "⚠️ 你刚才在文本中给出了公式建议，但没有实际写入文件。"
+        guard_msg = "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
         user_messages = [
             str(m.get("content", ""))
             for m in engine.memory.get_messages()

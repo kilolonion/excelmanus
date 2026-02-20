@@ -21,6 +21,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         max_sessions=10,
         memory_enabled=False,
         workspace_root="/tmp/excelmanus-test-session-lifecycle",
+        backup_enabled=False,
     )
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
