@@ -4950,6 +4950,7 @@ class AgentEngine:
                     write_hint=route_result.write_hint or "unknown",
                     sheet_count=route_result.sheet_count,
                     total_rows=route_result.max_total_rows,
+                    task_tags=list(route_result.task_tags),
                 )
                 _strategy_text = self._prompt_composer.compose_strategies_text(_p_ctx)
                 if _strategy_text:
