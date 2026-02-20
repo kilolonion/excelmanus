@@ -148,10 +148,10 @@ class ToolDef:
     ) -> dict[str, Any]:
         """生成摘要 schema：仅 name + description，无参数细节。
 
-        用于 ToolProfile extended 工具的默认呈现。
-        LLM 看到工具存在但不知道如何调用，需先 expand_tools 获取完整 schema。
+        .. deprecated:: v5.1
+            所有工具现在始终暴露完整 schema，此方法不再被调用。
         """
-        hint = "（调用 expand_tools 展开此类别获取完整参数）"
+        hint = "（此方法已废弃，所有工具现在始终暴露完整 schema）"
         desc = self.description
         if hint not in desc:
             desc = f"{desc}\n{hint}"
@@ -245,30 +245,15 @@ class ToolRegistry:
 
     def get_tiered_schemas(
         self,
-        expanded_categories: set[str],
+        expanded_categories: set[str] | None = None,
         mode: OpenAISchemaMode = "responses",
     ) -> list[dict[str, Any]]:
-        """根据 ToolProfile 生成分层 tool schemas。
+        """返回所有工具的完整 schema。
 
-        core 工具始终返回完整 schema。
-        extended 工具默认返回摘要 schema，除非其 category 在 expanded_categories 中。
-        不在 TOOL_PROFILES 中的工具（如 MCP 动态注册）始终返回完整 schema。
+        v5.1: 所有工具始终暴露完整 schema，不再区分 tier。
+        expanded_categories 参数保留仅为向后兼容，不影响行为。
         """
-        from excelmanus.tools.profile import TOOL_PROFILES
-
-        schemas: list[dict[str, Any]] = []
-        for name, tool in self._tools.items():
-            profile = TOOL_PROFILES.get(name)
-            if profile is None:
-                schemas.append(tool.to_openai_schema(mode=mode))
-                continue
-            if profile["tier"] == "core":
-                schemas.append(tool.to_openai_schema(mode=mode))
-            elif profile.get("category") in expanded_categories:
-                schemas.append(tool.to_openai_schema(mode=mode))
-            else:
-                schemas.append(tool.to_summary_schema(mode=mode))
-        return schemas
+        return [tool.to_openai_schema(mode=mode) for tool in self._tools.values()]
 
     def call_tool(
         self,

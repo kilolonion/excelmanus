@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("activate_skill", "expand_tools", "delegate_to_subagent", "list_subagents", "ask_user")
+_META_TOOL_NAMES = ("activate_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
     "memory_save", "memory_read_topic",
@@ -645,7 +645,7 @@ class AgentEngine:
         self._loaded_skill_names: dict[str, int] = {}
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # session 级别已展开的工具类别（expand_tools 元工具激活后持续生效）
+        # v5.1: _expanded_categories 已废弃，保留仅为向后兼容
         self._expanded_categories: set[str] = set()
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
@@ -1860,10 +1860,8 @@ class AgentEngine:
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """构建 LLM-Native 元工具定义。
 
-        构建 activate_skill + expand_tools + finish_task + delegate_to_subagent + list_subagents + ask_user。
+        构建 activate_skill + finish_task + delegate_to_subagent + list_subagents + ask_user。
         """
-        from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS
-
         # ── 构建 skill catalog ──
         skill_catalog = "当前无可用技能。"
         skill_names: list[str] = []
@@ -1916,25 +1914,12 @@ class AgentEngine:
                                 lines.append(f"- {name}{suffix}")
                         skill_catalog = "\n".join(lines)
 
-        # ── 构建 tool category catalog ──
-        category_lines = []
-        for cat in sorted(EXTENDED_CATEGORIES):
-            desc = CATEGORY_DESCRIPTIONS.get(cat, cat)
-            category_lines.append(f"- {cat}: {desc}")
-        category_catalog = "\n".join(category_lines)
-
         activate_skill_description = (
             "激活技能获取专业操作指引。技能提供特定领域的最佳实践和步骤指导。\n"
             "当你需要执行复杂任务、不确定最佳方案时，激活对应技能获取指引。\n"
             "⚠️ 不要向用户提及技能名称或工具名称等内部概念。\n"
             "调用后立即执行任务，不要仅输出计划。\n\n"
             f"{skill_catalog}"
-        )
-        expand_tools_description = (
-            "按类别展开工具的完整参数说明。\n"
-            "当你需要调用某个类别的工具但只看到了名称和简短描述时，"
-            "先调用此工具获取完整的参数定义。\n\n"
-            f"可用类别：\n{category_catalog}"
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
@@ -2003,25 +1988,6 @@ class AgentEngine:
                             },
                         },
                         "required": ["skill_name"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "expand_tools",
-                    "description": expand_tools_description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "category": {
-                                "type": "string",
-                                "description": "要展开的工具类别",
-                                "enum": sorted(EXTENDED_CATEGORIES),
-                            },
-                        },
-                        "required": ["category"],
                         "additionalProperties": False,
                     },
                 },
@@ -2157,30 +2123,9 @@ class AgentEngine:
             tools.append(finish_task_tool)
         return tools
 
-    def _handle_expand_tools(self, category: str) -> str:
-        """处理 expand_tools 元工具调用，将指定类别工具从摘要升级为完整 schema。"""
-        from excelmanus.tools.profile import EXTENDED_CATEGORIES, CATEGORY_DESCRIPTIONS, get_tools_in_category
-
-        if category not in EXTENDED_CATEGORIES:
-            valid = ", ".join(sorted(EXTENDED_CATEGORIES))
-            return f"无效类别 '{category}'。可用类别：{valid}"
-
-        self._expanded_categories.add(category)
-        tools = get_tools_in_category(category)
-        registered = set(self._all_tool_names())
-        available = [t for t in tools if t in registered]
-        desc = CATEGORY_DESCRIPTIONS.get(category, category)
-        tool_list = ", ".join(available) if available else "(无)"
-        return (
-            f"已展开类别 [{category}]: {desc}\n"
-            f"包含工具：{tool_list}\n"
-            f"这些工具的完整参数定义已在下一轮对话中可见。"
-        )
-
     def _build_v5_tools(self) -> list[dict[str, Any]]:
-        """构建分层工具 schema（core=完整, extended=摘要/已展开=完整）+ 元工具。"""
+        """构建全量工具 schema + 元工具。"""
         domain_schemas = self._registry.get_tiered_schemas(
-            expanded_categories=self._expanded_categories,
             mode="chat_completions",
         )
         meta_schemas = self._build_meta_tools()
@@ -3293,8 +3238,7 @@ class AgentEngine:
                     guard_msg = (
                         "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
                         "你拥有完整的 Excel 工具集可直接操作数据。"
-                        "请立即调用 expand_tools 展开对应类别，"
-                        "然后使用工具执行操作。"
+                        "请立即调用对应工具执行操作。"
                         "严禁给出 VBA 宏代码、AppleScript 或外部脚本替代执行。"
                         "你的所有能力均可通过内置工具实现，无需用户离开本系统。"
                     )
@@ -3310,8 +3254,7 @@ class AgentEngine:
                     if consecutive_text_only < 2 and iteration < max_iter:
                         guard_msg = (
                             "你尚未调用任何写入工具完成实际操作。"
-                            "请先调用 expand_tools 展开对应类别获取工具参数，"
-                            "再立即调用对应写入/格式化/图表工具执行。"
+                            "请立即调用对应写入/格式化/图表工具执行。"
                             "注意：你拥有完整的 Excel 工具集可直接操作数据，"
                             "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
                             "严禁在文本中输出 VBA 代码块作为操作方案。"

@@ -35,7 +35,6 @@ _SUBAGENT_TOOL_MAX_ITEMS = 8
 # 元工具：对用户隐藏内部细节，使用友好名称和描述
 _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
     "activate_skill": ("⚙️", "激活技能指引"),
-    "expand_tools": ("🔧", "展开工具参数"),
     "delegate_to_subagent": ("🧵", "委派子任务"),
     "list_subagents": ("📋", "查询可用助手"),
 }

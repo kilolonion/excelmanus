@@ -3098,10 +3098,9 @@ class TestMetaToolDefinitions:
         )
 
         meta_tools = engine._build_meta_tools()
-        assert len(meta_tools) >= 5
+        assert len(meta_tools) >= 4
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "activate_skill" in by_name
-        assert "expand_tools" in by_name
         assert "delegate_to_subagent" in by_name
         assert "list_subagents" in by_name
         assert "ask_user" in by_name

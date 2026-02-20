@@ -214,7 +214,7 @@ SUBAGENT_WRITE_EXTRA_TOOLS: tuple[str, ...] = (
 )
 
 
-# ── 工具分类映射（用于工具索引和 expand_tools 元工具） ────
+# ── 工具分类映射（用于工具索引） ────
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "data_read": (

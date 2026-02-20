@@ -236,23 +236,6 @@ class ToolDispatcher:
                             result=result_str if success else None,
                             error=error if not success else None,
                         )
-                    elif tool_name == "expand_tools":
-                        category_value = arguments.get("category", "")
-                        if not isinstance(category_value, str):
-                            result_str = "工具参数错误: category 必须为字符串。"
-                            success = False
-                            error = result_str
-                        else:
-                            result_str = e._handle_expand_tools(category=category_value)
-                            success = True
-                            error = None
-                        log_tool_call(
-                            logger,
-                            tool_name,
-                            arguments,
-                            result=result_str if success else None,
-                            error=error if not success else None,
-                        )
                     elif tool_name == "delegate_to_subagent":
                         task_value = arguments.get("task")
                         task_brief = arguments.get("task_brief")
