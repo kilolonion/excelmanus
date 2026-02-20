@@ -1822,7 +1822,8 @@ async def _run_chat_turn(
         raise
     except Exception as exc:
         logger.error("%s时发生错误: %s", error_label, exc, exc_info=True)
-        console.print(f"  [red]✗ {error_label}时发生错误：{exc}[/red]")
+        from excelmanus.cli_errors import render_error_panel
+        render_error_panel(console, error=exc, error_label=error_label)
         return None
 
 

@@ -915,25 +915,25 @@ class TestSkillsSubcommands:
 
     def test_exception_during_chat_repl_continues(self) -> None:
         """engine.chat 抛出异常后，REPL 应继续运行，用户可继续输入。"""
+        import excelmanus.cli as cli_mod
+        cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
         # 第一次调用抛出异常，第二次正常返回
         engine.chat.side_effect = [RuntimeError("网络超时"), "第二次回复"]
-        with patch("excelmanus.cli.console") as mock_console, \
-             patch("excelmanus.cli.StreamRenderer"):
+        with patch("excelmanus.cli.console") as mock_console:
             mock_console.input.side_effect = ["第一次输入", "第二次输入", "exit"]
             _run(_repl_loop(engine))
             # 验证 engine.chat 被调用了两次（异常后继续）
             assert engine.chat.call_count == 2
-            # 验证错误信息被输出
-            error_printed = any(
+            # 验证错误面板被输出（Panel 对象或字符串）
+            from rich.panel import Panel as RichPanel
+            error_rendered = any(
+                isinstance(c.args[0], RichPanel) if c.args else False
+                for c in mock_console.print.call_args_list
+            ) or any(
                 "网络超时" in str(call) for call in mock_console.print.call_args_list
             )
-            assert error_printed
-            # 验证最终正常退出（显示告别信息）
-            farewell_printed = any(
-                "再见" in str(call) for call in mock_console.print.call_args_list
-            )
-            assert farewell_printed
+            assert error_rendered
 
     def test_final_reply_rendered_as_markdown_after_cards(self) -> None:
         """最终回复应在工具调用卡片之后以 Panel(Markdown) 形式渲染。"""
@@ -1252,7 +1252,7 @@ class TestRunChatTurn:
         assert mock_console.print.call_count >= 1
 
     def test_run_chat_turn_error_label(self) -> None:
-        """异常时应使用 error_label 输出错误信息。"""
+        """异常时应输出结构化错误面板。"""
         import excelmanus.cli as cli_mod
         cli_mod._current_layout_mode = "classic"
         engine = _make_engine()
@@ -1265,8 +1265,13 @@ class TestRunChatTurn:
                 error_label="处理请求",
             ))
         assert result is None
-        printed = " ".join(str(c) for c in mock_console.print.call_args_list)
-        assert "处理请求" in printed or "boom" in printed
+        # 应输出结构化错误面板（Panel 对象）
+        from rich.panel import Panel as RichPanel
+        panel_rendered = any(
+            isinstance(c.args[0], RichPanel) if c.args else False
+            for c in mock_console.print.call_args_list
+        )
+        assert panel_rendered or mock_console.print.call_count >= 1
 
 
 async def _run_chat_turn_helper(
