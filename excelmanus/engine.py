@@ -645,8 +645,6 @@ class AgentEngine:
         self._loaded_skill_names: dict[str, int] = {}
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # v5.1: _expanded_categories 已废弃，保留仅为向后兼容
-        self._expanded_categories: set[str] = set()
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
         self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
@@ -1923,13 +1921,13 @@ class AgentEngine:
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
-            "把任务委派给 subagent 执行。适用场景："
-            "(1) 需要批量探查多个文件/sheet 结构时委派 explorer；"
-            "(2) 需要执行复杂数据分析时委派 analyst；"
-            "(3) 需要批量写入或格式化时委派 writer；"
-            "(4) 需要编写和调试 Python 脚本时委派 coder；"
-            "(5) 复杂研究或多步骤修改任务委派 full（全能力子代理）。\n"
-            "当搜索结果不确定、需要逐个检查多个目标时，优先委派 explorer 而非自己逐个尝试。\n"
+            "把任务委派给独立上下文的 subagent 执行。\n"
+            "⚠️ 仅适用于需要 20+ 次工具调用的大规模后台任务（如：多文件批量变换、"
+            "复杂多步骤修改、长链条数据管线）。\n"
+            "⚠️ 禁止将以下任务委派给 subagent：\n"
+            "- 单文件读取、探查（直接用 inspect_excel_files 或 read_excel）\n"
+            "- 简单写入/格式化（直接用 run_code 或对应写入工具）\n"
+            "- 单步分析（直接用 analyze_data / filter_data）\n"
             "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物），"
             "简单任务直接用 task 字符串。\n"
             "注意：委派即执行，不要先描述你将要委派什么，直接调用。\n\n"

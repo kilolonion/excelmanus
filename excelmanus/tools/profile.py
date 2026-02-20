@@ -4,14 +4,9 @@ v5 三层正交架构之 Layer 1。
 与 Skill 层完全解耦（Skill 只负责知识注入）。
 与 ToolPolicy 完全解耦（ToolPolicy 只负责安全拦截）。
 
-注意：v5.1 起废弃 core/extended 分层，所有工具始终暴露完整 schema。
-ToolTier 保留仅为向后兼容，运行时不再影响 schema 生成。
+v5.1: 废弃 core/extended 分层，所有工具始终暴露完整 schema。
 """
 from __future__ import annotations
-
-from typing import Literal
-
-ToolTier = Literal["core", "extended"]  # deprecated: 所有工具现在均为 core
 
 # ── 所有工具（v5.1: 统一暴露完整 schema） ──────────────────
 CORE_TOOLS: frozenset[str] = frozenset({
@@ -50,10 +45,6 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "copy_file", "rename_file", "delete_file",
 })
 
-# deprecated: v5.1 起不再使用，保留仅为向后兼容
-EXTENDED_CATEGORIES: frozenset[str] = frozenset()
-CATEGORY_DESCRIPTIONS: dict[str, str] = {}
-
 # ── 全量 ToolProfile 定义 ─────────────────────────────────
 TOOL_PROFILES: dict[str, dict] = {}
 
@@ -89,12 +80,6 @@ _TOOL_CATEGORY_MAP: dict[str, tuple[str, ...]] = {
 for _category, _tools in _TOOL_CATEGORY_MAP.items():
     for _tool_name in _tools:
         TOOL_PROFILES[_tool_name] = {"tier": "core", "category": _category}
-
-
-def get_tier(tool_name: str) -> ToolTier | None:
-    """返回工具的 tier，不存在返回 None。"""
-    profile = TOOL_PROFILES.get(tool_name)
-    return profile["tier"] if profile else None
 
 
 def get_category(tool_name: str) -> str | None:
