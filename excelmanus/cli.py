@@ -1070,6 +1070,12 @@ def _render_help(engine: AgentEngine | None = None) -> None:
     t4.add_row("/undo <id>", "回滚已确认且可回滚的操作")
     t4.add_row("多选回答", "每行一个选项，空行提交")
 
+    # ── 显示模式 ──
+    t6 = _section_table()
+    t6.add_row("/ui [status]", "查看当前布局模式（dashboard / classic）")
+    t6.add_row("/ui dashboard", "切换到 Dashboard 密集信息模式")
+    t6.add_row("/ui classic", "切换到经典流式输出模式")
+
     # 技能命令
     skill_rows = _load_skill_command_rows(engine) if engine is not None else []
     t5: Table | None = None
@@ -1080,14 +1086,25 @@ def _render_help(engine: AgentEngine | None = None) -> None:
             t5.add_row(f"/{name}", hint_text)
 
     # 组装渲染
-    sections: list[tuple[str, Table]] = [
+    sections: list[tuple[str, Table | str]] = [
         ("💬 对话与导航", t1),
         ("🧩 技能与工具", t2),
         ("⚙️  会话控制", t3),
         ("🔐 审批操作", t4),
+        ("🖥️  显示模式", t6),
     ]
     if t5:
         sections.append(("📦 已加载技能", t5))
+
+    # 快速入门流程示例
+    flow_example = (
+        "  [dim white]典型使用步骤：[/dim white]\n"
+        '  [dim white]1.[/dim white] 输入自然语言指令（如 "读取 sales.xlsx 前10行"）\n'
+        "  [dim white]2.[/dim white] 查看工具调用过程与结果\n"
+        "  [dim white]3.[/dim white] 高风险操作需 /accept 确认\n"
+        "  [dim white]4.[/dim white] 使用 /ui dashboard 切换密集信息模式"
+    )
+    sections.append(("🚀 快速入门", flow_example))
 
     parts: list[str | Table] = []
     for i, (title, tbl) in enumerate(sections):
@@ -1115,31 +1132,77 @@ def _render_help(engine: AgentEngine | None = None) -> None:
 
 
 def _render_history(engine: AgentEngine) -> None:
-    """渲染对话历史摘要。"""
+    """渲染对话历史摘要 — 回合聚合视图。"""
     messages = engine.memory.get_messages()
 
-    # 过滤掉 system 消息，只展示用户和助手的对话
-    history_entries: list[str] = []
+    if not messages or all(m.get("role") == "system" for m in messages):
+        console.print("  [dim white]暂无对话历史。[/dim white]")
+        return
+
+    # 按回合聚合：每个 user 消息开始一个新回合
+    turns: list[dict] = []
+    current_turn: dict | None = None
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content")
-
+        if role == "system":
+            continue
         if role == "user" and content:
-            display = content if len(content) <= 80 else content[:77] + "…"
-            history_entries.append(f"  [bold green]▸[/bold green] {display}")
-        elif role == "assistant" and content:
-            display = content if len(content) <= 80 else content[:77] + "…"
-            history_entries.append(f"  [bold #81a2be]◂[/bold #81a2be] {display}")
+            current_turn = {
+                "user_input": content,
+                "assistant_reply": "",
+                "tool_calls": [],
+                "tool_results": [],
+            }
+            turns.append(current_turn)
+        elif current_turn is not None:
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "unknown")
+                    current_turn["tool_calls"].append(name)
+                if content:
+                    current_turn["assistant_reply"] = content
+            elif role == "tool":
+                name = msg.get("name", "")
+                if name:
+                    current_turn["tool_results"].append(name)
 
-    if not history_entries:
+    if not turns:
         console.print("  [dim white]暂无对话历史。[/dim white]")
         return
+
+    total_tool_calls = sum(len(t["tool_calls"]) for t in turns)
+    history_entries: list[str] = []
+
+    for i, turn in enumerate(turns, start=1):
+        user_text = turn["user_input"]
+        display_user = user_text if len(user_text) <= 70 else user_text[:67] + "…"
+        reply = turn["assistant_reply"]
+        display_reply = reply if len(reply) <= 70 else reply[:67] + "…"
+        tools = turn["tool_calls"]
+
+        header = f"  [bold #5fd7af]回合 #{i}[/bold #5fd7af]"
+        if tools:
+            tool_names = ", ".join(dict.fromkeys(tools))
+            header += f"  [dim white]🔧 {tool_names}[/dim white]"
+        history_entries.append(header)
+        history_entries.append(f"    [bold green]▸[/bold green] {display_user}")
+        if display_reply:
+            history_entries.append(f"    [bold #81a2be]◂[/bold #81a2be] {display_reply}")
+
+    # 统计摘要
+    stats_line = (
+        f"  [dim white]{len(turns)} 个回合 · "
+        f"{total_tool_calls} 次工具调用[/dim white]"
+    )
 
     console.print()
     console.print(
         Panel(
-            "\n".join(history_entries),
-            title=f"[bold]对话历史[/bold] [dim white]({len(history_entries)} 条)[/dim white]",
+            "\n".join(history_entries) + "\n\n" + stats_line,
+            title=f"[bold]📋 对话历史[/bold]",
             title_align="left",
             border_style="#de935f",
             expand=False,
