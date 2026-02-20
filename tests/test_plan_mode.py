@@ -76,15 +76,9 @@ def test_save_plan_markdown_does_not_migrate_legacy_plans(tmp_path: Path) -> Non
     assert legacy_dir.exists()
 
 
-def test_builtin_planner_exists() -> None:
-    planner = BUILTIN_SUBAGENTS.get("planner")
-    assert planner is not None
-    assert planner.permission_mode == "readOnly"
-    # planner 提示词已迁移到 prompts/subagent/planner.md，通过 PromptComposer 加载
-    from pathlib import Path
-    from excelmanus.prompt_composer import PromptComposer
-    prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
-    composer = PromptComposer(prompts_dir)
-    prompt = composer.compose_for_subagent("planner")
-    assert prompt is not None
-    assert "tasklist-json" in prompt
+def test_builtin_subagent_exists() -> None:
+    # v6: planner 已移除，唯一内置子代理为 subagent
+    subagent = BUILTIN_SUBAGENTS.get("subagent")
+    assert subagent is not None
+    assert subagent.permission_mode == "acceptEdits"
+    assert subagent.capability_mode == "full"

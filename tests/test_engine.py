@@ -295,8 +295,7 @@ class TestControlCommandSubagent:
         engine = AgentEngine(config, registry)
 
         result = await engine.chat("/subagent list")
-        assert "explorer" in result
-        assert "analyst" in result
+        assert "subagent" in result
 
     @pytest.mark.asyncio
     async def test_run_command_with_agent_routes_to_delegate(self) -> None:
@@ -2829,27 +2828,15 @@ class TestDelegateSubagent:
         assert "agent_name 必须为字符串" in result.result
 
     @pytest.mark.asyncio
-    async def test_auto_select_subagent_uses_description_catalog(self) -> None:
+    async def test_auto_select_subagent_returns_single_candidate(self) -> None:
+        """v6: 只有一个候选时直接返回，不调用 LLM。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._subagent_registry = MagicMock()
-        engine._subagent_registry.list_all.return_value = [
-            SubagentConfig(
-                name="explorer",
-                description="目录与 Excel 结构探查",
-            ),
-            SubagentConfig(
-                name="analyst",
-                description="统计分析与异常定位",
-            ),
-        ]
         engine._subagent_registry.build_catalog.return_value = (
-            "可用子代理：\n- explorer：目录与 Excel 结构探查\n- analyst：统计分析与异常定位",
-            ["explorer", "analyst"],
-        )
-        engine._router_client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response('{"agent_name":"explorer"}')
+            "可用子代理：\n- subagent：通用全能力子代理",
+            ["subagent"],
         )
 
         picked = await engine._auto_select_subagent(
@@ -2857,30 +2844,18 @@ class TestDelegateSubagent:
             file_paths=["data"],
         )
 
-        assert picked == "explorer"
-        _, kwargs = engine._router_client.chat.completions.create.call_args
-        messages = kwargs["messages"]
-        assert "候选子代理：" in messages[1]["content"]
-        assert "explorer" in messages[1]["content"]
-        assert "analyst" in messages[1]["content"]
-        assert "相关文件：data" in messages[1]["content"]
+        assert picked == "subagent"
 
     @pytest.mark.asyncio
-    async def test_auto_select_subagent_fallbacks_to_explorer_on_invalid_choice(self) -> None:
+    async def test_auto_select_subagent_returns_first_when_multiple(self) -> None:
+        """v6: 多个候选时返回第一个（用户自定义场景）。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._subagent_registry = MagicMock()
-        engine._subagent_registry.list_all.return_value = [
-            SubagentConfig(name="explorer", description="目录探查"),
-            SubagentConfig(name="writer", description="写入改造"),
-        ]
         engine._subagent_registry.build_catalog.return_value = (
-            "可用子代理：\n- explorer：目录探查\n- writer：写入改造",
-            ["explorer", "writer"],
-        )
-        engine._router_client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response('{"agent_name":"unknown"}')
+            "可用子代理：\n- subagent：通用\n- custom：自定义",
+            ["subagent", "custom"],
         )
 
         picked = await engine._auto_select_subagent(
@@ -2888,7 +2863,23 @@ class TestDelegateSubagent:
             file_paths=[],
         )
 
-        assert picked == "explorer"
+        assert picked == "subagent"
+
+    @pytest.mark.asyncio
+    async def test_auto_select_subagent_fallback_when_no_candidates(self) -> None:
+        """v6: 无候选时回退 subagent。"""
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.build_catalog.return_value = ("", [])
+
+        picked = await engine._auto_select_subagent(
+            task="请分析一下",
+            file_paths=[],
+        )
+
+        assert picked == "subagent"
 
 
 class TestAskUserFlow:

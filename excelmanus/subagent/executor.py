@@ -17,7 +17,7 @@ from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.memory import ConversationMemory
-from excelmanus.subagent.models import SubagentConfig, SubagentResult
+from excelmanus.subagent.models import SubagentConfig, SubagentFileChange, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
 _SUMMARY_MAX_CHARS = 4000
@@ -113,7 +113,7 @@ class SubagentExecutor:
         iterations = 0
         tool_calls = 0
         pending_id: str | None = None
-        file_changes: list[str] = []
+        structured_changes: list[SubagentFileChange] = []
         observed_files: set[str] = set()
         consecutive_failures = 0
         last_summary = ""
@@ -219,7 +219,13 @@ class SubagentExecutor:
                     )
 
                     if result.file_changes:
-                        file_changes.extend(result.file_changes)
+                        for _fc_path in result.file_changes:
+                            structured_changes.append(SubagentFileChange(
+                                path=_fc_path,
+                                tool_name=tool_name,
+                                change_type=self._infer_change_type(tool_name),
+                                sheets_affected=self._extract_sheet_names(tool_name, args),
+                            ))
 
                     if result.pending_approval_id:
                         pending_id = result.pending_approval_id
@@ -327,7 +333,7 @@ class SubagentExecutor:
             tool_calls_count=tool_calls,
             error=error,
             pending_approval_id=pending_id,
-            file_changes=sorted(set(file_changes)),
+            structured_changes=structured_changes,
             observed_files=sorted(observed_files),
         )
 
@@ -789,6 +795,40 @@ class SubagentExecutor:
                 if cls._is_excel_path(normalized):
                     paths.append(normalized)
         return paths
+
+    _FORMAT_TOOLS: frozenset[str] = frozenset({
+        "format_cells", "adjust_column_width", "adjust_row_height",
+        "merge_cells", "unmerge_cells", "apply_threshold_icon_format",
+        "style_card_blocks", "scale_range_unit", "apply_dashboard_dark_theme",
+        "add_color_scale", "add_data_bar", "add_conditional_rule",
+        "set_print_layout", "set_page_header_footer",
+    })
+    _DELETE_TOOLS: frozenset[str] = frozenset({"delete_file", "delete_sheet"})
+    _CREATE_TOOLS: frozenset[str] = frozenset({"create_sheet", "create_excel_chart", "create_chart"})
+    _CODE_TOOLS: frozenset[str] = frozenset({"run_code", "run_shell"})
+
+    @classmethod
+    def _infer_change_type(cls, tool_name: str) -> str:
+        """根据工具名推断变更类型。"""
+        if tool_name in cls._FORMAT_TOOLS:
+            return "format"
+        if tool_name in cls._DELETE_TOOLS:
+            return "delete"
+        if tool_name in cls._CREATE_TOOLS:
+            return "create"
+        if tool_name in cls._CODE_TOOLS:
+            return "code_modified"
+        return "write"
+
+    @staticmethod
+    def _extract_sheet_names(tool_name: str, arguments: dict[str, Any]) -> tuple[str, ...]:
+        """从工具参数中提取受影响的 sheet 名称。"""
+        names: list[str] = []
+        for key in ("sheet_name", "sheet", "source_sheet", "target_sheet"):
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                names.append(value.strip())
+        return tuple(dict.fromkeys(names))  # 去重保序
 
     @staticmethod
     def _normalize_path(path: str) -> str:

@@ -1728,7 +1728,7 @@ class AgentEngine:
                 task=task_text,
                 file_paths=[],
             )
-        picked_agent = self._normalize_skill_agent_name(picked_agent) or "explorer"
+        picked_agent = self._normalize_skill_agent_name(picked_agent) or "subagent"
 
         logger.info(
             "执行 hook agent action：event=%s agent=%s",
@@ -2311,45 +2311,15 @@ class AgentEngine:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """自动选择最合适的子代理，失败时回退 explorer。"""
+        """选择子代理。v6: 不再调用 LLM，直接返回默认 subagent。"""
         _, candidates = self._subagent_registry.build_catalog()
         if not candidates:
-            return "explorer"
-
-        joined_candidates = ", ".join(candidates)
-        file_hint = "、".join(file_paths) if file_paths else "无"
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是子代理分派器。只输出 JSON："
-                    '{"agent_name":"候选中的一个名称"}。'
-                    "不要输出解释。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"候选子代理：{joined_candidates}\n"
-                    f"任务：{task}\n"
-                    f"相关文件：{file_hint}"
-                ),
-            },
-        ]
-        try:
-            response = await self._router_client.chat.completions.create(
-                model=self._router_model,
-                messages=messages,
-            )
-            message, _ = _extract_completion_message(response)
-            content = _message_content_to_text(getattr(message, "content", None)).strip()
-            parsed = json.loads(content) if content else {}
-            picked = str(parsed.get("agent_name", "")).strip()
-            if picked in set(candidates):
-                return picked
-        except Exception:
-            logger.warning("自动选择子代理失败，回退 explorer", exc_info=True)
-        return "explorer"
+            return "subagent"
+        # 如果只有一个候选，直接返回
+        if len(candidates) == 1:
+            return candidates[0]
+        # 多个候选时（用户自定义场景），返回第一个
+        return candidates[0]
 
     async def run_subagent(
         self,

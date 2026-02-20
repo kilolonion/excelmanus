@@ -274,12 +274,13 @@ class ToolDispatcher:
                                     if (
                                         success
                                         and sub_result is not None
-                                        and sub_result.file_changes
+                                        and sub_result.structured_changes
                                     ):
                                         e._has_write_tool_call = True
                                         e._current_write_hint = "may_write"
                                         logger.info(
-                                            "delegate_to_subagent 写入传播: file_changes=%s",
+                                            "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
+                                            len(sub_result.structured_changes),
                                             sub_result.file_changes,
                                         )
                                     if (

@@ -12,6 +12,16 @@ SubagentSource = Literal["builtin", "user", "project"]
 
 
 @dataclass(frozen=True)
+class SubagentFileChange:
+    """子代理单次文件变更的结构化描述。"""
+
+    path: str
+    tool_name: str
+    change_type: str = "write"  # write | format | delete | create | code_modified
+    sheets_affected: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SubagentConfig:
     """子代理配置定义。"""
 
@@ -45,5 +55,16 @@ class SubagentResult:
     tool_calls_count: int = 0
     error: str | None = None
     pending_approval_id: str | None = None
-    file_changes: list[str] = field(default_factory=list)
+    structured_changes: list[SubagentFileChange] = field(default_factory=list)
     observed_files: list[str] = field(default_factory=list)
+
+    @property
+    def file_changes(self) -> list[str]:
+        """向后兼容：返回去重的变更路径列表。"""
+        seen: set[str] = set()
+        paths: list[str] = []
+        for change in self.structured_changes:
+            if change.path not in seen:
+                seen.add(change.path)
+                paths.append(change.path)
+        return paths

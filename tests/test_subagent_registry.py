@@ -71,10 +71,7 @@ def test_builtin_agents_loaded(tmp_path: Path) -> None:
     registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
 
     loaded = registry.load_all()
-    assert "explorer" in loaded
-    assert "analyst" in loaded
-    assert "writer" in loaded
-    assert "coder" in loaded
+    assert "subagent" in loaded
 
 
 def test_project_overrides_user_and_builtin(tmp_path: Path) -> None:
@@ -152,12 +149,13 @@ def test_get_supports_ecosystem_aliases(tmp_path: Path) -> None:
     registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
     registry.load_all()
 
+    # v6: 所有旧角色名映射到通用 subagent
     assert registry.get("Explore") is not None
-    assert registry.get("Explore").name == "explorer"  # type: ignore[union-attr]
+    assert registry.get("Explore").name == "subagent"  # type: ignore[union-attr]
     assert registry.get("Plan") is not None
-    assert registry.get("Plan").name == "planner"  # type: ignore[union-attr]
+    assert registry.get("Plan").name == "subagent"  # type: ignore[union-attr]
     assert registry.get("General-purpose") is not None
-    assert registry.get("General-purpose").name == "analyst"  # type: ignore[union-attr]
+    assert registry.get("General-purpose").name == "subagent"  # type: ignore[union-attr]
 
 
 def test_external_agent_uses_global_threshold_defaults_when_not_declared(
@@ -238,8 +236,9 @@ def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
         )
     )
     loaded = registry.load_all()
-    assert loaded["explorer"].max_iterations == 60
-    assert loaded["explorer"].max_consecutive_failures == 2
+    # v6: 唯一的内置 subagent 保持自身声明的阈值
+    assert loaded["subagent"].max_iterations == 120
+    assert loaded["subagent"].max_consecutive_failures == 2
 
 
 def test_memory_scope_field_is_loaded_from_memory_scope_key(tmp_path: Path) -> None:
