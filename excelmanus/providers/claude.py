@@ -75,6 +75,17 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
+    @dataclass
+    class _StreamDelta:
+        """Claude 流式 chunk 的标准化表示。"""
+        thinking_delta: str = ""
+        content_delta: str = ""
+        tool_calls_delta: list[Any] = field(default_factory=list)
+        finish_reason: str | None = None
+        usage: _Usage | None = None
+
+
+
 # ── 格式转换：OpenAI → Claude ─────────────────────────────────
 
 
@@ -321,8 +332,14 @@ class _ClaudeChatCompletions:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        stream: bool = False,
         **kwargs: Any,
-    ) -> _ChatCompletion:
+    ) -> _ChatCompletion | Any:
+        if stream:
+            return self._client._generate_stream(
+                model=model, messages=messages, tools=tools,
+                tool_choice=kwargs.get("tool_choice"),
+            )
         return await self._client._generate(
             model=model,
             messages=messages,
@@ -425,6 +442,116 @@ class ClaudeClient:
         )
         return result
 
+    async def _generate_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Any = None,
+        tool_choice: Any = None,
+    ) -> Any:
+        """流式执行 Claude Messages API 请求，返回异步生成器 yield _StreamDelta。"""
+        system_text, claude_messages = _openai_messages_to_claude(messages)
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": claude_messages,
+            "max_tokens": _DEFAULT_MAX_TOKENS,
+            "stream": True,
+        }
+        if system_text:
+            body["system"] = system_text
+        tools_list = tools if isinstance(tools, list) else None
+        claude_tools = _openai_tools_to_claude(tools_list)
+        if claude_tools:
+            body["tools"] = claude_tools
+        mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
+        if mapped_tool_choice is not None:
+            body["tool_choice"] = mapped_tool_choice
+
+        url = f"{self._base_url}/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+        async def _stream_generator():
+            async with self._http.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    raise RuntimeError(
+                        f"Claude API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                    )
+
+                current_tool_id: str | None = None
+                current_tool_name: str | None = None
+                current_tool_json: str = ""
+                tool_call_index: int = -1
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line[6:]
+                    if raw.strip() == "[DONE]":
+                        break
+                    try:
+                        event_data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_type = event_data.get("type", "")
+
+                    if event_type == "content_block_start":
+                        block = event_data.get("content_block", {})
+                        if block.get("type") == "tool_use":
+                            tool_call_index += 1
+                            current_tool_id = block.get("id", str(uuid.uuid4()))
+                            current_tool_name = block.get("name", "")
+                            current_tool_json = ""
+
+                    elif event_type == "content_block_delta":
+                        delta = event_data.get("delta", {})
+                        delta_type = delta.get("type", "")
+                        if delta_type == "text_delta":
+                            yield _StreamDelta(content_delta=delta.get("text", ""))
+                        elif delta_type == "thinking_delta":
+                            yield _StreamDelta(thinking_delta=delta.get("thinking", ""))
+                        elif delta_type == "input_json_delta":
+                            current_tool_json += delta.get("partial_json", "")
+
+                    elif event_type == "content_block_stop":
+                        if current_tool_id and current_tool_name:
+                            yield _StreamDelta(tool_calls_delta=[{
+                                "index": tool_call_index,
+                                "id": current_tool_id,
+                                "name": current_tool_name,
+                                "arguments": current_tool_json,
+                            }])
+                            current_tool_id = None
+                            current_tool_name = None
+                            current_tool_json = ""
+
+                    elif event_type == "message_delta":
+                        delta = event_data.get("delta", {})
+                        stop_reason = delta.get("stop_reason")
+                        usage_data = event_data.get("usage", {})
+                        finish = None
+                        if stop_reason == "end_turn":
+                            finish = "stop"
+                        elif stop_reason == "tool_use":
+                            finish = "tool_calls"
+                        u = None
+                        if usage_data:
+                            u = _Usage(
+                                prompt_tokens=usage_data.get("input_tokens", 0),
+                                completion_tokens=usage_data.get("output_tokens", 0),
+                                total_tokens=usage_data.get("input_tokens", 0)
+                                + usage_data.get("output_tokens", 0),
+                            )
+                        yield _StreamDelta(finish_reason=finish, usage=u)
+
+        return _stream_generator()
+
     async def close(self) -> None:
         """关闭 HTTP 客户端。"""
         await self._http.aclose()
+

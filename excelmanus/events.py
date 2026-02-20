@@ -19,12 +19,15 @@ class EventType(Enum):
     ROUTE_END = "route_end"
     SUBAGENT_START = "subagent_start"
     SUBAGENT_END = "subagent_end"
+    SUBAGENT_ITERATION = "subagent_iteration"
     SUBAGENT_SUMMARY = "subagent_summary"
     CHAT_SUMMARY = "chat_summary"
     TASK_LIST_CREATED = "task_list_created"
     TASK_ITEM_UPDATED = "task_item_updated"
     USER_QUESTION = "user_question"
     PENDING_APPROVAL = "pending_approval"
+    THINKING_DELTA = "thinking_delta"
+    TEXT_DELTA = "text_delta"
 
 
 @dataclass
@@ -84,6 +87,9 @@ class ToolCallEvent:
     approval_id: str = ""
     approval_tool_name: str = ""
     approval_arguments: Dict[str, Any] = field(default_factory=dict)
+    # 流式 delta 字段
+    text_delta: str = ""
+    thinking_delta: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

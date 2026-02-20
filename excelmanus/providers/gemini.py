@@ -76,6 +76,17 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
+    @dataclass
+    class _StreamDelta:
+        """Gemini 流式 chunk 的标准化表示。"""
+        thinking_delta: str = ""
+        content_delta: str = ""
+        tool_calls_delta: list[Any] = field(default_factory=list)
+        finish_reason: str | None = None
+        usage: _Usage | None = None
+
+
+
 # ── 格式转换工具函数 ─────────────────────────────────────────
 
 
@@ -427,9 +438,15 @@ class _GeminiChatCompletions:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        stream: bool = False,
         **kwargs: Any,
-    ) -> _ChatCompletion:
+    ) -> _ChatCompletion | Any:
         """将 OpenAI chat.completions.create 调用转发到 Gemini API。"""
+        if stream:
+            return self._client._generate_stream(
+                model=model, messages=messages, tools=tools,
+                tool_choice=kwargs.get("tool_choice"),
+            )
         return await self._client._generate(
             model=model,
             messages=messages,
@@ -549,6 +566,97 @@ class GeminiClient:
             result.usage.total_tokens,
         )
         return result
+
+    async def _generate_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Any = None,
+        tool_choice: Any = None,
+    ) -> Any:
+        """流式执行 Gemini generateContent 请求，返回异步生成器 yield _StreamDelta。"""
+        effective_model = self._default_model or model
+        system_instruction, contents = _openai_messages_to_gemini(messages)
+        body: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            body["systemInstruction"] = system_instruction
+        tools_list = tools if isinstance(tools, list) else None
+        gemini_tools = _openai_tools_to_gemini(tools_list)
+        if gemini_tools:
+            body["tools"] = gemini_tools
+        mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
+        if mapped_tool_config is not None:
+            body["toolConfig"] = mapped_tool_config
+
+        url = f"{self._base_url}/models/{effective_model}:streamGenerateContent?alt=sse"
+        headers = {"Content-Type": "application/json"}
+        if self._api_key.startswith("ya29."):
+            headers["Authorization"] = f"Bearer {self._api_key}"
+            params: dict[str, str] = {}
+        else:
+            params = {"key": self._api_key}
+
+        async def _stream_generator():
+            async with self._http.stream("POST", url, json=body, headers=headers, params=params) as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    raise RuntimeError(
+                        f"Gemini API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                    )
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line[6:]
+                    try:
+                        chunk_data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    candidates = chunk_data.get("candidates", [])
+                    if not candidates:
+                        usage_meta = chunk_data.get("usageMetadata")
+                        if usage_meta:
+                            yield _StreamDelta(usage=_Usage(
+                                prompt_tokens=usage_meta.get("promptTokenCount", 0),
+                                completion_tokens=usage_meta.get("candidatesTokenCount", 0),
+                                total_tokens=usage_meta.get("totalTokenCount", 0),
+                            ))
+                        continue
+
+                    candidate = candidates[0]
+                    parts = candidate.get("content", {}).get("parts", [])
+                    finish = candidate.get("finishReason")
+
+                    for part in parts:
+                        if "text" in part:
+                            yield _StreamDelta(content_delta=part["text"])
+                        elif "thought" in part:
+                            yield _StreamDelta(thinking_delta=part["thought"])
+                        elif "functionCall" in part:
+                            fc = part["functionCall"]
+                            yield _StreamDelta(tool_calls_delta=[{
+                                "index": 0,
+                                "id": str(uuid.uuid4()),
+                                "name": fc.get("name", ""),
+                                "arguments": json.dumps(fc.get("args", {})),
+                            }])
+
+                    if finish:
+                        mapped_finish = "stop"
+                        if finish in ("FUNCTION_CALL", "TOOL_CALLS"):
+                            mapped_finish = "tool_calls"
+                        usage_meta = chunk_data.get("usageMetadata")
+                        u = None
+                        if usage_meta:
+                            u = _Usage(
+                                prompt_tokens=usage_meta.get("promptTokenCount", 0),
+                                completion_tokens=usage_meta.get("candidatesTokenCount", 0),
+                                total_tokens=usage_meta.get("totalTokenCount", 0),
+                            )
+                        yield _StreamDelta(finish_reason=mapped_finish, usage=u)
+
+        return _stream_generator()
 
     async def close(self) -> None:
         """关闭 HTTP 客户端。"""

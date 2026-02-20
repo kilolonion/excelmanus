@@ -129,6 +129,17 @@ class SubagentExecutor:
         try:
             while iterations < config.max_iterations:
                 iterations += 1
+                self._emit_safe(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.SUBAGENT_ITERATION,
+                        subagent_name=config.name,
+                        subagent_conversation_id=conversation_id,
+                        subagent_iterations=iterations,
+                        subagent_tool_calls=tool_calls,
+                        iteration=iterations,
+                    ),
+                )
                 messages = memory.get_messages(system_prompts=[system_prompt])
                 response = await client.chat.completions.create(
                     model=model,

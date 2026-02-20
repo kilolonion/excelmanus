@@ -71,6 +71,17 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
+    @dataclass
+    class _StreamDelta:
+        """Responses API 流式 chunk 的标准化表示。"""
+        thinking_delta: str = ""
+        content_delta: str = ""
+        tool_calls_delta: list[Any] = field(default_factory=list)
+        finish_reason: str | None = None
+        usage: _Usage | None = None
+
+
+
 # ── 格式转换：Chat Completions → Responses API ──────────────────
 
 
@@ -304,8 +315,14 @@ class _ResponsesChatCompletions:
         model: str,
         messages: list[dict[str, Any]],
         tools: Any = None,
+        stream: bool = False,
         **kwargs: Any,
-    ) -> _ChatCompletion:
+    ) -> _ChatCompletion | Any:
+        if stream:
+            return self._client._generate_stream(
+                model=model, messages=messages, tools=tools,
+                tool_choice=kwargs.get("tool_choice"),
+            )
         return await self._client._generate(
             model=model,
             messages=messages,
@@ -408,6 +425,120 @@ class OpenAIResponsesClient:
             result.usage.total_tokens,
         )
         return result
+
+    async def _generate_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: Any = None,
+        tool_choice: Any = None,
+    ) -> Any:
+        """流式执行 Responses API 请求，返回异步生成器 yield _StreamDelta。"""
+        instructions, input_items = _chat_messages_to_responses_input(messages)
+        body: dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "stream": True,
+        }
+        if instructions:
+            body["instructions"] = instructions
+        tools_list = tools if isinstance(tools, list) else None
+        responses_tools = _chat_tools_to_responses_tools(tools_list)
+        if responses_tools:
+            body["tools"] = responses_tools
+        mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
+        if mapped_tool_choice is not None:
+            body["tool_choice"] = mapped_tool_choice
+
+        url = f"{self._base_url}/responses"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+
+        async def _stream_generator():
+            current_tools: dict[int, dict] = {}
+
+            async with self._http.stream("POST", url, json=body, headers=headers) as resp:
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    raise RuntimeError(
+                        f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                    )
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line[6:]
+                    if raw.strip() == "[DONE]":
+                        break
+                    try:
+                        event_data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_type = event_data.get("type", "")
+
+                    if event_type == "response.output_text.delta":
+                        delta_text = event_data.get("delta", "")
+                        if delta_text:
+                            yield _StreamDelta(content_delta=delta_text)
+
+                    elif event_type == "response.output_item.added":
+                        item = event_data.get("item", {})
+                        output_index = event_data.get("output_index", 0)
+                        if item.get("type") == "function_call":
+                            current_tools[output_index] = {
+                                "id": item.get("call_id", item.get("id", "")),
+                                "name": item.get("name", ""),
+                                "arguments": "",
+                            }
+
+                    elif event_type == "response.function_call_arguments.delta":
+                        output_index = event_data.get("output_index", 0)
+                        delta_args = event_data.get("delta", "")
+                        if output_index not in current_tools:
+                            current_tools[output_index] = {
+                                "id": event_data.get("item_id", ""),
+                                "name": "",
+                                "arguments": "",
+                            }
+                        current_tools[output_index]["arguments"] += delta_args
+
+                    elif event_type == "response.function_call_arguments.done":
+                        output_index = event_data.get("output_index", 0)
+                        if output_index in current_tools:
+                            tool = current_tools[output_index]
+                            yield _StreamDelta(tool_calls_delta=[{
+                                "index": output_index,
+                                "id": tool["id"],
+                                "name": tool["name"],
+                                "arguments": tool["arguments"],
+                            }])
+
+                    elif event_type == "response.completed":
+                        response_obj = event_data.get("response", {})
+                        usage_data = response_obj.get("usage", {})
+                        u = None
+                        if usage_data:
+                            u = _Usage(
+                                prompt_tokens=usage_data.get("input_tokens", 0),
+                                completion_tokens=usage_data.get("output_tokens", 0),
+                                total_tokens=usage_data.get("input_tokens", 0)
+                                + usage_data.get("output_tokens", 0),
+                            )
+                        output = response_obj.get("output", [])
+                        has_tool = any(
+                            item.get("type") == "function_call"
+                            for item in output
+                            if isinstance(item, dict)
+                        )
+                        yield _StreamDelta(
+                            finish_reason="tool_calls" if has_tool else "stop",
+                            usage=u,
+                        )
+
+        return _stream_generator()
 
     async def close(self) -> None:
         """关闭 HTTP 客户端。"""

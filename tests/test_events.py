@@ -100,12 +100,15 @@ class TestEventTypeEnum:
             "TOOL_CALL_START",
             "TOOL_CALL_END",
             "THINKING",
+            "THINKING_DELTA",
+            "TEXT_DELTA",
             "ITERATION_START",
             "ROUTE_START",
             "ROUTE_END",
             "CHAT_SUMMARY",
             "SUBAGENT_START",
             "SUBAGENT_END",
+            "SUBAGENT_ITERATION",
             "SUBAGENT_SUMMARY",
             "TASK_LIST_CREATED",
             "TASK_ITEM_UPDATED",
@@ -136,12 +139,15 @@ class TestEventTypeEnum:
             ("ROUTE_END", "route_end"),
             ("SUBAGENT_START", "subagent_start"),
             ("SUBAGENT_END", "subagent_end"),
+            ("SUBAGENT_ITERATION", "subagent_iteration"),
             ("SUBAGENT_SUMMARY", "subagent_summary"),
             ("CHAT_SUMMARY", "chat_summary"),
             ("TASK_LIST_CREATED", "task_list_created"),
             ("TASK_ITEM_UPDATED", "task_item_updated"),
             ("USER_QUESTION", "user_question"),
             ("PENDING_APPROVAL", "pending_approval"),
+            ("THINKING_DELTA", "thinking_delta"),
+            ("TEXT_DELTA", "text_delta"),
         ]
 
 
@@ -256,5 +262,7 @@ class TestToolCallEventFields:
             "approval_id",
             "approval_tool_name",
             "approval_arguments",
+            "text_delta",
+            "thinking_delta",
         }
         assert set(annotations.keys()) == expected_fields

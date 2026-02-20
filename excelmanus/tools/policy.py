@@ -31,6 +31,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         # 任务工具仅修改会话内存态，不触达工作区文件。
         "task_create",
         "task_update",
+        # 自省工具：纯查询，无副作用
+        "introspect_capability",
     }
 )
 

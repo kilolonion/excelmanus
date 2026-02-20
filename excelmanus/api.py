@@ -679,10 +679,12 @@ def _sse_event_to_sse(
     """将 ToolCallEvent 转换为 SSE 文本。"""
     if safe_mode and event.event_type in {
         EventType.THINKING,
+        EventType.THINKING_DELTA,
         EventType.TOOL_CALL_START,
         EventType.TOOL_CALL_END,
         EventType.ITERATION_START,
         EventType.SUBAGENT_START,
+        EventType.SUBAGENT_ITERATION,
         EventType.SUBAGENT_SUMMARY,
         EventType.SUBAGENT_END,
     }:
@@ -694,9 +696,12 @@ def _sse_event_to_sse(
         EventType.TOOL_CALL_END: "tool_call_end",
         EventType.ITERATION_START: "iteration_start",
         EventType.SUBAGENT_START: "subagent_start",
+        EventType.SUBAGENT_ITERATION: "subagent_iteration",
         EventType.SUBAGENT_SUMMARY: "subagent_summary",
         EventType.SUBAGENT_END: "subagent_end",
         EventType.USER_QUESTION: "user_question",
+        EventType.THINKING_DELTA: "thinking_delta",
+        EventType.TEXT_DELTA: "text_delta",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -744,6 +749,16 @@ def _sse_event_to_sse(
                 event.subagent_conversation_id,
                 max_len=120,
             ),
+        }
+    elif event.event_type == EventType.SUBAGENT_ITERATION:
+        data = {
+            "name": sanitize_external_text(event.subagent_name, max_len=100),
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
+            "iteration": event.subagent_iterations,
+            "tool_calls": event.subagent_tool_calls,
         }
     elif event.event_type == EventType.SUBAGENT_SUMMARY:
         data = {
@@ -811,6 +826,16 @@ def _sse_event_to_sse(
             "task_status": event.task_status,
         }
         sse_type = "task_update"
+    elif event.event_type == EventType.THINKING_DELTA:
+        data = {
+            "content": event.thinking_delta,
+            "iteration": event.iteration,
+        }
+    elif event.event_type == EventType.TEXT_DELTA:
+        data = {
+            "content": event.text_delta,
+            "iteration": event.iteration,
+        }
     else:
         data = event.to_dict()
 

@@ -31,7 +31,7 @@ layer: core
   - 任何需要遍历行或条件判断的操作
   `run_code` 比逐步 write_cells 更可靠、可扩展，且避免 LLM 在大数据量下手动转录出错。仅对少量固定值的单元格写入（如写入标题行、填入单个值）才使用 write_cells。
   **`run_code` 已知限制**：
-  - `bench/external` 目录受沙盒保护，`run_code` 无法写入其中的文件。需写入此类文件时，使用 `mcp_excel` 工具或 `delegate_to_subagent`。
+  - `bench/external` 目录受沙盒保护，`run_code` 无法写入其中的文件。处理策略（按优先级）：① 先用 `copy_file` 将文件复制到 `outputs/` 目录，再对副本执行 `run_code`；② 使用 `delegate_to_subagent`（subagent 可自动处理备份副本写入）。
   - `run_code` 失败返回中若包含 `recovery_hint` 字段，优先按提示切换执行路径，不要反复调试同类错误。
 - 需要用户选择时调用 ask_user，不在文本中列出选项。
 - 参数不足时先读取或询问，不猜测路径和字段名。

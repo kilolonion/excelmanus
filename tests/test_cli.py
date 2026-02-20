@@ -135,11 +135,9 @@ class TestRenderHelp:
         assert "/clear" in text_str
         assert "/skills list" in text_str
         assert "/skills get <name>" in text_str
-        assert "/skills create <name>" in text_str
-        assert "/skills patch <name>" in text_str
-        assert "/skills delete <name>" in text_str
+        assert "/skills create/patch/delete" in text_str
         assert "/subagent" in text_str
-        assert "/fullAccess" in text_str
+        assert "/fullaccess" in text_str
         assert "/accept" in text_str
         assert "/reject" in text_str
         assert "/undo" in text_str
@@ -296,7 +294,7 @@ class TestInlineSuggestion:
 
     def test_command_prefix_suggestion(self) -> None:
         """输入 /ful 应补全到 /fullAccess。"""
-        assert _compute_inline_suggestion("/ful") == "lAccess"
+        assert _compute_inline_suggestion("/ful") == "laccess"
 
     def test_fullaccess_argument_suggestion(self) -> None:
         """输入 /fullAccess s 应补全 status。"""
@@ -457,8 +455,9 @@ class TestLiveStatusTicker:
             return buf.getvalue()
 
         output = _run(_run_ticker())
-        assert "思考中.. " in output
-        assert "思考中.  " in output
+        # Ticker 使用 braille spinner 帧（⠋⠙⠹…），验证状态标签和帧字符出现
+        assert "思考中" in output
+        assert any(frame in output for frame in ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴"))
 
 
 class TestChatWithFeedback:
@@ -651,34 +650,60 @@ class TestReplSlashCommands:
         with patch("excelmanus.cli.console") as mock_console, \
              patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/subagent status", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            engine.chat.assert_called_once_with("/subagent status")
-            mock_renderer_cls.assert_not_called()
+            mock_renderer_cls.assert_called_once_with(mock_console)
+            engine.chat.assert_called_once_with(
+                "/subagent status",
+                on_event=mock_renderer.handle_event,
+            )
 
     def test_sub_agent_alias_routes_to_engine_chat(self) -> None:
         """/sub_agent 也应通过 engine.chat 处理。"""
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="已开启 subagent。")
-        with patch("excelmanus.cli.console") as mock_console:
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/sub_agent on", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            engine.chat.assert_called_once_with("/sub_agent on")
+            mock_renderer_cls.assert_called_once_with(mock_console)
+            engine.chat.assert_called_once_with(
+                "/sub_agent on",
+                on_event=mock_renderer.handle_event,
+            )
 
     def test_subagent_list_routes_to_engine_chat(self) -> None:
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="共 4 个可用子代理。")
-        with patch("excelmanus.cli.console") as mock_console:
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/subagent list", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            engine.chat.assert_called_once_with("/subagent list")
+            mock_renderer_cls.assert_called_once_with(mock_console)
+            engine.chat.assert_called_once_with(
+                "/subagent list",
+                on_event=mock_renderer.handle_event,
+            )
 
     def test_subagent_run_routes_to_engine_chat(self) -> None:
         engine = _make_engine()
         engine.chat = AsyncMock(return_value="执行完成")
-        with patch("excelmanus.cli.console") as mock_console:
+        with patch("excelmanus.cli.console") as mock_console, \
+             patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["/subagent run explorer -- 分析", "exit"]
+            mock_renderer = MagicMock()
+            mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
-            engine.chat.assert_called_once_with("/subagent run explorer -- 分析")
+            mock_renderer_cls.assert_called_once_with(mock_console)
+            engine.chat.assert_called_once_with(
+                "/subagent run explorer -- 分析",
+                on_event=mock_renderer.handle_event,
+            )
 
     def test_accept_command_routes_to_engine_chat(self) -> None:
         engine = _make_engine()
@@ -946,6 +971,8 @@ class TestSkillsSubcommands:
              patch("excelmanus.cli.StreamRenderer") as mock_renderer_cls:
             mock_console.input.side_effect = ["分析数据", "exit"]
             mock_renderer = MagicMock()
+            mock_renderer._streaming_text = False
+            mock_renderer._streaming_thinking = False
             mock_renderer_cls.return_value = mock_renderer
             _run(_repl_loop(engine))
             # 收集所有 print 调用的参数
