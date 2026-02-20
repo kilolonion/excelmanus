@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 import json
 import random
+import re as _re
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -124,28 +125,33 @@ def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
     return _merge_write_hint(route_hint, override_hint)
 
 
-def _to_plain(value: Any) -> Any:
+_TO_PLAIN_MAX_DEPTH = 32
+
+
+def _to_plain(value: Any, _depth: int = 0) -> Any:
     """将 SDK 对象/命名空间对象转换为纯 Python 结构。"""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if _depth >= _TO_PLAIN_MAX_DEPTH:
+        return str(value)
     if isinstance(value, dict):
-        return {k: _to_plain(v) for k, v in value.items()}
+        return {k: _to_plain(v, _depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_to_plain(v) for v in value]
+        return [_to_plain(v, _depth + 1) for v in value]
 
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
-            return _to_plain(model_dump(exclude_none=False))
+            return _to_plain(model_dump(exclude_none=False), _depth + 1)
         except TypeError:
-            return _to_plain(model_dump())
+            return _to_plain(model_dump(), _depth + 1)
 
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
-        return _to_plain(to_dict())
+        return _to_plain(to_dict(), _depth + 1)
 
     if hasattr(value, "__dict__"):
-        return {k: _to_plain(v) for k, v in vars(value).items() if not k.startswith("_")}
+        return {k: _to_plain(v, _depth + 1) for k, v in vars(value).items() if not k.startswith("_")}
 
     return str(value)
 
@@ -292,7 +298,6 @@ def _looks_like_html_document(text: str) -> bool:
 
 
 # ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
-import re as _re
 
 _FORMULA_ADVICE_PATTERN = _re.compile(
     r"=(?:IF|DATE|VLOOKUP|HLOOKUP|INDEX|MATCH|SUMIF|COUNTIF|CONCATENATE|LEFT|RIGHT|MID|"
@@ -599,6 +604,17 @@ class AgentEngine:
             refill_reader=self._focus_window_refill_reader,
         )
 
+        # ── PromptComposer 集成 ─────────────────────────────
+        self._prompt_composer: Any = None
+        try:
+            from excelmanus.prompt_composer import PromptComposer as _PC
+            _prompts_dir = Path(__file__).resolve().parent / "prompts"
+            if _prompts_dir.is_dir():
+                self._prompt_composer = _PC(_prompts_dir)
+                self._prompt_composer.load_all()
+        except Exception:
+            logger.debug("PromptComposer 初始化失败，策略注入不可用", exc_info=True)
+
         # ── 持久记忆集成 ──────────────────────────────────
         self._persistent_memory = persistent_memory
         self._memory_extractor = memory_extractor
@@ -688,6 +704,7 @@ class AgentEngine:
         self._hook_started_skills.clear()
         if self._own_mcp_manager:
             await self._mcp_manager.shutdown()
+
     def mcp_server_info(self) -> list[dict[str, Any]]:
         """返回 MCP Server 连接状态摘要，供 CLI 展示。"""
         return self._mcp_manager.get_server_info()
@@ -4924,6 +4941,21 @@ class AgentEngine:
         )
         if _tool_index:
             base_prompt = base_prompt + "\n\n" + _tool_index
+
+        # 注入任务策略（PromptComposer strategies）
+        if self._prompt_composer is not None and route_result is not None:
+            try:
+                from excelmanus.prompt_composer import PromptContext as _PCtx
+                _p_ctx = _PCtx(
+                    write_hint=route_result.write_hint or "unknown",
+                    sheet_count=route_result.sheet_count,
+                    total_rows=route_result.max_total_rows,
+                )
+                _strategy_text = self._prompt_composer.compose_strategies_text(_p_ctx)
+                if _strategy_text:
+                    base_prompt = base_prompt + "\n\n" + _strategy_text
+            except Exception:
+                logger.debug("策略注入失败，跳过", exc_info=True)
 
         if self._transient_hook_contexts:
             hook_context = "\n".join(self._transient_hook_contexts).strip()

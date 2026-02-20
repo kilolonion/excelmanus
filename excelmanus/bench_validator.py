@@ -8,8 +8,12 @@ suite JSON 中通过 ``assertions`` 字段声明规则，runner 执行完毕后
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ── 断言结果 ──────────────────────────────────────────────
@@ -235,23 +239,229 @@ def _check_reply_not_contains(
     )
 
 
+# ── Golden 文件单元格比对 ─────────────────────────────────
+
+
+def _check_golden_cells(
+    workfile_dir: Path,
+    golden_file: str | Path,
+    answer_position: str,
+    answer_sheet: str | None = None,
+) -> AssertionResult:
+    """对比输出文件与 golden 文件在指定范围内的单元格值。
+
+    Args:
+        workfile_dir: 工作文件目录，包含 agent 修改后的 xlsx 文件。
+        golden_file: golden 文件路径（相对于项目根或绝对路径）。
+        answer_position: 待比对的单元格范围，格式如 "'Sheet1'!H1:I370"。
+        answer_sheet: 可选的回答工作表名称（当 answer_position 中无 sheet 前缀时使用）。
+
+    Returns:
+        AssertionResult 包含匹配统计和不匹配样本。
+    """
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.utils.cell import range_boundaries
+    except ImportError:
+        return AssertionResult(
+            rule="golden_cells",
+            passed=False,
+            message="openpyxl 未安装，无法执行 golden 文件比对",
+        )
+
+    # ── 解析 answer_position ──
+    sheet_name: str | None = answer_sheet
+    cell_range = answer_position
+    if "!" in answer_position:
+        sheet_part, cell_range = answer_position.rsplit("!", 1)
+        # 去掉引号，如 'Sheet1' -> Sheet1
+        sheet_name = sheet_part.strip("'\"")
+
+    if not sheet_name:
+        return AssertionResult(
+            rule="golden_cells",
+            passed=False,
+            message=f"无法确定工作表名称: {answer_position}",
+        )
+
+    # ── 定位输出文件 ──
+    output_file: Path | None = None
+    if workfile_dir and workfile_dir.is_dir():
+        xlsx_files = list(workfile_dir.glob("*.xlsx"))
+        if len(xlsx_files) == 1:
+            output_file = xlsx_files[0]
+        elif len(xlsx_files) > 1:
+            # 尝试匹配 golden 文件名
+            golden_name = Path(golden_file).name
+            # 查找与源文件同名的（init 文件被复制到 workdir）
+            for f in xlsx_files:
+                if "init" in f.name or f.stem in golden_name:
+                    output_file = f
+                    break
+            if output_file is None:
+                output_file = xlsx_files[0]
+
+    if output_file is None or not output_file.exists():
+        return AssertionResult(
+            rule="golden_cells",
+            passed=False,
+            message=f"未找到输出 xlsx 文件: {workfile_dir}",
+        )
+
+    # ── 定位 golden 文件 ──
+    golden_path = Path(golden_file)
+    if not golden_path.is_absolute():
+        # 尝试相对于项目根目录解析
+        for candidate in [
+            golden_path,
+            Path.cwd() / golden_path,
+        ]:
+            if candidate.exists():
+                golden_path = candidate
+                break
+
+    if not golden_path.exists():
+        return AssertionResult(
+            rule="golden_cells",
+            passed=False,
+            message=f"golden 文件不存在: {golden_file}",
+        )
+
+    # ── 加载两个文件 ──
+    try:
+        wb_out = load_workbook(output_file, data_only=True)
+        wb_gold = load_workbook(golden_path, data_only=True)
+    except Exception as exc:
+        return AssertionResult(
+            rule="golden_cells",
+            passed=False,
+            message=f"加载 xlsx 文件失败: {exc}",
+        )
+
+    try:
+        if sheet_name not in wb_out.sheetnames:
+            return AssertionResult(
+                rule="golden_cells",
+                passed=False,
+                message=f"输出文件缺少工作表 {sheet_name!r}",
+            )
+        if sheet_name not in wb_gold.sheetnames:
+            return AssertionResult(
+                rule="golden_cells",
+                passed=False,
+                message=f"golden 文件缺少工作表 {sheet_name!r}",
+            )
+
+        ws_out = wb_out[sheet_name]
+        ws_gold = wb_gold[sheet_name]
+
+        # ── 解析范围边界 ──
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+
+        # ── 逐单元格比对 ──
+        total = 0
+        matched = 0
+        mismatches: list[dict[str, Any]] = []
+
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                total += 1
+                val_out = ws_out.cell(row=row, column=col).value
+                val_gold = ws_gold.cell(row=row, column=col).value
+
+                # 归一化: None 和 '' 视为等价
+                norm_out = None if (val_out is None or val_out == "") else val_out
+                norm_gold = None if (val_gold is None or val_gold == "") else val_gold
+
+                # 数值宽松比对: float vs int
+                if isinstance(norm_out, float) and isinstance(norm_gold, int):
+                    values_equal = abs(norm_out - norm_gold) < 1e-9
+                elif isinstance(norm_out, int) and isinstance(norm_gold, float):
+                    values_equal = abs(norm_out - norm_gold) < 1e-9
+                elif isinstance(norm_out, float) and isinstance(norm_gold, float):
+                    values_equal = abs(norm_out - norm_gold) < 1e-9
+                else:
+                    values_equal = norm_out == norm_gold
+
+                if values_equal:
+                    matched += 1
+                else:
+                    if len(mismatches) < 20:
+                        from openpyxl.utils import get_column_letter
+                        cell_ref = f"{get_column_letter(col)}{row}"
+                        mismatches.append({
+                            "cell": cell_ref,
+                            "output": _serialize_cell_value(val_out),
+                            "golden": _serialize_cell_value(val_gold),
+                        })
+    finally:
+        wb_out.close()
+        wb_gold.close()
+
+    accuracy = round(matched / total * 100, 1) if total > 0 else 0.0
+    passed = matched == total
+
+    message_parts: list[str] = []
+    if not passed:
+        message_parts.append(
+            f"单元格比对: {matched}/{total} 匹配 ({accuracy}%), "
+            f"{total - matched} 不匹配"
+        )
+        if mismatches:
+            samples = "; ".join(
+                f"{m['cell']}: 输出={m['output']!r} vs 期望={m['golden']!r}"
+                for m in mismatches[:5]
+            )
+            message_parts.append(f"示例: {samples}")
+
+    return AssertionResult(
+        rule="golden_cells",
+        passed=passed,
+        expected=f"{total} 单元格全部匹配 ({answer_position})",
+        actual={
+            "total_cells": total,
+            "matched": matched,
+            "accuracy_pct": accuracy,
+            "mismatches_sample": mismatches,
+        },
+        message=" | ".join(message_parts),
+    )
+
+
+def _serialize_cell_value(val: Any) -> Any:
+    """将单元格值序列化为 JSON 友好格式。"""
+    if val is None:
+        return None
+    if isinstance(val, (int, float, bool, str)):
+        return val
+    return str(val)
+
+
 # ── 主校验函数 ────────────────────────────────────────────
 
 
 def validate_case(
     result_dict: dict[str, Any],
     assertions: dict[str, Any],
+    *,
+    expected: dict[str, Any] | None = None,
+    workfile_dir: Path | None = None,
 ) -> ValidationSummary:
     """对单个用例的输出 dict 执行所有断言规则。
 
     Args:
         result_dict: ``BenchResult.to_dict()`` 的输出。
         assertions: 合并后的断言规则字典。
+        expected: case 级 ``expected`` 字段（含 golden_file / answer_position 等）。
+        workfile_dir: 工作文件目录，用于 golden 文件比对。
 
     Returns:
         ValidationSummary 包含所有断言结果。
     """
-    if not assertions:
+    has_golden = bool(
+        expected and expected.get("golden_file") and expected.get("answer_position")
+    )
+    if not assertions and not has_golden:
         return ValidationSummary()
 
     results: list[AssertionResult] = []
@@ -325,6 +535,20 @@ def validate_case(
     # reply_not_contains
     if "reply_not_contains" in assertions:
         results.append(_check_reply_not_contains(result_dict, assertions["reply_not_contains"]))
+
+    # golden_cells — 自动从 expected 推导，无需在 assertions 中显式声明
+    if expected and expected.get("golden_file") and expected.get("answer_position"):
+        if workfile_dir is not None:
+            results.append(_check_golden_cells(
+                workfile_dir=workfile_dir,
+                golden_file=expected["golden_file"],
+                answer_position=expected["answer_position"],
+                answer_sheet=expected.get("answer_sheet"),
+            ))
+        else:
+            logger.debug(
+                "跳过 golden_cells 断言: workfile_dir 未提供",
+            )
 
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed

@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import tiktoken
 
 from excelmanus.config import ExcelManusConfig
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 默认系统提示词 v3：模块化分段，按优先级排序组装
 # ---------------------------------------------------------------------------
 
-# ① 身份定义（极简）
+# ① 身份定义
 _SEGMENT_IDENTITY = (
     "你是 ExcelManus，工作区内的 Excel 智能代理。\n"
     "工作区根目录：`{workspace_root}`。\n"
     "用户提供的文件路径只要在工作区内即可直接使用，无需因绝对路径而拒绝。"
 )
 
-# ② 输出风格与反空承诺（最关键约束，放最前）
+# ② 输出风格与反空承诺
 _SEGMENT_TONE_STYLE = (
     "## 输出风格\n"
     "- 简洁直接，聚焦于做了什么和结果。\n"
@@ -151,7 +156,7 @@ _SEGMENT_MEMORY = (
 )
 
 # 组装：按优先级排序，关键约束靠前
-_DEFAULT_SYSTEM_PROMPT = "\n\n".join([
+_HARDCODED_SYSTEM_PROMPT = "\n\n".join([
     _SEGMENT_IDENTITY,
     _SEGMENT_TONE_STYLE,
     _SEGMENT_DECISION_GATE,
@@ -163,6 +168,27 @@ _DEFAULT_SYSTEM_PROMPT = "\n\n".join([
     _SEGMENT_CAPABILITIES,
     _SEGMENT_MEMORY,
 ])
+
+
+def _load_prompt_from_composer() -> str | None:
+    """尝试从 prompts/ 文件加载系统提示词，失败时返回 None（回退到硬编码）。"""
+    try:
+        from excelmanus.prompt_composer import PromptComposer, PromptContext
+        prompts_dir = Path(__file__).resolve().parent / "prompts"
+        if not prompts_dir.is_dir():
+            return None
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+        if not composer.core_segments:
+            return None
+        ctx = PromptContext(write_hint="unknown")
+        return composer.compose_text(ctx)
+    except Exception:
+        logger.debug("PromptComposer 加载失败，回退到硬编码提示词", exc_info=True)
+        return None
+
+
+_DEFAULT_SYSTEM_PROMPT = _load_prompt_from_composer() or _HARDCODED_SYSTEM_PROMPT
 
 
 class TokenCounter:
