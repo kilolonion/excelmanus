@@ -643,6 +643,7 @@ class AgentEngine:
         self._pending_approval_route_result: SkillMatchResult | None = None
         self._plan_mode_enabled: bool = False
         self._plan_intercept_task_create: bool = False
+        self._bench_mode: bool = False
         self._pending_plan: PendingPlanState | None = None
         self._approved_plan_context: str | None = None
         self._suspend_task_create_plan_once: bool = False
@@ -840,11 +841,13 @@ class AgentEngine:
         - plan 拦截关闭：task_create 直接执行，不生成待审批计划
         - plan mode 关闭：普通对话不进入仅规划路径
         - subagent 启用：允许委派子代理
+        - bench 模式标志：用于 activate_skill 短路非 Excel 类 skill
         """
         self._full_access_enabled = True
         self._plan_intercept_task_create = False
         self._plan_mode_enabled = False
         self._subagent_enabled = True
+        self._bench_mode = True
 
 
     def has_pending_question(self) -> bool:
@@ -3849,6 +3852,75 @@ class AgentEngine:
                             result=result_str if success else None,
                             error=error if not success else None,
                         )
+                    elif tool_name == "run_code" and self._config.code_policy_enabled:
+                        # ── 动态代码策略引擎路由 ──
+                        from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier
+                        _code_arg = arguments.get("code") or ""
+                        _cp_engine = CodePolicyEngine(
+                            extra_safe_modules=self._config.code_policy_extra_safe_modules,
+                            extra_blocked_modules=self._config.code_policy_extra_blocked_modules,
+                        )
+                        _analysis = _cp_engine.analyze(_code_arg)
+                        _auto_green = (
+                            _analysis.tier == CodeRiskTier.GREEN
+                            and self._config.code_policy_green_auto_approve
+                        )
+                        _auto_yellow = (
+                            _analysis.tier == CodeRiskTier.YELLOW
+                            and self._config.code_policy_yellow_auto_approve
+                        )
+                        if _auto_green or _auto_yellow or self._full_access_enabled:
+                            _sandbox_tier = _analysis.tier.value
+                            _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
+                            result_value, audit_record = await self._execute_tool_with_audit(
+                                tool_name=tool_name,
+                                arguments=_augmented_args,
+                                tool_scope=tool_scope,
+                                approval_id=self._approval.new_approval_id(),
+                                created_at_utc=self._approval.utc_now(),
+                                undoable=False,
+                            )
+                            result_str = str(result_value)
+                            tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
+                            if tool_def is not None:
+                                result_str = tool_def.truncate_result(result_str)
+                            success = True
+                            error = None
+                            logger.info(
+                                "run_code 策略引擎: tier=%s auto_approved=True caps=%s",
+                                _analysis.tier.value,
+                                sorted(_analysis.capabilities),
+                            )
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
+                        else:
+                            # RED 或配置不允许自动执行 → /accept 流程
+                            _caps_detail = ", ".join(sorted(_analysis.capabilities))
+                            _details_text = "; ".join(_analysis.details[:3])
+                            pending = self._approval.create_pending(
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                tool_scope=tool_scope,
+                            )
+                            pending_approval = True
+                            approval_id = pending.approval_id
+                            result_str = (
+                                f"⚠️ 代码包含高风险操作，需要人工确认：\n"
+                                f"- 风险等级: {_analysis.tier.value}\n"
+                                f"- 检测到: {_caps_detail}\n"
+                                f"- 详情: {_details_text}\n"
+                                f"{self._format_pending_prompt(pending)}"
+                            )
+                            success = True
+                            error = None
+                            self._emit_pending_approval_event(
+                                pending=pending, on_event=on_event, iteration=iteration,
+                            )
+                            logger.info(
+                                "run_code 策略引擎: tier=%s → pending approval %s",
+                                _analysis.tier.value,
+                                pending.approval_id,
+                            )
+                            log_tool_call(logger, tool_name, arguments, result=result_str)
                     elif self._approval.is_audit_only_tool(tool_name):
                         result_value, audit_record = await self._execute_tool_with_audit(
                             tool_name=tool_name,

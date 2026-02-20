@@ -40,7 +40,6 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
 MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
     {
         "write_text_file",
-        "run_code",
         "run_shell",
         "delete_file",
         "rename_file",
@@ -129,6 +128,9 @@ AUDIT_TARGET_ARG_RULES_FIRST: dict[str, tuple[str, ...]] = {
     "transform_data": ("output_path", "file_path"),
     "copy_range_between_sheets": ("target_file", "source_file"),
 }
+
+# run_code 使用动态策略引擎分级，不在静态 CONFIRM/AUDIT 集合中
+CODE_POLICY_DYNAMIC_TOOLS: frozenset[str] = frozenset({"run_code"})
 
 _PATH_RULED_TOOLS = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
 _EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}

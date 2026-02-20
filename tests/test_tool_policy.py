@@ -23,7 +23,6 @@ from excelmanus.tools.policy import (
 
 EXPECTED_MUTATING_CONFIRM_TOOLS = {
     "write_text_file",
-    "run_code",
     "run_shell",
     "delete_file",
     "rename_file",
@@ -99,9 +98,11 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
         for name in registered
         if name in {"run_code", "run_shell"} or name.startswith(prefixes)
     }
-    assert mutating_like == set(MUTATING_ALL_TOOLS), (
+    from excelmanus.tools.policy import CODE_POLICY_DYNAMIC_TOOLS
+    expected_all = set(MUTATING_ALL_TOOLS) | set(CODE_POLICY_DYNAMIC_TOOLS)
+    assert mutating_like == expected_all, (
         "存在未分层的写入类工具或误分层工具，"
-        f"diff={sorted(mutating_like ^ set(MUTATING_ALL_TOOLS))}"
+        f"diff={sorted(mutating_like ^ expected_all)}"
     )
 
 

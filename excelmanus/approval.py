@@ -235,6 +235,7 @@ class ApprovalManager:
         execute: Callable[[str, dict[str, Any], Sequence[str]], Any],
         undoable: bool,
         created_at_utc: str | None = None,
+        code_policy_info: dict[str, Any] | None = None,
     ) -> tuple[str, AppliedApprovalRecord]:
         audit_dir = self.audit_root / approval_id
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -341,7 +342,7 @@ class ApprovalManager:
             repo_diff_after_file=str(repo_after_file.relative_to(self.workspace_root)),
         )
 
-        manifest = self._build_manifest_v2(record)
+        manifest = self._build_manifest_v2(record, code_policy_info=code_policy_info)
         (audit_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -627,8 +628,13 @@ class ApprovalManager:
             patch_text += "\n"
         return changes, patch_text, binary_snapshots
 
-    def _build_manifest_v2(self, record: AppliedApprovalRecord) -> dict[str, Any]:
-        return {
+    def _build_manifest_v2(
+        self,
+        record: AppliedApprovalRecord,
+        *,
+        code_policy_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
             "version": 2,
             "approval": {
                 "approval_id": record.approval_id,
@@ -658,6 +664,9 @@ class ApprovalManager:
                 "binary_snapshots": [asdict(item) for item in record.binary_snapshots],
             },
         }
+        if code_policy_info is not None:
+            result["code_policy"] = code_policy_info
+        return result
 
     def _load_applied_from_manifest(self, approval_id: str) -> AppliedApprovalRecord | None:
         manifest_path = self.audit_root / approval_id / "manifest.json"
