@@ -1367,6 +1367,99 @@ class TestSmartCommandSuggestions:
             assert "/help" in printed
 
 
+# ══════════════════════════════════════════════════════════
+# Task 7: /history 与 /help 重构
+# ══════════════════════════════════════════════════════════
+
+
+class TestHistoryRedesign:
+    """/history 回合聚合视图测试。"""
+
+    @staticmethod
+    def _capture_history(engine) -> str:
+        from io import StringIO
+        from rich.console import Console as RichConsole
+        buf = StringIO()
+        c = RichConsole(file=buf, width=120, force_terminal=True)
+        with patch("excelmanus.cli.console", c):
+            _render_history(engine)
+        buf.seek(0)
+        return buf.read()
+
+    def test_history_shows_turn_aggregation(self) -> None:
+        """/history 应按回合聚合显示，包含回合号标记。"""
+        engine = _make_engine()
+        engine.memory.get_messages.return_value = [
+            {"role": "user", "content": "读取数据"},
+            {"role": "assistant", "content": "已读取数据，共100行。"},
+            {"role": "user", "content": "分析趋势"},
+            {"role": "assistant", "content": "趋势分析完成。"},
+        ]
+        output = self._capture_history(engine)
+        assert "回合" in output or "#1" in output
+
+    def test_history_shows_message_stats(self) -> None:
+        """/history 应显示消息统计信息。"""
+        engine = _make_engine()
+        engine.memory.get_messages.return_value = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
+        ]
+        output = self._capture_history(engine)
+        assert "1" in output
+
+    def test_history_tool_calls_counted(self) -> None:
+        """/history 应统计工具调用。"""
+        engine = _make_engine()
+        engine.memory.get_messages.return_value = [
+            {"role": "user", "content": "读取文件"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"function": {"name": "read_excel", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "content": "读取成功", "name": "read_excel"},
+            {"role": "assistant", "content": "已读取。"},
+        ]
+        output = self._capture_history(engine)
+        assert "read_excel" in output or "工具" in output or "🔧" in output
+
+    def test_history_empty(self) -> None:
+        """/history 无历史时应提示。"""
+        engine = _make_engine()
+        engine.memory.get_messages.return_value = []
+        output = self._capture_history(engine)
+        assert "暂无" in output
+
+
+class TestHelpRedesign:
+    """/help 重构测试。"""
+
+    @staticmethod
+    def _capture_help() -> str:
+        from io import StringIO
+        from rich.console import Console as RichConsole
+        buf = StringIO()
+        c = RichConsole(file=buf, width=120, force_terminal=True)
+        with patch("excelmanus.cli.console", c):
+            _render_help()
+        buf.seek(0)
+        return buf.read()
+
+    def test_help_contains_ui_command(self) -> None:
+        """/help 应包含 /ui 命令说明。"""
+        output = self._capture_help()
+        assert "/ui" in output
+
+    def test_help_contains_flow_example(self) -> None:
+        """/help 应包含使用流程示例。"""
+        output = self._capture_help()
+        assert "步骤" in output or "入门" in output
+
+    def test_help_contains_layout_section(self) -> None:
+        """/help 应包含显示模式相关说明。"""
+        output = self._capture_help()
+        assert "dashboard" in output or "显示模式" in output
+
+
 async def _run_chat_turn_helper(
     engine,
     user_input: str,
