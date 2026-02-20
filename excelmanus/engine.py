@@ -583,6 +583,21 @@ class AgentEngine:
             self._memory.system_prompt = self._memory.system_prompt.replace(
                 f"{{{_var_key}}}", _var_val
             )
+        # ── 动态能力图谱注入 ──────────────────────────────────
+        try:
+            from excelmanus.introspection.capability_map import CapabilityMapGenerator
+            _cap_gen = CapabilityMapGenerator(registry=self._registry)
+            self._capability_map_text = _cap_gen.generate()
+            self._memory.system_prompt = self._memory.system_prompt.replace(
+                "{auto_generated_capability_map}", self._capability_map_text
+            )
+        except Exception:
+            logger.debug("能力图谱生成失败，使用占位符", exc_info=True)
+            self._capability_map_text = ""
+            # 移除未替换的占位符，避免 LLM 看到原始模板标记
+            self._memory.system_prompt = self._memory.system_prompt.replace(
+                "{auto_generated_capability_map}", ""
+            )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             route_mode="all_tools",
@@ -3886,6 +3901,20 @@ class AgentEngine:
                                 result_str = tool_def.truncate_result(result_str)
                             success = True
                             error = None
+                            # ── run_code → window 感知桥接 ──
+                            if audit_record is not None and self._window_perception is not None:
+                                _stdout_tail = ""
+                                try:
+                                    _rc_json = json.loads(result_str)
+                                    _stdout_tail = _rc_json.get("stdout_tail", "") if isinstance(_rc_json, dict) else ""
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                                self._window_perception.observe_code_execution(
+                                    code=_code_arg,
+                                    audit_changes=audit_record.changes if audit_record else None,
+                                    stdout_tail=_stdout_tail,
+                                    iteration=iteration,
+                                )
                             logger.info(
                                 "run_code 策略引擎: tier=%s auto_approved=True caps=%s",
                                 _analysis.tier.value,
@@ -4874,6 +4903,22 @@ class AgentEngine:
             self._approval.clear_pending()
             self._pending_approval_route_result = None
             return f"accept 执行失败：{exc}"
+
+        # ── run_code RED 路径 → window 感知桥接 ──
+        if pending.tool_name == "run_code" and self._window_perception is not None:
+            _rc_code = pending.arguments.get("code") or ""
+            _rc_stdout = ""
+            try:
+                _rc_result_json = json.loads(record.result_preview or "")
+                _rc_stdout = _rc_result_json.get("stdout_tail", "") if isinstance(_rc_result_json, dict) else ""
+            except (json.JSONDecodeError, TypeError):
+                pass
+            self._window_perception.observe_code_execution(
+                code=_rc_code,
+                audit_changes=record.changes,
+                stdout_tail=_rc_stdout,
+                iteration=0,
+            )
 
         self._approval.clear_pending()
         route_to_resume = self._pending_approval_route_result

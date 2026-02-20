@@ -169,6 +169,142 @@ class _ASTVisitor(ast.NodeVisitor):
             self.details.append("obfuscation: base64 + exec combination")
 
 
+@dataclass(frozen=True)
+class ExcelTarget:
+    """run_code 脚本中识别出的 Excel 操作目标。"""
+
+    file_path: str
+    sheet_name: str | None = None
+    operation: str = "unknown"  # "read" | "write" | "unknown"
+    source: str = ""           # "pd.read_excel" | "df.to_excel" | ...
+
+
+# ── Excel 目标提取 ──────────────────────────────────────
+
+_EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".csv"})
+
+
+def _is_excel_literal(value: str) -> bool:
+    """判断字符串字面量是否像 Excel 文件路径。"""
+    lower = value.lower()
+    return any(lower.endswith(ext) for ext in _EXCEL_EXTENSIONS)
+
+
+class _ExcelTargetVisitor(ast.NodeVisitor):
+    """从 AST 中提取 Excel 文件操作目标。"""
+
+    def __init__(self) -> None:
+        self.targets: list[ExcelTarget] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self._check_pandas_read(node)
+        self._check_pandas_write(node)
+        self._check_openpyxl_load(node)
+        self._check_openpyxl_save(node)
+        self.generic_visit(node)
+
+    def _get_str_literal(self, node: ast.expr) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def _get_keyword_str(self, node: ast.Call, name: str) -> str | None:
+        for kw in node.keywords:
+            if kw.arg == name:
+                return self._get_str_literal(kw.value)
+        return None
+
+    def _check_pandas_read(self, node: ast.Call) -> None:
+        """pd.read_excel("file.xlsx", sheet_name="Sheet1")"""
+        if not self._is_attr_call(node, ("read_excel", "read_csv")):
+            return
+        if not node.args:
+            return
+        file_path = self._get_str_literal(node.args[0])
+        if not file_path:
+            return
+        sheet_name = self._get_keyword_str(node, "sheet_name")
+        if not sheet_name and len(node.args) > 1:
+            sheet_name = self._get_str_literal(node.args[1])
+        func_name = "pd.read_excel" if self._is_attr_call(node, ("read_excel",)) else "pd.read_csv"
+        self.targets.append(ExcelTarget(
+            file_path=file_path,
+            sheet_name=sheet_name,
+            operation="read",
+            source=func_name,
+        ))
+
+    def _check_pandas_write(self, node: ast.Call) -> None:
+        """df.to_excel("file.xlsx", sheet_name="Result")"""
+        if not self._is_attr_call(node, ("to_excel", "to_csv")):
+            return
+        if not node.args:
+            return
+        file_path = self._get_str_literal(node.args[0])
+        if not file_path:
+            return
+        sheet_name = self._get_keyword_str(node, "sheet_name")
+        func_name = "df.to_excel" if self._is_attr_call(node, ("to_excel",)) else "df.to_csv"
+        self.targets.append(ExcelTarget(
+            file_path=file_path,
+            sheet_name=sheet_name,
+            operation="write",
+            source=func_name,
+        ))
+
+    def _check_openpyxl_load(self, node: ast.Call) -> None:
+        """openpyxl.load_workbook("file.xlsx")"""
+        if not self._is_attr_call(node, ("load_workbook",)):
+            if not (isinstance(node.func, ast.Name) and node.func.id == "load_workbook"):
+                return
+        if not node.args:
+            return
+        file_path = self._get_str_literal(node.args[0])
+        if not file_path:
+            return
+        self.targets.append(ExcelTarget(
+            file_path=file_path,
+            sheet_name=None,
+            operation="unknown",
+            source="openpyxl.load_workbook",
+        ))
+
+    def _check_openpyxl_save(self, node: ast.Call) -> None:
+        """wb.save("file.xlsx")"""
+        if not self._is_attr_call(node, ("save",)):
+            return
+        if not node.args:
+            return
+        file_path = self._get_str_literal(node.args[0])
+        if not file_path or not _is_excel_literal(file_path):
+            return
+        self.targets.append(ExcelTarget(
+            file_path=file_path,
+            sheet_name=None,
+            operation="write",
+            source="wb.save",
+        ))
+
+    @staticmethod
+    def _is_attr_call(node: ast.Call, attr_names: tuple[str, ...]) -> bool:
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr in attr_names
+        return False
+
+
+def extract_excel_targets(code: str) -> list[ExcelTarget]:
+    """从 Python 代码中提取 Excel 操作目标（仅字面量路径）。"""
+    if not code or not code.strip():
+        return []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    visitor = _ExcelTargetVisitor()
+    visitor.visit(tree)
+    return visitor.targets
+
+
 class CodePolicyEngine:
     """AST 静态分析 + 风险分级引擎。"""
 

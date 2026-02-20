@@ -44,3 +44,14 @@ class RepeatDetector:
         ]
         for key in stale_keys:
             self._counter.pop(key, None)
+
+    def reset_for_file(self, file_path: str) -> None:
+        """按文件重置所有读取计数（run_code 修改文件后调用）。"""
+        normalized_file = file_path.strip()
+        if not normalized_file:
+            return
+        stale_keys = [
+            key for key in self._counter if key[0] == normalized_file
+        ]
+        for key in stale_keys:
+            self._counter.pop(key, None)

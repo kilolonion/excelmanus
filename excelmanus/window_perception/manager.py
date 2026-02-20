@@ -302,6 +302,139 @@ class WindowPerceptionManager:
             self._set_window_field(window, "summary", summary)
             self._touch(window)
 
+    def observe_code_execution(
+        self,
+        *,
+        code: str,
+        audit_changes: list[Any] | None,
+        stdout_tail: str,
+        iteration: int,
+    ) -> None:
+        """run_code 执行后，将影响同步到 window 系统。
+
+        三层信息提取：
+        - Layer A: AST 提取脚本中的 Excel 目标文件
+        - Layer B: 审计 diff 提取实际变化的文件（ground truth）
+        - Layer C: stdout 解析提取操作摘要
+        """
+        if not self._enabled:
+            return
+
+        # ── Layer A: AST 提取 ──
+        from excelmanus.security.code_policy import extract_excel_targets
+        ast_targets = extract_excel_targets(code or "")
+        ast_write_files: set[str] = set()
+        for target in ast_targets:
+            if target.operation in ("write", "unknown"):
+                normalized = normalize_path(target.file_path)
+                if normalized and is_excel_path(normalized):
+                    ast_write_files.add(normalized)
+
+        # ── Layer B: 审计 diff ──
+        audit_excel_files: set[str] = set()
+        if audit_changes:
+            for change in audit_changes:
+                path = getattr(change, "path", None) or ""
+                if not path:
+                    continue
+                normalized = normalize_path(path)
+                if normalized and is_excel_path(normalized):
+                    audit_excel_files.add(normalized)
+
+        # ── Layer C: stdout 摘要 ──
+        execution_summary = self._parse_code_execution_summary(stdout_tail or "")
+
+        # ── 合并受影响文件 ──
+        affected_files = audit_excel_files | ast_write_files
+        if not affected_files:
+            return
+
+        self._operation_seq += 1
+
+        for file_path in affected_files:
+            in_audit = file_path in audit_excel_files
+            stale_reason = "run_code 已修改此文件" if in_audit else "run_code 可能修改此文件"
+            if execution_summary:
+                stale_reason = f"{stale_reason}（{execution_summary}）"
+
+            # 查找或创建 SheetWindow
+            window = self._find_sheet_window(file_path=file_path, sheet_name="")
+            if window is None:
+                # 按 file_path 模糊查找（忽略 sheet_name）
+                for win in self._windows.values():
+                    if win.type != WindowType.SHEET:
+                        continue
+                    if normalize_path(win.file_path or "") == file_path:
+                        window = win
+                        break
+
+            if window is None and in_audit:
+                # 仅对审计确认变化的文件创建新 window
+                window = SheetWindow.new(
+                    id=self._new_id("sheet"),
+                    title=file_path,
+                    file_path=file_path,
+                    sheet_name="",
+                )
+                self._windows[window.id] = window
+                self._register_window_identity(window)
+
+            if window is None:
+                continue
+
+            # 标记 stale + 清空数据缓存
+            self._set_window_field(window, "stale_hint", stale_reason)
+            self._set_window_field(window, "data_buffer", [])
+            self._set_window_field(window, "preview_rows", [])
+            self._set_window_field(window, "cached_ranges", [])
+            self._set_window_field(window, "unfiltered_buffer", None)
+
+            # 追加 change_log
+            self._append_change(
+                window,
+                make_change_record(
+                    operation="code_execution",
+                    tool_summary=f"run_code: {execution_summary or '代码执行'}",
+                    affected_range="-",
+                    change_type="code_modified",
+                    iteration=iteration,
+                ),
+            )
+
+            # 更新 summary
+            self._set_window_field(window, "summary", stale_reason)
+
+            # 重置 repeat detector
+            self._repeat_detector.reset_for_file(file_path)
+
+            # 唤醒 + touch
+            self._wake_window(window)
+            self._touch(window)
+
+        logger.info(
+            "observe_code_execution: %d files affected (%d from audit, %d from AST)",
+            len(affected_files),
+            len(audit_excel_files),
+            len(ast_write_files),
+        )
+
+    @staticmethod
+    def _parse_code_execution_summary(stdout_tail: str) -> str:
+        """从 stdout 中提取操作摘要（best-effort）。"""
+        if not stdout_tail or not stdout_tail.strip():
+            return ""
+        import re as _re
+        # 尝试提取行数信息
+        row_match = _re.search(r"(\d+)\s*(?:rows?|行)", stdout_tail)
+        row_hint = f"{row_match.group(1)}行" if row_match else ""
+        # 取最后一行非空文本作为摘要
+        lines = [line.strip() for line in stdout_tail.strip().splitlines() if line.strip()]
+        last_line = lines[-1] if lines else ""
+        if len(last_line) > 100:
+            last_line = last_line[:100] + "..."
+        parts = [p for p in [row_hint, last_line] if p]
+        return "; ".join(parts) if parts else ""
+
     def build_system_notice(self, *, mode: str = "enriched", model_id: str = "") -> str:
         """构建系统注入窗口快照。"""
         if not self._enabled:
@@ -1120,6 +1253,11 @@ class WindowPerceptionManager:
             self._windows[window.id] = window
 
         self._wake_window(window)
+
+        # 读取工具访问 stale window 时自动清除过时标记
+        if window.stale_hint and is_read_like_tool(canonical_tool_name):
+            self._set_window_field(window, "stale_hint", None)
+
         tabs = extract_sheet_tabs(result_json)
         if tabs:
             self._set_window_field(window, "sheet_tabs", tabs)
