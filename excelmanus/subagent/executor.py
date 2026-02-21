@@ -124,7 +124,7 @@ class SubagentExecutor:
             api_key=config.api_key or self._parent_config.api_key,
             base_url=config.base_url or self._parent_config.base_url,
         )
-        model = config.model or self._parent_config.subagent_model or self._parent_config.model
+        model = config.model or self._parent_config.aux_model or self._parent_config.model
 
         try:
             while iterations < config.max_iterations:
@@ -621,7 +621,7 @@ class SubagentExecutor:
             memory_dir=str(memory_dir),
             auto_load_lines=self._parent_config.memory_auto_load_lines,
         )
-        model = config.model or self._parent_config.subagent_model or self._parent_config.model
+        model = config.model or self._parent_config.aux_model or self._parent_config.model
         client = create_client(
             api_key=config.api_key or self._parent_config.api_key,
             base_url=config.base_url or self._parent_config.base_url,

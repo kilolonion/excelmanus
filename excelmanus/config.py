@@ -68,9 +68,10 @@ class ExcelManusConfig:
     router_api_key: str | None = None
     router_base_url: str | None = None
     router_model: str | None = None
+    # 辅助模型（统一用于子代理默认模型 + 窗口感知顾问模型）
+    aux_model: str | None = None
     # subagent 执行配置
     subagent_enabled: bool = True
-    subagent_model: str | None = None
     subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 6
     subagent_user_dir: str = "~/.excelmanus/agents"
@@ -112,10 +113,9 @@ class ExcelManusConfig:
     window_intent_repeat_warn_threshold: int = 2
     window_intent_repeat_trip_threshold: int = 3
     window_rule_engine_version: str = "v1"
-    # 窗口感知顾问独立小模型配置（可选，未配置时回退到主模型）
+    # 窗口感知顾问独立 API 配置（可选，未配置时回退到主配置）
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
-    window_advisor_model: str | None = None
     # VLM（视觉语言模型）独立模型配置（可选，未配置时回退到主模型）
     vlm_api_key: str | None = None
     vlm_base_url: str | None = None
@@ -550,6 +550,14 @@ def load_config() -> ExcelManusConfig:
     if router_base_url:
         _validate_base_url(router_base_url)
     router_model = os.environ.get("EXCELMANUS_ROUTER_MODEL") or None
+    # 辅助模型（统一配置），兼容旧变量：
+    # EXCELMANUS_SUBAGENT_MODEL / EXCELMANUS_WINDOW_ADVISOR_MODEL
+    aux_model = (
+        os.environ.get("EXCELMANUS_AUX_MODEL")
+        or os.environ.get("EXCELMANUS_SUBAGENT_MODEL")
+        or os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL")
+        or None
+    )
 
     # subagent 执行配置
     subagent_enabled = _parse_bool(
@@ -557,7 +565,6 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SUBAGENT_ENABLED",
         True,
     )
-    subagent_model = os.environ.get("EXCELMANUS_SUBAGENT_MODEL") or None
     subagent_max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
@@ -735,7 +742,6 @@ def load_config() -> ExcelManusConfig:
     window_advisor_base_url = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_BASE_URL") or None
     if window_advisor_base_url:
         _validate_base_url(window_advisor_base_url)
-    window_advisor_model = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL") or None
 
     # VLM 独立模型配置（可选）
     vlm_api_key = os.environ.get("EXCELMANUS_VLM_API_KEY") or None
@@ -815,8 +821,8 @@ def load_config() -> ExcelManusConfig:
         router_api_key=router_api_key,
         router_base_url=router_base_url,
         router_model=router_model,
+        aux_model=aux_model,
         subagent_enabled=subagent_enabled,
-        subagent_model=subagent_model,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
         subagent_user_dir=subagent_user_dir,
@@ -856,7 +862,6 @@ def load_config() -> ExcelManusConfig:
         window_rule_engine_version=window_rule_engine_version,
         window_advisor_api_key=window_advisor_api_key,
         window_advisor_base_url=window_advisor_base_url,
-        window_advisor_model=window_advisor_model,
         vlm_api_key=vlm_api_key,
         vlm_base_url=vlm_base_url,
         vlm_model=vlm_model,

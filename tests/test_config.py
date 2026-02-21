@@ -361,9 +361,13 @@ class TestDefaultValues:
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        # 显式清空统一/旧模型变量，避免本地 .env 干扰默认值断言
+        monkeypatch.setenv("EXCELMANUS_AUX_MODEL", "")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_ADVISOR_MODEL", "")
         cfg = load_config()
         assert cfg.subagent_enabled is True
-        assert cfg.subagent_model is None
+        assert cfg.aux_model is None
         assert cfg.subagent_max_iterations == 120
         assert cfg.subagent_max_consecutive_failures == 6
         assert cfg.subagent_user_dir == "~/.excelmanus/agents"
@@ -375,18 +379,36 @@ class TestDefaultValues:
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_ENABLED", "false")
-        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "qwen-turbo")
+        monkeypatch.setenv("EXCELMANUS_AUX_MODEL", "qwen-turbo")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_ITERATIONS", "4")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES", "1")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_USER_DIR", "~/.my-agents")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_PROJECT_DIR", ".my-agents")
         cfg = load_config()
         assert cfg.subagent_enabled is False
-        assert cfg.subagent_model == "qwen-turbo"
+        assert cfg.aux_model == "qwen-turbo"
         assert cfg.subagent_max_iterations == 4
         assert cfg.subagent_max_consecutive_failures == 1
         assert cfg.subagent_user_dir == "~/.my-agents"
         assert cfg.subagent_project_dir == ".my-agents"
+
+    def test_aux_model_falls_back_to_legacy_subagent_model(self, monkeypatch) -> None:
+        """兼容旧变量 EXCELMANUS_SUBAGENT_MODEL。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "legacy-subagent")
+        cfg = load_config()
+        assert cfg.aux_model == "legacy-subagent"
+
+    def test_aux_model_falls_back_to_legacy_window_advisor_model(self, monkeypatch) -> None:
+        """兼容旧变量 EXCELMANUS_WINDOW_ADVISOR_MODEL。"""
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_ADVISOR_MODEL", "legacy-window-advisor")
+        cfg = load_config()
+        assert cfg.aux_model == "legacy-window-advisor"
 
     def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
         """默认开启对外安全模式。"""
@@ -911,5 +933,3 @@ class TestModelsRouterHooksAndMcpConfig:
         monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "maybe")
         with pytest.raises(ConfigError, match="EXCELMANUS_MCP_SHARED_MANAGER"):
             load_config()
-
-

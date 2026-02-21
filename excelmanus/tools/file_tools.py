@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,19 @@ SKILL_DESCRIPTION = "文件系统工具集：查看、搜索、读取、复制�
 
 _guard: FileAccessGuard | None = None
 _MAX_LIST_PAGE_SIZE = 500
+_MAX_TREE_NODES = 2000
+_MAX_OVERVIEW_HOTSPOTS = 10
+_MAX_OVERVIEW_EXTENSIONS = 20
+_DEFAULT_EXCLUDE_PATTERNS = (
+    ".git",
+    ".venv",
+    "node_modules",
+    ".worktrees",
+    "outputs",
+    "dist",
+    "build",
+    "__pycache__",
+)
 
 
 def _get_guard() -> FileAccessGuard:
@@ -57,6 +71,85 @@ def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_
 # ── 工具函数 ──────────────────────────────────────────────
 
 
+def _new_omitted_stats() -> dict[str, int]:
+    return {
+        "hidden": 0,
+        "ignored_by_pattern": 0,
+        "permission_denied": 0,
+    }
+
+
+def _resolve_mode(mode: str, depth: int) -> str | None:
+    normalized = (mode or "auto").strip().lower()
+    if normalized not in {"auto", "flat", "tree", "overview"}:
+        return None
+    if normalized == "auto":
+        return "flat" if depth == 0 else "tree"
+    return normalized
+
+
+def _resolve_offset(offset: int, cursor: str | None) -> tuple[int, str | None]:
+    if cursor is None or not str(cursor).strip():
+        return offset, None
+
+    raw = str(cursor).strip()
+    if not raw.isdigit():
+        return offset, "cursor 必须是非负整数字符串"
+    return int(raw), None
+
+
+def _normalize_exclude_patterns(
+    exclude: list[str] | None,
+    *,
+    use_default_excludes: bool,
+) -> list[str]:
+    patterns: list[str] = []
+    if use_default_excludes:
+        patterns.extend(_DEFAULT_EXCLUDE_PATTERNS)
+
+    if exclude:
+        for pattern in exclude:
+            cleaned = str(pattern or "").strip()
+            if cleaned:
+                patterns.append(cleaned)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        if pattern in seen:
+            continue
+        seen.add(pattern)
+        deduped.append(pattern)
+    return deduped
+
+
+def _matches_exclude_pattern(relative_path: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+
+    rel = relative_path.as_posix().lstrip("./")
+    name = relative_path.name
+
+    for pattern in patterns:
+        normalized = pattern.replace("\\", "/").strip().lstrip("./")
+        if not normalized:
+            continue
+        if normalized.endswith("/**"):
+            prefix = normalized[:-3].rstrip("/")
+            if rel == prefix or rel.startswith(f"{prefix}/"):
+                return True
+            continue
+        if "/" in normalized:
+            if fnmatch(rel, normalized) or rel == normalized or rel.startswith(f"{normalized}/"):
+                return True
+            continue
+        if name == normalized or fnmatch(name, normalized):
+            return True
+        if fnmatch(rel, normalized) or rel.startswith(f"{normalized}/"):
+            return True
+    return False
+
+
 
 def list_directory(
     directory: str = ".",
@@ -64,6 +157,11 @@ def list_directory(
     depth: int = 2,
     offset: int = 0,
     limit: int = 100,
+    mode: str = "auto",
+    cursor: str | None = None,
+    exclude: list[str] | None = None,
+    use_default_excludes: bool = True,
+    max_nodes: int = _MAX_TREE_NODES,
 ) -> str:
     """列出指定目录下的文件和子目录。
 
@@ -72,12 +170,33 @@ def list_directory(
         show_hidden: 是否显示隐藏文件（以 . 开头），默认不显示。
         depth: 递归深度。0 = 仅当前层（扁平分页模式），1 = 含直接子目录内容，
                2 = 默认两层，-1 = 无限递归。默认 2。
-        offset: 分页起始偏移（仅 depth=0 时生效），默认 0。
-        limit: 分页大小（仅 depth=0 时生效），默认 100，最大 500。
+        offset: 分页起始偏移（flat/overview 模式生效），默认 0。
+        limit: 分页大小（flat/overview 模式生效），默认 100，最大 500。
+        mode: 扫描模式。auto=depth 推断，flat=扁平分页，tree=递归树，overview=摘要模式。
+        cursor: 游标分页（数字字符串），提供后会覆盖 offset。
+        exclude: 额外排除规则（支持目录名或 glob）。
+        use_default_excludes: 是否启用默认噪音目录排除规则。
+        max_nodes: tree 模式最大节点数，超过后截断。
 
     Returns:
-        JSON 格式的目录内容（depth=0 为扁平列表，depth>=1 为嵌套树）。
+        JSON 格式的目录内容。
     """
+    effective_mode = _resolve_mode(mode, depth)
+    if effective_mode is None:
+        return json.dumps(
+            {"error": "mode 仅支持 auto、flat、tree、overview"},
+            ensure_ascii=False,
+        )
+
+    effective_offset, cursor_error = _resolve_offset(offset, cursor)
+    if cursor_error is not None:
+        return json.dumps({"error": cursor_error}, ensure_ascii=False)
+
+    exclude_patterns = _normalize_exclude_patterns(
+        exclude,
+        use_default_excludes=use_default_excludes,
+    )
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(directory)
 
@@ -87,17 +206,75 @@ def list_directory(
             ensure_ascii=False,
         )
 
-    # depth=0：保持原有扁平分页行为
-    if depth == 0:
-        return _list_directory_flat(directory, safe_path, show_hidden, offset, limit)
+    if effective_mode == "flat":
+        return _list_directory_flat(
+            directory=directory,
+            safe_path=safe_path,
+            show_hidden=show_hidden,
+            offset=effective_offset,
+            limit=limit,
+            exclude_patterns=exclude_patterns,
+        )
 
-    # depth>=1 或 -1：递归树模式
-    tree = _build_tree(safe_path, show_hidden, depth)
+    if effective_mode == "overview":
+        return _list_directory_overview(
+            directory=directory,
+            safe_path=safe_path,
+            show_hidden=show_hidden,
+            offset=effective_offset,
+            limit=limit,
+            exclude_patterns=exclude_patterns,
+        )
+
+    if max_nodes <= 0:
+        return json.dumps({"error": "max_nodes 必须为正整数"}, ensure_ascii=False)
+
+    paging_error = _validate_pagination(effective_offset, limit)
+    if paging_error is not None:
+        return json.dumps({"error": paging_error}, ensure_ascii=False)
+
+    stats: dict[str, Any] = {
+        "scanned_count": 0,
+        "returned_nodes": 0,
+        "truncated": False,
+        "omitted": _new_omitted_stats(),
+    }
+    tree = _build_tree(
+        dir_path=safe_path,
+        root_path=safe_path,
+        show_hidden=show_hidden,
+        remaining_depth=depth,
+        exclude_patterns=exclude_patterns,
+        stats=stats,
+        max_nodes=max_nodes,
+    )
+    entries = [
+        {k: v for k, v in item.items() if k != "children"}
+        for item in tree
+    ]
+    end = effective_offset + limit
+    paged_entries = entries[effective_offset:end]
+    has_more = end < len(entries)
     result = {
         "directory": directory,
         "absolute_path": str(safe_path),
+        "mode": "tree",
         "depth": depth,
         "tree": tree,
+        "entries": paged_entries,
+        "total": len(entries),
+        "offset": effective_offset,
+        "limit": limit,
+        "returned": len(paged_entries),
+        "has_more": has_more,
+        "next_cursor": str(end) if has_more else None,
+        "truncated": bool(stats["truncated"]),
+        "omitted": stats["omitted"],
+        "summary": {
+            "scanned_count": int(stats["scanned_count"]),
+            "returned_nodes": int(stats["returned_nodes"]),
+        },
+        "exclude_patterns": exclude_patterns,
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -108,6 +285,7 @@ def _list_directory_flat(
     show_hidden: bool,
     offset: int,
     limit: int,
+    exclude_patterns: list[str],
 ) -> str:
     """扁平分页模式（depth=0 时的原有行为）。"""
     paging_error = _validate_pagination(offset, limit)
@@ -115,14 +293,27 @@ def _list_directory_flat(
         return json.dumps({"error": paging_error}, ensure_ascii=False)
 
     entries: list[dict[str, str]] = []
+    omitted = _new_omitted_stats()
+    scanned_count = 0
+    total_files = 0
+    total_directories = 0
     try:
         for item in sorted(safe_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            scanned_count += 1
             if not show_hidden and item.name.startswith("."):
+                omitted["hidden"] += 1
+                continue
+            rel = item.relative_to(safe_path)
+            if _matches_exclude_pattern(rel, exclude_patterns):
+                omitted["ignored_by_pattern"] += 1
                 continue
             entry_type = "directory" if item.is_dir() else "file"
             entry: dict[str, str] = {"name": item.name, "type": entry_type}
             if item.is_file():
                 entry["size"] = _format_size(item.stat().st_size)
+                total_files += 1
+            else:
+                total_directories += 1
             entries.append(entry)
     except PermissionError:
         return json.dumps(
@@ -132,15 +323,28 @@ def _list_directory_flat(
     total = len(entries)
     end = offset + limit
     paged_entries = entries[offset:end]
+    has_more = end < total
     return json.dumps(
         {
             "directory": directory,
             "absolute_path": str(safe_path),
+            "mode": "flat",
             "total": total,
             "offset": offset,
             "limit": limit,
             "returned": len(paged_entries),
-            "has_more": end < total,
+            "returned_count": len(paged_entries),
+            "has_more": has_more,
+            "next_cursor": str(end) if has_more else None,
+            "truncated": has_more,
+            "scanned_count": scanned_count,
+            "omitted": omitted,
+            "summary": {
+                "total_visible": total,
+                "total_files": total_files,
+                "total_directories": total_directories,
+            },
+            "exclude_patterns": exclude_patterns,
             "entries": paged_entries,
         },
         ensure_ascii=False,
@@ -150,8 +354,12 @@ def _list_directory_flat(
 
 def _build_tree(
     dir_path: Path,
+    root_path: Path,
     show_hidden: bool,
     remaining_depth: int,
+    exclude_patterns: list[str],
+    stats: dict[str, Any],
+    max_nodes: int,
 ) -> list[dict[str, Any]]:
     """递归构建目录树。
 
@@ -164,30 +372,193 @@ def _build_tree(
         嵌套的条目列表，目录条目含 ``children`` 字段。
     """
     entries: list[dict[str, Any]] = []
+    if int(stats["returned_nodes"]) >= max_nodes:
+        stats["truncated"] = True
+        return entries
+
     try:
         items = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except PermissionError:
+        stats["omitted"]["permission_denied"] += 1
         return entries
 
     for item in items:
+        stats["scanned_count"] += 1
         if not show_hidden and item.name.startswith("."):
+            stats["omitted"]["hidden"] += 1
             continue
+
+        relative = item.relative_to(root_path)
+        if _matches_exclude_pattern(relative, exclude_patterns):
+            stats["omitted"]["ignored_by_pattern"] += 1
+            continue
+        if int(stats["returned_nodes"]) >= max_nodes:
+            stats["truncated"] = True
+            break
 
         if item.is_dir():
             entry: dict[str, Any] = {"name": item.name, "type": "directory"}
+            stats["returned_nodes"] += 1
             # remaining_depth: -1 无限，>1 继续递归，==1 不再展开
             if remaining_depth == -1 or remaining_depth > 1:
                 next_depth = -1 if remaining_depth == -1 else remaining_depth - 1
-                entry["children"] = _build_tree(item, show_hidden, next_depth)
+                entry["children"] = _build_tree(
+                    item,
+                    root_path,
+                    show_hidden,
+                    next_depth,
+                    exclude_patterns,
+                    stats,
+                    max_nodes,
+                )
             entries.append(entry)
         elif item.is_file():
-            entries.append({
-                "name": item.name,
-                "type": "file",
-                "size": _format_size(item.stat().st_size),
-            })
+            entries.append(
+                {
+                    "name": item.name,
+                    "type": "file",
+                    "size": _format_size(item.stat().st_size),
+                }
+            )
+            stats["returned_nodes"] += 1
 
     return entries
+
+
+def _count_visible_children(
+    dir_path: Path,
+    *,
+    root_path: Path,
+    show_hidden: bool,
+    exclude_patterns: list[str],
+) -> int | None:
+    try:
+        children = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        return None
+
+    count = 0
+    for child in children:
+        if not show_hidden and child.name.startswith("."):
+            continue
+        rel = child.relative_to(root_path)
+        if _matches_exclude_pattern(rel, exclude_patterns):
+            continue
+        count += 1
+    return count
+
+
+def _list_directory_overview(
+    directory: str,
+    safe_path: Path,
+    show_hidden: bool,
+    offset: int,
+    limit: int,
+    exclude_patterns: list[str],
+) -> str:
+    paging_error = _validate_pagination(offset, limit)
+    if paging_error is not None:
+        return json.dumps({"error": paging_error}, ensure_ascii=False)
+
+    entries: list[dict[str, Any]] = []
+    hotspots: list[dict[str, Any]] = []
+    omitted = _new_omitted_stats()
+    scanned_count = 0
+    total_file_size_bytes = 0
+    total_files = 0
+    total_directories = 0
+    by_extension: dict[str, int] = {}
+
+    try:
+        items = sorted(safe_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        return json.dumps(
+            {"error": f"没有权限访问目录 '{directory}'"},
+            ensure_ascii=False,
+        )
+
+    for item in items:
+        scanned_count += 1
+        if not show_hidden and item.name.startswith("."):
+            omitted["hidden"] += 1
+            continue
+
+        rel = item.relative_to(safe_path)
+        if _matches_exclude_pattern(rel, exclude_patterns):
+            omitted["ignored_by_pattern"] += 1
+            continue
+
+        item_type = "directory" if item.is_dir() else "file"
+        entry: dict[str, Any] = {"name": item.name, "type": item_type}
+        if item.is_file():
+            size_bytes = item.stat().st_size
+            entry["size"] = _format_size(size_bytes)
+            entry["size_bytes"] = size_bytes
+            total_file_size_bytes += size_bytes
+            total_files += 1
+            ext = item.suffix.lower() if item.suffix else "[none]"
+            by_extension[ext] = by_extension.get(ext, 0) + 1
+        else:
+            total_directories += 1
+            direct_children = _count_visible_children(
+                item,
+                root_path=safe_path,
+                show_hidden=show_hidden,
+                exclude_patterns=exclude_patterns,
+            )
+            entry["direct_children"] = direct_children
+            hotspots.append(
+                {
+                    "path": item.name,
+                    "direct_children": direct_children if direct_children is not None else -1,
+                }
+            )
+            if direct_children is None:
+                omitted["permission_denied"] += 1
+        entries.append(entry)
+
+    total = len(entries)
+    end = offset + limit
+    paged_entries = entries[offset:end]
+    has_more = end < total
+    sorted_exts = sorted(
+        by_extension.items(),
+        key=lambda pair: (-pair[1], pair[0]),
+    )[:_MAX_OVERVIEW_EXTENSIONS]
+    top_hotspots = sorted(
+        hotspots,
+        key=lambda row: (-int(row["direct_children"]), str(row["path"])),
+    )[:_MAX_OVERVIEW_HOTSPOTS]
+
+    return json.dumps(
+        {
+            "directory": directory,
+            "absolute_path": str(safe_path),
+            "mode": "overview",
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(paged_entries),
+            "returned_count": len(paged_entries),
+            "has_more": has_more,
+            "next_cursor": str(end) if has_more else None,
+            "truncated": has_more,
+            "entries": paged_entries,
+            "hotspots": top_hotspots,
+            "omitted": omitted,
+            "summary": {
+                "total_visible": total,
+                "total_files": total_files,
+                "total_directories": total_directories,
+                "total_file_size_bytes": total_file_size_bytes,
+                "by_extension": {ext: count for ext, count in sorted_exts},
+                "scanned_count": scanned_count,
+            },
+            "exclude_patterns": exclude_patterns,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 
@@ -496,7 +867,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_directory",
-            description="列出指定目录下的文件和子目录。默认递归展开两层返回完整目录树结构；depth=0 时退化为扁平分页列表",
+            description="列出指定目录下的文件和子目录。支持扁平分页、递归树、overview 摘要模式；默认附带 agent 友好元数据（next_cursor/omitted/summary）。",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -515,15 +886,39 @@ def get_tools() -> list[ToolDef]:
                         "description": "递归深度。0=仅当前层（扁平分页），1=含直接子目录，2=默认两层，-1=无限递归",
                         "default": 2,
                     },
+                    "mode": {
+                        "type": "string",
+                        "description": "扫描模式：auto|flat|tree|overview。auto 时 depth=0 使用 flat，否则使用 tree",
+                        "default": "auto",
+                    },
                     "offset": {
                         "type": "integer",
-                        "description": "分页起始偏移（仅 depth=0 时生效），默认 0",
+                        "description": "分页起始偏移（flat/overview 生效；tree 用于 entries 预览分页）",
                         "default": 0,
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "分页大小（仅 depth=0 时生效），默认 100，最大 500",
+                        "description": "分页大小（默认 100，最大 500）",
                         "default": 100,
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "游标分页（数字字符串）。提供后覆盖 offset，便于续扫。",
+                    },
+                    "exclude": {
+                        "type": "array",
+                        "description": "额外排除规则（目录名或 glob）",
+                        "items": {"type": "string"},
+                    },
+                    "use_default_excludes": {
+                        "type": "boolean",
+                        "description": "是否启用默认噪音目录排除（.git/.venv/node_modules/outputs/.worktrees 等）",
+                        "default": True,
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "tree 模式最多返回节点数，超过会截断并标记 truncated=true",
+                        "default": 2000,
                     },
                 },
                 "required": [],

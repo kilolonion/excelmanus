@@ -609,18 +609,18 @@ class AgentEngine:
             self._router_client = self._client
             self._router_model = config.model
             self._router_follow_active_model = True
-        # 窗口感知顾问小模型：window_advisor_* → 主模型
+        # 窗口感知顾问小模型：window_advisor_* + aux_model → 主模型
         _adv_api_key = config.window_advisor_api_key or config.api_key
         _adv_base_url = config.window_advisor_base_url or config.base_url
-        _adv_model = config.window_advisor_model or config.model
+        _adv_model = config.aux_model or config.model
         # 始终创建独立 client，避免与 _client 共享对象导致测试 mock 互相干扰
         self._advisor_client = create_client(
             api_key=_adv_api_key,
             base_url=_adv_base_url,
         )
         self._advisor_model = _adv_model
-        # adviser 是否跟随主模型切换：仅当未配置任何独立小模型时
-        self._advisor_follow_active_model = not config.window_advisor_model
+        # adviser 是否跟随主模型切换：仅当未配置辅助模型时
+        self._advisor_follow_active_model = not config.aux_model
         # VLM 独立客户端：vlm_* → 主模型
         _vlm_api_key = config.vlm_api_key or config.api_key
         _vlm_base_url = config.vlm_base_url or config.base_url
@@ -2539,9 +2539,9 @@ class AgentEngine:
                 permission_mode="default",
                 conversation_id="",
             )
-        # 运行时模型选择：子代理自身 > 全局 subagent_model > 当前激活主模型
+        # 运行时模型选择：子代理自身 > 全局 aux_model > 当前激活主模型
         # 这样在未配置“子路由模型”时，可随着 /model 切换正确回退到主模型。
-        resolved_model = config.model or self._config.subagent_model or self._active_model
+        resolved_model = config.model or self._config.aux_model or self._active_model
         runtime_config = config if config.model == resolved_model else replace(config, model=resolved_model)
         parent_context_parts: list[str] = []
         parent_summary = self._build_parent_context_summary()
