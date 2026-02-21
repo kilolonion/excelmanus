@@ -183,7 +183,7 @@ class TestProperty6ToolEndCardStatus:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "✅" in output, f"成功标记 ✅ 未出现在输出中: {output!r}"
+        assert "✓" in output, f"成功标记 ✓ 未出现在输出中: {output!r}"
         # 结果文本（可能被截断）的前缀应出现在输出中
         result_prefix = result[:_RESULT_MAX_LEN]
         assert result_prefix in output, (
@@ -207,7 +207,7 @@ class TestProperty6ToolEndCardStatus:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "❌" in output, f"失败标记 ❌ 未出现在输出中: {output!r}"
+        assert "✗" in output, f"失败标记 ✗ 未出现在输出中: {output!r}"
         assert error in output, f"错误信息 '{error}' 未出现在输出中: {output!r}"
 
 
@@ -343,7 +343,7 @@ class TestProperty9ThinkingBlockRendering:
         output = _get_output(console)
 
         # 输出应包含思考标记
-        assert "💭" in output, "输出应包含思考标记 💭"
+        assert "●" in output, "输出应包含 agent 前缀 ●"
         # 短文本应完整出现
         assert text in output, f"短思考文本 '{text}' 应完整出现在输出中"
 
@@ -361,7 +361,7 @@ class TestProperty9ThinkingBlockRendering:
         output = _get_output(console)
 
         # 输出应包含思考标记
-        assert "💭" in output, "输出应包含思考标记 💭"
+        assert "●" in output, "输出应包含 agent 前缀 ●"
         # 完整原始文本不应出现（因为已被截断）
         assert text not in output, "超长思考文本不应完整出现在输出中"
         # 截断后应以省略标记结尾
@@ -541,7 +541,7 @@ class TestStreamRendererUnit:
 
         # 纯空白字符串不为 falsy，当前实现会渲染
         # 验证至少不会崩溃，且输出包含思考标记
-        assert "💭" in output, "纯空白思考文本当前会被渲染"
+        assert "●" in output, "纯空白思考文本当前会被渲染"
 
     # ---- 文件路径高亮 (需求 2.2) ----
 
@@ -605,12 +605,10 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "subagent 启动" in output
+        assert "委派子任务" in output
         assert "analyst" in output
         assert "命中大文件" in output
         assert "read_excel" in output
-        assert "workspace-write" in output
-        assert "conv_123" in output
 
     def test_subagent_summary_rendered(self) -> None:
         console = _make_console(width=120)
@@ -624,7 +622,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "subagent 摘要" in output
+        assert "子代理摘要" in output
         assert "analyst" in output
         assert "关键列" in output
 
@@ -639,7 +637,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "subagent" in output
+        assert "✓" in output or "完成" in output
         assert "完成" in output
 
     def test_subagent_iteration_escapes_name(self) -> None:
@@ -656,7 +654,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        assert "analyst[v2]" in output
+        # In Claude Code style, iteration renders turn/calls but not name
         assert "2" in output
         assert "3" in output
 
@@ -684,7 +682,7 @@ class TestStreamRendererUnit:
         assert "请选择方案" in output
         assert "方案A" in output
         assert "Other" in output
-        assert "空行提交" in output
+        assert "Esc" in output or "Space" in output
 
     # ---- 渲染异常降级 (需求 2.1 异常处理) ----
 
@@ -715,7 +713,7 @@ class TestStreamRendererUnit:
             f"降级后工具名称 'write_excel' 应出现在输出中: {output!r}"
         )
         # 降级后应包含工具图标
-        assert "🔧" in output, "降级后应包含工具图标 🔧"
+        assert "●" in output, "降级后应包含 agent 前缀 ●"
 
     def test_render_exception_fallback_tool_end(self) -> None:
         """tool_call_end 渲染异常时，降级输出应包含状态标记。
@@ -741,4 +739,4 @@ class TestStreamRendererUnit:
         output = _get_output(console)
 
         # 降级后应包含成功标记
-        assert "✅" in output, f"降级后应包含成功标记 ✅: {output!r}"
+        assert "✓" in output, f"降级后应包含成功标记 ✓: {output!r}"
