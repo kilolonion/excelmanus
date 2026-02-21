@@ -113,3 +113,47 @@ class TestSemanticColorMap:
     def test_resolve_semantic_color_unknown_returns_none(self):
         from excelmanus.vision_extractor import resolve_semantic_color
         assert resolve_semantic_color("rainbow_sparkle") is None
+
+
+class TestPhaseAStructuredPrompt:
+    def test_prompt_contains_json_schema(self):
+        from excelmanus.vision_extractor import build_phase_a_structured_prompt
+        prompt = build_phase_a_structured_prompt()
+        assert "address" in prompt
+        assert "value" in prompt
+        assert "value_type" in prompt
+
+    def test_prompt_no_html_reference(self):
+        from excelmanus.vision_extractor import build_phase_a_structured_prompt
+        prompt = build_phase_a_structured_prompt()
+        assert "<table>" not in prompt
+        assert "HTML" not in prompt
+
+
+class TestParsePhaseAStructured:
+    def test_parse_valid_phase_a_json(self):
+        import json
+        from excelmanus.vision_extractor import parse_phase_a_structured
+        raw = json.dumps({
+            "cells": [
+                {"address": "A1", "value": "名称", "value_type": "string"},
+                {"address": "B1", "value": 100, "value_type": "number"},
+            ],
+            "merged_ranges": [],
+            "dimensions": {"rows": 1, "cols": 2},
+        })
+        result = parse_phase_a_structured(raw)
+        assert len(result["cells"]) == 2
+        assert result["cells"][0]["address"] == "A1"
+
+    def test_parse_wrapped_in_code_block(self):
+        import json
+        from excelmanus.vision_extractor import parse_phase_a_structured
+        inner = json.dumps({
+            "cells": [{"address": "A1", "value": "test", "value_type": "string"}],
+            "merged_ranges": [],
+            "dimensions": {"rows": 1, "cols": 1},
+        })
+        raw = f"```json\n{inner}\n```"
+        result = parse_phase_a_structured(raw)
+        assert len(result["cells"]) == 1

@@ -62,6 +62,114 @@ def build_phase_b_prompt(html_table: str) -> str:
     ])
 
 
+def build_phase_a_structured_prompt() -> str:
+    """Phase A 结构化 prompt：直接输出 JSON 而非 HTML。"""
+    return "\n\n".join([
+        _PHASE_A_STRUCTURED_ROLE,
+        _PHASE_A_STRUCTURED_SCHEMA,
+        _PHASE_A_STRUCTURED_RULES,
+    ])
+
+
+def parse_phase_a_structured(raw: str) -> dict[str, Any]:
+    """解析 Phase A 结构化输出。
+
+    Raises:
+        ValueError: JSON 解析失败或缺少必要字段。
+    """
+    text = raw.strip()
+    match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if match:
+        text = match.group(1).strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Phase A JSON 解析失败: {exc}") from exc
+    if not isinstance(data, dict) or "cells" not in data:
+        raise ValueError("Phase A 输出缺少 cells 字段")
+    return data
+
+
+def phase_a_structured_to_replica_spec(
+    data: dict[str, Any],
+    style_json: dict[str, Any] | None = None,
+    *,
+    cv_hints: dict[str, Any] | None = None,
+) -> ReplicaSpec:
+    """将 Phase A 结构化输出 + Phase B 样式 + CV hints 合并为 ReplicaSpec。"""
+    from excelmanus.replica_spec import (
+        CellSpec,
+        FillSpec,
+        MergedRange,
+        Provenance,
+        SheetSpec,
+        StyleClass,
+        WorkbookSpec,
+    )
+
+    cells: list[CellSpec] = []
+    for c in data.get("cells", []):
+        cells.append(CellSpec(
+            address=c["address"],
+            value=c.get("value"),
+            value_type=c.get("value_type", "string"),
+            display_text=c.get("display_text"),
+            number_format=c.get("number_format"),
+            confidence=c.get("confidence", 0.95),
+        ))
+
+    merged_ranges = [
+        MergedRange(range=m["range"], confidence=m.get("confidence", 0.9))
+        for m in data.get("merged_ranges", [])
+    ]
+
+    dims = data.get("dimensions", {"rows": 0, "cols": 0})
+
+    # 样式处理
+    styles: dict[str, StyleClass] = {}
+    column_widths: list[float] = []
+    row_heights: dict[str, float] = {}
+    if style_json:
+        raw_styles = style_json.get("styles", {})
+        for sid, sdata in raw_styles.items():
+            _resolve_style_colors(sdata)
+            try:
+                styles[sid] = StyleClass.model_validate(sdata)
+            except Exception:
+                logger.warning("样式 %s 解析失败，已跳过", sid)
+        cell_styles = style_json.get("cell_styles", {})
+        for cell in cells:
+            if cell.address in cell_styles:
+                cell.style_id = cell_styles[cell.address]
+        column_widths = style_json.get("column_widths", [])
+
+    # CV hints 覆盖
+    if cv_hints:
+        if "column_widths" in cv_hints:
+            column_widths = cv_hints["column_widths"]
+        if "row_heights" in cv_hints:
+            row_heights = cv_hints["row_heights"]
+        if "cell_colors" in cv_hints:
+            _apply_cv_colors(cells, styles, cv_hints["cell_colors"], style_json)
+
+    sheet = SheetSpec(
+        name="Sheet1",
+        dimensions=dims,
+        cells=cells,
+        merged_ranges=merged_ranges,
+        styles=styles,
+        column_widths=column_widths,
+        row_heights=row_heights,
+    )
+
+    return ReplicaSpec(
+        provenance=Provenance(source_image_hash="", model="", timestamp=""),
+        workbook=WorkbookSpec(name="replica"),
+        sheets=[sheet],
+        uncertainties=[],
+    )
+
+
 def parse_extraction_result(raw: str) -> ReplicaSpec:
     """解析 LLM 返回的 JSON 为 ReplicaSpec。
 
@@ -279,6 +387,53 @@ def _infer_value_type(text: str) -> tuple[Any, str]:
     return text, "string"
 
 
+def _resolve_style_colors(sdata: dict) -> None:
+    """递归解析样式字典中的语义颜色。"""
+    if "font" in sdata and isinstance(sdata["font"], dict):
+        if "color" in sdata["font"]:
+            sdata["font"]["color"] = resolve_semantic_color(sdata["font"]["color"])
+    if "fill" in sdata and isinstance(sdata["fill"], dict):
+        if "color" in sdata["fill"]:
+            sdata["fill"]["color"] = resolve_semantic_color(sdata["fill"]["color"])
+    if "border" in sdata and isinstance(sdata["border"], dict):
+        if "color" in sdata["border"]:
+            sdata["border"]["color"] = resolve_semantic_color(sdata["border"]["color"])
+
+
+def _apply_cv_colors(
+    cells: list,
+    styles: dict,
+    cell_colors: list[list[str]],
+    style_json: dict | None,
+) -> None:
+    """用 CV 采样的背景色覆盖 VLM 样式中的 fill color。"""
+    from excelmanus.replica_spec import FillSpec
+
+    for cell in cells:
+        col_idx = 0
+        row_idx = 0
+        addr = cell.address
+        col_str = ""
+        for ch in addr:
+            if ch.isalpha():
+                col_str += ch
+            else:
+                break
+        row_str = addr[len(col_str):]
+        if col_str and row_str.isdigit():
+            col_idx = sum(
+                (ord(c) - 64) * (26 ** i)
+                for i, c in enumerate(reversed(col_str.upper()))
+            ) - 1
+            row_idx = int(row_str) - 1
+
+        if row_idx < len(cell_colors) and col_idx < len(cell_colors[row_idx]):
+            cv_color = cell_colors[row_idx][col_idx]
+            if cv_color and cv_color.upper() not in ("#FFFFFF", "#FEFEFE", "#FDFDFD"):
+                if cell.style_id and cell.style_id in styles:
+                    styles[cell.style_id].fill = FillSpec(type="solid", color=cv_color)
+
+
 # ════════════════════════════════════════════════════════════════
 # 语义颜色映射
 # ════════════════════════════════════════════════════════════════
@@ -486,3 +641,52 @@ _PHASE_B_RULES = """\
 - 颜色使用 6 位 hex
 - 只输出纯 JSON，无解释文字
 - 省略默认值（如无边框、左对齐等）"""
+
+
+# ════════════════════════════════════════════════════════════════
+# Prompt 模板 — Phase A 结构化输出（JSON 替代 HTML）
+# ════════════════════════════════════════════════════════════════
+
+_PHASE_A_STRUCTURED_ROLE = """\
+你是高精度表格提取引擎。将图片中的表格精确转换为 JSON 格式。
+**本阶段只关注结构和数据，不关注样式。精确度是最高优先级。**"""
+
+_PHASE_A_STRUCTURED_SCHEMA = """\
+**输出 JSON 格式：**
+```json
+{
+  "dimensions": {"rows": 5, "cols": 4},
+  "cells": [
+    {"address": "A1", "value": "产品名称", "value_type": "string", "confidence": 0.98},
+    {"address": "B1", "value": "单价", "value_type": "string", "confidence": 0.98},
+    {"address": "A2", "value": 128.50, "value_type": "number", "number_format": "#,##0.00", "confidence": 0.95},
+    {"address": "C3", "value": null, "value_type": "empty", "confidence": 1.0}
+  ],
+  "merged_ranges": [
+    {"range": "A1:C1", "confidence": 0.9}
+  ]
+}
+```
+
+**字段说明：**
+- address: Excel 单元格地址（A1, B2, ...）
+- value: 单元格值 — 数字为 JSON 数值类型，文字为字符串，空为 null
+- value_type: string / number / date / boolean / formula / empty
+- number_format: 可选，含千分位/百分号/货币时填写（如 "#,##0.00", "0.0%", "$#,##0"）
+- confidence: 0.0-1.0，看不清的标低值
+- merged_ranges: 合并单元格范围列表"""
+
+_PHASE_A_STRUCTURED_RULES = """\
+**逐行提取步骤（不要输出思考过程）：**
+1. 确定表格行数、列数、合并单元格
+2. 从第 1 行开始逐行逐列提取每个单元格
+3. 精确复制文字/数字（保留原始精度：12.50 不写成 12.5）
+4. 空单元格也要列出（value_type: "empty"）
+5. 看不清的内容 confidence 设为 0.3-0.5
+
+**严格禁止：**
+- ❌ 不要编造数据
+- ❌ 不要改变数字精度
+- ❌ 不要遗漏任何行或列
+- ❌ 不要在 JSON 外输出解释文字
+- ❌ 不要输出样式信息（本阶段不需要）"""
