@@ -173,7 +173,7 @@ def cosine_top_k(query_vec: np.ndarray, corpus_vecs: np.ndarray, k: int = 5) -> 
 
 **当前状态：**
 - `engine.py:_auto_select_subagent()` 直接返回第一个候选（硬编码逻辑）
-- 注释说明 `v5.2: 不再调用 LLM，直接返回默认 subagent`
+- 注释说明：不再调用 LLM，直接返回默认 subagent
 - `SubagentRegistry` 支持 builtin/user/project 三层覆盖
 
 **Embedding 方案：**

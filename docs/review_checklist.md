@@ -2,7 +2,7 @@
 
 ## 代码与行为
 - [ ] `loader.py` 的目录发现规则与协议文档一致。
-- [ ] OpenClaw 项目级目录仅为 `.openclaw/skills`，无 `workspace/skills` 兼容残留。
+- [ ] 外部工具目录（`.openclaw/skills`）仅支持项目级路径，无 `workspace/skills` 兼容残留。
 - [ ] 路由语义（slash/fallback）与 README、测试一致。
 
 ## 文档同步
