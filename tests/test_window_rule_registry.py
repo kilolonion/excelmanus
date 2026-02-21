@@ -51,7 +51,7 @@ def test_resolve_intent_decision_sticky_lock_keeps_current_tag() -> None:
         intent_enabled=True,
         sticky_turns=3,
         user_intent_text="",
-        canonical_tool_name="analyze_data",
+        canonical_tool_name="filter_data",
         arguments={},
         result_json=None,
     )

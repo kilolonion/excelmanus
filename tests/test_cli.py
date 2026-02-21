@@ -1479,3 +1479,39 @@ async def _run_chat_turn_helper(
         raw_args=raw_args,
         error_label=error_label,
     )
+
+
+# ---------------------------------------------------------------------------
+# @img 语法解析测试
+# ---------------------------------------------------------------------------
+
+
+class TestParseImageAttachments:
+    """@img 语法解析测试。"""
+
+    def test_parse_img_syntax(self) -> None:
+        """@img /path/to/file.png 被解析为图片 + 文本。"""
+        from excelmanus.cli import _parse_image_attachments
+
+        text, images = _parse_image_attachments("@img /tmp/photo.png 请复刻这个表格")
+        assert text.strip() == "请复刻这个表格"
+        assert len(images) == 1
+        assert images[0] == "/tmp/photo.png"
+
+    def test_no_img_syntax_passthrough(self) -> None:
+        """无 @img 时原样返回。"""
+        from excelmanus.cli import _parse_image_attachments
+
+        text, images = _parse_image_attachments("普通消息")
+        assert text == "普通消息"
+        assert images == []
+
+    def test_multiple_images(self) -> None:
+        """多个 @img 均被解析。"""
+        from excelmanus.cli import _parse_image_attachments
+
+        text, images = _parse_image_attachments("@img a.png @img b.jpg 分析两张图")
+        assert len(images) == 2
+        assert "a.png" in images
+        assert "b.jpg" in images
+        assert text.strip() == "分析两张图"

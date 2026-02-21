@@ -89,6 +89,15 @@ class _ChatCompletion:
 # ── 格式转换：OpenAI → Claude ─────────────────────────────────
 
 
+def _parse_data_uri(url: str) -> tuple[str, str]:
+    """解析 data:mime;base64,data 格式的 URI，返回 (mime_type, base64_data)。"""
+    if url.startswith("data:"):
+        header, _, data = url.partition(",")
+        mime = header.split(":")[1].split(";")[0] if ":" in header else "image/png"
+        return mime, data
+    return "image/png", url
+
+
 def _openai_messages_to_claude(
     messages: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -109,10 +118,30 @@ def _openai_messages_to_claude(
             continue
 
         if role == "user":
-            claude_messages.append({
-                "role": "user",
-                "content": content or "",
-            })
+            if isinstance(content, list):
+                blocks: list[dict[str, Any]] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            blocks.append({"type": "text", "text": item.get("text", "")})
+                        elif item.get("type") == "image_url":
+                            img_info = item.get("image_url", {})
+                            url = img_info.get("url", "")
+                            mime, b64 = _parse_data_uri(url)
+                            blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime,
+                                    "data": b64,
+                                },
+                            })
+                claude_messages.append({"role": "user", "content": blocks})
+            else:
+                claude_messages.append({
+                    "role": "user",
+                    "content": content or "",
+                })
             continue
 
         if role == "assistant":

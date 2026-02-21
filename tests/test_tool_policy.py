@@ -12,9 +12,6 @@ from excelmanus.tools.policy import (
     MUTATING_ALL_TOOLS,
     MUTATING_AUDIT_ONLY_TOOLS,
     MUTATING_CONFIRM_TOOLS,
-    SUBAGENT_ANALYSIS_EXTRA_TOOLS,
-    SUBAGENT_READ_ONLY_TOOLS,
-    SUBAGENT_WRITE_EXTRA_TOOLS,
     WORKSPACE_SCAN_EXCLUDE_PREFIXES,
     WORKSPACE_SCAN_MAX_FILES,
     WORKSPACE_SCAN_MAX_HASH_BYTES,
@@ -26,36 +23,18 @@ EXPECTED_MUTATING_CONFIRM_TOOLS = {
     "run_shell",
     "delete_file",
     "rename_file",
-    "write_excel",
-    "transform_data",
-    "create_sheet",
-    "copy_sheet",
-    "rename_sheet",
-    "delete_sheet",
-    "copy_range_between_sheets",
+    # Batch 1: write_excel, transform_data
+    # Batch 3: create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets
 }
 
 EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "copy_file",
-    "create_chart",
-    "create_excel_chart",
-    "write_cells",
-    "insert_rows",
-    "insert_columns",
-    "format_cells",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "apply_threshold_icon_format",
-    "style_card_blocks",
-    "scale_range_unit",
-    "apply_dashboard_dark_theme",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
-    "set_print_layout",
-    "set_page_header_footer",
+    # Macro 工具
+    "vlookup_write",
+    "computed_column",
+    # Vision 工具
+    "rebuild_excel_from_spec",
+    "verify_excel_replica",
 }
 
 
@@ -96,7 +75,8 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
     mutating_like = {
         name
         for name in registered
-        if name in {"run_code", "run_shell"} or name.startswith(prefixes)
+        if name in {"run_code", "run_shell", "vlookup_write", "computed_column", "rebuild_excel_from_spec", "verify_excel_replica"}
+        or name.startswith(prefixes)
     }
     from excelmanus.tools.policy import CODE_POLICY_DYNAMIC_TOOLS
     expected_all = set(MUTATING_ALL_TOOLS) | set(CODE_POLICY_DYNAMIC_TOOLS)

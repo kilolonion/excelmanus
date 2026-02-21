@@ -437,7 +437,7 @@ class TestDashboardRenderFallback:
 class TestDashboardLiveManagement:
     def test_live_not_started_on_stringio(self) -> None:
         """StringIO Console 不是终端，Live 不应启动。"""
-        c = _make_console()
+        c = Console(file=StringIO(), width=120)
         r = DashboardRenderer(c)
         r.start_turn(turn_number=1, model_name="m")
         # StringIO console is_terminal == False, so _live should be None

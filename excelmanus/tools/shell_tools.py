@@ -83,14 +83,44 @@ def _tail(text: str, lines: int) -> str:
     return "\n".join(parts[-lines:])
 
 
-def _validate_command(command: str) -> tuple[bool, str]:
-    """校验命令安全性，返回 (通过, 原因)。"""
-    stripped = command.strip()
+def _split_pipeline(command: str) -> list[str]:
+    """将管道命令按 ``|`` 安全拆分（考虑引号）。
+
+    返回子命令列表；无管道时返回单元素列表。
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    chars = command
+    while i < len(chars):
+        ch = chars[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+        elif ch == "\\" and i + 1 < len(chars) and not in_single:
+            current.append(ch)
+            current.append(chars[i + 1])
+            i += 1
+        elif ch == "|" and not in_single and not in_double:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    parts.append("".join(current))
+    return parts
+
+
+def _validate_single_command(segment: str) -> tuple[bool, str]:
+    """校验单条命令（不含管道）的安全性，返回 (通过, 原因)。"""
+    stripped = segment.strip()
     if not stripped:
         return False, "命令不能为空"
-
-    if re.search(r"\|\||&&|\|", stripped):
-        return False, "当前不支持管道/逻辑运算，请拆分命令"
 
     # 检测危险元字符
     for pattern in _DANGEROUS_PATTERNS:
@@ -117,7 +147,6 @@ def _validate_command(command: str) -> tuple[bool, str]:
     # python/pip 子命令限制
     if cmd_name in ("python", "python3") and len(tokens) > 1:
         sub = tokens[1]
-        # 仅允许 --version / -V / -c（内联代码用 run_code）
         if sub not in ("--version", "-V", "-c"):
             return False, (
                 f"run_shell 仅允许 {cmd_name} --version / -V，"
@@ -126,11 +155,30 @@ def _validate_command(command: str) -> tuple[bool, str]:
 
     if cmd_name in ("pip", "pip3") and len(tokens) > 1:
         sub = tokens[1]
-        # 仅允许 list / show / freeze / --version
         if sub not in ("list", "show", "freeze", "--version", "-V"):
             return False, (
                 f"run_shell 仅允许 {cmd_name} list/show/freeze/--version"
             )
+
+    return True, "ok"
+
+
+def _validate_command(command: str) -> tuple[bool, str]:
+    """校验命令安全性（支持管道），返回 (通过, 原因)。"""
+    stripped = command.strip()
+    if not stripped:
+        return False, "命令不能为空"
+
+    # 逻辑运算符仍然禁止
+    if re.search(r"\|\||&&", stripped):
+        return False, "当前不支持逻辑运算符 (|| / &&)，请拆分命令"
+
+    # 按管道拆分并逐段验证
+    segments = _split_pipeline(stripped)
+    for seg in segments:
+        valid, reason = _validate_single_command(seg)
+        if not valid:
+            return False, reason
 
     return True, "ok"
 
@@ -170,6 +218,9 @@ def run_shell(
     # 构建最小环境
     sandbox_env = _build_shell_env()
 
+    # 拆分管道
+    segments = _split_pipeline(command.strip())
+
     started = time.time()
     timed_out = False
     return_code = 1
@@ -177,24 +228,65 @@ def run_shell(
     stderr = ""
 
     try:
-        run_kwargs: dict[str, Any] = {
-            "cwd": workdir_safe,
-            "capture_output": True,
-            "text": True,
-            "timeout": timeout_seconds,
-            "check": False,
-            "env": sandbox_env,
-            "stdin": subprocess.DEVNULL,
-            "close_fds": True,
-            "start_new_session": True,
-            "shell": False,  # 绝不使用 shell=True
-        }
-        # 用 shlex 解析并直接传列表，避免 shell 注入
-        tokens = shlex.split(command.strip())
-        completed = subprocess.run(tokens, **run_kwargs)
-        return_code = completed.returncode
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
+        if len(segments) == 1:
+            # 单命令，直接执行
+            tokens = shlex.split(segments[0].strip())
+            completed = subprocess.run(
+                tokens,
+                cwd=workdir_safe,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+                env=sandbox_env,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+                shell=False,
+            )
+            return_code = completed.returncode
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+        else:
+            # 管道链：用 subprocess.PIPE 连接
+            procs: list[subprocess.Popen[str]] = []
+            prev_stdout: Any = subprocess.DEVNULL
+            for idx, seg in enumerate(segments):
+                tokens = shlex.split(seg.strip())
+                stdin_src = prev_stdout if idx > 0 else subprocess.DEVNULL
+                p = subprocess.Popen(
+                    tokens,
+                    cwd=workdir_safe,
+                    stdin=stdin_src,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=sandbox_env,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+                # 关闭上一个进程的 stdout（已被当前进程接管）
+                if idx > 0 and prev_stdout is not None:
+                    prev_stdout.close()
+                prev_stdout = p.stdout
+                procs.append(p)
+
+            # 等待最后一个进程完成
+            last = procs[-1]
+            try:
+                out, err = last.communicate(timeout=timeout_seconds)
+                stdout = out or ""
+                stderr = err or ""
+                return_code = last.returncode
+            finally:
+                # 清理所有进程
+                for p in procs:
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+                    p.wait()
+
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         return_code = 124
@@ -212,7 +304,7 @@ def run_shell(
         return json.dumps(
             {
                 "status": "error",
-                "error": f"命令未找到: {shlex.split(command.strip())[0]}",
+                "error": f"命令未找到: {shlex.split(segments[0].strip())[0]}",
                 "command": command,
             },
             ensure_ascii=False,

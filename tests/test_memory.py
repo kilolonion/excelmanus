@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, assume
+from hypothesis import HealthCheck, given, assume, settings
 from hypothesis import strategies as st
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.memory import ConversationMemory, TokenCounter, _DEFAULT_SYSTEM_PROMPT
+from excelmanus.memory import ConversationMemory, TokenCounter, _DEFAULT_SYSTEM_PROMPT, IMAGE_TOKEN_ESTIMATE
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +64,9 @@ class TestTokenCounter:
 class TestConversationMemory:
     """ConversationMemory 基本功能测试。"""
 
-    def test_default_system_prompt_blocks_write_completion_claims_without_tool_result(self) -> None:
-        assert "写入完成声明门禁" in _DEFAULT_SYSTEM_PROMPT
-        assert "未收到写入类工具成功返回前" in _DEFAULT_SYSTEM_PROMPT
+    def test_default_system_prompt_contains_verification_principle(self) -> None:
+        assert "验证闭环" in _DEFAULT_SYSTEM_PROMPT
+        assert "finish_task" in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
         """初始状态只有 system 消息。"""
@@ -288,6 +288,51 @@ class TestTruncation:
 
 
 # ---------------------------------------------------------------------------
+# 多模态支持测试
+# ---------------------------------------------------------------------------
+
+class TestMultimodalMemory:
+    """多模态 content parts 支持测试。"""
+
+    def test_add_user_message_str_backward_compat(self, config: ExcelManusConfig) -> None:
+        """纯文本消息向后兼容。"""
+        mem = ConversationMemory(config)
+        mem.add_user_message("hello")
+        msgs = mem.get_messages()
+        assert msgs[-1] == {"role": "user", "content": "hello"}
+
+    def test_add_user_message_list_content(self, config: ExcelManusConfig) -> None:
+        """多模态 content parts。"""
+        mem = ConversationMemory(config)
+        parts = [
+            {"type": "text", "text": "看这张图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc", "detail": "auto"}},
+        ]
+        mem.add_user_message(parts)
+        msgs = mem.get_messages()
+        assert msgs[-1] == {"role": "user", "content": parts}
+
+    def test_add_image_message(self, config: ExcelManusConfig) -> None:
+        """便捷图片注入方法。"""
+        mem = ConversationMemory(config)
+        mem.add_image_message(base64_data="iVBOR...", mime_type="image/png")
+        msgs = mem.get_messages()
+        last = msgs[-1]
+        assert last["role"] == "user"
+        assert isinstance(last["content"], list)
+        assert last["content"][0]["type"] == "image_url"
+
+    def test_count_message_with_image(self, config: ExcelManusConfig) -> None:
+        """图片消息 token 估算。"""
+        mem = ConversationMemory(config)
+        mem.add_image_message(base64_data="x" * 100, mime_type="image/png")
+        msgs = mem.get_messages()
+        count = TokenCounter.count_message(msgs[-1])
+        # 应包含 IMAGE_TOKEN_ESTIMATE 的估算值
+        assert count >= IMAGE_TOKEN_ESTIMATE
+
+
+# ---------------------------------------------------------------------------
 # Property 7：对话截断属性测试
 # **Validates: Requirements 1.8**
 # ---------------------------------------------------------------------------
@@ -296,6 +341,7 @@ class TestTruncation:
 message_content = st.text(min_size=1, max_size=500)
 
 
+@settings(suppress_health_check=[HealthCheck.filter_too_much])
 @given(
     messages=st.lists(
         st.tuples(

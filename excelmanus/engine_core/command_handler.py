@@ -19,6 +19,7 @@ from excelmanus.tools.registry import ToolNotAllowedError
 # - BackupManager (from excelmanus.backup)
 
 if TYPE_CHECKING:
+    from excelmanus.engine import AgentEngine
     from excelmanus.events import EventCallback
 
 logger = get_logger("command_handler")
@@ -27,7 +28,7 @@ logger = get_logger("command_handler")
 class CommandHandler:
     """控制命令处理器，从 AgentEngine 搬迁所有 /command 处理逻辑。"""
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
 
     async def handle(
@@ -261,6 +262,24 @@ class CommandHandler:
             e._pending_approval_route_result = None
             return f"accept 执行失败：{exc}"
 
+        # ── run_code RED 路径 → 写入追踪 ──
+        if pending.tool_name == "run_code":
+            from excelmanus.security.code_policy import extract_excel_targets
+            _rc_code = pending.arguments.get("code") or ""
+            _rc_result_json: dict | None = None
+            try:
+                _rc_result_json = json.loads(record.result_preview or "")
+                if not isinstance(_rc_result_json, dict):
+                    _rc_result_json = None
+            except (json.JSONDecodeError, TypeError):
+                pass
+            _has_cow = bool(_rc_result_json and _rc_result_json.get("cow_mapping"))
+            _has_ast_write = any(
+                t.operation == "write"
+                for t in extract_excel_targets(_rc_code)
+            )
+            if record.changes or _has_cow or _has_ast_write:
+                e._state.record_write_action()
         # ── run_code RED 路径 → window 感知桥接 ──
         if pending.tool_name == "run_code" and e._window_perception is not None:
             _rc_code = pending.arguments.get("code") or ""
@@ -276,6 +295,21 @@ class CommandHandler:
                 stdout_tail=_rc_stdout,
                 iteration=0,
             )
+
+        # ── 通用 CoW 映射提取（覆盖 run_code RED 及其他高风险工具） ──
+        if record.result_preview:
+            try:
+                _accept_result = json.loads(record.result_preview)
+                if isinstance(_accept_result, dict):
+                    _accept_cow = _accept_result.get("cow_mapping")
+                    if _accept_cow and isinstance(_accept_cow, dict):
+                        e._state.register_cow_mappings(_accept_cow)
+                        logger.info(
+                            "/accept CoW 映射已注册: tool=%s mappings=%s",
+                            pending.tool_name, _accept_cow,
+                        )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         e._approval.clear_pending()
         route_to_resume = e._pending_approval_route_result

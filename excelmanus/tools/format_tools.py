@@ -98,6 +98,9 @@ def format_cells(
 ) -> str:
     """对指定单元格范围应用格式化样式。
 
+    注意：仅推荐用于单次、简单的区域格式化。整列或整表的批量条件样式，
+    强烈建议用 run_code 工具（openpyxl 脚本）完成。
+
     Args:
         file_path: Excel 文件路径。
         cell_range: 单元格范围，如 "A1:C3" 或 "A1"。
@@ -668,7 +671,17 @@ def _extract_alignment(alignment: Alignment | None) -> dict[str, Any] | None:
 
 
 def get_tools() -> list[ToolDef]:
-    """返回格式化 Skill 的所有工具定义。"""
+    """返回格式化 Skill 的所有工具定义。
+
+    Batch 2 精简：format_cells/adjust_column_width/read_cell_styles/
+    adjust_row_height/merge_cells/unmerge_cells 已删除，由 run_code 替代。
+    函数实现保留以支持内部引用和未来可能的恢复。
+    """
+    return []
+
+
+def _get_tools_deprecated() -> list[ToolDef]:
+    """已废弃的工具定义，保留供参考。"""
     _side_schema = {
         "type": "object",
         "description": "单边边框设置",

@@ -244,7 +244,7 @@ class TestDefaultValues:
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         cfg = load_config()
-        assert cfg.max_iterations == 20
+        assert cfg.max_iterations == 50
 
     def test_default_max_consecutive_failures(self, monkeypatch) -> None:
         """默认最大连续失败次数为 6。（需求 6.6）"""

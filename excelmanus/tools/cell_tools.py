@@ -114,6 +114,9 @@ def write_cells(
 ) -> str:
     """向指定单元格或范围写入值/公式，不影响工作表其他区域的数据。
 
+    注意：仅适用于少量数据（<=3行）的精确写入。超过3行的批量写入、条件更新、
+    复杂数据流转必须使用 run_code 工具。
+
     两种模式（互斥）：
     - **单元格模式**：传 cell + value，写入单个单元格。
     - **范围模式**：传 cell_range + values，批量写入二维数据。
@@ -405,114 +408,9 @@ def insert_columns(
 
 
 def get_tools() -> list[ToolDef]:
-    """返回单元格级操作工具的所有工具定义。"""
-    return [
-        ToolDef(
-            name="write_cells",
-            description=(
-                "【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n"
-                "向 Excel 指定单元格或范围写入值/公式，不影响其他区域数据。"
-                "两种模式：(1) cell+value 写单个单元格；"
-                "(2) cell_range+values 批量写入二维数据。"
-                "支持数字、字符串和公式（以 = 开头）。"
-                "设置 return_preview=true 可直接返回写入后的值预览，省去额外 read 验证"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认活动工作表",
-                    },
-                    "cell": {
-                        "type": "string",
-                        "description": "目标单元格引用（如 'A1'），单元格模式",
-                    },
-                    "value": {
-                        "description": "要写入的值（数字、字符串或公式），单元格模式",
-                    },
-                    "cell_range": {
-                        "type": "string",
-                        "description": "目标范围起始位置（如 'A1' 或 'A1:C3'），范围模式",
-                    },
-                    "values": {
-                        "type": "array",
-                        "items": {
-                            "type": "array",
-                            "items": {},
-                        },
-                        "description": "二维数组数据，每个内层列表代表一行，范围模式",
-                    },
-                    "return_preview": {
-                        "type": "boolean",
-                        "description": "写入后返回受影响区域的值预览（含公式求值结果）",
-                        "default": False,
-                    },
-                },
-                "required": ["file_path"],
-                "additionalProperties": False,
-            },
-            func=write_cells,
-        ),
-        ToolDef(
-            name="insert_rows",
-            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n在 Excel 指定行号前插入空行，已有数据自动下移",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "row": {
-                        "type": "integer",
-                        "description": "插入位置行号（从 1 开始），新行将插入到此行之前",
-                    },
-                    "count": {
-                        "type": "integer",
-                        "description": "插入行数，默认 1",
-                        "default": 1,
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认活动工作表",
-                    },
-                },
-                "required": ["file_path", "row"],
-                "additionalProperties": False,
-            },
-            func=insert_rows,
-        ),
-        ToolDef(
-            name="insert_columns",
-            description="【警告：极低效工具】本工具仅适用于偶尔修改单个格子的极简场景。如果你需要处理多行数据、整列计算或批量样式，强制要求你放弃本工具，改用 run_code，否则任务将不可避免地失败。\n在 Excel 指定列前插入空列，已有数据自动右移。列可以用字母（如 'C'）或数字（如 3）指定",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "column": {
-                        "description": "插入位置，列字母（如 'C'）或列号（如 3），新列插入到此列之前",
-                    },
-                    "count": {
-                        "type": "integer",
-                        "description": "插入列数，默认 1",
-                        "default": 1,
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认活动工作表",
-                    },
-                },
-                "required": ["file_path", "column"],
-                "additionalProperties": False,
-            },
-            func=insert_columns,
-        ),
-    ]
+    """返回单元格级操作工具的所有工具定义。
+
+    Batch 1 精简：write_cells/insert_rows/insert_columns 已删除，由 run_code 替代。
+    函数实现保留以支持内部引用和未来可能的恢复。
+    """
+    return []

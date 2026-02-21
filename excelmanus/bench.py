@@ -568,6 +568,89 @@ def _serialize_llm_response(response: Any) -> dict[str, Any]:
     return result
 
 
+class _StreamRecorder:
+    """包装异步流式响应，透传 chunk 同时累计 call 级指标。
+
+    在 stream 消费完毕后，将累计的 finish_reason / usage / delta 统计
+    回写到 call_record["response"]，使 run_*.json 中每个 llm_call
+    都具备完整的观测数据。
+    """
+
+    def __init__(self, stream: Any, call_record: dict[str, Any]) -> None:
+        self._stream = stream
+        self._call_record = call_record
+        # 累计指标
+        self._finish_reason: str | None = None
+        self._usage: dict[str, int] | None = None
+        self._delta_chars = 0
+        self._tool_call_deltas = 0
+
+    def __aiter__(self):  # noqa: D105
+        return self
+
+    async def __anext__(self):  # noqa: D105
+        try:
+            chunk = await self._stream.__anext__()
+        except StopAsyncIteration:
+            self._finalize()
+            raise
+
+        # ── 从 chunk 中提取指标 ──
+
+        # openai ChatCompletionChunk 格式
+        choices = getattr(chunk, "choices", None)
+        if choices:
+            delta = getattr(choices[0], "delta", None)
+            if delta is not None:
+                delta_content = getattr(delta, "content", None)
+                if delta_content:
+                    self._delta_chars += len(delta_content)
+                delta_tool_calls = getattr(delta, "tool_calls", None)
+                if delta_tool_calls:
+                    self._tool_call_deltas += len(delta_tool_calls)
+            fr = getattr(choices[0], "finish_reason", None)
+            if fr:
+                self._finish_reason = fr
+
+        # 自定义 provider _StreamDelta 格式
+        if hasattr(chunk, "content_delta"):
+            if chunk.content_delta:
+                self._delta_chars += len(chunk.content_delta)
+            if getattr(chunk, "tool_calls_delta", None):
+                self._tool_call_deltas += len(chunk.tool_calls_delta)
+            if getattr(chunk, "finish_reason", None):
+                self._finish_reason = chunk.finish_reason
+
+        # usage（通常在最后一个 chunk）
+        chunk_usage = getattr(chunk, "usage", None)
+        if chunk_usage is not None:
+            self._usage = {
+                "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(chunk_usage, "completion_tokens", 0),
+                "total_tokens": getattr(chunk_usage, "total_tokens", 0),
+            }
+
+        return chunk
+
+    # 支持 async for ... 以外的 aclose 调用（如提前中断）
+    async def aclose(self):  # noqa: D102
+        close_fn = getattr(self._stream, "aclose", None)
+        if close_fn:
+            await close_fn()
+        self._finalize()
+
+    def _finalize(self) -> None:
+        """将累计指标写入 call_record。"""
+        resp: dict[str, Any] = {"_stream": True}
+        if self._finish_reason is not None:
+            resp["finish_reason"] = self._finish_reason
+        if self._usage is not None:
+            resp["usage"] = self._usage
+        resp["delta_chars"] = self._delta_chars
+        resp["tool_call_deltas"] = self._tool_call_deltas
+        self._call_record["response"] = resp
+
+
 class _LLMCallInterceptor:
     """拦截 engine 的 LLM API 调用，记录完整的请求和响应。
 
@@ -603,6 +686,8 @@ class _LLMCallInterceptor:
                 if isinstance(t, dict)
             ]
 
+        is_stream = bool(kwargs.get("stream"))
+
         start = time.monotonic()
         try:
             response = await self._original_create(**kwargs)
@@ -617,9 +702,16 @@ class _LLMCallInterceptor:
         call_record["duration_ms"] = round(
             (time.monotonic() - start) * 1000, 1
         )
-        call_record["response"] = _serialize_llm_response(response)
-        self.calls.append(call_record)
-        return response
+
+        if is_stream:
+            # 先 append，_StreamRecorder 消费完毕后回写 response
+            call_record["response"] = {"_stream": True}
+            self.calls.append(call_record)
+            return _StreamRecorder(response, call_record)
+        else:
+            call_record["response"] = _serialize_llm_response(response)
+            self.calls.append(call_record)
+            return response
 
     def restore(self) -> None:
         """恢复原始的 create 方法。"""

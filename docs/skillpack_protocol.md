@@ -1,6 +1,6 @@
 # Skillpack 协议规范（SSOT）
 
-> 最后更新：2026-02-19 (v5)  
+> 最后更新：2026-02-21 (v5.2)  
 > 适用范围：`excelmanus/skillpacks`、README、测试与任务文档
 
 ## 1. 目标

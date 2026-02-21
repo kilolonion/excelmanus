@@ -462,7 +462,7 @@ def _render_sheet(window: SheetWindow) -> str:
     ):
         lines.append(
             f"⚠️ 当前仅显示 {preview_len} 行样本（共 {sheet_total_rows} 行），"
-            f"分组统计需调用 group_aggregate"
+            f"分组统计需通过 run_code 执行 pandas 聚合"
         )
 
     if window.style_summary:
@@ -628,7 +628,7 @@ def render_window_wurm_full(
     if profile["intent"] == IntentTag.AGGREGATE.value and total_rows > render_max_rows * 2:
         lines.append(
             f"⚠️ 当前仅显示 {render_max_rows} 行样本（共 {total_rows} 行），"
-            f"分组统计需调用 group_aggregate"
+            f"分组统计需通过 run_code 执行 pandas 聚合"
         )
 
     status_bar = window.status_bar

@@ -32,26 +32,29 @@ def workspace(tmp_path: Path) -> Path:
 # ── list_directory ───────────────────────────────────────
 
 
+
 class TestListDirectory:
-    def test_list_root(self, workspace: Path) -> None:
-        result = json.loads(file_tools.list_directory())
+    # ── depth=0 扁平分页模式（原有行为） ──
+
+    def test_flat_list_root(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(depth=0))
         assert result["total"] >= 3
         names = [e["name"] for e in result["entries"]]
         assert "hello.txt" in names
         assert "subdir" in names
 
-    def test_hidden_files_excluded_by_default(self, workspace: Path) -> None:
-        result = json.loads(file_tools.list_directory())
+    def test_flat_hidden_files_excluded_by_default(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(depth=0))
         names = [e["name"] for e in result["entries"]]
         assert ".hidden" not in names
 
-    def test_hidden_files_shown(self, workspace: Path) -> None:
-        result = json.loads(file_tools.list_directory(show_hidden=True))
+    def test_flat_hidden_files_shown(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(show_hidden=True, depth=0))
         names = [e["name"] for e in result["entries"]]
         assert ".hidden" in names
 
-    def test_subdirectory(self, workspace: Path) -> None:
-        result = json.loads(file_tools.list_directory("subdir"))
+    def test_flat_subdirectory(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory("subdir", depth=0))
         assert result["total"] == 1
         assert result["entries"][0]["name"] == "nested.txt"
 
@@ -64,8 +67,8 @@ class TestListDirectory:
             file_tools.list_directory("..")
 
     def test_pagination(self, workspace: Path) -> None:
-        full = json.loads(file_tools.list_directory())
-        page = json.loads(file_tools.list_directory(offset=0, limit=2))
+        full = json.loads(file_tools.list_directory(depth=0))
+        page = json.loads(file_tools.list_directory(offset=0, limit=2, depth=0))
         assert page["total"] == full["total"]
         assert page["offset"] == 0
         assert page["limit"] == 2
@@ -74,10 +77,43 @@ class TestListDirectory:
         assert page["has_more"] is True
 
     def test_pagination_invalid_args(self, workspace: Path) -> None:
-        result = json.loads(file_tools.list_directory(offset=-1, limit=10))
+        result = json.loads(file_tools.list_directory(offset=-1, limit=10, depth=0))
         assert "error" in result
-        result = json.loads(file_tools.list_directory(offset=0, limit=0))
+        result = json.loads(file_tools.list_directory(offset=0, limit=0, depth=0))
         assert "error" in result
+
+    # ── 递归树模式 ──
+
+    def test_tree_default_depth(self, workspace: Path) -> None:
+        """默认 depth=2，返回树结构且包含子目录内容。"""
+        result = json.loads(file_tools.list_directory())
+        assert "tree" in result
+        assert result["depth"] == 2
+        names = [e["name"] for e in result["tree"]]
+        assert "subdir" in names
+        # subdir 应该被展开，包含 children
+        subdir = next(e for e in result["tree"] if e["name"] == "subdir")
+        assert "children" in subdir
+        child_names = [c["name"] for c in subdir["children"]]
+        assert "nested.txt" in child_names
+
+    def test_tree_depth_1(self, workspace: Path) -> None:
+        """depth=1 只列出当前层，目录不展开 children。"""
+        result = json.loads(file_tools.list_directory(depth=1))
+        assert result["depth"] == 1
+        subdir = next(e for e in result["tree"] if e["name"] == "subdir")
+        assert "children" not in subdir
+
+    def test_tree_hidden_excluded(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(depth=1))
+        names = [e["name"] for e in result["tree"]]
+        assert ".hidden" not in names
+
+    def test_tree_hidden_shown(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(show_hidden=True, depth=1))
+        names = [e["name"] for e in result["tree"]]
+        assert ".hidden" in names
+
 
 
 # ── get_file_info ────────────────────────────────────────
@@ -277,15 +313,13 @@ class TestDeleteFile:
 class TestGetTools:
     def test_tool_count(self) -> None:
         tools = file_tools.get_tools()
-        assert len(tools) == 7
+        assert len(tools) == 4  # Batch 5 精简: get_file_info/find_files/read_text_file 已删除
 
     def test_tool_names(self) -> None:
         names = {t.name for t in file_tools.get_tools()}
         expected = {
             "list_directory",
-            "get_file_info",
-            "find_files",
-            "read_text_file",
+            # get_file_info, find_files, read_text_file: Batch 5 精简
             "copy_file",
             "rename_file",
             "delete_file",

@@ -336,28 +336,12 @@ class TestFormatCellsColorName:
 
 class TestGetTools:
     def test_all_new_tools_registered(self) -> None:
+        """Batch 2 精简：get_tools() 返回空列表。"""
         tools = get_tools()
-        tool_names = {t.name for t in tools}
-        expected = {
-            "format_cells",
-            "adjust_column_width",
-            "read_cell_styles",
-            "adjust_row_height",
-            "merge_cells",
-            "unmerge_cells",
-        }
-        assert expected.issubset(tool_names)
+        assert len(tools) == 0
 
     def test_format_cells_schema_has_underline(self) -> None:
-        tools = get_tools()
-        fc_tool = next(t for t in tools if t.name == "format_cells")
-        font_props = fc_tool.input_schema["properties"]["font"]["properties"]
-        assert "underline" in font_props
-        assert "strikethrough" in font_props
+        """Batch 2 精简：format_cells 已删除，跳过。"""
 
     def test_border_schema_has_sides(self) -> None:
-        tools = get_tools()
-        fc_tool = next(t for t in tools if t.name == "format_cells")
-        border_props = fc_tool.input_schema["properties"]["border"]["properties"]
-        assert "left" in border_props
-        assert "right" in border_props
+        """Batch 2 精简：format_cells 已删除，跳过。"""

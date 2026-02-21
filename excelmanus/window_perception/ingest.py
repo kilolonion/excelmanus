@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from openpyxl.utils.cell import range_boundaries  # kept for potential future use
-
 from .domain import Window
 from .models import CachedRange, ChangeRecord, ColumnDef, DetailLevel
 

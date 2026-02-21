@@ -79,19 +79,11 @@ def _registry_with_tools(tmp_path: Path) -> ToolRegistry:
         path.write_text(content, encoding="utf-8")
         return f"写入完成: {file_path}"
 
-    def write_cells(file_path: str, sheet_name: str, cells: list[dict]) -> str:
-        _ = sheet_name
-        _ = cells
-        path = Path(tmp_path) / file_path
+    def copy_file(source: str, destination: str) -> str:
+        path = Path(tmp_path) / destination
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch()
-        return f"写入单元格完成: {file_path}"
-
-    def create_chart(output_path: str) -> str:
-        path = Path(tmp_path) / output_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("chart", encoding="utf-8")
-        return f"图表已生成: {output_path}"
+        path.write_text("copied", encoding="utf-8")
+        return f"复制完成: {destination}"
 
     registry.register_tools(
         [
@@ -116,32 +108,18 @@ def _registry_with_tools(tmp_path: Path) -> ToolRegistry:
                 func=write_text_file,
             ),
             ToolDef(
-                name="write_cells",
-                description="写入单元格",
+                name="copy_file",
+                description="复制文件",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "file_path": {"type": "string"},
-                        "sheet_name": {"type": "string"},
-                        "cells": {"type": "array"},
+                        "source": {"type": "string"},
+                        "destination": {"type": "string"},
                     },
-                    "required": ["file_path", "sheet_name", "cells"],
+                    "required": ["source", "destination"],
                     "additionalProperties": False,
                 },
-                func=write_cells,
-            ),
-            ToolDef(
-                name="create_chart",
-                description="生成图表",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "output_path": {"type": "string"},
-                    },
-                    "required": ["output_path"],
-                    "additionalProperties": False,
-                },
-                func=create_chart,
+                func=copy_file,
             ),
         ]
     )
@@ -399,10 +377,10 @@ async def test_default_mode_audit_only_tool_executes_without_pending(tmp_path: P
     sub_cfg = SubagentConfig(
         name="analyst",
         description="默认模式审批测试",
-        allowed_tools=["create_chart"],
+        allowed_tools=["copy_file"],
         permission_mode="default",
         max_iterations=2,
-        max_consecutive_failures=2,
+        max_consecutive_failures=1,
     )
 
     fake_client = SimpleNamespace(
@@ -412,8 +390,8 @@ async def test_default_mode_audit_only_tool_executes_without_pending(tmp_path: P
                     side_effect=[
                         _response_from_message(
                             _tool_call_message(
-                                "create_chart",
-                                {"output_path": "charts/subagent.png"},
+                                "copy_file",
+                                {"source": "a.txt", "destination": "charts/subagent.png"},
                             )
                         ),
                         _response_from_message(_text_message("执行完成")),
@@ -424,7 +402,7 @@ async def test_default_mode_audit_only_tool_executes_without_pending(tmp_path: P
     )
 
     with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
-        result = await executor.run(config=sub_cfg, prompt="生成图表")
+        result = await executor.run(config=sub_cfg, prompt="复制文件")
 
     assert result.success is True
     assert result.pending_approval_id is None
@@ -437,24 +415,24 @@ async def test_audit_only_tool_failure_still_writes_audit_manifest(tmp_path: Pat
     config = _make_config(tmp_path)
     registry = ToolRegistry()
 
-    def create_chart(output_path: str) -> str:
-        path = Path(tmp_path) / output_path
+    def copy_file(source: str, destination: str) -> str:
+        path = Path(tmp_path) / destination
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("chart", encoding="utf-8")
+        path.write_text("copied", encoding="utf-8")
         raise RuntimeError("chart_fail")
 
     registry.register_tools(
         [
             ToolDef(
-                name="create_chart",
-                description="生成图表",
+                name="copy_file",
+                description="复制文件",
                 input_schema={
                     "type": "object",
-                    "properties": {"output_path": {"type": "string"}},
-                    "required": ["output_path"],
+                    "properties": {"source": {"type": "string"}, "destination": {"type": "string"}},
+                    "required": ["source", "destination"],
                     "additionalProperties": False,
                 },
-                func=create_chart,
+                func=copy_file,
             )
         ]
     )
@@ -468,7 +446,7 @@ async def test_audit_only_tool_failure_still_writes_audit_manifest(tmp_path: Pat
     sub_cfg = SubagentConfig(
         name="analyst",
         description="审计失败回归",
-        allowed_tools=["create_chart"],
+        allowed_tools=["copy_file"],
         permission_mode="default",
         max_iterations=2,
         max_consecutive_failures=1,
@@ -481,8 +459,8 @@ async def test_audit_only_tool_failure_still_writes_audit_manifest(tmp_path: Pat
                     side_effect=[
                         _response_from_message(
                             _tool_call_message(
-                                "create_chart",
-                                {"output_path": "charts/failed.png"},
+                                "copy_file",
+                                {"source": "a.txt", "destination": "charts/failed.png"},
                             )
                         ),
                     ]
@@ -664,6 +642,7 @@ async def test_on_event_callback_error_does_not_interrupt_run(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
+    """Batch 3: write_cells 已删除，改用 copy_file 测试 readOnly 拦截。"""
     config = _make_config(tmp_path)
     registry = _registry_with_tools(tmp_path)
     approval = ApprovalManager(str(tmp_path))
@@ -675,7 +654,7 @@ async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
     sub_cfg = SubagentConfig(
         name="explorer",
         description="只读模式写入拦截测试",
-        allowed_tools=["write_cells"],
+        allowed_tools=["copy_file"],
         permission_mode="readOnly",
         max_iterations=2,
         max_consecutive_failures=1,
@@ -688,11 +667,10 @@ async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
                     side_effect=[
                         _response_from_message(
                             _tool_call_message(
-                                "write_cells",
+                                "copy_file",
                                 {
-                                    "file_path": "out/demo.xlsx",
-                                    "sheet_name": "Sheet1",
-                                    "cells": [{"cell": "A1", "value": 1}],
+                                    "source": "a.xlsx",
+                                    "destination": "out/demo.xlsx",
                                 },
                             )
                         ),
@@ -703,12 +681,12 @@ async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
     )
 
     with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
-        result = await executor.run(config=sub_cfg, prompt="写入 A1")
+        result = await executor.run(config=sub_cfg, prompt="复制文件")
 
     assert result.success is False
     assert result.error is not None
     assert "只读模式仅允许白名单工具" in result.error
-    assert "write_cells" in result.error
+    assert "copy_file" in result.error
 
 
 @pytest.mark.asyncio

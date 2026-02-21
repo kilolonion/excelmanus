@@ -4452,24 +4452,25 @@ class TestApprovalFlow:
     def _make_registry_with_audit_tool(self, workspace: Path) -> ToolRegistry:
         registry = ToolRegistry()
 
-        def create_chart(output_path: str) -> str:
-            target = workspace / output_path
+        def copy_file(source: str, destination: str) -> str:
+            target = workspace / destination
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("chart", encoding="utf-8")
-            return json.dumps({"status": "success", "output_path": output_path}, ensure_ascii=False)
+            target.write_text("copied", encoding="utf-8")
+            return json.dumps({"status": "success", "destination": destination}, ensure_ascii=False)
 
         registry.register_tools([
             ToolDef(
-                name="create_chart",
-                description="生成图表文件",
+                name="copy_file",
+                description="复制文件",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "output_path": {"type": "string"},
+                        "source": {"type": "string"},
+                        "destination": {"type": "string"},
                     },
-                    "required": ["output_path"],
+                    "required": ["source", "destination"],
                 },
-                func=create_chart,
+                func=copy_file,
             ),
         ])
         return registry
@@ -4503,24 +4504,25 @@ class TestApprovalFlow:
     def _make_registry_with_failing_audit_tool(self, workspace: Path) -> ToolRegistry:
         registry = ToolRegistry()
 
-        def create_chart(output_path: str) -> str:
-            target = workspace / output_path
+        def copy_file(source: str, destination: str) -> str:
+            target = workspace / destination
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("chart", encoding="utf-8")
+            target.write_text("copied", encoding="utf-8")
             raise RuntimeError("intentional_audit_failure")
 
         registry.register_tools([
             ToolDef(
-                name="create_chart",
-                description="生成图表后抛错",
+                name="copy_file",
+                description="复制文件后抛错",
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "output_path": {"type": "string"},
+                        "source": {"type": "string"},
+                        "destination": {"type": "string"},
                     },
-                    "required": ["output_path"],
+                    "required": ["source", "destination"],
                 },
-                func=create_chart,
+                func=copy_file,
             ),
         ])
         return registry
@@ -4699,14 +4701,14 @@ class TestApprovalFlow:
         tc = SimpleNamespace(
             id="call_audit_fail",
             function=SimpleNamespace(
-                name="create_chart",
-                arguments=json.dumps({"output_path": "failed_chart.txt"}, ensure_ascii=False),
+                name="copy_file",
+                arguments=json.dumps({"source": "a.txt", "destination": "failed_copy.txt"}, ensure_ascii=False),
             ),
         )
 
         result = await engine._execute_tool_call(
             tc=tc,
-            tool_scope=["create_chart"],
+            tool_scope=["copy_file"],
             on_event=None,
             iteration=1,
         )
@@ -4811,14 +4813,14 @@ class TestApprovalFlow:
         engine._execute_tool_with_audit = AsyncMock(return_value=('{"status":"success"}', None))
 
         tool_response = _make_tool_call_response([
-            ("call_1", "create_chart", json.dumps({"output_path": "charts/a.png"}))
+            ("call_1", "copy_file", json.dumps({"source": "a.xlsx", "destination": "b.xlsx"}))
         ])
         text_response = _make_text_response("完成")
         engine._client.chat.completions.create = AsyncMock(
             side_effect=[tool_response, text_response]
         )
 
-        reply = await engine.chat("生成图表")
+        reply = await engine.chat("复制文件")
         assert reply == "完成"
         assert engine._approval.pending is None
         engine._execute_tool_with_audit.assert_awaited_once()

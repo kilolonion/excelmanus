@@ -38,6 +38,8 @@ CATEGORY_DISPLAY_NAMES: dict[str, str] = {
     "sheet": "工作表 (sheet)",
     "file": "文件操作 (file)",
     "code": "代码执行 (code)",
+    "macro": "声明式复合操作 (macro)",
+    "vision": "图片视觉 (vision)",
 }
 
 # ── 自省指引段落 ──────────────────────────────────────────

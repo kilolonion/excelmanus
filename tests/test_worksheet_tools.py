@@ -200,6 +200,4 @@ class TestSetPageHeaderFooter:
 def test_get_tools_returns_all() -> None:
     """验证 get_tools 返回正确数量和名称。"""
     tools = get_tools()
-    assert len(tools) == 2
-    names = {t.name for t in tools}
-    assert names == {"set_print_layout", "set_page_header_footer"}
+    assert len(tools) == 0  # Batch 3 精简：set_print_layout/set_page_header_footer 已删除

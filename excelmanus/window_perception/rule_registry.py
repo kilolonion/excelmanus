@@ -17,36 +17,22 @@ _FORMULA_HINT_RE = re.compile(
 
 _EXPLORER_TOOLS = {
     "list_directory",
-    "find_files",
+    # find_files: Batch 5 精简
     "inspect_excel_files",
 }
 
 _SHEET_TOOLS = {
     "read_excel",
     "read_sheet",
-    "analyze_data",
     "filter_data",
-    "transform_data",
     "list_sheets",
+    # Macro 工具
+    "vlookup_write",
+    "computed_column",
+    # MCP 工具名
     "describe_sheets",
-    "write_excel",
     "write_to_sheet",
-    "write_cells",
-    "format_cells",
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "read_cell_styles",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
-    "create_sheet",
-    "copy_sheet",
-    "rename_sheet",
-    "delete_sheet",
-    "copy_range_between_sheets",
     "focus_window_refill",
 }
 
@@ -66,26 +52,18 @@ _MCP_SHEET_SUFFIXES = {
 _READ_LIKE_TOOLS = {
     "read_excel",
     "read_sheet",
-    "analyze_data",
+    # analyze_data: Batch 4 精简
     "filter_data",
-    "transform_data",
-    "read_cell_styles",
     "focus_window_refill",
 }
 
 _WRITE_LIKE_TOOLS = {
-    "write_excel",
+    # MCP 工具名
     "write_to_sheet",
-    "write_cells",
-    "format_cells",
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
+    # Macro 工具
+    "vlookup_write",
+    "computed_column",
 }
 
 _INTENT_USER_KEYWORDS: dict[IntentTag, tuple[str, ...]] = {
@@ -97,20 +75,12 @@ _INTENT_USER_KEYWORDS: dict[IntentTag, tuple[str, ...]] = {
 }
 
 _INTENT_FORMAT_TOOLS = {
-    "format_cells",
+    # Batch 2/3 精简：仅保留 MCP 工具名
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
-    "read_cell_styles",
 }
-_INTENT_AGGREGATE_TOOLS = {"analyze_data", "transform_data"}
+_INTENT_AGGREGATE_TOOLS: set[str] = set()  # analyze_data: Batch 4 精简
 _INTENT_VALIDATE_TOOLS = {"filter_data"}
-_INTENT_ENTRY_TOOLS = {"write_excel", "write_to_sheet", "write_cells"}
+_INTENT_ENTRY_TOOLS = {"write_to_sheet"}  # write_excel, write_cells: Batch 1 精简
 
 _INTENT_TO_TASK_TYPE: dict[IntentTag, str] = {
     IntentTag.AGGREGATE: "DATA_COMPARISON",

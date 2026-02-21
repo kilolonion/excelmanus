@@ -236,8 +236,6 @@ class TestInsertColumns:
 
 
 def test_get_tools_returns_all() -> None:
-    """验证 get_tools 返回正确数量和名称。"""
+    """验证 get_tools 返回空列表（Batch 1 精简：全部由 run_code 替代）。"""
     tools = get_tools()
-    assert len(tools) == 3
-    names = {t.name for t in tools}
-    assert names == {"write_cells", "insert_rows", "insert_columns"}
+    assert len(tools) == 0

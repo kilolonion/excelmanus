@@ -1,0 +1,22 @@
+{
+  "suite_name": "图片表格复刻",
+  "description": "测试图片→Excel 复刻全流水线：read_image → extract_table_from_image → rebuild_excel_from_spec → verify_excel_replica",
+  "assertions": {
+    "status": "ok",
+    "max_iterations": 15,
+    "max_tool_failures": 2,
+    "no_empty_promise": true
+  },
+  "cases": [
+    {
+      "id": "case_image_replica_full",
+      "name": "图片完整复刻",
+      "message": "请读取 image.png 这张图片，识别其中的表格结构和数据，然后复刻为 Excel 文件。要求：1) 先用 read_image 查看图片 2) 用 extract_table_from_image 提取结构化数据 3) 用 rebuild_excel_from_spec 生成 Excel 4) 用 verify_excel_replica 验证一致性 5) 汇报结果",
+      "tags": ["vision", "replica", "pipeline"],
+      "assertions": {
+        "required_tools": ["read_image"],
+        "max_iterations": 15
+      }
+    }
+  ]
+}

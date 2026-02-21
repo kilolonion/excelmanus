@@ -18,7 +18,7 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Literal
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -62,6 +62,14 @@ _APP_CORS_ALLOW_ORIGINS = tuple(load_cors_allow_origins())
 # ── 请求 / 响应模型 ──────────────────────────────────────
 
 
+class ImageAttachment(BaseModel):
+    """图片附件。"""
+
+    data: str  # base64 编码
+    media_type: str = "image/png"
+    detail: Literal["auto", "low", "high"] = "auto"
+
+
 class ChatRequest(BaseModel):
     """对话请求体。"""
 
@@ -73,6 +81,7 @@ class ChatRequest(BaseModel):
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
+    images: list[ImageAttachment] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -81,7 +90,7 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     skills_used: list[str]
-    tool_scope: list[str] = Field(default_factory=list, deprecated="v5: 始终为空，保留向后兼容")
+    tool_scope: list[str] = Field(default_factory=list, deprecated="v5.2: 始终为空，保留向后兼容")
     route_mode: str
     iterations: int = 0
     truncated: bool = False
@@ -329,6 +338,11 @@ def _normalize_chat_result(value: ChatResult | str | None) -> ChatResult:
     return ChatResult(reply="" if value is None else str(value))
 
 
+def _serialize_images(images: list[ImageAttachment]) -> list[dict[str, str]]:
+    """将请求中的图片附件标准化为引擎可消费的字典列表。"""
+    return [img.model_dump() for img in images]
+
+
 def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
     """根据安全模式裁剪工具调用明细。"""
     if _is_external_safe_mode():
@@ -513,7 +527,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
         request.session_id
     )
     try:
-        chat_result = _normalize_chat_result(await engine.chat(request.message))
+        chat_result = _normalize_chat_result(
+            await engine.chat(
+                request.message,
+                images=_serialize_images(request.images),
+            )
+        )
     finally:
         await _session_manager.release_for_chat(session_id)
 
@@ -561,6 +580,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
             result = await engine.chat(
                 request.message,
                 on_event=_on_event,
+                images=_serialize_images(request.images),
             )
             return _normalize_chat_result(result)
         except Exception:

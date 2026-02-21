@@ -21,7 +21,8 @@ class TestWindowRules:
         assert result.window_type == WindowType.SHEET
 
     def test_classify_sheet_style_tool(self) -> None:
-        result = classify_tool("adjust_row_height")
+        """Phase 3: adjust_row_height 已删除，改用 list_sheets 验证。"""
+        result = classify_tool("list_sheets")
         assert result.window_type == WindowType.SHEET
 
     def test_classify_mcp_tool(self) -> None:

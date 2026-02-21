@@ -632,6 +632,9 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     当目标文件已存在时，仅写入/替换指定工作表，保留其他工作表。
     当目标文件不存在时，创建新文件。
 
+    注意：仅推荐用于覆盖写入整表或简单追加。跨表匹配、复杂清洗转换、
+    超过3行的条件更新等场景，请优先使用 run_code 工具（pandas）。
+
     Args:
         file_path: 目标 Excel 文件路径。
         data: 要写入的数据，每个字典代表一行。
@@ -842,7 +845,7 @@ def filter_data(
         "original_rows": len(df),
         "filtered_rows": total_filtered,
         "returned_rows": len(filtered),
-        "data": json.loads(filtered.to_json(orient="records", force_ascii=False)),
+        "data": json.loads(filtered.to_json(orient="records", force_ascii=False, date_format="iso")),
     }
     if total_filtered > len(filtered):
         result["truncated"] = True
@@ -2169,56 +2172,8 @@ def get_tools() -> list[ToolDef]:
             func=read_excel,
             max_result_chars=0,
         ),
-        ToolDef(
-            name="write_excel",
-            description="将数据写入 Excel 文件。写入前必须先用 read_excel 确认目标区域现有内容；优先批量写入，避免逐行调用。",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "目标 Excel 文件路径",
-                    },
-                    "data": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                        "description": "要写入的数据，每个对象代表一行",
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认 Sheet1",
-                        "default": "Sheet1",
-                    },
-                },
-                "required": ["file_path", "data"],
-                "additionalProperties": False,
-            },
-            func=write_excel,
-        ),
-        ToolDef(
-            name="analyze_data",
-            description="对 Excel 数据进行基本统计分析（描述性统计、缺失值等）",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认第一个",
-                    },
-                    "header_row": {
-                        "type": "integer",
-                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
-                    },
-                },
-                "required": ["file_path"],
-                "additionalProperties": False,
-            },
-            func=analyze_data,
-        ),
+        # write_excel: Batch 1 精简
+        # analyze_data: Batch 4 精简，由 run_code + pandas describe() 替代
         ToolDef(
             name="filter_data",
             description="根据条件过滤 Excel 数据行并可选排序。支持单条件（column/operator/value）和多条件 AND/OR 组合（conditions 数组）。可通过 columns 参数只返回指定列，通过 sort_by 排序结果，通过 max_rows 限制返回行数以减少数据量。适用于排序、筛选、Top-N 等场景",
@@ -2350,73 +2305,15 @@ def get_tools() -> list[ToolDef]:
             func=inspect_excel_files,
             max_result_chars=0,
         ),
-        ToolDef(
-            name="transform_data",
-            description="对 Excel 数据执行转换操作（重命名列、添加列、删除列、排序）",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "源 Excel 文件路径",
-                    },
-                    "operations": {
-                        "type": "array",
-                        "description": (
-                            "转换操作列表，每项包含 type 及对应参数：\n"
-                            "- sort: by（列名）+ ascending（布尔，默认 true）\n"
-                            "- rename: columns（字典，{\"旧名\": \"新名\"}）\n"
-                            "- add_column: name（列名）+ value（值或表达式）\n"
-                            "- drop_columns: columns（列名列表）"
-                        ),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "enum": ["rename", "add_column", "drop_columns", "sort"],
-                                    "description": "操作类型：rename（重命名列）、add_column（添加列）、drop_columns（删除列）、sort（排序）",
-                                },
-                                "by": {
-                                    "type": "string",
-                                    "description": "sort 操作：排序依据的列名",
-                                },
-                                "ascending": {
-                                    "type": "boolean",
-                                    "description": "sort 操作：是否升序排列，默认 true",
-                                },
-                                "columns": {
-                                    "description": "rename 操作时为字典 {\"旧列名\": \"新列名\"}；drop_columns 操作时为要删除的列名列表",
-                                },
-                                "name": {
-                                    "type": "string",
-                                    "description": "add_column 操作：新列的列名",
-                                },
-                                "value": {
-                                    "description": "add_column 操作：新列的值（可以是常量或表达式）",
-                                },
-                            },
-                            "required": ["type"],
-                        },
-                    },
-                    "sheet_name": {
-                        "type": "string",
-                        "description": "工作表名称，默认第一个",
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "输出文件路径，默认覆盖源文件",
-                    },
-                    "header_row": {
-                        "type": "integer",
-                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
-                    },
-                },
-                "required": ["file_path", "operations"],
-                "additionalProperties": False,
-            },
-            func=transform_data,
-        ),
+        # transform_data: Batch 1 精简
+        # group_aggregate: Batch 4 精简，由 run_code + pandas groupby() 替代
+        # analyze_sheet_mapping: Batch 4 精简，由 run_code + pandas merge 分析替代
+    ]
+
+
+def _get_tools_deprecated_batch4() -> list[ToolDef]:
+    """Batch 4 废弃的工具定义，保留供参考。"""
+    return [
         ToolDef(
             name="group_aggregate",
             description='按指定列分组并执行聚合统计（如 COUNT、SUM、MEAN 等）。仅适用于"统计每个X的Y总和/数量"类分组聚合需求，不适用于简单排序或筛选（请用 filter_data）。调用时必须提供 aggregations 参数，例如 aggregations={"销售额": "sum"}。自动处理含千分位逗号、中文单位后缀的文本型数值列',

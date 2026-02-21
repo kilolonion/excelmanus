@@ -17,6 +17,7 @@ from excelmanus.memory import TokenCounter
 from excelmanus.task_list import TaskStatus
 
 if TYPE_CHECKING:
+    from excelmanus.engine import AgentEngine
     from excelmanus.events import EventCallback
     from excelmanus.skillpacks import SkillMatchResult
 
@@ -31,7 +32,7 @@ logger = get_logger("context_builder")
 class ContextBuilder:
     """系统提示词组装器，从 AgentEngine 搬迁所有 _build_*_notice 和 _prepare_system_prompts。"""
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
 
     def _all_tool_names(self) -> list[str]:
@@ -171,6 +172,10 @@ class ContextBuilder:
         if backup_notice:
             base_prompt = base_prompt + "\n\n" + backup_notice
 
+        cow_path_notice = self._build_cow_path_notice()
+        if cow_path_notice:
+            base_prompt = base_prompt + "\n\n" + cow_path_notice
+
         mcp_context = e._build_mcp_context_notice()
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
@@ -183,6 +188,7 @@ class ContextBuilder:
             base_prompt = base_prompt + "\n\n" + _tool_index
 
         # 注入任务策略（PromptComposer strategies）
+        _strategy_text_captured = ""
         if e._prompt_composer is not None and route_result is not None:
             try:
                 from excelmanus.prompt_composer import PromptContext as _PCtx
@@ -195,14 +201,17 @@ class ContextBuilder:
                 _strategy_text = e._prompt_composer.compose_strategies_text(_p_ctx)
                 if _strategy_text:
                     base_prompt = base_prompt + "\n\n" + _strategy_text
+                    _strategy_text_captured = _strategy_text
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
 
+        _hook_context_captured = ""
         if e._transient_hook_contexts:
             hook_context = "\n".join(e._transient_hook_contexts).strip()
             e._transient_hook_contexts.clear()
             if hook_context:
                 base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
+                _hook_context_captured = hook_context
 
         approved_plan_context = self._build_approved_plan_context_notice()
         window_perception_context = self._build_window_perception_notice()
@@ -210,6 +219,41 @@ class ContextBuilder:
         current_skill_contexts = [
             ctx for ctx in skill_contexts if isinstance(ctx, str) and ctx.strip()
         ]
+
+        # ── 采集提示词注入快照 ──
+        _snapshot_components: dict[str, str] = {}
+        if access_notice:
+            _snapshot_components["access_notice"] = access_notice
+        if backup_notice:
+            _snapshot_components["backup_notice"] = backup_notice
+        if cow_path_notice:
+            _snapshot_components["cow_path_notice"] = cow_path_notice
+        if mcp_context:
+            _snapshot_components["mcp_context"] = mcp_context
+        if _tool_index:
+            _snapshot_components["tool_index"] = _tool_index
+        if _strategy_text_captured:
+            _snapshot_components["prompt_strategies"] = _strategy_text_captured
+        if _hook_context_captured:
+            _snapshot_components["hook_context"] = _hook_context_captured
+        if approved_plan_context:
+            _snapshot_components["approved_plan_context"] = approved_plan_context
+        if window_perception_context:
+            _snapshot_components["window_perception_context"] = window_perception_context
+        for idx, ctx in enumerate(current_skill_contexts):
+            _snapshot_components[f"skill_context_{idx}"] = ctx
+
+        _injection_summary: list[dict[str, Any]] = [
+            {"name": name, "chars": len(text)}
+            for name, text in _snapshot_components.items()
+        ]
+        _injection_snapshot: dict[str, Any] = {
+            "session_turn": e._session_turn,
+            "summary": _injection_summary,
+            "total_chars": sum(len(t) for t in _snapshot_components.values()),
+            "components": _snapshot_components,
+        }
+        e._state.prompt_injection_snapshots.append(_injection_snapshot)
 
         def _compose_prompts() -> list[str]:
             mode = e._effective_system_mode()
@@ -488,6 +532,33 @@ class ContextBuilder:
         )
         return "\n".join(lines)
 
+    def _build_cow_path_notice(self) -> str:
+        """生成 CoW 路径映射清单，注入 system prompt。
+
+        当会话中存在受保护文件的 CoW 副本时，每轮都将映射清单注入系统提示词，
+        确保 agent 始终知道应使用副本路径而非原始路径。
+        """
+        e = self._engine
+        registry = e._state.cow_path_registry
+        if not registry:
+            return ""
+        lines = [
+            "## ⚠️ 文件保护路径映射（CoW）",
+            "以下原始文件受保护，已自动复制到 outputs/ 目录。",
+            "**你必须使用副本路径进行所有后续读取和写入操作，严禁访问原始路径。**",
+            "",
+            "| 原始路径（禁止访问） | 副本路径（请使用） |",
+            "|---|---|",
+        ]
+        for src, dst in registry.items():
+            lines.append(f"| `{src}` | `{dst}` |")
+        lines.append("")
+        lines.append(
+            "如果你在工具参数中使用了原始路径，系统会自动重定向到副本，"
+            "但请主动记住并使用副本路径以避免混淆。"
+        )
+        return "\n".join(lines)
+
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
         e = self._engine
@@ -504,7 +575,7 @@ class ContextBuilder:
     ) -> str:
         """生成工具分类索引，注入 system prompt。
 
-        v5.1: 所有工具始终暴露完整 schema，统一按类别展示。
+        v5.2: 所有工具始终暴露完整 schema，统一按类别展示。
         """
         from excelmanus.tools.policy import TOOL_CATEGORIES, TOOL_SHORT_DESCRIPTIONS
 

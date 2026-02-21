@@ -8,6 +8,7 @@ suite JSON 中通过 ``assertions`` 字段声明规则，runner 执行完毕后
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -208,6 +209,29 @@ def _check_no_empty_promise(result_dict: dict[str, Any]) -> AssertionResult:
         message="" if not is_empty_promise else "首轮存在空承诺：有文字回复但未发起工具调用",
     )
 
+def _check_no_silent_first_turn(result_dict: dict[str, Any]) -> AssertionResult:
+    """首轮 LLM 响应不应完全静默：content 和 tool_calls 均为空。"""
+    llm_calls = result_dict.get("artifacts", {}).get("llm_calls", [])
+    if not llm_calls:
+        return AssertionResult(
+            rule="no_silent_first_turn",
+            passed=True,
+            message="无 LLM 调用记录，跳过检查",
+            severity="warning",
+        )
+    first_resp = llm_calls[0].get("response", {})
+    content = first_resp.get("content") or ""
+    tool_calls = first_resp.get("tool_calls") or []
+    is_silent = not content.strip() and not tool_calls
+    return AssertionResult(
+        rule="no_silent_first_turn",
+        passed=not is_silent,
+        expected="首轮应有响应内容（content 或 tool_calls）",
+        actual=f"content={len(content)}chars, tool_calls={len(tool_calls)}",
+        message="" if not is_silent else "首轮完全静默：既无文字回复也无工具调用",
+    )
+
+
 
 def _check_reply_contains(
     result_dict: dict[str, Any],
@@ -240,6 +264,23 @@ def _check_reply_not_contains(
 
 
 # ── Golden 文件单元格比对 ─────────────────────────────────
+
+
+def _normalize_to_date(val: Any):
+    """尝试将值归一化为 date 对象。"""
+    from datetime import date, datetime
+
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, str):
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(val.strip(), fmt).date()
+            except ValueError:
+                continue
+    return None
 
 
 def _check_golden_cells(
@@ -381,7 +422,13 @@ def _check_golden_cells(
                 elif isinstance(norm_out, float) and isinstance(norm_gold, float):
                     values_equal = abs(norm_out - norm_gold) < 1e-9
                 else:
-                    values_equal = norm_out == norm_gold
+                    # 日期归一化比较
+                    d_out = _normalize_to_date(norm_out)
+                    d_gold = _normalize_to_date(norm_gold)
+                    if d_out is not None and d_gold is not None:
+                        values_equal = d_out == d_gold
+                    else:
+                        values_equal = norm_out == norm_gold
 
                 if values_equal:
                     matched += 1
@@ -435,6 +482,70 @@ def _serialize_cell_value(val: Any) -> Any:
     if isinstance(val, (int, float, bool, str)):
         return val
     return str(val)
+
+def _check_min_match_rate(
+    result_dict: dict[str, Any],
+    threshold: float,
+) -> AssertionResult:
+    """检查 verify_excel_replica 工具返回的 match_rate 是否达标。
+
+    从 tool_calls 中找到最后一次 verify_excel_replica 调用，
+    解析其 result JSON 字符串中的 match_rate 字段，与阈值比较。
+
+    Args:
+        result_dict: BenchResult.to_dict() 的输出。
+        threshold: match_rate 最低阈值（如 0.95）。
+
+    Returns:
+        AssertionResult 包含实际 match_rate 和比较结果。
+    """
+    tool_calls = result_dict.get("artifacts", {}).get("tool_calls", [])
+
+    # 找到所有 verify_excel_replica 调用
+    verify_calls = [
+        tc for tc in tool_calls
+        if tc.get("tool_name") == "verify_excel_replica"
+    ]
+
+    if not verify_calls:
+        return AssertionResult(
+            rule="min_match_rate",
+            passed=False,
+            expected=f"match_rate >= {threshold}",
+            actual=None,
+            message="未找到 verify_excel_replica 工具调用",
+        )
+
+    # 取最后一次调用（最终验证结果）
+    last_call = verify_calls[-1]
+    raw_result = last_call.get("result", "")
+
+    try:
+        parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        actual_rate = parsed["match_rate"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return AssertionResult(
+            rule="min_match_rate",
+            passed=False,
+            expected=f"match_rate >= {threshold}",
+            actual=raw_result,
+            message=f"解析 verify_excel_replica 结果失败: {exc}",
+        )
+
+    passed = actual_rate >= threshold
+    message = "" if passed else (
+        f"match_rate {actual_rate} 低于阈值 {threshold}"
+    )
+
+    return AssertionResult(
+        rule="min_match_rate",
+        passed=passed,
+        expected=f"match_rate >= {threshold}",
+        actual=actual_rate,
+        message=message,
+    )
+
+
 
 
 # ── 主校验函数 ────────────────────────────────────────────
@@ -528,6 +639,10 @@ def validate_case(
     if assertions.get("no_empty_promise"):
         results.append(_check_no_empty_promise(result_dict))
 
+    # no_silent_first_turn
+    if assertions.get("no_silent_first_turn"):
+        results.append(_check_no_silent_first_turn(result_dict))
+
     # reply_contains
     if "reply_contains" in assertions:
         results.append(_check_reply_contains(result_dict, assertions["reply_contains"]))
@@ -535,6 +650,10 @@ def validate_case(
     # reply_not_contains
     if "reply_not_contains" in assertions:
         results.append(_check_reply_not_contains(result_dict, assertions["reply_not_contains"]))
+
+    # min_match_rate
+    if "min_match_rate" in assertions:
+        results.append(_check_min_match_rate(result_dict, assertions["min_match_rate"]))
 
     # golden_cells — 自动从 expected 推导，无需在 assertions 中显式声明
     if expected and expected.get("golden_file") and expected.get("answer_position"):

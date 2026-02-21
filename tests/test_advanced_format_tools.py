@@ -183,10 +183,5 @@ def test_apply_dashboard_dark_theme_updates_cells_cards_and_chart(tmp_path: Path
 
 
 def test_get_tools_contains_advanced_format_tools() -> None:
-    names = {tool.name for tool in get_tools()}
-    assert {
-        "apply_threshold_icon_format",
-        "style_card_blocks",
-        "scale_range_unit",
-        "apply_dashboard_dark_theme",
-    }.issubset(names)
+    """Batch 3 精简：get_tools() 返回空列表。"""
+    assert len(get_tools()) == 0

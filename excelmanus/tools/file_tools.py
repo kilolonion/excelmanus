@@ -57,9 +57,11 @@ def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_
 # ── 工具函数 ──────────────────────────────────────────────
 
 
+
 def list_directory(
     directory: str = ".",
     show_hidden: bool = False,
+    depth: int = 2,
     offset: int = 0,
     limit: int = 100,
 ) -> str:
@@ -68,11 +70,13 @@ def list_directory(
     Args:
         directory: 目标目录路径（相对于工作目录），默认为当前工作目录。
         show_hidden: 是否显示隐藏文件（以 . 开头），默认不显示。
-        offset: 分页起始偏移（从 0 开始），默认 0。
-        limit: 分页大小，默认 100，最大 500。
+        depth: 递归深度。0 = 仅当前层（扁平分页模式），1 = 含直接子目录内容，
+               2 = 默认两层，-1 = 无限递归。默认 2。
+        offset: 分页起始偏移（仅 depth=0 时生效），默认 0。
+        limit: 分页大小（仅 depth=0 时生效），默认 100，最大 500。
 
     Returns:
-        JSON 格式的目录内容列表。
+        JSON 格式的目录内容（depth=0 为扁平列表，depth>=1 为嵌套树）。
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(directory)
@@ -82,6 +86,30 @@ def list_directory(
             {"error": f"路径 '{directory}' 不是一个有效的目录"},
             ensure_ascii=False,
         )
+
+    # depth=0：保持原有扁平分页行为
+    if depth == 0:
+        return _list_directory_flat(directory, safe_path, show_hidden, offset, limit)
+
+    # depth>=1 或 -1：递归树模式
+    tree = _build_tree(safe_path, show_hidden, depth)
+    result = {
+        "directory": directory,
+        "absolute_path": str(safe_path),
+        "depth": depth,
+        "tree": tree,
+    }
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def _list_directory_flat(
+    directory: str,
+    safe_path: Path,
+    show_hidden: bool,
+    offset: int,
+    limit: int,
+) -> str:
+    """扁平分页模式（depth=0 时的原有行为）。"""
     paging_error = _validate_pagination(offset, limit)
     if paging_error is not None:
         return json.dumps({"error": paging_error}, ensure_ascii=False)
@@ -89,43 +117,79 @@ def list_directory(
     entries: list[dict[str, str]] = []
     try:
         for item in sorted(safe_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-            # 跳过隐藏文件（除非明确要求显示）
             if not show_hidden and item.name.startswith("."):
                 continue
-
             entry_type = "directory" if item.is_dir() else "file"
-            entry: dict[str, str] = {
-                "name": item.name,
-                "type": entry_type,
-            }
-
-            # 文件附加大小信息
+            entry: dict[str, str] = {"name": item.name, "type": entry_type}
             if item.is_file():
-                size = item.stat().st_size
-                entry["size"] = _format_size(size)
-
+                entry["size"] = _format_size(item.stat().st_size)
             entries.append(entry)
     except PermissionError:
         return json.dumps(
-            {"error": f"没有权限访问目录 '{directory}'"},
-            ensure_ascii=False,
+            {"error": f"没有权限访问目录 '{directory}'"}, ensure_ascii=False
         )
 
     total = len(entries)
     end = offset + limit
     paged_entries = entries[offset:end]
-    has_more = end < total
-    result = {
-        "directory": directory,
-        "absolute_path": str(safe_path),
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "returned": len(paged_entries),
-        "has_more": has_more,
-        "entries": paged_entries,
-    }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(
+        {
+            "directory": directory,
+            "absolute_path": str(safe_path),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(paged_entries),
+            "has_more": end < total,
+            "entries": paged_entries,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _build_tree(
+    dir_path: Path,
+    show_hidden: bool,
+    remaining_depth: int,
+) -> list[dict[str, Any]]:
+    """递归构建目录树。
+
+    Args:
+        dir_path: 当前目录的绝对路径。
+        show_hidden: 是否包含隐藏条目。
+        remaining_depth: 剩余递归层数，-1 表示无限。
+
+    Returns:
+        嵌套的条目列表，目录条目含 ``children`` 字段。
+    """
+    entries: list[dict[str, Any]] = []
+    try:
+        items = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except PermissionError:
+        return entries
+
+    for item in items:
+        if not show_hidden and item.name.startswith("."):
+            continue
+
+        if item.is_dir():
+            entry: dict[str, Any] = {"name": item.name, "type": "directory"}
+            # remaining_depth: -1 无限，>1 继续递归，==1 不再展开
+            if remaining_depth == -1 or remaining_depth > 1:
+                next_depth = -1 if remaining_depth == -1 else remaining_depth - 1
+                entry["children"] = _build_tree(item, show_hidden, next_depth)
+            entries.append(entry)
+        elif item.is_file():
+            entries.append({
+                "name": item.name,
+                "type": "file",
+                "size": _format_size(item.stat().st_size),
+            })
+
+    return entries
+
+
 
 
 def _format_size(size_bytes: int) -> str:
@@ -432,7 +496,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_directory",
-            description="列出指定目录下的文件和子目录，返回名称、类型和大小信息",
+            description="列出指定目录下的文件和子目录。默认递归展开两层返回完整目录树结构；depth=0 时退化为扁平分页列表",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -446,14 +510,19 @@ def get_tools() -> list[ToolDef]:
                         "description": "是否显示隐藏文件（以 . 开头），默认不显示",
                         "default": False,
                     },
+                    "depth": {
+                        "type": "integer",
+                        "description": "递归深度。0=仅当前层（扁平分页），1=含直接子目录，2=默认两层，-1=无限递归",
+                        "default": 2,
+                    },
                     "offset": {
                         "type": "integer",
-                        "description": "分页起始偏移（从 0 开始），默认 0",
+                        "description": "分页起始偏移（仅 depth=0 时生效），默认 0",
                         "default": 0,
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "分页大小，默认 100，最大 500",
+                        "description": "分页大小（仅 depth=0 时生效），默认 100，最大 500",
                         "default": 100,
                     },
                 },
@@ -463,75 +532,7 @@ def get_tools() -> list[ToolDef]:
             func=list_directory,
             max_result_chars=0,
         ),
-        ToolDef(
-            name="get_file_info",
-            description="获取文件或目录的详细信息（大小、修改时间、扩展名等）",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "文件或目录路径（相对于工作目录）",
-                    },
-                },
-                "required": ["file_path"],
-                "additionalProperties": False,
-            },
-            func=get_file_info,
-        ),
-        ToolDef(
-            name="find_files",
-            description="按 glob 模式在工作区内搜索文件，如 '*.xlsx'、'**/*.csv'",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "glob 搜索模式，如 '*.xlsx'、'**/*.csv'",
-                        "default": "*",
-                    },
-                    "directory": {
-                        "type": "string",
-                        "description": "搜索起始目录（相对于工作目录），默认当前目录",
-                        "default": ".",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "最大返回结果数，默认 50",
-                        "default": 50,
-                    },
-                },
-                "required": [],
-                "additionalProperties": False,
-            },
-            func=find_files,
-        ),
-        ToolDef(
-            name="read_text_file",
-            description="读取文本文件内容（CSV、TXT、JSON 等），返回文件内容和行数",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "文本文件路径（相对于工作目录）",
-                    },
-                    "encoding": {
-                        "type": "string",
-                        "description": "文件编码，默认 utf-8",
-                        "default": "utf-8",
-                    },
-                    "max_lines": {
-                        "type": "integer",
-                        "description": "最大读取行数，默认 200",
-                        "default": 200,
-                    },
-                },
-                "required": ["file_path"],
-                "additionalProperties": False,
-            },
-            func=read_text_file,
-        ),
+        # get_file_info, find_files, read_text_file: Batch 5 精简，由 run_code/run_shell 替代
         ToolDef(
             name="copy_file",
             description="复制文件到工作区内的新位置（不覆盖已有文件）",

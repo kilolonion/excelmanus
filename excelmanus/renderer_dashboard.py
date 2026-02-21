@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from rich.console import Console
 from rich.live import Live
+from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
@@ -49,18 +50,14 @@ _META_TOOL_DISPLAY: dict[str, tuple[str, str]] = {
 
 _TOOL_ICONS: dict[str, str] = {
     "read_excel": "📖",
-    "write_excel": "📝",
-    "analyze_data": "📊",
-    "filter_data": "🔍",
-    "sort_data": "🔃",
-    "create_chart": "📈",
-    "format_cells": "🎨",
-    "set_column_width": "↔️",
-    "merge_cells": "🔗",
-    "add_formula": "🧮",
-    "create_pivot_table": "📋",
-    "validate_data": "✅",
-    "conditional_format": "🌈",
+    "filter_data": "�",
+    "inspect_excel_files": "�",
+    "list_sheets": "�",
+    "list_directory": "�",
+    "run_code": "💻",
+    "write_text_file": "📝",
+    "copy_file": "�",
+    "delete_file": "🗑️",
 }
 
 # 状态到显示文本的映射
@@ -123,6 +120,8 @@ class DashboardRenderer:
         # 流式输出状态（与 StreamRenderer 兼容）
         self._streaming_text = False
         self._streaming_thinking = False
+        # 文本缓冲区，用于流结束后统一 Markdown 渲染
+        self._text_buffer: list[str] = []
         # Rich Live 状态栏
         self._live: Live | None = None
         self._live_paused = False
@@ -309,12 +308,17 @@ class DashboardRenderer:
         )
 
     def finish_streaming(self) -> None:
-        """流式输出结束时调用，确保换行并恢复 Live。"""
-        if self._streaming_text or self._streaming_thinking:
+        """流式输出结束时调用，将缓冲文本以 Markdown 渲染输出并恢复 Live。"""
+        if self._streaming_text and self._text_buffer:
+            full_text = "".join(self._text_buffer)
             self._console.print()
-            self._streaming_text = False
-            self._streaming_thinking = False
-            self._resume_live()
+            self._console.print(Markdown(full_text))
+        elif self._streaming_thinking:
+            self._console.print()
+        self._streaming_text = False
+        self._streaming_thinking = False
+        self._text_buffer.clear()
+        self._resume_live()
 
     # ------------------------------------------------------------------
     # Header 渲染
@@ -480,8 +484,7 @@ class DashboardRenderer:
         if not self._streaming_text:
             self._streaming_text = True
             self._pause_live()
-            self._console.print()
-        self._console.print(event.text_delta, end="")
+        self._text_buffer.append(event.text_delta)
 
     # ------------------------------------------------------------------
     # Iteration / Route

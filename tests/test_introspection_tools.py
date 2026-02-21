@@ -40,10 +40,10 @@ def registry() -> ToolRegistry:
     reg = ToolRegistry()
     # 注册一些代表性工具
     for name in (
-        "read_excel", "write_excel", "format_cells", "analyze_data",
-        "filter_data", "create_excel_chart", "list_sheets",
-        "add_conditional_rule", "read_cell_styles", "merge_cells",
-        "adjust_column_width", "transform_data",
+        "read_excel", "write_text_file", "copy_file", "analyze_data",
+        "filter_data", "list_sheets", "run_code",
+        "list_directory", "get_file_info", "run_shell",
+        "delete_file", "rename_file",
     ):
         desc = TOOL_SHORT_DESCRIPTIONS.get(name, f"desc of {name}")
         reg.register_tool(
@@ -130,12 +130,12 @@ class TestToolDetail:
 
     def test_permission_confirm(self, registry: ToolRegistry) -> None:
         """Tier A 工具应标注为 🔴。"""
-        result = introspect_capability("tool_detail", "write_excel")
+        result = introspect_capability("tool_detail", "write_text_file")
         assert "🔴" in result
 
     def test_permission_audit(self, registry: ToolRegistry) -> None:
         """Tier B 工具应标注为 🟡。"""
-        result = introspect_capability("tool_detail", "add_conditional_rule")
+        result = introspect_capability("tool_detail", "copy_file")
         assert "🟡" in result
 
     def test_category_shown(self, registry: ToolRegistry) -> None:
@@ -222,15 +222,12 @@ class TestRelatedTools:
     def test_same_category(self, registry: ToolRegistry) -> None:
         """应返回同分类的其他工具。"""
         result = introspect_capability("related_tools", "read_excel")
-        # read_excel 在 data_read 分类，应包含 analyze_data
-        assert "analyze_data" in result
+        # read_excel 在 data_read 分类，应包含 filter_data
+        assert "filter_data" in result
 
     def test_predefined_combinations(self, registry: ToolRegistry) -> None:
-        """应返回预定义组合工具。"""
-        result = introspect_capability("related_tools", "write_excel")
-        assert "预定义组合" in result
-        for combo_tool in TOOL_COMBINATIONS["write_excel"]:
-            assert combo_tool in result
+        """工具精简后 TOOL_COMBINATIONS 为空，不应返回预定义组合。"""
+        assert len(TOOL_COMBINATIONS) == 0
 
     def test_no_related(self, registry: ToolRegistry) -> None:
         """不在分类和组合中的工具应返回无推荐。"""

@@ -297,7 +297,7 @@ class TestComposeForSubagent:
         if not (prompts_dir / "subagent").is_dir():
             pytest.skip("prompts/subagent/ 不存在")
         composer = PromptComposer(prompts_dir)
-        for name in ("planner", "explorer", "analyst", "writer", "coder", "full"):
+        for name in ("subagent",):
             result = composer.compose_for_subagent(name)
             assert result is not None, f"{name} 子代理提示词加载失败"
             assert len(result) > 50, f"{name} 子代理提示词过短"
