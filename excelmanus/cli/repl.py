@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Callable
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.padding import Padding
 from rich.text import Text
 from rich.cells import cell_len
 
@@ -199,11 +200,8 @@ async def run_chat_turn(
 
         if not streamed and not _skip_reply:
             console.print()
-            console.print(
-                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}] ",
-                end="",
-            )
-            console.print(Markdown(reply))
+            # Claude Code 风格：回复文本用左缩进 Markdown 块，无 ● 前缀
+            console.print(Padding(Markdown(reply), (0, 2, 0, 2)))
 
         return reply, streamed
     except KeyboardInterrupt:
@@ -221,7 +219,7 @@ async def run_chat_turn(
 
 
 async def interactive_model_select(engine: "AgentEngine") -> str | None:
-    """Claude Code 风格交互式模型选择器。"""
+    """交互式模型选择器（箭头键导航）。"""
     from excelmanus.cli.prompt import is_interactive_terminal
 
     if not is_interactive_terminal():

@@ -1,6 +1,5 @@
 """对话历史摘要器 — 当消息超阈值时，用轻量模型压缩早期对话。
 
-仿 Claude Agent SDK compaction + LangChain SummarizationMiddleware 设计：
 - 系统提示始终完整保留（不压缩）
 - 仅压缩对话历史中的早期消息
 - 保留最近 N 轮完整上下文

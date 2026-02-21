@@ -1,4 +1,4 @@
-"""ExcelManus v5.2 Tools 层导出。"""
+"""ExcelManus Tools 层导出。"""
 
 from excelmanus.tools.registry import (
     OpenAISchemaMode,

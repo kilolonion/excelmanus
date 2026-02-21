@@ -55,8 +55,7 @@ class ExcelManusConfig:
     skills_discovery_enabled: bool = True
     skills_discovery_scan_workspace_ancestors: bool = True
     skills_discovery_include_agents: bool = True
-    skills_discovery_include_claude: bool = True
-    skills_discovery_include_openclaw: bool = True
+    skills_discovery_scan_external_tool_dirs: bool = True
     skills_discovery_extra_dirs: tuple[str, ...] = ()
     system_message_mode: str = "auto"
     tool_result_hard_cap_chars: int = 12000
@@ -531,14 +530,9 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
         True,
     )
-    skills_discovery_include_claude = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE"),
-        "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_CLAUDE",
-        True,
-    )
-    skills_discovery_include_openclaw = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW"),
-        "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW",
+    skills_discovery_scan_external_tool_dirs = _parse_bool(
+        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS"),
+        "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS",
         True,
     )
     skills_discovery_extra_dirs = _parse_csv_tuple(
@@ -905,8 +899,7 @@ def load_config() -> ExcelManusConfig:
         skills_discovery_enabled=skills_discovery_enabled,
         skills_discovery_scan_workspace_ancestors=skills_discovery_scan_workspace_ancestors,
         skills_discovery_include_agents=skills_discovery_include_agents,
-        skills_discovery_include_claude=skills_discovery_include_claude,
-        skills_discovery_include_openclaw=skills_discovery_include_openclaw,
+        skills_discovery_scan_external_tool_dirs=skills_discovery_scan_external_tool_dirs,
         skills_discovery_extra_dirs=skills_discovery_extra_dirs,
         system_message_mode=system_message_mode,
         tool_result_hard_cap_chars=tool_result_hard_cap_chars,

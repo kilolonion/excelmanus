@@ -33,8 +33,8 @@ class BorderSideSpec(BaseModel):
 
 
 class BorderSpec(BaseModel):
-    style: str | None = None  # 统一边框样式（向后兼容）
-    color: str | None = None  # 统一边框颜色（向后兼容）
+    style: str | None = None  # 统一边框样式
+    color: str | None = None  # 统一边框颜色
     top: BorderSideSpec | None = None
     bottom: BorderSideSpec | None = None
     left: BorderSideSpec | None = None

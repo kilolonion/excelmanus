@@ -202,7 +202,6 @@ class ContextBuilder:
     def _build_runtime_metadata_line(self) -> str:
         """生成紧凑的运行时元数据行，让 agent 感知自身状态。
 
-        灵感来源：OpenClaw Prompt Compiler 的 Runtime Metadata 设计。
         一行即可让 agent 知道自己是什么模型、当前轮次、权限状态等。
         """
         e = self._engine
@@ -685,7 +684,7 @@ class ContextBuilder:
     ) -> str:
         """生成工具分类索引，注入 system prompt。
 
-        v5.2: 所有工具始终暴露完整 schema，统一按类别展示。
+        所有工具始终暴露完整 schema，统一按类别展示。
         """
         from excelmanus.tools.policy import TOOL_CATEGORIES, TOOL_SHORT_DESCRIPTIONS
 
