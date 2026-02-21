@@ -1244,7 +1244,7 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "首行预览" not in first.result
-        # Phase 2: repeat reads are never blocked or downgraded
+        # 重复读取不再被阻断或降级
         assert second.success
         assert third.success
         assert isinstance(second.result, str) and len(second.result) > 0
@@ -1327,7 +1327,7 @@ class TestContextBudgetAndHardCap:
             iteration=3,
             route_result=None,
         )
-        # Phase 2: repeat reads no longer downgrade mode
+        # 重复读取不再触发降级，模式保持 adaptive 解析结果
         # Mode stays at whatever adaptive resolved (unified for gpt-5.3)
         assert engine._effective_window_return_mode() in ("unified", "anchored")
 
@@ -1483,7 +1483,7 @@ class TestContextBudgetAndHardCap:
         )
 
         assert "⚠️ 此数据已在窗口" not in first.result
-        # Phase 2: repeat reads are never blocked — all succeed normally
+        # 重复读取不再被阻断，全部正常成功
         assert second.success
         assert third.success
 

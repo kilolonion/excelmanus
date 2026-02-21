@@ -73,8 +73,6 @@ class ToolDispatcher:
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
 
-    # ── 向后兼容：供测试直接 ToolDispatcher(registry=xxx) ──
-
     @property
     def _registry(self) -> Any:
         return self._engine._registry

@@ -2086,7 +2086,7 @@ async def _main(argv: list[str] | None = None) -> int:
     try:
         plan = _resolve_run_mode(args)
     except ValueError as exc:
-        print(f"参数错误：{exc}", file=sys.stderr)
+        logger.error("参数错误：%s", exc)
         return 1
 
     if plan.mode == "help":

@@ -1,4 +1,4 @@
-"""窗口感知层规则引擎（兼容层，委托 v2 注册表）。"""
+"""窗口感知层规则引擎。"""
 
 from __future__ import annotations
 

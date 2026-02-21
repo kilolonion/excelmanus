@@ -352,7 +352,7 @@ def test_pbt_property_8_tool_call_event_task_fields_serialization(
 
 import io
 from rich.console import Console
-from excelmanus.renderer import StreamRenderer, _STATUS_ICONS
+from excelmanus.renderer import StreamRenderer, _STATUS_SYMBOLS as _STATUS_ICONS
 
 # 生成包含各种状态组合的 task_list_data 字典
 _task_list_data_for_render = st.fixed_dictionaries({

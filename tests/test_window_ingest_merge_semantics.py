@@ -1,4 +1,4 @@
-"""WURM Phase 2 ingest 语义测试：read-replace + write-through。"""
+"""WURM ingest 语义测试：read-replace + write-through。"""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _build_window() -> Window:
 
 
 def test_read_replace_non_contiguous_range_replaces_cache() -> None:
-    """Phase 2: any read replaces the entire cache, even non-contiguous ranges."""
+    """任意读操作替换整个缓存，即使是非连续区域。"""
     window = _build_window()
     ingest_read_result(
         window,
@@ -45,14 +45,14 @@ def test_read_replace_non_contiguous_range_replaces_cache() -> None:
         new_rows=[{"A": 10, "B": 11, "C": 12}],
         iteration=2,
     )
-    # Phase 2: single viewport replaces all, no separate cache blocks
+    # 单视口替换全部，不保留独立缓存块
     assert len(window.cached_ranges) == 1
     assert window.cached_ranges[0].range_ref == "E1:G3"
     assert len(window.data_buffer) == 1
 
 
 def test_write_always_wipes_cache_regardless_of_target() -> None:
-    """Phase 2: writes always wipe cache, no in-memory patching."""
+    """写操作始终清空缓存，不做内存补丁。"""
     window = _build_window()
     affected = ingest_write_result(
         window,
@@ -67,7 +67,7 @@ def test_write_always_wipes_cache_regardless_of_target() -> None:
 
 
 def test_write_unmappable_target_also_wipes() -> None:
-    """Phase 2: even unmappable target ranges wipe cache."""
+    """即使目标区域无法映射，写操作也会清空缓存。"""
     window = _build_window()
     affected = ingest_write_result(
         window,

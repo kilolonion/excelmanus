@@ -121,8 +121,8 @@ def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
 def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
     """合并 write_hint，但 override_hint == 'may_write' 时强制覆盖 route_hint。
 
-    用于写入工具成功后的场景：self._current_write_hint 已被
-    升级为 'may_write'，不应被原始 route_hint（如 'read_only'）压制。
+    用于写入工具成功后的场景：当 override_hint == 'may_write' 时
+    强制覆盖，不应被原始 route_hint（如 'read_only'）压制。
     """
     normalized_override = _normalize_write_hint(override_hint)
     if normalized_override == "may_write":
@@ -730,8 +730,7 @@ class AgentEngine:
         self._loaded_skill_names: dict[str, int] = {}
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
-        # 保留实例属性作为向后兼容别名
+        # auto 模式系统消息回退缓存（实例别名指向类变量 _system_mode_fallback_cache）
         self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
         # ── 状态变量由 self._state 统一管理 ──
         # self._state 在 __init__ 顶部初始化，以下属性通过 @property 代理访问：
