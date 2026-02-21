@@ -157,3 +157,42 @@ class TestParsePhaseAStructured:
         raw = f"```json\n{inner}\n```"
         result = parse_phase_a_structured(raw)
         assert len(result["cells"]) == 1
+
+
+class TestCvHintsMerge:
+    def test_cv_column_widths_override_vlm(self):
+        """CV 列宽应覆盖 VLM 猜测。"""
+        from excelmanus.vision_extractor import phase_a_structured_to_replica_spec
+        data = {
+            "cells": [{"address": "A1", "value": "test", "value_type": "string"}],
+            "merged_ranges": [],
+            "dimensions": {"rows": 1, "cols": 2},
+        }
+        style_json = {"styles": {}, "cell_styles": {}, "column_widths": [10, 20]}
+        cv_hints = {"column_widths": [15.5, 12.3], "row_heights": {"1": 18.0}}
+        spec = phase_a_structured_to_replica_spec(data, style_json, cv_hints=cv_hints)
+        # CV 列宽应覆盖 VLM 列宽
+        assert spec.sheets[0].column_widths == [15.5, 12.3]
+        assert spec.sheets[0].row_heights == {"1": 18.0}
+
+    def test_cv_colors_override_vlm_styles(self):
+        """CV 背景色应覆盖 VLM 样式中的 fill color。"""
+        from excelmanus.vision_extractor import phase_a_structured_to_replica_spec
+        data = {
+            "cells": [
+                {"address": "A1", "value": "header", "value_type": "string"},
+            ],
+            "merged_ranges": [],
+            "dimensions": {"rows": 1, "cols": 1},
+        }
+        style_json = {
+            "styles": {"h1": {"fill": {"type": "solid", "color": "blue"}}},
+            "cell_styles": {"A1": "h1"},
+            "column_widths": [],
+        }
+        cv_hints = {
+            "cell_colors": [["#4472C4"]],  # row 0, col 0
+        }
+        spec = phase_a_structured_to_replica_spec(data, style_json, cv_hints=cv_hints)
+        # CV 颜色应覆盖语义映射的颜色
+        assert spec.sheets[0].styles["h1"].fill.color == "#4472C4"

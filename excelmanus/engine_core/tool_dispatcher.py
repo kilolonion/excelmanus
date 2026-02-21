@@ -135,10 +135,13 @@ class ToolDispatcher:
         from excelmanus.vision_extractor import (
             build_extraction_prompt,
             build_phase_a_prompt,
+            build_phase_a_structured_prompt,
             build_phase_b_prompt,
             html_table_to_replica_spec,
             parse_extraction_result,
             parse_html_table,
+            parse_phase_a_structured,
+            phase_a_structured_to_replica_spec,
         )
 
         file_path = arguments.get("file_path", "")
@@ -192,42 +195,50 @@ class ToolDispatcher:
 
         source_hash = f"sha256:{hashlib.sha256(raw).hexdigest()[:16]}"
 
-        # 图片预处理：适度缩放 + 增强对比度/锐度以提升 VLM 表格识别
-        compressed, mime = self._prepare_image_for_vlm(
-            raw,
-            max_long_edge=e._config.vlm_image_max_long_edge,
-            jpeg_quality=e._config.vlm_image_jpeg_quality,
-        )
-        b64 = base64.b64encode(compressed).decode("ascii")
-        logger.info(
-            "VLM 图片预处理: %d bytes → %d bytes (%.0f%%)",
-            len(raw), len(compressed),
-            len(compressed) / max(len(raw), 1) * 100,
-        )
-
         # ── VLM 调用参数 ──
         vlm_client = e._vlm_client
         vlm_model = e._vlm_model
         vlm_timeout = e._config.vlm_timeout_seconds
         vlm_max_retries = e._config.vlm_max_retries
         vlm_base_delay = e._config.vlm_retry_base_delay_seconds
-        image_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}}
+        max_long_edge = e._config.vlm_image_max_long_edge
+        jpeg_quality = e._config.vlm_image_jpeg_quality
         logger.info("VLM 提取使用模型: %s, 策略: %s", vlm_model, strategy)
 
         # ── 策略分派 ──
         if strategy == "two_phase":
+            # 双模式预处理：data（增强文字识别）+ style（保留颜色信息）
+            compressed_data, mime_data = self._prepare_image_for_vlm(
+                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="data",
+            )
+            compressed_style, mime_style = self._prepare_image_for_vlm(
+                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="style",
+            )
+            b64_data = base64.b64encode(compressed_data).decode("ascii")
+            b64_style = base64.b64encode(compressed_style).decode("ascii")
+            logger.info(
+                "VLM 双模式预处理: data=%d bytes, style=%d bytes (原始 %d bytes)",
+                len(compressed_data), len(compressed_style), len(raw),
+            )
+            image_content_data = {"type": "image_url", "image_url": {"url": f"data:{mime_data};base64,{b64_data}", "detail": "high"}}
+            image_content_style = {"type": "image_url", "image_url": {"url": f"data:{mime_style};base64,{b64_style}", "detail": "high"}}
+
             spec_or_error = await self._extract_two_phase(
-                image_content=image_content,
+                image_content_data=image_content_data,
+                image_content_style=image_content_style,
+                raw_style_bytes=compressed_style,
                 vlm_client=vlm_client, vlm_model=vlm_model,
                 vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
                 vlm_base_delay=vlm_base_delay,
                 file_path=file_path,
-                build_phase_a_prompt=build_phase_a_prompt,
-                build_phase_b_prompt=build_phase_b_prompt,
-                parse_html_table=parse_html_table,
-                html_table_to_replica_spec=html_table_to_replica_spec,
             )
         else:
+            # single 策略：使用 data 模式预处理
+            compressed, mime = self._prepare_image_for_vlm(
+                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="data",
+            )
+            b64 = base64.b64encode(compressed).decode("ascii")
+            image_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}}
             spec_or_error = await self._extract_single(
                 image_content=image_content, focus=focus,
                 vlm_client=vlm_client, vlm_model=vlm_model,
@@ -419,25 +430,42 @@ class ToolDispatcher:
     async def _extract_two_phase(
         self,
         *,
-        image_content: dict,
+        image_content_data: dict,
+        image_content_style: dict,
+        raw_style_bytes: bytes,
         vlm_client: Any,
         vlm_model: str,
         vlm_timeout: int,
         vlm_max_retries: int,
         vlm_base_delay: float,
         file_path: str,
-        build_phase_a_prompt: Any,
-        build_phase_b_prompt: Any,
-        parse_html_table: Any,
-        html_table_to_replica_spec: Any,
     ) -> "ReplicaSpec | str":
-        """两阶段策略：Phase A 提取 HTML 表格，Phase B 提取样式。"""
+        """两阶段策略：Phase A 结构化 JSON + Phase B 语义颜色样式 + CV 像素分析。
 
-        # ── Phase A: 提取结构+数据（HTML） ──
-        prompt_a = build_phase_a_prompt()
+        新流程：
+        1. Phase A：用 data_image + 结构化 prompt → JSON cells
+           - 失败时降级到旧 HTML prompt
+        2. Phase B：用 style_image + 语义颜色 prompt → 样式 JSON
+           - 失败时降级为无样式
+        3. CV 分析：用 style_image → grid lines + colors + widths
+           - 失败时跳过
+        4. 合并：Phase A data + Phase B styles + CV hints → ReplicaSpec
+        """
+        from excelmanus.vision_extractor import (
+            build_phase_a_prompt,
+            build_phase_a_structured_prompt,
+            build_phase_b_prompt,
+            html_table_to_replica_spec,
+            parse_html_table,
+            parse_phase_a_structured,
+            phase_a_structured_to_replica_spec,
+        )
+
+        # ── Phase A: 结构化 JSON 提取（优先）──
+        prompt_a = build_phase_a_structured_prompt()
         messages_a = [
             {"role": "user", "content": [
-                image_content,
+                image_content_data,
                 {"type": "text", "text": prompt_a},
             ]},
         ]
@@ -446,7 +474,8 @@ class ToolDispatcher:
             messages=messages_a,
             vlm_client=vlm_client, vlm_model=vlm_model,
             vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-            vlm_base_delay=vlm_base_delay, phase_label="Phase A",
+            vlm_base_delay=vlm_base_delay, phase_label="Phase A (structured)",
+            response_format={"type": "json_object"},
         )
 
         if raw_a is None:
@@ -454,28 +483,68 @@ class ToolDispatcher:
                 error_a, vlm_max_retries + 1, file_path,
             )
 
+        # 尝试结构化解析，失败则降级到 HTML
+        phase_a_data: dict[str, Any] | None = None
+        html_table: str | None = None
+        use_structured = False
+
         try:
-            html_table = parse_html_table(raw_a)
+            phase_a_data = parse_phase_a_structured(raw_a)
+            use_structured = True
+            logger.info(
+                "Phase A (structured) 完成: %d cells",
+                len(phase_a_data.get("cells", [])),
+            )
         except ValueError as exc:
-            return json.dumps({
-                "status": "error",
-                "error_code": "PHASE_A_PARSE_FAILED",
-                "message": f"Phase A HTML 解析失败: {exc}",
-                "raw_length": len(raw_a),
-                "fallback_hint": (
-                    "VLM Phase A 未返回有效 HTML 表格。"
-                    "建议：1) 用 strategy='single' 重试；"
-                    "2) 或用 read_image 查看图片后用 run_code 手动构建。"
-                ),
-            }, ensure_ascii=False)
+            logger.warning("Phase A 结构化解析失败，降级到 HTML: %s", exc)
+            # 降级：用旧 HTML prompt 重试
+            prompt_a_html = build_phase_a_prompt()
+            messages_a_html = [
+                {"role": "user", "content": [
+                    image_content_data,
+                    {"type": "text", "text": prompt_a_html},
+                ]},
+            ]
+            raw_a_html, error_a_html = await self._call_vlm_with_retry(
+                messages=messages_a_html,
+                vlm_client=vlm_client, vlm_model=vlm_model,
+                vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
+                vlm_base_delay=vlm_base_delay, phase_label="Phase A (HTML fallback)",
+            )
+            if raw_a_html is not None:
+                try:
+                    html_table = parse_html_table(raw_a_html)
+                    logger.info("Phase A (HTML fallback) 完成: %d 字符", len(html_table))
+                except ValueError as exc2:
+                    return json.dumps({
+                        "status": "error",
+                        "error_code": "PHASE_A_PARSE_FAILED",
+                        "message": f"Phase A 解析失败（结构化+HTML 均失败）: {exc2}",
+                        "raw_length": len(raw_a),
+                        "fallback_hint": (
+                            "VLM Phase A 未返回有效输出。"
+                            "建议：1) 用 strategy='single' 重试；"
+                            "2) 或用 read_image 查看图片后用 run_code 手动构建。"
+                        ),
+                    }, ensure_ascii=False)
+            else:
+                return self._build_vlm_failure_result(
+                    error_a_html, vlm_max_retries + 1, file_path,
+                )
 
-        logger.info("Phase A 完成: HTML 表格 %d 字符", len(html_table))
+        # ── Phase B: 语义颜色样式提取 ──
+        # 构建 Phase B prompt（需要 Phase A 的表格结构作为参考）
+        if use_structured and phase_a_data:
+            # 从结构化数据构建简要表格描述供 Phase B 参考
+            dims = phase_a_data.get("dimensions", {})
+            phase_b_ref = f"表格结构: {dims.get('rows', '?')}行 x {dims.get('cols', '?')}列"
+        else:
+            phase_b_ref = html_table or ""
 
-        # ── Phase B: 提取样式（JSON） ──
-        prompt_b = build_phase_b_prompt(html_table)
+        prompt_b = build_phase_b_prompt(phase_b_ref)
         messages_b = [
             {"role": "user", "content": [
-                image_content,
+                image_content_style,
                 {"type": "text", "text": prompt_b},
             ]},
         ]
@@ -486,6 +555,7 @@ class ToolDispatcher:
             vlm_client=vlm_client, vlm_model=vlm_model,
             vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
             vlm_base_delay=vlm_base_delay, phase_label="Phase B",
+            response_format={"type": "json_object"},
         )
 
         if raw_b is not None:
@@ -503,16 +573,46 @@ class ToolDispatcher:
         else:
             logger.warning("Phase B 调用失败（降级为无样式）")
 
-        # ── 合并 HTML + 样式 → ReplicaSpec ──
+        # ── CV 像素分析（使用 style 模式预处理的图片） ──
+        cv_hints: dict[str, Any] | None = None
         try:
-            return html_table_to_replica_spec(html_table, style_json)
+            from excelmanus.cv_analyzer import (
+                compute_column_widths,
+                compute_row_heights,
+                detect_grid_lines,
+                sample_cell_colors,
+            )
+            grid = detect_grid_lines(raw_style_bytes)
+            if len(grid["h_lines"]) >= 2 and len(grid["v_lines"]) >= 2:
+                cv_hints = {
+                    "column_widths": compute_column_widths(grid),
+                    "row_heights": compute_row_heights(grid),
+                    "cell_colors": sample_cell_colors(raw_style_bytes, grid),
+                }
+                logger.info(
+                    "CV 分析完成: %d行 x %d列",
+                    len(grid["h_lines"]) - 1, len(grid["v_lines"]) - 1,
+                )
+            else:
+                logger.info("CV 分析: 未检测到足够网格线，跳过")
+        except Exception as exc:
+            logger.warning("CV 分析失败（降级为纯 VLM）: %s", exc)
+
+        # ── 合并 → ReplicaSpec ──
+        try:
+            if use_structured and phase_a_data:
+                return phase_a_structured_to_replica_spec(
+                    phase_a_data, style_json, cv_hints=cv_hints,
+                )
+            else:
+                return html_table_to_replica_spec(html_table, style_json)
         except Exception as exc:
             return json.dumps({
                 "status": "error",
                 "error_code": "MERGE_FAILED",
-                "message": f"HTML→ReplicaSpec 转换失败: {exc}",
+                "message": f"ReplicaSpec 转换失败: {exc}",
                 "fallback_hint": (
-                    "HTML 解析成功但转换失败。"
+                    "数据提取成功但转换失败。"
                     "建议：用 strategy='single' 重试。"
                 ),
             }, ensure_ascii=False)
