@@ -944,7 +944,7 @@ class TestCompleterFileCompletions:
         assert not any("node_modules" in t for t in texts)
 
     def test_file_depth_limit(self, tmp_path: Path) -> None:
-        """@file: 深度限制 ≤ 2。"""
+        """@file: 深度限制 ≤ 2（逐级浏览模式）。"""
         deep = tmp_path / "a" / "b" / "c"
         deep.mkdir(parents=True)
         (deep / "deep.txt").write_text("")
@@ -952,13 +952,23 @@ class TestCompleterFileCompletions:
         (tmp_path / "top.txt").write_text("")
 
         completer = _make_completer(str(tmp_path), max_scan_depth=2)
-        completions = _get_completions(completer, "@file:")
 
-        texts = [c.text for c in completions]
-        assert "top.txt" in texts
-        assert "a/b/shallow.txt" in texts
-        # depth 3 的文件不应出现
-        assert "a/b/c/deep.txt" not in texts
+        # 根目录层级：能看到 top.txt 和 a/ 目录
+        root_completions = _get_completions(completer, "@file:")
+        root_texts = [c.text for c in root_completions]
+        assert "top.txt" in root_texts
+        assert "a/" in root_texts
+
+        # depth 2 层级（a/b/）：能看到 shallow.txt 和 c/ 目录
+        depth2_completions = _get_completions(completer, "@file:a/b/")
+        depth2_texts = [c.text for c in depth2_completions]
+        assert "a/b/shallow.txt" in depth2_texts
+        assert "a/b/c/" in depth2_texts
+
+        # depth 3 层级（a/b/c/）：超过限制，不应返回任何条目
+        depth3_completions = _get_completions(completer, "@file:a/b/c/")
+        depth3_texts = [c.text for c in depth3_completions]
+        assert "a/b/c/deep.txt" not in depth3_texts
 
     def test_file_prefix_filter(self, tmp_path: Path) -> None:
         """@file:da 过滤以 da 开头的文件。"""
