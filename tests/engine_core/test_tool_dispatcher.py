@@ -112,3 +112,64 @@ class TestCallRegistryTool:
             tool_scope=None,
         )
         assert result == "truncated"
+
+
+class TestPrepareImageForVlm:
+    """测试图片预处理双模式。"""
+
+    def _make_test_image(self, w=200, h=100, color=(180, 180, 180)):
+        """创建测试用灰底图片。"""
+        from io import BytesIO
+        from PIL import Image
+        img = Image.new("RGB", (w, h), color)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_data_mode_enhances_contrast(self):
+        """data 模式应增强对比度（灰底图片会被处理）。"""
+        from io import BytesIO
+        from PIL import Image
+        import random
+        random.seed(42)
+        # 创建带噪声的灰色图片（JPEG 压缩后更小，确保不会回退到原始 PNG）
+        img = Image.new("RGB", (800, 600), (200, 200, 200))
+        pixels = img.load()
+        for x in range(800):
+            for y in range(600):
+                v = 200 + random.randint(-15, 15)
+                pixels[x, y] = (v, v, v)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        raw = buf.getvalue()
+        result_data, _ = ToolDispatcher._prepare_image_for_vlm(
+            raw, mode="data"
+        )
+        result_style, _ = ToolDispatcher._prepare_image_for_vlm(
+            raw, mode="style"
+        )
+        # data 模式处理后应与 style 模式不同（data 会做对比度增强等）
+        assert result_data != result_style
+
+    def test_style_mode_preserves_colors(self):
+        """style 模式应保留原始颜色信息（仅缩放）。"""
+        from io import BytesIO
+        from PIL import Image
+        raw = self._make_test_image(color=(100, 150, 200))
+        result, _ = ToolDispatcher._prepare_image_for_vlm(
+            raw, mode="style"
+        )
+        # style 模式输出的图片应保留蓝色调
+        img = Image.open(BytesIO(result))
+        center = img.getpixel((100, 50))
+        # R < G < B 的蓝色调应保留
+        assert center[2] > center[0]  # B > R
+
+    def test_default_mode_is_data(self):
+        """默认模式应为 data（向后兼容）。"""
+        raw = self._make_test_image()
+        default_result, _ = ToolDispatcher._prepare_image_for_vlm(raw)
+        data_result, _ = ToolDispatcher._prepare_image_for_vlm(
+            raw, mode="data"
+        )
+        assert default_result == data_result
