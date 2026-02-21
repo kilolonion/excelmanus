@@ -173,3 +173,68 @@ class TestPrepareImageForVlm:
             raw, mode="data"
         )
         assert default_result == data_result
+
+
+class TestCallVlmResponseFormat:
+    """测试 _call_vlm_with_retry 的 response_format 透传。"""
+
+    async def test_response_format_passed_to_client(self):
+        """response_format 参数应透传给 VLM client。"""
+        from unittest.mock import MagicMock
+
+        dispatcher = MagicMock()
+        dispatcher._sanitize_vlm_error = ToolDispatcher._sanitize_vlm_error
+
+        captured_kwargs = {}
+        async def mock_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = '{"test": true}'
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = mock_create
+
+        rf = {"type": "json_object"}
+        raw, err = await ToolDispatcher._call_vlm_with_retry(
+            dispatcher,
+            messages=[{"role": "user", "content": "test"}],
+            vlm_client=mock_client,
+            vlm_model="test-model",
+            vlm_timeout=30,
+            vlm_max_retries=0,
+            vlm_base_delay=1.0,
+            response_format=rf,
+        )
+        assert raw == '{"test": true}'
+        assert captured_kwargs.get("response_format") == rf
+
+    async def test_no_response_format_by_default(self):
+        """默认不传 response_format。"""
+        from unittest.mock import MagicMock
+
+        dispatcher = MagicMock()
+        dispatcher._sanitize_vlm_error = ToolDispatcher._sanitize_vlm_error
+
+        captured_kwargs = {}
+        async def mock_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "hello"
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = mock_create
+
+        raw, err = await ToolDispatcher._call_vlm_with_retry(
+            dispatcher,
+            messages=[{"role": "user", "content": "test"}],
+            vlm_client=mock_client,
+            vlm_model="test-model",
+            vlm_timeout=30,
+            vlm_max_retries=0,
+            vlm_base_delay=1.0,
+        )
+        assert "response_format" not in captured_kwargs

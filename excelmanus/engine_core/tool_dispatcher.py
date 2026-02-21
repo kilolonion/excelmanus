@@ -322,6 +322,7 @@ class ToolDispatcher:
         vlm_max_retries: int,
         vlm_base_delay: float,
         phase_label: str = "",
+        response_format: dict | None = None,
     ) -> tuple[str | None, Exception | None]:
         """共享的 VLM 调用逻辑（带超时+网络错误重试）。
 
@@ -333,14 +334,18 @@ class ToolDispatcher:
         last_error: Exception | None = None
         label = f" [{phase_label}]" if phase_label else ""
 
+        create_kwargs: dict[str, Any] = {
+            "model": vlm_model,
+            "messages": messages,
+            "temperature": 0.0,
+        }
+        if response_format is not None:
+            create_kwargs["response_format"] = response_format
+
         for attempt in range(vlm_max_retries + 1):
             try:
                 response = await asyncio.wait_for(
-                    vlm_client.chat.completions.create(
-                        model=vlm_model,
-                        messages=messages,
-                        temperature=0.0,
-                    ),
+                    vlm_client.chat.completions.create(**create_kwargs),
                     timeout=vlm_timeout,
                 )
                 raw_text = response.choices[0].message.content or ""
