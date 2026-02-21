@@ -496,41 +496,47 @@ class ToolDispatcher:
                 len(phase_a_data.get("cells", [])),
             )
         except ValueError as exc:
-            logger.warning("Phase A 结构化解析失败，降级到 HTML: %s", exc)
-            # 降级：用旧 HTML prompt 重试
-            prompt_a_html = build_phase_a_prompt()
-            messages_a_html = [
-                {"role": "user", "content": [
-                    image_content_data,
-                    {"type": "text", "text": prompt_a_html},
-                ]},
-            ]
-            raw_a_html, error_a_html = await self._call_vlm_with_retry(
-                messages=messages_a_html,
-                vlm_client=vlm_client, vlm_model=vlm_model,
-                vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-                vlm_base_delay=vlm_base_delay, phase_label="Phase A (HTML fallback)",
-            )
-            if raw_a_html is not None:
-                try:
-                    html_table = parse_html_table(raw_a_html)
-                    logger.info("Phase A (HTML fallback) 完成: %d 字符", len(html_table))
-                except ValueError as exc2:
-                    return json.dumps({
-                        "status": "error",
-                        "error_code": "PHASE_A_PARSE_FAILED",
-                        "message": f"Phase A 解析失败（结构化+HTML 均失败）: {exc2}",
-                        "raw_length": len(raw_a),
-                        "fallback_hint": (
-                            "VLM Phase A 未返回有效输出。"
-                            "建议：1) 用 strategy='single' 重试；"
-                            "2) 或用 read_image 查看图片后用 run_code 手动构建。"
-                        ),
-                    }, ensure_ascii=False)
-            else:
-                return self._build_vlm_failure_result(
-                    error_a_html, vlm_max_retries + 1, file_path,
+            logger.warning("Phase A 结构化解析失败，尝试 HTML 解析同一响应: %s", exc)
+            # 先尝试对同一响应做 HTML 解析（避免额外 VLM 调用）
+            try:
+                html_table = parse_html_table(raw_a)
+                logger.info("Phase A (HTML in-place fallback) 完成: %d 字符", len(html_table))
+            except ValueError:
+                # 同一响应 HTML 也解析失败，发起新的 HTML VLM 调用
+                logger.warning("同一响应 HTML 解析也失败，发起 HTML fallback VLM 调用")
+                prompt_a_html = build_phase_a_prompt()
+                messages_a_html = [
+                    {"role": "user", "content": [
+                        image_content_data,
+                        {"type": "text", "text": prompt_a_html},
+                    ]},
+                ]
+                raw_a_html, error_a_html = await self._call_vlm_with_retry(
+                    messages=messages_a_html,
+                    vlm_client=vlm_client, vlm_model=vlm_model,
+                    vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
+                    vlm_base_delay=vlm_base_delay, phase_label="Phase A (HTML fallback)",
                 )
+                if raw_a_html is not None:
+                    try:
+                        html_table = parse_html_table(raw_a_html)
+                        logger.info("Phase A (HTML fallback) 完成: %d 字符", len(html_table))
+                    except ValueError as exc2:
+                        return json.dumps({
+                            "status": "error",
+                            "error_code": "PHASE_A_PARSE_FAILED",
+                            "message": f"Phase A 解析失败（结构化+HTML 均失败）: {exc2}",
+                            "raw_length": len(raw_a),
+                            "fallback_hint": (
+                                "VLM Phase A 未返回有效输出。"
+                                "建议：1) 用 strategy='single' 重试；"
+                                "2) 或用 read_image 查看图片后用 run_code 手动构建。"
+                            ),
+                        }, ensure_ascii=False)
+                else:
+                    return self._build_vlm_failure_result(
+                        error_a_html, vlm_max_retries + 1, file_path,
+                    )
 
         # ── Phase B: 语义颜色样式提取 ──
         # 构建 Phase B prompt（需要 Phase A 的表格结构作为参考）
