@@ -33,7 +33,7 @@ _PT_ENABLED = False
 try:
     from prompt_toolkit import Application
     from prompt_toolkit.formatted_text import FormattedText
-    from prompt_toolkit.key_bindings import KeyBindings
+    from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style

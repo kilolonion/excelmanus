@@ -20,8 +20,9 @@ from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.renderer import StreamRenderer
 
 if TYPE_CHECKING:
-    from excelmanus.approval import PendingApproval, PendingQuestion
+    from excelmanus.approval import PendingApproval
     from excelmanus.engine import AgentEngine
+    from excelmanus.question_flow import PendingQuestion
     from excelmanus.types import ChatResult
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,7 @@ async def interactive_model_select(engine: "AgentEngine") -> str | None:
     try:
         from prompt_toolkit import Application
         from prompt_toolkit.formatted_text import FormattedText
-        from prompt_toolkit.key_bindings import KeyBindings
+        from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.styles import Style
@@ -293,7 +294,7 @@ async def interactive_model_select(engine: "AgentEngine") -> str | None:
             fragments.append((style, line))
 
         fragments.append(("", "\n"))
-        fragments.append(("class:hint", "  Esc to cancel · Tab to amend\n"))
+        fragments.append(("class:hint", "  ↑↓ 移动 · Enter 确认 · Esc 取消\n"))
         return FormattedText(fragments)
 
     control = FormattedTextControl(_get_formatted_text)
@@ -345,6 +346,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
         extract_slash_raw_args,
         handle_config_command,
         handle_skills_subcommand,
+        handle_ui_command,
         render_farewell,
         render_history,
         render_mcp,
@@ -535,7 +537,11 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
             handle_config_command(console, user_input, engine._config.workspace_root)
             continue
 
-        if user_input.startswith("/skills "):
+        if user_input.lower().startswith("/ui"):
+            handle_ui_command(console, user_input, engine)
+            continue
+
+        if user_input.lower().startswith("/skills "):
             try:
                 handled = handle_skills_subcommand(
                     console, engine, user_input,
@@ -689,6 +695,8 @@ def _sync_slash_commands(engine: "AgentEngine") -> None:
         SLASH_COMMAND_SUGGESTIONS,
         SUBAGENT_ALIASES,
         SUBAGENT_ARGUMENTS,
+        UI_ALIASES,
+        UI_ARGUMENTS,
         load_skill_command_rows,
     )
 
@@ -708,6 +716,8 @@ def _sync_slash_commands(engine: "AgentEngine") -> None:
         arg_map[alias] = BACKUP_ARGUMENTS
     for alias in CONFIG_ALIASES:
         arg_map[alias] = CONFIG_ARGUMENTS
+    for alias in UI_ALIASES:
+        arg_map[alias] = UI_ARGUMENTS
 
     # 模型名称
     model_names = engine.model_names()

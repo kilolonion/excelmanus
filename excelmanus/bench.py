@@ -1008,6 +1008,14 @@ async def run_case(
         messages = _isolate_source_files(case, workdir)
     else:
         messages = list(case.messages) if case.messages else [case.message]
+    # SpreadsheetBench 写入引导：对 spreadsheetbench 用例追加温和的写入提示
+    if case.tags and "spreadsheetbench" in case.tags:
+        _sb_hint = (
+            "\n\nPlease implement your solution by writing the formula or values "
+            "directly into the file, then verify the result."
+        )
+        messages = [m + _sb_hint if i == 0 else m for i, m in enumerate(messages)]
+
     is_multi_turn = len(messages) > 1
 
     logger.info(

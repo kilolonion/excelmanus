@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from excelmanus.cli.theme import THEME
 
 if TYPE_CHECKING:
-    from excelmanus.approval import PendingQuestion
+    from excelmanus.question_flow import PendingQuestion
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ _PT_ENABLED = False
 try:
     from prompt_toolkit import Application
     from prompt_toolkit.formatted_text import FormattedText
-    from prompt_toolkit.key_bindings import KeyBindings
+    from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style
@@ -188,7 +188,7 @@ async def interactive_question_select(
             )
         else:
             fragments.append(
-                ("class:hint", "  Esc to cancel · Tab to amend\n")
+                ("class:hint", "  ↑↓ 移动 · Enter 确认 · Esc 取消\n")
             )
         return FormattedText(fragments)
 
@@ -224,10 +224,8 @@ async def interactive_question_select(
 
     # 处理 Other 选项：需要文本输入
     if result.other_text == "__NEED_INPUT__":
-        from excelmanus.cli.prompt import read_user_input
-        from rich.console import Console
-        _console = Console()
-        _console.print(f"  [{THEME.DIM}]请输入自定义内容：[/{THEME.DIM}]")
+        from excelmanus.cli.prompt import _get_console, read_user_input
+        _get_console().print(f"  [{THEME.DIM}]请输入自定义内容：[/{THEME.DIM}]")
         try:
             other_input = (await read_user_input()).strip()
         except (KeyboardInterrupt, EOFError):

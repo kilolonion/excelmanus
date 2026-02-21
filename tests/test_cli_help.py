@@ -7,7 +7,8 @@ from unittest.mock import MagicMock
 
 from rich.console import Console
 
-from excelmanus.cli.help import render_help, _load_skill_command_rows
+from excelmanus.cli.commands import load_skill_command_rows
+from excelmanus.cli.help import render_help
 
 
 def _make_console(width: int = 80) -> Console:
@@ -73,18 +74,18 @@ class TestLoadSkillCommandRows:
             ("data_basic", "基础数据处理"),
             ("chart", "图表生成"),
         ]
-        rows = _load_skill_command_rows(engine)
+        rows = load_skill_command_rows(engine)
         assert len(rows) == 2
         assert rows[0] == ("data_basic", "基础数据处理")
 
     def test_fallback_to_list_loaded(self):
         engine = MagicMock(spec=[])
         engine.list_loaded_skillpacks = MagicMock(return_value=["data_basic"])
-        rows = _load_skill_command_rows(engine)
+        rows = load_skill_command_rows(engine)
         assert len(rows) == 1
         assert rows[0][0] == "data_basic"
 
     def test_no_methods(self):
         engine = MagicMock(spec=[])
-        rows = _load_skill_command_rows(engine)
+        rows = load_skill_command_rows(engine)
         assert rows == []

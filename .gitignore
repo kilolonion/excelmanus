@@ -51,15 +51,13 @@ logs/
 *.png
 *.csv
 *.xlsx
-scripts/temp/
+.tmp/
 
 # ==============================
 # 内部开发文档与任务
 # ==============================
 tasks/
-docs/plans/
-docs/analysis/
-docs/research/
+docs/
 
 # ==============================
 # 锁文件
@@ -67,9 +65,10 @@ docs/research/
 uv.lock
 
 # ==============================
-# 外部 Benchmark 数据集（大文件）
+# Benchmark 数据与脚本
 # ==============================
-bench/external/
+bench/
+scripts/
 
 # ==============================
 # 测试报告
@@ -80,3 +79,4 @@ test_report/
 # 外部工具仓库
 # ==============================
 gemini-cli/
+

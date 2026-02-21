@@ -32,6 +32,10 @@ async def _async_main() -> None:
     from excelmanus.skillpacks import SkillpackLoader, SkillRouter
     from excelmanus.tools import ToolRegistry
 
+    # ── 注入 console 实例到 prompt 模块 ──
+    import excelmanus.cli.prompt as _prompt_mod
+    _prompt_mod.console = console
+
     # ── 欢迎横幅（启动序列中打印进度） ──
     console.print()
 

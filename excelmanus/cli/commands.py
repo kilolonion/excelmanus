@@ -58,7 +58,7 @@ SLASH_COMMAND_SUGGESTIONS = (
     "/help", "/history", "/clear", "/save", "/skills",
     "/subagent", "/sub_agent", "/mcp", "/config",
     "/fullaccess", "/full_access", "/accept", "/reject", "/undo",
-    "/plan", "/model", "/backup",
+    "/plan", "/model", "/backup", "/ui",
 )
 
 CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
@@ -67,6 +67,7 @@ BACKUP_ARGUMENTS = ("status", "on", "off", "apply", "list")
 SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
 PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
 MODEL_ARGUMENTS: tuple[str, ...] = ("list",)
+UI_ARGUMENTS = ("status", "dashboard", "classic")
 
 
 # ------------------------------------------------------------------
@@ -358,17 +359,16 @@ def handle_skills_subcommand(
 
     if sub == "delete":
         if len(tokens) < 3:
-            console.print(f"  [{THEME.GOLD}]用法：/skills delete <name> [--yes][/{THEME.GOLD}]")
+            console.print(f"  [{THEME.GOLD}]用法：/skills delete <name>[/{THEME.GOLD}]")
             return True
         name = tokens[2]
-        force = "--yes" in tokens[3:]
-        ok = engine.delete_skillpack(name, force=force, actor="cli")
-        if ok:
+        try:
+            engine.delete_skillpack(name, actor="cli")
             if sync_callback:
                 sync_callback()
             console.print(f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 已删除 Skillpack: {name}[/{THEME.PRIMARY_LIGHT}]")
-        else:
-            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 删除失败或 Skillpack 不存在: {name}[/{THEME.RED}]")
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 删除失败：{exc}[/{THEME.RED}]")
         return True
 
     console.print(
@@ -553,7 +553,23 @@ def handle_config_command(
             console.print(f"  [{THEME.GOLD}]未找到变量 {key}[/{THEME.GOLD}]")
         return True
 
-    console.print(f"  [{THEME.GOLD}]未知 /config 子命令。可用：list/set/delete[/{THEME.GOLD}]")
+    if lowered.startswith("/config get "):
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            console.print(f"  [{THEME.GOLD}]用法：/config get <KEY>[/{THEME.GOLD}]")
+            return True
+        key = parts[2]
+        value = os.environ.get(key)
+        if value is not None:
+            console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{key}[/{THEME.PRIMARY_LIGHT}]"
+                f" = {mask_secret(value)}"
+            )
+        else:
+            console.print(f"  [{THEME.GOLD}]未找到变量 {key}[/{THEME.GOLD}]")
+        return True
+
+    console.print(f"  [{THEME.GOLD}]未知 /config 子命令。可用：list/set/get/delete[/{THEME.GOLD}]")
     return True
 
 
@@ -630,6 +646,52 @@ def render_mcp(console: Console, engine: "AgentEngine") -> None:
     console.print()
     console.print(table)
     console.print()
+
+
+def handle_ui_command(
+    console: Console,
+    user_input: str,
+    engine: "AgentEngine",
+) -> bool:
+    """处理 /ui 命令：查看/切换 CLI 显示模式。返回 True 表示已处理。"""
+    stripped = user_input.strip()
+    lowered = stripped.lower()
+
+    # 获取/设置 layout_mode 的回调
+    get_layout = getattr(engine, "get_cli_layout_mode", None)
+    set_layout = getattr(engine, "set_cli_layout_mode", None)
+
+    current_mode = get_layout() if callable(get_layout) else "classic"
+
+    if lowered in ("/ui", "/ui status"):
+        console.print(
+            f"  [{THEME.DIM}]当前布局模式：[/{THEME.DIM}]"
+            f"[{THEME.BOLD} {THEME.PRIMARY_LIGHT}]{current_mode}[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]"
+        )
+        return True
+
+    if lowered == "/ui dashboard":
+        if callable(set_layout):
+            set_layout("dashboard")
+        console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
+            f" 已切换到 [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]dashboard[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}] 模式"
+        )
+        return True
+
+    if lowered == "/ui classic":
+        if callable(set_layout):
+            set_layout("classic")
+        console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
+            f" 已切换到 [{THEME.BOLD} {THEME.GOLD}]classic[/{THEME.BOLD} {THEME.GOLD}] 模式"
+        )
+        return True
+
+    console.print(
+        f"  [{THEME.GOLD}]未知 /ui 子命令。可用：status / dashboard / classic[/{THEME.GOLD}]"
+    )
+    return True
 
 
 def render_farewell(console: Console) -> None:

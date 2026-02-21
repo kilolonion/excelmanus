@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from excelmanus.cli.commands import load_skill_command_rows
 from excelmanus.cli.theme import THEME
 from excelmanus.cli.utils import separator_line
 
@@ -71,7 +72,7 @@ def render_help(
         console.print(f"  {left}  {right}")
 
     # 技能命令
-    skill_rows = _load_skill_command_rows(engine) if engine is not None else []
+    skill_rows = load_skill_command_rows(engine) if engine is not None else []
     if skill_rows:
         console.print()
         console.print(f"  [{THEME.BOLD}]Skills[/{THEME.BOLD}]")
@@ -89,28 +90,3 @@ def render_help(
     console.print()
 
 
-def _load_skill_command_rows(engine: "AgentEngine") -> list[tuple[str, str]]:
-    """读取技能命令列表，格式为 [(name, argument_hint), ...]。"""
-    list_commands = getattr(engine, "list_skillpack_commands", None)
-    if callable(list_commands):
-        rows = list_commands()
-        normalized: list[tuple[str, str]] = []
-        for row in rows:
-            if (
-                isinstance(row, tuple)
-                and len(row) == 2
-                and isinstance(row[0], str)
-                and isinstance(row[1], str)
-            ):
-                normalized.append((row[0], row[1]))
-        return normalized
-
-    list_loaded = getattr(engine, "list_loaded_skillpacks", None)
-    if callable(list_loaded):
-        names = list_loaded()
-        return [
-            (name, "")
-            for name in names
-            if isinstance(name, str) and name.strip()
-        ]
-    return []

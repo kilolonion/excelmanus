@@ -29,7 +29,7 @@ try:
     from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.history import InMemoryHistory
-    from prompt_toolkit.key_bindings import KeyBindings
+    from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.styles import Style
 
     _PROMPT_TOOLKIT_ENABLED = True
@@ -50,8 +50,16 @@ _DYNAMIC_SKILL_SLASH_COMMANDS: tuple[str, ...] = ()
 # 命令参数补全映射（从外部同步）
 _COMMAND_ARGUMENT_MAP: dict[str, tuple[str, ...]] = {}
 
-# console 实例（从外部注入）
-console = Console()
+# console 实例（从外部注入，默认懒创建）
+console: Console | None = None
+
+
+def _get_console() -> Console:
+    """获取 console 实例，若未注入则懒创建。"""
+    global console
+    if console is None:
+        console = Console()
+    return console
 
 # ------------------------------------------------------------------
 # 提示符构建
@@ -240,7 +248,7 @@ async def read_user_input(
         except Exception as exc:  # pragma: no cover
             logger.warning("prompt_toolkit 输入失败，回退到基础输入：%s", exc)
 
-    return console.input(rich_prompt)
+    return _get_console().input(rich_prompt)
 
 
 async def read_multiline_user_input() -> str:

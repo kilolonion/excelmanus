@@ -581,8 +581,8 @@ class TestGoldenCells:
         assert v.total == 3
         assert v.passed == 3
 
-    def test_formula_output_fails_golden(self, tmp_path):
-        """写入公式的输出文件（data_only=True 读取为 None）应当断言失败。"""
+    def test_formula_output_tolerated_by_golden(self, tmp_path):
+        """写入公式的输出文件（data_only=True 读取为 None）应通过公式容错。"""
         from openpyxl import Workbook
 
         golden_data = [["(P)", 1], ["(O)", 2]]
@@ -621,9 +621,12 @@ class TestGoldenCells:
             },
             workfile_dir=workdir,
         )
-        assert v.failed == 1
+        # 公式容错：所有单元格都写入了公式，视为通过
+        assert v.passed == 1
         golden_result = v.results[0]
+        assert golden_result.passed is True
         assert golden_result.actual["matched"] == 0
+        assert golden_result.actual["formula_written"] == 4
         assert golden_result.actual["total_cells"] == 4
 
 
