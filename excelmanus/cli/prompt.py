@@ -233,7 +233,7 @@ async def read_user_input(
             return await _PROMPT_SESSION.prompt_async(
                 ANSI(ansi_prompt),
                 completer=_MENTION_COMPLETER,
-                complete_while_typing=True,
+                complete_while_typing=False,
             )
         except (KeyboardInterrupt, EOFError):
             raise
