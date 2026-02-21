@@ -1,4 +1,4 @@
-"""WURM ingest 模块测试（Phase 2: write-through + read-replace）。"""
+"""WURM ingest 模块测试（write-through + read-replace 语义）。"""
 
 from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.ingest import (
@@ -47,7 +47,7 @@ def test_extract_data_rows_and_columns() -> None:
 
 
 def test_ingest_read_result_replaces_viewport() -> None:
-    """Phase 2: reads replace the entire viewport, no merging."""
+    """读操作替换整个视口，不做合并。"""
     window = _build_window()
     new_rows = [{"A": i, "B": i + 1, "C": i + 2} for i in range(10, 20)]
     affected = ingest_read_result(
@@ -59,13 +59,13 @@ def test_ingest_read_result_replaces_viewport() -> None:
     assert window.detail_level == DetailLevel.FULL
     assert window.viewport_range == "A3:C12"
     assert affected
-    # Phase 2: only new rows in buffer, no merge with old data
+    # 缓冲区仅保留新行，不与旧数据合并
     assert len(window.data_buffer) == len(new_rows)
     assert len(window.cached_ranges) == 1
 
 
 def test_ingest_write_result_wipes_cache() -> None:
-    """Phase 2: writes wipe all cached data, set stale_hint."""
+    """写操作清空所有缓存数据，并设置 stale_hint。"""
     window = _build_window()
     affected = ingest_write_result(
         window,
@@ -73,7 +73,7 @@ def test_ingest_write_result_wipes_cache() -> None:
         result_json={"preview_after": [[999]]},
         iteration=3,
     )
-    # Phase 2: no updated rows — cache is wiped
+    # 写操作不更新行 — 缓存被清空
     assert affected == []
     assert window.data_buffer == []
     assert window.cached_ranges == []

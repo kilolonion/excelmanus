@@ -90,7 +90,7 @@ class ChatResponse(BaseModel):
     session_id: str
     reply: str
     skills_used: list[str]
-    tool_scope: list[str] = Field(default_factory=list, deprecated=True)
+    tool_scope: list[str] = Field(default_factory=list)
     route_mode: str
     iterations: int = 0
     truncated: bool = False

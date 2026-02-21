@@ -173,6 +173,14 @@ if _PROMPT_TOOLKIT_ENABLED:
         """补全菜单打开时，回车选择当前补全项而非提交。"""
         _accept_and_maybe_retrigger(event)
 
+    @_PROMPT_KEY_BINDINGS.add("@")
+    def _trigger_mention_completion(event) -> None:
+        """输入 @ 后立即插入字符并触发补全菜单。"""
+        buf = event.current_buffer
+        buf.insert_text("@")
+        if _MENTION_COMPLETER is not None:
+            buf.start_completion()
+
     @_PROMPT_KEY_BINDINGS.add("tab")
     def _accept_inline_suggestion(event) -> None:
         """按 Tab 接受灰色补全建议。"""

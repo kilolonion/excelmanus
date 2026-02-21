@@ -94,8 +94,7 @@ def test_manager_adaptive_repeat_tripwire_downgrades_one_level() -> None:
     )
 
     assert "首行预览" not in first
-    # Phase 2: repeat reads are no longer blocked or downgraded.
-    # All three reads should succeed normally without "repeat read detected" warnings.
+    # 重复读取不再被阻断或降级，三次读取均正常返回
     assert isinstance(second, str) and len(second) > 0
     assert isinstance(third, str) and len(third) > 0
 

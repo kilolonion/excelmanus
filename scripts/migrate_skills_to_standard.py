@@ -40,8 +40,7 @@ def _build_config(workspace_root: Path, extra_dirs: tuple[str, ...]) -> ExcelMan
         skills_discovery_enabled=True,
         skills_discovery_scan_workspace_ancestors=True,
         skills_discovery_include_agents=True,
-        skills_discovery_include_claude=True,
-        skills_discovery_include_openclaw=True,
+        skills_discovery_scan_external_tool_dirs=True,
         skills_discovery_extra_dirs=extra_dirs,
     )
 

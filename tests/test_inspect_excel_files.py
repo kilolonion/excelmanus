@@ -224,7 +224,7 @@ class TestInspectExcelFiles:
         tool = tools["inspect_excel_files"]
         assert tool.max_result_chars == 0
 
-    # ── Phase 1 新增测试：搜索功能 ──
+    # ── 搜索功能测试 ──
 
     def test_search_by_filename(self, workspace: Path) -> None:
         """按文件名搜索应快速命中，无需打开文件。"""

@@ -40,14 +40,6 @@ from excelmanus.events import EventType, ToolCallEvent
 
 logger = logging.getLogger(__name__)
 
-# 常量别名（供外部模块引用）
-_RESULT_MAX_LEN = RESULT_MAX_LEN
-_THINKING_THRESHOLD = THINKING_THRESHOLD
-_THINKING_SUMMARY_LEN = THINKING_SUMMARY_LEN
-_truncate = truncate
-_format_arguments = format_arguments
-_format_elapsed = format_elapsed
-
 # 元工具：对用户隐藏内部细节，使用友好名称
 _META_TOOL_DISPLAY: dict[str, str] = {
     "activate_skill": "激活技能指引",
@@ -62,8 +54,6 @@ _STATUS_SYMBOLS: dict[str, str] = {
     "completed": THEME.SUCCESS,
     "failed": THEME.FAILURE,
 }
-# 常量别名（供外部模块引用）
-_STATUS_ICONS = _STATUS_SYMBOLS
 
 
 class StreamRenderer:

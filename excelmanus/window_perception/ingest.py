@@ -101,7 +101,7 @@ def ingest_read_result(
 ) -> list[int]:
     """将读取结果写入窗口，直接替换视口（不做范围合并）。
 
-    Phase 2 架构原则：每次读取即最新快照，不与旧缓存合并。
+    每次读取即最新快照，不与旧缓存合并。
     这确保了 data_buffer 始终与磁盘上一次读取结果一致。
     """
     if not new_range:
@@ -137,7 +137,7 @@ def ingest_write_result(
 ) -> list[int]:
     """处理写入结果：清空全部数据缓存，强制下次从磁盘读取。
 
-    Phase 2 架构原则：Window 不在内存中模拟写入结果。
+    Window 不在内存中模拟写入结果。
     写入后的真实状态只能通过 read_excel 从磁盘获取。
     """
     # 彻底清空所有数据缓冲

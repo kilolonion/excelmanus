@@ -60,7 +60,7 @@ class SubagentResult:
 
     @property
     def file_changes(self) -> list[str]:
-        """向后兼容：返回去重的变更路径列表。"""
+        """返回去重的变更路径列表。"""
         seen: set[str] = set()
         paths: list[str] = []
         for change in self.structured_changes:

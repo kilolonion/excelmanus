@@ -711,9 +711,8 @@ class WindowPerceptionManager:
                         )
                 except Exception:
                     repeat_count = 0
-                # Phase 2: record for audit only, never block or downgrade.
-                # Re-reading is the agent's primary mechanism to verify writes
-                # and eliminate hallucinations. Never interfere with it.
+                # 仅记录用于审计，不阻断或降级。
+                # 重新读取是 agent 验证写入结果、消除幻觉的主要机制，不应干预。
 
             self._apply_delta_pipeline(
                 window=window,

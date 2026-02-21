@@ -12,13 +12,13 @@ from hypothesis import strategies as st
 from rich.console import Console
 
 from excelmanus.events import EventType, ToolCallEvent
-from excelmanus.renderer import (
-    StreamRenderer,
-    _RESULT_MAX_LEN,
-    _THINKING_SUMMARY_LEN,
-    _THINKING_THRESHOLD,
-    _truncate,
+from excelmanus.cli.utils import (
+    RESULT_MAX_LEN as _RESULT_MAX_LEN,
+    THINKING_SUMMARY_LEN as _THINKING_SUMMARY_LEN,
+    THINKING_THRESHOLD as _THINKING_THRESHOLD,
+    truncate as _truncate,
 )
+from excelmanus.renderer import StreamRenderer
 
 # ---------------------------------------------------------------------------
 # 辅助函数
