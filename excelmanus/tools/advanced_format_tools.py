@@ -716,7 +716,15 @@ def add_conditional_rule(
 
 
 def get_tools() -> list[ToolDef]:
-    """返回高级格式工具定义。"""
+    """返回高级格式工具定义。
+
+    Batch 3 精简：全部 9 个高级格式化工具已删除，由 run_code 替代。
+    """
+    return []
+
+
+def _get_tools_deprecated() -> list[ToolDef]:
+    """已废弃的工具定义，保留供参考。"""
     border_style_enum = ["thin", "medium", "thick", "double", "dotted", "dashed"]
     return [
         ToolDef(

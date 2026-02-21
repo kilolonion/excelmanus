@@ -41,18 +41,9 @@ SECTION_END = "--- end ---"
 
 # 写入类工具集合（与 manager._apply_ingest 保持一致）
 _WRITE_TOOLS = {
-    "write_excel",
+    # Batch 1/2/3 精简：仅保留 MCP 工具名
     "write_to_sheet",
-    "write_cells",
-    "format_cells",
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
 }
 
 

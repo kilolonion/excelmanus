@@ -64,20 +64,34 @@ class TestRunShellAllowed:
         assert result["status"] == "success"
         assert result["return_code"] == 0
 
-    def test_pipe_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo a | wc -c"))
+    def test_pipe_allowed(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("echo hello world | wc -w"))
+        assert result["status"] == "success"
+        assert "2" in result["stdout_tail"]
+
+    def test_pipe_find_head(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("find . -type f | head -n 5"))
+        assert result["status"] == "success"
+
+    def test_pipe_grep(self, workspace: Path) -> None:
+        result = json.loads(shell_tools.run_shell("cat hello.txt | grep hello"))
+        assert result["status"] == "success"
+        assert "hello world" in result["stdout_tail"]
+
+    def test_pipe_blocked_command_in_pipeline(self, workspace: Path) -> None:
+        """管道中包含黑名单命令仍然被拦截。"""
+        result = json.loads(shell_tools.run_shell("echo a | bash"))
         assert result["status"] == "blocked"
-        assert "不支持管道/逻辑运算" in result["reason"]
 
     def test_and_blocked(self, workspace: Path) -> None:
         result = json.loads(shell_tools.run_shell("echo a && echo b"))
         assert result["status"] == "blocked"
-        assert "不支持管道/逻辑运算" in result["reason"]
+        assert "逻辑运算符" in result["reason"]
 
     def test_or_blocked(self, workspace: Path) -> None:
         result = json.loads(shell_tools.run_shell("echo a || echo b"))
         assert result["status"] == "blocked"
-        assert "不支持管道/逻辑运算" in result["reason"]
+        assert "逻辑运算符" in result["reason"]
 
 
 class TestRunShellBlocked:

@@ -444,7 +444,15 @@ def create_excel_chart(
 
 
 def get_tools() -> list[ToolDef]:
-    """返回可视化 Skill 的所有工具定义。"""
+    """返回可视化 Skill 的所有工具定义。
+
+    Batch 3 精简：create_chart/create_excel_chart 已删除，由 run_code 替代。
+    """
+    return []
+
+
+def _get_tools_deprecated() -> list[ToolDef]:
+    """已废弃的工具定义，保留供参考。"""
     return [
         ToolDef(
             name="create_chart",

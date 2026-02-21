@@ -14,7 +14,7 @@ from excelmanus.hooks import HookDecision, HookEvent
 from excelmanus.logger import get_logger
 
 if TYPE_CHECKING:
-    from excelmanus.engine import DelegateSubagentOutcome
+    from excelmanus.engine import AgentEngine, DelegateSubagentOutcome
     from excelmanus.events import EventCallback
 
 logger = get_logger("subagent_orchestrator")
@@ -28,7 +28,7 @@ class SubagentOrchestrator:
     的控制逻辑集中在此类中。
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
 
     async def delegate(

@@ -13,6 +13,7 @@ from typing import Any, Dict
 
 from rich.columns import Columns
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
@@ -50,18 +51,14 @@ _STATUS_ICONS: dict[str, str] = {
 
 _TOOL_ICONS: dict[str, str] = {
     "read_excel": "📖",
-    "write_excel": "📝",
-    "analyze_data": "📊",
-    "filter_data": "🔍",
-    "sort_data": "🔃",
-    "create_chart": "📈",
-    "format_cells": "🎨",
-    "set_column_width": "↔️",
-    "merge_cells": "🔗",
-    "add_formula": "🧮",
-    "create_pivot_table": "📋",
-    "validate_data": "✅",
-    "conditional_format": "🌈",
+    "filter_data": "�",
+    "inspect_excel_files": "�",
+    "list_sheets": "�",
+    "list_directory": "�",
+    "run_code": "💻",
+    "write_text_file": "📝",
+    "copy_file": "�",
+    "delete_file": "🗑️",
 }
 
 
@@ -131,6 +128,8 @@ class StreamRenderer:
         # 流式输出状态
         self._streaming_text = False
         self._streaming_thinking = False
+        # 文本缓冲区，用于流结束后统一 Markdown 渲染
+        self._text_buffer: list[str] = []
 
     # ------------------------------------------------------------------
     # 公共接口
@@ -234,7 +233,7 @@ class StreamRenderer:
         self._console.print(event.thinking_delta, end="", style="dim italic")
 
     def _render_text_delta(self, event: ToolCallEvent) -> None:
-        """渲染回复文本增量。"""
+        """缓冲回复文本增量，流结束后统一 Markdown 渲染。"""
         if not event.text_delta:
             return
         if self._streaming_thinking:
@@ -242,15 +241,19 @@ class StreamRenderer:
             self._streaming_thinking = False
         if not self._streaming_text:
             self._streaming_text = True
-            self._console.print()
-        self._console.print(event.text_delta, end="")
+        self._text_buffer.append(event.text_delta)
 
     def finish_streaming(self) -> None:
-        """流式输出结束时调用，确保换行。"""
-        if self._streaming_text or self._streaming_thinking:
+        """流式输出结束时调用，将缓冲文本以 Markdown 渲染输出。"""
+        if self._streaming_text and self._text_buffer:
+            full_text = "".join(self._text_buffer)
             self._console.print()
-            self._streaming_text = False
-            self._streaming_thinking = False
+            self._console.print(Markdown(full_text))
+        elif self._streaming_thinking:
+            self._console.print()
+        self._streaming_text = False
+        self._streaming_thinking = False
+        self._text_buffer.clear()
 
     # ------------------------------------------------------------------
     # 工具调用渲染

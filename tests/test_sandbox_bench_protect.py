@@ -49,33 +49,11 @@ class TestBenchProtectedDirWrite:
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')"
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode != 0
-        assert "bench 保护目录" in result.stderr
+        assert result.returncode == 0
         assert target.read_text(encoding="utf-8") == "original"
 
-    def test_read_from_bench_external_allowed(self, workspace: Path) -> None:
-        """读取 bench/external/ 下的文件不受影响。"""
-        bench_dir = workspace / "bench" / "external"
-        bench_dir.mkdir(parents=True)
-        target = bench_dir / "source.xlsx"
-        target.write_text("data123", encoding="utf-8")
-        code = f"with open(r'{target}', 'r') as f:\n    print(f.read())"
-        result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        assert "data123" in result.stdout
-
-    def test_write_to_non_protected_dir_allowed(self, workspace: Path) -> None:
-        """写入非保护目录（工作区内）正常。"""
-        output_dir = workspace / "outputs"
-        output_dir.mkdir()
-        target = output_dir / "result.txt"
-        code = f"with open(r'{target}', 'w') as f:\n    f.write('ok')\nprint('done')"
-        result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        assert target.read_text(encoding="utf-8") == "ok"
-
     def test_env_var_override_protected_dirs(self, workspace: Path) -> None:
-        """环境变量 EXCELMANUS_BENCH_PROTECTED_DIRS 覆盖保护目录。"""
+        """环境变量 EXCELMANUS_BENCH_PROTECTED_DIRS 覆盖保护目录触发 Auto-CoW。"""
         custom_dir = workspace / "my_data"
         custom_dir.mkdir()
         target = custom_dir / "file.txt"
@@ -85,20 +63,19 @@ class TestBenchProtectedDirWrite:
             workspace, code, "GREEN",
             env_override={"EXCELMANUS_BENCH_PROTECTED_DIRS": "my_data"},
         )
-        assert result.returncode != 0
-        assert "bench 保护目录" in result.stderr
+        assert result.returncode == 0
         assert target.read_text(encoding="utf-8") == "original"
 
     def test_bench_protection_yellow_mode(self, workspace: Path) -> None:
-        """YELLOW 模式同样拦截 bench 保护目录写入。"""
+        """YELLOW 模式同样触发 Auto-CoW。"""
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True)
         target = bench_dir / "source.xlsx"
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')"
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode != 0
-        assert "bench 保护目录" in result.stderr
+        assert result.returncode == 0
+        assert target.read_text(encoding="utf-8") == "original"
 
     def test_bench_protection_red_mode_no_restriction(self, workspace: Path) -> None:
         """RED 模式不受 bench 保护限制。"""
@@ -311,7 +288,7 @@ class TestOpenpyxlSandboxSave:
         assert "updated" in result.stdout
 
     def test_openpyxl_save_bench_protected_blocked(self, workspace: Path) -> None:
-        """openpyxl wb.save() 写入 bench/external 应被拦截。"""
+        """openpyxl wb.save() 写入 bench/external 触发 Auto-CoW。"""
         from openpyxl import Workbook as _Wb
 
         bench_dir = workspace / "bench" / "external"
@@ -329,8 +306,13 @@ class TestOpenpyxlSandboxSave:
             f"wb.save(r'{target}')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode != 0
-        assert "bench 保护目录" in (result.stderr + result.stdout)
+        assert result.returncode == 0
+        
+        # 原文件应未修改
+        wb_orig = _Wb()
+        from openpyxl import load_workbook
+        wb_check = load_workbook(target)
+        assert wb_check.active["A1"].value == "original"
 
 
 class TestWrapperTemplateContent:

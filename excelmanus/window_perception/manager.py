@@ -99,25 +99,13 @@ _FORMULA_HINT_RE = re.compile(
 _REPEAT_READ_TOOLS = {
     "read_excel",
     "read_sheet",
-    "analyze_data",
     "filter_data",
-    "transform_data",
-    "read_cell_styles",
     "focus_window_refill",
 }
 _WRITE_LIKE_TOOLS = {
-    "write_excel",
+    # Batch 1/2/3 精简：全部内置写入工具已删除，仅保留 MCP 工具名
     "write_to_sheet",
-    "write_cells",
-    "format_cells",
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
 }
 _INTENT_USER_KEYWORDS: dict[IntentTag, tuple[str, ...]] = {
     IntentTag.AGGREGATE: ("汇总", "总计", "求和", "平均", "同比", "环比", "统计", "销量", "占比"),
@@ -135,20 +123,12 @@ _INTENT_TO_TASK_TYPE: dict[IntentTag, str] = {
     IntentTag.GENERAL: "GENERAL_BROWSE",
 }
 _INTENT_FORMAT_TOOLS = {
-    "format_cells",
+    # Batch 2/3 精简：仅保留 MCP 工具名
     "format_range",
-    "adjust_column_width",
-    "adjust_row_height",
-    "merge_cells",
-    "unmerge_cells",
-    "add_color_scale",
-    "add_data_bar",
-    "add_conditional_rule",
-    "read_cell_styles",
 }
-_INTENT_AGGREGATE_TOOLS = {"analyze_data", "transform_data"}
+_INTENT_AGGREGATE_TOOLS: set[str] = set()  # analyze_data: Batch 4 精简
 _INTENT_VALIDATE_TOOLS = {"filter_data"}
-_INTENT_ENTRY_TOOLS = {"write_excel", "write_to_sheet", "write_cells"}
+_INTENT_ENTRY_TOOLS = {"write_to_sheet"}  # write_excel, write_cells: Batch 1 精简
 
 logger = get_logger("window_perception.manager")
 
@@ -1148,18 +1128,9 @@ class WindowPerceptionManager:
                 affected_row_indices=affected,
             )
         elif canonical_tool_name in {
-            "write_excel",
+            # Batch 1/2/3 精简：仅保留 MCP 工具名
             "write_to_sheet",
-            "write_cells",
-            "format_cells",
             "format_range",
-            "adjust_column_width",
-            "adjust_row_height",
-            "merge_cells",
-            "unmerge_cells",
-            "add_color_scale",
-            "add_data_bar",
-            "add_conditional_rule",
         }:
             target_range = str(
                 arguments.get("range")
@@ -1433,23 +1404,11 @@ class WindowPerceptionManager:
         if style_summary:
             self._set_window_field(window, "style_summary", style_summary)
 
-        if canonical_tool_name in {"write_excel", "write_to_sheet", "write_cells", "format_cells", "format_range"}:
+        if canonical_tool_name in {"write_to_sheet", "format_range"}:
             target_range = str(arguments.get("range") or arguments.get("cell_range") or arguments.get("cell") or "").strip()
             if target_range:
                 self._set_window_field(window, "summary", f"最近修改区域: {target_range}")
-        elif canonical_tool_name in {"adjust_column_width"}:
-            if column_widths:
-                self._set_window_field(window, "summary", f"最近调整列宽: {len(column_widths)}列")
-        elif canonical_tool_name in {"adjust_row_height"}:
-            if row_heights:
-                self._set_window_field(window, "summary", f"最近调整行高: {len(row_heights)}行")
-        elif canonical_tool_name in {"merge_cells", "unmerge_cells"}:
-            merged_total = len(window.merged_ranges)
-            self._set_window_field(window, "summary", f"当前合并区域: {merged_total}处")
-        elif canonical_tool_name in {"add_color_scale", "add_data_bar", "add_conditional_rule"}:
-            effect_total = len(window.conditional_effects)
-            self._set_window_field(window, "summary", f"条件格式视觉效果: {effect_total}条")
-        elif canonical_tool_name in {"copy_sheet", "rename_sheet", "delete_sheet", "create_sheet", "list_sheets", "describe_sheets"}:
+        elif canonical_tool_name in {"list_sheets", "describe_sheets"}:
             self._set_window_field(window, "summary", "工作表元信息已更新")
 
         self._register_window_identity(window)

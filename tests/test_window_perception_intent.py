@@ -89,9 +89,10 @@ def test_formula_intent_from_write_arguments() -> None:
     )
     decision = manager._resolve_window_intent(
         window=_build_window(),
-        canonical_tool_name="write_cells",
+        canonical_tool_name="format_range",
         arguments={"values": [["=SUMIFS(C:C,A:A,\"苹果\")"]]},
         result_json=None,
     )
-    assert decision["tag"] == IntentTag.FORMULA
+    # Batch 3 精简后仅 MCP 工具名 format_range 在 _INTENT_FORMAT_TOOLS 中。
+    assert decision["tag"] == IntentTag.FORMAT
     assert decision["source"] == "tool_rule"

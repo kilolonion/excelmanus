@@ -98,7 +98,7 @@ class SkillMatchResult:
     skills_used: list[str]
     route_mode: str
     system_contexts: list[str] = field(default_factory=list)
-    tool_scope: list[str] = field(default_factory=list)  # v5: 始终为空，保留向后兼容
+    tool_scope: list[str] = field(default_factory=list)  # v5.2: 始终为空，保留向后兼容
     parameterized: bool = False
     write_hint: str = "unknown"  # "may_write" | "read_only" | "unknown"
     sheet_count: int = 0  # 路由阶段检测到的 sheet 数量

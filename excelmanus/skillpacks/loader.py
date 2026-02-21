@@ -255,7 +255,7 @@ class SkillpackLoader:
         for raw_key, display_key in _DEPRECATED_FIELDS.items():
             if raw_key in frontmatter:
                 self._append_warning(
-                    f"{skill_file}: frontmatter 字段 '{display_key}' 已在 v5 中移除"
+                    f"{skill_file}: frontmatter 字段 '{display_key}' 已在 v5.2 中移除"
                     "（Skill 不再控制工具授权），该字段将被忽略。"
                 )
                 frontmatter.pop(raw_key, None)

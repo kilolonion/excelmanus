@@ -309,7 +309,15 @@ def set_page_header_footer(
 
 
 def get_tools() -> list[ToolDef]:
-    """返回工作表级设置工具的所有工具定义。"""
+    """返回工作表级设置工具的所有工具定义。
+
+    Batch 3 精简：set_print_layout/set_page_header_footer 已删除，由 run_code 替代。
+    """
+    return []
+
+
+def _get_tools_deprecated() -> list[ToolDef]:
+    """已废弃的工具定义，保留供参考。"""
     return [
         ToolDef(
             name="set_print_layout",

@@ -97,9 +97,11 @@ class TestYellowSandbox:
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 
-    def test_import_ctypes_blocked(self, workspace: Path) -> None:
-        result = _run_in_sandbox(workspace, "import ctypes", "YELLOW")
-        assert result.returncode != 0
+    def test_import_ctypes_allowed(self, workspace: Path) -> None:
+        """ctypes 已从 YELLOW 禁止列表移除（pandas 等数据处理库间接依赖）。"""
+        result = _run_in_sandbox(workspace, "import ctypes\nprint('ctypes_ok')", "YELLOW")
+        assert result.returncode == 0
+        assert "ctypes_ok" in result.stdout
 
     def test_import_socket_allowed(self, workspace: Path) -> None:
         # socket should NOT be blocked in YELLOW
@@ -124,6 +126,76 @@ class TestRedSandbox:
         assert result.returncode == 0
         data = json.loads(result.stdout.strip())
         assert "pid" in data
+
+
+class TestAutoCoW:
+    """自动 Copy-on-Write 行为测试。"""
+
+    def test_auto_cow_on_protected_dir(self, workspace: Path) -> None:
+        import os
+        
+        bench_dir = workspace / "bench" / "external"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        target = bench_dir / "protected.txt"
+        target.write_text("original_data", encoding="utf-8")
+        
+        outputs_dir = workspace / "outputs"
+        
+        # EXCELMANUS_BENCH_PROTECTED_DIRS="bench/external" is default
+        code = (
+            "import os\n"
+            f"with open(r'{target}', 'w') as f:\n"
+            f"    f.write('new_data')\n"
+            f"with open(r'{target}', 'r') as f:\n"
+            f"    print('READ:', f.read())\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0
+        assert "READ: new_data" in result.stdout
+        
+        # 原文件未被修改
+        assert target.read_text(encoding="utf-8") == "original_data"
+        
+        # 副本已生成并被修改
+        cow_file = outputs_dir / "protected.txt"
+        assert cow_file.exists()
+        assert cow_file.read_text(encoding="utf-8") == "new_data"
+        
+    def test_auto_cow_openpyxl_save(self, workspace: Path) -> None:
+        import os
+        
+        bench_dir = workspace / "bench" / "external"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        target = bench_dir / "protected.xlsx"
+        
+        # 创建一个合法的空 excel
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "original"
+        wb.save(target)
+        
+        outputs_dir = workspace / "outputs"
+        
+        code = (
+            "import openpyxl\n"
+            f"wb = openpyxl.load_workbook(r'{target}')\n"
+            "ws = wb.active\n"
+            "ws['A1'] = 'new_data'\n"
+            f"wb.save(r'{target}')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0
+        
+        # 原文件未被修改
+        wb_orig = openpyxl.load_workbook(target)
+        assert wb_orig.active["A1"].value == "original"
+        
+        # 副本已生成并被修改
+        cow_file = outputs_dir / "protected.xlsx"
+        assert cow_file.exists()
+        wb_cow = openpyxl.load_workbook(cow_file)
+        assert wb_cow.active["A1"].value == "new_data"
 
 
 class TestWrapperPreservesSemantics:

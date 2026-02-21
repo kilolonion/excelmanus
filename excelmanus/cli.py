@@ -27,6 +27,7 @@ try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.application import Application
     from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.formatted_text import ANSI, FormattedText
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
@@ -132,6 +133,9 @@ _AUTO_SAVE_PATH: str | None = None
 # 会话级布局模式（初始值从配置加载，可通过 /ui 切换）
 _current_layout_mode: str = "dashboard"
 
+# @ 提及补全器（在 _repl_loop 中 engine 可用后初始化）
+_MENTION_COMPLETER: object | None = None
+
 
 def _resolve_skill_slash_command(engine: AgentEngine, user_input: str) -> str | None:
     """识别是否为可手动调用的 Skill 斜杠命令。"""
@@ -150,6 +154,16 @@ def _extract_slash_raw_args(user_input: str) -> str:
         return ""
     _, _, raw_args = user_input[1:].partition(" ")
     return raw_args.strip()
+
+
+_IMG_PATTERN = re.compile(r"@img\s+(\S+\.(?:png|jpg|jpeg|gif|bmp|webp))", re.IGNORECASE)
+
+
+def _parse_image_attachments(user_input: str) -> tuple[str, list[str]]:
+    """解析 @img 语法，返回 (剩余文本, 图片路径列表)。"""
+    images = _IMG_PATTERN.findall(user_input)
+    text = _IMG_PATTERN.sub("", user_input).strip()
+    return text, images
 
 
 def _parse_skills_payload_options(tokens: list[str], start_idx: int) -> dict:
@@ -583,16 +597,58 @@ if _PROMPT_TOOLKIT_ENABLED:
 
 
     _PROMPT_HISTORY = InMemoryHistory()
-    _PROMPT_STYLE = Style.from_dict({"auto-suggestion": "ansibrightblack"})
+    _PROMPT_STYLE = Style.from_dict({
+        "auto-suggestion": "ansibrightblack",
+        # 补全菜单样式
+        "completion-menu":                "bg:#1e1e2e #cdd6f4",
+        "completion-menu.completion":      "bg:#1e1e2e #cdd6f4",
+        "completion-menu.completion.current": "bg:#45475a #89b4fa bold",
+        "completion-menu.meta.completion":  "bg:#1e1e2e #6c7086 italic",
+        "completion-menu.meta.completion.current": "bg:#45475a #89b4fa italic",
+        "scrollbar.background":            "bg:#313244",
+        "scrollbar.button":                "bg:#585b70",
+    })
     _SLASH_AUTO_SUGGEST = _SlashCommandAutoSuggest()
     _PROMPT_KEY_BINDINGS = KeyBindings()
+
+    @Condition
+    def _completion_menu_is_open() -> bool:
+        """补全菜单是否打开。"""
+        app = _PROMPT_SESSION and getattr(_PROMPT_SESSION, "app", None)
+        if app is None:
+            return False
+        buf = app.current_buffer
+        return buf.complete_state is not None
+
+    def _accept_and_maybe_retrigger(event) -> None:
+        """确认补全项，若结果以 @type: 或目录 / 结尾则自动触发下一级补全。"""
+        buf = event.current_buffer
+        buf.complete_state = None
+        text = buf.text[:buf.cursor_position]
+        import re as _re
+        # 第一级分类选择后（@type: 或 @img ）→ 触发第二级
+        if _re.search(r"@(?:file|folder|skill|mcp):\s*$", text) or _re.search(r"@img\s+$", text):
+            buf.start_completion()
+        # 选择目录后（以 / 结尾且在 @type: 或 @img 上下文中）→ 触发下一级
+        elif _re.search(r"@(?:file|folder):\S*/$", text) or _re.search(r"@img\s+\S*/$", text):
+            buf.start_completion()
+
+    @_PROMPT_KEY_BINDINGS.add("enter", filter=_completion_menu_is_open)
+    def _accept_completion(event) -> None:
+        """补全菜单打开时，回车选择当前补全项而非提交。"""
+        _accept_and_maybe_retrigger(event)
 
     @_PROMPT_KEY_BINDINGS.add("tab")
     def _accept_inline_suggestion(event) -> None:
         """按 Tab 接受灰色补全建议。"""
-        suggestion = event.current_buffer.suggestion
+        buf = event.current_buffer
+        # 补全菜单打开时，Tab 选择补全项
+        if buf.complete_state is not None:
+            _accept_and_maybe_retrigger(event)
+            return
+        suggestion = buf.suggestion
         if suggestion:
-            event.current_buffer.insert_text(suggestion.text)
+            buf.insert_text(suggestion.text)
 
 
 def _render_welcome(
@@ -1029,7 +1085,11 @@ async def _read_user_input(
         and sys.stdout.isatty()
     ):
         try:
-            return await _PROMPT_SESSION.prompt_async(ANSI(ansi_prompt))
+            return await _PROMPT_SESSION.prompt_async(
+                ANSI(ansi_prompt),
+                completer=_MENTION_COMPLETER,
+                complete_while_typing=True,
+            )
         except (KeyboardInterrupt, EOFError):
             raise
         except Exception as exc:  # pragma: no cover - 仅保护交互式边界
@@ -1280,7 +1340,7 @@ def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
     model_name = getattr(engine, "current_model_name", None) or getattr(engine, "current_model", "unknown")
 
     save_data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "conversation_export",
         "timestamp": timestamp,
         "meta": {
@@ -1295,6 +1355,7 @@ def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
             "tool_call_count": tool_call_count,
         },
         "diagnostics": getattr(engine, "session_diagnostics", []),
+        "prompt_injection_details": getattr(engine, "prompt_injection_snapshots", []),
         "messages": serialized_messages,
     }
 
@@ -1918,6 +1979,7 @@ async def _chat_with_feedback(
     renderer: StreamRenderer,
     slash_command: str | None = None,
     raw_args: str | None = None,
+    mention_contexts: list | None = None,
 ) -> tuple[str, bool]:
     """统一封装 chat 调用，增加等待期动态状态反馈。返回 (reply_text, streamed)。"""
     # Dashboard 模式自带 Live 状态栏，禁用 ticker 避免冲突
@@ -1932,6 +1994,8 @@ async def _chat_with_feedback(
             chat_kwargs["slash_command"] = slash_command
         if raw_args is not None:
             chat_kwargs["raw_args"] = raw_args
+        if mention_contexts is not None:
+            chat_kwargs["mention_contexts"] = mention_contexts
         reply = _reply_text(await engine.chat(user_input, **chat_kwargs))
         streamed = renderer._streaming_text or renderer._streaming_thinking
         renderer.finish_streaming()
@@ -1946,6 +2010,7 @@ async def _run_chat_turn(
     user_input: str,
     slash_command: str | None = None,
     raw_args: str | None = None,
+    mention_contexts: list | None = None,
     error_label: str = "处理请求",
 ) -> tuple[str, bool] | None:
     """统一回合执行入口：根据 _current_layout_mode 选择渲染器，调用引擎，渲染结果。
@@ -1978,6 +2043,7 @@ async def _run_chat_turn(
             renderer=renderer,
             slash_command=slash_command,
             raw_args=raw_args,
+            mention_contexts=mention_contexts,
         )
 
         # Dashboard 模式下若进入 pending question/approval，跳过冗余 reply Panel（交互选择器会展示）
@@ -2024,6 +2090,19 @@ async def _run_chat_turn(
 
 async def _repl_loop(engine: AgentEngine) -> None:
     """异步 REPL 主循环。"""
+    global _MENTION_COMPLETER
+    # 初始化 @ 提及补全器（需要 engine 引用）
+    try:
+        from excelmanus.mentions.completer import MentionCompleter
+
+        _MENTION_COMPLETER = MentionCompleter(
+            workspace_root=engine._config.workspace_root,
+            engine=engine,
+        )
+    except Exception as exc:
+        logger.warning("@ 提及补全器初始化失败：%s", exc)
+        _MENTION_COMPLETER = None
+
     _sync_skill_command_suggestions(engine)
     _sync_model_suggestions(engine)
     while True:
@@ -2199,7 +2278,7 @@ async def _repl_loop(engine: AgentEngine) -> None:
             continue
 
         if user_input.lower().startswith("/config"):
-            _handle_config_command(user_input, engine.config.workspace_root)
+            _handle_config_command(user_input, engine._config.workspace_root)
             continue
 
         if user_input.lower().startswith("/ui"):
@@ -2300,10 +2379,37 @@ async def _repl_loop(engine: AgentEngine) -> None:
             continue
 
         # 自然语言指令：调用 AgentEngine，使用事件流渲染
+        # @ 提及解析与上下文解析
+        mention_contexts = None
+        try:
+            from excelmanus.mentions import MentionParser, MentionResolver
+            from excelmanus.security.guard import FileAccessGuard
+
+            parse_result = MentionParser.parse(user_input)
+            if parse_result.mentions:
+                guard = FileAccessGuard(engine._config.workspace_root)
+                # NOTE: 访问 engine 私有属性以获取 skill_loader 和 mcp_manager
+                skill_loader = getattr(engine, "_skill_loader", None)
+                if skill_loader is None:
+                    _router = getattr(engine, "_skill_router", None)
+                    if _router is not None:
+                        skill_loader = getattr(_router, "_loader", None)
+                mcp_manager = getattr(engine, "_mcp_manager", None)
+                resolver = MentionResolver(
+                    workspace_root=engine._config.workspace_root,
+                    guard=guard,
+                    skill_loader=skill_loader,
+                    mcp_manager=mcp_manager,
+                )
+                mention_contexts = await resolver.resolve(list(parse_result.mentions))
+        except Exception as exc:
+            logger.debug("@ 提及解析失败，跳过上下文注入：%s", exc)
+
         try:
             await _run_chat_turn(
                 engine,
                 user_input=user_input,
+                mention_contexts=mention_contexts,
                 error_label="处理请求",
             )
         except KeyboardInterrupt:

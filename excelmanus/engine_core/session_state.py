@@ -41,6 +41,13 @@ class SessionState:
         self.vba_exempt: bool = False
         self.finish_task_warned: bool = False
 
+        # CoW 路径映射注册表（会话级累积）
+        # key: 原始相对路径, value: outputs/ 下的副本相对路径
+        self.cow_path_registry: dict[str, str] = {}
+
+        # 提示词注入快照（每轮完整文本，供 /save 导出）
+        self.prompt_injection_snapshots: list[dict[str, Any]] = []
+
     def increment_turn(self) -> None:
         """递增会话轮次。"""
         self.session_turn += 1
@@ -69,6 +76,8 @@ class SessionState:
         self.last_failure_count = 0
         self.turn_diagnostics = []
         self.session_diagnostics = []
+        self.cow_path_registry = {}
+        self.prompt_injection_snapshots = []
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
@@ -84,3 +93,14 @@ class SessionState:
         """记录一次工具调用失败。"""
         self.last_tool_call_count += 1
         self.last_failure_count += 1
+
+    # ── CoW 路径注册表 ──────────────────────────────────────
+
+    def register_cow_mappings(self, mapping: dict[str, str]) -> None:
+        """合并新的 CoW 路径映射到会话级注册表。"""
+        if mapping:
+            self.cow_path_registry.update(mapping)
+
+    def lookup_cow_redirect(self, rel_path: str) -> str | None:
+        """查找相对路径是否有 CoW 副本，返回副本路径或 None。"""
+        return self.cow_path_registry.get(rel_path)

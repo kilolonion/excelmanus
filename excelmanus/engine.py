@@ -55,6 +55,7 @@ from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
+from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.policy import MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
@@ -77,10 +78,6 @@ _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
     "memory_save", "memory_read_topic",
 )
-_PLAN_CONTEXT_MAX_CHARS = 6000
-_MAX_PLAN_AUTO_CONTINUE = 3  # 计划审批后自动续跑最大次数
-_MIN_SYSTEM_CONTEXT_CHARS = 256
-_SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
@@ -129,6 +126,58 @@ def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
     if normalized_override == "may_write":
         return "may_write"
     return _merge_write_hint(route_hint, override_hint)
+
+
+# ── Mention 上下文 XML 组装 ──────────────────────────────
+
+# 各 mention 类型对应的 XML 标签名和属性名
+_MENTION_XML_TAG_MAP: dict[str, tuple[str, str]] = {
+    "file": ("file", "path"),
+    "folder": ("folder", "path"),
+    "skill": ("skill", "name"),
+    "mcp": ("mcp", "server"),
+}
+
+
+def build_mention_context_block(
+    mention_contexts: list[ResolvedMention],
+) -> str:
+    """将 ResolvedMention 列表组装为 <mention_context> XML 块。
+
+    规则：
+    - 成功解析的 mention 用类型对应的 XML 标签包裹 context_block
+    - 解析失败的 mention 用 <error> 标签包裹错误信息
+    - img 类型跳过（不生成 context block）
+    - 列表为空时返回空字符串
+    """
+    if not mention_contexts:
+        return ""
+
+    parts: list[str] = []
+    for rm in mention_contexts:
+        # img 类型不生成 context block
+        if rm.mention.kind == "img":
+            continue
+
+        if rm.error:
+            parts.append(
+                f'<error ref="{rm.mention.raw}">\n  {rm.error}\n</error>'
+            )
+        elif rm.context_block:
+            tag_info = _MENTION_XML_TAG_MAP.get(rm.mention.kind)
+            if tag_info:
+                tag, attr = tag_info
+                parts.append(
+                    f'<{tag} {attr}="{rm.mention.value}">\n'
+                    f"{rm.context_block}\n"
+                    f"</{tag}>"
+                )
+
+    if not parts:
+        return ""
+
+    inner = "\n".join(parts)
+    return f"<mention_context>\n{inner}\n</mention_context>"
 
 
 _TO_PLAIN_MAX_DEPTH = 32
@@ -373,26 +422,6 @@ _FILE_REFERENCE_PATTERN = _re.compile(
 )
 
 
-_ADVICE_WRITE_VALUE_RE = _re.compile(
-    r"(?:VBA|macro|Sub\s+\w+|End\s+Sub|宏|请.*(?:粘贴|运行|执行)"
-    r"|paste.*module|run\s+(?:the\s+)?(?:code|macro)"
-    r"|prior\s+response|prepared\b.*\b(?:run|paste|execute))",
-    _re.IGNORECASE,
-)
-
-
-def _is_advice_like_value(value: Any) -> bool:
-    """检测 write_cells 单元格模式写入的值是否为建议性文本而非业务数据。"""
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    if len(stripped) < 30:
-        return False
-    if stripped.startswith("="):
-        return False
-    return bool(_ADVICE_WRITE_VALUE_RE.search(stripped))
-
-
 def _detect_write_intent(text: str) -> bool:
     """检测用户消息是否同时包含文件引用和写入动作动词。"""
     if not text:
@@ -592,6 +621,18 @@ class AgentEngine:
         self._advisor_model = _adv_model
         # adviser 是否跟随主模型切换：仅当未配置任何独立小模型时
         self._advisor_follow_active_model = not config.window_advisor_model
+        # VLM 独立客户端：vlm_* → 主模型
+        _vlm_api_key = config.vlm_api_key or config.api_key
+        _vlm_base_url = config.vlm_base_url or config.base_url
+        _vlm_model = config.vlm_model or config.model
+        if config.vlm_base_url:
+            self._vlm_client = create_client(
+                api_key=_vlm_api_key,
+                base_url=_vlm_base_url,
+            )
+        else:
+            self._vlm_client = self._client
+        self._vlm_model = _vlm_model
         self._config = config
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
@@ -680,6 +721,7 @@ class AgentEngine:
         self._plan_mode_enabled: bool = False
         self._plan_intercept_task_create: bool = False
         self._bench_mode: bool = False
+        self._mention_contexts: list[ResolvedMention] | None = None
         self._pending_plan: PendingPlanState | None = None
         self._approved_plan_context: str | None = None
         self._suspend_task_create_plan_once: bool = False
@@ -951,6 +993,11 @@ class AgentEngine:
         return self._session_diagnostics
 
     @property
+    def prompt_injection_snapshots(self) -> list[dict[str, Any]]:
+        """提示词注入完整快照，供 /save 导出。"""
+        return self._state.prompt_injection_snapshots
+
+    @property
     def full_access_enabled(self) -> bool:
         """当前会话是否启用 fullaccess。"""
         return self._full_access_enabled
@@ -1136,8 +1183,45 @@ class AgentEngine:
         on_event: EventCallback | None = None,
         slash_command: str | None = None,
         raw_args: str | None = None,
+        mention_contexts: list[ResolvedMention] | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        normalized_images: list[dict[str, str]] = []
+        for item in images or []:
+            if not isinstance(item, dict):
+                continue
+            data = str(item.get("data", "") or "").strip()
+            if not data:
+                continue
+            media_type = str(item.get("media_type", "image/png") or "image/png").strip() or "image/png"
+            detail_raw = str(item.get("detail", "auto") or "auto").strip().lower()
+            detail = detail_raw if detail_raw in {"auto", "low", "high"} else "auto"
+            normalized_images.append({
+                "data": data,
+                "media_type": media_type,
+                "detail": detail,
+            })
+
+        def _add_user_turn_to_memory(text: str) -> None:
+            if not normalized_images:
+                self._memory.add_user_message(text)
+                return
+
+            parts: list[dict[str, Any]] = []
+            if text:
+                parts.append({"type": "text", "text": text})
+            for image in normalized_images:
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{image['media_type']};base64,{image['data']}",
+                        "detail": image["detail"],
+                    },
+                })
+
+            self._memory.add_user_message(parts if parts else text)
+
         if self._question_flow.has_pending():
             pending_chat_start = time.monotonic()
             pending_result = await self._handle_pending_question_answer(
@@ -1212,6 +1296,16 @@ class AgentEngine:
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
+        # ── @skill:name 路由：当无斜杠命令时，检测 mention 中的 skill 引用 ──
+        if effective_slash_command is None and mention_contexts:
+            for rm in mention_contexts:
+                if rm.mention.kind == "skill" and not rm.error:
+                    effective_slash_command = rm.mention.value
+                    # raw_args: 从 clean_text 中提取（即移除所有 @ 标记后的文本）
+                    parse_result = MentionParser.parse(user_message)
+                    effective_raw_args = parse_result.clean_text
+                    break
+
         # ── 路由（斜杠命令 + write_hint 分类） ──
         route_result = await self._route_skills(
             user_message,
@@ -1263,7 +1357,7 @@ class AgentEngine:
 
         if effective_slash_command and route_result.route_mode == "slash_not_user_invocable":
             reply = f"技能 `{effective_slash_command}` 不允许手动调用。"
-            self._memory.add_user_message(user_message)
+            _add_user_turn_to_memory(user_message)
             self._memory.add_assistant_message(reply)
             self._last_iteration_count = 1
             self._last_tool_call_count = 0
@@ -1302,7 +1396,7 @@ class AgentEngine:
                 )
             else:
                 reply = f"未找到技能 `{effective_slash_command}`，请通过 `/skills` 查看可用技能列表。"
-            self._memory.add_user_message(user_message)
+            _add_user_turn_to_memory(user_message)
             self._memory.add_assistant_message(reply)
             self._last_iteration_count = 1
             self._last_tool_call_count = 0
@@ -1358,7 +1452,7 @@ class AgentEngine:
             if user_prompt_hook is not None and user_prompt_hook.decision == HookDecision.DENY:
                 reason = user_prompt_hook.reason or "Hook 拒绝了当前请求。"
                 reply = f"请求已被 Hook 拦截：{reason}"
-                self._memory.add_user_message(user_message)
+                _add_user_turn_to_memory(user_message)
                 self._memory.add_assistant_message(reply)
                 self._last_iteration_count = 1
                 self._last_tool_call_count = 0
@@ -1393,7 +1487,7 @@ class AgentEngine:
             and selected_skill.command_dispatch == "tool"
             and selected_skill.command_tool
         ):
-            self._memory.add_user_message(user_message)
+            _add_user_turn_to_memory(user_message)
             chat_result = await self._run_command_dispatch_skill(
                 skill=selected_skill,
                 raw_args=effective_raw_args,
@@ -1418,7 +1512,7 @@ class AgentEngine:
             return chat_result
 
         # 追加用户消息
-        self._memory.add_user_message(user_message)
+        _add_user_turn_to_memory(user_message)
         logger.info(
             "用户指令摘要: %s | route_mode=%s | skills=%s",
             _summarize_text(user_message),
@@ -1433,6 +1527,8 @@ class AgentEngine:
         # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
         self._execution_guard_fired = False
         self._vba_exempt = _user_requests_vba(user_message)
+        # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
+        self._mention_contexts = mention_contexts
         chat_result = await self._tool_calling_loop(route_result, on_event)
 
         # 注入路由诊断信息到 ChatResult
@@ -1443,6 +1539,12 @@ class AgentEngine:
         chat_result.turn_diagnostics = list(self._turn_diagnostics)
 
         # 累积到会话级诊断
+        # 获取本轮提示词注入摘要
+        _injection_summary_for_diag: list[dict[str, Any]] = []
+        if self._state.prompt_injection_snapshots:
+            _latest = self._state.prompt_injection_snapshots[-1]
+            if _latest.get("session_turn") == self._session_turn:
+                _injection_summary_for_diag = _latest.get("summary", [])
         self._session_diagnostics.append({
             "session_turn": self._session_turn,
             "write_hint": self._current_write_hint,
@@ -1455,6 +1557,7 @@ class AgentEngine:
             "total_tokens": chat_result.total_tokens,
             "write_guard_triggered": chat_result.write_guard_triggered,
             "turn_diagnostics": [d.to_dict() for d in self._turn_diagnostics],
+            "prompt_injection_summary": _injection_summary_for_diag,
         })
 
         # 发出执行摘要事件
@@ -1927,7 +2030,7 @@ class AgentEngine:
             "⚠️ 禁止将以下任务委派给 subagent：\n"
             "- 单文件读取、探查（直接用 inspect_excel_files 或 read_excel）\n"
             "- 简单写入/格式化（直接用 run_code 或对应写入工具）\n"
-            "- 单步分析（直接用 analyze_data / filter_data）\n"
+            "- 单步分析（直接用 filter_data 或 run_code）\n"
             "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物），"
             "简单任务直接用 task 字符串。\n"
             "注意：委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
@@ -1948,28 +2051,82 @@ class AgentEngine:
         # 写入门禁：仅当 write_hint == "may_write" 时注入 finish_task
         finish_task_tool = None
         if _normalize_write_hint(getattr(self, "_current_write_hint", "unknown")) == "may_write":
-            finish_task_tool = {
-                "type": "function",
-                "function": {
-                    "name": "finish_task",
-                    "description": (
-                        "任务完成声明。所有写入/修改操作实际执行完毕后调用。"
-                        "summary 填写做了什么和产出。"
-                        "未实际执行写入操作时不得调用。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "summary": {
-                                "type": "string",
-                                "description": "完成摘要（做了什么、产出是什么）",
+            # bench 模式：精简汇报，减少最后一轮 token 消耗
+            if getattr(self, "_bench_mode", False):
+                finish_task_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": "finish_task",
+                        "description": (
+                            "任务完成声明。写入操作执行完毕后调用。"
+                            "只需一句话概括即可，不要详细展开。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "summary": {
+                                    "type": "string",
+                                    "description": "一句话完成摘要",
+                                },
                             },
+                            "required": ["summary"],
+                            "additionalProperties": False,
                         },
-                        "required": ["summary"],
-                        "additionalProperties": False,
                     },
-                },
-            }
+                }
+            else:
+                finish_task_tool = {
+                    "type": "function",
+                    "function": {
+                        "name": "finish_task",
+                        "description": (
+                            "任务完成声明。所有写入/修改操作实际执行完毕后调用。"
+                            "优先使用 report 参数进行结构化汇报（详细讲解模式），"
+                            "像向同事汇报工作一样清晰易懂地说明操作、发现和建议。"
+                            "未实际执行写入操作时不得调用。"
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "report": {
+                                    "type": "object",
+                                    "description": "结构化任务汇报（推荐）。用详细讲解语言填写各字段。",
+                                    "properties": {
+                                        "operations": {
+                                            "type": "string",
+                                            "description": "执行了哪些操作（按步骤简述，每步说清做了什么）",
+                                        },
+                                        "key_findings": {
+                                            "type": "string",
+                                            "description": "关键发现和数据结果（具体数字、行数、匹配率等）",
+                                        },
+                                        "explanation": {
+                                            "type": "string",
+                                            "description": "为什么这样做、结果的含义解读",
+                                        },
+                                        "suggestions": {
+                                            "type": "string",
+                                            "description": "后续使用建议或注意事项",
+                                        },
+                                        "affected_files": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "涉及修改的文件路径列表",
+                                        },
+                                    },
+                                    "required": ["operations", "key_findings"],
+                                    "additionalProperties": False,
+                                },
+                                "summary": {
+                                    "type": "string",
+                                    "description": "（兼容旧格式）简要完成摘要。优先使用 report。",
+                                },
+                            },
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
         tools = [
             {
                 "type": "function",
@@ -2117,6 +2274,49 @@ class AgentEngine:
                 },
             },
         ]
+        # extract_table_from_image 元工具
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "extract_table_from_image",
+                "description": (
+                    "从图片中结构化提取表格数据和样式，生成 ReplicaSpec JSON。\n"
+                    "这是图片→Excel 复刻流水线的第一步。\n"
+                    "执行后会发起独立 VLM 调用进行表格识别，结果保存为 JSON 文件。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "图片文件路径（需先用 read_image 加载）",
+                        },
+                        "output_path": {
+                            "type": "string",
+                            "description": "输出 ReplicaSpec JSON 的路径",
+                            "default": "outputs/replica_spec.json",
+                        },
+                        "focus": {
+                            "type": "string",
+                            "enum": ["full", "data", "style"],
+                            "default": "full",
+                            "description": "提取模式：full(数据+样式)、data(仅数据)、style(仅样式)",
+                        },
+                        "strategy": {
+                            "type": "string",
+                            "enum": ["single", "two_phase"],
+                            "default": "two_phase",
+                            "description": (
+                                "提取策略：single(单次VLM调用)、"
+                                "two_phase(Phase A提取HTML结构+数据，Phase B提取样式，精度更高)"
+                            ),
+                        },
+                    },
+                    "required": ["file_path"],
+                    "additionalProperties": False,
+                },
+            },
+        })
         if finish_task_tool is not None:
             tools.append(finish_task_tool)
         return tools
@@ -2311,7 +2511,7 @@ class AgentEngine:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """选择子代理。v6: 不再调用 LLM，直接返回默认 subagent。"""
+        """选择子代理。v5.2: 不再调用 LLM，直接返回默认 subagent。"""
         _, candidates = self._subagent_registry.build_catalog()
         if not candidates:
             return "subagent"
@@ -2527,7 +2727,7 @@ class AgentEngine:
             return None, "当前已有待审批计划，请先批准或拒绝。"
 
         plan_result = await self.run_subagent(
-            agent_name="planner",
+            agent_name="subagent",
             prompt=self._build_planner_prompt(objective=objective, source=source),
             on_event=on_event,
         )
@@ -3092,6 +3292,13 @@ class AgentEngine:
                     total_tokens=total_prompt_tokens + total_completion_tokens,
                 )
 
+            # 注入 mention 上下文 XML 块到系统提示词
+            mention_block = build_mention_context_block(
+                getattr(self, "_mention_contexts", None) or [],
+            )
+            if mention_block:
+                system_prompts.append(mention_block)
+
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
                 max_context_tokens=self._config.max_context_tokens,
@@ -3131,6 +3338,9 @@ class AgentEngine:
                 message, usage = _extract_completion_message(response)
 
             tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
+
+            # 图片降级：本轮 LLM 已收到完整 base64，后续轮次降级为文本引用
+            self._memory.mark_images_sent()
 
             # 累计 token 使用量
             if usage is not None:
@@ -3227,7 +3437,7 @@ class AgentEngine:
                             "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
                             "严禁在文本中输出 VBA 代码块作为操作方案。"
                             "禁止以文本建议替代工具执行。"
-                            "完成后再调用 finish_task 并在 summary 中说明结果。"
+                            "完成后再调用 finish_task 并在 report 中详细汇报结果。"
                         )
                         self._memory.add_user_message(guard_msg)
                         if diag:
@@ -3393,35 +3603,10 @@ class AgentEngine:
                     self._last_success_count += 1
                     consecutive_failures = 0
                     if tc_result.tool_name in _WRITE_TOOL_NAMES:
-                        # 检测建议性写入（write_cells 写入建议文本而非业务数据）
-                        _advice_write = False
-                        if tc_result.tool_name == "write_cells":
-                            _raw_tc_args = getattr(
-                                getattr(tc, "function", None), "arguments", None,
-                            )
-                            try:
-                                _tc_args = (
-                                    json.loads(_raw_tc_args)
-                                    if isinstance(_raw_tc_args, str)
-                                    else (_raw_tc_args or {})
-                                )
-                            except Exception:
-                                _tc_args = {}
-                            _advice_write = (
-                                _tc_args.get("cell") is not None
-                                and _tc_args.get("values") is None
-                                and _is_advice_like_value(_tc_args.get("value"))
-                            )
-                        if _advice_write:
-                            logger.info(
-                                "检测到建议性写入（write_cells 写入建议文本），不计入实质写入",
-                            )
-                            if diag:
-                                diag.guard_events.append("advice_write_detected")
-                        else:
-                            self._state.record_write_action()
-                            if write_hint != "may_write":
-                                write_hint = "may_write"
+                        # Batch 1 精简: write_cells advice detection 已移除
+                        self._state.record_write_action()
+                        if write_hint != "may_write":
+                            write_hint = "may_write"
                     # ── 同步 _execute_tool_call 内部的写入传播 ──
                     # delegate_to_subagent 等工具在 _execute_tool_call 中直接
                     # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
@@ -3606,7 +3791,7 @@ class AgentEngine:
     ) -> dict[str, Any]:
         """按执行上下文调整参数。"""
         copied = dict(arguments)
-        if force_delete_confirm and tool_name in {"delete_file", "delete_sheet"}:
+        if force_delete_confirm and tool_name in {"delete_file"}:
             copied["confirm"] = True
         return copied
 
@@ -4032,57 +4217,84 @@ class AgentEngine:
             user_message, on_event=on_event,
         )
 
-    async def _handle_accept_command(self, parts, *, on_event=None):
+    async def _handle_accept_command(
+        self, parts: list[str], *, on_event: EventCallback | None = None,
+    ) -> str:
         return await self._command_handler._handle_accept_command(parts, on_event=on_event)
 
-    def _handle_reject_command(self, parts):
+    def _handle_reject_command(self, parts: list[str]) -> str:
         return self._command_handler._handle_reject_command(parts)
 
-    async def _handle_plan_approve(self, *, parts, on_event=None):
+    async def _handle_plan_approve(
+        self, *, parts: list[str], on_event: EventCallback | None = None,
+    ) -> str:
         return await self._command_handler._handle_plan_approve(parts=parts, on_event=on_event)
 
-    def _handle_plan_reject(self, *, parts):
+    def _handle_plan_reject(self, *, parts: list[str]) -> str:
         return self._command_handler._handle_plan_reject(parts=parts)
-
 
     # ── Context Builder 委托方法 ──────────────────────────────
 
     def _all_tool_names(self) -> list[str]:
         return self._context_builder._all_tool_names()
 
-    def _focus_window_refill_reader(self, *args, **kwargs):
-        return self._context_builder._focus_window_refill_reader(*args, **kwargs)
+    def _focus_window_refill_reader(
+        self, *, file_path: str, sheet_name: str, range_ref: str,
+    ) -> dict[str, Any]:
+        return self._context_builder._focus_window_refill_reader(
+            file_path=file_path, sheet_name=sheet_name, range_ref=range_ref,
+        )
 
-    def _prepare_system_prompts_for_request(self, *args, **kwargs):
-        return self._context_builder._prepare_system_prompts_for_request(*args, **kwargs)
+    def _prepare_system_prompts_for_request(
+        self,
+        skill_contexts: list[str],
+        *,
+        route_result: SkillMatchResult | None = None,
+    ) -> tuple[list[str], str | None]:
+        return self._context_builder._prepare_system_prompts_for_request(
+            skill_contexts, route_result=route_result,
+        )
 
-    def _build_access_notice(self):
+    def _build_access_notice(self) -> str:
         return self._context_builder._build_access_notice()
 
-    def _build_backup_notice(self):
+    def _build_backup_notice(self) -> str:
         return self._context_builder._build_backup_notice()
 
-    def _build_mcp_context_notice(self):
+    def _build_mcp_context_notice(self) -> str:
         return self._context_builder._build_mcp_context_notice()
 
-    def _build_window_perception_notice(self):
+    def _build_window_perception_notice(self) -> str:
         return self._context_builder._build_window_perception_notice()
 
-    def _build_tool_index_notice(self, *args, **kwargs):
-        return self._context_builder._build_tool_index_notice(*args, **kwargs)
+    def _build_tool_index_notice(
+        self, *, compact: bool = False, max_tools_per_category: int = 8,
+    ) -> str:
+        return self._context_builder._build_tool_index_notice(
+            compact=compact, max_tools_per_category=max_tools_per_category,
+        )
 
-    def _set_window_perception_turn_hints(self, *, user_message, is_new_task):
-        return self._context_builder._set_window_perception_turn_hints(
+    def _set_window_perception_turn_hints(
+        self, *, user_message: str, is_new_task: bool,
+    ) -> None:
+        self._context_builder._set_window_perception_turn_hints(
             user_message=user_message, is_new_task=is_new_task,
         )
 
-    def _redirect_backup_paths(self, tool_name, arguments):
+    def _redirect_backup_paths(
+        self, tool_name: str, arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         return self._context_builder._redirect_backup_paths(tool_name, arguments)
 
-    def _has_incomplete_tasks(self):
+    def _has_incomplete_tasks(self) -> bool:
         return self._context_builder._has_incomplete_tasks()
 
-    async def _auto_continue_task_loop(self, route_result, on_event, initial_result):
+    async def _auto_continue_task_loop(
+        self,
+        route_result: SkillMatchResult,
+        on_event: EventCallback | None,
+        initial_result: "ChatResult",
+    ) -> "ChatResult":
         return await self._context_builder._auto_continue_task_loop(
             route_result, on_event, initial_result,
         )

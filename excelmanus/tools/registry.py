@@ -323,43 +323,40 @@ class ToolRegistry:
             return False
 
     def register_builtin_tools(self, workspace_root: str) -> None:
-        """注册内置工具集。"""
+        """注册内置工具集。
+
+        工具精简后仅注册仍有活跃 ToolDef 的模块：
+        data_tools, file_tools, code_tools, shell_tools, sheet_tools, focus_tools, memory_tools。
+        已清空的模块（cell_tools/format_tools/advanced_format_tools/chart_tools/worksheet_tools）
+        不再导入，节省启动开销。
+        """
         from excelmanus.tools import (
-            advanced_format_tools,
-            cell_tools,
-            chart_tools,
             code_tools,
             data_tools,
             file_tools,
             focus_tools,
-            format_tools,
+            image_tools,
+            macro_tools,
             shell_tools,
             sheet_tools,
-            worksheet_tools,
         )
 
         data_tools.init_guard(workspace_root)
-        chart_tools.init_guard(workspace_root)
-        format_tools.init_guard(workspace_root)
-        advanced_format_tools.init_guard(workspace_root)
         file_tools.init_guard(workspace_root)
         code_tools.init_guard(workspace_root)
         shell_tools.init_guard(workspace_root)
         sheet_tools.init_guard(workspace_root)
-        cell_tools.init_guard(workspace_root)
-        worksheet_tools.init_guard(workspace_root)
+        macro_tools.init_guard(workspace_root)
+        image_tools.init_guard(workspace_root)
 
         self.register_tools(data_tools.get_tools())
-        self.register_tools(chart_tools.get_tools())
-        self.register_tools(format_tools.get_tools())
-        self.register_tools(advanced_format_tools.get_tools())
         self.register_tools(file_tools.get_tools())
         self.register_tools(code_tools.get_tools())
         self.register_tools(shell_tools.get_tools())
         self.register_tools(sheet_tools.get_tools())
-        self.register_tools(cell_tools.get_tools())
-        self.register_tools(worksheet_tools.get_tools())
+        self.register_tools(macro_tools.get_tools())
         self.register_tools(focus_tools.get_tools())
+        self.register_tools(image_tools.get_tools())
 
         from excelmanus.tools import memory_tools
 

@@ -797,14 +797,11 @@ class SubagentExecutor:
         return paths
 
     _FORMAT_TOOLS: frozenset[str] = frozenset({
-        "format_cells", "adjust_column_width", "adjust_row_height",
-        "merge_cells", "unmerge_cells", "apply_threshold_icon_format",
-        "style_card_blocks", "scale_range_unit", "apply_dashboard_dark_theme",
-        "add_color_scale", "add_data_bar", "add_conditional_rule",
-        "set_print_layout", "set_page_header_footer",
+        # 内置格式化工具已全部精简，仅保留 MCP 工具名
+        "format_range",
     })
-    _DELETE_TOOLS: frozenset[str] = frozenset({"delete_file", "delete_sheet"})
-    _CREATE_TOOLS: frozenset[str] = frozenset({"create_sheet", "create_excel_chart", "create_chart"})
+    _DELETE_TOOLS: frozenset[str] = frozenset({"delete_file"})
+    _CREATE_TOOLS: frozenset[str] = frozenset()  # create_sheet/create_chart 等已精简
     _CODE_TOOLS: frozenset[str] = frozenset({"run_code", "run_shell"})
 
     @classmethod

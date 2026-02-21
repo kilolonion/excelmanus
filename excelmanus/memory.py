@@ -11,6 +11,8 @@ from excelmanus.config import ExcelManusConfig
 
 logger = logging.getLogger(__name__)
 
+IMAGE_TOKEN_ESTIMATE = 1500  # 图片 token 估算值（用于 memory 截断）
+
 # ---------------------------------------------------------------------------
 # 默认系统提示词：从 prompts/ 文件加载，缺失时自动补齐
 # ---------------------------------------------------------------------------
@@ -58,8 +60,17 @@ class TokenCounter:
             if isinstance(value, str):
                 tokens += TokenCounter.count(value)
             elif isinstance(value, list):
-                # tool_calls 列表：序列化后计算
-                tokens += TokenCounter.count(str(value))
+                # 多模态 content parts 或 tool_calls 列表
+                for item in value:
+                    if isinstance(item, dict):
+                        if item.get("type") == "image_url":
+                            tokens += IMAGE_TOKEN_ESTIMATE
+                        elif item.get("type") == "text":
+                            tokens += TokenCounter.count(item.get("text", ""))
+                        else:
+                            tokens += TokenCounter.count(str(item))
+                    else:
+                        tokens += TokenCounter.count(str(item))
         return tokens
 
 
@@ -79,6 +90,9 @@ class ConversationMemory:
         self._token_counter = TokenCounter()
         # 预留 10% 的 token 空间给模型输出
         self._truncation_threshold = int(self._max_context_tokens * 0.9)
+        # 图片降级追踪
+        self._image_seq: int = 0  # 图片序号
+        self._fresh_image_ids: set[int] = set()  # 尚未发送过的图片 ID
 
     @property
     def system_prompt(self) -> str:
@@ -90,9 +104,36 @@ class ConversationMemory:
         """设置系统提示词。"""
         self._system_prompt = value
 
-    def add_user_message(self, content: str) -> None:
-        """添加用户消息。"""
+    def add_user_message(self, content: str | list[dict]) -> None:
+        """添加用户消息。
+
+        Args:
+            content: 纯文本字符串或多模态 content parts 列表。
+        """
         self._messages.append({"role": "user", "content": content})
+        self._truncate_if_needed()
+
+    def add_image_message(
+        self, base64_data: str, mime_type: str = "image/png", detail: str = "auto",
+    ) -> None:
+        """便捷方法：注入图片到对话上下文。
+
+        图片首次注入时保留完整 base64 数据；LLM 调用完成后通过
+        ``mark_images_sent()`` 将其降级为短文本引用，避免后续轮次
+        重复携带巨大的 base64 payload。
+        """
+        self._image_seq += 1
+        image_id = self._image_seq
+        part = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{base64_data}",
+                "detail": detail,
+            },
+        }
+        msg = {"role": "user", "content": [part], "_image_id": image_id}
+        self._messages.append(msg)
+        self._fresh_image_ids.add(image_id)
         self._truncate_if_needed()
 
     def add_assistant_message(self, content: str) -> None:
@@ -149,12 +190,22 @@ class ConversationMemory:
     def get_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
         """获取完整消息列表（system prompt + 对话历史）。
 
+        对于图片消息，会过滤掉内部标记字段 ``_image_id`` / ``_image_downgraded``，
+        确保不泄露到发送给 LLM 的消息中。
+
         Args:
             system_prompts:
                 可选的 system 消息列表；为空时使用默认 system prompt。
         """
         system_msgs = self._build_system_messages(system_prompts)
-        return system_msgs + list(self._messages)
+        output: list[dict] = []
+        for msg in self._messages:
+            if msg.get("_image_id") is not None:
+                clean = {k: v for k, v in msg.items() if not k.startswith("_image_")}
+                output.append(clean)
+            else:
+                output.append(msg)
+        return system_msgs + output
 
     def trim_for_request(
         self,
@@ -173,11 +224,40 @@ class ConversationMemory:
         threshold = max(1, int(max_context_tokens * (1 - ratio)))
         system_msgs = self._build_system_messages(system_prompts)
         self._truncate_history_to_threshold(threshold, system_msgs=system_msgs)
-        return system_msgs + list(self._messages)
+        # 过滤内部标记字段，与 get_messages 保持一致
+        output: list[dict] = []
+        for msg in self._messages:
+            if msg.get("_image_id") is not None:
+                clean = {k: v for k, v in msg.items() if not k.startswith("_image_")}
+                output.append(clean)
+            else:
+                output.append(msg)
+        return system_msgs + output
 
     def clear(self) -> None:
         """清除所有对话历史（保留 system prompt 配置）。"""
         self._messages.clear()
+        self._image_seq = 0
+        self._fresh_image_ids.clear()
+
+    def mark_images_sent(self) -> None:
+        """将已发送的图片消息降级为文本引用，释放 base64 内存。
+
+        在每轮 LLM 调用完成后调用。fresh 图片在本轮已随完整 base64
+        发送给 LLM，后续轮次只需保留短文本引用即可。
+        """
+        if not self._fresh_image_ids:
+            return
+        for i, msg in enumerate(self._messages):
+            image_id = msg.get("_image_id")
+            if image_id is not None and image_id in self._fresh_image_ids:
+                self._messages[i] = {
+                    "role": "user",
+                    "content": f"[图片 #{image_id} 已在之前的对话中发送]",
+                    "_image_id": image_id,
+                    "_image_downgraded": True,
+                }
+        self._fresh_image_ids.clear()
 
     def _total_tokens(self) -> int:
         """计算当前所有消息（含 system prompt）的总 token 数。"""

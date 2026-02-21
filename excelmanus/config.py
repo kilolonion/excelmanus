@@ -42,7 +42,7 @@ class ExcelManusConfig:
     api_key: str
     base_url: str
     model: str
-    max_iterations: int = 20
+    max_iterations: int = 50
     max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
@@ -116,6 +116,15 @@ class ExcelManusConfig:
     window_advisor_api_key: str | None = None
     window_advisor_base_url: str | None = None
     window_advisor_model: str | None = None
+    # VLM（视觉语言模型）独立模型配置（可选，未配置时回退到主模型）
+    vlm_api_key: str | None = None
+    vlm_base_url: str | None = None
+    vlm_model: str | None = None
+    vlm_timeout_seconds: int = 300
+    vlm_max_retries: int = 1
+    vlm_retry_base_delay_seconds: float = 5.0
+    vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
+    vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True
     # 代码策略引擎配置
@@ -446,7 +455,7 @@ def load_config() -> ExcelManusConfig:
         )
 
     max_iterations = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 20
+        os.environ.get("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
     )
     max_consecutive_failures = _parse_int(
         os.environ.get("EXCELMANUS_MAX_CONSECUTIVE_FAILURES"),
@@ -728,6 +737,13 @@ def load_config() -> ExcelManusConfig:
         _validate_base_url(window_advisor_base_url)
     window_advisor_model = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL") or None
 
+    # VLM 独立模型配置（可选）
+    vlm_api_key = os.environ.get("EXCELMANUS_VLM_API_KEY") or None
+    vlm_base_url = os.environ.get("EXCELMANUS_VLM_BASE_URL") or None
+    if vlm_base_url:
+        _validate_base_url(vlm_base_url)
+    vlm_model = os.environ.get("EXCELMANUS_VLM_MODEL") or None
+
     # 备份沙盒模式
     backup_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_BACKUP_ENABLED"),
@@ -841,6 +857,9 @@ def load_config() -> ExcelManusConfig:
         window_advisor_api_key=window_advisor_api_key,
         window_advisor_base_url=window_advisor_base_url,
         window_advisor_model=window_advisor_model,
+        vlm_api_key=vlm_api_key,
+        vlm_base_url=vlm_base_url,
+        vlm_model=vlm_model,
         backup_enabled=backup_enabled,
         code_policy_enabled=code_policy_enabled,
         code_policy_green_auto_approve=code_policy_green_auto_approve,

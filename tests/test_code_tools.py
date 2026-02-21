@@ -252,12 +252,10 @@ class TestRunCodeValidation:
         with pytest.raises(ValueError, match="必须指定"):
             code_tools.run_code(code="   ", script_path="  ")
 
-
-class TestRecoveryHint:
     """run_code 沙盒权限错误恢复提示测试。"""
 
     def test_bench_protection_recovery_hint(self, workspace: Path) -> None:
-        """写入 bench 保护目录失败时应返回 recovery_hint。"""
+        """写入 bench 保护目录会触发 Auto-CoW 并在结果中返回 cow_mapping。"""
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True)
         target = bench_dir / "data.txt"
@@ -270,10 +268,57 @@ class TestRecoveryHint:
                 sandbox_tier="GREEN",
             )
         )
-        assert result["status"] == "failed"
-        assert "recovery_hint" in result
-        assert "bench/external" in result["recovery_hint"]
-        assert "copy_file" in result["recovery_hint"] or "delegate_to_subagent" in result["recovery_hint"] or "outputs/" in result["recovery_hint"]
+        assert result["status"] == "success"
+        
+        # 验证 cow_mapping 是否包含此文件的映射
+        rel_target = str(target.relative_to(workspace))
+        assert "cow_mapping" in result
+        assert rel_target in result["cow_mapping"]
+        
+        # 验证原始文件未被修改
+        assert target.read_text(encoding="utf-8") == "original"
+        
+        # 验证输出文件内容
+        cow_path = workspace / result["cow_mapping"][rel_target]
+        assert cow_path.exists()
+        assert cow_path.read_text(encoding="utf-8") == "bad"
+
+    def test_cow_hint_present_when_cow_mapping_non_empty(self, workspace: Path) -> None:
+        """cow_mapping 非空时 result 应包含 cow_hint 提示 agent 使用副本路径。
+
+        回归测试：conversation_20260220T162730 中 agent 写入 bench 文件后
+        仍从原始 bench 路径读取验证，导致看到旧数据。
+        """
+        bench_dir = workspace / "bench" / "external"
+        bench_dir.mkdir(parents=True)
+        target = bench_dir / "data.txt"
+        target.write_text("original", encoding="utf-8")
+        code = f"with open(r'{target}', 'w') as f:\n    f.write('updated')"
+        result = json.loads(
+            code_tools.run_code(
+                code=code,
+                python_command=sys.executable,
+                sandbox_tier="GREEN",
+            )
+        )
+        assert result["status"] == "success"
+        assert result["cow_mapping"]  # 非空
+        assert "cow_hint" in result
+        assert "outputs/" in result["cow_hint"]
+        assert "副本路径" in result["cow_hint"]
+
+    def test_no_cow_hint_when_no_cow_mapping(self, workspace: Path) -> None:
+        """无 cow_mapping 时不应有 cow_hint。"""
+        result = json.loads(
+            code_tools.run_code(
+                code="print('ok')",
+                python_command=sys.executable,
+                sandbox_tier="GREEN",
+            )
+        )
+        assert result["status"] == "success"
+        assert not result.get("cow_mapping")
+        assert "cow_hint" not in result
 
     def test_no_recovery_hint_on_success(self, workspace: Path) -> None:
         """成功执行不应有 recovery_hint。"""

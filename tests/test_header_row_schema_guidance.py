@@ -17,13 +17,11 @@ def _get_prop_desc(tool_defs, tool_name: str, prop_name: str) -> str:
 def test_header_row_schema_guidance_is_consistent() -> None:
     checks = [
         (data_tools.get_tools(), "read_excel", "header_row"),
-        (data_tools.get_tools(), "analyze_data", "header_row"),
+        # analyze_data: Batch 4 精简
         (data_tools.get_tools(), "filter_data", "header_row"),
-        (data_tools.get_tools(), "transform_data", "header_row"),
-        (data_tools.get_tools(), "group_aggregate", "header_row"),
-        (data_tools.get_tools(), "analyze_sheet_mapping", "left_header_row"),
-        (data_tools.get_tools(), "analyze_sheet_mapping", "right_header_row"),
-        (chart_tools.get_tools(), "create_chart", "header_row"),
+        # transform_data: Batch 1 精简
+        # group_aggregate, analyze_sheet_mapping: Batch 4 精简
+        # create_chart: Batch 3 精简
     ]
 
     for tool_defs, tool_name, prop_name in checks:

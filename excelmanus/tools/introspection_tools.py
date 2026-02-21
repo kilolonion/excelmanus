@@ -49,10 +49,7 @@ INTROSPECT_CAPABILITY_SCHEMA: dict = {
 # ── 预定义工具组合 ────────────────────────────────────────
 
 TOOL_COMBINATIONS: dict[str, list[str]] = {
-    "write_excel": ["read_excel", "format_cells", "adjust_column_width"],
-    "create_excel_chart": ["read_excel", "format_cells"],
-    "format_cells": ["read_cell_styles", "merge_cells", "adjust_column_width"],
-    "transform_data": ["read_excel", "analyze_data", "filter_data"],
+    # 工具精简后所有预定义组合已清空（被引用工具均已删除）
 }
 
 # ── can_i_do 匹配阈值与上限 ──────────────────────────────

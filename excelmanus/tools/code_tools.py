@@ -437,6 +437,10 @@ def _execute_script(
     sandbox_env["TMP"] = str(sandbox_tmpdir)
     sandbox_env["TEMP"] = str(sandbox_tmpdir)
 
+    # ── CoW 日志 ──
+    cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
+    sandbox_env["EXCELMANUS_COW_LOG"] = str(cow_log_path)
+
     # ── 沙盒 wrapper 注入（GREEN/YELLOW 模式） ──
     temp_wrapper: Path | None = None
     if sandbox_tier in ("GREEN", "YELLOW"):
@@ -510,6 +514,26 @@ def _execute_script(
         status = "success"
     else:
         status = "failed"
+        
+    cow_mapping = {}
+    if cow_log_path.exists():
+        try:
+            for line in cow_log_path.read_text(encoding="utf-8").splitlines():
+                if "\t" in line:
+                    src, dst = line.split("\t", 1)
+                    try:
+                        rel_src = str(Path(src).relative_to(guard.workspace_root))
+                        rel_dst = str(Path(dst).relative_to(guard.workspace_root))
+                        cow_mapping[rel_src] = rel_dst
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                cow_log_path.unlink()
+            except OSError:
+                pass
 
     result: dict[str, Any] = {
         "status": status,
@@ -534,6 +558,7 @@ def _execute_script(
         "stderr_tail": _tail(stderr, tail_lines),
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
+        "cow_mapping": cow_mapping,
         "sandbox": {
             "mode": "soft" if sandbox_tier == "RED" else "policy_engine",
             "tier": sandbox_tier,
@@ -543,6 +568,15 @@ def _execute_script(
             "warnings": sandbox_warnings,
         },
     }
+    # CoW 路径提示：bench/external 文件被保护时，提醒使用副本路径
+    if cow_mapping:
+        _cow_lines = [f"  {src} → {dst}" for src, dst in cow_mapping.items()]
+        result["cow_hint"] = (
+            "⚠️ 原始文件受保护，已自动复制到 outputs/ 目录。"
+            "后续对该文件的读取和写入请使用副本路径：\n"
+            + "\n".join(_cow_lines)
+        )
+
     # 检测沙盒权限错误，追加恢复提示
     if status == "failed":
         stderr_text = stderr or ""
@@ -552,11 +586,6 @@ def _execute_script(
                 hints.append(
                     "库内部临时文件写入被拦截。"
                     "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
-                )
-            if "bench 保护目录" in stderr_text:
-                hints.append(
-                    "【高优先级】bench/external 目录受沙盒保护，run_code 无法直接写入其中文件。"
-                    "先调用 copy_file 工具将文件复制到 outputs/ 目录下，再对 outputs/ 下的副本使用 run_code 进行操作。"
                 )
         
         if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:

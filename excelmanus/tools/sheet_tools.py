@@ -618,6 +618,13 @@ def get_tools() -> list[ToolDef]:
             func=list_sheets,
             max_result_chars=0,
         ),
+        # Batch 3 精简：create_sheet/copy_sheet/rename_sheet/delete_sheet/copy_range_between_sheets 已删除，由 run_code 替代
+    ]
+
+
+def _get_tools_deprecated() -> list[ToolDef]:
+    """已废弃的工具定义，保留供参考。"""
+    return [
         ToolDef(
             name="create_sheet",
             description="在已有 Excel 文件中新建空白工作表，支持指定插入位置",

@@ -125,12 +125,12 @@ class TestClassifyPermission:
     def test_confirm_tool(self) -> None:
         reg = _make_registry([])
         gen = CapabilityMapGenerator(reg)
-        assert gen._classify_permission("write_excel") == ICON_CONFIRM
+        assert gen._classify_permission("write_text_file") == ICON_CONFIRM
 
     def test_audit_only_tool(self) -> None:
         reg = _make_registry([])
         gen = CapabilityMapGenerator(reg)
-        assert gen._classify_permission("format_cells") == ICON_AUDIT_ONLY
+        assert gen._classify_permission("copy_file") == ICON_AUDIT_ONLY
 
     def test_dynamic_tool_gets_default(self) -> None:
         """run_code 不在三个权限集合中，应返回默认图标。"""

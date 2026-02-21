@@ -90,6 +90,15 @@ class _ChatCompletion:
 # ── 格式转换工具函数 ─────────────────────────────────────────
 
 
+def _parse_data_uri(url: str) -> tuple[str, str]:
+    """解析 data:mime;base64,data 格式的 URI，返回 (mime_type, base64_data)。"""
+    if url.startswith("data:"):
+        header, _, data = url.partition(",")
+        mime = header.split(":")[1].split(";")[0] if ":" in header else "image/png"
+        return mime, data
+    return "image/png", url
+
+
 def _openai_messages_to_gemini(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -111,10 +120,23 @@ def _openai_messages_to_gemini(
             continue
 
         if role == "user":
-            contents.append({
-                "role": "user",
-                "parts": [{"text": content or ""}],
-            })
+            if isinstance(content, list):
+                parts: list[dict[str, Any]] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            parts.append({"text": item.get("text", "")})
+                        elif item.get("type") == "image_url":
+                            img_info = item.get("image_url", {})
+                            url = img_info.get("url", "")
+                            mime, b64 = _parse_data_uri(url)
+                            parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+                contents.append({"role": "user", "parts": parts})
+            else:
+                contents.append({
+                    "role": "user",
+                    "parts": [{"text": content or ""}],
+                })
             continue
 
         if role == "assistant":

@@ -71,15 +71,15 @@ def test_binary_snapshot_and_undo(tmp_path: Path) -> None:
     approval_id = manager.new_approval_id()
 
     def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
-        assert tool_name == "write_excel"
+        assert tool_name == "copy_file"
         target.write_bytes(b"\x00NEW_BINARY")
         return '{"status":"success"}'
 
     _, record = manager.execute_and_audit(
         approval_id=approval_id,
-        tool_name="write_excel",
-        arguments={"file_path": "demo.xlsx", "data": []},
-        tool_scope=["write_excel"],
+        tool_name="copy_file",
+        arguments={"source": "src.xlsx", "destination": "demo.xlsx"},
+        tool_scope=["copy_file"],
         execute=execute,
         undoable=True,
         created_at_utc=manager.utc_now(),
@@ -221,9 +221,9 @@ def test_pending_queue_single_item(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="存在待确认操作"):
         manager.create_pending(
-            tool_name="write_excel",
-            arguments={"file_path": "a.xlsx", "data": []},
-            tool_scope=["write_excel"],
+            tool_name="create_sheet",
+            arguments={"file_path": "a.xlsx"},
+            tool_scope=["create_sheet"],
         )
 
 
@@ -247,9 +247,9 @@ def test_unknown_tool_not_high_risk_by_default(tmp_path: Path) -> None:
 
 def test_audit_only_tool_not_high_risk_but_mutating(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
-    assert manager.is_audit_only_tool("create_chart") is True
-    assert manager.is_high_risk_tool("create_chart") is False
-    assert manager.is_mutating_tool("create_chart") is True
+    assert manager.is_audit_only_tool("copy_file") is True
+    assert manager.is_high_risk_tool("copy_file") is False
+    assert manager.is_mutating_tool("copy_file") is True
 
 
 def test_read_only_safe_tool_not_high_risk(tmp_path: Path) -> None:
@@ -268,30 +268,8 @@ def test_non_whitelisted_mcp_high_risk_until_auto_approve(tmp_path: Path) -> Non
 def test_resolve_target_paths_covers_mutating_tools_with_path_rules(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     cases = [
-        ("create_excel_chart", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("write_cells", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("insert_rows", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("insert_columns", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("apply_threshold_icon_format", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("style_card_blocks", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("scale_range_unit", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("apply_dashboard_dark_theme", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("add_color_scale", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("add_data_bar", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("add_conditional_rule", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("set_print_layout", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("set_page_header_footer", {"file_path": "book.xlsx"}, ["book.xlsx"]),
-        ("create_chart", {"output_path": "charts/out.png"}, ["charts/out.png"]),
-        (
-            "copy_range_between_sheets",
-            {"source_file": "src.xlsx", "target_file": "dst.xlsx"},
-            ["dst.xlsx"],
-        ),
-        (
-            "transform_data",
-            {"file_path": "src.xlsx", "output_path": "out.xlsx"},
-            ["out.xlsx"],
-        ),
+        # Batch 1/2/3 精简：大部分专有工具已删除
+        ("copy_file", {"source": "a.xlsx", "destination": "b.xlsx"}, ["b.xlsx"]),
         ("run_code", {"code": "print('hi')"}, []),
         ("run_shell", {"command": "ls"}, []),
     ]

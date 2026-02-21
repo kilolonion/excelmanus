@@ -10,6 +10,7 @@ MCP 检测双向正确性（P3）。
 
 from __future__ import annotations
 
+import pytest
 from hypothesis import given, assume, settings
 from hypothesis import strategies as st
 
@@ -245,8 +246,12 @@ _valid_category_strategy = st.sampled_from(list(TOOL_CATEGORIES.keys()))
 # 有描述的工具名
 _described_tool_strategy = st.sampled_from(list(TOOL_SHORT_DESCRIPTIONS.keys()))
 
-# TOOL_COMBINATIONS 中的工具名
-_combination_tool_strategy = st.sampled_from(list(TOOL_COMBINATIONS.keys()))
+# TOOL_COMBINATIONS 中的工具名（工具精简后可能为空）
+_combination_tool_strategy = (
+    st.sampled_from(list(TOOL_COMBINATIONS.keys()))
+    if TOOL_COMBINATIONS
+    else st.nothing()
+)
 
 # 有效 query_type
 _query_type_strategy = st.sampled_from(
@@ -387,6 +392,7 @@ def test_pbt_property_7_no_side_effects(query_type: str, query: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not TOOL_COMBINATIONS, reason="工具精简后 TOOL_COMBINATIONS 为空")
 @given(tool_name=_combination_tool_strategy)
 def test_pbt_property_8_related_tools_combinations(tool_name: str) -> None:
     """Property 8：对于 TOOL_COMBINATIONS 中的任意工具，related_tools 结果

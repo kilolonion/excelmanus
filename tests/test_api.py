@@ -1764,3 +1764,83 @@ class TestPBTProperty20AsyncNonBlockingAPI:
             assert mock.call_count == n_concurrent
             # 不变量 3：至少有 2 个请求发生重叠执行
             assert max_active >= 2
+
+
+# ---------------------------------------------------------------------------
+# 多模态 ImageAttachment 测试
+# ---------------------------------------------------------------------------
+
+
+class TestImageAttachment:
+    """ImageAttachment 模型与 ChatRequest.images 字段测试。"""
+
+    def test_chat_request_with_images(self) -> None:
+        """ChatRequest 支持 images 字段。"""
+        from excelmanus.api import ChatRequest, ImageAttachment
+
+        req = ChatRequest(
+            message="复刻这个表格",
+            images=[ImageAttachment(data="iVBOR...", media_type="image/png")],
+        )
+        assert len(req.images) == 1
+        assert req.images[0].media_type == "image/png"
+        assert req.images[0].detail == "auto"
+
+    def test_chat_request_without_images_backward_compat(self) -> None:
+        """无 images 时向后兼容。"""
+        from excelmanus.api import ChatRequest
+
+        req = ChatRequest(message="hello")
+        assert req.images == []
+
+    def test_image_attachment_defaults(self) -> None:
+        """ImageAttachment 默认值。"""
+        from excelmanus.api import ImageAttachment
+
+        img = ImageAttachment(data="abc123")
+        assert img.media_type == "image/png"
+        assert img.detail == "auto"
+
+    @pytest.mark.asyncio
+    async def test_chat_endpoint_forwards_images_to_engine(self, client: AsyncClient) -> None:
+        """/api/v1/chat 应将 images 透传给 engine.chat。"""
+        mock_chat = AsyncMock(return_value=ChatResult(reply="ok"))
+        with patch("excelmanus.engine.AgentEngine.chat", mock_chat):
+            resp = await client.post(
+                "/api/v1/chat",
+                json={
+                    "message": "复刻这张图",
+                    "images": [
+                        {"data": "iVBOR...", "media_type": "image/png", "detail": "high"},
+                    ],
+                },
+            )
+        assert resp.status_code == 200
+        assert mock_chat.await_count == 1
+        kwargs = mock_chat.await_args.kwargs
+        assert "images" in kwargs
+        assert kwargs["images"] == [
+            {"data": "iVBOR...", "media_type": "image/png", "detail": "high"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_endpoint_forwards_images_to_engine(self, client: AsyncClient) -> None:
+        """/api/v1/chat/stream 应将 images 透传给 engine.chat。"""
+        mock_chat = AsyncMock(return_value=ChatResult(reply="stream-ok"))
+        with patch("excelmanus.engine.AgentEngine.chat", mock_chat):
+            resp = await client.post(
+                "/api/v1/chat/stream",
+                json={
+                    "message": "流式复刻",
+                    "images": [
+                        {"data": "abcd", "media_type": "image/jpeg", "detail": "low"},
+                    ],
+                },
+            )
+        assert resp.status_code == 200
+        assert mock_chat.await_count == 1
+        kwargs = mock_chat.await_args.kwargs
+        assert "images" in kwargs
+        assert kwargs["images"] == [
+            {"data": "abcd", "media_type": "image/jpeg", "detail": "low"},
+        ]

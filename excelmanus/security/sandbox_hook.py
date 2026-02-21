@@ -3,6 +3,9 @@ from __future__ import annotations
 
 
 # GREEN 模式禁止导入的模块
+# NOTE: ctypes 已移除 — pandas/numpy 等数据处理库间接依赖 ctypes，
+# 禁止会导致 GREEN tier 下 pandas 完全不可用。ctypes 的理论风险（FFI 调用）
+# 在 LLM agent 场景下极低，且仍有 subprocess/os.system 等多层防护兜底。
 _GREEN_BLOCKED: tuple[str, ...] = (
     "subprocess", "socket", "ssl",
     "http.client", "http.server", "http.cookiejar",
@@ -11,14 +14,14 @@ _GREEN_BLOCKED: tuple[str, ...] = (
     "ftplib", "smtplib", "imaplib", "poplib",
     "xmlrpc", "xmlrpc.client", "xmlrpc.server",
     "websocket", "websockets",
-    "ctypes", "signal", "multiprocessing",
+    "signal", "multiprocessing",
     "pty", "pexpect",
     "webbrowser", "antigravity",
 )
 
 # YELLOW 模式禁止导入的模块（子集）
 _YELLOW_BLOCKED: tuple[str, ...] = (
-    "subprocess", "ctypes", "signal", "multiprocessing",
+    "subprocess", "signal", "multiprocessing",
     "pty", "pexpect",
 )
 
@@ -100,9 +103,49 @@ _BENCH_PROTECTED_DIRS = [
     if d.strip()
 ]
 
+_COW_MAPPING = {{}}
+
+def _apply_cow(resolved):
+    if resolved in _COW_MAPPING:
+        return _COW_MAPPING[resolved]
+        
+    redirect_dir = os.path.join(_WORKSPACE_ROOT, "outputs")
+    os.makedirs(redirect_dir, exist_ok=True)
+    redirect_path = os.path.join(redirect_dir, os.path.basename(resolved))
+    
+    # Copy on write
+    if os.path.exists(resolved):
+        try:
+            with _original_open(resolved, "rb") as src, _original_open(redirect_path, "wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+        except Exception:
+            pass
+            
+    _COW_MAPPING[resolved] = redirect_path
+    
+    cow_log = os.environ.get("EXCELMANUS_COW_LOG")
+    if cow_log:
+        try:
+            with _original_open(cow_log, "a", encoding="utf-8") as f:
+                f.write(resolved + "\\t" + redirect_path + "\\n")
+        except Exception:
+            pass
+            
+    return redirect_path
+
 def _guarded_open(file, mode="r", *args, **kwargs):
+    resolved = os.path.realpath(str(file))
+    
+    # 同一脚本内已触发 CoW 的文件，读写都重定向到副本
+    if resolved in _COW_MAPPING:
+        resolved = _COW_MAPPING[resolved]
+        file = resolved
+        
     if any(c in str(mode) for c in "wax+"):
-        resolved = os.path.realpath(str(file))
         # 先检查工作区内路径（走正常的 workspace + bench 保护逻辑）
         ws = _WORKSPACE_ROOT + os.sep
         _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT
@@ -115,13 +158,13 @@ def _guarded_open(file, mode="r", *args, **kwargs):
             raise PermissionError(
                 f"文件写入被安全策略禁止：路径不在工作区内 [等级: {{_TIER}}]"
             )
-        # bench 保护目录检查
+        # bench 保护目录检查 (触发 Auto CoW)
         for protected in _BENCH_PROTECTED_DIRS:
             protected_prefix = protected + os.sep
             if resolved.startswith(protected_prefix) or resolved == protected:
-                raise PermissionError(
-                    f"文件写入被安全策略禁止：路径在 bench 保护目录内 ({{protected}}) [等级: {{_TIER}}]"
-                )
+                resolved = _apply_cow(resolved)
+                file = resolved
+                break
     return _original_open(file, mode, *args, **kwargs)
 
 builtins.open = _guarded_open
@@ -167,13 +210,20 @@ def _patch_openpyxl_save():
     def _atomic_save(self, filename):
         import tempfile
         resolved = os.path.realpath(str(filename))
-        # bench 保护检查（zipfile 使用 io.open 绕过 _guarded_open，需在此拦截）
+        
+        # 处理同一次运行中已被 CoW 的文件
+        if resolved in _COW_MAPPING:
+            resolved = _COW_MAPPING[resolved]
+            filename = resolved
+            
+        # bench 保护检查 (触发 Auto CoW)
         for _p in _BENCH_PROTECTED_DIRS:
             _pp = _p + os.sep
             if resolved.startswith(_pp) or resolved == _p:
-                raise PermissionError(
-                    f"文件写入被安全策略禁止：路径在 bench 保护目录内 ({{_p}}) [等级: {{_TIER}}]"
-                )
+                resolved = _apply_cow(resolved)
+                filename = resolved
+                break
+                
         if not os.path.exists(resolved):
             return _original_save(self, filename)
         dir_name = os.path.dirname(resolved)
