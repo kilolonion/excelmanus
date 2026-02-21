@@ -436,6 +436,38 @@ class TestModelSwitchConsistency:
         assert kwargs["model"] == "main-b"
 
     @pytest.mark.asyncio
+    async def test_window_perception_advisor_keeps_aux_model_when_configured(self) -> None:
+        config = _make_config(
+            model="main-a",
+            aux_model="aux-fixed",
+            models=(
+                ModelProfile(
+                    name="alt",
+                    model="main-b",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="备选模型",
+                ),
+            ),
+            window_perception_advisor_mode="hybrid",
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+        engine.switch_model("alt")
+        engine._advisor_client.chat.completions.create = AsyncMock(
+            return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
+        )
+
+        _ = await engine._run_window_perception_advisor_async(
+            windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
+            active_window_id="w1",
+            budget=PerceptionBudget(),
+            context=AdvisorContext(turn_number=1, task_type="GENERAL_BROWSE"),
+        )
+
+        _, kwargs = engine._advisor_client.chat.completions.create.call_args
+        assert kwargs["model"] == "aux-fixed"
+
+    @pytest.mark.asyncio
     async def test_run_subagent_uses_active_model_when_subroute_not_configured(self) -> None:
         config = _make_config(
             model="main-a",
@@ -476,7 +508,7 @@ class TestModelSwitchConsistency:
     async def test_run_subagent_keeps_global_subroute_model_when_configured(self) -> None:
         config = _make_config(
             model="main-a",
-            subagent_model="sub-fixed",
+            aux_model="sub-fixed",
             models=(
                 ModelProfile(
                     name="alt",

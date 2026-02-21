@@ -76,7 +76,7 @@ EXCELMANUS_MODEL=your-model-id
 |---|---|---|
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 subagent 委派提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 subagent 执行 | `true` |
-| `EXCELMANUS_SUBAGENT_MODEL` | subagent 模型（为空时回退主模型） | — |
+| `EXCELMANUS_AUX_MODEL` | 辅助模型（统一用于 subagent 默认模型与窗口顾问模型；为空时回退主模型） | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `2` |
 

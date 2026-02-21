@@ -76,6 +76,51 @@ class TestListDirectory:
         assert page["entries"] == full["entries"][:2]
         assert page["has_more"] is True
 
+    def test_cursor_pagination(self, workspace: Path) -> None:
+        full = json.loads(file_tools.list_directory(depth=0, use_default_excludes=False))
+        page1 = json.loads(file_tools.list_directory(depth=0, limit=2, cursor="0", use_default_excludes=False))
+        assert page1["offset"] == 0
+        assert page1["returned"] == 2
+        assert page1["next_cursor"] == "2"
+        page2 = json.loads(
+            file_tools.list_directory(
+                depth=0,
+                limit=2,
+                cursor=page1["next_cursor"],
+                use_default_excludes=False,
+            )
+        )
+        assert page2["offset"] == 2
+        assert page2["entries"] == full["entries"][2:4]
+
+    def test_invalid_cursor(self, workspace: Path) -> None:
+        result = json.loads(file_tools.list_directory(depth=0, cursor="bad_cursor"))
+        assert "error" in result
+
+    def test_default_excludes_noise_directories(self, workspace: Path) -> None:
+        (workspace / "outputs").mkdir()
+        (workspace / "outputs" / "debug.log").write_text("x", encoding="utf-8")
+        result = json.loads(file_tools.list_directory(depth=0))
+        names = [e["name"] for e in result["entries"]]
+        assert "outputs" not in names
+        assert result["omitted"]["ignored_by_pattern"] >= 1
+
+    def test_disable_default_excludes(self, workspace: Path) -> None:
+        (workspace / "outputs").mkdir()
+        result = json.loads(file_tools.list_directory(depth=0, use_default_excludes=False))
+        names = [e["name"] for e in result["entries"]]
+        assert "outputs" in names
+
+    def test_overview_mode(self, workspace: Path) -> None:
+        (workspace / "cache").mkdir()
+        (workspace / "cache" / "x.bin").write_bytes(b"abc")
+        result = json.loads(file_tools.list_directory(mode="overview", limit=2))
+        assert result["mode"] == "overview"
+        assert "summary" in result
+        assert "hotspots" in result
+        assert "entries" in result
+        assert result["returned"] <= 2
+
     def test_pagination_invalid_args(self, workspace: Path) -> None:
         result = json.loads(file_tools.list_directory(offset=-1, limit=10, depth=0))
         assert "error" in result
