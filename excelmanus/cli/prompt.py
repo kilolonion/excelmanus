@@ -1,6 +1,6 @@
 """CLI 输入提示符 — prompt_toolkit 配置与用户输入读取。
 
-提供 Claude Code 风格的 › 前缀输入提示符，
+提供 › 前缀输入提示符，
 支持斜杠命令补全、@ 提及补全、内联建议。
 """
 
@@ -63,7 +63,7 @@ def build_prompt_badges(
     model_hint: str = "",
     turn_number: int = 0,
 ) -> str:
-    """构建 prompt 徽章字符串（Claude Code 风格）。"""
+    """构建 prompt 徽章字符串。"""
     parts: list[str] = []
     if model_hint:
         parts.append(model_hint)
@@ -202,12 +202,12 @@ async def read_user_input(
     model_hint: str = "",
     turn_number: int = 0,
 ) -> str:
-    """读取用户输入：Claude Code 风格 › 前缀。"""
+    """读取用户输入：› 前缀提示符。"""
     badges = build_prompt_badges(
         model_hint=model_hint,
         turn_number=turn_number,
     )
-    # Claude Code 风格：绿色 › 前缀
+    # 绿色 › 前缀
     if badges:
         ansi_prompt = f"\n \x1b[2;37m{badges}\x1b[0m \x1b[1;38;2;33;168;103m{THEME.USER_PREFIX}\x1b[0m "
         rich_prompt = f"\n [{THEME.DIM}]{badges}[/{THEME.DIM}] [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]{THEME.USER_PREFIX}[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}] "

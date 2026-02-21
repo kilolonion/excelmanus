@@ -683,7 +683,8 @@ class TestFinishTaskAcceptance:
         assert second.success is True
         assert second.finish_accepted is True
         assert "任务完成" in second.result
-        assert "无写入" in second.result
+        # write_hint 默认为 unknown，P1 修复后不再显示"无写入"
+        assert "无写入" not in second.result
 
         engine._has_write_tool_call = True
         with_write = await engine._execute_tool_call(
@@ -724,7 +725,8 @@ class TestFinishTaskAcceptance:
         assert second.success is True
         assert second.finish_accepted is True
         assert "任务完成" in second.result
-        assert "无写入" in second.result
+        # write_hint=may_write，P1 修复后不再显示"无写入"
+        assert "无写入" not in second.result
 
     @pytest.mark.asyncio
     async def test_finish_task_accepted_when_may_write_with_actual_write(self):
@@ -890,3 +892,174 @@ class TestFinishTaskStructuredReport:
         assert "执行了操作X" in result.result
         assert "发现Y" in result.result
         assert "这个不应该出现" not in result.result
+
+
+class TestRunCodeASTVariableWriteRegression:
+    """回归测试：wb.save(file_path) 使用变量参数时 AST 检测应触发写入。
+
+    conversation_20260221T135637 中 run_code 通过 openpyxl wb.save(file_path)
+    实际写入了文件，但 AST 检测因仅识别字面量而漏检，导致 finish_task 被拒。
+    """
+
+    @staticmethod
+    def _run_code_tc(code: str) -> types.SimpleNamespace:
+        import json as _json
+        return types.SimpleNamespace(
+            id="call_run_code_var",
+            function=types.SimpleNamespace(
+                name="run_code",
+                arguments=_json.dumps({"code": code}),
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_wb_save_variable_triggers_write_detection(self):
+        """wb.save(file_path) 使用变量 → AST 检测应识别为写入。"""
+        engine = _make_engine(code_policy_enabled=True)
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+        engine._window_perception = None
+
+        code_with_var_save = (
+            "from openpyxl import load_workbook\n"
+            "file_path = './.tmp/test.xlsx'\n"
+            "wb = load_workbook(file_path)\n"
+            "ws = wb.active\n"
+            "ws['A1'] = 42\n"
+            "wb.save(file_path)\n"
+        )
+        from excelmanus.approval import AppliedApprovalRecord
+        audit_record = AppliedApprovalRecord(
+            approval_id="test-var",
+            tool_name="run_code",
+            arguments={"code": code_with_var_save},
+            tool_scope=[],
+            created_at_utc="2026-01-01T00:00:00Z",
+            applied_at_utc="2026-01-01T00:00:01Z",
+            undoable=False,
+            manifest_file="outputs/approvals/test/manifest.json",
+            audit_dir="outputs/approvals/test",
+            result_preview='{"status":"success","cow_mapping":{}}',
+            changes=[],
+        )
+        result_json = '{"status":"success","stdout_tail":"ok","cow_mapping":{}}'
+
+        with patch.object(engine, "_execute_tool_with_audit", new_callable=AsyncMock,
+                          return_value=(result_json, audit_record)):
+            result = await engine._execute_tool_call(
+                self._run_code_tc(code_with_var_save),
+                tool_scope=None, on_event=None, iteration=1,
+            )
+
+        assert result.success is True
+        assert engine._has_write_tool_call is True
+
+    @pytest.mark.asyncio
+    async def test_wb_save_variable_then_finish_task_accepted(self):
+        """wb.save(var) 写入后 finish_task 应直接通过，不再被拒。"""
+        engine = _make_engine(code_policy_enabled=True)
+        engine._current_write_hint = "may_write"
+        engine._has_write_tool_call = False
+        engine._window_perception = None
+
+        code = "wb.save(file_path)\n"
+        from excelmanus.approval import AppliedApprovalRecord
+        audit_record = AppliedApprovalRecord(
+            approval_id="test-var2",
+            tool_name="run_code",
+            arguments={"code": code},
+            tool_scope=[],
+            created_at_utc="2026-01-01T00:00:00Z",
+            applied_at_utc="2026-01-01T00:00:01Z",
+            undoable=False,
+            manifest_file="outputs/approvals/test/manifest.json",
+            audit_dir="outputs/approvals/test",
+            result_preview='{"status":"success","cow_mapping":{}}',
+            changes=[],
+        )
+        result_json = '{"status":"success","stdout_tail":"ok","cow_mapping":{}}'
+
+        with patch.object(engine, "_execute_tool_with_audit", new_callable=AsyncMock,
+                          return_value=(result_json, audit_record)):
+            await engine._execute_tool_call(
+                self._run_code_tc(code),
+                tool_scope=None, on_event=None, iteration=1,
+            )
+
+        ft = types.SimpleNamespace(
+            id="call_finish_var",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary":"done via wb.save(var)"}',
+            ),
+        )
+        finish_result = await engine._execute_tool_call(
+            ft, tool_scope=None, on_event=None, iteration=2,
+        )
+        assert finish_result.finish_accepted is True
+        assert "任务完成" in finish_result.result
+
+
+class TestFinishTaskNoWriteLabelByHint:
+    """P1 回归：finish_task warned 分支根据 write_hint 决定"无写入"标签。"""
+
+    @staticmethod
+    def _finish_task_call(summary: str = "done") -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            id="call_finish_label",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments=f'{{"summary":"{summary}"}}',
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_only_hint_shows_no_write_label(self):
+        """write_hint=read_only 时 warned 分支应显示"无写入"。"""
+        engine = _make_engine()
+        engine._current_write_hint = "read_only"
+
+        await engine._execute_tool_call(
+            self._finish_task_call("first"),
+            tool_scope=None, on_event=None, iteration=1,
+        )
+        second = await engine._execute_tool_call(
+            self._finish_task_call("second"),
+            tool_scope=None, on_event=None, iteration=2,
+        )
+        assert second.finish_accepted is True
+        assert "无写入" in second.result
+
+    @pytest.mark.asyncio
+    async def test_may_write_hint_hides_no_write_label(self):
+        """write_hint=may_write 时 warned 分支不应显示"无写入"。"""
+        engine = _make_engine()
+        engine._current_write_hint = "may_write"
+
+        await engine._execute_tool_call(
+            self._finish_task_call("first"),
+            tool_scope=None, on_event=None, iteration=1,
+        )
+        second = await engine._execute_tool_call(
+            self._finish_task_call("second"),
+            tool_scope=None, on_event=None, iteration=2,
+        )
+        assert second.finish_accepted is True
+        assert "无写入" not in second.result
+
+    @pytest.mark.asyncio
+    async def test_unknown_hint_hides_no_write_label(self):
+        """write_hint=unknown 时 warned 分支不应显示"无写入"。"""
+        engine = _make_engine()
+        engine._current_write_hint = "unknown"
+
+        await engine._execute_tool_call(
+            self._finish_task_call("first"),
+            tool_scope=None, on_event=None, iteration=1,
+        )
+        second = await engine._execute_tool_call(
+            self._finish_task_call("second"),
+            tool_scope=None, on_event=None, iteration=2,
+        )
+        assert second.finish_accepted is True
+        assert "无写入" not in second.result

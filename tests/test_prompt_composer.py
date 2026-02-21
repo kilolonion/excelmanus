@@ -245,6 +245,67 @@ class TestMatchConditions:
             {"write_hint": "may_write", "sheet_count_gte": 5}, ctx,
         )
 
+    def test_full_access_false_match(self) -> None:
+        ctx_off = PromptContext(full_access=False)
+        ctx_on = PromptContext(full_access=True)
+        assert PromptComposer._match_conditions({"full_access": False}, ctx_off)
+        assert not PromptComposer._match_conditions({"full_access": False}, ctx_on)
+
+    def test_full_access_true_match(self) -> None:
+        ctx_on = PromptContext(full_access=True)
+        ctx_off = PromptContext(full_access=False)
+        assert PromptComposer._match_conditions({"full_access": True}, ctx_on)
+        assert not PromptComposer._match_conditions({"full_access": True}, ctx_off)
+
+
+class TestSandboxAwarenessStrategy:
+    """sandbox_awareness 策略文件加载与条件匹配测试。"""
+
+    @staticmethod
+    def _make_dir_with_sandbox(tmp_path: Path) -> Path:
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "00_id.md").write_text(
+            '---\nname: id\nversion: "1.0"\npriority: 0\nlayer: core\n---\n身份。',
+            encoding="utf-8",
+        )
+        strats = tmp_path / "strategies"
+        strats.mkdir()
+        (strats / "20_sandbox_awareness.md").write_text(
+            '---\nname: sandbox_awareness\nversion: "1.0.0"\npriority: 20\nlayer: strategy\n'
+            'conditions:\n  full_access: false\n---\n沙箱安全机制内容。',
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_sandbox_included_when_full_access_off(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_sandbox(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext(full_access=False)
+        text = composer.compose_strategies_text(ctx)
+        assert "沙箱安全机制内容。" in text
+
+    def test_sandbox_excluded_when_full_access_on(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_sandbox(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext(full_access=True)
+        text = composer.compose_strategies_text(ctx)
+        assert "沙箱安全机制内容。" not in text
+
+    def test_real_sandbox_awareness_file(self) -> None:
+        """验证实际 prompts/strategies/20_sandbox_awareness.md 文件可正确加载。"""
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        strat_file = prompts_dir / "strategies" / "20_sandbox_awareness.md"
+        if not strat_file.exists():
+            pytest.skip("20_sandbox_awareness.md 不存在")
+        seg = parse_prompt_file(strat_file)
+        assert seg.name == "sandbox_awareness"
+        assert seg.conditions.get("full_access") is False
+        assert "GREEN" in seg.content
+        assert "RED" in seg.content
+
 
 # ── 回归测试：core 文件与 legacy prompt 一致性 ───────────
 

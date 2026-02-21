@@ -732,6 +732,8 @@ class _EngineTracer:
         self.entries: list[dict[str, Any]] = []
         self._engine = engine
         self._iteration = 0
+        # label → (first_seen_iter, content_hash) — 用于折叠不变的 component
+        self._component_seen: dict[str, tuple[int, int]] = {}
 
         # 保存原始方法
         self._orig_prepare = engine._prepare_system_prompts_for_request
@@ -744,7 +746,11 @@ class _EngineTracer:
     def _traced_prepare(
         self, skill_contexts: list[str], **kwargs: Any,
     ) -> tuple[list[str], str | None]:
-        """拦截系统提示构建，记录各组件内容。"""
+        """拦截系统提示构建，记录各组件内容。
+
+        对跨轮次内容完全不变的 component，省略 ``content`` 字段，
+        改为记录 ``same_as_iter`` 指向首次出现的迭代轮次，避免重复存储。
+        """
         self._iteration += 1
         prompts, error = self._orig_prepare(skill_contexts, **kwargs)
 
@@ -767,12 +773,26 @@ class _EngineTracer:
                     label = "approved_plan_context"
                 else:
                     label = f"skill_context_{idx}"
-            components.append({
-                "label": label,
-                "char_count": len(prompt),
-                "content": prompt[:_TRACE_SYSTEM_PROMPT_MAX_CHARS],
-                "truncated": len(prompt) > _TRACE_SYSTEM_PROMPT_MAX_CHARS,
-            })
+
+            content_hash = hash(prompt)
+            prev = self._component_seen.get(label)
+            if prev is not None and prev[1] == content_hash:
+                # 内容与首次出现完全相同 — 折叠，不重复存 content
+                comp: dict[str, Any] = {
+                    "label": label,
+                    "char_count": len(prompt),
+                    "same_as_iter": prev[0],
+                }
+            else:
+                # 首次出现或内容已变化 — 完整记录
+                self._component_seen[label] = (self._iteration, content_hash)
+                comp = {
+                    "label": label,
+                    "char_count": len(prompt),
+                    "content": prompt[:_TRACE_SYSTEM_PROMPT_MAX_CHARS],
+                    "truncated": len(prompt) > _TRACE_SYSTEM_PROMPT_MAX_CHARS,
+                }
+            components.append(comp)
 
         self.entries.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -820,10 +840,14 @@ class _EngineTracer:
         return enriched
 
     def snapshot_and_reset(self) -> list[dict[str, Any]]:
-        """快照当前 trace 数据并重置，用于多轮分轮记录。"""
+        """快照当前 trace 数据并重置，用于多轮分轮记录。
+
+        注意：``_iteration`` 不重置（保持单调递增），确保 ``same_as_iter``
+        引用在整个 engine 生命周期内始终有效。``_component_seen`` 同样保留，
+        跨轮次内容不变的 component 继续折叠。
+        """
         snapshot = list(self.entries)
         self.entries = []
-        self._iteration = 0
         return snapshot
 
     def restore(self) -> None:

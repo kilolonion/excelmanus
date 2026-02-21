@@ -1295,6 +1295,46 @@ def _render_history(engine: AgentEngine) -> None:
     console.print()
 
 
+def _compress_injection_snapshots(
+    snapshots: list[dict],
+) -> dict:
+    """将逐迭代注入快照压缩为内容寻址格式，去除重复 components 文本。
+
+    输出格式::
+
+        {
+            "component_store": {
+                "<fingerprint>": {
+                    "summary": [...], "total_chars": N, "components": {...}
+                }
+            },
+            "timeline": [
+                {"session_turn": 1, "ref": "<fingerprint>"},
+                ...
+            ]
+        }
+    """
+    store: dict[str, dict] = {}
+    timeline: list[dict] = []
+
+    for snap in snapshots:
+        fp = snap.get("_fingerprint") or snap.get("_ref")
+        turn = snap.get("session_turn")
+
+        if "_ref" in snap:
+            timeline.append({"session_turn": turn, "ref": fp})
+        else:
+            if fp and fp not in store:
+                store[fp] = {
+                    "summary": snap.get("summary", []),
+                    "total_chars": snap.get("total_chars", 0),
+                    "components": snap.get("components", {}),
+                }
+            timeline.append({"session_turn": turn, "ref": fp})
+
+    return {"component_store": store, "timeline": timeline}
+
+
 def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
     """处理 /save 命令：保存完整对话记录（含工具调用）到 JSON 文件。
 
@@ -1340,7 +1380,7 @@ def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
     model_name = getattr(engine, "current_model_name", None) or getattr(engine, "current_model", "unknown")
 
     save_data = {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "conversation_export",
         "timestamp": timestamp,
         "meta": {
@@ -1355,7 +1395,9 @@ def _handle_save_command(engine: AgentEngine, user_input: str) -> None:
             "tool_call_count": tool_call_count,
         },
         "diagnostics": getattr(engine, "session_diagnostics", []),
-        "prompt_injection_details": getattr(engine, "prompt_injection_snapshots", []),
+        "prompt_injection_details": _compress_injection_snapshots(
+            getattr(engine, "prompt_injection_snapshots", [])
+        ),
         "messages": serialized_messages,
     }
 

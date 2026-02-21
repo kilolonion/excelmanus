@@ -240,15 +240,25 @@ class TestRebuildExcelFromSpec:
         assert result["status"] == "error"
 
     def test_merged_cells(self, tmp_path: Path) -> None:
-        """合并单元格正确应用。"""
+        """合并单元格正确应用（非锚点无值时正常合并）。"""
         from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
 
         init_guard(str(tmp_path))
-        spec = dict(_BASIC_SPEC)
-        spec["sheets"] = [{
-            **_BASIC_SPEC["sheets"][0],
-            "merged_ranges": [{"range": "A1:B1", "confidence": 0.95}],
-        }]
+        spec = {
+            **_BASIC_SPEC,
+            "sheets": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 2, "cols": 2},
+                "cells": [
+                    {"address": "A1", "value": "Title", "value_type": "string", "confidence": 1.0},
+                    {"address": "A2", "value": "Alice", "value_type": "string", "confidence": 1.0},
+                    {"address": "B2", "value": 30, "value_type": "number", "confidence": 1.0},
+                ],
+                "merged_ranges": [{"range": "A1:B1", "confidence": 0.95}],
+                "styles": {},
+                "column_widths": [15, 10],
+            }],
+        }
         spec_path = tmp_path / "spec.json"
         spec_path.write_text(json.dumps(spec), encoding="utf-8")
         output_path = tmp_path / "output.xlsx"
@@ -258,6 +268,44 @@ class TestRebuildExcelFromSpec:
         ))
         assert result["status"] == "ok"
         assert result["build_summary"]["merges_applied"] == 1
+
+    def test_merge_skipped_when_non_anchor_has_value(self, tmp_path: Path) -> None:
+        """非锚点单元格含有值时跳过合并，保留数据完整性。"""
+        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
+
+        init_guard(str(tmp_path))
+        spec = {
+            **_BASIC_SPEC,
+            "sheets": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 2, "cols": 4},
+                "cells": [
+                    {"address": "A1", "value": "日期：", "value_type": "string", "confidence": 1.0},
+                    {"address": "C1", "value": "客户：", "value_type": "string", "confidence": 1.0},
+                ],
+                "merged_ranges": [{"range": "A1:D1", "confidence": 0.98}],
+                "styles": {},
+                "column_widths": [10, 10, 10, 10],
+            }],
+        }
+        spec_path = tmp_path / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        output_path = tmp_path / "output.xlsx"
+
+        result = json.loads(rebuild_excel_from_spec(
+            spec_path=str(spec_path), output_path=str(output_path),
+        ))
+        assert result["status"] == "ok"
+        # 合并被跳过（因为 C1 是非锚点但有值）
+        assert result["build_summary"]["merges_applied"] == 0
+        assert any("跳过" in s for s in result["build_summary"]["skipped_items"])
+
+        # 值仍然保留
+        from openpyxl import load_workbook
+        wb = load_workbook(str(output_path))
+        ws = wb["Sheet1"]
+        assert ws["A1"].value == "日期："
+        assert ws["C1"].value == "客户："
 
     def test_rejects_outside_workspace_output_path(self, tmp_path: Path) -> None:
         """输出路径在 workspace 外时应被拒绝。"""
@@ -335,6 +383,56 @@ class TestVerifyReplica:
         assert result["issues"]["low_confidence"] == 1
         content = report_path.read_text(encoding="utf-8")
         assert "低置信项" in content
+
+    def test_merge_conflict_not_counted_as_mismatch(self, tmp_path: Path) -> None:
+        """合并区域非锚点单元格归类为 merge_conflict 而非 mismatch，不降低匹配率。"""
+        from excelmanus.tools.image_tools import verify_excel_replica, init_guard
+        from openpyxl import Workbook
+
+        init_guard(str(tmp_path))
+
+        # 手动构建一个含合并单元格的 Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"].value = "日期："
+        # C1 本应有值 "客户：" 但因合并会变成 None
+        ws.merge_cells("A1:D1")
+        excel_path = tmp_path / "merged.xlsx"
+        wb.save(str(excel_path))
+
+        # 构建 spec：A1 和 C1 都有值
+        spec = {
+            **_BASIC_SPEC,
+            "sheets": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 1, "cols": 4},
+                "cells": [
+                    {"address": "A1", "value": "日期：", "value_type": "string", "confidence": 1.0},
+                    {"address": "C1", "value": "客户：", "value_type": "string", "confidence": 1.0},
+                ],
+                "merged_ranges": [{"range": "A1:D1", "confidence": 0.98}],
+                "styles": {},
+                "column_widths": [],
+            }],
+        }
+        spec_path = tmp_path / "spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        report_path = tmp_path / "report.md"
+
+        result = json.loads(verify_excel_replica(
+            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
+        ))
+        assert result["status"] == "ok"
+        # C1 应被识别为 merge_conflict 而非 mismatch
+        assert result["issues"]["merge_conflicts"] == 1
+        assert result["issues"]["conflict"] == 0
+        # 匹配率应为 100%（merge_conflict 不降低匹配率）
+        assert result["match_rate"] == 1.0
+
+        # 报告中应包含合并冲突信息
+        content = report_path.read_text(encoding="utf-8")
+        assert "合并单元格冲突" in content
 
     def test_rejects_outside_workspace_report_path(self, tmp_path: Path) -> None:
         """报告路径在 workspace 外时应被拒绝。"""

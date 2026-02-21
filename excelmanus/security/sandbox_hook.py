@@ -5,23 +5,33 @@ from __future__ import annotations
 # GREEN 模式禁止导入的模块
 # NOTE: ctypes 已移除 — pandas/numpy 等数据处理库间接依赖 ctypes，
 # 禁止会导致 GREEN tier 下 pandas 完全不可用。ctypes 的理论风险（FFI 调用）
-# 在 LLM agent 场景下极低，且仍有 subprocess/os.system 等多层防护兜底。
+# 在 LLM agent 场景下极低，且仍有 os.system 等多层防护兜底。
+#
+# NOTE: subprocess/signal/multiprocessing 已从 import 封禁列表移除 —
+# pandas 3.x 初始化链中 _config/localization.py 顶层 import subprocess，
+# matplotlib 的后端检测也依赖 subprocess。signal/multiprocessing 被 numpy
+# 等库间接使用。改为 Layer 6 函数级 monkey-patch：允许 import，但禁止
+# 用户脚本直接调用 subprocess.Popen/run/call 等进程创建函数。
+#
+# NOTE: socket 已从 import 封禁列表移除 —
+# matplotlib.pyplot 初始化链中 backend_bases.py 顶层 import socket。
+# 改为 Layer 6 函数级 monkey-patch：允许 import，但禁止创建 socket
+# 实例（即禁止实际网络通信）。gethostname 等只读信息函数仍可用。
 _GREEN_BLOCKED: tuple[str, ...] = (
-    "subprocess", "socket", "ssl",
+    "ssl",
     "http.client", "http.server", "http.cookiejar",
     "urllib.request", "urllib.error",
     "requests", "httpx", "aiohttp",
     "ftplib", "smtplib", "imaplib", "poplib",
     "xmlrpc", "xmlrpc.client", "xmlrpc.server",
     "websocket", "websockets",
-    "signal", "multiprocessing",
     "pty", "pexpect",
     "webbrowser", "antigravity",
 )
 
 # YELLOW 模式禁止导入的模块（子集）
+# NOTE: subprocess/signal/multiprocessing 已移除，理由同 GREEN。
 _YELLOW_BLOCKED: tuple[str, ...] = (
-    "subprocess", "signal", "multiprocessing",
     "pty", "pexpect",
 )
 
@@ -240,6 +250,50 @@ def _patch_openpyxl_save():
             raise
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
+
+# ── Layer 6: subprocess / socket function guard ──
+# subprocess 模块允许导入（pandas/matplotlib 等库初始化链依趖），
+# 但禁止用户脚本直接调用进程创建函数。
+try:
+    import subprocess as _subprocess_mod
+    _SUBPROCESS_BLOCKED_ATTRS = ('Popen', 'run', 'call', 'check_call', 'check_output')
+    def _make_subprocess_blocker(_name):
+        def _blocked_fn(*_args, **_kwargs):
+            raise RuntimeError(
+                "subprocess." + _name + "() 被安全策略禁止 [等级: " + _TIER + "]。"
+                "允许 import subprocess（库内部依赖），但禁止直接调用进程创建函数。"
+            )
+        return _blocked_fn
+    for _attr in _SUBPROCESS_BLOCKED_ATTRS:
+        if hasattr(_subprocess_mod, _attr):
+            setattr(_subprocess_mod, _attr, _make_subprocess_blocker(_attr))
+except ImportError:
+    pass
+
+# socket 模块允许导入（matplotlib.pyplot 初始化链依赖），
+# 但禁止创建 socket 实例（即禁止实际网络通信）。
+# gethostname/getfqdn 等只读信息函数仍可用。
+try:
+    import socket as _socket_mod
+    _original_socket_class = _socket_mod.socket
+    class _BlockedSocket:
+        def __init__(self, *a, **kw):
+            raise RuntimeError(
+                "socket.socket() 被安全策略禁止 [等级: " + _TIER + "]。"
+                "允许 import socket（库内部依赖），但禁止创建网络连接。"
+            )
+    _socket_mod.socket = _BlockedSocket
+    for _fn in ('create_connection', 'create_server', 'socketpair', 'fromfd'):
+        if hasattr(_socket_mod, _fn):
+            def _make_socket_blocker(_name):
+                def _blocked(*a, **kw):
+                    raise RuntimeError(
+                        "socket." + _name + "() 被安全策略禁止 [等级: " + _TIER + "]。"
+                    )
+                return _blocked
+            setattr(_socket_mod, _fn, _make_socket_blocker(_fn))
+except ImportError:
+    pass
 
 # ── execute user script ──
 if len(sys.argv) < 2:

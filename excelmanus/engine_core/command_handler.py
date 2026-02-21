@@ -49,7 +49,7 @@ class CommandHandler:
             return "命令已移除，请使用 /plan ..."
 
         command = raw_command.replace("_", "")
-        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model", "/backup"}:
+        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model", "/backup", "/compact"}:
             return None
 
         from excelmanus.skillpacks.router import SkillMatchResult
@@ -157,11 +157,102 @@ class CommandHandler:
         if command == "/backup":
             return self._handle_backup_command(parts)
 
+        if command == "/compact":
+            return await self._handle_compact_command(parts)
+
         if command == "/accept":
             return await self._handle_accept_command(parts, on_event=on_event)
         if command == "/reject":
             return self._handle_reject_command(parts)
         return self._handle_undo_command(parts)
+
+    async def _handle_compact_command(self, parts: list[str]) -> str:
+        """处理 /compact 会话控制命令。
+
+        用法：
+        - /compact          — 立即执行压缩
+        - /compact status   — 显示 compaction 统计和当前 token 使用率
+        - /compact on       — 启用自动压缩
+        - /compact off      — 禁用自动压缩
+        - /compact <指令>   — 带自定义指令执行压缩
+        """
+        e = self._engine
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
+
+        compaction_mgr = getattr(e, "_compaction_manager", None)
+        if compaction_mgr is None:
+            return "Compaction 功能未初始化。"
+
+        # /compact status
+        if action == "status":
+            sys_msgs = e._memory._build_system_messages()
+            status = compaction_mgr.get_status(e._memory, sys_msgs)
+            pct = status["usage_ratio"] * 100
+            threshold_pct = status["threshold_ratio"] * 100
+            lines = [
+                f"**上下文压缩状态**",
+                f"- 自动压缩: {'启用' if status['enabled'] else '禁用'}",
+                f"- 当前 token 使用: {status['current_tokens']:,} / {status['max_tokens']:,} ({pct:.1f}%)",
+                f"- 自动压缩阈值: {threshold_pct:.0f}%",
+                f"- 对话消息数: {status['message_count']}",
+                f"- 累计压缩次数: {status['compaction_count']}",
+            ]
+            if status["last_compaction_at"]:
+                import time as _time
+                elapsed = _time.time() - status["last_compaction_at"]
+                if elapsed < 60:
+                    lines.append(f"- 上次压缩: {elapsed:.0f} 秒前")
+                else:
+                    lines.append(f"- 上次压缩: {elapsed / 60:.1f} 分钟前")
+            return "\n".join(lines)
+
+        # /compact on
+        if action == "on" and len(parts) == 2:
+            compaction_mgr.enabled = True
+            return "已启用自动上下文压缩。"
+
+        # /compact off
+        if action == "off" and len(parts) == 2:
+            compaction_mgr.enabled = False
+            return "已禁用自动上下文压缩。"
+
+        # /compact 或 /compact <自定义指令> — 执行压缩
+        custom_instruction = None
+        if action and action not in {"on", "off", "status"}:
+            custom_instruction = " ".join(parts[1:])
+
+        # 确定摘要模型
+        summary_model = e._config.aux_model or e._active_model
+        sys_msgs = e._memory._build_system_messages()
+
+        result = await compaction_mgr.manual_compact(
+            memory=e._memory,
+            system_msgs=sys_msgs,
+            client=e._client,
+            summary_model=summary_model,
+            custom_instruction=custom_instruction,
+        )
+
+        if not result.success:
+            return f"压缩未执行: {result.error}"
+
+        pct_before = (
+            result.tokens_before / e._config.max_context_tokens * 100
+            if e._config.max_context_tokens > 0
+            else 0
+        )
+        pct_after = (
+            result.tokens_after / e._config.max_context_tokens * 100
+            if e._config.max_context_tokens > 0
+            else 0
+        )
+        return (
+            f"✅ 上下文压缩完成。\n"
+            f"- 消息: {result.messages_before} → {result.messages_after}\n"
+            f"- Token: {result.tokens_before:,} ({pct_before:.1f}%) → "
+            f"{result.tokens_after:,} ({pct_after:.1f}%)\n"
+            f"- 累计压缩次数: {compaction_mgr.stats.compaction_count}"
+        )
 
     def _handle_backup_command(self, parts: list[str]) -> str:
         """处理 /backup 会话控制命令。"""
@@ -314,6 +405,8 @@ class CommandHandler:
         e._approval.clear_pending()
         route_to_resume = e._pending_approval_route_result
         e._pending_approval_route_result = None
+        saved_tool_call_id = e._pending_approval_tool_call_id
+        e._pending_approval_tool_call_id = None
         lines = [
             f"已执行待确认操作 `{approval_id}`。",
             f"- 工具: `{record.tool_name}`",
@@ -324,8 +417,18 @@ class CommandHandler:
             lines.append(f"- 结果摘要: {record.result_preview}")
         if record.undoable:
             lines.append(f"- 回滚命令: `/undo {approval_id}`")
-        if route_to_resume is None or not e._has_incomplete_tasks():
+        if route_to_resume is None:
             return "\n".join(lines)
+
+        # ── 将实际工具结果注入 memory 替换审批提示，使 LLM 能处理真实输出 ──
+        if saved_tool_call_id and record.result_preview:
+            e._memory.replace_tool_result(saved_tool_call_id, record.result_preview)
+            # 移除审批提示对应的 assistant 尾部消息（避免 LLM 重复看到审批文本）
+            msgs = e._memory._messages
+            if msgs and msgs[-1].get("role") == "assistant":
+                last_content = msgs[-1].get("content", "")
+                if isinstance(last_content, str) and "待确认队列" in last_content:
+                    msgs.pop()
 
         resume_iteration = e._last_iteration_count + 1
         e._set_window_perception_turn_hints(

@@ -1,4 +1,4 @@
-"""CLI 帮助页 — Claude Code 风格分区帮助展示。"""
+"""CLI 帮助页 — 分区帮助展示。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def render_help(
     *,
     version: str = "",
 ) -> None:
-    """渲染 Claude Code 风格帮助页。
+    """渲染帮助页。
 
     布局：用 ─ 分隔线包围，Shortcuts + Commands 双列展示。
     """

@@ -163,22 +163,141 @@ def _validate_single_command(segment: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _split_chain(command: str) -> list[tuple[str, str]]:
+    """将命令按 ``&&`` / ``||`` 拆分为链式段（考虑引号和管道）。
+
+    返回 [(segment, operator), ...] 列表。
+    第一段的 operator 为 ""，后续段的 operator 为 "&&" 或 "||"。
+    """
+    parts: list[tuple[str, str]] = []
+    current: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    chars = command
+    while i < len(chars):
+        ch = chars[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+        elif ch == "\\" and i + 1 < len(chars) and not in_single:
+            current.append(ch)
+            current.append(chars[i + 1])
+            i += 1
+        elif not in_single and not in_double:
+            # 检测 && 和 ||
+            if ch == "&" and i + 1 < len(chars) and chars[i + 1] == "&":
+                parts.append(("".join(current), "" if not parts else parts[-1][1]))
+                # 修正：用占位方式记录 operator 归属于下一段
+                # 重新组织：parts 记录的是 (segment_text, leading_operator)
+                # 第一段 leading_operator = ""
+                current = []
+                i += 2
+                # 为下一段标记 operator
+                parts_rewrite = parts
+                parts = []
+                for seg_text, _ in parts_rewrite:
+                    parts.append((seg_text, "" if len(parts) == 0 else "&&"))
+                # 当前 current 属于新段，其 operator 是 &&
+                # 我们在最后统一处理
+                parts.append(("", "&&"))  # placeholder
+                continue
+            elif ch == "|" and i + 1 < len(chars) and chars[i + 1] == "|":
+                parts.append(("".join(current), "" if not parts else parts[-1][1]))
+                current = []
+                i += 2
+                parts_rewrite = parts
+                parts = []
+                for seg_text, _ in parts_rewrite:
+                    parts.append((seg_text, "" if len(parts) == 0 else "||"))
+                parts.append(("", "||"))  # placeholder
+                continue
+            else:
+                current.append(ch)
+        else:
+            current.append(ch)
+        i += 1
+
+    # 处理最后一个 current
+    if parts and parts[-1][0] == "":
+        # 替换最后一个 placeholder
+        op = parts[-1][1]
+        parts[-1] = ("".join(current), op)
+    else:
+        parts.append(("".join(current), ""))
+
+    return parts
+
+
+def _split_chain_simple(command: str) -> list[tuple[str, str]]:
+    """将命令按 ``&&`` / ``||`` 拆分（考虑引号）。
+
+    返回 [(segment, operator), ...] 列表。
+    operator 是该段**前面**的运算符，第一段为 ""。
+    """
+    result: list[tuple[str, str]] = []
+    current: list[str] = []
+    pending_op = ""  # 下一段的前导运算符
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            current.append(ch)
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+            current.append(ch)
+        elif ch == "\\" and i + 1 < len(command) and not in_single:
+            current.append(ch)
+            current.append(command[i + 1])
+            i += 2
+            continue
+        elif not in_single and not in_double:
+            if ch == "&" and i + 1 < len(command) and command[i + 1] == "&":
+                result.append(("".join(current), pending_op))
+                current = []
+                pending_op = "&&"
+                i += 2
+                continue
+            elif ch == "|" and i + 1 < len(command) and command[i + 1] == "|":
+                result.append(("".join(current), pending_op))
+                current = []
+                pending_op = "||"
+                i += 2
+                continue
+            else:
+                current.append(ch)
+        else:
+            current.append(ch)
+        i += 1
+    result.append(("".join(current), pending_op))
+    return result
+
+
 def _validate_command(command: str) -> tuple[bool, str]:
-    """校验命令安全性（支持管道），返回 (通过, 原因)。"""
+    """校验命令安全性（支持管道和链式运算符 && / ||），返回 (通过, 原因)。"""
     stripped = command.strip()
     if not stripped:
         return False, "命令不能为空"
 
-    # 逻辑运算符仍然禁止
-    if re.search(r"\|\||&&", stripped):
-        return False, "当前不支持逻辑运算符 (|| / &&)，请拆分命令"
+    # 按 && / || 拆分为链式段
+    chain_segments = _split_chain_simple(stripped)
 
-    # 按管道拆分并逐段验证
-    segments = _split_pipeline(stripped)
-    for seg in segments:
-        valid, reason = _validate_single_command(seg)
-        if not valid:
-            return False, reason
+    for seg_text, _op in chain_segments:
+        seg_stripped = seg_text.strip()
+        if not seg_stripped:
+            return False, "链式命令中存在空段"
+        # 每段按管道拆分并逐段验证
+        pipe_segments = _split_pipeline(seg_stripped)
+        for pipe_seg in pipe_segments:
+            valid, reason = _validate_single_command(pipe_seg)
+            if not valid:
+                return False, reason
 
     return True, "ok"
 
@@ -218,8 +337,8 @@ def run_shell(
     # 构建最小环境
     sandbox_env = _build_shell_env()
 
-    # 拆分管道
-    segments = _split_pipeline(command.strip())
+    # 按 && / || 拆分为链式段
+    chain_segments = _split_chain_simple(command.strip())
 
     started = time.time()
     timed_out = False
@@ -228,83 +347,108 @@ def run_shell(
     stderr = ""
 
     try:
-        if len(segments) == 1:
-            # 单命令，直接执行
-            tokens = shlex.split(segments[0].strip())
-            completed = subprocess.run(
-                tokens,
-                cwd=workdir_safe,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-                env=sandbox_env,
-                stdin=subprocess.DEVNULL,
-                close_fds=True,
-                start_new_session=True,
-                shell=False,
-            )
-            return_code = completed.returncode
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
-        else:
-            # 管道链：用 subprocess.PIPE 连接
-            procs: list[subprocess.Popen[str]] = []
-            prev_stdout: Any = subprocess.DEVNULL
-            for idx, seg in enumerate(segments):
-                tokens = shlex.split(seg.strip())
-                stdin_src = prev_stdout if idx > 0 else subprocess.DEVNULL
-                p = subprocess.Popen(
+        for chain_idx, (seg_text, chain_op) in enumerate(chain_segments):
+            # 链式运算符语义
+            if chain_idx > 0:
+                if chain_op == "&&" and return_code != 0:
+                    break  # 前一段失败，停止执行
+                if chain_op == "||" and return_code == 0:
+                    break  # 前一段成功，停止执行
+
+            seg_stripped = seg_text.strip()
+            segments = _split_pipeline(seg_stripped)
+
+            seg_stdout = ""
+            seg_stderr = ""
+
+            if len(segments) == 1:
+                # 单命令，直接执行
+                tokens = shlex.split(segments[0].strip())
+                completed = subprocess.run(
                     tokens,
                     cwd=workdir_safe,
-                    stdin=stdin_src,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     text=True,
+                    timeout=timeout_seconds,
+                    check=False,
                     env=sandbox_env,
+                    stdin=subprocess.DEVNULL,
                     close_fds=True,
                     start_new_session=True,
+                    shell=False,
                 )
-                # 关闭上一个进程的 stdout（已被当前进程接管）
-                if idx > 0 and prev_stdout is not None:
-                    prev_stdout.close()
-                prev_stdout = p.stdout
-                procs.append(p)
+                return_code = completed.returncode
+                seg_stdout = completed.stdout or ""
+                seg_stderr = completed.stderr or ""
+            else:
+                # 管道链：用 subprocess.PIPE 连接
+                procs: list[subprocess.Popen[str]] = []
+                prev_stdout: Any = subprocess.DEVNULL
+                for idx, seg in enumerate(segments):
+                    tokens = shlex.split(seg.strip())
+                    stdin_src = prev_stdout if idx > 0 else subprocess.DEVNULL
+                    p = subprocess.Popen(
+                        tokens,
+                        cwd=workdir_safe,
+                        stdin=stdin_src,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=sandbox_env,
+                        close_fds=True,
+                        start_new_session=True,
+                    )
+                    # 关闭上一个进程的 stdout（已被当前进程接管）
+                    if idx > 0 and prev_stdout is not None:
+                        prev_stdout.close()
+                    prev_stdout = p.stdout
+                    procs.append(p)
 
-            # 等待最后一个进程完成
-            last = procs[-1]
-            try:
-                out, err = last.communicate(timeout=timeout_seconds)
-                stdout = out or ""
-                stderr = err or ""
-                return_code = last.returncode
-            finally:
-                # 清理所有进程
-                for p in procs:
-                    try:
-                        p.kill()
-                    except OSError:
-                        pass
-                    p.wait()
+                # 等待最后一个进程完成
+                last = procs[-1]
+                try:
+                    out, err = last.communicate(timeout=timeout_seconds)
+                    seg_stdout = out or ""
+                    seg_stderr = err or ""
+                    return_code = last.returncode
+                finally:
+                    # 清理所有进程
+                    for p in procs:
+                        try:
+                            p.kill()
+                        except OSError:
+                            pass
+                        p.wait()
+
+            # 累积输出
+            if seg_stdout:
+                stdout += ("\n" if stdout else "") + seg_stdout
+            if seg_stderr:
+                stderr += ("\n" if stderr else "") + seg_stderr
 
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         return_code = 124
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else exc.stdout
-        ) or ""
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else exc.stderr
-        ) or ""
+        stdout += "\n" + (
+            (
+                exc.stdout.decode(errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else exc.stdout
+            ) or ""
+        )
+        stderr += "\n" + (
+            (
+                exc.stderr.decode(errors="replace")
+                if isinstance(exc.stderr, bytes)
+                else exc.stderr
+            ) or ""
+        )
     except FileNotFoundError:
+        seg0 = _split_pipeline(chain_segments[0][0].strip())
         return json.dumps(
             {
                 "status": "error",
-                "error": f"命令未找到: {shlex.split(segments[0].strip())[0]}",
+                "error": f"命令未找到: {shlex.split(seg0[0].strip())[0]}",
                 "command": command,
             },
             ensure_ascii=False,

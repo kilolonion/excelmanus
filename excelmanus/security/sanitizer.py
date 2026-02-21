@@ -23,6 +23,61 @@ _ABS_PATH_PATTERN = re.compile(
 # URL 整体匹配，用于保护 URL 内路径不被脱敏
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
+# ── PII 个人身份信息脱敏 ──────────────────────────────────
+
+# 中国大陆手机号（11位，1[3-9]开头）
+_PHONE_PATTERN = re.compile(r"(?<![\d])1[3-9]\d{9}(?![\d])")
+
+# 身份证号（18位，末位可为 X/x）
+_ID_CARD_PATTERN = re.compile(r"(?<![\d])\d{17}[\dXx](?![\d])")
+
+# 银行卡号（16-19位纯数字，排除已匹配的身份证）
+_BANK_CARD_PATTERN = re.compile(r"(?<![\d])\d{16,19}(?![\d])")
+
+# 邮箱地址
+_EMAIL_PATTERN = re.compile(
+    r"(?<![\w.@])" r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" r"(?![\w@])"
+)
+
+
+def _mask_phone(match: re.Match[str]) -> str:
+    """138****1234"""
+    num = match.group(0)
+    return num[:3] + "****" + num[7:]
+
+
+def _mask_id_card(match: re.Match[str]) -> str:
+    """320106********1234"""
+    num = match.group(0)
+    return num[:6] + "********" + num[14:]
+
+
+def _mask_bank_card(match: re.Match[str]) -> str:
+    """6222 **** **** 1234"""
+    num = match.group(0)
+    return num[:4] + " **** **** " + num[-4:]
+
+
+def _mask_email(match: re.Match[str]) -> str:
+    """u***@example.com"""
+    email = match.group(0)
+    local, domain = email.rsplit("@", 1)
+    if len(local) <= 1:
+        masked_local = local + "***"
+    else:
+        masked_local = local[0] + "***"
+    return f"{masked_local}@{domain}"
+
+
+def _sanitize_pii(text: str) -> str:
+    """对文本中的 PII 个人信息做统一脱敏。"""
+    # 顺序很重要：先身份证（18位），再银行卡（16-19位），再手机（11位）
+    value = _ID_CARD_PATTERN.sub(_mask_id_card, text)
+    value = _BANK_CARD_PATTERN.sub(_mask_bank_card, value)
+    value = _PHONE_PATTERN.sub(_mask_phone, value)
+    value = _EMAIL_PATTERN.sub(_mask_email, value)
+    return value
+
 
 def _build_url_spans(text: str) -> list[tuple[int, int]]:
     """返回文本中所有 URL 的 (start, end) 区间列表。"""
@@ -52,8 +107,13 @@ def _make_path_replacer(url_spans: list[tuple[int, int]]):
     return _replacer
 
 
-def sanitize_sensitive_text(text: str) -> str:
-    """对文本中的敏感信息做统一脱敏。"""
+def sanitize_sensitive_text(text: str, *, mask_pii: bool = True) -> str:
+    """对文本中的敏感信息做统一脱敏。
+
+    Args:
+        text: 待脱敏文本。
+        mask_pii: 是否同时脱敏 PII 个人信息（手机号/身份证/银行卡/邮箱），默认 True。
+    """
     value = str(text or "")
     if not value:
         return ""
@@ -70,4 +130,8 @@ def sanitize_sensitive_text(text: str) -> str:
     value = _COOKIE_PATTERN.sub(r"\1***", value)
     url_spans = _build_url_spans(value)
     value = _ABS_PATH_PATTERN.sub(_make_path_replacer(url_spans), value)
+
+    if mask_pii:
+        value = _sanitize_pii(value)
+
     return value

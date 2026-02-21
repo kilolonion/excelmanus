@@ -83,15 +83,42 @@ class TestRunShellAllowed:
         result = json.loads(shell_tools.run_shell("echo a | bash"))
         assert result["status"] == "blocked"
 
-    def test_and_blocked(self, workspace: Path) -> None:
+    def test_and_chain(self, workspace: Path) -> None:
+        """&& 链式命令正常执行，两段输出合并。"""
         result = json.loads(shell_tools.run_shell("echo a && echo b"))
-        assert result["status"] == "blocked"
-        assert "逻辑运算符" in result["reason"]
+        assert result["status"] == "success"
+        assert "a" in result["stdout_tail"]
+        assert "b" in result["stdout_tail"]
 
-    def test_or_blocked(self, workspace: Path) -> None:
+    def test_or_chain(self, workspace: Path) -> None:
+        """|| 链式命令：第一段成功时不执行第二段。"""
         result = json.loads(shell_tools.run_shell("echo a || echo b"))
+        assert result["status"] == "success"
+        assert "a" in result["stdout_tail"]
+        # 第一段成功，第二段不会执行
+        assert result["stdout_tail"].strip() == "a"
+
+    def test_and_chain_stops_on_failure(self, workspace: Path) -> None:
+        """&& 链式：前一段失败时不执行后续段。"""
+        result = json.loads(shell_tools.run_shell("ls nonexistent_file && echo should_not_appear"))
+        assert result["return_code"] != 0
+        assert "should_not_appear" not in result["stdout_tail"]
+
+    def test_or_chain_runs_on_failure(self, workspace: Path) -> None:
+        """|| 链式：前一段失败时执行第二段。"""
+        result = json.loads(shell_tools.run_shell("ls nonexistent_file || echo fallback"))
+        assert "fallback" in result["stdout_tail"]
+
+    def test_and_chain_with_pipe(self, workspace: Path) -> None:
+        """&& 和管道混合使用。"""
+        result = json.loads(shell_tools.run_shell("echo hello | wc -w && echo done"))
+        assert result["status"] == "success"
+        assert "done" in result["stdout_tail"]
+
+    def test_chain_blocked_command(self, workspace: Path) -> None:
+        """&& 链中包含黑名单命令仍被拦截。"""
+        result = json.loads(shell_tools.run_shell("echo ok && rm -rf /"))
         assert result["status"] == "blocked"
-        assert "逻辑运算符" in result["reason"]
 
 
 class TestRunShellBlocked:

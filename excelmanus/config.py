@@ -82,6 +82,17 @@ class ExcelManusConfig:
     memory_auto_load_lines: int = 200
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
+    # Prompt Cache 优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
+    prompt_cache_key_enabled: bool = True
+    # 对话历史摘要：超阈值时用辅助模型压缩早期对话（需配置 aux_model）
+    summarization_enabled: bool = True
+    summarization_threshold_ratio: float = 0.8
+    summarization_keep_recent_turns: int = 3
+    # 上下文自动压缩（Compaction）：增强版对话摘要，后台静默执行
+    compaction_enabled: bool = True
+    compaction_threshold_ratio: float = 0.85
+    compaction_keep_recent_turns: int = 5
+    compaction_max_summary_tokens: int = 1500
     # hooks 配置
     hooks_command_enabled: bool = False
     hooks_command_allowlist: tuple[str, ...] = ()
@@ -125,6 +136,8 @@ class ExcelManusConfig:
     vlm_retry_base_delay_seconds: float = 5.0
     vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
     vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
+    vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
+    main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True
     # 代码策略引擎配置
@@ -133,6 +146,18 @@ class ExcelManusConfig:
     code_policy_yellow_auto_approve: bool = True
     code_policy_extra_safe_modules: tuple[str, ...] = ()
     code_policy_extra_blocked_modules: tuple[str, ...] = ()
+    # Embedding 语义检索配置（需独立配置 embedding API，未配置时功能关闭）
+    embedding_enabled: bool = False
+    embedding_api_key: str | None = None
+    embedding_base_url: str | None = None
+    embedding_model: str = "text-embedding-v3"
+    embedding_dimensions: int = 1536
+    embedding_timeout_seconds: float = 30.0
+    memory_semantic_top_k: int = 10
+    memory_semantic_threshold: float = 0.3
+    memory_semantic_fallback_recent: int = 5
+    manifest_semantic_top_k: int = 5
+    manifest_semantic_threshold: float = 0.25
     # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
     cli_layout_mode: str = "dashboard"
     # 多模型配置档案（可选，通过 /model 命令切换）
@@ -550,14 +575,8 @@ def load_config() -> ExcelManusConfig:
     if router_base_url:
         _validate_base_url(router_base_url)
     router_model = os.environ.get("EXCELMANUS_ROUTER_MODEL") or None
-    # 辅助模型（统一配置），兼容旧变量：
-    # EXCELMANUS_SUBAGENT_MODEL / EXCELMANUS_WINDOW_ADVISOR_MODEL
-    aux_model = (
-        os.environ.get("EXCELMANUS_AUX_MODEL")
-        or os.environ.get("EXCELMANUS_SUBAGENT_MODEL")
-        or os.environ.get("EXCELMANUS_WINDOW_ADVISOR_MODEL")
-        or None
-    )
+    # 辅助模型（统一配置）
+    aux_model = os.environ.get("EXCELMANUS_AUX_MODEL") or None
 
     # subagent 执行配置
     subagent_enabled = _parse_bool(
@@ -600,6 +619,25 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"),
         "EXCELMANUS_MAX_CONTEXT_TOKENS",
         128_000,
+    )
+    # 上下文自动压缩（Compaction）
+    compaction_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_COMPACTION_ENABLED"),
+        "EXCELMANUS_COMPACTION_ENABLED",
+        True,
+    )
+    compaction_threshold_ratio = float(
+        os.environ.get("EXCELMANUS_COMPACTION_THRESHOLD_RATIO", "0.85")
+    )
+    compaction_keep_recent_turns = _parse_int(
+        os.environ.get("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS"),
+        "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
+        5,
+    )
+    compaction_max_summary_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS"),
+        "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
+        1500,
     )
     hooks_command_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
@@ -749,6 +787,20 @@ def load_config() -> ExcelManusConfig:
     if vlm_base_url:
         _validate_base_url(vlm_base_url)
     vlm_model = os.environ.get("EXCELMANUS_VLM_MODEL") or None
+    vlm_enhance = _parse_bool(
+        os.environ.get("EXCELMANUS_VLM_ENHANCE"),
+        "EXCELMANUS_VLM_ENHANCE",
+        True,
+    )
+    main_model_vision = (
+        os.environ.get("EXCELMANUS_MAIN_MODEL_VISION", "auto").strip().lower()
+    )
+    if main_model_vision not in ("auto", "true", "false"):
+        logger.warning(
+            "EXCELMANUS_MAIN_MODEL_VISION=%r 无效，回退到 'auto'",
+            main_model_vision,
+        )
+        main_model_vision = "auto"
 
     # 备份沙盒模式
     backup_enabled = _parse_bool(
@@ -778,6 +830,50 @@ def load_config() -> ExcelManusConfig:
     )
     code_policy_extra_blocked_modules = _parse_csv_tuple(
         os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
+    )
+
+    # Embedding 语义检索配置（需独立配置 API，未配置时功能关闭）
+    embedding_api_key = os.environ.get("EXCELMANUS_EMBEDDING_API_KEY") or None
+    embedding_base_url = os.environ.get("EXCELMANUS_EMBEDDING_BASE_URL") or None
+    if embedding_base_url:
+        _validate_base_url(embedding_base_url)
+    # 自动启用：配置了 API key 或 base_url 即视为启用；也可显式覆盖
+    _embedding_explicit = os.environ.get("EXCELMANUS_EMBEDDING_ENABLED")
+    if _embedding_explicit is not None:
+        embedding_enabled = _parse_bool(
+            _embedding_explicit, "EXCELMANUS_EMBEDDING_ENABLED", False,
+        )
+    else:
+        embedding_enabled = bool(embedding_api_key or embedding_base_url)
+    embedding_model = os.environ.get("EXCELMANUS_EMBEDDING_MODEL") or "text-embedding-v3"
+    embedding_dimensions = _parse_int(
+        os.environ.get("EXCELMANUS_EMBEDDING_DIMENSIONS"),
+        "EXCELMANUS_EMBEDDING_DIMENSIONS",
+        1536,
+    )
+    embedding_timeout_seconds = float(
+        os.environ.get("EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS", "30.0")
+    )
+    memory_semantic_top_k = _parse_int(
+        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_TOP_K"),
+        "EXCELMANUS_MEMORY_SEMANTIC_TOP_K",
+        10,
+    )
+    memory_semantic_threshold = float(
+        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "0.3")
+    )
+    memory_semantic_fallback_recent = _parse_int(
+        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT"),
+        "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
+        5,
+    )
+    manifest_semantic_top_k = _parse_int(
+        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_TOP_K"),
+        "EXCELMANUS_MANIFEST_SEMANTIC_TOP_K",
+        5,
+    )
+    manifest_semantic_threshold = float(
+        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD", "0.25")
     )
 
     # CLI 布局模式
@@ -831,6 +927,10 @@ def load_config() -> ExcelManusConfig:
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
         max_context_tokens=max_context_tokens,
+        compaction_enabled=compaction_enabled,
+        compaction_threshold_ratio=compaction_threshold_ratio,
+        compaction_keep_recent_turns=compaction_keep_recent_turns,
+        compaction_max_summary_tokens=compaction_max_summary_tokens,
         hooks_command_enabled=hooks_command_enabled,
         hooks_command_allowlist=hooks_command_allowlist,
         hooks_command_timeout_seconds=hooks_command_timeout_seconds,
@@ -865,12 +965,25 @@ def load_config() -> ExcelManusConfig:
         vlm_api_key=vlm_api_key,
         vlm_base_url=vlm_base_url,
         vlm_model=vlm_model,
+        vlm_enhance=vlm_enhance,
+        main_model_vision=main_model_vision,
         backup_enabled=backup_enabled,
         code_policy_enabled=code_policy_enabled,
         code_policy_green_auto_approve=code_policy_green_auto_approve,
         code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
         code_policy_extra_safe_modules=code_policy_extra_safe_modules,
         code_policy_extra_blocked_modules=code_policy_extra_blocked_modules,
+        embedding_enabled=embedding_enabled,
+        embedding_api_key=embedding_api_key,
+        embedding_base_url=embedding_base_url,
+        embedding_model=embedding_model,
+        embedding_dimensions=embedding_dimensions,
+        embedding_timeout_seconds=embedding_timeout_seconds,
+        memory_semantic_top_k=memory_semantic_top_k,
+        memory_semantic_threshold=memory_semantic_threshold,
+        memory_semantic_fallback_recent=memory_semantic_fallback_recent,
+        manifest_semantic_top_k=manifest_semantic_top_k,
+        manifest_semantic_threshold=manifest_semantic_threshold,
         cli_layout_mode=cli_layout_mode,
         models=models,
     )

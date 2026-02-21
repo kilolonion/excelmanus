@@ -654,7 +654,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        # In Claude Code style, iteration renders turn/calls but not name
+        # In minimal style, iteration renders turn/calls but not name
         assert "2" in output
         assert "3" in output
 

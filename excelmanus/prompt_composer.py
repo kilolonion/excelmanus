@@ -45,6 +45,7 @@ class PromptContext:
     file_count: int = 0
     task_tags: list[str] = field(default_factory=list)
     user_message: str = ""
+    full_access: bool = False
 
 
 # ── Frontmatter 解析 ─────────────────────────────────────
@@ -326,6 +327,10 @@ class PromptComposer:
             elif key == "task_tags":
                 expected = set(value) if isinstance(value, list) else {value}
                 if not expected & set(ctx.task_tags):
+                    return False
+            elif key == "full_access":
+                expected_val = bool(value)
+                if ctx.full_access != expected_val:
                     return False
             # 未知条件键：忽略（宽松匹配，便于扩展）
         return True

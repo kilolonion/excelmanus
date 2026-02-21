@@ -58,6 +58,7 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         # Vision 工具（写文件，自动审批）
         "rebuild_excel_from_spec",
         "verify_excel_replica",
+        # extract_table_from_image 已废弃（B+C 混合架构）
     }
 )
 

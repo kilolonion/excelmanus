@@ -361,10 +361,8 @@ class TestDefaultValues:
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
-        # 显式清空统一/旧模型变量，避免本地 .env 干扰默认值断言
+        # 显式清空统一模型变量，避免本地 .env 干扰默认值断言
         monkeypatch.setenv("EXCELMANUS_AUX_MODEL", "")
-        monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "")
-        monkeypatch.setenv("EXCELMANUS_WINDOW_ADVISOR_MODEL", "")
         cfg = load_config()
         assert cfg.subagent_enabled is True
         assert cfg.aux_model is None
@@ -392,23 +390,25 @@ class TestDefaultValues:
         assert cfg.subagent_user_dir == "~/.my-agents"
         assert cfg.subagent_project_dir == ".my-agents"
 
-    def test_aux_model_falls_back_to_legacy_subagent_model(self, monkeypatch) -> None:
-        """兼容旧变量 EXCELMANUS_SUBAGENT_MODEL。"""
+    def test_legacy_subagent_model_env_is_ignored(self, monkeypatch) -> None:
+        """旧变量 EXCELMANUS_SUBAGENT_MODEL 不再生效。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_AUX_MODEL", "")
         monkeypatch.setenv("EXCELMANUS_SUBAGENT_MODEL", "legacy-subagent")
         cfg = load_config()
-        assert cfg.aux_model == "legacy-subagent"
+        assert cfg.aux_model is None
 
-    def test_aux_model_falls_back_to_legacy_window_advisor_model(self, monkeypatch) -> None:
-        """兼容旧变量 EXCELMANUS_WINDOW_ADVISOR_MODEL。"""
+    def test_legacy_window_advisor_model_env_is_ignored(self, monkeypatch) -> None:
+        """旧变量 EXCELMANUS_WINDOW_ADVISOR_MODEL 不再生效。"""
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
+        monkeypatch.setenv("EXCELMANUS_AUX_MODEL", "")
         monkeypatch.setenv("EXCELMANUS_WINDOW_ADVISOR_MODEL", "legacy-window-advisor")
         cfg = load_config()
-        assert cfg.aux_model == "legacy-window-advisor"
+        assert cfg.aux_model is None
 
     def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
         """默认开启对外安全模式。"""
