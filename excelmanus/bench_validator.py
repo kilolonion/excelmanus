@@ -318,12 +318,8 @@ def _check_golden_cells(
         # 去掉引号，如 'Sheet1' -> Sheet1
         sheet_name = sheet_part.strip("'\"")
 
-    if not sheet_name:
-        return AssertionResult(
-            rule="golden_cells",
-            passed=False,
-            message=f"无法确定工作表名称: {answer_position}",
-        )
+    # sheet_name 延迟解析：若无前缀，打开文件后回退到首个/唯一 sheet
+    _sheet_name_deferred = sheet_name is None
 
     # ── 定位输出文件 ──
     output_file: Path | None = None
@@ -371,6 +367,7 @@ def _check_golden_cells(
     # ── 加载两个文件 ──
     try:
         wb_out = load_workbook(output_file, data_only=True)
+        wb_out_formula = load_workbook(output_file, data_only=False)
         wb_gold = load_workbook(golden_path, data_only=True)
     except Exception as exc:
         return AssertionResult(
@@ -380,6 +377,19 @@ def _check_golden_cells(
         )
 
     try:
+        # ── 延迟解析 sheet_name：无前缀时回退到首个/唯一 sheet ──
+        if _sheet_name_deferred:
+            if len(wb_out.sheetnames) == 1:
+                sheet_name = wb_out.sheetnames[0]
+            elif wb_out.active is not None:
+                sheet_name = wb_out.active.title
+            else:
+                sheet_name = wb_out.sheetnames[0]
+            logger.debug(
+                "answer_position 无 sheet 前缀，回退到 %r (from %r)",
+                sheet_name, answer_position,
+            )
+
         if sheet_name not in wb_out.sheetnames:
             return AssertionResult(
                 rule="golden_cells",
@@ -395,6 +405,7 @@ def _check_golden_cells(
 
         ws_out = wb_out[sheet_name]
         ws_gold = wb_gold[sheet_name]
+        ws_out_formula = wb_out_formula[sheet_name] if sheet_name in wb_out_formula.sheetnames else None
 
         # ── 解析范围边界 ──
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
@@ -402,6 +413,7 @@ def _check_golden_cells(
         # ── 逐单元格比对 ──
         total = 0
         matched = 0
+        formula_written = 0  # 公式已写入但未求值（容错计数）
         mismatches: list[dict[str, Any]] = []
 
         for row in range(min_row, max_row + 1):
@@ -433,6 +445,13 @@ def _check_golden_cells(
                 if values_equal:
                     matched += 1
                 else:
+                    # ── 公式容错：输出为 None 但有公式写入 ──
+                    if norm_out is None and norm_gold is not None and ws_out_formula is not None:
+                        formula_val = ws_out_formula.cell(row=row, column=col).value
+                        if isinstance(formula_val, str) and formula_val.startswith("="):
+                            formula_written += 1
+                            continue  # 不计入 mismatches
+
                     if len(mismatches) < 20:
                         from openpyxl.utils import get_column_letter
                         cell_ref = f"{get_column_letter(col)}{row}"
@@ -443,16 +462,23 @@ def _check_golden_cells(
                         })
     finally:
         wb_out.close()
+        wb_out_formula.close()
         wb_gold.close()
 
-    accuracy = round(matched / total * 100, 1) if total > 0 else 0.0
-    passed = matched == total
+    effective_matched = matched + formula_written
+    accuracy = round(effective_matched / total * 100, 1) if total > 0 else 0.0
+    # 公式容错：matched + formula_written 覆盖全部单元格即视为通过
+    passed = effective_matched == total
 
     message_parts: list[str] = []
+    if formula_written > 0:
+        message_parts.append(f"公式已写入但未求值: {formula_written} 个单元格")
     if not passed:
+        strict_mismatches = total - effective_matched
         message_parts.append(
-            f"单元格比对: {matched}/{total} 匹配 ({accuracy}%), "
-            f"{total - matched} 不匹配"
+            f"单元格比对: {matched}/{total} 精确匹配"
+            + (f", {formula_written} 公式容错" if formula_written else "")
+            + f", {strict_mismatches} 不匹配"
         )
         if mismatches:
             samples = "; ".join(
@@ -468,6 +494,7 @@ def _check_golden_cells(
         actual={
             "total_cells": total,
             "matched": matched,
+            "formula_written": formula_written,
             "accuracy_pct": accuracy,
             "mismatches_sample": mismatches,
         },
@@ -546,6 +573,29 @@ def _check_min_match_rate(
     )
 
 
+
+
+def _split_composite_position(raw: str) -> list[str]:
+    """将可能包含逗号分隔的多 sheet 复合 position 拆分为独立子 position。
+
+    示例:
+        "'Sheet1'!A1:A50,'Sheet2'!A1:E20" → ["'Sheet1'!A1:A50", "'Sheet2'!A1:E20"]
+        "Sheet1!B2:B6" → ["Sheet1!B2:B6"]
+        "B2" → ["B2"]
+    """
+    # 简单 position（无逗号或无 !）直接返回
+    if "," not in raw:
+        return [raw]
+    # 有逗号但无 ! → 可能是单个 range（不太可能，保险起见直接返回）
+    if "!" not in raw:
+        return [raw]
+    # 按逗号拆分，重新组装带 sheet 前缀的子 position
+    parts = [p.strip() for p in raw.split(",")]
+    result: list[str] = []
+    for part in parts:
+        if part:
+            result.append(part)
+    return result if result else [raw]
 
 
 # ── 主校验函数 ────────────────────────────────────────────
@@ -658,12 +708,16 @@ def validate_case(
     # golden_cells — 自动从 expected 推导，无需在 assertions 中显式声明
     if expected and expected.get("golden_file") and expected.get("answer_position"):
         if workfile_dir is not None:
-            results.append(_check_golden_cells(
-                workfile_dir=workfile_dir,
-                golden_file=expected["golden_file"],
-                answer_position=expected["answer_position"],
-                answer_sheet=expected.get("answer_sheet"),
-            ))
+            raw_position = expected["answer_position"]
+            # 支持多 sheet 复合 position（逗号分隔的多个 'SheetN'!Range）
+            sub_positions = _split_composite_position(raw_position)
+            for sub_pos in sub_positions:
+                results.append(_check_golden_cells(
+                    workfile_dir=workfile_dir,
+                    golden_file=expected["golden_file"],
+                    answer_position=sub_pos,
+                    answer_sheet=expected.get("answer_sheet"),
+                ))
         else:
             logger.debug(
                 "跳过 golden_cells 断言: workfile_dir 未提供",

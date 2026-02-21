@@ -4144,6 +4144,63 @@ class AgentEngine:
             route_mode="fallback",
         )
 
+    @property
+    def turn_count(self) -> int:
+        """当前会话轮次计数，供 CLI 提示符展示。"""
+        return self._state.session_turn
+
+    def conversation_summary(self) -> str:
+        """返回对话历史摘要文本，供 /history 展示。"""
+        messages = self._memory._messages
+        if not messages:
+            return ""
+        user_count = sum(1 for m in messages if m.get("role") == "user")
+        assistant_count = sum(1 for m in messages if m.get("role") == "assistant")
+        tool_count = sum(
+            1 for m in messages
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        )
+        parts = [
+            f"对话轮次: {self._state.session_turn}",
+            f"用户消息: {user_count}",
+            f"助手回复: {assistant_count}",
+            f"工具调用消息: {tool_count}",
+            f"总消息数: {len(messages)}",
+        ]
+        return " · ".join(parts)
+
+    def save_conversation(self, path: str | None = None) -> str | None:
+        """将对话历史保存为 JSON 文件，返回保存路径或 None。"""
+        import json as _json
+        from datetime import datetime as _dt
+        from pathlib import Path as _Path
+
+        messages = self._memory.get_messages()
+        if not messages:
+            return None
+
+        if path:
+            save_path = _Path(path)
+        else:
+            out_dir = _Path(self._config.workspace_root) / "outputs" / "conversations"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+            save_path = out_dir / f"conversation_{timestamp}.json"
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": self._active_model,
+            "session_turn": self._state.session_turn,
+            "messages": messages,
+            "session_diagnostics": self._session_diagnostics,
+            "prompt_injection_snapshots": self._state.prompt_injection_snapshots,
+        }
+        save_path.write_text(
+            _json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return str(save_path)
+
     # ── 多模型切换 ──────────────────────────────────
 
     @property
