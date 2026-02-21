@@ -1,4 +1,4 @@
-"""CLI 包 — 基于 Claude Code 风格的命令行交互界面。"""
+"""CLI 包 — 极简风格的命令行交互界面。"""
 
 
 def main() -> None:

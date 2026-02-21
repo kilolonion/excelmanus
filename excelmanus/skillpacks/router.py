@@ -31,7 +31,7 @@ _MAY_WRITE_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _READ_ONLY_HINT_RE = re.compile(
-    r"(查看|列出|读取|扫描|分析|统计|对比|检查|预览|read|scan|analyz|inspect|list)",
+    r"(查看|列出|读取|扫描|分析|统计|对比|检查|预览|找出|筛选|汇总|排名|占比|read|scan|analyz|inspect|list)",
     re.IGNORECASE,
 )
 
@@ -388,7 +388,8 @@ class SkillRouter:
             "write_hint 判断：\n"
             "- may_write：创建/修改/写入/删除/替换/填充/格式化/图表/排序/合并/转置/"
             "fill/match/replace/insert/sort/solve/fix/apply/set/add/create/generate/compute/calculate\n"
-            "- read_only：仅当消息明确只涉及查看/列出/读取/分析/统计/对比/检查/预览，且不涉及任何数据变更时\n"
+            "- read_only：消息仅涉及查看/列出/读取/分析/统计/对比/检查/预览/筛选/找出/汇总/排名/占比，且不涉及任何数据变更时\n"
+            "- read_only 典型示例：'筛选出所有XX并统计每组数量'、'找出哪个XX最多'、'分析数据趋势'、'对比两个表的差异'\n"
             "- 当消息中同时包含文件路径和数据变更描述（如 fill column D、match invoice numbers）时，优先 may_write\n"
             "- 仅当完全确定不涉及写入时才判定 read_only\n\n"
             "task_tags 可选值（选择所有适用的）：\n"

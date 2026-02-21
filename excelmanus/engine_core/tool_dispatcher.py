@@ -100,228 +100,102 @@ class ToolDispatcher:
         return cow_mapping
 
     def _try_inject_image(self, result_str: str) -> str:
-        """从工具返回值中提取 _image_injection，注入到 memory，返回清理后的结果。"""
+        """从工具返回值中提取 _image_injection，根据 B+C 模式路由。
+
+        - C 通道（主模型有视觉）：注入 base64 图片到 memory
+        - B 通道（VLM enhance）：缓存图片数据，供后续异步 VLM 描述使用
+        - 主模型无视觉且无 VLM：仅返回文件元信息
+        """
         try:
             parsed = json.loads(result_str)
             if not isinstance(parsed, dict) or "_image_injection" not in parsed:
                 return result_str
         except (json.JSONDecodeError, TypeError):
             return result_str
+
         injection = parsed.pop("_image_injection")
-        self._engine._memory.add_image_message(
-            base64_data=injection["base64"],
-            mime_type=injection.get("mime_type", "image/png"),
-            detail=injection.get("detail", "auto"),
-        )
-        logger.info("图片已注入 memory: mime=%s", injection.get("mime_type"))
+        e = self._engine
+
+        # C 通道：主模型支持视觉 → 注入图片到对话 memory
+        if e._is_vision_capable:
+            e._memory.add_image_message(
+                base64_data=injection["base64"],
+                mime_type=injection.get("mime_type", "image/png"),
+                detail=injection.get("detail", "auto"),
+            )
+            logger.info("C 通道: 图片已注入 memory (mime=%s)", injection.get("mime_type"))
+            parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
+        else:
+            logger.info("主模型无视觉能力，跳过图片注入")
+            parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
+
+        # B 通道：缓存图片数据供异步 VLM 描述
+        if e._vlm_enhance_available:
+            self._pending_vlm_image = injection
+            parsed["vlm_enhance"] = "VLM 增强描述将自动生成并追加到下方。"
+        elif not e._is_vision_capable:
+            parsed["hint"] += "且未配置 VLM 增强，无法分析图片内容。建议配置 EXCELMANUS_VLM_* 环境变量。"
+
         return json.dumps(parsed, ensure_ascii=False)
 
-    async def _handle_extract_table(
-        self,
-        arguments: dict[str, Any],
-        e: "AgentEngine",
-    ) -> str:
-        """处理 extract_table_from_image 元工具调用。
+    async def _run_vlm_describe(self) -> str | None:
+        """B 通道：调用小 VLM 生成图片的 Markdown 描述。
 
-        读取图片 → 构造专用提取 prompt → 独立 VLM 调用（带超时+重试） → 解析为 ReplicaSpec → 写入文件。
+        读取 _pending_vlm_image 中缓存的图片数据，调用 VLM，返回描述文本。
+        调用后清除缓存。返回 None 表示失败或无待处理图片。
         """
-        import asyncio
         import base64
-        import hashlib
-        import re as _re
-        from datetime import datetime, timezone
-        from pathlib import Path
 
-        from excelmanus.vision_extractor import (
-            build_extraction_prompt,
-            build_phase_a_prompt,
-            build_phase_a_structured_prompt,
-            build_phase_b_prompt,
-            html_table_to_replica_spec,
-            parse_extraction_result,
-            parse_html_table,
-            parse_phase_a_structured,
-            phase_a_structured_to_replica_spec,
-        )
+        from excelmanus.vision_extractor import build_describe_prompt
 
-        file_path = arguments.get("file_path", "")
-        output_path = arguments.get("output_path", "outputs/replica_spec.json")
-        focus = arguments.get("focus", "full")
-        strategy = arguments.get("strategy", "two_phase")
+        injection = getattr(self, "_pending_vlm_image", None)
+        if injection is None:
+            return None
+        self._pending_vlm_image = None
 
-        if not file_path:
-            return "错误: file_path 参数不能为空。"
-
-        workspace = Path(e._config.workspace_root).resolve()
-
-        img_path = Path(file_path)
-        if not img_path.is_absolute():
-            img_path = workspace / img_path
-        try:
-            if not img_path.resolve().is_relative_to(workspace):
-                return json.dumps({
-                    "status": "error",
-                    "message": f"路径安全限制: 输入图片路径必须在工作区内: {file_path}",
-                }, ensure_ascii=False)
-        except (ValueError, OSError):
-            return json.dumps({
-                "status": "error",
-                "message": f"路径安全限制: 无法解析输入路径: {file_path}",
-            }, ensure_ascii=False)
-
-        out_path = Path(output_path)
-        if not out_path.is_absolute():
-            out_path = workspace / out_path
-        try:
-            if not out_path.resolve().is_relative_to(workspace):
-                return json.dumps({
-                    "status": "error",
-                    "message": f"路径安全限制: 输出路径必须在工作区内: {output_path}",
-                }, ensure_ascii=False)
-        except (ValueError, OSError):
-            return json.dumps({
-                "status": "error",
-                "message": f"路径安全限制: 无法解析输出路径: {output_path}",
-            }, ensure_ascii=False)
-
-        if not img_path.is_file():
-            return f"错误: 图片文件不存在: {file_path}"
-
-        # 读取图片
-        try:
-            raw = img_path.read_bytes()
-        except OSError as exc:
-            return f"错误: 读取图片失败: {exc}"
-
-        source_hash = f"sha256:{hashlib.sha256(raw).hexdigest()[:16]}"
-
-        # ── VLM 调用参数 ──
+        e = self._engine
         vlm_client = e._vlm_client
         vlm_model = e._vlm_model
-        vlm_timeout = e._config.vlm_timeout_seconds
-        vlm_max_retries = e._config.vlm_max_retries
-        vlm_base_delay = e._config.vlm_retry_base_delay_seconds
-        max_long_edge = e._config.vlm_image_max_long_edge
-        jpeg_quality = e._config.vlm_image_jpeg_quality
-        logger.info("VLM 提取使用模型: %s, 策略: %s", vlm_model, strategy)
 
-        # ── 策略分派 ──
-        if strategy == "two_phase":
-            # 双模式预处理：data（增强文字识别）+ style（保留颜色信息）
-            compressed_data, mime_data = self._prepare_image_for_vlm(
-                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="data",
-            )
-            compressed_style, mime_style = self._prepare_image_for_vlm(
-                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="style",
-            )
-            b64_data = base64.b64encode(compressed_data).decode("ascii")
-            b64_style = base64.b64encode(compressed_style).decode("ascii")
-            logger.info(
-                "VLM 双模式预处理: data=%d bytes, style=%d bytes (原始 %d bytes)",
-                len(compressed_data), len(compressed_style), len(raw),
-            )
-            image_content_data = {"type": "image_url", "image_url": {"url": f"data:{mime_data};base64,{b64_data}", "detail": "high"}}
-            image_content_style = {"type": "image_url", "image_url": {"url": f"data:{mime_style};base64,{b64_style}", "detail": "high"}}
-
-            spec_or_error = await self._extract_two_phase(
-                image_content_data=image_content_data,
-                image_content_style=image_content_style,
-                raw_style_bytes=compressed_style,
-                vlm_client=vlm_client, vlm_model=vlm_model,
-                vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-                vlm_base_delay=vlm_base_delay,
-                file_path=file_path,
-            )
-        else:
-            # single 策略：使用 data 模式预处理
-            compressed, mime = self._prepare_image_for_vlm(
-                raw, max_long_edge=max_long_edge, jpeg_quality=jpeg_quality, mode="data",
-            )
-            b64 = base64.b64encode(compressed).decode("ascii")
-            image_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}}
-            spec_or_error = await self._extract_single(
-                image_content=image_content, focus=focus,
-                vlm_client=vlm_client, vlm_model=vlm_model,
-                vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-                vlm_base_delay=vlm_base_delay,
-                file_path=file_path,
-                build_extraction_prompt=build_extraction_prompt,
-                parse_extraction_result=parse_extraction_result,
-            )
-
-        if isinstance(spec_or_error, str):
-            return spec_or_error  # 错误 JSON
-        spec = spec_or_error
-
-        # 补充 provenance
-        spec.provenance.source_image_hash = source_hash
-        spec.provenance.model = vlm_model
-        spec.provenance.timestamp = datetime.now(timezone.utc).isoformat()
-
-        # 写入文件
-        out = Path(e._config.workspace_root) / output_path
-        out.parent.mkdir(parents=True, exist_ok=True)
-        spec_json = spec.model_dump_json(indent=2)
-        out.write_text(spec_json, encoding="utf-8")
-
-        # 构建摘要
-        total_cells = sum(len(s.cells) for s in spec.sheets)
-        total_styles = sum(len(s.styles) for s in spec.sheets)
-        total_merges = sum(len(s.merged_ranges) for s in spec.sheets)
-
-        # ── 自动流水线：extract 成功后自动 rebuild + verify ──
-        auto_excel_path = output_path.replace("replica_spec.json", "draft.xlsx")
-        if auto_excel_path == output_path:
-            auto_excel_path = "outputs/draft.xlsx"
-        auto_report_path = auto_excel_path.replace(".xlsx", "_diff_report.md")
-
-        rebuild_result: dict[str, Any] = {"status": "skipped"}
-        verify_result: dict[str, Any] = {"status": "skipped"}
-        try:
-            from excelmanus.tools.image_tools import (
-                init_guard,
-                rebuild_excel_from_spec,
-                verify_excel_replica,
-            )
-            init_guard(e._config.workspace_root)
-            rebuild_raw = rebuild_excel_from_spec(
-                spec_path=str(out), output_path=str(Path(e._config.workspace_root) / auto_excel_path),
-            )
-            rebuild_result = json.loads(rebuild_raw)
-            if rebuild_result.get("status") == "ok":
-                verify_raw = verify_excel_replica(
-                    spec_path=str(out),
-                    excel_path=str(Path(e._config.workspace_root) / auto_excel_path),
-                    report_path=str(Path(e._config.workspace_root) / auto_report_path),
-                )
-                verify_result = json.loads(verify_raw)
-        except Exception as exc:
-            logger.warning("自动流水线异常: %s", exc)
-
-        summary = {
-            "status": "ok",
-            "spec_path": output_path,
-            "summary": {
-                "sheets": len(spec.sheets),
-                "total_cells": total_cells,
-                "style_classes": total_styles,
-                "uncertainties": len(spec.uncertainties),
-                "merged_ranges": total_merges,
-            },
-            "auto_pipeline": {
-                "rebuild": {
-                    "status": rebuild_result.get("status", "error"),
-                    "output_path": auto_excel_path if rebuild_result.get("status") == "ok" else None,
-                    "build_summary": rebuild_result.get("build_summary"),
-                },
-                "verify": {
-                    "status": verify_result.get("status", "skipped"),
-                    "match_rate": verify_result.get("match_rate"),
-                    "report_path": auto_report_path if verify_result.get("status") == "ok" else None,
-                },
-            },
+        # 预处理图片（data 模式：增强文字可读性）
+        raw_bytes = base64.b64decode(injection["base64"])
+        compressed, mime = self._prepare_image_for_vlm(
+            raw_bytes,
+            max_long_edge=e._config.vlm_image_max_long_edge,
+            jpeg_quality=e._config.vlm_image_jpeg_quality,
+            mode="data",
+        )
+        b64 = base64.b64encode(compressed).decode("ascii")
+        image_content = {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
         }
-        return json.dumps(summary, ensure_ascii=False)
+
+        prompt = build_describe_prompt()
+        messages = [
+            {"role": "user", "content": [
+                image_content,
+                {"type": "text", "text": prompt},
+            ]},
+        ]
+
+        raw_text, last_error = await self._call_vlm_with_retry(
+            messages=messages,
+            vlm_client=vlm_client,
+            vlm_model=vlm_model,
+            vlm_timeout=e._config.vlm_timeout_seconds,
+            vlm_max_retries=e._config.vlm_max_retries,
+            vlm_base_delay=e._config.vlm_retry_base_delay_seconds,
+            phase_label="B通道描述",
+        )
+
+        if raw_text is None:
+            sanitized = self._sanitize_vlm_error(last_error) if last_error else "未知错误"
+            logger.warning("B 通道 VLM 描述失败: %s", sanitized)
+            return None
+
+        logger.info("B 通道 VLM 描述完成: %d 字符", len(raw_text))
+        return raw_text
 
     async def _call_vlm_with_retry(
         self,
@@ -377,251 +251,6 @@ class ToolDispatcher:
                     await asyncio.sleep(delay)
 
         return raw_text, last_error
-
-    async def _extract_single(
-        self,
-        *,
-        image_content: dict,
-        focus: str,
-        vlm_client: Any,
-        vlm_model: str,
-        vlm_timeout: int,
-        vlm_max_retries: int,
-        vlm_base_delay: float,
-        file_path: str,
-        build_extraction_prompt: Any,
-        parse_extraction_result: Any,
-    ) -> "ReplicaSpec | str":
-        """单次调用策略：一次 VLM 调用提取数据+样式。"""
-        prompt = build_extraction_prompt(focus=focus)
-        messages = [
-            {"role": "user", "content": [
-                image_content,
-                {"type": "text", "text": prompt},
-            ]},
-        ]
-
-        raw_text, last_error = await self._call_vlm_with_retry(
-            messages=messages,
-            vlm_client=vlm_client, vlm_model=vlm_model,
-            vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-            vlm_base_delay=vlm_base_delay, phase_label="single",
-        )
-
-        if raw_text is None:
-            return self._build_vlm_failure_result(
-                last_error, vlm_max_retries + 1, file_path,
-            )
-
-        try:
-            return parse_extraction_result(raw_text)
-        except ValueError as exc:
-            return json.dumps({
-                "status": "error",
-                "error_code": "PARSE_FAILED",
-                "message": f"提取结果解析失败: {exc}",
-                "raw_length": len(raw_text),
-                "fallback_hint": (
-                    "VLM 返回了非法 JSON。建议：1) 重试 extract_table_from_image；"
-                    "2) 或使用 read_image 查看图片后用 run_code + openpyxl 手动构建。"
-                ),
-            }, ensure_ascii=False)
-
-    async def _extract_two_phase(
-        self,
-        *,
-        image_content_data: dict,
-        image_content_style: dict,
-        raw_style_bytes: bytes,
-        vlm_client: Any,
-        vlm_model: str,
-        vlm_timeout: int,
-        vlm_max_retries: int,
-        vlm_base_delay: float,
-        file_path: str,
-    ) -> "ReplicaSpec | str":
-        """两阶段策略：Phase A 结构化 JSON + Phase B 语义颜色样式 + CV 像素分析。
-
-        新流程：
-        1. Phase A：用 data_image + 结构化 prompt → JSON cells
-           - 失败时降级到旧 HTML prompt
-        2. Phase B：用 style_image + 语义颜色 prompt → 样式 JSON
-           - 失败时降级为无样式
-        3. CV 分析：用 style_image → grid lines + colors + widths
-           - 失败时跳过
-        4. 合并：Phase A data + Phase B styles + CV hints → ReplicaSpec
-        """
-        from excelmanus.vision_extractor import (
-            build_phase_a_prompt,
-            build_phase_a_structured_prompt,
-            build_phase_b_prompt,
-            html_table_to_replica_spec,
-            parse_html_table,
-            parse_phase_a_structured,
-            phase_a_structured_to_replica_spec,
-        )
-
-        # ── Phase A: 结构化 JSON 提取（优先）──
-        prompt_a = build_phase_a_structured_prompt()
-        messages_a = [
-            {"role": "user", "content": [
-                image_content_data,
-                {"type": "text", "text": prompt_a},
-            ]},
-        ]
-
-        raw_a, error_a = await self._call_vlm_with_retry(
-            messages=messages_a,
-            vlm_client=vlm_client, vlm_model=vlm_model,
-            vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-            vlm_base_delay=vlm_base_delay, phase_label="Phase A (structured)",
-            response_format={"type": "json_object"},
-        )
-
-        if raw_a is None:
-            return self._build_vlm_failure_result(
-                error_a, vlm_max_retries + 1, file_path,
-            )
-
-        # 尝试结构化解析，失败则降级到 HTML
-        phase_a_data: dict[str, Any] | None = None
-        html_table: str | None = None
-        use_structured = False
-
-        try:
-            phase_a_data = parse_phase_a_structured(raw_a)
-            use_structured = True
-            logger.info(
-                "Phase A (structured) 完成: %d cells",
-                len(phase_a_data.get("cells", [])),
-            )
-        except ValueError as exc:
-            logger.warning("Phase A 结构化解析失败，尝试 HTML 解析同一响应: %s", exc)
-            # 先尝试对同一响应做 HTML 解析（避免额外 VLM 调用）
-            try:
-                html_table = parse_html_table(raw_a)
-                logger.info("Phase A (HTML in-place fallback) 完成: %d 字符", len(html_table))
-            except ValueError:
-                # 同一响应 HTML 也解析失败，发起新的 HTML VLM 调用
-                logger.warning("同一响应 HTML 解析也失败，发起 HTML fallback VLM 调用")
-                prompt_a_html = build_phase_a_prompt()
-                messages_a_html = [
-                    {"role": "user", "content": [
-                        image_content_data,
-                        {"type": "text", "text": prompt_a_html},
-                    ]},
-                ]
-                raw_a_html, error_a_html = await self._call_vlm_with_retry(
-                    messages=messages_a_html,
-                    vlm_client=vlm_client, vlm_model=vlm_model,
-                    vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-                    vlm_base_delay=vlm_base_delay, phase_label="Phase A (HTML fallback)",
-                )
-                if raw_a_html is not None:
-                    try:
-                        html_table = parse_html_table(raw_a_html)
-                        logger.info("Phase A (HTML fallback) 完成: %d 字符", len(html_table))
-                    except ValueError as exc2:
-                        return json.dumps({
-                            "status": "error",
-                            "error_code": "PHASE_A_PARSE_FAILED",
-                            "message": f"Phase A 解析失败（结构化+HTML 均失败）: {exc2}",
-                            "raw_length": len(raw_a),
-                            "fallback_hint": (
-                                "VLM Phase A 未返回有效输出。"
-                                "建议：1) 用 strategy='single' 重试；"
-                                "2) 或用 read_image 查看图片后用 run_code 手动构建。"
-                            ),
-                        }, ensure_ascii=False)
-                else:
-                    return self._build_vlm_failure_result(
-                        error_a_html, vlm_max_retries + 1, file_path,
-                    )
-
-        # ── Phase B: 语义颜色样式提取 ──
-        # 构建 Phase B prompt（需要 Phase A 的表格结构作为参考）
-        if use_structured and phase_a_data:
-            # 从结构化数据构建简要表格描述供 Phase B 参考
-            dims = phase_a_data.get("dimensions", {})
-            phase_b_ref = f"表格结构: {dims.get('rows', '?')}行 x {dims.get('cols', '?')}列"
-        else:
-            phase_b_ref = html_table or ""
-
-        prompt_b = build_phase_b_prompt(phase_b_ref)
-        messages_b = [
-            {"role": "user", "content": [
-                image_content_style,
-                {"type": "text", "text": prompt_b},
-            ]},
-        ]
-
-        style_json: dict[str, Any] | None = None
-        raw_b, error_b = await self._call_vlm_with_retry(
-            messages=messages_b,
-            vlm_client=vlm_client, vlm_model=vlm_model,
-            vlm_timeout=vlm_timeout, vlm_max_retries=vlm_max_retries,
-            vlm_base_delay=vlm_base_delay, phase_label="Phase B",
-            response_format={"type": "json_object"},
-        )
-
-        if raw_b is not None:
-            try:
-                import re as _re
-                text_b = raw_b.strip()
-                code_match = _re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text_b, _re.DOTALL)
-                if code_match:
-                    text_b = code_match.group(1).strip()
-                style_json = json.loads(text_b)
-                logger.info("Phase B 完成: %d 个样式类", len(style_json.get("styles", {})))
-            except (json.JSONDecodeError, Exception) as exc:
-                logger.warning("Phase B 样式解析失败（降级为无样式）: %s", exc)
-                style_json = None
-        else:
-            logger.warning("Phase B 调用失败（降级为无样式）")
-
-        # ── CV 像素分析（使用 style 模式预处理的图片） ──
-        cv_hints: dict[str, Any] | None = None
-        try:
-            from excelmanus.cv_analyzer import (
-                compute_column_widths,
-                compute_row_heights,
-                detect_grid_lines,
-                sample_cell_colors,
-            )
-            grid = detect_grid_lines(raw_style_bytes)
-            if len(grid["h_lines"]) >= 2 and len(grid["v_lines"]) >= 2:
-                cv_hints = {
-                    "column_widths": compute_column_widths(grid),
-                    "row_heights": compute_row_heights(grid),
-                    "cell_colors": sample_cell_colors(raw_style_bytes, grid),
-                }
-                logger.info(
-                    "CV 分析完成: %d行 x %d列",
-                    len(grid["h_lines"]) - 1, len(grid["v_lines"]) - 1,
-                )
-            else:
-                logger.info("CV 分析: 未检测到足够网格线，跳过")
-        except Exception as exc:
-            logger.warning("CV 分析失败（降级为纯 VLM）: %s", exc)
-
-        # ── 合并 → ReplicaSpec ──
-        try:
-            if use_structured and phase_a_data:
-                return phase_a_structured_to_replica_spec(
-                    phase_a_data, style_json, cv_hints=cv_hints,
-                )
-            else:
-                return html_table_to_replica_spec(html_table, style_json)
-        except Exception as exc:
-            return json.dumps({
-                "status": "error",
-                "error_code": "MERGE_FAILED",
-                "message": f"ReplicaSpec 转换失败: {exc}",
-                "fallback_hint": (
-                    "数据提取成功但转换失败。"
-                    "建议：用 strategy='single' 重试。"
-                ),
-            }, ensure_ascii=False)
 
     @staticmethod
     def _prepare_image_for_vlm(
@@ -1063,19 +692,6 @@ class ToolDispatcher:
                             result=result_str if success else None,
                             error=error if not success else None,
                         )
-                    elif tool_name == "extract_table_from_image":
-                        result_str = await self._handle_extract_table(
-                            arguments=arguments, e=e,
-                        )
-                        success = not result_str.startswith("错误")
-                        error = None if success else result_str
-                        log_tool_call(
-                            logger,
-                            tool_name,
-                            arguments,
-                            result=result_str if success else None,
-                            error=error if not success else None,
-                        )
                     elif tool_name == "delegate_to_subagent":
                         task_value = arguments.get("task")
                         task_brief = arguments.get("task_brief")
@@ -1180,7 +796,8 @@ class ToolDispatcher:
                             error = None
                             finish_accepted = True
                         elif getattr(e, "_finish_task_warned", False):
-                            result_str = f"✅ 任务完成（无写入）\n\n{rendered}" if rendered else "✓ 任务完成（无写入）。"
+                            _no_write_suffix = "（无写入）" if _hint == "read_only" else ""
+                            result_str = f"✅ 任务完成{_no_write_suffix}\n\n{rendered}" if rendered else f"✓ 任务完成{_no_write_suffix}。"
                             success = True
                             error = None
                             finish_accepted = True
@@ -1241,7 +858,7 @@ class ToolDispatcher:
                         )
                     elif tool_name == "run_code" and e._config.code_policy_enabled:
                         # ── 动态代码策略引擎路由 ──
-                        from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets
+                        from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets, strip_exit_calls
                         _code_arg = arguments.get("code") or ""
                         _cp_engine = CodePolicyEngine(
                             extra_safe_modules=e._config.code_policy_extra_safe_modules,
@@ -1315,34 +932,107 @@ class ToolDispatcher:
                             )
                             log_tool_call(logger, tool_name, arguments, result=result_str)
                         else:
-                            # RED 或配置不允许自动执行 → /accept 流程
-                            _caps_detail = ", ".join(sorted(_analysis.capabilities))
-                            _details_text = "; ".join(_analysis.details[:3])
-                            pending = e._approval.create_pending(
-                                tool_name=tool_name,
-                                arguments=arguments,
-                                tool_scope=tool_scope,
-                            )
-                            pending_approval = True
-                            approval_id = pending.approval_id
-                            result_str = (
-                                f"⚠️ 代码包含高风险操作，需要人工确认：\n"
-                                f"- 风险等级: {_analysis.tier.value}\n"
-                                f"- 检测到: {_caps_detail}\n"
-                                f"- 详情: {_details_text}\n"
-                                f"{e._format_pending_prompt(pending)}"
-                            )
-                            success = True
-                            error = None
-                            e._emit_pending_approval_event(
-                                pending=pending, on_event=on_event, iteration=iteration,
-                            )
-                            logger.info(
-                                "run_code 策略引擎: tier=%s → pending approval %s",
-                                _analysis.tier.value,
-                                pending.approval_id,
-                            )
-                            log_tool_call(logger, tool_name, arguments, result=result_str)
+                            # RED 或配置不允许自动执行
+                            # ── 尝试自动清洗退出调用并降级 ──
+                            _sanitized_code = strip_exit_calls(_code_arg) if _analysis.tier == CodeRiskTier.RED else None
+                            _downgraded = False
+                            if _sanitized_code is not None:
+                                _re_analysis = _cp_engine.analyze(_sanitized_code)
+                                _re_auto_green = (
+                                    _re_analysis.tier == CodeRiskTier.GREEN
+                                    and e._config.code_policy_green_auto_approve
+                                )
+                                _re_auto_yellow = (
+                                    _re_analysis.tier == CodeRiskTier.YELLOW
+                                    and e._config.code_policy_yellow_auto_approve
+                                )
+                                if _re_auto_green or _re_auto_yellow:
+                                    _downgraded = True
+                                    logger.info(
+                                        "run_code 自动清洗: %s → %s (移除退出调用)",
+                                        _analysis.tier.value,
+                                        _re_analysis.tier.value,
+                                    )
+                                    _sanitized_args = {**arguments, "code": _sanitized_code, "sandbox_tier": _re_analysis.tier.value}
+                                    result_value, audit_record = await e._execute_tool_with_audit(
+                                        tool_name=tool_name,
+                                        arguments=_sanitized_args,
+                                        tool_scope=tool_scope,
+                                        approval_id=e._approval.new_approval_id(),
+                                        created_at_utc=e._approval.utc_now(),
+                                        undoable=False,
+                                    )
+                                    result_str = str(result_value)
+                                    tool_def = getattr(e._registry, "get_tool", lambda _: None)(tool_name)
+                                    if tool_def is not None:
+                                        result_str = tool_def.truncate_result(result_str)
+                                    success = True
+                                    error = None
+                                    # 写入追踪（与 GREEN/YELLOW 路径一致）
+                                    _rc_json_s: dict | None = None
+                                    try:
+                                        _rc_json_s = json.loads(result_str)
+                                        if not isinstance(_rc_json_s, dict):
+                                            _rc_json_s = None
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                                    _has_cow_s = bool(_rc_json_s and _rc_json_s.get("cow_mapping"))
+                                    _has_ast_write_s = any(
+                                        t.operation == "write"
+                                        for t in extract_excel_targets(_sanitized_code)
+                                    )
+                                    if (
+                                        (audit_record is not None and audit_record.changes)
+                                        or _has_cow_s
+                                        or _has_ast_write_s
+                                    ):
+                                        e._state.record_write_action()
+                                    _stdout_tail_s = ""
+                                    if _rc_json_s is not None:
+                                        _stdout_tail_s = _rc_json_s.get("stdout_tail", "")
+                                    if audit_record is not None and e._window_perception is not None:
+                                        e._window_perception.observe_code_execution(
+                                            code=_sanitized_code,
+                                            audit_changes=audit_record.changes if audit_record else None,
+                                            stdout_tail=_stdout_tail_s,
+                                            iteration=iteration,
+                                        )
+                                    logger.info(
+                                        "run_code 策略引擎: tier=%s(清洗后) auto_approved=True caps=%s",
+                                        _re_analysis.tier.value,
+                                        sorted(_re_analysis.capabilities),
+                                    )
+                                    log_tool_call(logger, tool_name, _sanitized_args, result=result_str)
+
+                            if not _downgraded:
+                                # 无法降级 → /accept 流程
+                                _caps_detail = ", ".join(sorted(_analysis.capabilities))
+                                _details_text = "; ".join(_analysis.details[:3])
+                                pending = e._approval.create_pending(
+                                    tool_name=tool_name,
+                                    arguments=arguments,
+                                    tool_scope=tool_scope,
+                                )
+                                pending_approval = True
+                                approval_id = pending.approval_id
+                                result_str = (
+                                    f"⚠️ 代码包含高风险操作，需要人工确认：\n"
+                                    f"- 风险等级: {_analysis.tier.value}\n"
+                                    f"- 检测到: {_caps_detail}\n"
+                                    f"- 详情: {_details_text}\n"
+                                    f"{e._format_pending_prompt(pending)}"
+                                )
+                                success = True
+                                error = None
+                                e._emit_pending_approval_event(
+                                    pending=pending, on_event=on_event, iteration=iteration,
+                                )
+                                logger.info(
+                                    "run_code 策略引擎: tier=%s → pending approval %s",
+                                    _analysis.tier.value,
+                                    pending.approval_id,
+                                )
+                                log_tool_call(logger, tool_name, arguments, result=result_str)
                     elif e._approval.is_audit_only_tool(tool_name):
                         result_value, audit_record = await e._execute_tool_with_audit(
                             tool_name=tool_name,
@@ -1486,9 +1176,58 @@ class ToolDispatcher:
         if _cow_reminders:
             result_str = result_str + "\n" + "\n".join(_cow_reminders)
 
+        # ── 备份沙盒提醒：首次写入成功后追加备份文件路径 ──
+        if (
+            success
+            and e._backup_enabled
+            and e._backup_manager is not None
+            and not e._state.backup_write_notice_shown
+        ):
+            from pathlib import Path as _Path
+
+            from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS as _RO_TOOLS
+
+            if tool_name not in _RO_TOOLS:
+                backups = e._backup_manager.list_backups()
+                if backups:
+                    backup_dir = str(e._backup_manager.backup_dir)
+                    file_names = [
+                        _Path(b["backup"]).name
+                        for b in backups
+                        if b.get("exists") == "True"
+                    ]
+                    files_str = "、".join(file_names) if file_names else ""
+                    notice_parts = [
+                        f"\n[备份提示] 修改已保存到备份副本目录 `{backup_dir}/`",
+                    ]
+                    if files_str:
+                        notice_parts.append(f"（当前备份文件：{files_str}）")
+                    notice_parts.append(
+                        "。请在回复中告知用户备份文件位置，"
+                        "用户可通过 `/backup apply` 将修改应用到原文件。"
+                    )
+                    result_str = result_str + "".join(notice_parts)
+                    e._state.backup_write_notice_shown = True
+
         # ── 图片注入：检测 _image_injection 并注入到 memory ──
         if success and result_str:
             result_str = self._try_inject_image(result_str)
+
+        # ── B 通道：异步 VLM 描述追加 ──
+        if success and getattr(self, "_pending_vlm_image", None) is not None:
+            vlm_desc = await self._run_vlm_describe()
+            if vlm_desc:
+                result_str = (
+                    result_str
+                    + "\n\n--- VLM 增强描述（B 通道） ---\n"
+                    + vlm_desc
+                )
+                logger.info("B 通道描述已追加到 tool result")
+            else:
+                result_str = (
+                    result_str
+                    + "\n\n[VLM 增强描述失败，请直接基于图片或已有信息操作]"
+                )
 
         result_str = e._enrich_tool_result_with_window_perception(
             tool_name=tool_name,

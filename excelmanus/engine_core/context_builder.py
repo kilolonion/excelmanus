@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import hashlib as _hashlib
+import json as _json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -154,6 +156,68 @@ class ContextBuilder:
         minimal_parts.append("[Skillpack 正文已省略以适配上下文窗口]")
         return "\n".join(minimal_parts)
 
+    def _build_meta_cognition_notice(self) -> str:
+        """条件性注入进展反思提示，帮助 agent 在困境中调整策略。
+
+        灵感来源：Metacognition is All You Need 论文。
+        仅在特定退化条件下触发（接近迭代上限 / 连续失败 / 执行守卫已触发），
+        否则返回空字符串（零 token 开销）。
+        """
+        e = self._engine
+        state = e._state
+        max_iter = e._config.max_iterations
+        iteration = state.last_iteration_count
+        failures = state.last_failure_count
+        successes = state.last_success_count
+
+        parts: list[str] = []
+
+        # 条件 1：接近迭代上限（已用 >= 60%）
+        if max_iter > 0 and iteration >= max_iter * 0.6:
+            parts.append(
+                f"⚠️ 接近迭代上限（{iteration}/{max_iter}），"
+                "请尽快完成任务或调用 finish_task/ask_user。"
+            )
+
+        # 条件 2：连续失败 >= 3
+        if failures >= 3 and successes == 0:
+            parts.append(
+                f"⚠️ 已连续失败 {failures} 次且无成功调用。建议："
+                "1) 检查文件路径和 sheet 名是否正确 "
+                "2) 简化操作步骤 "
+                "3) 调用 ask_user 确认。"
+            )
+
+        # 条件 3：执行守卫曾触发（agent 曾给出建议而不执行）
+        if state.execution_guard_fired and not state.has_write_tool_call:
+            parts.append(
+                "⚠️ 此前已触发执行守卫。请通过工具执行操作，不要仅给出文本建议。"
+            )
+
+        if not parts:
+            return ""
+
+        return "## 进展反思\n" + "\n".join(parts)
+
+    def _build_runtime_metadata_line(self) -> str:
+        """生成紧凑的运行时元数据行，让 agent 感知自身状态。
+
+        灵感来源：OpenClaw Prompt Compiler 的 Runtime Metadata 设计。
+        一行即可让 agent 知道自己是什么模型、当前轮次、权限状态等。
+        """
+        e = self._engine
+        parts: list[str] = [
+            f"model={e._active_model}",
+            f"turn={e._session_turn}/{e._config.max_iterations}",
+            f"write_hint={e._state.current_write_hint}",
+            f"fullaccess={'on' if e._full_access_enabled else 'off'}",
+            f"backup={'on' if e._backup_enabled else 'off'}",
+            f"mcp={e.mcp_connected_count}",
+        ]
+        if e._workspace_manifest is not None:
+            parts.append(f"files={e._workspace_manifest.total_files}")
+        return "Runtime: " + " | ".join(parts)
+
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
@@ -163,6 +227,10 @@ class ContextBuilder:
         """构建用于本轮请求的 system prompts，并在必要时压缩上下文。"""
         e = self._engine
         base_prompt = e._memory.system_prompt
+
+        # 注入运行时元数据（紧凑单行，~30 token）
+        runtime_line = self._build_runtime_metadata_line()
+        base_prompt = base_prompt + "\n\n" + runtime_line
 
         access_notice = e._build_access_notice()
         if access_notice:
@@ -180,12 +248,17 @@ class ContextBuilder:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # 注入工具索引
-        _tool_index = e._build_tool_index_notice(
-            compact=False,
-        )
-        if _tool_index:
-            base_prompt = base_prompt + "\n\n" + _tool_index
+        workspace_manifest_notice = self._build_workspace_manifest_notice()
+        if workspace_manifest_notice:
+            base_prompt = base_prompt + "\n\n" + workspace_manifest_notice
+
+        # 工具索引已合并到 {auto_generated_capability_map}（identity prompt），
+        # 不再独立注入，避免重复消耗 ~200-400 token/轮。
+
+        # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
+        meta_cognition = self._build_meta_cognition_notice()
+        if meta_cognition:
+            base_prompt = base_prompt + "\n\n" + meta_cognition
 
         # 注入任务策略（PromptComposer strategies）
         _strategy_text_captured = ""
@@ -197,6 +270,7 @@ class ContextBuilder:
                     sheet_count=route_result.sheet_count,
                     total_rows=route_result.max_total_rows,
                     task_tags=list(route_result.task_tags),
+                    full_access=e._full_access_enabled,
                 )
                 _strategy_text = e._prompt_composer.compose_strategies_text(_p_ctx)
                 if _strategy_text:
@@ -230,8 +304,10 @@ class ContextBuilder:
             _snapshot_components["cow_path_notice"] = cow_path_notice
         if mcp_context:
             _snapshot_components["mcp_context"] = mcp_context
-        if _tool_index:
-            _snapshot_components["tool_index"] = _tool_index
+        if workspace_manifest_notice:
+            _snapshot_components["workspace_manifest"] = workspace_manifest_notice
+        if runtime_line:
+            _snapshot_components["runtime_metadata"] = runtime_line
         if _strategy_text_captured:
             _snapshot_components["prompt_strategies"] = _strategy_text_captured
         if _hook_context_captured:
@@ -247,13 +323,28 @@ class ContextBuilder:
             {"name": name, "chars": len(text)}
             for name, text in _snapshot_components.items()
         ]
-        _injection_snapshot: dict[str, Any] = {
-            "session_turn": e._session_turn,
-            "summary": _injection_summary,
-            "total_chars": sum(len(t) for t in _snapshot_components.values()),
-            "components": _snapshot_components,
-        }
-        e._state.prompt_injection_snapshots.append(_injection_snapshot)
+        _content_fingerprint = _hashlib.md5(
+            _json.dumps(
+                _snapshot_components, sort_keys=True, ensure_ascii=False,
+            ).encode()
+        ).hexdigest()[:12]
+
+        _snapshots = e._state.prompt_injection_snapshots
+        _last_fp = _snapshots[-1].get("_fingerprint") if _snapshots else None
+
+        if _last_fp != _content_fingerprint:
+            _snapshots.append({
+                "session_turn": e._session_turn,
+                "summary": _injection_summary,
+                "total_chars": sum(len(t) for t in _snapshot_components.values()),
+                "components": _snapshot_components,
+                "_fingerprint": _content_fingerprint,
+            })
+        else:
+            _snapshots.append({
+                "session_turn": e._session_turn,
+                "_ref": _content_fingerprint,
+            })
 
         def _compose_prompts() -> list[str]:
             mode = e._effective_system_mode()
@@ -498,19 +589,19 @@ class ContextBuilder:
         )
 
     def _build_backup_notice(self) -> str:
-        """备份模式启用时，生成提示词注入。"""
+        """备份模式启用时，生成提示词注入。
+
+        注意：此文本必须在整个 turn 内保持稳定（不含动态计数等），
+        以确保系统提示前缀一致性，最大化 provider prompt cache 命中率。
+        """
         e = self._engine
         if not e._backup_enabled or e._backup_manager is None:
             return ""
-        backups = e._backup_manager.list_backups()
-        count = len(backups)
         lines = [
             "## ⚠️ 备份沙盒模式已启用",
             "所有文件读写操作已自动重定向到 `outputs/backups/` 下的工作副本。",
             "原始文件不会被修改。操作完成后用户可通过 `/backup apply` 将修改应用到原文件。",
         ]
-        if count > 0:
-            lines.append(f"当前已管理 {count} 个备份文件。")
         return "\n".join(lines)
 
     def _build_mcp_context_notice(self) -> str:
@@ -559,6 +650,25 @@ class ContextBuilder:
         )
         return "\n".join(lines)
 
+    def _build_workspace_manifest_notice(self) -> str:
+        """懒加载构建工作区 Manifest 并生成 system prompt 注入文本。
+
+        首次调用时构建 Manifest（递归扫描工作区 Excel 文件元数据），
+        后续调用复用缓存。注入文本根据文件数量自动选择详细度。
+        """
+        e = self._engine
+        if not e._workspace_manifest_built:
+            e._workspace_manifest_built = True
+            try:
+                from excelmanus.workspace_manifest import build_manifest
+                e._workspace_manifest = build_manifest(e._config.workspace_root)
+            except Exception:
+                logger.debug("Workspace manifest 构建失败", exc_info=True)
+                e._workspace_manifest = None
+        if e._workspace_manifest is None:
+            return ""
+        return e._workspace_manifest.get_system_prompt_summary()
+
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
         e = self._engine
@@ -581,13 +691,11 @@ class ContextBuilder:
 
         _CATEGORY_LABELS: dict[str, str] = {
             "data_read": "数据读取",
-            "data_write": "数据写入",
-            "format": "格式化",
-            "advanced_format": "高级格式",
-            "chart": "图表",
             "sheet": "工作表操作",
             "file": "文件操作",
             "code": "代码执行",
+            "macro": "声明式复合操作",
+            "vision": "图片视觉",
         }
 
         limit = max(1, int(max_tools_per_category))

@@ -1,4 +1,4 @@
-"""CLI 问题选择器 — Claude Code 风格内联式选择。
+"""CLI 问题选择器 — 内联式选择。
 
 提供 › 光标导航的内联选择器，支持单选/多选、Other 文本输入。
 """
@@ -77,7 +77,7 @@ def _is_interactive() -> bool:
 async def interactive_question_select(
     question: "PendingQuestion",
 ) -> InteractiveSelectResult | None:
-    """Claude Code 风格内联问题选择器。
+    """内联问题选择器。
 
     单选：↑↓ 移动光标，Enter 确认。
     多选：↑↓ 移动光标，Space 切换选中，Enter 提交。
@@ -150,7 +150,7 @@ async def interactive_question_select(
         event.app.exit()
 
     def _get_formatted_text() -> FormattedText:
-        """生成 Claude Code 风格选择器文本。"""
+        """生成选择器文本。"""
         fragments: list[tuple[str, str]] = []
         header = question.header or "待确认"
         fragments.append(("class:header", f"  {THEME.AGENT_PREFIX} {header}\n"))

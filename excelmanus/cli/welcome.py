@@ -1,4 +1,4 @@
-"""CLI 欢迎横幅 — Claude Code 风格 + Excel 电子表格 ASCII art。"""
+"""CLI 欢迎横幅 — 极简风格 + Excel 电子表格 ASCII art。"""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def render_welcome(
     skill_count: int = 0,
     mcp_count: int = 0,
 ) -> None:
-    """渲染 Claude Code 风格欢迎横幅。
+    """渲染欢迎横幅。
 
     布局：
     ── ExcelManus vX.Y.Z ──────────────────────

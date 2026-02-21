@@ -1,4 +1,4 @@
-"""CLI 配色主题 — Excel 绿色系亮色主题 + Claude Code 风格符号。"""
+"""CLI 配色主题 — Excel 绿色系亮色主题 + 极简风格符号。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ class Theme:
     """CLI 配色与符号常量。
 
     主色取自 Microsoft Excel 品牌色板（绿色系），
-    符号参考 Claude Code 的极简交互风格。
+    符号采用极简交互风格。
     """
 
     # 主色 — Excel 绿色系
@@ -29,7 +29,7 @@ class Theme:
     DIM: str = "dim"
     BOLD: str = "bold"
 
-    # Claude Code 风格符号
+    # 极简风格符号
     USER_PREFIX: str = "›"
     AGENT_PREFIX: str = "●"
     SEPARATOR: str = "─"

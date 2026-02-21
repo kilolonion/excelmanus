@@ -31,10 +31,6 @@ ICON_DEFAULT = "🟡"
 
 CATEGORY_DISPLAY_NAMES: dict[str, str] = {
     "data_read": "数据读取 (data_read)",
-    "data_write": "数据写入 (data_write)",
-    "format": "格式化 (format)",
-    "advanced_format": "高级格式 (advanced_format)",
-    "chart": "图表 (chart)",
     "sheet": "工作表 (sheet)",
     "file": "文件操作 (file)",
     "code": "代码执行 (code)",
@@ -47,7 +43,7 @@ CATEGORY_DISPLAY_NAMES: dict[str, str] = {
 INTROSPECTION_GUIDANCE = """\
 ## 自省指引
 - 不确定某工具的参数或限制时，调用 introspect_capability 查询
-- 遇到复杂能力判断且 introspect_capability 无法明确回答时，委派 introspector 子代理
+- 遇到复杂能力判断且 introspect_capability 无法明确回答时，尝试 run_code 通过 Python 实现
 - 禁止向用户暴露自省过程和内部实现细节"""
 
 

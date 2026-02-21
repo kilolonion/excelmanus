@@ -1,6 +1,6 @@
-"""流式事件渲染器 — Claude Code 风格的统一终端渲染。
+"""流式事件渲染器 — 极简风格的统一终端渲染。
 
-将 AgentEngine 事件渲染为极简的 Claude Code 风格输出：
+将 AgentEngine 事件渲染为极简风格输出：
 - 工具调用：● tool_name(args) + └ ✓/✗ result
 - 思考：dim italic 流式输出
 - 子代理：树形进度 + 分隔线摘要
@@ -64,9 +64,9 @@ _STATUS_SYMBOLS: dict[str, str] = {
 
 
 class StreamRenderer:
-    """Claude Code 风格流式事件渲染器。
+    """极简风格流式事件渲染器。
 
-    接收 ToolCallEvent 并渲染为极简的 Claude Code 风格终端输出。
+    接收 ToolCallEvent 并渲染为极简风格终端输出。
     使用 ● 前缀、└/├ 树形结构、─ 分隔线，无 emoji 图标。
     """
 

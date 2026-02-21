@@ -195,3 +195,41 @@ def test_chitchat_regex_matches_greetings(message: str) -> None:
 def test_chitchat_regex_does_not_match_task_messages(message: str) -> None:
     """包含任务内容的消息不应被 _CHITCHAT_RE 匹配。"""
     assert not _CHITCHAT_RE.match(message.strip()), f"Should NOT match: {message!r}"
+
+
+# ── 8. P2 回归：纯分析中文消息应返回 read_only ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "筛选出所有必须参加的班干部并统计每个班有多少人",
+        "找出哪个班自愿报名的人数最多",
+        "帮我汇总各部门的销售数据",
+        "按月份排名各产品销量",
+        "分析各地区营收占比",
+        "预览前20行数据",
+        "检查是否有重复的学号",
+        "对比两个工作表的差异",
+    ],
+)
+def test_pure_analysis_chinese_returns_read_only(message: str) -> None:
+    """P2 回归：纯分析/筛选/统计/找出中文消息应返回 read_only。
+
+    conversation_20260221T135637 中"筛选+统计+找出"被误判为 may_write。
+    """
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "read_only", f"Expected 'read_only' for: {message!r}, got {result!r}"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "筛选出所有必须参加的班干部并排序",
+        "格式化表头后统计数据",
+        "创建一个汇总表",
+    ],
+)
+def test_mixed_write_and_read_returns_may_write(message: str) -> None:
+    """同时包含写入和只读关键词时，may_write 应优先。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"

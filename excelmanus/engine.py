@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import openai
 
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
+from excelmanus.compaction import CompactionManager
 from excelmanus.backup import BackupManager
 from excelmanus.providers import create_client
 from excelmanus.config import ExcelManusConfig, ModelProfile
@@ -78,6 +79,7 @@ _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
     "memory_save", "memory_read_topic",
 )
+_ALWAYS_AVAILABLE_TOOLS_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS)
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
@@ -341,6 +343,31 @@ def _usage_token(usage: Any, key: str) -> int:
         return 0
 
 
+def _extract_cached_tokens(usage: Any) -> int:
+    """从 usage.prompt_tokens_details.cached_tokens 提取缓存命中 token 数。
+
+    兼容 OpenAI SDK 对象和 dict 两种格式。非 OpenAI provider 无此字段时返回 0。
+    """
+    if usage is None:
+        return 0
+    details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    if details is None:
+        return 0
+    raw = (
+        details.get("cached_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "cached_tokens", 0)
+    )
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _looks_like_html_document(text: str) -> bool:
     """判断文本是否像整页 HTML 文档（常见于 base_url 配置错误）。"""
     stripped = text.lstrip()
@@ -482,6 +509,8 @@ class TurnDiagnostic:
     # token 使用
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # provider 缓存命中的 token 数（OpenAI prompt_tokens_details.cached_tokens）
+    cached_tokens: int = 0
     # 模型 thinking/reasoning 内容
     thinking_content: str = ""
     # 该迭代暴露给模型的工具名列表
@@ -495,6 +524,8 @@ class TurnDiagnostic:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
         }
+        if self.cached_tokens:
+            d["cached_tokens"] = self.cached_tokens
         if self.thinking_content:
             d["thinking_content"] = self.thinking_content
         if self.tool_names:
@@ -634,6 +665,19 @@ class AgentEngine:
             self._vlm_client = self._client
         self._vlm_model = _vlm_model
         self._config = config
+        # ── 视觉能力推断 ──
+        self._is_vision_capable = self._infer_vision_capable(config)
+        # B 通道可用：vlm_enhance 开启 且 有独立 VLM 配置（或主模型可作为 VLM）
+        self._vlm_enhance_available = (
+            config.vlm_enhance
+            and bool(config.vlm_api_key or config.vlm_base_url or config.vlm_model)
+        )
+        if config.vlm_enhance and not self._vlm_enhance_available:
+            logger.info("VLM 增强已开启但未配置独立 VLM，B 通道不可用")
+        logger.info(
+            "视觉模式: main_vision=%s, vlm_enhance=%s",
+            self._is_vision_capable, self._vlm_enhance_available,
+        )
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
         self._registry = registry.fork() if hasattr(registry, "fork") else registry
@@ -718,6 +762,7 @@ class AgentEngine:
         self._system_question_actions: dict[str, dict[str, Any]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
         self._pending_approval_route_result: SkillMatchResult | None = None
+        self._pending_approval_tool_call_id: str | None = None
         self._plan_mode_enabled: bool = False
         self._plan_intercept_task_create: bool = False
         self._bench_mode: bool = False
@@ -763,6 +808,9 @@ class AgentEngine:
             refill_reader=self._focus_window_refill_reader,
         )
 
+        # ── 上下文自动压缩（Compaction）──────────────────────
+        self._compaction_manager = CompactionManager(config)
+
         # ── PromptComposer 集成 ─────────────────────────────
         self._prompt_composer: Any = None
         try:
@@ -774,10 +822,43 @@ class AgentEngine:
         except Exception:
             logger.debug("PromptComposer 初始化失败，策略注入不可用", exc_info=True)
 
-        # ── 持久记忆集成 ──────────────────────────────────
+        # ── Workspace Manifest（工作区文件清单） ─────────────
+        self._workspace_manifest: Any = None  # WorkspaceManifest | None
+        self._workspace_manifest_built: bool = False
+        self._manifest_refresh_needed: bool = False
+
+        # ── 持久记忆集成 ────────────────────────
         self._persistent_memory = persistent_memory
         self._memory_extractor = memory_extractor
-        # 会话启动时加载核心记忆到 system prompt
+        # 语义记忆增强层（延迟初始化，待首轮 chat 时异步同步索引）
+        self._semantic_memory: Any = None  # SemanticMemory | None
+        self._embedding_client: Any = None  # EmbeddingClient | None
+        if persistent_memory is not None and config.embedding_enabled:
+            try:
+                from excelmanus.embedding.client import EmbeddingClient
+                from excelmanus.embedding.semantic_memory import SemanticMemory
+                _emb_openai_client = openai.AsyncOpenAI(
+                    api_key=config.embedding_api_key or config.api_key,
+                    base_url=config.embedding_base_url or config.base_url,
+                )
+                self._embedding_client = EmbeddingClient(
+                    client=_emb_openai_client,
+                    model=config.embedding_model,
+                    dimensions=config.embedding_dimensions,
+                    timeout_seconds=config.embedding_timeout_seconds,
+                )
+                self._semantic_memory = SemanticMemory(
+                    persistent_memory=persistent_memory,
+                    embedding_client=self._embedding_client,
+                    top_k=config.memory_semantic_top_k,
+                    threshold=config.memory_semantic_threshold,
+                    fallback_recent=config.memory_semantic_fallback_recent,
+                )
+            except Exception:
+                logger.debug("语义记忆初始化失败，回退到传统加载", exc_info=True)
+                self._semantic_memory = None
+                self._embedding_client = None
+        # 会话启动时加载核心记忆到 system prompt（同步回退，语义检索在首轮 chat 时异步执行）
         if persistent_memory is not None:
             core_memory = persistent_memory.load_core()
             if core_memory:
@@ -801,6 +882,122 @@ class AgentEngine:
         self._subagent_orchestrator = SubagentOrchestrator(self)
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
+
+    @staticmethod
+    def _infer_vision_capable(config: "ExcelManusConfig") -> bool:
+        """推断主模型是否支持视觉输入。"""
+        mv = config.main_model_vision
+        if mv == "true":
+            return True
+        if mv == "false":
+            return False
+        # auto: 根据模型名关键词推断
+        model_lower = config.model.lower()
+        _NON_VISION_KEYWORDS = (
+            # OpenAI o-mini 文本推理模型（无视觉）
+            "o1-mini", "o3-mini",
+            # Amazon Nova 文本/语音模型（无视觉）
+            "amazon.nova-micro", "amazon.nova-sonic",
+            # Gemini embedding（文本向量）
+            "gemini-embedding",
+            # Llama 3.2 文本模型（非 Vision 版本）
+            "llama-3.2-1b", "llama-3.2-3b",
+            # Stepfun 当前无图片理解标记的 flash 变体
+            "step-3.5-flash",
+            # Mistral Small 3.0/3.1 文本模型（3.2 起支持视觉）
+            "mistral-small-3.0", "mistral-small-3.1",
+        )
+        if any(kw in model_lower for kw in _NON_VISION_KEYWORDS):
+            return False
+
+        _VISION_KEYWORDS = (
+            # ── OpenAI GPT 系列 ──────────────────────────────────────
+            # GPT-4 视觉系列
+            "gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-4.1",
+            # GPT-5 全系（gpt-5 / gpt-5.1 / gpt-5.2 均支持视觉）
+            "gpt-5",
+            # OpenAI 图像模型
+            "gpt-image-1",
+            # ── OpenAI o 推理系列（o1 起均支持图像输入）────────────
+            # o1 / o1-pro / o3 / o3-pro / o4-mini / o4
+            "o1", "o3", "o4",
+            # ── xAI Grok 视觉系列 ────────────────────────────────────
+            # grok-2-vision-1212（已弃用但仍在用）/ grok-4（原生多模态）
+            "grok-2-vision", "grok-4",
+            # ── Anthropic Claude ────────────────────────────────────
+            # 3.x 格式：claude-opus-3-... / claude-sonnet-3-... / claude-haiku-3-...
+            "claude-opus-", "claude-sonnet-", "claude-haiku-",
+            # 4.x+ 格式：claude-opus-4-6 / claude-sonnet-4-6 / claude-haiku-4-5
+            "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
+            # ── Google Gemini ────────────────────────────────────────
+            # 覆盖 1.5 / 2.0 / 2.5 / 3.x / 3.1 全系（全部支持视觉）
+            "gemini",
+            # ── Amazon Nova ─────────────────────────────────────────
+            # Nova Lite / Pro / Premier 支持图片+视频输入
+            # Bedrock 格式：amazon.nova-lite-v1:0 / amazon.nova-pro-v1:0
+            # Nova 2 系列：us.amazon.nova-2-lite-v1:0
+            "amazon.nova", "nova-lite", "nova-pro", "nova-premier",
+            # ── 通用视觉后缀 ─────────────────────────────────────────
+            "-vl", "-vision", "-multimodal",
+            # ── Qwen VL 系列（阿里云）────────────────────────────────
+            "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
+            # Qwen-Omni / Qwen3-Omni：全模态（文本+图像+音频+视频）
+            "qwen-omni", "qwen2.5-omni", "qwen3-omni",
+            # ── DeepSeek VL 系列 ─────────────────────────────────────
+            "deepseek-vl",
+            # Janus-Pro：DeepSeek 开源多模态（第三方 API 部署）
+            "janus-pro",
+            # ── Meta Llama Vision 系列 ───────────────────────────────
+            # Llama 3.2：Llama-3.2-11B-Vision / Llama-3.2-90B-Vision
+            "llama-3.2-", "llama3.2-vision",
+            # Llama 4：Llama-4-Scout / Llama-4-Maverick（原生多模态）
+            "llama-4-", "llama4-",
+            # ── Mistral 视觉系列 ─────────────────────────────────────
+            # Pixtral 12B / Pixtral Large
+            "pixtral",
+            # Ministral 3B / 8B / 14B（支持视觉）
+            "ministral-3b", "ministral-8b", "ministral-14b",
+            # Mistral Small 3.1+ / Mistral Medium 3+ / Mistral Large 3+（含视觉编码器）
+            "mistral-small-3", "mistral-medium-3", "mistral-large-3",
+            # ── Microsoft Phi 多模态系列 ─────────────────────────────
+            # phi-3-vision / phi-3.5-vision / phi-4-multimodal
+            "phi-3-vision", "phi-3.5-vision", "phi-4-multimodal",
+            # ── 智谱 GLM 视觉系列（Z.ai）────────────────────────────
+            # GLM-4V / GLM-4.1V / GLM-4.5V / GLM-4.6V
+            "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v",
+            # ── 开源视觉模型 ─────────────────────────────────────────
+            "internvl",          # InternVL / InternVL2 / InternVL2.5 / InternVL3
+            "minicpm-v",         # MiniCPM-V 系列
+            "minicpm-o",         # MiniCPM-o 系列（全模态）
+            # ── 百度 ERNIE VL 系列 ───────────────────────────────────
+            "ernie-4.5-vl", "ernie-vl",
+            # ── Cohere Command A Vision / Aya Vision ────────────────
+            "command-a-vision",
+            "aya-vision",        # Cohere Aya Vision 8B / 32B（多语言视觉模型）
+            # ── Moonshot Kimi VL ─────────────────────────────────────
+            # moonshot-v1-vision-preview / kimi-vl
+            "moonshot-v1-vision", "kimi-vl",
+            # ── 零一万物 Yi-VL ───────────────────────────────────────
+            "yi-vl",
+            # ── 字节跳动 Doubao / Seed VL ────────────────────────────
+            # doubao-1.5-vision-pro / doubao-1.5-vision-pro-32k / doubao-1.6-vision
+            "doubao-1.5-vision", "doubao-1.6-vision", "doubao-vision", "seed1.5-vl", "seed-vl",
+            # ── 腾讯混元 Hunyuan Vision ──────────────────────────────
+            # hunyuan-vision / hunyuan-vision-1.5
+            "hunyuan-vision",
+            # ── MiniMax VL 系列 ──────────────────────────────────────
+            # MiniMax-VL-01（视觉语言模型）
+            "minimax-vl",
+            # ── Stepfun Step 视觉系列 ────────────────────────────────
+            # step-1v / step-1.5v / step-3（多模态推理）
+            "step-1v", "step-1.5v", "step-3",
+            # step-r1-v-mini / step-1o-vision-* / step-1o-turbo-vision
+            "step-r1-v-mini", "step-1o-vision", "step-1o-turbo-vision",
+            # ── LLaVA 系列（开源经典）────────────────────────────────
+            # llava / llava-1.5 / llava-1.6 / llava-onevision / llava-next
+            "llava",
+        )
+        return any(kw in model_lower for kw in _VISION_KEYWORDS)
 
     # ── Property 代理：所有循环/会话级状态委托给 self._state ──────
 
@@ -914,6 +1111,12 @@ class AgentEngine:
             if entries:
                 self._persistent_memory.save_entries(entries)
                 logger.info("持久记忆提取完成，保存了 %d 条记忆条目", len(entries))
+                # 增量建立向量索引
+                if self._semantic_memory is not None:
+                    try:
+                        await self._semantic_memory.index_entries(entries)
+                    except Exception:
+                        logger.debug("增量向量索引失败", exc_info=True)
         except Exception:
             logger.exception("持久记忆提取或保存失败，已跳过")
 
@@ -2080,10 +2283,10 @@ class AgentEngine:
                     "function": {
                         "name": "finish_task",
                         "description": (
-                            "任务完成声明。所有写入/修改操作实际执行完毕后调用。"
+                            "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
                             "优先使用 report 参数进行结构化汇报（详细讲解模式），"
                             "像向同事汇报工作一样清晰易懂地说明操作、发现和建议。"
-                            "未实际执行写入操作时不得调用。"
+                            "如任务仅涉及筛选/统计/分析/查找且无需写回文件，可直接调用并在 report 中说明。"
                         ),
                         "parameters": {
                             "type": "object",
@@ -2274,63 +2477,34 @@ class AgentEngine:
                 },
             },
         ]
-        # extract_table_from_image 元工具
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "extract_table_from_image",
-                "description": (
-                    "从图片中结构化提取表格数据和样式，生成 ReplicaSpec JSON。\n"
-                    "这是图片→Excel 复刻流水线的第一步。\n"
-                    "执行后会发起独立 VLM 调用进行表格识别，结果保存为 JSON 文件。"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "图片文件路径（需先用 read_image 加载）",
-                        },
-                        "output_path": {
-                            "type": "string",
-                            "description": "输出 ReplicaSpec JSON 的路径",
-                            "default": "outputs/replica_spec.json",
-                        },
-                        "focus": {
-                            "type": "string",
-                            "enum": ["full", "data", "style"],
-                            "default": "full",
-                            "description": "提取模式：full(数据+样式)、data(仅数据)、style(仅样式)",
-                        },
-                        "strategy": {
-                            "type": "string",
-                            "enum": ["single", "two_phase"],
-                            "default": "two_phase",
-                            "description": (
-                                "提取策略：single(单次VLM调用)、"
-                                "two_phase(Phase A提取HTML结构+数据，Phase B提取样式，精度更高)"
-                            ),
-                        },
-                    },
-                    "required": ["file_path"],
-                    "additionalProperties": False,
-                },
-            },
-        })
         if finish_task_tool is not None:
             tools.append(finish_task_tool)
         return tools
 
-    def _build_v5_tools(self) -> list[dict[str, Any]]:
-        """构建全量工具 schema + 元工具。"""
+    def _build_v5_tools(self, *, write_hint: str = "unknown") -> list[dict[str, Any]]:
+        """构建工具 schema + 元工具。
+
+        当 write_hint == "read_only" 时，仅暴露只读工具子集 + run_code + 元工具，
+        减少约 40-60% 的工具 schema token 开销。
+        """
+        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS
+
         domain_schemas = self._registry.get_tiered_schemas(
             mode="chat_completions",
         )
         meta_schemas = self._build_meta_tools()
         # 去除与 domain 重复的元工具（元工具优先）
-        domain_names = {s.get("function", {}).get("name") for s in domain_schemas}
         meta_names = {s.get("function", {}).get("name") for s in meta_schemas}
         filtered_domain = [s for s in domain_schemas if s.get("function", {}).get("name") not in meta_names]
+
+        # 窄路由：read_only 任务只暴露读工具 + run_code（用于复杂分析）
+        if write_hint == "read_only":
+            _allowed = READ_ONLY_SAFE_TOOLS | CODE_POLICY_DYNAMIC_TOOLS | _ALWAYS_AVAILABLE_TOOLS_SET
+            filtered_domain = [
+                s for s in filtered_domain
+                if s.get("function", {}).get("name", "") in _allowed
+            ]
+
         return meta_schemas + filtered_domain
 
     @staticmethod
@@ -3299,13 +3473,47 @@ class AgentEngine:
             if mention_block:
                 system_prompts.append(mention_block)
 
+            # 上下文自动压缩（Compaction）：超阈值时后台静默压缩早期对话，
+            # 使用增强的 ExcelManus 场景化摘要提示词，避免硬截断导致重要上下文丢失。
+            if iteration > 1:
+                _sys_msgs = self._memory._build_system_messages(system_prompts)
+                if self._compaction_manager.should_compact(self._memory, _sys_msgs):
+                    _summary_model = self._config.aux_model or self._active_model
+                    try:
+                        await self._compaction_manager.auto_compact(
+                            memory=self._memory,
+                            system_msgs=_sys_msgs,
+                            client=self._client,
+                            summary_model=_summary_model,
+                        )
+                    except Exception as _compact_exc:
+                        logger.debug("自动 Compaction 异常，跳过: %s", _compact_exc)
+                # 向后兼容：旧版 summarization 作为次级兜底
+                elif (
+                    self._config.summarization_enabled
+                    and self._config.aux_model
+                ):
+                    _cur_tokens = self._memory._total_tokens_with_system_messages(_sys_msgs)
+                    _threshold_ratio = self._config.summarization_threshold_ratio
+                    if _cur_tokens > self._config.max_context_tokens * _threshold_ratio:
+                        try:
+                            await self._memory.summarize_and_trim(
+                                threshold=int(self._config.max_context_tokens * (_threshold_ratio - 0.1)),
+                                system_msgs=_sys_msgs,
+                                client=self._client,
+                                summary_model=self._config.aux_model,
+                                keep_recent_turns=self._config.summarization_keep_recent_turns,
+                            )
+                        except Exception as _sum_exc:
+                            logger.debug("对话摘要异常，跳过: %s", _sum_exc)
+
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
                 max_context_tokens=self._config.max_context_tokens,
             )
 
             # 分层 schema（core=完整, extended=摘要/已展开=完整）
-            tools = self._build_v5_tools()
+            tools = self._build_v5_tools(write_hint=write_hint)
             tool_scope = None
 
             kwargs: dict[str, Any] = {
@@ -3314,6 +3522,11 @@ class AgentEngine:
             }
             if tools:
                 kwargs["tools"] = tools
+
+            # Prompt Cache 优化：同一 session_turn 内共享 cache key，
+            # 确保 OpenAI 路由到同一缓存机器，最大化系统提示前缀 cache hit。
+            if self._config.prompt_cache_key_enabled:
+                kwargs["prompt_cache_key"] = f"em_s{self._session_turn}"
 
             # 尝试流式调用
             stream_kwargs = dict(kwargs)
@@ -3363,10 +3576,12 @@ class AgentEngine:
             # ── 收集本轮迭代诊断快照 ──
             iter_prompt = _usage_token(usage, "prompt_tokens") if usage else 0
             iter_completion = _usage_token(usage, "completion_tokens") if usage else 0
+            iter_cached = _extract_cached_tokens(usage)
             diag = TurnDiagnostic(
                 iteration=iteration,
                 prompt_tokens=iter_prompt,
                 completion_tokens=iter_completion,
+                cached_tokens=iter_cached,
                 thinking_content=thinking_content,
                 tool_names=[
                     s.get("function", {}).get("name", "")
@@ -3432,12 +3647,13 @@ class AgentEngine:
                     if consecutive_text_only < 2 and iteration < max_iter:
                         guard_msg = (
                             "你尚未调用任何写入工具完成实际操作。"
-                            "请立即调用对应写入/格式化/图表工具执行。"
+                            "如果当前任务确实仅涉及筛选/统计/分析/查找且无需写回文件，"
+                            "请直接调用 finish_task 并在 report 中说明分析结果。"
+                            "如果任务需要写入，请立即调用对应写入/格式化/图表工具执行。"
                             "注意：你拥有完整的 Excel 工具集可直接操作数据，"
                             "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
                             "严禁在文本中输出 VBA 代码块作为操作方案。"
                             "禁止以文本建议替代工具执行。"
-                            "完成后再调用 finish_task 并在 report 中详细汇报结果。"
                         )
                         self._memory.add_user_message(guard_msg)
                         if diag:
@@ -3532,6 +3748,15 @@ class AgentEngine:
                 consecutive_text_only = 0
                 all_tool_results.append(tc_result)
 
+                # Stuck Detection：记录工具调用到滑动窗口
+                try:
+                    _tc_args, _ = self._tool_dispatcher.parse_arguments(
+                        getattr(function, "arguments", None)
+                    )
+                except Exception:
+                    _tc_args = {}
+                self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
+
                 # finish_task 成功接受时退出循环
                 if (
                     tc_result.tool_name == "finish_task"
@@ -3561,6 +3786,7 @@ class AgentEngine:
 
                 if tc_result.pending_approval:
                     self._pending_approval_route_result = current_route_result
+                    self._pending_approval_tool_call_id = tool_call_id
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     self._last_iteration_count = iteration
@@ -3607,6 +3833,8 @@ class AgentEngine:
                         self._state.record_write_action()
                         if write_hint != "may_write":
                             write_hint = "may_write"
+                        # Manifest 增量刷新：写入操作后标记需要刷新
+                        self._manifest_refresh_needed = True
                     # ── 同步 _execute_tool_call 内部的写入传播 ──
                     # delegate_to_subagent 等工具在 _execute_tool_call 中直接
                     # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
@@ -3641,6 +3869,14 @@ class AgentEngine:
                     total_tokens=total_prompt_tokens + total_completion_tokens,
                 )
 
+            # ── Stuck Detection：检测重复/冗余工具调用模式 ──
+            stuck_warning = self._state.detect_stuck_pattern()
+            if stuck_warning:
+                self._memory.add_user_message(stuck_warning)
+                if diag:
+                    diag.guard_events.append("stuck_detection")
+                logger.warning("Stuck Detection 触发: %s", stuck_warning[:100])
+
             if breaker_triggered:
                 reply = (
                     f"连续 {max_failures} 次工具调用失败，已终止执行。"
@@ -3665,6 +3901,8 @@ class AgentEngine:
         self._memory.add_assistant_message(reply)
         logger.warning("达到迭代上限 %d，截断返回", max_iter)
         logger.info("最终结果摘要: %s", _summarize_text(reply))
+        # Manifest 增量刷新（debounce：整个 loop 结束后刷新一次）
+        self._try_refresh_manifest()
         return ChatResult(
             reply=reply,
             tool_calls=list(all_tool_results),
@@ -3674,6 +3912,18 @@ class AgentEngine:
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
+
+    def _try_refresh_manifest(self) -> None:
+        """写入操作后增量刷新 Workspace Manifest（debounce：每轮最多一次）。"""
+        if not self._manifest_refresh_needed or self._workspace_manifest is None:
+            return
+        self._manifest_refresh_needed = False
+        try:
+            from excelmanus.workspace_manifest import refresh_manifest
+            self._workspace_manifest = refresh_manifest(self._workspace_manifest)
+            logger.info("Workspace manifest 增量刷新完成")
+        except Exception:
+            logger.debug("Workspace manifest 增量刷新失败", exc_info=True)
 
     async def _execute_tool_call(
         self,
@@ -3881,6 +4131,7 @@ class AgentEngine:
         self._system_question_actions.clear()
         self._pending_question_route_result = None
         self._pending_approval_route_result = None
+        self._pending_approval_tool_call_id = None
         self._pending_plan = None
         self._approved_plan_context = None
         self._task_store.clear()
@@ -4188,6 +4439,7 @@ class AgentEngine:
             self._pending_question_route_result = route_result
         if tc_result.pending_approval:
             self._pending_approval_route_result = route_result
+            self._pending_approval_tool_call_id = tool_call_id
 
         if self._question_flow.has_pending():
             reply = self._question_flow.format_prompt()
@@ -4642,6 +4894,15 @@ class AgentEngine:
         try:
             return await self._client.chat.completions.create(**kwargs)
         except Exception as exc:
+            # prompt_cache_key 兼容性：非 OpenAI provider 可能不支持该参数
+            if "prompt_cache_key" in kwargs and self._is_unsupported_param_error(exc):
+                logger.debug("Provider 不支持 prompt_cache_key，移除后重试")
+                retry_kwargs = {k: v for k, v in kwargs.items() if k != "prompt_cache_key"}
+                try:
+                    return await self._client.chat.completions.create(**retry_kwargs)
+                except Exception:
+                    pass  # 回退失败，走下方原有逻辑
+
             if (
                 self._config.system_message_mode == "auto"
                 and self._effective_system_mode() == "replace"
@@ -4656,6 +4917,8 @@ class AgentEngine:
                 merged_messages = self._merge_leading_system_messages(source_messages)
                 retry_kwargs = dict(kwargs)
                 retry_kwargs["messages"] = merged_messages
+                # 同样移除可能不支持的 prompt_cache_key
+                retry_kwargs.pop("prompt_cache_key", None)
                 return await self._client.chat.completions.create(**retry_kwargs)
             raise
 
@@ -4691,6 +4954,20 @@ class AgentEngine:
         merged_content = "\n\n".join(parts).strip()
         merged_message = {"role": "system", "content": merged_content}
         return [merged_message, *normalized[idx:]]
+
+    @staticmethod
+    def _is_unsupported_param_error(exc: Exception) -> bool:
+        """检测是否为 provider 不支持某参数的错误（如 prompt_cache_key）。"""
+        text = str(exc).lower()
+        keywords = [
+            "unexpected keyword",
+            "unrecognized request argument",
+            "unknown parameter",
+            "invalid parameter",
+            "prompt_cache_key",
+            "extra inputs are not permitted",
+        ]
+        return any(keyword in text for keyword in keywords)
 
     @staticmethod
     def _is_system_compatibility_error(exc: Exception) -> bool:

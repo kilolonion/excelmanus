@@ -30,21 +30,59 @@ def _run_in_sandbox(workspace: Path, script_content: str, tier: str) -> subproce
 
 
 class TestGreenSandbox:
-    """GREEN 模式：禁止网络 + 子进程模块导入。"""
+    """GREEN 模式：禁止网络模块导入 + subprocess 函数级拦截。"""
 
     def test_import_requests_blocked(self, workspace: Path) -> None:
         result = _run_in_sandbox(workspace, "import requests\nprint('should not reach')", "GREEN")
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 
-    def test_import_subprocess_blocked(self, workspace: Path) -> None:
-        result = _run_in_sandbox(workspace, "import subprocess\nprint('should not reach')", "GREEN")
+    def test_import_subprocess_allowed(self, workspace: Path) -> None:
+        """subprocess 模块允许导入（pandas/matplotlib 内部依赖）。"""
+        result = _run_in_sandbox(workspace, "import subprocess\nprint('import_ok')", "GREEN")
+        assert result.returncode == 0
+        assert "import_ok" in result.stdout
+
+    def test_subprocess_run_blocked(self, workspace: Path) -> None:
+        """subprocess.run() 等进程创建函数被拦截。"""
+        result = _run_in_sandbox(workspace, "import subprocess\nsubprocess.run(['echo','hi'])", "GREEN")
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 
-    def test_import_socket_blocked(self, workspace: Path) -> None:
-        result = _run_in_sandbox(workspace, "import socket", "GREEN")
+    def test_subprocess_popen_blocked(self, workspace: Path) -> None:
+        result = _run_in_sandbox(workspace, "import subprocess\nsubprocess.Popen(['echo','hi'])", "GREEN")
         assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+
+    def test_subprocess_check_output_blocked(self, workspace: Path) -> None:
+        result = _run_in_sandbox(workspace, "import subprocess\nsubprocess.check_output(['echo','hi'])", "GREEN")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+
+    def test_import_socket_allowed(self, workspace: Path) -> None:
+        """socket 模块允许导入（matplotlib.pyplot 内部依赖）。"""
+        result = _run_in_sandbox(workspace, "import socket\nprint('socket_ok')", "GREEN")
+        assert result.returncode == 0
+        assert "socket_ok" in result.stdout
+
+    def test_socket_create_blocked(self, workspace: Path) -> None:
+        """创建 socket 实例被拦截（禁止实际网络通信）。"""
+        result = _run_in_sandbox(workspace, "import socket\ns = socket.socket()", "GREEN")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+
+    def test_socket_gethostname_allowed(self, workspace: Path) -> None:
+        """只读信息函数仍可用。"""
+        result = _run_in_sandbox(workspace, "import socket\nprint('host:', socket.gethostname())", "GREEN")
+        assert result.returncode == 0
+        assert "host:" in result.stdout
+
+    def test_matplotlib_pyplot_allowed(self, workspace: Path) -> None:
+        """回归测试：matplotlib.pyplot 依赖 socket，确保 GREEN 沙盒不拦截。"""
+        code = "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; print('pyplot_ok')"
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0
+        assert "pyplot_ok" in result.stdout
 
     def test_safe_import_allowed(self, workspace: Path) -> None:
         result = _run_in_sandbox(workspace, "import json\nprint(json.dumps({'ok': True}))", "GREEN")
@@ -52,11 +90,11 @@ class TestGreenSandbox:
         assert "ok" in result.stdout
 
     def test_pandas_import_allowed(self, workspace: Path) -> None:
-        # pandas may not be in the subprocess env, test that import hook doesn't block it
-        code = "try:\n    import pandas\n    print('import_ok')\nexcept ImportError:\n    print('not_installed_ok')"
+        """回归测试：pandas 3.x 内部依赖 subprocess，确保 GREEN 沙盒不拦截。"""
+        code = "import pandas\nprint('pandas_version:', pandas.__version__)"
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode == 0
-        assert "ok" in result.stdout
+        assert "pandas_version:" in result.stdout
 
     def test_file_write_inside_workspace_allowed(self, workspace: Path) -> None:
         out = workspace / "output.txt"
@@ -90,10 +128,17 @@ class TestGreenSandbox:
 
 
 class TestYellowSandbox:
-    """YELLOW 模式：允许网络模块，禁止子进程。"""
+    """YELLOW 模式：允许网络模块，subprocess 允许导入但函数被拦截。"""
 
-    def test_import_subprocess_blocked(self, workspace: Path) -> None:
-        result = _run_in_sandbox(workspace, "import subprocess", "YELLOW")
+    def test_import_subprocess_allowed(self, workspace: Path) -> None:
+        """subprocess 模块允许导入。"""
+        result = _run_in_sandbox(workspace, "import subprocess\nprint('import_ok')", "YELLOW")
+        assert result.returncode == 0
+        assert "import_ok" in result.stdout
+
+    def test_subprocess_run_blocked(self, workspace: Path) -> None:
+        """subprocess.run() 仍被拦截。"""
+        result = _run_in_sandbox(workspace, "import subprocess\nsubprocess.run(['echo','hi'])", "YELLOW")
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 

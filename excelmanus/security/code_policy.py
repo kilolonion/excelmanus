@@ -235,18 +235,16 @@ class _ExcelTargetVisitor(ast.NodeVisitor):
         ))
 
     def _check_pandas_write(self, node: ast.Call) -> None:
-        """df.to_excel("file.xlsx", sheet_name="Result")"""
+        """df.to_excel("file.xlsx", sheet_name="Result") or df.to_excel(var)"""
         if not self._is_attr_call(node, ("to_excel", "to_csv")):
             return
         if not node.args:
             return
         file_path = self._get_str_literal(node.args[0])
-        if not file_path:
-            return
         sheet_name = self._get_keyword_str(node, "sheet_name")
         func_name = "df.to_excel" if self._is_attr_call(node, ("to_excel",)) else "df.to_csv"
         self.targets.append(ExcelTarget(
-            file_path=file_path,
+            file_path=file_path or "<variable>",
             sheet_name=sheet_name,
             operation="write",
             source=func_name,
@@ -270,16 +268,17 @@ class _ExcelTargetVisitor(ast.NodeVisitor):
         ))
 
     def _check_openpyxl_save(self, node: ast.Call) -> None:
-        """wb.save("file.xlsx")"""
+        """wb.save("file.xlsx") or wb.save(file_path)"""
         if not self._is_attr_call(node, ("save",)):
             return
         if not node.args:
             return
         file_path = self._get_str_literal(node.args[0])
-        if not file_path or not _is_excel_literal(file_path):
+        # 字面量路径须匹配 Excel 后缀；变量参数保守视为写入
+        if file_path is not None and not _is_excel_literal(file_path):
             return
         self.targets.append(ExcelTarget(
-            file_path=file_path,
+            file_path=file_path or "<variable>",
             sheet_name=None,
             operation="write",
             source="wb.save",
@@ -360,3 +359,81 @@ class CodePolicyEngine:
             capabilities=capabilities,
             details=visitor.details,
         )
+
+
+# ── 可自动清洗的退出调用模式 ──────────────────────────────
+
+# sys.exit(...) / os._exit(...) 作为独立表达式语句
+_EXIT_ATTR_PATTERNS: frozenset[tuple[str, str]] = frozenset({
+    ("sys", "exit"),
+    ("os", "_exit"),
+})
+
+# exit() / quit() 作为独立表达式语句
+_EXIT_BUILTIN_NAMES: frozenset[str] = frozenset({"exit", "quit"})
+
+
+class _ExitCallRemover(ast.NodeTransformer):
+    """AST 变换器：将 sys.exit() / exit() 等退出调用替换为 pass。"""
+
+    def __init__(self, imported_names: dict[str, str]) -> None:
+        self.removed: int = 0
+        self._imported_names = imported_names
+
+    def _is_exit_call(self, node: ast.expr) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        # sys.exit(...) / os._exit(...)
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            real_module = self._imported_names.get(func.value.id, func.value.id)
+            root = _module_root(real_module)
+            if (root, func.attr) in _EXIT_ATTR_PATTERNS:
+                return True
+        # exit(...) / quit(...)
+        if isinstance(func, ast.Name) and func.id in _EXIT_BUILTIN_NAMES:
+            return True
+        return False
+
+    def visit_Expr(self, node: ast.Expr) -> ast.AST | None:
+        if self._is_exit_call(node.value):
+            self.removed += 1
+            # 替换为 pass 以防空块语法错误
+            return ast.copy_location(ast.Pass(), node)
+        return node
+
+
+def strip_exit_calls(code: str) -> str | None:
+    """移除代码中的 sys.exit() / exit() / os._exit() / quit() 调用。
+
+    Returns:
+        清洗后的代码字符串；如果代码不含退出调用或解析失败则返回 None。
+    """
+    if not code or not code.strip():
+        return None
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    # 先收集 import 映射（与 _ASTVisitor 逻辑一致）
+    imported: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                imported[alias.asname or alias.name] = f"{module}.{alias.name}" if module else alias.name
+
+    remover = _ExitCallRemover(imported)
+    new_tree = remover.visit(tree)
+    if remover.removed == 0:
+        return None
+
+    ast.fix_missing_locations(new_tree)
+    try:
+        return ast.unparse(new_tree)
+    except Exception:
+        return None

@@ -1,9 +1,11 @@
 ---
 name: run_code_patterns
-version: "1.0.0"
+version: "1.1.0"
 priority: 35
-layer: core
+layer: strategy
 max_tokens: 600
+conditions:
+  write_hint: "may_write"
 ---
 ## run_code 常用代码模板
 
@@ -120,13 +122,47 @@ wb["Sheet1"].title = "新名称"         # 重命名
 del wb["要删除的表"]                   # 删除
 ```
 
+### 智能读取（处理合并标题行）
+当工作表可能有合并单元格标题行时，裸 `pd.read_excel()` 会产生 `Unnamed:*` 列名。使用内置工具自动检测真实表头：
+```python
+from excelmanus.utils import smart_read_excel
+df, header_row = smart_read_excel("file.xlsx", sheet="Sheet1")
+print(f"检测到表头行: {header_row}")
+print(f"数据行数: {len(df)}（不含表头）")
+print(df.head().to_string())
+```
+
+### 隐私脱敏输出
+输出含个人信息的数据样本时，使用内置脱敏工具：
+```python
+from excelmanus.utils import mask_pii
+for _, row in df.head(5).iterrows():
+    print(mask_pii(str(row.to_dict())))
+```
+
+### 标准异常处理
+`run_code` 脚本必须包含顶层异常捕获，确保错误信息友好可读。
+**禁止**使用 `sys.exit()`、`exit()` 或 `os._exit()`，会触发安全拦截。只需 print 到 stderr，脚本正常结束即可：
+```python
+import sys
+try:
+    # ... 业务逻辑 ...
+    pass
+except FileNotFoundError as e:
+    print(f"错误：文件不存在 - {e}", file=sys.stderr)
+except PermissionError as e:
+    print(f"错误：无权限访问文件 - {e}", file=sys.stderr)
+except Exception as e:
+    print(f"错误：{type(e).__name__}: {e}", file=sys.stderr)
+```
+
 ### 描述性统计分析
 ```python
 import pandas as pd
 df = pd.read_excel("file.xlsx", sheet_name="Sheet1")
 print(df.describe(include="all").to_string())
 print(f"缺失值:\n{df.isnull().sum().to_string()}")
-print(f"总行数: {len(df)}, 总列数: {len(df.columns)}")
+print(f"数据行数: {len(df)}（不含表头），列数: {len(df.columns)}")
 ```
 
 ### 分组聚合
@@ -262,6 +298,15 @@ while r <= ws.max_row:
 - **ActiveX 控件 / UserForm** — 无 Python 等价方案
 - **事件驱动宏**（Workbook_Open 等）— 无法模拟 Excel 事件模型
 
+### 写入后独立验证
+`run_code` 写入完成后，**必须用 `read_excel` 对目标 sheet 做一次独立回读验证**，而非仅依赖代码自身的 `print` 输出。
+验证要点：
+- 新增列是否出现在预期位置（表头名称正确）
+- 抽样前 3~5 行数据与预期一致
+- 数据行数未意外增减
+
+`print` 输出和 `read_excel` 回读不可互相替代：前者验证代码逻辑，后者验证文件实际写入结果。两者都通过才算写入成功。
+
 ### 文件损坏恢复
 当 openpyxl 打开文件失败（如 `KeyError: '[Content_Types].xml'`、`BadZipFile` 等），说明文件损坏。**不要**花多轮迭代诊断损坏原因，按以下策略快速恢复：
 1. 如果同目录有参考文件（如 golden/模板），用 `copy_file` 复制为工作副本到 `outputs/`
@@ -271,15 +316,19 @@ while r <= ws.max_row:
 
 ## 图片表格复刻工作流
 
-当用户提供图片并要求复刻表格时，遵循以下流水线：
+当用户提供图片并要求复刻表格时，遵循以下流程：
 
-1. **读取图片**：若图片未在聊天中附带，先用 `read_image` 查看
-2. **结构化提取**：调用 `extract_table_from_image` 生成 ReplicaSpec
-3. **检查不确定项**：如 spec 中 uncertainties 数量 > 0，先汇报关键不确定项给用户
-4. **生成草稿**：调用 `rebuild_excel_from_spec` 编译为 Excel
-5. **验证**：调用 `verify_excel_replica` 生成差异报告
-6. **交付**：将 diff_report 中的问题项汇总到 finish_task.report 中
-
-交付物固定为两份：
-- `draft.xlsx`（可直接打开的 Excel 文件）
-- `replica_diff_report.md`（告诉用户哪些地方不确定/还原不完整）
+1. **读取图片**：用 `read_image` 加载图片。系统会自动处理：
+   - 若主模型支持视觉（C 通道）：图片注入对话上下文，你可以直接看到图片
+   - 若配置了 VLM 增强（B 通道）：小视觉模型自动生成 Markdown 表格描述，追加在 tool result 中
+   - 两者可同时生效（B+C 模式）
+2. **分析结构**：结合图片（C 通道）和/或 VLM 描述（B 通道），理解表格的：
+   - 行列数、合并区域、标签-值对布局
+   - 数据区内容、样式特征
+3. **用 `run_code` 构建**：使用 openpyxl 直接编写 Python 代码构建 Excel 文件
+   - 先构建基础框架（行列、数据填充）
+   - 再添加样式（字体、颜色、边框、对齐）
+   - 最后处理合并单元格和列宽
+4. **验证**：用 `read_excel` 回读构建结果，对比图片/描述检查数据是否一致
+5. **迭代修正**：发现问题后用 `run_code` 修正，重复验证直到满意
+6. **交付**：将构建结果和已知差异汇总到 finish_task.report 中

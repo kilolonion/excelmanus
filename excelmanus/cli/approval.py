@@ -1,4 +1,4 @@
-"""CLI 审批确认流 — Claude Code 风格内联式确认。
+"""CLI 审批确认流 — 内联式确认。
 
 提供 Yes / Yes for session / No 三选一内联确认，
 支持 ↑↓ 箭头键导航、Enter 确认、Esc 取消、Shift+Tab 快捷全部授权。
@@ -52,7 +52,7 @@ def _is_interactive() -> bool:
 async def interactive_approval_select(
     pending: "PendingApproval",
 ) -> str | None:
-    """Claude Code 风格内联审批选择器。
+    """内联审批选择器。
 
     ↑↓ 移动光标，Enter 确认，Esc 取消。
     Shift+Tab 快捷选择 "Yes for session"。
@@ -104,7 +104,7 @@ async def interactive_approval_select(
     args_summary = ", ".join(args_parts) if args_parts else ""
 
     def _get_formatted_text() -> FormattedText:
-        """生成 Claude Code 风格审批选择器文本。"""
+        """生成审批选择器文本。"""
         fragments: list[tuple[str, str]] = []
         # 工具调用信息
         tool_display = pending.tool_name or "未知工具"

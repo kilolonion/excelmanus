@@ -991,6 +991,12 @@ _SCAN_FILES_DIMENSIONS = (
     "vba",
 )
 
+# 递归扫描时跳过的噪音目录
+_SCAN_SKIP_DIRS: frozenset[str] = frozenset({
+    ".git", ".venv", "node_modules", "__pycache__",
+    ".worktrees", "dist", "build", "outputs",
+})
+
 
 def inspect_excel_files(
     directory: str = ".",
@@ -998,6 +1004,9 @@ def inspect_excel_files(
     preview_rows: int = 3,
     max_columns: int = 15,
     include: list[str] | None = None,
+    recursive: bool = True,
+    search: str | None = None,
+    sheet_name: str | None = None,
 ) -> str:
     """批量扫描目录下所有 Excel 文件，返回轻量级概览，可按需附加额外维度。
 
@@ -1011,6 +1020,9 @@ def inspect_excel_files(
         max_columns: header/preview 最多展示列数，默认 15。
         include: 按需请求的额外维度列表。可选值：
             freeze_panes, charts, images, conditional_formatting, column_widths。
+        recursive: 是否递归扫描子目录，默认 True。
+        search: 模糊搜索关键词，匹配文件名或 sheet 名称。
+        sheet_name: 按 sheet 名称精确搜索，返回包含该 sheet 的文件。
 
     Returns:
         JSON 格式的批量概览结果。
@@ -1036,13 +1048,53 @@ def inspect_excel_files(
 
     # 收集 Excel 文件（.xlsx / .xlsm），跳过隐藏文件和临时文件
     # 先收集全部再排序，确保结果确定性（glob 返回顺序依赖文件系统，不可靠）
+    glob_method = safe_dir.rglob if recursive else safe_dir.glob
     excel_paths: list[Path] = []
     for ext in ("*.xlsx", "*.xlsm"):
-        for p in safe_dir.glob(ext):
+        for p in glob_method(ext):
             if p.name.startswith((".", "~$")):
                 continue
+            # 递归模式下跳过噪音目录
+            if recursive:
+                rel_parts = p.relative_to(safe_dir).parts[:-1]  # 不含文件名
+                if any(part in _SCAN_SKIP_DIRS for part in rel_parts):
+                    continue
             excel_paths.append(p)
-    excel_paths.sort(key=lambda p: p.name.lower())
+    excel_paths.sort(key=lambda p: str(p.relative_to(safe_dir)).lower())
+
+    # ── 搜索过滤：按文件名 / sheet 名匹配 ──
+    if search or sheet_name:
+        search_lower = (search or "").lower()
+        sheet_lower = (sheet_name or "").lower()
+        matched: list[Path] = []
+        # 第一轮：按文件名快速过滤（无需打开文件）
+        remaining: list[Path] = []
+        for fp in excel_paths:
+            if search_lower and search_lower in fp.name.lower():
+                matched.append(fp)
+            else:
+                remaining.append(fp)
+        # 第二轮：需要读取 sheet names 的文件
+        for fp in remaining:
+            if len(matched) >= max_files:
+                break
+            try:
+                wb_peek = load_workbook(fp, read_only=True, data_only=True)
+                try:
+                    for sn in wb_peek.sheetnames:
+                        sn_lower = sn.lower()
+                        if sheet_lower and sheet_lower in sn_lower:
+                            matched.append(fp)
+                            break
+                        if search_lower and search_lower in sn_lower:
+                            matched.append(fp)
+                            break
+                finally:
+                    wb_peek.close()
+            except Exception:  # noqa: BLE001
+                continue
+        excel_paths = matched
+
     excel_paths = excel_paths[:max_files]
 
     files_summary: list[dict[str, Any]] = []
@@ -2258,7 +2310,9 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="inspect_excel_files",
             description=(
-                "批量扫描目录下所有 Excel 文件，一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
+                "批量扫描目录下所有 Excel 文件（默认递归子目录），一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
+                "支持按文件名、sheet 名模糊搜索，快速定位目标数据。"
+                "当用户提到特定数据名称但未给出文件路径时，优先使用 search 参数定位。"
                 "通过 include 可按需附加：freeze_panes、charts、images、conditional_formatting、column_widths"
             ),
             input_schema={
@@ -2297,6 +2351,19 @@ def get_tools() -> list[ToolDef]:
                             ],
                         },
                         "description": "按需请求的额外维度，每个文件的每个 sheet 均返回对应信息",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "是否递归扫描子目录，默认 true",
+                        "default": True,
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "模糊搜索关键词，匹配文件名或 sheet 名（如 '学生花名册'、'销售汇总'）",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "按 sheet 名称搜索，返回包含该 sheet 的文件",
                     },
                 },
                 "required": [],

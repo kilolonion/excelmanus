@@ -175,6 +175,18 @@ class ConversationMemory:
         })
         self._truncate_if_needed()
 
+    def replace_tool_result(self, tool_call_id: str, content: str) -> bool:
+        """替换已有工具结果消息的内容（按 tool_call_id 匹配最后一条）。
+
+        用于审批通过后将审批提示替换为实际工具执行结果。
+        返回是否成功替换。
+        """
+        for msg in reversed(self._messages):
+            if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
+                msg["content"] = content
+                return True
+        return False
+
     def _build_system_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
         """构建 system 消息列表。"""
         prompts = system_prompts or [self._system_prompt]
@@ -408,4 +420,75 @@ class ConversationMemory:
             return True
 
         msg["content"] = best
+        return True
+
+    async def summarize_and_trim(
+        self,
+        threshold: int,
+        system_msgs: list[dict] | None,
+        *,
+        client: object,
+        summary_model: str,
+        keep_recent_turns: int = 3,
+    ) -> bool:
+        """超阈值时：用轻量模型摘要旧消息 + 保留最近 N 轮。
+
+        Args:
+            threshold: token 阈值
+            system_msgs: 当前系统消息（用于 token 计算）
+            client: openai.AsyncOpenAI 兼容客户端
+            summary_model: 摘要模型名称
+            keep_recent_turns: 保留最近的 user turn 数
+
+        Returns:
+            是否执行了摘要操作
+        """
+        if self._total_tokens_with_system_messages(system_msgs) <= threshold:
+            return False
+
+        # 找到最近 keep_recent_turns 个 user 消息的起始索引
+        user_indices = [
+            i for i, m in enumerate(self._messages)
+            if m.get("role") == "user"
+        ]
+        if len(user_indices) <= keep_recent_turns:
+            # 消息太少，不值得摘要，走硬截断
+            self._truncate_history_to_threshold(threshold, system_msgs)
+            return False
+
+        split_idx = user_indices[-keep_recent_turns]
+        old_messages = self._messages[:split_idx]
+        recent_messages = self._messages[split_idx:]
+
+        if not old_messages:
+            self._truncate_history_to_threshold(threshold, system_msgs)
+            return False
+
+        from excelmanus.memory_summarizer import summarize_history
+
+        summary_text = await summarize_history(
+            client, summary_model, old_messages,
+        )
+
+        if not summary_text:
+            # 摘要失败，走硬截断兜底
+            logger.warning("对话摘要为空，回退到硬截断")
+            self._truncate_history_to_threshold(threshold, system_msgs)
+            return False
+
+        # 用两条合成消息替换旧历史
+        synthetic: list[dict] = [
+            {"role": "user", "content": "[系统] 请基于以下摘要继续工作。"},
+            {"role": "assistant", "content": f"[对话摘要]\n{summary_text}"},
+        ]
+        self._messages = synthetic + recent_messages
+
+        # 如果摘要后仍然超限，走硬截断兜底
+        if self._total_tokens_with_system_messages(system_msgs) > threshold:
+            self._truncate_history_to_threshold(threshold, system_msgs)
+
+        logger.info(
+            "对话历史已摘要压缩: %d 条旧消息 → 2 条合成消息 + %d 条保留消息",
+            len(old_messages), len(recent_messages),
+        )
         return True

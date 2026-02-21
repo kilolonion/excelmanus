@@ -556,12 +556,17 @@ def cmd_trace(args: argparse.Namespace) -> int:
             for comp in entry_data.get("components", []):
                 label = comp.get("label", "?")
                 chars = comp.get("char_count", 0)
-                truncated = " [截断]" if comp.get("truncated") else ""
-                print(f"  ── {label} ({chars} chars){truncated}")
-                if args.verbose:
-                    content = comp.get("content", "")
-                    print(_truncate(content, args.max_chars))
-                    print()
+                same_as = comp.get("same_as_iter")
+                if same_as is not None:
+                    # 折叠条目：内容与首次出现轮次完全相同
+                    print(f"  ── {label} ({chars} chars) [与 iter={same_as} 相同，已折叠]")
+                else:
+                    truncated = " [截断]" if comp.get("truncated") else ""
+                    print(f"  ── {label} ({chars} chars){truncated}")
+                    if args.verbose:
+                        content = comp.get("content", "")
+                        print(_truncate(content, args.max_chars))
+                        print()
 
         elif event == "window_perception_enrichment":
             print(f"  tool_name: {entry_data.get('tool_name')}")

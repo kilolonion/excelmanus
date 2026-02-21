@@ -22,7 +22,7 @@ def test_theme_defaults():
 
 
 def test_theme_symbols():
-    """Claude Code 风格符号正确。"""
+    """极简风格符号正确。"""
     t = Theme()
     assert t.USER_PREFIX == "›"
     assert t.AGENT_PREFIX == "●"

@@ -1,4 +1,4 @@
-"""vision_extractor 单元测试。"""
+"""vision_extractor 单元测试（B+C 混合架构）。"""
 
 from __future__ import annotations
 
@@ -7,83 +7,31 @@ import json
 import pytest
 
 
-class TestBuildExtractionPrompt:
-    def test_prompt_contains_schema(self) -> None:
-        from excelmanus.vision_extractor import build_extraction_prompt
+class TestBuildDescribePrompt:
+    def test_prompt_contains_key_sections(self) -> None:
+        from excelmanus.vision_extractor import build_describe_prompt
 
-        prompt = build_extraction_prompt(focus="full")
-        assert "ReplicaSpec" in prompt or "cells" in prompt
-        assert "uncertainties" in prompt
+        prompt = build_describe_prompt()
+        assert "概览" in prompt
+        assert "逐行结构描述" in prompt
+        assert "Markdown 表格" in prompt
+        assert "样式特征" in prompt
+        assert "不确定项" in prompt
 
-    def test_prompt_data_focus(self) -> None:
-        from excelmanus.vision_extractor import build_extraction_prompt
+    def test_prompt_warns_about_merge_vs_label_value(self) -> None:
+        """Prompt 应包含防止将 label-value 对误判为合并的警告。"""
+        from excelmanus.vision_extractor import build_describe_prompt
 
-        prompt = build_extraction_prompt(focus="data")
-        assert "只需提取数据" in prompt
+        prompt = build_describe_prompt()
+        assert "标签" in prompt or "label" in prompt.lower()
+        assert "不要" in prompt and "合并" in prompt
 
-    def test_prompt_style_focus(self) -> None:
-        from excelmanus.vision_extractor import build_extraction_prompt
+    def test_prompt_precision_requirement(self) -> None:
+        from excelmanus.vision_extractor import build_describe_prompt
 
-        prompt = build_extraction_prompt(focus="style")
-        assert "只需提取样式" in prompt
-
-
-class TestParseExtractionResult:
-    def test_valid_json_parses(self) -> None:
-        from excelmanus.vision_extractor import parse_extraction_result
-
-        raw = json.dumps({
-            "version": "1.0",
-            "provenance": {
-                "source_image_hash": "sha256:x",
-                "model": "test",
-                "timestamp": "2026-01-01T00:00:00Z",
-            },
-            "workbook": {"name": "test"},
-            "sheets": [{
-                "name": "Sheet1",
-                "dimensions": {"rows": 1, "cols": 1},
-                "cells": [
-                    {"address": "A1", "value": "hello", "value_type": "string", "confidence": 0.9},
-                ],
-                "styles": {},
-            }],
-            "uncertainties": [],
-        })
-        spec = parse_extraction_result(raw)
-        assert spec.sheets[0].cells[0].value == "hello"
-
-    def test_json_in_code_block(self) -> None:
-        """LLM 输出被包裹在 ```json ... ``` 中也能解析。"""
-        from excelmanus.vision_extractor import parse_extraction_result
-
-        inner = json.dumps({
-            "version": "1.0",
-            "provenance": {
-                "source_image_hash": "sha256:x",
-                "model": "test",
-                "timestamp": "2026-01-01T00:00:00Z",
-            },
-            "sheets": [{
-                "name": "Sheet1",
-                "dimensions": {"rows": 1, "cols": 1},
-            }],
-        })
-        raw = f"这是提取结果：\n```json\n{inner}\n```\n完成。"
-        spec = parse_extraction_result(raw)
-        assert spec.version == "1.0"
-
-    def test_invalid_json_raises(self) -> None:
-        from excelmanus.vision_extractor import parse_extraction_result
-
-        with pytest.raises(ValueError, match="JSON"):
-            parse_extraction_result("not json at all")
-
-    def test_invalid_schema_raises(self) -> None:
-        from excelmanus.vision_extractor import parse_extraction_result
-
-        with pytest.raises(ValueError, match="校验失败"):
-            parse_extraction_result('{"version": "1.0"}')
+        prompt = build_describe_prompt()
+        assert "12.50" in prompt
+        assert "[?]" in prompt
 
 
 class TestSemanticColorMap:
@@ -115,84 +63,60 @@ class TestSemanticColorMap:
         assert resolve_semantic_color("rainbow_sparkle") is None
 
 
-class TestPhaseAStructuredPrompt:
-    def test_prompt_contains_json_schema(self):
-        from excelmanus.vision_extractor import build_phase_a_structured_prompt
-        prompt = build_phase_a_structured_prompt()
-        assert "address" in prompt
-        assert "value" in prompt
-        assert "value_type" in prompt
+class TestInferVisionCapable:
+    """测试 engine 中的视觉能力推断逻辑。"""
 
-    def test_prompt_no_html_reference(self):
-        from excelmanus.vision_extractor import build_phase_a_structured_prompt
-        prompt = build_phase_a_structured_prompt()
-        assert "<table>" not in prompt
-        assert "HTML" not in prompt
+    @staticmethod
+    def _infer(model: str, main_model_vision: str = "auto") -> bool:
+        from unittest.mock import MagicMock
+        from excelmanus.engine import AgentEngine
 
+        config = MagicMock()
+        config.main_model_vision = main_model_vision
+        config.model = model
+        return AgentEngine._infer_vision_capable(config)
 
-class TestParsePhaseAStructured:
-    def test_parse_valid_phase_a_json(self):
-        import json
-        from excelmanus.vision_extractor import parse_phase_a_structured
-        raw = json.dumps({
-            "cells": [
-                {"address": "A1", "value": "名称", "value_type": "string"},
-                {"address": "B1", "value": 100, "value_type": "number"},
-            ],
-            "merged_ranges": [],
-            "dimensions": {"rows": 1, "cols": 2},
-        })
-        result = parse_phase_a_structured(raw)
-        assert len(result["cells"]) == 2
-        assert result["cells"][0]["address"] == "A1"
+    def test_auto_detects_gpt4o(self):
+        assert self._infer("gpt-4o-2024-08-06") is True
 
-    def test_parse_wrapped_in_code_block(self):
-        import json
-        from excelmanus.vision_extractor import parse_phase_a_structured
-        inner = json.dumps({
-            "cells": [{"address": "A1", "value": "test", "value_type": "string"}],
-            "merged_ranges": [],
-            "dimensions": {"rows": 1, "cols": 1},
-        })
-        raw = f"```json\n{inner}\n```"
-        result = parse_phase_a_structured(raw)
-        assert len(result["cells"]) == 1
+    def test_auto_detects_qwen_vl(self):
+        assert self._infer("qwen2.5-vl-72b-instruct") is True
 
+    def test_auto_rejects_text_only(self):
+        assert self._infer("gpt-4-0613") is False
 
-class TestCvHintsMerge:
-    def test_cv_column_widths_override_vlm(self):
-        """CV 列宽应覆盖 VLM 猜测。"""
-        from excelmanus.vision_extractor import phase_a_structured_to_replica_spec
-        data = {
-            "cells": [{"address": "A1", "value": "test", "value_type": "string"}],
-            "merged_ranges": [],
-            "dimensions": {"rows": 1, "cols": 2},
-        }
-        style_json = {"styles": {}, "cell_styles": {}, "column_widths": [10, 20]}
-        cv_hints = {"column_widths": [15.5, 12.3], "row_heights": {"1": 18.0}}
-        spec = phase_a_structured_to_replica_spec(data, style_json, cv_hints=cv_hints)
-        # CV 列宽应覆盖 VLM 列宽
-        assert spec.sheets[0].column_widths == [15.5, 12.3]
-        assert spec.sheets[0].row_heights == {"1": 18.0}
+    def test_auto_rejects_openai_o1_mini(self):
+        assert self._infer("o1-mini-2024-09-12") is False
 
-    def test_cv_colors_override_vlm_styles(self):
-        """CV 背景色应覆盖 VLM 样式中的 fill color。"""
-        from excelmanus.vision_extractor import phase_a_structured_to_replica_spec
-        data = {
-            "cells": [
-                {"address": "A1", "value": "header", "value_type": "string"},
-            ],
-            "merged_ranges": [],
-            "dimensions": {"rows": 1, "cols": 1},
-        }
-        style_json = {
-            "styles": {"h1": {"fill": {"type": "solid", "color": "blue"}}},
-            "cell_styles": {"A1": "h1"},
-            "column_widths": [],
-        }
-        cv_hints = {
-            "cell_colors": [["#4472C4"]],  # row 0, col 0
-        }
-        spec = phase_a_structured_to_replica_spec(data, style_json, cv_hints=cv_hints)
-        # CV 颜色应覆盖语义映射的颜色
-        assert spec.sheets[0].styles["h1"].fill.color == "#4472C4"
+    def test_auto_rejects_openai_o3_mini(self):
+        assert self._infer("o3-mini-2025-01-31") is False
+
+    def test_auto_rejects_amazon_nova_micro(self):
+        assert self._infer("amazon.nova-micro-v1:0") is False
+
+    def test_auto_rejects_amazon_nova_sonic(self):
+        assert self._infer("amazon.nova-sonic-v1:0") is False
+
+    def test_auto_rejects_llama_3_2_text_only(self):
+        assert self._infer("Llama-3.2-1B-Instruct") is False
+
+    def test_auto_rejects_gemini_embedding(self):
+        assert self._infer("gemini-embedding-001") is False
+
+    def test_auto_rejects_step_3_5_flash(self):
+        assert self._infer("step-3.5-flash") is False
+
+    def test_auto_detects_ministral_vision(self):
+        assert self._infer("ministral-8b-2512") is True
+
+    def test_auto_detects_qwen2_5_omni(self):
+        assert self._infer("qwen2.5-omni-7b") is True
+
+    def test_auto_detects_step_1o_turbo_vision(self):
+        assert self._infer("step-1o-turbo-vision") is True
+
+    def test_force_true(self):
+        assert self._infer("deepseek-chat", "true") is True
+
+    def test_force_false(self):
+        assert self._infer("gpt-4o", "false") is False

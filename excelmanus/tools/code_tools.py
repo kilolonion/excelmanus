@@ -88,6 +88,7 @@ def _command_exists(command: list[str]) -> bool:
 def _probe_environment(
     command: list[str], *,
     require_excel_deps: bool,
+    sandbox_tier: str = "RED",
 ) -> _InterpreterProbe:
     if not _command_exists(command):
         return _InterpreterProbe(
@@ -97,7 +98,27 @@ def _probe_environment(
         )
 
     if require_excel_deps:
-        probe_command = [*command, "-c", "import pandas,openpyxl"]
+        if sandbox_tier in ("GREEN", "YELLOW"):
+            # 模拟实际沙盒的 Import Guard，避免探针通过但实际执行失败
+            from excelmanus.security.sandbox_hook import (
+                _GREEN_BLOCKED,
+                _YELLOW_BLOCKED,
+            )
+            blocked = _GREEN_BLOCKED if sandbox_tier == "GREEN" else _YELLOW_BLOCKED
+            blocked_repr = repr(blocked)
+            probe_code = (
+                "import sys\n"
+                "class _B:\n"
+                "    def find_spec(self, n, *a):\n"
+                "        for b in " + blocked_repr + ":\n"
+                "            if n == b or n.startswith(b + '.'):\n"
+                "                raise ImportError('sandbox blocks ' + n)\n"
+                "sys.meta_path.insert(0, _B())\n"
+                "import pandas,openpyxl\n"
+            )
+            probe_command = [*command, "-c", probe_code]
+        else:
+            probe_command = [*command, "-c", "import pandas,openpyxl"]
     else:
         probe_command = [*command, "-c", "import sys; print(sys.version_info[0])"]
 
@@ -136,10 +157,11 @@ def _probe_environment(
 def _resolve_python_command(
     python_command: str, *,
     require_excel_deps: bool,
+    sandbox_tier: str = "RED",
 ) -> tuple[list[str], list[_InterpreterProbe], str]:
     if python_command != "auto":
         command = _parse_python_command(python_command)
-        probe = _probe_environment(command, require_excel_deps=require_excel_deps)
+        probe = _probe_environment(command, require_excel_deps=require_excel_deps, sandbox_tier=sandbox_tier)
         if probe.status != "ok":
             raise RuntimeError(
                 f"指定解释器不可用: {_command_to_text(command)}; {probe.status}: {probe.detail}"
@@ -172,7 +194,7 @@ def _resolve_python_command(
 
     probes: list[_InterpreterProbe] = []
     for command in deduped:
-        probe = _probe_environment(command, require_excel_deps=require_excel_deps)
+        probe = _probe_environment(command, require_excel_deps=require_excel_deps, sandbox_tier=sandbox_tier)
         probes.append(probe)
         if probe.status == "ok":
             return command, probes, "auto"
@@ -421,6 +443,7 @@ def _execute_script(
     python_cmd, probes, mode = _resolve_python_command(
         python_command,
         require_excel_deps=require_excel_deps,
+        sandbox_tier=sandbox_tier,
     )
     sandbox_python_cmd, isolated_python = _ensure_isolated_python(python_cmd)
     sandbox_env, env_warnings = _build_sandbox_env()

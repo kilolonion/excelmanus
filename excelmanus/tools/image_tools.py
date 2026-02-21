@@ -294,9 +294,32 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
 
             cells_written += 1
 
-        # 合并单元格
+        # 合并单元格（安全模式：检测非锚点位置的数据冲突）
+        # 构建 spec 中有值的 cell 地址集合
+        from openpyxl.utils import range_boundaries
+
+        valued_cells: dict[str, str] = {}  # address → value repr
+        for cs in sheet_spec.cells:
+            if cs.value is not None and cs.value_type != "empty":
+                valued_cells[cs.address.upper()] = repr(cs.value)
+
         for mr in sheet_spec.merged_ranges:
             try:
+                min_col, min_row, max_col, max_row = range_boundaries(mr.range)
+                anchor = f"{get_column_letter(min_col)}{min_row}"
+                # 检测非锚点位置是否有 spec 定义的值
+                conflict_cells: list[str] = []
+                for r in range(min_row, max_row + 1):
+                    for c in range(min_col, max_col + 1):
+                        addr = f"{get_column_letter(c)}{r}"
+                        if addr.upper() != anchor.upper() and addr.upper() in valued_cells:
+                            conflict_cells.append(addr)
+                if conflict_cells:
+                    skipped_items.append(
+                        f"merge {mr.range} 跳过: 非锚点单元格 {', '.join(conflict_cells)} "
+                        f"含有值，合并会导致数据丢失"
+                    )
+                    continue
                 ws.merge_cells(mr.range)
                 merges_applied += 1
             except Exception as exc:
@@ -378,6 +401,7 @@ def verify_excel_replica(
 
     matches = 0
     mismatches: list[str] = []
+    merge_conflicts: list[str] = []
     missing: list[str] = []
     low_confidence: list[str] = []
     total_cells = 0
@@ -387,6 +411,17 @@ def verify_excel_replica(
             missing.append(f"Sheet '{sheet_spec.name}' 不存在于 Excel 中")
             continue
         ws = wb[sheet_spec.name]
+
+        # 构建合并区域查找表：addr → (anchor_addr, merge_range_str)
+        merge_lookup: dict[str, tuple[str, str]] = {}
+        from openpyxl.utils import get_column_letter
+        for merged_range in ws.merged_cells.ranges:
+            anchor_addr = f"{get_column_letter(merged_range.min_col)}{merged_range.min_row}"
+            for r in range(merged_range.min_row, merged_range.max_row + 1):
+                for c in range(merged_range.min_col, merged_range.max_col + 1):
+                    addr = f"{get_column_letter(c)}{r}"
+                    if addr.upper() != anchor_addr.upper():
+                        merge_lookup[addr.upper()] = (anchor_addr, str(merged_range))
 
         # 值比对
         for cell_spec in sheet_spec.cells:
@@ -400,6 +435,15 @@ def verify_excel_replica(
             expected = cell_spec.value
             # 类型感知比较
             if _values_match(expected, actual):
+                matches += 1
+            elif actual is None and cell_spec.address.upper() in merge_lookup:
+                # 该 cell 在合并区域的非锚点位置，值被合并操作清零
+                anchor, mr_str = merge_lookup[cell_spec.address.upper()]
+                merge_conflicts.append(
+                    f"{sheet_spec.name}!{cell_spec.address}: 期望={expected!r} "
+                    f"但该单元格在合并区域 {mr_str} 内（锚点={anchor}），值被合并覆盖"
+                )
+                # 仍计为匹配（数据在锚点可读，这是 merge 的预期行为）
                 matches += 1
             else:
                 mismatches.append(
@@ -423,12 +467,18 @@ def verify_excel_replica(
         "# ReplicaSpec 验证报告\n",
         f"**匹配率**: {match_rate:.1%} ({matches}/{total_cells})\n",
     ]
-    if not mismatches and not missing:
+    if not mismatches and not missing and not merge_conflicts:
         report_lines.append("## ✅ 全部匹配\n")
     if mismatches:
         report_lines.append(f"## ❌ 不匹配项 ({len(mismatches)})\n")
         for m in mismatches:
             report_lines.append(f"- {m}")
+        report_lines.append("")
+    if merge_conflicts:
+        report_lines.append(f"## 🔀 合并单元格冲突 ({len(merge_conflicts)})\n")
+        report_lines.append("以下单元格在合并区域非锚点位置，值已被合并覆盖（不影响匹配率）：\n")
+        for mc in merge_conflicts:
+            report_lines.append(f"- {mc}")
         report_lines.append("")
     if missing:
         report_lines.append(f"## ⚠️ 缺失项 ({len(missing)})\n")
@@ -453,6 +503,7 @@ def verify_excel_replica(
         "issues": {
             "missing": len(missing),
             "conflict": len(mismatches),
+            "merge_conflicts": len(merge_conflicts),
             "low_confidence": len(low_confidence),
             "total": len(missing) + len(mismatches) + len(low_confidence),
         },
