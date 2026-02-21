@@ -414,7 +414,7 @@ class ToolDispatcher:
             "fallback_hint": (
                 "建议降级方案：1) 使用 read_image 查看图片，由主模型直接描述表格内容；"
                 "2) 用 run_code + openpyxl 根据描述手动构建 Excel 文件。"
-                "不要再次调用 extract_table_from_image，上游 API 可能暂时不可用。"
+                "VLM 上游 API 可能暂时不可用。"
             ),
             "file_path": file_path,
         }, ensure_ascii=False)

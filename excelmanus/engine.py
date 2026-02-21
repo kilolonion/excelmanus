@@ -622,7 +622,7 @@ class AgentEngine:
         mcp_manager: MCPManager | None = None,
         own_mcp_manager: bool = True,
     ) -> None:
-        # ── 解耦组件（Phase 3）：必须在所有 property 代理字段赋值之前初始化 ──
+        # ── 核心组件初始化（必须在所有 property 代理字段赋值之前）──
         self._state = SessionState()
         self._client = create_client(
             api_key=config.api_key,
@@ -733,7 +733,7 @@ class AgentEngine:
         # auto 模式系统消息回退缓存（已迁移至类变量 _system_mode_fallback_cache）
         # 保留实例属性作为向后兼容别名
         self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache
-        # ── 解耦组件（Phase 3）：状态变量已由 self._state 管理 ──
+        # ── 状态变量由 self._state 统一管理 ──
         # self._state 在 __init__ 顶部初始化，以下属性通过 @property 代理访问：
         # _session_turn, _last_iteration_count, _last_tool_call_count,
         # _last_success_count, _last_failure_count, _current_write_hint,
@@ -922,7 +922,7 @@ class AgentEngine:
             # o1 / o1-pro / o3 / o3-pro / o4-mini / o4
             "o1", "o3", "o4",
             # ── xAI Grok 视觉系列 ────────────────────────────────────
-            # grok-2-vision-1212（已弃用但仍在用）/ grok-4（原生多模态）
+            # grok-2-vision 系列 / grok-4（原生多模态）
             "grok-2-vision", "grok-4",
             # ── Anthropic Claude ────────────────────────────────────
             # 3.x 格式：claude-opus-3-... / claude-sonnet-3-... / claude-haiku-3-...
@@ -1126,7 +1126,6 @@ class AgentEngine:
         由 CLI 或 API 入口在启动时显式调用。
 
         注意：
-        破坏性重构后，不再将 MCP Server 自动注入为 Skillpack。
         MCP 仅负责工具注册；Skill 仅负责策略与授权。
         """
         await self._mcp_manager.initialize(self._registry)
@@ -2685,7 +2684,7 @@ class AgentEngine:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """选择子代理。v5.2: 不再调用 LLM，直接返回默认 subagent。"""
+        """选择子代理。不再调用 LLM，直接返回默认 subagent。"""
         _, candidates = self._subagent_registry.build_catalog()
         if not candidates:
             return "subagent"
@@ -3488,7 +3487,7 @@ class AgentEngine:
                         )
                     except Exception as _compact_exc:
                         logger.debug("自动 Compaction 异常，跳过: %s", _compact_exc)
-                # 向后兼容：旧版 summarization 作为次级兜底
+                # summarization 作为 compaction 的次级兜底
                 elif (
                     self._config.summarization_enabled
                     and self._config.aux_model

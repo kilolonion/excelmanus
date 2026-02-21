@@ -145,7 +145,7 @@ class TestSkillpackLoader:
             project_dir,
             workspace_root=str(workspace),
             skills_discovery_include_agents=False,
-            skills_discovery_include_openclaw=False,
+            skills_discovery_scan_external_tool_dirs=True,
         )
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
@@ -182,8 +182,7 @@ class TestSkillpackLoader:
             user_dir,
             project_dir,
             workspace_root=str(workspace),
-            skills_discovery_include_claude=False,
-            skills_discovery_include_openclaw=False,
+            skills_discovery_scan_external_tool_dirs=False,
         )
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
@@ -216,8 +215,7 @@ class TestSkillpackLoader:
             user_dir,
             project_dir,
             workspace_root=str(workspace),
-            skills_discovery_include_claude=False,
-            skills_discovery_include_openclaw=False,
+            skills_discovery_scan_external_tool_dirs=False,
         )
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
@@ -256,7 +254,7 @@ class TestSkillpackLoader:
             project_dir,
             workspace_root=str(workspace),
             skills_discovery_include_agents=False,
-            skills_discovery_include_claude=False,
+            skills_discovery_scan_external_tool_dirs=True,
         )
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()
@@ -295,7 +293,7 @@ class TestSkillpackLoader:
             project_dir,
             workspace_root=str(workspace),
             skills_discovery_include_agents=False,
-            skills_discovery_include_claude=False,
+            skills_discovery_scan_external_tool_dirs=True,
         )
         loader = SkillpackLoader(config, _tool_registry())
         loaded = loader.load_all()

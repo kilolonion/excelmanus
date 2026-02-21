@@ -19,6 +19,7 @@ from typing import Any, Dict
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
+from rich.padding import Padding
 from rich.text import Text
 
 from excelmanus.cli.theme import THEME
@@ -39,7 +40,7 @@ from excelmanus.events import EventType, ToolCallEvent
 
 logger = logging.getLogger(__name__)
 
-# 向后兼容：旧代码中直接引用的常量别名
+# 常量别名（供外部模块引用）
 _RESULT_MAX_LEN = RESULT_MAX_LEN
 _THINKING_THRESHOLD = THINKING_THRESHOLD
 _THINKING_SUMMARY_LEN = THINKING_SUMMARY_LEN
@@ -61,6 +62,8 @@ _STATUS_SYMBOLS: dict[str, str] = {
     "completed": THEME.SUCCESS,
     "failed": THEME.FAILURE,
 }
+# 常量别名（供外部模块引用）
+_STATUS_ICONS = _STATUS_SYMBOLS
 
 
 class StreamRenderer:
@@ -116,11 +119,8 @@ class StreamRenderer:
         if self._streaming_text and self._text_buffer:
             full_text = "".join(self._text_buffer)
             self._console.print()
-            self._console.print(
-                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}] ",
-                end="",
-            )
-            self._console.print(Markdown(full_text))
+            # 回复文本用左缩进 Markdown 块，无 ● 前缀
+            self._console.print(Padding(Markdown(full_text), (0, 2, 0, 2)))
         elif self._streaming_thinking:
             self._console.print()
         self._streaming_text = False

@@ -23,7 +23,7 @@ _VALID_CAPABILITY_MODES: set[str] = {"restricted", "full"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
 _MEMORY_SCOPE_KEYS: tuple[str, ...] = ("memory_scope", "memory-scope", "memory")
 _SUBAGENT_NAME_ALIASES: dict[str, str] = {
-    # v5.2: 所有旧角色名映射到通用 subagent
+    # 所有旧角色名映射到通用 subagent
     "explore": "subagent",
     "explorer": "subagent",
     "plan": "subagent",

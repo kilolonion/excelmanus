@@ -126,9 +126,8 @@ class SkillpackLoader:
 
         # user 级目录：低于任意 project 目录
         _append("user", Path(self._config.skills_user_dir))
-        if self._config.skills_discovery_include_claude:
+        if self._config.skills_discovery_scan_external_tool_dirs:
             _append("user", Path("~/.claude/skills"))
-        if self._config.skills_discovery_include_openclaw:
             _append("user", Path("~/.openclaw/skills"))
 
         # ancestor .agents/skills：
@@ -164,9 +163,8 @@ class SkillpackLoader:
         _append("project", Path(self._config.skills_project_dir))
         if self._config.skills_discovery_include_agents:
             _append("project", workspace_root / ".agents" / "skills")
-        if self._config.skills_discovery_include_claude:
+        if self._config.skills_discovery_scan_external_tool_dirs:
             _append("project", workspace_root / ".claude" / "skills")
-        if self._config.skills_discovery_include_openclaw:
             _append("project", workspace_root / ".openclaw" / "skills")
 
         for raw in self._config.skills_discovery_extra_dirs:
@@ -255,7 +253,7 @@ class SkillpackLoader:
         for raw_key, display_key in _DEPRECATED_FIELDS.items():
             if raw_key in frontmatter:
                 self._append_warning(
-                    f"{skill_file}: frontmatter 字段 '{display_key}' 已在 v5.2 中移除"
+                    f"{skill_file}: frontmatter 字段 '{display_key}' 已移除"
                     "（Skill 不再控制工具授权），该字段将被忽略。"
                 )
                 frontmatter.pop(raw_key, None)

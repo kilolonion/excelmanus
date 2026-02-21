@@ -1,14 +1,14 @@
 """工具呈现层（ToolProfile）：工具元数据与分类。
 
-v5.2 三层正交架构之 Layer 1。
+三层正交架构之 Layer 1。
 与 Skill 层完全解耦（Skill 只负责知识注入）。
 与 ToolPolicy 完全解耦（ToolPolicy 只负责安全拦截）。
 
-v5.2: 废弃 core/extended 分层，所有工具始终暴露完整 schema。
+废弃 core/extended 分层，所有工具始终暴露完整 schema。
 """
 from __future__ import annotations
 
-# ── 所有工具（v5.2: 统一暴露完整 schema） ──────────────────
+# ── 所有工具（统一暴露完整 schema） ──────────────────
 CORE_TOOLS: frozenset[str] = frozenset({
     # 数据读取
     "read_excel", "filter_data", "inspect_excel_files",
@@ -39,7 +39,7 @@ CORE_TOOLS: frozenset[str] = frozenset({
 # ── 全量 ToolProfile 定义 ─────────────────────────────────
 TOOL_PROFILES: dict[str, dict] = {}
 
-# v5.2: 按类别设置 category（tier 统一为 core）
+# 按类别设置 category（tier 统一为 core）
 _TOOL_CATEGORY_MAP: dict[str, tuple[str, ...]] = {
     "data_read": ("read_excel", "filter_data", "inspect_excel_files"),
     "structure": ("list_sheets", "list_directory"),

@@ -73,17 +73,17 @@ class TestSkillpackDocsContract:
         assert "`EXCELMANUS_HOOKS_COMMAND_ENABLED=true`" in text
         assert "命令" in text
 
-    def test_readme_openclaw_row_matches_new_protocol(self) -> None:
+    def test_readme_external_tool_dirs_row_matches_protocol(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
 
         row_pattern = re.compile(
-            r"EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_OPENCLAW.*?"
-            r"`\.openclaw/skills`/`~/.openclaw/skills`",
+            r"EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS.*?"
+            r"`\.openclaw/skills`.*?`~/.openclaw/skills`",
             re.DOTALL,
         )
         assert row_pattern.search(text), (
-            "README 的 OpenClaw 环境变量描述必须使用 "
-            "`.openclaw/skills`/`~/.openclaw/skills`"
+            "README 的外部工具目录环境变量描述必须包含 "
+            "`.openclaw/skills` 和 `~/.openclaw/skills`"
         )
 
     def test_loader_discovery_uses_openclaw_project_dir_not_workspace_skills(
@@ -111,8 +111,7 @@ class TestSkillpackDocsContract:
             skills_user_dir=str(user_dir),
             skills_project_dir=str(project_dir),
             skills_discovery_include_agents=False,
-            skills_discovery_include_claude=False,
-            skills_discovery_include_openclaw=True,
+            skills_discovery_scan_external_tool_dirs=True,
         )
         loader = SkillpackLoader(cfg, _tool_registry())
         roots = loader._iter_discovery_roots()

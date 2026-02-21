@@ -28,7 +28,7 @@ async def _async_main() -> None:
     from excelmanus.cli.welcome import render_welcome
     from excelmanus.config import ConfigError, load_config
     from excelmanus.engine import AgentEngine
-    from excelmanus.logging_config import setup_logging
+    from excelmanus.logger import setup_logging
     from excelmanus.skillpacks import SkillpackLoader, SkillRouter
     from excelmanus.tools import ToolRegistry
 
@@ -155,10 +155,21 @@ async def _async_main() -> None:
         )
     render_welcome(console, config, version=__version__, skill_count=skill_count, mcp_count=mcp_count)
 
+    # ── REPL 期间抑制 INFO/DEBUG 日志输出到终端，避免噪音 ──
+    _excelmanus_logger = logging.getLogger("excelmanus")
+    _prev_handler_levels: list[tuple[logging.Handler, int]] = []
+    for _h in _excelmanus_logger.handlers:
+        if isinstance(_h, logging.StreamHandler):
+            _prev_handler_levels.append((_h, _h.level))
+            _h.setLevel(logging.WARNING)
+
     # ── 启动 REPL ──
     try:
         await repl_loop(console, engine)
     finally:
+        # 恢复日志级别
+        for _h, _lvl in _prev_handler_levels:
+            _h.setLevel(_lvl)
         if _AUTO_SAVE_PATH is not None:
             try:
                 from excelmanus.cli.repl import _handle_save_command

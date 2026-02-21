@@ -61,7 +61,7 @@ class BenchCase:
     """单个测试用例。
 
     支持单轮和多轮两种格式：
-    - 单轮：仅设置 ``message``（向后兼容）
+    - 单轮：仅设置 ``message``
     - 多轮：设置 ``messages`` 列表，按顺序发送给同一个 engine 实例
     加载时会统一归一化为 ``messages`` 列表。
     """
