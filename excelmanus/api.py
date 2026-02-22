@@ -21,13 +21,14 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncIterator, Literal
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
 
 import excelmanus
 from excelmanus.config import (
+    ConfigError,
     ExcelManusConfig,
     load_config,
     load_cors_allow_origins,
@@ -57,7 +58,6 @@ from excelmanus.skillpacks import (
 from excelmanus.tools import ToolRegistry
 
 logger = get_logger("api")
-_APP_CORS_ALLOW_ORIGINS = tuple(load_cors_allow_origins())
 
 # ── 请求 / 响应模型 ──────────────────────────────────────
 
@@ -213,6 +213,21 @@ _tool_registry: ToolRegistry | None = None
 _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _config: ExcelManusConfig | None = None
+_router = APIRouter()
+
+
+def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
+    """构建应用启动配置：优先完整配置，失败时保留错误并回退到仅供导入期使用的占位配置。"""
+    try:
+        return load_config(), None
+    except ConfigError as exc:
+        fallback = ExcelManusConfig(
+            api_key="",
+            base_url="https://example.invalid/v1",
+            model="",
+            cors_allow_origins=tuple(load_cors_allow_origins()),
+        )
+        return fallback, exc
 
 
 def _is_external_safe_mode() -> bool:
@@ -381,8 +396,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
     global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config
 
-    # 加载配置
-    _config = load_config()
+    # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
+    bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
+    if bootstrap_error is not None:
+        raise bootstrap_error
+
+    _config = app.state.bootstrap_config
     setup_logging(_config.log_level)
 
     # 初始化工具层
@@ -398,14 +417,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     shared_mcp_manager: MCPManager | None = None
     if _config.mcp_shared_manager:
         shared_mcp_manager = MCPManager(_config.workspace_root)
-
-    # 启动时校验 CORS 配置入口一致性，避免“配置已加载但中间件未消费”
-    if _APP_CORS_ALLOW_ORIGINS != _config.cors_allow_origins:
-        logger.warning(
-            "CORS 配置来源不一致：middleware=%s config=%s",
-            list(_APP_CORS_ALLOW_ORIGINS),
-            list(_config.cors_allow_origins),
-        )
 
     _session_manager = SessionManager(
         max_sessions=_config.max_sessions,
@@ -442,27 +453,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("API 服务已关闭")
 
 
-# ── FastAPI 应用 ──────────────────────────────────────────
-
-app = FastAPI(
-    title="ExcelManus API",
-    version=excelmanus.__version__,
-    lifespan=lifespan,
-)
-
-# CORS 中间件必须在应用启动前注册，避免 Starlette 运行时报错
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(_APP_CORS_ALLOW_ORIGINS),
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type"],
-)
-
-
 # ── 全局异常处理 ──────────────────────────────────────────
 
 
-@app.exception_handler(SessionNotFoundError)
 async def _handle_session_not_found(
     request: Request, exc: SessionNotFoundError
 ) -> JSONResponse:
@@ -472,7 +465,6 @@ async def _handle_session_not_found(
     return JSONResponse(status_code=404, content=body.model_dump())
 
 
-@app.exception_handler(SessionLimitExceededError)
 async def _handle_session_limit(
     request: Request, exc: SessionLimitExceededError
 ) -> JSONResponse:
@@ -482,7 +474,6 @@ async def _handle_session_limit(
     return JSONResponse(status_code=429, content=body.model_dump())
 
 
-@app.exception_handler(SessionBusyError)
 async def _handle_session_busy(
     request: Request, exc: SessionBusyError
 ) -> JSONResponse:
@@ -492,7 +483,6 @@ async def _handle_session_busy(
     return JSONResponse(status_code=409, content=body.model_dump())
 
 
-@app.exception_handler(Exception)
 async def _handle_unexpected(
     request: Request, exc: Exception
 ) -> JSONResponse:
@@ -503,6 +493,40 @@ async def _handle_unexpected(
     )
     body = ErrorResponse(error="服务内部错误，请联系管理员。", error_id=error_id)
     return JSONResponse(status_code=500, content=body.model_dump())
+
+
+def _register_exception_handlers(application: FastAPI) -> None:
+    """注册全局异常处理器。"""
+    application.add_exception_handler(SessionNotFoundError, _handle_session_not_found)
+    application.add_exception_handler(SessionLimitExceededError, _handle_session_limit)
+    application.add_exception_handler(SessionBusyError, _handle_session_busy)
+    application.add_exception_handler(Exception, _handle_unexpected)
+
+
+def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
+    """创建 FastAPI 应用，CORS 与运行期配置共享同一来源。"""
+    bootstrap_error: ConfigError | None = None
+    bootstrap_config = config
+    if bootstrap_config is None:
+        bootstrap_config, bootstrap_error = _build_bootstrap_config()
+    assert bootstrap_config is not None
+
+    application = FastAPI(
+        title="ExcelManus API",
+        version=excelmanus.__version__,
+        lifespan=lifespan,
+    )
+    application.state.bootstrap_config = bootstrap_config
+    application.state.bootstrap_config_error = bootstrap_error
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(bootstrap_config.cors_allow_origins),
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Content-Type"],
+    )
+    _register_exception_handlers(application)
+    application.include_router(_router)
+    return application
 
 
 # ── 端点 ──────────────────────────────────────────────────
@@ -518,7 +542,7 @@ _error_responses: dict = {
 }
 
 
-@app.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
+@_router.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
 async def chat(request: ChatRequest) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     assert _session_manager is not None, "服务未初始化"
@@ -558,7 +582,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     )
 
 
-@app.post("/api/v1/chat/stream", responses=_error_responses)
+@_router.post("/api/v1/chat/stream", responses=_error_responses)
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。"""
     assert _session_manager is not None, "服务未初始化"
@@ -862,7 +886,7 @@ def _sse_event_to_sse(
     return _sse_format(sse_type, data)
 
 
-@app.get(
+@_router.get(
     "/api/v1/skills",
     response_model=list[SkillpackSummaryResponse],
     responses={
@@ -876,7 +900,7 @@ async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
     return [_to_skill_summary(detail) for detail in details]
 
 
-@app.get(
+@_router.get(
     "/api/v1/skills/{name}",
     response_model=SkillpackDetailResponse | SkillpackSummaryResponse,
     responses={
@@ -900,7 +924,7 @@ async def get_skill(name: str) -> SkillpackDetailResponse | SkillpackSummaryResp
     return _to_skill_detail(detail)
 
 
-@app.post(
+@_router.post(
     "/api/v1/skills",
     status_code=201,
     response_model=SkillpackMutationResponse,
@@ -937,7 +961,7 @@ async def create_skill(
     )
 
 
-@app.patch(
+@_router.patch(
     "/api/v1/skills/{name}",
     response_model=SkillpackMutationResponse,
     responses={
@@ -977,7 +1001,7 @@ async def patch_skill(
     )
 
 
-@app.delete(
+@_router.delete(
     "/api/v1/skills/{name}",
     response_model=SkillpackMutationResponse,
     responses={
@@ -1017,7 +1041,7 @@ async def delete_skill(
     )
 
 
-@app.delete("/api/v1/sessions/{session_id}", responses={
+@_router.delete("/api/v1/sessions/{session_id}", responses={
     409: _error_responses[409],
     404: _error_responses[404],
     500: _error_responses[500],
@@ -1032,7 +1056,7 @@ async def delete_session(session_id: str) -> dict:
     return {"status": "ok", "session_id": session_id}
 
 
-@app.get("/api/v1/health")
+@_router.get("/api/v1/health")
 async def health() -> dict:
     """健康检查：返回版本号和已加载的工具/技能包。"""
     if _is_external_safe_mode():
@@ -1063,6 +1087,10 @@ async def health() -> dict:
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
     }
+
+
+# 默认 ASGI app（供 `uvicorn excelmanus.api:app` 与测试直接导入）
+app = create_app()
 
 
 # ── 入口函数 ──────────────────────────────────────────────

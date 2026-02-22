@@ -9,6 +9,10 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
+from excelmanus.config import (
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    DEFAULT_EMBEDDING_MODEL,
+)
 from excelmanus.embedding.client import EmbeddingClient
 
 
@@ -38,6 +42,13 @@ def _make_mock_client(vectors: list[list[float]] | None = None):
 
 class TestEmbeddingClient:
     """EmbeddingClient 基础功能测试。"""
+
+    @pytest.mark.asyncio
+    async def test_defaults_follow_config_constants(self):
+        mock = _make_mock_client()
+        ec = EmbeddingClient(client=mock)
+        assert ec.model == DEFAULT_EMBEDDING_MODEL
+        assert ec.dimensions == DEFAULT_EMBEDDING_DIMENSIONS
 
     @pytest.mark.asyncio
     async def test_embed_single(self):

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from excelmanus.cli.commands import load_skill_command_rows
+from excelmanus.cli.commands import HELP_COMMAND_ENTRIES, load_skill_command_rows
 from excelmanus.cli.theme import THEME
 from excelmanus.cli.utils import separator_line
 
@@ -52,18 +52,13 @@ def render_help(
 
     # Commands
     console.print(f"  [{THEME.BOLD}]Commands[/{THEME.BOLD}]")
-    commands = [
-        ("/help", "显示帮助", "/skills", "查看技能包"),
-        ("/history", "对话历史摘要", "/model", "查看/切换模型"),
-        ("/clear", "清除对话历史", "/mcp", "MCP Server 状态"),
-        ("/save [路径]", "保存对话记录", "/config", "环境变量配置"),
-        ("/subagent", "子代理控制", "/fullaccess", "权限控制"),
-        ("/backup", "备份沙盒控制", "/plan", "计划模式"),
-        ("/accept <id>", "确认操作", "/reject <id>", "拒绝操作"),
-        ("/undo <id>", "回滚操作", "", ""),
-    ]
-    for row in commands:
-        cmd1, desc1, cmd2, desc2 = row
+    commands = list(HELP_COMMAND_ENTRIES)
+    if len(commands) % 2 != 0:
+        commands.append(("", ""))
+
+    for i in range(0, len(commands), 2):
+        cmd1, desc1 = commands[i]
+        cmd2, desc2 = commands[i + 1]
         left = f"[{THEME.PRIMARY_LIGHT}]{cmd1:<16}[/{THEME.PRIMARY_LIGHT}][{THEME.DIM}]{desc1}[/{THEME.DIM}]"
         if cmd2:
             right = f"[{THEME.PRIMARY_LIGHT}]{cmd2:<16}[/{THEME.PRIMARY_LIGHT}][{THEME.DIM}]{desc2}[/{THEME.DIM}]"

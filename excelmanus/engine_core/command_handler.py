@@ -1,7 +1,7 @@
 """CommandHandler — 从 AgentEngine 解耦的控制命令处理组件。
 
 负责管理：
-- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /backup 命令
+- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /backup, /compact 命令
 """
 
 from __future__ import annotations
@@ -10,6 +10,10 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.control_commands import (
+    NORMALIZED_ALIAS_TO_CANONICAL_CONTROL_COMMAND,
+    normalize_control_command,
+)
 from excelmanus.logger import get_logger
 from excelmanus.tools.registry import ToolNotAllowedError
 
@@ -48,8 +52,9 @@ class CommandHandler:
         if raw_command in {"/planmode", "/plan_mode"}:
             return "命令已移除，请使用 /plan ..."
 
-        command = raw_command.replace("_", "")
-        if command not in {"/fullaccess", "/subagent", "/accept", "/reject", "/undo", "/plan", "/model", "/backup", "/compact"}:
+        normalized_command = normalize_control_command(raw_command)
+        command = NORMALIZED_ALIAS_TO_CANONICAL_CONTROL_COMMAND.get(normalized_command)
+        if command is None:
             return None
 
         from excelmanus.skillpacks.router import SkillMatchResult

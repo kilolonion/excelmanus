@@ -8,10 +8,16 @@ from unittest.mock import MagicMock
 from rich.console import Console
 
 from excelmanus.cli.commands import (
+    COMMAND_ARGUMENTS_BY_ALIAS,
+    DECLARED_SLASH_COMMAND_ALIASES,
     EXIT_COMMANDS,
+    HELP_COMMAND_ENTRIES,
+    MODEL_ALIASES,
     SLASH_COMMANDS,
     SLASH_COMMAND_SUGGESTIONS,
     SESSION_CONTROL_ALIASES,
+    build_command_argument_map,
+    build_prompt_command_sync_payload,
     extract_slash_raw_args,
     load_skill_command_rows,
     mask_secret,
@@ -21,6 +27,7 @@ from excelmanus.cli.commands import (
     suggest_similar_commands,
     to_standard_skill_detail,
 )
+from excelmanus.control_commands import CONTROL_COMMAND_SPECS
 
 
 def _make_console(width: int = 80) -> Console:
@@ -37,16 +44,73 @@ class TestConstants:
         assert "exit" in EXIT_COMMANDS
         assert "quit" in EXIT_COMMANDS
 
-    def test_slash_commands_non_empty(self):
-        assert len(SLASH_COMMANDS) > 10
+    def test_declared_aliases_keep_backward_compatible_membership_surface(self):
+        assert SLASH_COMMANDS == frozenset(DECLARED_SLASH_COMMAND_ALIASES)
 
     def test_suggestions_non_empty(self):
         assert len(SLASH_COMMAND_SUGGESTIONS) > 10
+
+    def test_ui_removed_from_all_command_surfaces(self):
+        assert "/ui" not in SLASH_COMMANDS
+        assert "/ui" not in SLASH_COMMAND_SUGGESTIONS
+        help_commands = [cmd for cmd, _ in HELP_COMMAND_ENTRIES]
+        assert "/ui" not in help_commands
+        assert "/ui" not in COMMAND_ARGUMENTS_BY_ALIAS
+
+    def test_suggestions_are_subset_of_declared_commands(self):
+        assert set(SLASH_COMMAND_SUGGESTIONS).issubset(SLASH_COMMANDS)
+
+    def test_argument_map_contains_aliases(self):
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/fullaccess"] == ("status", "on", "off")
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/full_access"] == ("status", "on", "off")
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/subagent"] == ("status", "on", "off", "list", "run")
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/sub_agent"] == ("status", "on", "off", "list", "run")
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/compact"] == ("status", "on", "off")
 
     def test_session_control_aliases(self):
         assert "/fullaccess" in SESSION_CONTROL_ALIASES
         assert "/subagent" in SESSION_CONTROL_ALIASES
         assert "/accept" in SESSION_CONTROL_ALIASES
+        assert "/compact" in SESSION_CONTROL_ALIASES
+
+    def test_session_control_aliases_match_shared_registry(self):
+        expected_aliases = {
+            alias for spec in CONTROL_COMMAND_SPECS for alias in spec.all_aliases
+        }
+        assert SESSION_CONTROL_ALIASES == expected_aliases
+
+
+class TestPromptCommandSyncContract:
+    def test_build_command_argument_map_injects_model_names_for_all_aliases(self):
+        arg_map = build_command_argument_map(
+            model_names=["gpt-4o", "  ", "gpt-4o", "claude-3.7-sonnet"]
+        )
+        expected = ("list", "gpt-4o", "claude-3.7-sonnet")
+        for alias in MODEL_ALIASES:
+            assert arg_map[alias] == expected
+
+    def test_build_prompt_command_sync_payload_contains_dynamic_skills_and_model_args(self):
+        engine = MagicMock()
+        engine.list_skillpack_commands.return_value = [
+            ("data_basic", ""),
+            ("data_basic", "重复"),
+            ("excel_formula", ""),
+        ]
+        engine.model_names.return_value = ["gpt-4o-mini", "claude-3.7-sonnet"]
+
+        payload = build_prompt_command_sync_payload(engine)
+
+        assert payload.slash_command_suggestions == SLASH_COMMAND_SUGGESTIONS
+        assert payload.dynamic_skill_slash_commands == (
+            "/data_basic",
+            "/excel_formula",
+        )
+        for alias in MODEL_ALIASES:
+            assert payload.command_argument_map[alias] == (
+                "list",
+                "gpt-4o-mini",
+                "claude-3.7-sonnet",
+            )
 
 
 class TestExtractSlashRawArgs:

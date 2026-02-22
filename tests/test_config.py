@@ -922,6 +922,40 @@ class TestModelsRouterHooksAndMcpConfig:
         assert cfg.hooks_output_max_chars == 4096
         assert cfg.max_context_tokens == 32768
 
+    def test_context_optimization_flags_loaded(self, monkeypatch) -> None:
+        """上下文优化相关配置应由环境变量完整驱动。"""
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_SUMMARIZATION_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO", "0.7")
+        monkeypatch.setenv("EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS", "7")
+        monkeypatch.setenv("EXCELMANUS_COMPACTION_ENABLED", "false")
+        monkeypatch.setenv("EXCELMANUS_COMPACTION_THRESHOLD_RATIO", "0.9")
+        monkeypatch.setenv("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS", "6")
+        monkeypatch.setenv("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS", "2000")
+
+        cfg = load_config()
+
+        assert cfg.prompt_cache_key_enabled is False
+        assert cfg.summarization_enabled is False
+        assert cfg.summarization_threshold_ratio == pytest.approx(0.7)
+        assert cfg.summarization_keep_recent_turns == 7
+        assert cfg.compaction_enabled is False
+        assert cfg.compaction_threshold_ratio == pytest.approx(0.9)
+        assert cfg.compaction_keep_recent_turns == 6
+        assert cfg.compaction_max_summary_tokens == 2000
+
+    def test_context_optimization_invalid_values_raise_error(self, monkeypatch) -> None:
+        self._set_required_env(monkeypatch)
+        monkeypatch.setenv("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED", "maybe")
+        with pytest.raises(ConfigError, match="EXCELMANUS_PROMPT_CACHE_KEY_ENABLED"):
+            load_config()
+
+        monkeypatch.setenv("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED", "true")
+        monkeypatch.setenv("EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO", "1.5")
+        with pytest.raises(ConfigError, match="EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO"):
+            load_config()
+
     def test_mcp_shared_manager_flag_loaded(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)
         monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "true")

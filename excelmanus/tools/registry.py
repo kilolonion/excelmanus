@@ -325,10 +325,11 @@ class ToolRegistry:
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。
 
-        工具精简后仅注册仍有活跃 ToolDef 的模块：
-        data_tools, file_tools, code_tools, shell_tools, sheet_tools, focus_tools, memory_tools。
-        已清空的模块（cell_tools/format_tools/advanced_format_tools/chart_tools/worksheet_tools）
-        不再导入，节省启动开销。
+        当前默认注册模块：
+        data_tools / file_tools / code_tools / shell_tools /
+        sheet_tools / macro_tools / focus_tools / image_tools / memory_tools。
+
+        其中 task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册。
         """
         from excelmanus.tools import (
             code_tools,
@@ -341,24 +342,22 @@ class ToolRegistry:
             sheet_tools,
         )
 
-        data_tools.init_guard(workspace_root)
-        file_tools.init_guard(workspace_root)
-        code_tools.init_guard(workspace_root)
-        shell_tools.init_guard(workspace_root)
-        sheet_tools.init_guard(workspace_root)
-        macro_tools.init_guard(workspace_root)
-        image_tools.init_guard(workspace_root)
-
-        self.register_tools(data_tools.get_tools())
-        self.register_tools(file_tools.get_tools())
-        self.register_tools(code_tools.get_tools())
-        self.register_tools(shell_tools.get_tools())
-        self.register_tools(sheet_tools.get_tools())
-        self.register_tools(macro_tools.get_tools())
-        self.register_tools(focus_tools.get_tools())
-        self.register_tools(image_tools.get_tools())
+        builtin_modules = (
+            data_tools,
+            file_tools,
+            code_tools,
+            shell_tools,
+            sheet_tools,
+            macro_tools,
+            focus_tools,
+            image_tools,
+        )
+        for module in builtin_modules:
+            init_guard = getattr(module, "init_guard", None)
+            if callable(init_guard):
+                init_guard(workspace_root)
+            self.register_tools(module.get_tools())
 
         from excelmanus.tools import memory_tools
 
-        # task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册
         self.register_tools(memory_tools.get_tools())

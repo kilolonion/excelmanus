@@ -36,6 +36,8 @@ class TestRenderHelp:
         assert "/help" in output
         assert "/skills" in output
         assert "/model" in output
+        assert "/compact" in output
+        assert "/ui" not in output
 
     def test_contains_separator(self):
         console = _make_console()
