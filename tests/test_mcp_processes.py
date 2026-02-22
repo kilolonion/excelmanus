@@ -58,6 +58,26 @@ def test_snapshot_supports_custom_state_dir(tmp_path: Path) -> None:
     assert pids == {201}
 
 
+def test_state_dir_too_shallow_raises_error() -> None:
+    """回归：state_dir 为根目录等过浅路径时，应拒绝以防误匹配全部进程。"""
+    import pytest
+    from excelmanus.mcp.processes import _resolve_state_dir
+
+    with pytest.raises(ValueError, match="过浅"):
+        _resolve_state_dir("/tmp/workspace", state_dir="/")
+
+    # /var 在 macOS 上 resolve 为 /private/var（3 parts），
+    # 用 Path 直接构造确保只有 2 parts。
+    import sys
+    if sys.platform == "darwin":
+        # macOS: /private 只有 2 parts
+        shallow = "/private"
+    else:
+        shallow = "/tmp"
+    with pytest.raises(ValueError, match="过浅"):
+        _resolve_state_dir("/tmp/workspace", state_dir=shallow)
+
+
 def test_terminate_expands_descendants_in_same_scope() -> None:
     processes = [
         ProcessInfo(pid=301, ppid=1, command="/custom/mcp/a"),

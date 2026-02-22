@@ -232,6 +232,48 @@ async def test_readonly_blocks_high_risk_tool(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_allowed_tools_filtered_to_empty_does_not_fallback_to_unrestricted(
+    tmp_path: Path,
+) -> None:
+    """回归：allowed_tools 全部被 blocked 过滤后，不应退化为不限权。"""
+    config = _make_config(tmp_path)
+    registry = _registry_with_tools(tmp_path)
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="explorer",
+        description="allowed 过滤为空测试",
+        allowed_tools=["delegate_to_subagent"],  # restricted 模式下会被 blocked
+        permission_mode="readOnly",
+        max_iterations=2,
+        max_consecutive_failures=1,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(_tool_call_message("read_excel", {})),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(config=sub_cfg, prompt="尝试读取")
+
+    assert result.success is False
+    assert result.error is not None
+    assert "ToolNotAllowed: read_excel" in result.error
+
+
+@pytest.mark.asyncio
 async def test_default_mode_creates_pending_and_stops(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = _registry_with_tools(tmp_path)

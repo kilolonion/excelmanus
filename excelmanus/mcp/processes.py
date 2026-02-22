@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Iterable
 
 _ENV_MCP_STATE_DIR = "EXCELMANUS_MCP_STATE_DIR"
+_MIN_STATE_DIR_DEPTH = 3
+
+
+def _validate_state_dir_depth(resolved: Path) -> None:
+    """校验 state_dir 路径深度，防止过浅 marker 误匹配全部进程。"""
+    if len(resolved.parts) < _MIN_STATE_DIR_DEPTH:
+        raise ValueError(
+            f"MCP state_dir 路径过浅: {resolved}（至少需要 {_MIN_STATE_DIR_DEPTH} 层目录）"
+        )
 
 
 @dataclass(frozen=True)
@@ -48,6 +57,7 @@ def _resolve_state_dir(workspace_root: str, state_dir: str | None = None) -> Pat
             resolved = (root / resolved).resolve(strict=False)
         else:
             resolved = resolved.resolve(strict=False)
+        _validate_state_dir_depth(resolved)
         return resolved
     return (root / ".excelmanus" / "mcp").resolve(strict=False)
 

@@ -123,8 +123,11 @@ class ApprovalManager:
         self._mutating_tools: set[str] = set(self._MUTATING_TOOLS)
 
     def register_mcp_auto_approve(self, prefixed_names: Sequence[str]) -> None:
-        """注册 MCP 工具白名单（自动批准，无需用户确认）。"""
-        self._mcp_auto_approved.update(prefixed_names)
+        """注册 MCP 工具白名单（自动批准，无需用户确认）。
+
+        全量替换：每次同步使用最新列表，旧条目自动清除。
+        """
+        self._mcp_auto_approved = set(prefixed_names)
 
     def register_read_only_safe_tools(self, tool_names: Sequence[str]) -> None:
         """注册额外只读安全工具（仅影响当前实例）。"""

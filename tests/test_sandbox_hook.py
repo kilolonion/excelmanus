@@ -59,6 +59,13 @@ class TestGreenSandbox:
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 
+    def test_from_os_import_execv_blocked(self, workspace: Path) -> None:
+        """回归测试：from os import execv 不应绕过进程创建拦截。"""
+        code = "from os import execv\nexecv('/bin/echo', ('echo', 'hi'))"
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+
     def test_import_socket_allowed(self, workspace: Path) -> None:
         """socket 模块允许导入（matplotlib.pyplot 内部依赖）。"""
         result = _run_in_sandbox(workspace, "import socket\nprint('socket_ok')", "GREEN")

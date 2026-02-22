@@ -19,7 +19,7 @@ class FilteredToolRegistry:
         disallowed: list[str] | None = None,
     ) -> None:
         self._parent = parent
-        self._allowed = set(allowed) if allowed else None
+        self._allowed = set(allowed) if allowed is not None else None
         self._disallowed = set(disallowed or [])
 
     def is_tool_available(self, name: str) -> bool:

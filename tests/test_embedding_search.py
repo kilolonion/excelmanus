@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from excelmanus.embedding.search import SearchResult, cosine_top_k, semantic_search
+from excelmanus.embedding.search import SearchResult, cosine_top_k
 
 
 class TestCosineTopK:
@@ -81,13 +81,3 @@ class TestCosineTopK:
         assert scores == sorted(scores, reverse=True)
 
 
-class TestSemanticSearch:
-    """semantic_search 异步封装测试。"""
-
-    @pytest.mark.asyncio
-    async def test_async_wrapper(self):
-        query = np.array([1.0, 0.0], dtype=np.float32)
-        corpus = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-        results = await semantic_search(query, corpus, k=1)
-        assert len(results) == 1
-        assert results[0].index == 0

@@ -94,10 +94,29 @@ _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
 _VALID_WRITE_HINTS = {"may_write", "read_only", "unknown"}
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
-    "plan": "planner",
-    "general-purpose": "analyst",
-    "generalpurpose": "analyst",
+    "plan": "subagent",
+    "planner": "subagent",
+    "general-purpose": "subagent",
+    "generalpurpose": "subagent",
+    "analyst": "subagent",
 }
+
+# ── 子代理自动选择：关键词规则 ──────────────────────────────
+# 写入意图关键词：命中时优先使用通用 subagent（避免 explorer 被误选）
+_WRITE_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "写入", "修改", "删除", "创建", "生成", "新增", "插入", "替换", "更新",
+    "保存", "导出", "输出", "覆盖", "追加", "合并", "拆分", "格式化",
+    "画图", "图表", "公式", "计算列", "vlookup", "运行", "执行",
+    "write", "create", "delete", "update", "save", "export", "run",
+})
+# 只读意图关键词：命中时优先使用 explorer
+_READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "查看", "分析", "读取", "统计", "定位", "检查", "预览", "概况",
+    "列出", "搜索", "查找", "对比", "比较", "探索", "浏览", "扫描",
+    "有哪些", "多少", "几个", "什么结构", "哪些列", "哪些sheet",
+    "read", "analyze", "inspect", "list", "search", "find", "explore",
+    "preview", "scan", "count", "structure",
+})
 
 
 def _normalize_write_hint(value: Any) -> str:
@@ -2674,15 +2693,31 @@ class AgentEngine:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """选择子代理。不再调用 LLM，直接返回默认 subagent。"""
+        """基于关键词规则选择子代理（不调用 LLM）。
+
+        规则优先级：
+        1. 任务文本含写入意图关键词 → subagent（通用全能力）
+        2. 任务文本含只读意图关键词且 explorer 可用 → explorer
+        3. 以上均未命中 → subagent（安全回退）
+        """
         _, candidates = self._subagent_registry.build_catalog()
         if not candidates:
             return "subagent"
-        # 如果只有一个候选，直接返回
-        if len(candidates) == 1:
-            return candidates[0]
-        # 多个候选时（用户自定义场景），返回第一个
-        return candidates[0]
+
+        candidate_set = set(candidates)
+        task_lower = task.lower()
+
+        # 写入意图优先：一旦命中写入关键词，直接走通用 subagent
+        has_write_intent = any(kw in task_lower for kw in _WRITE_INTENT_KEYWORDS)
+        if has_write_intent:
+            return "subagent"
+
+        # 只读意图：命中且 explorer 已注册
+        has_read_intent = any(kw in task_lower for kw in _READ_INTENT_KEYWORDS)
+        if has_read_intent and "explorer" in candidate_set:
+            return "explorer"
+
+        return "subagent"
 
     async def run_subagent(
         self,
@@ -2727,6 +2762,90 @@ class AgentEngine:
             tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
             enriched_contexts=enriched_contexts,
         )
+
+    async def _run_finish_verifier_advisory(
+        self,
+        *,
+        report: dict[str, Any] | None,
+        summary: str,
+        on_event: EventCallback | None = None,
+    ) -> str | None:
+        """Advisory 模式：finish_task 前运行 verifier 子代理。
+
+        返回附加提示文本（拼接到 finish 响应），或 None 表示跳过/失败（fail-open）。
+        不阻塞 finish_accepted，仅追加诊断信息。
+        """
+        if not self._subagent_enabled:
+            return None
+
+        verifier_config = self._subagent_registry.get("verifier")
+        if verifier_config is None:
+            return None
+
+        # 构建验证提示词：包含任务摘要 + 报告内容
+        parts: list[str] = ["请验证以下任务是否真正完成："]
+        if report and isinstance(report, dict):
+            operations = (report.get("operations") or "").strip()
+            if operations:
+                parts.append(f"操作：{operations}")
+            key_findings = (report.get("key_findings") or "").strip()
+            if key_findings:
+                parts.append(f"关键发现：{key_findings}")
+            affected_files = report.get("affected_files")
+            if isinstance(affected_files, list) and affected_files:
+                parts.append(f"涉及文件：{', '.join(str(f) for f in affected_files)}")
+        elif summary.strip():
+            parts.append(f"完成摘要：{summary}")
+        else:
+            return None
+
+        # 注入最近对话上下文帮助 verifier 理解任务
+        recent_context = self._build_parent_context_summary()
+        if recent_context:
+            parts.append(f"会话上下文：{recent_context[:800]}")
+
+        prompt = "\n".join(parts)
+
+        try:
+            result = await self.run_subagent(
+                agent_name="verifier",
+                prompt=prompt,
+                on_event=on_event,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("verifier advisory 执行异常，fail-open", exc_info=True)
+            return None
+
+        if not result.success:
+            logger.info("verifier advisory 执行失败: %s", result.error)
+            return None
+
+        # 解析 verdict
+        import json as _json
+
+        verdict_text = result.summary.strip()
+        verdict = "unknown"
+        issues: list[str] = []
+        checks: list[str] = []
+
+        try:
+            parsed = _json.loads(verdict_text)
+            if isinstance(parsed, dict):
+                verdict = str(parsed.get("verdict", "unknown")).lower()
+                issues = parsed.get("issues", [])
+                checks = parsed.get("checks", [])
+        except (_json.JSONDecodeError, TypeError):
+            # verifier 未按格式输出，视为 unknown
+            pass
+
+        if verdict == "pass":
+            check_str = "、".join(str(c) for c in checks[:3]) if checks else "基本检查"
+            return f"\n\n✅ **验证通过**（{check_str}）"
+        elif verdict == "fail":
+            issue_str = "、".join(str(i) for i in issues[:3]) if issues else "未知问题"
+            return f"\n\n⚠️ **验证发现问题**（advisory）：{issue_str}（任务仍标记完成，建议复查）"
+        else:
+            return f"\n\n🔍 **验证结果不确定**：{verdict_text[:200]}"
 
     def _build_full_mode_contexts(self) -> list[str]:
         """为 full 模式子代理构建主代理级别的丰富上下文。"""
