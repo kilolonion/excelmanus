@@ -51,6 +51,7 @@ from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
+from excelmanus.tools.introspection_tools import register_introspection_tools
 from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
@@ -720,6 +721,8 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
+        # U1 修复：注册 introspect_capability 工具
+        register_introspection_tools(self._registry)
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullaccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
@@ -3454,6 +3457,7 @@ class AgentEngine:
                 self._last_failure_count += 1
                 self._memory.add_assistant_message(context_error)
                 logger.warning("系统上下文预算检查失败，终止执行: %s", context_error)
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=context_error,
                     tool_calls=list(all_tool_results),
@@ -3601,6 +3605,7 @@ class AgentEngine:
                         self._config.base_url,
                     )
                     logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=error_reply,
                         tool_calls=list(all_tool_results),
@@ -3664,6 +3669,7 @@ class AgentEngine:
                         if diag:
                             diag.guard_events.append("write_guard_exit")
                         logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
+                        self._try_refresh_manifest()
                         return ChatResult(
                             reply=reply_text,
                             tool_calls=list(all_tool_results),
@@ -3677,6 +3683,7 @@ class AgentEngine:
 
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply_text,
                     tool_calls=list(all_tool_results),
@@ -3769,6 +3776,7 @@ class AgentEngine:
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3790,6 +3798,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3806,6 +3815,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3833,6 +3843,10 @@ class AgentEngine:
                             write_hint = "may_write"
                         # Manifest 增量刷新：写入操作后标记需要刷新
                         self._manifest_refresh_needed = True
+                    # run_code 通过 Python 代码间接写入，不在 _WRITE_TOOL_NAMES 中，
+                    # 需单独置位刷新标记
+                    if tc_result.tool_name == "run_code":
+                        self._manifest_refresh_needed = True
                     # ── 同步 _execute_tool_call 内部的写入传播 ──
                     # delegate_to_subagent 等工具在 _execute_tool_call 中直接
                     # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
@@ -3857,6 +3871,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.info("命中 ask_user，进入待回答状态")
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply,
                     tool_calls=list(all_tool_results),
@@ -3884,6 +3899,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.warning("连续 %d 次工具失败，熔断终止", max_failures)
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply,
                     tool_calls=list(all_tool_results),

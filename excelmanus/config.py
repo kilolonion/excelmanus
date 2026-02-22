@@ -225,6 +225,20 @@ def _parse_float_between_zero_and_one(value: str | None, name: str, default: flo
     return result
 
 
+def _parse_threshold(env_value: str | None, default: float) -> float:
+    """解析语义阈值，非法值静默回退到默认值并记录警告。"""
+    if env_value is None:
+        return default
+    try:
+        result = float(env_value)
+        if 0.0 <= result <= 1.0:
+            return result
+    except (ValueError, TypeError):
+        pass
+    logger.warning("阈值配置非法，使用默认值 %s（原值: %r）", default, env_value)
+    return default
+
+
 def _validate_base_url(url: str) -> None:
     """校验 Base URL 为合法的 HTTP/HTTPS URL。"""
     if not _URL_PATTERN.match(url):
@@ -914,8 +928,8 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_SEMANTIC_TOP_K",
         10,
     )
-    memory_semantic_threshold = float(
-        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "0.3")
+    memory_semantic_threshold = _parse_threshold(
+        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD"), 0.3
     )
     memory_semantic_fallback_recent = _parse_int(
         os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT"),
@@ -927,8 +941,8 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MANIFEST_SEMANTIC_TOP_K",
         5,
     )
-    manifest_semantic_threshold = float(
-        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD", "0.25")
+    manifest_semantic_threshold = _parse_threshold(
+        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD"), 0.25
     )
 
     # CLI 布局模式

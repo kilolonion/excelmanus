@@ -9,11 +9,22 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import excelmanus.subagent.executor as subagent_executor_module
 
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
 from excelmanus.memory import ConversationMemory
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
+from excelmanus.message_serialization import assistant_message_to_dict
+from excelmanus.providers.claude import _Function as ClaudeFunction
+from excelmanus.providers.claude import _Message as ClaudeMessage
+from excelmanus.providers.claude import _ToolCall as ClaudeToolCall
+from excelmanus.providers.gemini import _Function as GeminiFunction
+from excelmanus.providers.gemini import _Message as GeminiMessage
+from excelmanus.providers.gemini import _ToolCall as GeminiToolCall
+from excelmanus.providers.openai_responses import _Function as ResponsesFunction
+from excelmanus.providers.openai_responses import _Message as ResponsesMessage
+from excelmanus.providers.openai_responses import _ToolCall as ResponsesToolCall
 from excelmanus.subagent import SubagentConfig, SubagentExecutor
 from excelmanus.tools import ToolDef, ToolRegistry
 
@@ -65,6 +76,56 @@ def _text_message(content: str):
 
 def _response_from_message(message):
     return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def test_subagent_executor_uses_shared_assistant_serializer() -> None:
+    assert (
+        getattr(subagent_executor_module, "assistant_message_to_dict", None)
+        is assistant_message_to_dict
+    )
+    assert not hasattr(subagent_executor_module.SubagentExecutor, "_assistant_message_to_dict")
+
+
+@pytest.mark.parametrize(
+    ("message_cls", "tool_call_cls", "function_cls"),
+    [
+        (GeminiMessage, GeminiToolCall, GeminiFunction),
+        (ClaudeMessage, ClaudeToolCall, ClaudeFunction),
+        (ResponsesMessage, ResponsesToolCall, ResponsesFunction),
+    ],
+)
+def test_assistant_message_to_dict_preserves_tool_calls_for_provider_message(
+    message_cls,
+    tool_call_cls,
+    function_cls,
+) -> None:
+    message = message_cls(
+        content=None,
+        tool_calls=[
+            tool_call_cls(
+                id="call_1",
+                function=function_cls(
+                    name="read_excel",
+                    arguments=json.dumps({"file_path": "data.xlsx"}, ensure_ascii=False),
+                ),
+            )
+        ],
+    )
+
+    payload = assistant_message_to_dict(message)
+
+    assert payload["role"] == "assistant"
+    assert payload["content"] is None
+    assert payload["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "read_excel",
+                "arguments": '{"file_path": "data.xlsx"}',
+            },
+        }
+    ]
 
 
 def _registry_with_tools(tmp_path: Path) -> ToolRegistry:

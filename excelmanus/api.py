@@ -638,13 +638,18 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                                     yield sse
                         break
                     # 等待新事件或任务完成
-                    done, _ = await asyncio.wait(
-                        [
-                            asyncio.create_task(event_queue.get()),
-                            chat_task,
-                        ],
+                    get_task = asyncio.create_task(event_queue.get())
+                    done, pending = await asyncio.wait(
+                        [get_task, chat_task],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                    # 取消所有 pending tasks，防止 task 泄漏
+                    for t in pending:
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
                     for task in done:
                         if task is not chat_task:
                             event = task.result()
@@ -731,6 +736,7 @@ def _sse_event_to_sse(
         EventType.SUBAGENT_ITERATION,
         EventType.SUBAGENT_SUMMARY,
         EventType.SUBAGENT_END,
+        EventType.PENDING_APPROVAL,  # 新增：safe_mode 下过滤审批事件
     }:
         return None
 
@@ -879,6 +885,12 @@ def _sse_event_to_sse(
         data = {
             "content": event.text_delta,
             "iteration": event.iteration,
+        }
+    elif event.event_type == EventType.PENDING_APPROVAL:
+        data = {
+            "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
+            "approval_tool_name": sanitize_external_text(event.approval_tool_name or "", max_len=100),
+            # 不输出 approval_arguments，防止敏感信息泄露
         }
     else:
         data = event.to_dict()
