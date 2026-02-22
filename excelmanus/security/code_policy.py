@@ -5,6 +5,8 @@ import ast
 import enum
 from dataclasses import dataclass, field
 
+from excelmanus.security.module_manifest import MODULE_ROOT_ALIASES, NETWORK_MODULES
+
 
 class CodeRiskTier(enum.Enum):
     GREEN = "GREEN"
@@ -43,14 +45,7 @@ _SAFE_IO_MODULES: frozenset[str] = frozenset({
     "tarfile", "fileinput", "mmap",
 })
 
-_NETWORK_MODULES: frozenset[str] = frozenset({
-    "requests", "urllib", "urllib.request", "urllib.parse", "urllib.error",
-    "httpx", "aiohttp", "socket", "ssl",
-    "http", "http.client", "http.server", "http.cookiejar",
-    "ftplib", "smtplib", "imaplib", "poplib",
-    "xmlrpc", "xmlrpc.client", "xmlrpc.server",
-    "websocket", "websockets",
-})
+_NETWORK_MODULES: frozenset[str] = NETWORK_MODULES
 
 _SUBPROCESS_MODULES: frozenset[str] = frozenset({
     "subprocess", "pty", "pexpect",
@@ -80,10 +75,7 @@ _DANGEROUS_ATTR_CALLS: frozenset[tuple[str, str]] = frozenset({
 })
 
 
-_MODULE_ROOT_ALIASES: dict[str, str] = {
-    "_socket": "socket",
-    "_ssl": "ssl",
-}
+_MODULE_ROOT_ALIASES: dict[str, str] = MODULE_ROOT_ALIASES
 
 
 def _module_root(name: str) -> str:
