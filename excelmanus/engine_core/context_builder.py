@@ -657,10 +657,10 @@ class ContextBuilder:
         """
         e = self._engine
         if not e._workspace_manifest_built:
-            e._workspace_manifest_built = True
             try:
                 from excelmanus.workspace_manifest import build_manifest
                 e._workspace_manifest = build_manifest(e._config.workspace_root)
+                e._workspace_manifest_built = True  # 仅成功时置位，失败保持 False 允许重试
             except Exception:
                 logger.debug("Workspace manifest 构建失败", exc_info=True)
                 e._workspace_manifest = None

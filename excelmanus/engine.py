@@ -51,6 +51,7 @@ from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools import focus_tools, task_tools
+from excelmanus.tools.introspection_tools import register_introspection_tools
 from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
@@ -74,7 +75,6 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("activate_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
     "memory_save", "memory_read_topic",
@@ -720,6 +720,8 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
+        # U1 修复：注册 introspect_capability 工具
+        register_introspection_tools(self._registry)
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullaccess 后解锁
         self._full_access_enabled: bool = False
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
@@ -2505,17 +2507,6 @@ class AgentEngine:
 
         return meta_schemas + filtered_domain
 
-    @staticmethod
-    def _is_activate_skill_ok(result: str) -> bool:
-        """判断 _handle_activate_skill 返回值是否表示成功。
-
-        成功时返回值以 "OK" 开头；失败情形包括：
-        - "未找到技能: ..." — 技能不存在
-        - "⚠️ ..." — 权限拒绝或 MCP 依赖未满足
-        任何非 "OK" 开头的返回均视为失败。
-        """
-        return result.startswith("OK")
-
     async def _handle_activate_skill(self, skill_name: str, reason: str = "") -> str:
         """处理 activate_skill 调用：激活技能并返回技能上下文。"""
         if self._skill_router is None:
@@ -2824,6 +2815,8 @@ class AgentEngine:
             on_event=on_event,
         )
 
+    # TODO: 过渡期残余，待测试迁移后删除
+    # 当前调用方：test_pbt_llm_routing.py:477, test_engine.py:2691, engine.py:3233
     async def _handle_delegate_to_subagent(
         self,
         *,
@@ -3454,6 +3447,7 @@ class AgentEngine:
                 self._last_failure_count += 1
                 self._memory.add_assistant_message(context_error)
                 logger.warning("系统上下文预算检查失败，终止执行: %s", context_error)
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=context_error,
                     tool_calls=list(all_tool_results),
@@ -3601,6 +3595,7 @@ class AgentEngine:
                         self._config.base_url,
                     )
                     logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=error_reply,
                         tool_calls=list(all_tool_results),
@@ -3664,6 +3659,7 @@ class AgentEngine:
                         if diag:
                             diag.guard_events.append("write_guard_exit")
                         logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
+                        self._try_refresh_manifest()
                         return ChatResult(
                             reply=reply_text,
                             tool_calls=list(all_tool_results),
@@ -3677,6 +3673,7 @@ class AgentEngine:
 
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply_text,
                     tool_calls=list(all_tool_results),
@@ -3769,6 +3766,7 @@ class AgentEngine:
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3790,6 +3788,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3806,6 +3805,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
+                    self._try_refresh_manifest()
                     return ChatResult(
                         reply=reply,
                         tool_calls=list(all_tool_results),
@@ -3833,6 +3833,10 @@ class AgentEngine:
                             write_hint = "may_write"
                         # Manifest 增量刷新：写入操作后标记需要刷新
                         self._manifest_refresh_needed = True
+                    # run_code 通过 Python 代码间接写入，不在 _WRITE_TOOL_NAMES 中，
+                    # 需单独置位刷新标记
+                    if tc_result.tool_name == "run_code":
+                        self._manifest_refresh_needed = True
                     # ── 同步 _execute_tool_call 内部的写入传播 ──
                     # delegate_to_subagent 等工具在 _execute_tool_call 中直接
                     # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
@@ -3857,6 +3861,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.info("命中 ask_user，进入待回答状态")
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply,
                     tool_calls=list(all_tool_results),
@@ -3884,6 +3889,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.warning("连续 %d 次工具失败，熔断终止", max_failures)
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
+                self._try_refresh_manifest()
                 return ChatResult(
                     reply=reply,
                     tool_calls=list(all_tool_results),
@@ -4513,6 +4519,7 @@ class AgentEngine:
             truncated=False,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_control_command(
         self,
         user_message: str,
@@ -4524,27 +4531,33 @@ class AgentEngine:
             user_message, on_event=on_event,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_accept_command(
         self, parts: list[str], *, on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_accept_command(parts, on_event=on_event)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _handle_reject_command(self, parts: list[str]) -> str:
         return self._command_handler._handle_reject_command(parts)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_plan_approve(
         self, *, parts: list[str], on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_plan_approve(parts=parts, on_event=on_event)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _handle_plan_reject(self, *, parts: list[str]) -> str:
         return self._command_handler._handle_plan_reject(parts=parts)
 
     # ── Context Builder 委托方法 ──────────────────────────────
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _all_tool_names(self) -> list[str]:
         return self._context_builder._all_tool_names()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _focus_window_refill_reader(
         self, *, file_path: str, sheet_name: str, range_ref: str,
     ) -> dict[str, Any]:
@@ -4552,6 +4565,7 @@ class AgentEngine:
             file_path=file_path, sheet_name=sheet_name, range_ref=range_ref,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
@@ -4562,18 +4576,23 @@ class AgentEngine:
             skill_contexts, route_result=route_result,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_access_notice(self) -> str:
         return self._context_builder._build_access_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_backup_notice(self) -> str:
         return self._context_builder._build_backup_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_mcp_context_notice(self) -> str:
         return self._context_builder._build_mcp_context_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_window_perception_notice(self) -> str:
         return self._context_builder._build_window_perception_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_tool_index_notice(
         self, *, compact: bool = False, max_tools_per_category: int = 8,
     ) -> str:
@@ -4581,6 +4600,7 @@ class AgentEngine:
             compact=compact, max_tools_per_category=max_tools_per_category,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _set_window_perception_turn_hints(
         self, *, user_message: str, is_new_task: bool,
     ) -> None:
@@ -4588,14 +4608,17 @@ class AgentEngine:
             user_message=user_message, is_new_task=is_new_task,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _redirect_backup_paths(
         self, tool_name: str, arguments: dict[str, Any],
     ) -> dict[str, Any]:
         return self._context_builder._redirect_backup_paths(tool_name, arguments)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _has_incomplete_tasks(self) -> bool:
         return self._context_builder._has_incomplete_tasks()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _auto_continue_task_loop(
         self,
         route_result: SkillMatchResult,

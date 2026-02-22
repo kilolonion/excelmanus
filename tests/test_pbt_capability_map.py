@@ -200,7 +200,6 @@ import json
 
 import excelmanus.tools.introspection_tools as introspection_mod
 from excelmanus.tools.introspection_tools import (
-    TOOL_COMBINATIONS,
     introspect_capability,
     register_introspection_tools,
 )
@@ -245,13 +244,6 @@ _valid_category_strategy = st.sampled_from(list(TOOL_CATEGORIES.keys()))
 
 # 有描述的工具名
 _described_tool_strategy = st.sampled_from(list(TOOL_SHORT_DESCRIPTIONS.keys()))
-
-# TOOL_COMBINATIONS 中的工具名（工具精简后可能为空）
-_combination_tool_strategy = (
-    st.sampled_from(list(TOOL_COMBINATIONS.keys()))
-    if TOOL_COMBINATIONS
-    else st.nothing()
-)
 
 # 有效 query_type
 _query_type_strategy = st.sampled_from(
@@ -383,31 +375,6 @@ def test_pbt_property_7_no_side_effects(query_type: str, query: str) -> None:
     # ToolRegistry 状态不变
     tools_after = set(reg.get_tool_names())
     assert tools_before == tools_after, "ToolRegistry 状态被修改"
-
-
-# ---------------------------------------------------------------------------
-# Property 8: related_tools 组合完整性
-# Feature: capability-introspection, Property 8
-# **Validates: Requirements 7.1, 7.2**
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(not TOOL_COMBINATIONS, reason="工具精简后 TOOL_COMBINATIONS 为空")
-@given(tool_name=_combination_tool_strategy)
-def test_pbt_property_8_related_tools_combinations(tool_name: str) -> None:
-    """Property 8：对于 TOOL_COMBINATIONS 中的任意工具，related_tools 结果
-    必须包含所有预定义组合工具。
-
-    **Validates: Requirements 7.1, 7.2**
-    """
-    _ensure_registry()
-    result = introspect_capability("related_tools", tool_name)
-
-    expected_combos = TOOL_COMBINATIONS[tool_name]
-    for combo_tool in expected_combos:
-        assert combo_tool in result, (
-            f"工具 {tool_name} 的预定义组合工具 {combo_tool} 未出现在 related_tools 结果中"
-        )
 
 
 # ---------------------------------------------------------------------------
