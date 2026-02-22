@@ -342,6 +342,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
     from excelmanus.cli.commands import (
         EXIT_COMMANDS,
         SESSION_CONTROL_ALIASES,
+        SHORTCUT_ACTION_SHOW_HELP,
         SUBAGENT_ALIASES,
         extract_slash_raw_args,
         handle_config_command,
@@ -350,6 +351,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
         render_history,
         render_mcp,
         render_skills,
+        resolve_shortcut_action,
         resolve_skill_slash_command,
         suggest_similar_commands,
     )
@@ -500,7 +502,8 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                 return
             continue
 
-        if user_input in {"?", "？"}:
+        shortcut_action = resolve_shortcut_action(user_input)
+        if shortcut_action == SHORTCUT_ACTION_SHOW_HELP:
             render_help(console, engine)
             continue
 

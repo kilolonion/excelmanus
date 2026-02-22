@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from importlib import import_module
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Sequence
@@ -12,6 +13,21 @@ from excelmanus.logger import get_logger
 logger = get_logger("tools")
 
 OpenAISchemaMode = Literal["responses", "chat_completions"]
+
+# 内置工具模块清单（单一事实源）：
+# 1) 该顺序即注册顺序；
+# 2) register_builtin_tools 与说明文档均以此为准，避免注释与实现漂移。
+_BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
+    "excelmanus.tools.data_tools",
+    "excelmanus.tools.file_tools",
+    "excelmanus.tools.code_tools",
+    "excelmanus.tools.shell_tools",
+    "excelmanus.tools.sheet_tools",
+    "excelmanus.tools.macro_tools",
+    "excelmanus.tools.focus_tools",
+    "excelmanus.tools.image_tools",
+    "excelmanus.tools.memory_tools",
+)
 
 
 class ToolRegistryError(Exception):
@@ -325,39 +341,14 @@ class ToolRegistry:
     def register_builtin_tools(self, workspace_root: str) -> None:
         """注册内置工具集。
 
-        当前默认注册模块：
-        data_tools / file_tools / code_tools / shell_tools /
-        sheet_tools / macro_tools / focus_tools / image_tools / memory_tools。
+        默认模块清单由 `_BUILTIN_TOOL_MODULE_PATHS` 统一维护，
+        避免注释与实现各自维护导致的漂移。
 
         其中 task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册。
         """
-        from excelmanus.tools import (
-            code_tools,
-            data_tools,
-            file_tools,
-            focus_tools,
-            image_tools,
-            macro_tools,
-            shell_tools,
-            sheet_tools,
-        )
-
-        builtin_modules = (
-            data_tools,
-            file_tools,
-            code_tools,
-            shell_tools,
-            sheet_tools,
-            macro_tools,
-            focus_tools,
-            image_tools,
-        )
-        for module in builtin_modules:
+        for module_path in _BUILTIN_TOOL_MODULE_PATHS:
+            module = import_module(module_path)
             init_guard = getattr(module, "init_guard", None)
             if callable(init_guard):
                 init_guard(workspace_root)
             self.register_tools(module.get_tools())
-
-        from excelmanus.tools import memory_tools
-
-        self.register_tools(memory_tools.get_tools())

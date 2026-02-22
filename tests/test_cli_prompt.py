@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from excelmanus.cli.prompt import (
+    apply_prompt_command_sync,
     build_prompt_badges,
     compute_inline_suggestion,
     is_interactive_terminal,
@@ -12,6 +13,7 @@ from excelmanus.cli.prompt import (
     _COMMAND_ARGUMENT_MAP,
 )
 import excelmanus.cli.prompt as prompt_mod
+from excelmanus.cli.commands import PromptCommandSyncPayload
 
 
 class TestBuildPromptBadges:
@@ -29,6 +31,26 @@ class TestBuildPromptBadges:
     def test_turn_zero_omitted(self):
         result = build_prompt_badges(model_hint="gpt-4", turn_number=0)
         assert "#" not in result
+
+
+class TestApplyPromptCommandSync:
+    def teardown_method(self):
+        prompt_mod._SLASH_COMMAND_SUGGESTIONS = ()
+        prompt_mod._DYNAMIC_SKILL_SLASH_COMMANDS = ()
+        prompt_mod._COMMAND_ARGUMENT_MAP = {}
+
+    def test_apply_payload_updates_prompt_command_surface(self):
+        payload = PromptCommandSyncPayload(
+            slash_command_suggestions=("/help", "/model"),
+            dynamic_skill_slash_commands=("/excel_clean",),
+            command_argument_map={"/model": ("list", "gpt-4o")},
+        )
+
+        apply_prompt_command_sync(payload)
+
+        assert prompt_mod._SLASH_COMMAND_SUGGESTIONS == ("/help", "/model")
+        assert prompt_mod._DYNAMIC_SKILL_SLASH_COMMANDS == ("/excel_clean",)
+        assert prompt_mod._COMMAND_ARGUMENT_MAP == {"/model": ("list", "gpt-4o")}
 
 
 class TestComputeInlineSuggestion:
