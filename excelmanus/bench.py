@@ -571,7 +571,7 @@ def _serialize_llm_response(response: Any) -> dict[str, Any]:
 class _StreamRecorder:
     """包装异步流式响应，透传 chunk 同时累计 call 级指标。
 
-    在 stream 消费完毕后，将累计的 finish_reason / usage / delta 统计
+    在 stream 消费完毕后，将累计的 finish_reason / usage
     回写到 call_record["response"]，使 run_*.json 中每个 llm_call
     都具备完整的观测数据。
     """
@@ -582,8 +582,6 @@ class _StreamRecorder:
         # 累计指标
         self._finish_reason: str | None = None
         self._usage: dict[str, int] | None = None
-        self._delta_chars = 0
-        self._tool_call_deltas = 0
 
     def __aiter__(self):  # noqa: D105
         return self
@@ -600,24 +598,12 @@ class _StreamRecorder:
         # openai ChatCompletionChunk 格式
         choices = getattr(chunk, "choices", None)
         if choices:
-            delta = getattr(choices[0], "delta", None)
-            if delta is not None:
-                delta_content = getattr(delta, "content", None)
-                if delta_content:
-                    self._delta_chars += len(delta_content)
-                delta_tool_calls = getattr(delta, "tool_calls", None)
-                if delta_tool_calls:
-                    self._tool_call_deltas += len(delta_tool_calls)
             fr = getattr(choices[0], "finish_reason", None)
             if fr:
                 self._finish_reason = fr
 
         # 自定义 provider _StreamDelta 格式
         if hasattr(chunk, "content_delta"):
-            if chunk.content_delta:
-                self._delta_chars += len(chunk.content_delta)
-            if getattr(chunk, "tool_calls_delta", None):
-                self._tool_call_deltas += len(chunk.tool_calls_delta)
             if getattr(chunk, "finish_reason", None):
                 self._finish_reason = chunk.finish_reason
 
@@ -646,8 +632,6 @@ class _StreamRecorder:
             resp["finish_reason"] = self._finish_reason
         if self._usage is not None:
             resp["usage"] = self._usage
-        resp["delta_chars"] = self._delta_chars
-        resp["tool_call_deltas"] = self._tool_call_deltas
         self._call_record["response"] = resp
 
 
@@ -661,6 +645,11 @@ class _LLMCallInterceptor:
     def __init__(self, engine: AgentEngine) -> None:
         self.calls: list[dict[str, Any]] = []
         self._engine = engine
+        if not hasattr(engine, "_client"):
+            raise AttributeError(
+                "bench requires engine._client (openai AsyncOpenAI client); "
+                "engine may have been refactored"
+            )
         self._original_create = engine._client.chat.completions.create
         # monkey-patch
         engine._client.chat.completions.create = self._intercepted_create
@@ -736,6 +725,12 @@ class _EngineTracer:
         self._component_seen: dict[str, tuple[int, int]] = {}
 
         # 保存原始方法
+        for attr in ("_prepare_system_prompts_for_request",
+                     "_enrich_tool_result_with_window_perception"):
+            if not hasattr(engine, attr):
+                raise AttributeError(
+                    f"bench requires engine.{attr}; engine may have been refactored"
+                )
         self._orig_prepare = engine._prepare_system_prompts_for_request
         self._orig_enrich = engine._enrich_tool_result_with_window_perception
 

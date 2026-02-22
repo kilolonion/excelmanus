@@ -71,11 +71,3 @@ def cosine_top_k(
     return results
 
 
-async def semantic_search(
-    query_vec: np.ndarray,
-    corpus_vecs: np.ndarray,
-    k: int = 5,
-    threshold: float = 0.0,
-) -> list[SearchResult]:
-    """异步语义检索（实际计算是 CPU 操作，封装为 async 以统一接口）。"""
-    return cosine_top_k(query_vec, corpus_vecs, k=k, threshold=threshold)
