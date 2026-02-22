@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from excelmanus.config import (
+    DEFAULT_EMBEDDING_DIMENSIONS,
+    DEFAULT_EMBEDDING_MODEL,
+)
+
 if TYPE_CHECKING:
     import openai
 
@@ -26,8 +31,8 @@ class EmbeddingClient:
     def __init__(
         self,
         client: "openai.AsyncOpenAI",
-        model: str = "text-embedding-3-small",
-        dimensions: int = 1536,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
         timeout_seconds: float = 30.0,
     ) -> None:
         self._client = client

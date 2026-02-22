@@ -346,7 +346,6 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
         extract_slash_raw_args,
         handle_config_command,
         handle_skills_subcommand,
-        handle_ui_command,
         render_farewell,
         render_history,
         render_mcp,
@@ -356,7 +355,6 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
     )
     from excelmanus.cli.help import render_help
     from excelmanus.cli.prompt import (
-        _COMMAND_ARGUMENT_MAP,
         read_multiline_user_input,
         read_user_input,
     )
@@ -378,9 +376,8 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
     except Exception as exc:
         logger.warning("@ 提及补全器初始化失败：%s", exc)
 
-    # 同步斜杠命令和模型建议
+    # 同步斜杠命令与参数建议（含模型名）
     _sync_slash_commands(engine)
-    _sync_model_suggestions(engine)
 
     while True:
         has_pending_question = bool(
@@ -503,6 +500,10 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                 return
             continue
 
+        if user_input in {"?", "？"}:
+            render_help(console, engine)
+            continue
+
         # ── 斜杠命令 ──
         if user_input.lower() == "/help":
             render_help(console, engine)
@@ -537,10 +538,6 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
             handle_config_command(console, user_input, engine._config.workspace_root)
             continue
 
-        if user_input.lower().startswith("/ui"):
-            handle_ui_command(console, user_input, engine)
-            continue
-
         if user_input.lower().startswith("/skills "):
             try:
                 handled = handle_skills_subcommand(
@@ -572,7 +569,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
             if selected_name is not None:
                 result_msg = engine.switch_model(selected_name)
                 console.print(f"  [{THEME.CYAN}]{result_msg}[/{THEME.CYAN}]")
-                _sync_model_suggestions(engine)
+                _sync_slash_commands(engine)
             else:
                 console.print(f"  [{THEME.DIM}]已取消选择。[/{THEME.DIM}]")
             continue
@@ -681,62 +678,13 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
 
 def _sync_slash_commands(engine: "AgentEngine") -> None:
     """同步斜杠命令建议到 prompt 模块。"""
-    import excelmanus.cli.prompt as prompt_mod
     from excelmanus.cli.commands import (
-        BACKUP_ALIASES,
-        BACKUP_ARGUMENTS,
-        CONFIG_ALIASES,
-        CONFIG_ARGUMENTS,
-        FULL_ACCESS_ALIASES,
-        FULL_ACCESS_ARGUMENTS,
-        MODEL_ALIASES,
-        PLAN_ALIASES,
-        PLAN_ARGUMENTS,
-        SLASH_COMMAND_SUGGESTIONS,
-        SUBAGENT_ALIASES,
-        SUBAGENT_ARGUMENTS,
-        UI_ALIASES,
-        UI_ARGUMENTS,
-        load_skill_command_rows,
+        build_prompt_command_sync_payload,
     )
+    from excelmanus.cli.prompt import apply_prompt_command_sync
 
-    prompt_mod._SLASH_COMMAND_SUGGESTIONS = SLASH_COMMAND_SUGGESTIONS
-    rows = load_skill_command_rows(engine)
-    prompt_mod._DYNAMIC_SKILL_SLASH_COMMANDS = tuple(f"/{name}" for name, _ in rows)
-
-    # 同步命令参数补全映射
-    arg_map: dict[str, tuple[str, ...]] = {}
-    for alias in FULL_ACCESS_ALIASES:
-        arg_map[alias] = FULL_ACCESS_ARGUMENTS
-    for alias in SUBAGENT_ALIASES:
-        arg_map[alias] = SUBAGENT_ARGUMENTS
-    for alias in PLAN_ALIASES:
-        arg_map[alias] = PLAN_ARGUMENTS
-    for alias in BACKUP_ALIASES:
-        arg_map[alias] = BACKUP_ARGUMENTS
-    for alias in CONFIG_ALIASES:
-        arg_map[alias] = CONFIG_ARGUMENTS
-    for alias in UI_ALIASES:
-        arg_map[alias] = UI_ARGUMENTS
-
-    # 模型名称
-    model_names = engine.model_names()
-    model_args = tuple(["list"] + model_names)
-    for alias in MODEL_ALIASES:
-        arg_map[alias] = model_args
-
-    prompt_mod._COMMAND_ARGUMENT_MAP = arg_map
-
-
-def _sync_model_suggestions(engine: "AgentEngine") -> None:
-    """同步模型名称到命令参数补全。"""
-    import excelmanus.cli.prompt as prompt_mod
-    from excelmanus.cli.commands import MODEL_ALIASES
-
-    model_names = engine.model_names()
-    model_args = tuple(["list"] + model_names)
-    for alias in MODEL_ALIASES:
-        prompt_mod._COMMAND_ARGUMENT_MAP[alias] = model_args
+    payload = build_prompt_command_sync_payload(engine)
+    apply_prompt_command_sync(payload)
 
 
 def _handle_save_command(

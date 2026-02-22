@@ -15,7 +15,7 @@ from rich.console import Console
 from excelmanus.cli.theme import THEME
 
 if TYPE_CHECKING:
-    pass
+    from excelmanus.cli.commands import PromptCommandSyncPayload
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,17 @@ def _get_console() -> Console:
     if console is None:
         console = Console()
     return console
+
+
+def apply_prompt_command_sync(payload: "PromptCommandSyncPayload") -> None:
+    """应用命令同步载荷，更新 prompt 补全面。"""
+    global _SLASH_COMMAND_SUGGESTIONS
+    global _DYNAMIC_SKILL_SLASH_COMMANDS
+    global _COMMAND_ARGUMENT_MAP
+
+    _SLASH_COMMAND_SUGGESTIONS = payload.slash_command_suggestions
+    _DYNAMIC_SKILL_SLASH_COMMANDS = payload.dynamic_skill_slash_commands
+    _COMMAND_ARGUMENT_MAP = dict(payload.command_argument_map)
 
 # ------------------------------------------------------------------
 # 提示符构建

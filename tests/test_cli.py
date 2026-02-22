@@ -24,7 +24,7 @@ from rich.console import Console as RealConsole
 from excelmanus.config import ConfigError
 from excelmanus.cli.question import InteractiveSelectResult
 from excelmanus.cli.question import build_answer_from_select
-from excelmanus.cli.repl import LiveStatusTicker, chat_with_feedback, run_chat_turn
+from excelmanus.cli.repl import LiveStatusTicker, chat_with_feedback, repl_loop, run_chat_turn
 from excelmanus.cli.prompt import compute_inline_suggestion
 from excelmanus.cli.commands import (
     render_farewell,
@@ -180,6 +180,26 @@ class TestChatWithFeedback:
             )
 
         engine.chat.assert_called_once_with("读取文件", on_event=renderer.handle_event)
+
+
+class TestReplShortcuts:
+    """REPL 快捷键回归测试。"""
+
+    def test_question_mark_shortcut_routes_to_help(self) -> None:
+        console = _make_console()
+        engine = _make_engine()
+        engine.model_names.return_value = []
+
+        with patch(
+            "excelmanus.cli.prompt.read_user_input",
+            new=AsyncMock(side_effect=["?", "exit"]),
+        ), patch(
+            "excelmanus.cli.help.render_help",
+        ) as mock_render_help:
+            _run(repl_loop(console, engine))
+
+        mock_render_help.assert_called_once_with(console, engine)
+        engine.chat.assert_not_called()
 
 
 # ── 入口点测试 ──

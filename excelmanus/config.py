@@ -32,6 +32,8 @@ _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
 _ALLOWED_WINDOW_RULE_ENGINE_VERSIONS = {"v1", "v2"}
+DEFAULT_EMBEDDING_MODEL = "text-embedding-v3"
+DEFAULT_EMBEDDING_DIMENSIONS = 1536
 logger = logging.getLogger(__name__)
 
 
@@ -149,8 +151,8 @@ class ExcelManusConfig:
     embedding_enabled: bool = False
     embedding_api_key: str | None = None
     embedding_base_url: str | None = None
-    embedding_model: str = "text-embedding-v3"
-    embedding_dimensions: int = 1536
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS
     embedding_timeout_seconds: float = 30.0
     memory_semantic_top_k: int = 10
     memory_semantic_threshold: float = 0.3
@@ -161,6 +163,21 @@ class ExcelManusConfig:
     cli_layout_mode: str = "dashboard"
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ContextOptimizationConfig:
+    """上下文预算与压缩策略配置（单一接线入口）。"""
+
+    max_context_tokens: int
+    prompt_cache_key_enabled: bool
+    summarization_enabled: bool
+    summarization_threshold_ratio: float
+    summarization_keep_recent_turns: int
+    compaction_enabled: bool
+    compaction_threshold_ratio: float
+    compaction_keep_recent_turns: int
+    compaction_max_summary_tokens: int
 
 
 def load_runtime_env() -> None:
@@ -192,6 +209,19 @@ def _parse_int_allow_zero(value: str | None, name: str, default: int) -> int:
         raise ConfigError(f"配置项 {name} 必须为整数，当前值: {value!r}")
     if result < 0:
         raise ConfigError(f"配置项 {name} 必须为非负整数，当前值: {result}")
+    return result
+
+
+def _parse_float_between_zero_and_one(value: str | None, name: str, default: float) -> float:
+    """将字符串解析为 (0, 1) 区间内浮点数。"""
+    if value is None:
+        return default
+    try:
+        result = float(value)
+    except (ValueError, TypeError):
+        raise ConfigError(f"配置项 {name} 必须为浮点数，当前值: {value!r}")
+    if not 0 < result < 1:
+        raise ConfigError(f"配置项 {name} 必须在 (0, 1) 区间内，当前值: {result}")
     return result
 
 
@@ -434,6 +464,57 @@ def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _load_context_optimization_config() -> _ContextOptimizationConfig:
+    """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。"""
+    return _ContextOptimizationConfig(
+        max_context_tokens=_parse_int(
+            os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"),
+            "EXCELMANUS_MAX_CONTEXT_TOKENS",
+            128_000,
+        ),
+        prompt_cache_key_enabled=_parse_bool(
+            os.environ.get("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED"),
+            "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
+            True,
+        ),
+        summarization_enabled=_parse_bool(
+            os.environ.get("EXCELMANUS_SUMMARIZATION_ENABLED"),
+            "EXCELMANUS_SUMMARIZATION_ENABLED",
+            True,
+        ),
+        summarization_threshold_ratio=_parse_float_between_zero_and_one(
+            os.environ.get("EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO"),
+            "EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO",
+            0.8,
+        ),
+        summarization_keep_recent_turns=_parse_int(
+            os.environ.get("EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS"),
+            "EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS",
+            3,
+        ),
+        compaction_enabled=_parse_bool(
+            os.environ.get("EXCELMANUS_COMPACTION_ENABLED"),
+            "EXCELMANUS_COMPACTION_ENABLED",
+            True,
+        ),
+        compaction_threshold_ratio=_parse_float_between_zero_and_one(
+            os.environ.get("EXCELMANUS_COMPACTION_THRESHOLD_RATIO"),
+            "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
+            0.85,
+        ),
+        compaction_keep_recent_turns=_parse_int(
+            os.environ.get("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS"),
+            "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
+            5,
+        ),
+        compaction_max_summary_tokens=_parse_int(
+            os.environ.get("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS"),
+            "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
+            1500,
+        ),
+    )
+
+
 def load_config() -> ExcelManusConfig:
     """加载配置。优先级：环境变量 > .env 文件 > 默认值。
 
@@ -609,30 +690,7 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
         200,
     )
-    max_context_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"),
-        "EXCELMANUS_MAX_CONTEXT_TOKENS",
-        128_000,
-    )
-    # 上下文自动压缩（Compaction）
-    compaction_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_COMPACTION_ENABLED"),
-        "EXCELMANUS_COMPACTION_ENABLED",
-        True,
-    )
-    compaction_threshold_ratio = float(
-        os.environ.get("EXCELMANUS_COMPACTION_THRESHOLD_RATIO", "0.85")
-    )
-    compaction_keep_recent_turns = _parse_int(
-        os.environ.get("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS"),
-        "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
-        5,
-    )
-    compaction_max_summary_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS"),
-        "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
-        1500,
-    )
+    context_optimization = _load_context_optimization_config()
     hooks_command_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
         "EXCELMANUS_HOOKS_COMMAND_ENABLED",
@@ -839,11 +897,14 @@ def load_config() -> ExcelManusConfig:
         )
     else:
         embedding_enabled = bool(embedding_api_key or embedding_base_url)
-    embedding_model = os.environ.get("EXCELMANUS_EMBEDDING_MODEL") or "text-embedding-v3"
+    embedding_model = (
+        os.environ.get("EXCELMANUS_EMBEDDING_MODEL")
+        or DEFAULT_EMBEDDING_MODEL
+    )
     embedding_dimensions = _parse_int(
         os.environ.get("EXCELMANUS_EMBEDDING_DIMENSIONS"),
         "EXCELMANUS_EMBEDDING_DIMENSIONS",
-        1536,
+        DEFAULT_EMBEDDING_DIMENSIONS,
     )
     embedding_timeout_seconds = float(
         os.environ.get("EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS", "30.0")
@@ -919,11 +980,15 @@ def load_config() -> ExcelManusConfig:
         memory_enabled=memory_enabled,
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
-        max_context_tokens=max_context_tokens,
-        compaction_enabled=compaction_enabled,
-        compaction_threshold_ratio=compaction_threshold_ratio,
-        compaction_keep_recent_turns=compaction_keep_recent_turns,
-        compaction_max_summary_tokens=compaction_max_summary_tokens,
+        max_context_tokens=context_optimization.max_context_tokens,
+        prompt_cache_key_enabled=context_optimization.prompt_cache_key_enabled,
+        summarization_enabled=context_optimization.summarization_enabled,
+        summarization_threshold_ratio=context_optimization.summarization_threshold_ratio,
+        summarization_keep_recent_turns=context_optimization.summarization_keep_recent_turns,
+        compaction_enabled=context_optimization.compaction_enabled,
+        compaction_threshold_ratio=context_optimization.compaction_threshold_ratio,
+        compaction_keep_recent_turns=context_optimization.compaction_keep_recent_turns,
+        compaction_max_summary_tokens=context_optimization.compaction_max_summary_tokens,
         hooks_command_enabled=hooks_command_enabled,
         hooks_command_allowlist=hooks_command_allowlist,
         hooks_command_timeout_seconds=hooks_command_timeout_seconds,

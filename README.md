@@ -331,6 +331,7 @@ python -m excelmanus
 | `/accept <id>` / `/reject <id>` / `/undo <id>` | 审批门禁 |
 | `/plan [on\|off\|status\|approve\|reject]` | Plan 模式 |
 | `/model [list\|<name>]` | 模型切换 |
+| `/compact [status\|on\|off\|<instruction>]` | 上下文压缩控制 |
 | `/config [list\|set\|get\|delete]` | MCP 环境变量管理 |
 | `/backup [status\|on\|off\|apply\|list]` | 备份沙盒控制 |
 | `/mcp` | MCP Server 状态 |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -11,11 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 from excelmanus.cli.theme import THEME
+from excelmanus.control_commands import CONTROL_COMMAND_SPECS
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -28,46 +29,174 @@ logger = logging.getLogger(__name__)
 
 EXIT_COMMANDS = {"exit", "quit"}
 
-SLASH_COMMANDS = {
-    "/help", "/history", "/clear", "/save", "/skills",
-    "/subagent", "/sub_agent", "/fullaccess", "/full_access",
-    "/accept", "/reject", "/undo", "/plan", "/model",
-    "/config", "/backup", "/mcp",
+CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
+
+
+@dataclass(frozen=True, slots=True)
+class StaticSlashCommand:
+    """内置斜杠命令定义。"""
+
+    command: str
+    description: str
+    aliases: tuple[str, ...] = ()
+    arguments: tuple[str, ...] = ()
+    session_control: bool = False
+    include_in_suggestions: bool = True
+    include_in_help: bool = True
+    help_label: str = ""
+
+    @property
+    def all_aliases(self) -> tuple[str, ...]:
+        return (self.command, *self.aliases)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptCommandSyncPayload:
+    """同步到 prompt 模块的命令面快照。"""
+
+    slash_command_suggestions: tuple[str, ...]
+    dynamic_skill_slash_commands: tuple[str, ...]
+    command_argument_map: dict[str, tuple[str, ...]]
+
+
+_BASE_SLASH_COMMANDS: tuple[StaticSlashCommand, ...] = (
+    StaticSlashCommand("/help", "显示帮助"),
+    StaticSlashCommand("/skills", "查看技能包"),
+    StaticSlashCommand("/history", "对话历史摘要"),
+    StaticSlashCommand("/clear", "清除对话历史"),
+    StaticSlashCommand("/mcp", "MCP Server 状态"),
+    StaticSlashCommand("/save", "保存对话记录", help_label="/save [路径]"),
+    StaticSlashCommand("/config", "环境变量配置", arguments=CONFIG_ARGUMENTS),
+)
+
+_CONTROL_SLASH_COMMANDS: tuple[StaticSlashCommand, ...] = tuple(
+    StaticSlashCommand(
+        command=spec.command,
+        description=spec.description,
+        aliases=spec.aliases,
+        arguments=spec.arguments,
+        session_control=True,
+        include_in_suggestions=spec.include_in_suggestions,
+        include_in_help=spec.include_in_help,
+        help_label=spec.help_label,
+    )
+    for spec in CONTROL_COMMAND_SPECS
+)
+
+_STATIC_SLASH_COMMANDS: tuple[StaticSlashCommand, ...] = (
+    *_BASE_SLASH_COMMANDS,
+    *_CONTROL_SLASH_COMMANDS,
+)
+
+
+def _aliases_for(command: str) -> set[str]:
+    for spec in _STATIC_SLASH_COMMANDS:
+        if spec.command == command:
+            return set(spec.all_aliases)
+    raise ValueError(f"未知命令定义: {command}")
+
+
+DECLARED_SLASH_COMMAND_ALIASES: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        alias
+        for spec in _STATIC_SLASH_COMMANDS
+        for alias in spec.all_aliases
+    )
+)
+
+# 兼容旧调用方：保留 membership 语义。
+SLASH_COMMANDS = frozenset(DECLARED_SLASH_COMMAND_ALIASES)
+
+FULL_ACCESS_ALIASES = _aliases_for("/fullaccess")
+BACKUP_ALIASES = _aliases_for("/backup")
+SUBAGENT_ALIASES = _aliases_for("/subagent")
+APPROVAL_ALIASES = (
+    _aliases_for("/accept")
+    | _aliases_for("/reject")
+    | _aliases_for("/undo")
+)
+PLAN_ALIASES = _aliases_for("/plan")
+MODEL_ALIASES = _aliases_for("/model")
+COMPACT_ALIASES = _aliases_for("/compact")
+CONFIG_ALIASES = _aliases_for("/config")
+
+SESSION_CONTROL_ALIASES = {
+    alias
+    for spec in _STATIC_SLASH_COMMANDS
+    if spec.session_control
+    for alias in spec.all_aliases
 }
 
-FULL_ACCESS_ALIASES = {"/fullaccess", "/full_access"}
-BACKUP_ALIASES = {"/backup"}
-SUBAGENT_ALIASES = {"/subagent", "/sub_agent"}
-APPROVAL_ALIASES = {"/accept", "/reject", "/undo"}
-PLAN_ALIASES = {"/plan"}
-MODEL_ALIASES = {"/model"}
-CONFIG_ALIASES = {"/config"}
-UI_ALIASES = {"/ui"}
-
-SESSION_CONTROL_ALIASES = (
-    FULL_ACCESS_ALIASES
-    | SUBAGENT_ALIASES
-    | APPROVAL_ALIASES
-    | PLAN_ALIASES
-    | MODEL_ALIASES
-    | BACKUP_ALIASES
-)
-
 # 补全建议
-SLASH_COMMAND_SUGGESTIONS = (
-    "/help", "/history", "/clear", "/save", "/skills",
-    "/subagent", "/sub_agent", "/mcp", "/config",
-    "/fullaccess", "/full_access", "/accept", "/reject", "/undo",
-    "/plan", "/model", "/backup", "/ui",
+SLASH_COMMAND_SUGGESTIONS = tuple(
+    dict.fromkeys(
+        alias
+        for spec in _STATIC_SLASH_COMMANDS
+        if spec.include_in_suggestions
+        for alias in spec.all_aliases
+    )
 )
 
-CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
-FULL_ACCESS_ARGUMENTS = ("status", "on", "off")
-BACKUP_ARGUMENTS = ("status", "on", "off", "apply", "list")
-SUBAGENT_ARGUMENTS = ("status", "on", "off", "list", "run")
-PLAN_ARGUMENTS = ("status", "on", "off", "approve", "reject")
-MODEL_ARGUMENTS: tuple[str, ...] = ("list",)
-UI_ARGUMENTS = ("status", "dashboard", "classic")
+HELP_COMMAND_ENTRIES = tuple(
+    (spec.help_label or spec.command, spec.description)
+    for spec in _STATIC_SLASH_COMMANDS
+    if spec.include_in_help
+)
+
+COMMAND_ARGUMENTS_BY_ALIAS: dict[str, tuple[str, ...]] = {
+    alias: spec.arguments
+    for spec in _STATIC_SLASH_COMMANDS
+    if spec.arguments
+    for alias in spec.all_aliases
+}
+
+
+def _normalize_model_names(model_names: object) -> tuple[str, ...]:
+    """规范化模型名称列表（去重、去空、保序）。"""
+    if not isinstance(model_names, (list, tuple, set)):
+        return ()
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in model_names:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return tuple(ordered)
+
+
+def build_command_argument_map(*, model_names: object = ()) -> dict[str, tuple[str, ...]]:
+    """构建完整命令参数映射（含 /model 动态模型名）。"""
+    arg_map = dict(COMMAND_ARGUMENTS_BY_ALIAS)
+    normalized_model_names = _normalize_model_names(model_names)
+    model_args = ("list", *normalized_model_names)
+    for alias in MODEL_ALIASES:
+        arg_map[alias] = model_args
+    return arg_map
+
+
+def build_prompt_command_sync_payload(engine: "AgentEngine") -> PromptCommandSyncPayload:
+    """构建 prompt 所需的命令补全/参数同步载荷。"""
+    rows = load_skill_command_rows(engine)
+    dynamic_skill_slash_commands = tuple(
+        dict.fromkeys(
+            f"/{name.strip()}"
+            for name, _ in rows
+            if isinstance(name, str) and name.strip()
+        )
+    )
+
+    model_names_getter = getattr(engine, "model_names", None)
+    model_names = model_names_getter() if callable(model_names_getter) else ()
+
+    return PromptCommandSyncPayload(
+        slash_command_suggestions=SLASH_COMMAND_SUGGESTIONS,
+        dynamic_skill_slash_commands=dynamic_skill_slash_commands,
+        command_argument_map=build_command_argument_map(model_names=model_names),
+    )
 
 
 # ------------------------------------------------------------------
@@ -646,52 +775,6 @@ def render_mcp(console: Console, engine: "AgentEngine") -> None:
     console.print()
     console.print(table)
     console.print()
-
-
-def handle_ui_command(
-    console: Console,
-    user_input: str,
-    engine: "AgentEngine",
-) -> bool:
-    """处理 /ui 命令：查看/切换 CLI 显示模式。返回 True 表示已处理。"""
-    stripped = user_input.strip()
-    lowered = stripped.lower()
-
-    # 获取/设置 layout_mode 的回调
-    get_layout = getattr(engine, "get_cli_layout_mode", None)
-    set_layout = getattr(engine, "set_cli_layout_mode", None)
-
-    current_mode = get_layout() if callable(get_layout) else "classic"
-
-    if lowered in ("/ui", "/ui status"):
-        console.print(
-            f"  [{THEME.DIM}]当前布局模式：[/{THEME.DIM}]"
-            f"[{THEME.BOLD} {THEME.PRIMARY_LIGHT}]{current_mode}[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]"
-        )
-        return True
-
-    if lowered == "/ui dashboard":
-        if callable(set_layout):
-            set_layout("dashboard")
-        console.print(
-            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
-            f" 已切换到 [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]dashboard[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}] 模式"
-        )
-        return True
-
-    if lowered == "/ui classic":
-        if callable(set_layout):
-            set_layout("classic")
-        console.print(
-            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
-            f" 已切换到 [{THEME.BOLD} {THEME.GOLD}]classic[/{THEME.BOLD} {THEME.GOLD}] 模式"
-        )
-        return True
-
-    console.print(
-        f"  [{THEME.GOLD}]未知 /ui 子命令。可用：status / dashboard / classic[/{THEME.GOLD}]"
-    )
-    return True
 
 
 def render_farewell(console: Console) -> None:

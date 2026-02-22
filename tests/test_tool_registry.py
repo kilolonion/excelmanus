@@ -88,6 +88,16 @@ class TestToolRegistry:
         assert payload["tool"] == "need_file_path"
         assert "file_path" in payload["required_fields"]
 
+    def test_register_builtin_tools_includes_macro_and_image_tools(self, tmp_path) -> None:
+        """内置注册应覆盖 macro/image 工具，避免模块清单漂移。"""
+        registry = ToolRegistry()
+        registry.register_builtin_tools(str(tmp_path))
+
+        tool_names = set(registry.get_tool_names())
+        assert "read_image" in tool_names
+        assert "vlookup_write" in tool_names
+        assert "computed_column" in tool_names
+
 
 class TestToolDefTruncate:
     """ToolDef.truncate_result 截断逻辑测试。"""
