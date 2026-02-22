@@ -16,6 +16,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
+from excelmanus.message_serialization import assistant_message_to_dict
 from excelmanus.memory import ConversationMemory
 from excelmanus.subagent.models import SubagentConfig, SubagentFileChange, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
@@ -157,7 +158,7 @@ class SubagentExecutor:
                     memory.add_assistant_message(last_summary)
                     break
 
-                memory.add_assistant_tool_message(self._assistant_message_to_dict(message))
+                memory.add_assistant_tool_message(assistant_message_to_dict(message))
 
                 breaker_skip_msg = (
                     f"工具未执行：连续 {config.max_consecutive_failures} 次工具调用失败，已触发熔断。"
@@ -652,16 +653,6 @@ class SubagentExecutor:
                 )
         except Exception:
             logger.warning("子代理 %s 持久记忆提取失败", subagent_name, exc_info=True)
-
-    @staticmethod
-    def _assistant_message_to_dict(message: Any) -> dict[str, Any]:
-        payload = getattr(message, "model_dump", None)
-        if callable(payload):
-            data = payload(exclude_none=False)
-            if isinstance(data, dict):
-                data["role"] = "assistant"
-                return data
-        return {"role": "assistant", "content": str(getattr(message, "content", "") or "")}
 
     @staticmethod
     def _backfill_tool_results_for_remaining_calls(

@@ -71,6 +71,12 @@ class TestGreenSandbox:
         assert result.returncode != 0
         assert "安全策略禁止" in result.stderr
 
+    def test_raw_socket_create_blocked(self, workspace: Path) -> None:
+        """回归测试：import _socket 不应绕过网络拦截。"""
+        result = _run_in_sandbox(workspace, "import _socket\ns = _socket.socket()", "GREEN")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+
     def test_socket_gethostname_allowed(self, workspace: Path) -> None:
         """只读信息函数仍可用。"""
         result = _run_in_sandbox(workspace, "import socket\nprint('host:', socket.gethostname())", "GREEN")
@@ -153,6 +159,11 @@ class TestYellowSandbox:
         result = _run_in_sandbox(workspace, "import socket\nprint('socket_ok')", "YELLOW")
         assert result.returncode == 0
         assert "socket_ok" in result.stdout
+
+    def test_raw_socket_create_blocked(self, workspace: Path) -> None:
+        result = _run_in_sandbox(workspace, "import _socket\ns = _socket.socket()", "YELLOW")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
 
     def test_network_module_not_blocked(self, workspace: Path) -> None:
         # requests may not be installed, just verify the hook doesn't block it
