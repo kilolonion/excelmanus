@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from excelmanus.excel_extensions import EXCEL_EXTENSIONS
 from excelmanus.mentions.parser import Mention, ResolvedMention
 from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 
@@ -18,8 +19,8 @@ if TYPE_CHECKING:
     from excelmanus.mcp.manager import MCPManager
     from excelmanus.skillpacks.loader import SkillpackLoader
 
-# Excel 文件扩展名
-_EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+# Excel 文件扩展名（向后兼容保留私有别名）
+_EXCEL_EXTENSIONS = EXCEL_EXTENSIONS
 
 # 目录树排除项
 _EXCLUDED_NAMES = {".venv", "node_modules", "__pycache__"}
