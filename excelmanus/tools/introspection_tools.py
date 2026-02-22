@@ -4,7 +4,7 @@
 - tool_detail: 查询工具完整参数 schema + 权限 + 分类
 - category_tools: 查询分类下所有工具列表
 - can_i_do: 基于关键词匹配的能力判断
-- related_tools: 查询相关工具推荐（同分类 + 预定义组合）
+- related_tools: 查询相关工具推荐（同分类）
 
 注册为 READ_ONLY_SAFE_TOOLS，纯查询无副作用。
 """
@@ -44,12 +44,6 @@ INTROSPECT_CAPABILITY_SCHEMA: dict = {
     },
     "required": ["query_type", "query"],
     "additionalProperties": False,
-}
-
-# ── 预定义工具组合 ────────────────────────────────────────
-
-TOOL_COMBINATIONS: dict[str, list[str]] = {
-    # 工具精简后所有预定义组合已清空（被引用工具均已删除）
 }
 
 # ── can_i_do 匹配阈值与上限 ──────────────────────────────
@@ -120,17 +114,12 @@ def _handle_tool_detail(tool_name: str) -> str:
     desc = TOOL_SHORT_DESCRIPTIONS.get(tool_name, tool_def.description)
     schema_str = json.dumps(tool_def.input_schema, ensure_ascii=False, indent=2)
 
-    # 查找预定义组合
-    combos = TOOL_COMBINATIONS.get(tool_name, [])
-    combo_line = f"\n常见组合工具: {', '.join(combos)}" if combos else ""
-
     return (
         f"工具: {tool_name}\n"
         f"分类: {category}\n"
         f"权限: {permission}\n"
         f"描述: {desc}\n\n"
         f"参数 Schema:\n{schema_str}"
-        f"{combo_line}"
     )
 
 
@@ -190,7 +179,7 @@ def _handle_can_i_do(description: str) -> str:
 
 
 def _handle_related_tools(tool_name: str) -> str:
-    """基于 TOOL_CATEGORIES 同分类 + TOOL_COMBINATIONS 返回相关工具。"""
+    """基于 TOOL_CATEGORIES 同分类返回相关工具。"""
     lines = [f"相关工具: {tool_name}"]
 
     # 同分类工具
@@ -202,14 +191,6 @@ def _handle_related_tools(tool_name: str) -> str:
             for t in siblings:
                 desc = TOOL_SHORT_DESCRIPTIONS.get(t, "")
                 lines.append(f"  - {t} — {desc}")
-
-    # 预定义组合
-    combos = TOOL_COMBINATIONS.get(tool_name, [])
-    if combos:
-        lines.append("\n预定义组合:")
-        for t in combos:
-            desc = TOOL_SHORT_DESCRIPTIONS.get(t, "")
-            lines.append(f"  - {t} — {desc}")
 
     if len(lines) == 1:
         lines.append("无相关工具推荐")

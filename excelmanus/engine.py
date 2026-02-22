@@ -74,7 +74,6 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
-_META_TOOL_NAMES = ("activate_skill", "delegate_to_subagent", "list_subagents", "ask_user")
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
     "memory_save", "memory_read_topic",
@@ -2505,17 +2504,6 @@ class AgentEngine:
 
         return meta_schemas + filtered_domain
 
-    @staticmethod
-    def _is_activate_skill_ok(result: str) -> bool:
-        """判断 _handle_activate_skill 返回值是否表示成功。
-
-        成功时返回值以 "OK" 开头；失败情形包括：
-        - "未找到技能: ..." — 技能不存在
-        - "⚠️ ..." — 权限拒绝或 MCP 依赖未满足
-        任何非 "OK" 开头的返回均视为失败。
-        """
-        return result.startswith("OK")
-
     async def _handle_activate_skill(self, skill_name: str, reason: str = "") -> str:
         """处理 activate_skill 调用：激活技能并返回技能上下文。"""
         if self._skill_router is None:
@@ -2824,6 +2812,8 @@ class AgentEngine:
             on_event=on_event,
         )
 
+    # TODO: 过渡期残余，待测试迁移后删除
+    # 当前调用方：test_pbt_llm_routing.py:477, test_engine.py:2691, engine.py:3233
     async def _handle_delegate_to_subagent(
         self,
         *,
@@ -4513,6 +4503,7 @@ class AgentEngine:
             truncated=False,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_control_command(
         self,
         user_message: str,
@@ -4524,27 +4515,33 @@ class AgentEngine:
             user_message, on_event=on_event,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_accept_command(
         self, parts: list[str], *, on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_accept_command(parts, on_event=on_event)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _handle_reject_command(self, parts: list[str]) -> str:
         return self._command_handler._handle_reject_command(parts)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_plan_approve(
         self, *, parts: list[str], on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_plan_approve(parts=parts, on_event=on_event)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _handle_plan_reject(self, *, parts: list[str]) -> str:
         return self._command_handler._handle_plan_reject(parts=parts)
 
     # ── Context Builder 委托方法 ──────────────────────────────
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _all_tool_names(self) -> list[str]:
         return self._context_builder._all_tool_names()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _focus_window_refill_reader(
         self, *, file_path: str, sheet_name: str, range_ref: str,
     ) -> dict[str, Any]:
@@ -4552,6 +4549,7 @@ class AgentEngine:
             file_path=file_path, sheet_name=sheet_name, range_ref=range_ref,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
@@ -4562,18 +4560,23 @@ class AgentEngine:
             skill_contexts, route_result=route_result,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_access_notice(self) -> str:
         return self._context_builder._build_access_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_backup_notice(self) -> str:
         return self._context_builder._build_backup_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_mcp_context_notice(self) -> str:
         return self._context_builder._build_mcp_context_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_window_perception_notice(self) -> str:
         return self._context_builder._build_window_perception_notice()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _build_tool_index_notice(
         self, *, compact: bool = False, max_tools_per_category: int = 8,
     ) -> str:
@@ -4581,6 +4584,7 @@ class AgentEngine:
             compact=compact, max_tools_per_category=max_tools_per_category,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _set_window_perception_turn_hints(
         self, *, user_message: str, is_new_task: bool,
     ) -> None:
@@ -4588,14 +4592,17 @@ class AgentEngine:
             user_message=user_message, is_new_task=is_new_task,
         )
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _redirect_backup_paths(
         self, tool_name: str, arguments: dict[str, Any],
     ) -> dict[str, Any]:
         return self._context_builder._redirect_backup_paths(tool_name, arguments)
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _has_incomplete_tasks(self) -> bool:
         return self._context_builder._has_incomplete_tasks()
 
+    # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _auto_continue_task_loop(
         self,
         route_result: SkillMatchResult,

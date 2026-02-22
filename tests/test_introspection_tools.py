@@ -11,7 +11,6 @@ import pytest
 
 from excelmanus.tools.introspection_tools import (
     INTROSPECT_CAPABILITY_SCHEMA,
-    TOOL_COMBINATIONS,
     _handle_can_i_do,
     _handle_category_tools,
     _handle_related_tools,
@@ -225,9 +224,10 @@ class TestRelatedTools:
         # read_excel 在 data_read 分类，应包含 filter_data
         assert "filter_data" in result
 
-    def test_predefined_combinations(self, registry: ToolRegistry) -> None:
-        """工具精简后 TOOL_COMBINATIONS 为空，不应返回预定义组合。"""
-        assert len(TOOL_COMBINATIONS) == 0
+    def test_no_predefined_combinations_section(self, registry: ToolRegistry) -> None:
+        """related_tools 结果中不应出现预定义组合段落。"""
+        result = introspect_capability("related_tools", "read_excel")
+        assert "预定义组合" not in result
 
     def test_no_related(self, registry: ToolRegistry) -> None:
         """不在分类和组合中的工具应返回无推荐。"""
