@@ -265,6 +265,21 @@ def test_non_whitelisted_mcp_high_risk_until_auto_approve(tmp_path: Path) -> Non
     assert manager.is_high_risk_tool(tool_name) is False
 
 
+def test_register_mcp_auto_approve_replaces_not_accumulates(tmp_path: Path) -> None:
+    """回归：重新同步 MCP 白名单时，旧的不再存在的工具应被移除。"""
+    manager = ApprovalManager(str(tmp_path))
+    old_tool = "mcp_old_server_tool"
+    new_tool = "mcp_new_server_tool"
+
+    manager.register_mcp_auto_approve([old_tool])
+    assert manager.is_mcp_auto_approved(old_tool) is True
+
+    # 重新同步，仅包含 new_tool
+    manager.register_mcp_auto_approve([new_tool])
+    assert manager.is_mcp_auto_approved(new_tool) is True
+    assert manager.is_mcp_auto_approved(old_tool) is False
+
+
 def test_resolve_target_paths_covers_mutating_tools_with_path_rules(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     cases = [

@@ -1,6 +1,10 @@
 """运行时沙盒钩子：生成注入子进程的 wrapper 脚本。"""
 from __future__ import annotations
 
+from excelmanus.security.module_manifest import RAW_SOCKET_MODULE_BLOCKED_CALLS
+from excelmanus.security.module_manifest import SOCKET_CONSTRUCTOR_NAMES
+from excelmanus.security.module_manifest import SOCKET_MODULE_BLOCKED_CALLS
+
 
 # GREEN 模式禁止导入的模块
 # NOTE: ctypes 已移除 — pandas/numpy 等数据处理库间接依赖 ctypes，
@@ -44,11 +48,17 @@ def generate_wrapper_script(tier: str, workspace_root: str) -> str:
     blocked = _GREEN_BLOCKED if tier == "GREEN" else _YELLOW_BLOCKED
     blocked_repr = repr(blocked)
     workspace_repr = repr(workspace_root)
+    socket_ctor_repr = repr(SOCKET_CONSTRUCTOR_NAMES)
+    socket_blocked_calls_repr = repr(SOCKET_MODULE_BLOCKED_CALLS)
+    raw_socket_blocked_calls_repr = repr(RAW_SOCKET_MODULE_BLOCKED_CALLS)
 
     return _SANDBOX_WRAPPER_TEMPLATE.format(
         blocked_modules=blocked_repr,
         workspace_root=workspace_repr,
         tier=repr(tier),
+        socket_constructor_names=socket_ctor_repr,
+        socket_module_blocked_calls=socket_blocked_calls_repr,
+        raw_socket_module_blocked_calls=raw_socket_blocked_calls_repr,
     )
 
 
@@ -270,6 +280,26 @@ try:
 except ImportError:
     pass
 
+# os 模块的进程创建函数同样需要拦截，防止 from os import execv 等绕过。
+import os as _os_mod
+_OS_BLOCKED_ATTRS = (
+    'system', 'popen',
+    'execl', 'execle', 'execlp', 'execlpe',
+    'execv', 'execve', 'execvp', 'execvpe',
+    'spawnl', 'spawnle', 'spawnlp', 'spawnlpe',
+    'spawnv', 'spawnve', 'spawnvp', 'spawnvpe',
+)
+def _make_os_blocker(_name):
+    def _blocked_fn(*_args, **_kwargs):
+        raise RuntimeError(
+            "os." + _name + "() 被安全策略禁止 [等级: " + _TIER + "]。"
+            "禁止通过 os 模块创建子进程。"
+        )
+    return _blocked_fn
+for _attr in _OS_BLOCKED_ATTRS:
+    if hasattr(_os_mod, _attr):
+        setattr(_os_mod, _attr, _make_os_blocker(_attr))
+
 # socket 模块允许导入（matplotlib.pyplot 初始化链依赖），
 # 但禁止创建 socket 实例（即禁止实际网络通信）。
 # gethostname/getfqdn 等只读信息函数仍可用。
@@ -290,10 +320,10 @@ class _BlockedSocket:
 
 try:
     import socket as _socket_mod
-    for _ctor in ('socket', 'SocketType'):
+    for _ctor in {socket_constructor_names}:
         if hasattr(_socket_mod, _ctor):
             setattr(_socket_mod, _ctor, _BlockedSocket)
-    for _fn in ('create_connection', 'create_server', 'socketpair', 'fromfd'):
+    for _fn in {socket_module_blocked_calls}:
         if hasattr(_socket_mod, _fn):
             setattr(_socket_mod, _fn, _make_socket_blocker("socket." + _fn + "()"))
 except ImportError:
@@ -302,10 +332,10 @@ except ImportError:
 # 低层 _socket 模块同样打补丁，防止绕过 socket 模块封装。
 try:
     import _socket as _raw_socket_mod
-    for _ctor in ('socket', 'SocketType'):
+    for _ctor in {socket_constructor_names}:
         if hasattr(_raw_socket_mod, _ctor):
             setattr(_raw_socket_mod, _ctor, _BlockedSocket)
-    for _fn in ('socketpair', 'fromfd'):
+    for _fn in {raw_socket_module_blocked_calls}:
         if hasattr(_raw_socket_mod, _fn):
             setattr(_raw_socket_mod, _fn, _make_socket_blocker("_socket." + _fn + "()"))
 except ImportError:

@@ -44,6 +44,7 @@ class TestRedTier:
     @pytest.mark.parametrize("code", [
         "import subprocess\nsubprocess.run(['ls'])",
         "import os\nos.system('rm -rf /')",
+        "from os import execv\nexecv('/bin/echo', ('echo', 'hi'))",
         "exec('print(1)')",
         "eval('__import__(\"os\").system(\"ls\")')",
         "import ctypes",

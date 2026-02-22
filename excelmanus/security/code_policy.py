@@ -162,6 +162,16 @@ class _ASTVisitor(ast.NodeVisitor):
                 if node.func.id == "exec":
                     self._has_exec_call = True
 
+            resolved = self._imported_names.get(node.func.id)
+            if isinstance(resolved, str) and "." in resolved:
+                root = _module_root(resolved)
+                attr_name = resolved.rsplit(".", 1)[1]
+                if (root, attr_name) in _DANGEROUS_ATTR_CALLS:
+                    self.capabilities.add("SUBPROCESS")
+                    self.details.append(
+                        f"dangerous imported call: {root}.{attr_name}()"
+                    )
+
         if isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
                 obj_name = node.func.value.id

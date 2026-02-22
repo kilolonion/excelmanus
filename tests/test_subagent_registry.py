@@ -149,9 +149,9 @@ def test_get_supports_ecosystem_aliases(tmp_path: Path) -> None:
     registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
     registry.load_all()
 
-    # v6: 所有旧角色名映射到通用 subagent
+    # v6: explore 映射到独立 explorer 子代理，其余旧角色名映射到通用 subagent
     assert registry.get("Explore") is not None
-    assert registry.get("Explore").name == "subagent"  # type: ignore[union-attr]
+    assert registry.get("Explore").name == "explorer"  # type: ignore[union-attr]
     assert registry.get("Plan") is not None
     assert registry.get("Plan").name == "subagent"  # type: ignore[union-attr]
     assert registry.get("General-purpose") is not None
@@ -315,3 +315,39 @@ def test_memory_scope_invalid_value_is_rejected(tmp_path: Path) -> None:
     registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
     loaded = registry.load_all()
     assert "invalid_scope_checker" not in loaded
+
+
+def test_subagent_name_with_path_traversal_is_rejected(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "bad_name.md",
+        name="../escape",
+        description="非法名称测试",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert "../escape" not in loaded
+
+
+def test_subagent_name_with_path_separator_is_rejected(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_agent(
+        project_dir,
+        "bad_name_sep.md",
+        name="team/agent",
+        description="非法名称测试",
+    )
+
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    loaded = registry.load_all()
+    assert "team/agent" not in loaded

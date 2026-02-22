@@ -23,9 +23,9 @@ _VALID_CAPABILITY_MODES: set[str] = {"restricted", "full"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
 _MEMORY_SCOPE_KEYS: tuple[str, ...] = ("memory_scope", "memory-scope", "memory")
 _SUBAGENT_NAME_ALIASES: dict[str, str] = {
-    # 所有旧角色名映射到通用 subagent
-    "explore": "subagent",
-    "explorer": "subagent",
+    # explorer/verifier 是独立内置子代理，不回退到 subagent
+    "explore": "explorer",
+    # 其他旧角色名仍映射到通用 subagent
     "plan": "subagent",
     "planner": "subagent",
     "analyst": "subagent",
@@ -109,7 +109,8 @@ class SubagentRegistry:
         text = path.read_text(encoding="utf-8")
         frontmatter, body = SkillpackLoader._split_frontmatter(text=text, skill_file=path)
 
-        name = SubagentRegistry._as_str(frontmatter.get("name"), default=path.stem)
+        name_raw = SubagentRegistry._as_str(frontmatter.get("name"), default=path.stem)
+        name = SubagentRegistry._validate_name(name_raw)
         description = SubagentRegistry._as_str(frontmatter.get("description"), default="")
         model = SubagentRegistry._as_optional_str(frontmatter.get("model"))
         api_key = SubagentRegistry._as_optional_str(frontmatter.get("api_key"))
@@ -188,6 +189,26 @@ class SubagentRegistry:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _validate_name(name: str) -> str:
+        normalized = (name or "").strip()
+        if not normalized:
+            raise SkillpackValidationError("name 不能为空")
+        if "/" in normalized or "\\" in normalized:
+            raise SkillpackValidationError(
+                f"name 非法: {normalized!r}，不能包含路径分隔符"
+            )
+        parts = Path(normalized).parts
+        if normalized in {".", ".."} or ".." in parts:
+            raise SkillpackValidationError(
+                f"name 非法: {normalized!r}，不能包含路径穿越片段"
+            )
+        if Path(normalized).is_absolute() or len(parts) != 1:
+            raise SkillpackValidationError(
+                f"name 非法: {normalized!r}，必须是单段相对名称"
+            )
+        return normalized
 
     @staticmethod
     def _extract_memory_scope(frontmatter: dict[str, Any]) -> str | None:
