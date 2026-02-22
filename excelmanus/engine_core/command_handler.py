@@ -422,7 +422,8 @@ class CommandHandler:
             lines.append(f"- 结果摘要: {record.result_preview}")
         if record.undoable:
             lines.append(f"- 回滚命令: `/undo {approval_id}`")
-        if route_to_resume is None:
+        # 仅在仍有未完成任务时恢复主循环；普通单步高风险确认不应额外触发一次 LLM 调用。
+        if route_to_resume is None or not e._has_incomplete_tasks():
             return "\n".join(lines)
 
         # ── 将实际工具结果注入 memory 替换审批提示，使 LLM 能处理真实输出 ──
@@ -660,4 +661,3 @@ class CommandHandler:
         if not agent_name or not task:
             return None, None, "无效参数。agent_name 与 task 都不能为空。"
         return agent_name, task, None
-

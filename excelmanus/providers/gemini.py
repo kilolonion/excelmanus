@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
+from excelmanus.providers.stream_types import StreamDelta
 
 logger = get_logger("gemini_provider")
 
@@ -76,14 +77,8 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
-    @dataclass
-    class _StreamDelta:
-        """Gemini 流式 chunk 的标准化表示。"""
-        thinking_delta: str = ""
-        content_delta: str = ""
-        tool_calls_delta: list[Any] = field(default_factory=list)
-        finish_reason: str | None = None
-        usage: _Usage | None = None
+    # 兼容旧引用：保留 _ChatCompletion._StreamDelta 名称。
+    _StreamDelta = StreamDelta
 
 
 
@@ -465,7 +460,7 @@ class _GeminiChatCompletions:
     ) -> _ChatCompletion | Any:
         """将 OpenAI chat.completions.create 调用转发到 Gemini API。"""
         if stream:
-            return self._client._generate_stream(
+            return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
             )
@@ -596,7 +591,7 @@ class GeminiClient:
         tools: Any = None,
         tool_choice: Any = None,
     ) -> Any:
-        """流式执行 Gemini generateContent 请求，返回异步生成器 yield _StreamDelta。"""
+        """流式执行 Gemini generateContent 请求，返回异步生成器 yield StreamDelta。"""
         effective_model = self._default_model or model
         system_instruction, contents = _openai_messages_to_gemini(messages)
         body: dict[str, Any] = {"contents": contents}
@@ -639,7 +634,7 @@ class GeminiClient:
                     if not candidates:
                         usage_meta = chunk_data.get("usageMetadata")
                         if usage_meta:
-                            yield _StreamDelta(usage=_Usage(
+                            yield StreamDelta(usage=_Usage(
                                 prompt_tokens=usage_meta.get("promptTokenCount", 0),
                                 completion_tokens=usage_meta.get("candidatesTokenCount", 0),
                                 total_tokens=usage_meta.get("totalTokenCount", 0),
@@ -652,12 +647,12 @@ class GeminiClient:
 
                     for part in parts:
                         if "text" in part:
-                            yield _StreamDelta(content_delta=part["text"])
+                            yield StreamDelta(content_delta=part["text"])
                         elif "thought" in part:
-                            yield _StreamDelta(thinking_delta=part["thought"])
+                            yield StreamDelta(thinking_delta=part["thought"])
                         elif "functionCall" in part:
                             fc = part["functionCall"]
-                            yield _StreamDelta(tool_calls_delta=[{
+                            yield StreamDelta(tool_calls_delta=[{
                                 "index": 0,
                                 "id": str(uuid.uuid4()),
                                 "name": fc.get("name", ""),
@@ -676,7 +671,7 @@ class GeminiClient:
                                 completion_tokens=usage_meta.get("candidatesTokenCount", 0),
                                 total_tokens=usage_meta.get("totalTokenCount", 0),
                             )
-                        yield _StreamDelta(finish_reason=mapped_finish, usage=u)
+                        yield StreamDelta(finish_reason=mapped_finish, usage=u)
 
         return _stream_generator()
 

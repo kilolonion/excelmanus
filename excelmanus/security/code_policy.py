@@ -5,6 +5,8 @@ import ast
 import enum
 from dataclasses import dataclass, field
 
+from excelmanus.security.module_manifest import MODULE_ROOT_ALIASES, NETWORK_MODULES
+
 
 class CodeRiskTier(enum.Enum):
     GREEN = "GREEN"
@@ -43,14 +45,7 @@ _SAFE_IO_MODULES: frozenset[str] = frozenset({
     "tarfile", "fileinput", "mmap",
 })
 
-_NETWORK_MODULES: frozenset[str] = frozenset({
-    "requests", "urllib", "urllib.request", "urllib.parse", "urllib.error",
-    "httpx", "aiohttp", "socket", "ssl",
-    "http", "http.client", "http.server", "http.cookiejar",
-    "ftplib", "smtplib", "imaplib", "poplib",
-    "xmlrpc", "xmlrpc.client", "xmlrpc.server",
-    "websocket", "websockets",
-})
+_NETWORK_MODULES: frozenset[str] = NETWORK_MODULES
 
 _SUBPROCESS_MODULES: frozenset[str] = frozenset({
     "subprocess", "pty", "pexpect",
@@ -80,8 +75,15 @@ _DANGEROUS_ATTR_CALLS: frozenset[tuple[str, str]] = frozenset({
 })
 
 
+_MODULE_ROOT_ALIASES: dict[str, str] = MODULE_ROOT_ALIASES
+
+
 def _module_root(name: str) -> str:
     return name.split(".")[0]
+
+
+def _normalize_module_root(root: str) -> str:
+    return _MODULE_ROOT_ALIASES.get(root, root)
 
 
 class _ASTVisitor(ast.NodeVisitor):
@@ -98,27 +100,36 @@ class _ASTVisitor(ast.NodeVisitor):
 
     def _classify_module(self, module_name: str) -> None:
         root = _module_root(module_name)
+        normalized_root = _normalize_module_root(root)
 
-        if root in self._extra_blocked or module_name in self._extra_blocked:
+        if (
+            root in self._extra_blocked
+            or normalized_root in self._extra_blocked
+            or module_name in self._extra_blocked
+        ):
             self.capabilities.add("SUBPROCESS")
             self.details.append(f"blocked by extra_blocked: {module_name}")
             return
 
-        if root in self._extra_safe or module_name in self._extra_safe:
+        if (
+            root in self._extra_safe
+            or normalized_root in self._extra_safe
+            or module_name in self._extra_safe
+        ):
             self.capabilities.add("SAFE_COMPUTE")
             return
 
-        if module_name in _SAFE_COMPUTE_MODULES or root in _SAFE_COMPUTE_MODULES:
+        if module_name in _SAFE_COMPUTE_MODULES or normalized_root in _SAFE_COMPUTE_MODULES:
             self.capabilities.add("SAFE_COMPUTE")
-        elif module_name in _SAFE_IO_MODULES or root in _SAFE_IO_MODULES:
+        elif module_name in _SAFE_IO_MODULES or normalized_root in _SAFE_IO_MODULES:
             self.capabilities.add("SAFE_IO")
-        elif module_name in _NETWORK_MODULES or root in _NETWORK_MODULES:
+        elif module_name in _NETWORK_MODULES or normalized_root in _NETWORK_MODULES:
             self.capabilities.add("NETWORK")
             self.details.append(f"network module: {module_name}")
-        elif module_name in _SUBPROCESS_MODULES or root in _SUBPROCESS_MODULES:
+        elif module_name in _SUBPROCESS_MODULES or normalized_root in _SUBPROCESS_MODULES:
             self.capabilities.add("SUBPROCESS")
             self.details.append(f"subprocess module: {module_name}")
-        elif module_name in _SYSTEM_CONTROL_MODULES or root in _SYSTEM_CONTROL_MODULES:
+        elif module_name in _SYSTEM_CONTROL_MODULES or normalized_root in _SYSTEM_CONTROL_MODULES:
             self.capabilities.add("SYSTEM_CONTROL")
             self.details.append(f"system control module: {module_name}")
         else:

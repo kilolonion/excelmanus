@@ -69,6 +69,10 @@ uv.lock
 # ==============================
 bench/
 scripts/
+!scripts/
+scripts/*
+!scripts/__init__.py
+!scripts/migrate_skills_to_standard.py
 
 # ==============================
 # 测试报告
@@ -79,4 +83,3 @@ test_report/
 # 外部工具仓库
 # ==============================
 gemini-cli/
-
