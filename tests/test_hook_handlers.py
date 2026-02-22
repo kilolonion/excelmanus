@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import subprocess
+from unittest.mock import Mock
+
+import pytest
+
+import excelmanus.hooks.handlers as hook_handlers
 from excelmanus.config import ExcelManusConfig
-from excelmanus.hooks.handlers import run_agent_handler, run_command_handler
+from excelmanus.hooks.handlers import (
+    _allowlist_matches_command,
+    run_agent_handler,
+    run_command_handler,
+)
 from excelmanus.hooks.models import HookDecision
 
 
@@ -60,6 +70,98 @@ def test_command_handler_rejects_multi_segment_shell_chain() -> None:
     )
     assert result.decision == HookDecision.CONTINUE
     assert "未获授权" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("command", "allowlist"),
+    [
+        ("cat $(id)", ("cat",)),
+        ("echo `whoami`", ("echo",)),
+        ("ls ${IFS}malicious", ("ls",)),
+    ],
+)
+def test_allowlist_rejects_shell_metacharacters(
+    command: str,
+    allowlist: tuple[str, ...],
+) -> None:
+    assert _allowlist_matches_command(command=command, allowlist=allowlist) is False
+
+
+def test_command_handler_rejects_shell_metachar_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_mock = Mock(
+        return_value=subprocess.CompletedProcess(
+            args=["cat", "$(id)"],
+            returncode=0,
+            stdout='{"decision":"deny","reason":"blocked"}',
+            stderr="",
+        )
+    )
+    monkeypatch.setattr(hook_handlers.subprocess, "run", run_mock)
+    config = _config(
+        hooks_command_enabled=True,
+        hooks_command_allowlist=("cat",),
+    )
+
+    result = run_command_handler(
+        command="cat $(id)",
+        payload={"x": 1},
+        full_access_enabled=False,
+        config=config,
+    )
+
+    assert result.decision == HookDecision.CONTINUE
+    assert "未获授权" in result.reason
+    run_mock.assert_not_called()
+
+
+def test_command_handler_returns_parse_error_for_invalid_quotes() -> None:
+    config = _config(
+        hooks_command_enabled=True,
+        hooks_command_allowlist=("printf",),
+    )
+
+    result = run_command_handler(
+        command='printf "unterminated',
+        payload={"x": 1},
+        full_access_enabled=False,
+        config=config,
+    )
+
+    assert result.decision == HookDecision.CONTINUE
+    assert "解析失败" in result.reason
+
+
+def test_command_handler_executes_with_shell_false_and_split_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_mock = Mock(
+        return_value=subprocess.CompletedProcess(
+            args=["printf"],
+            returncode=0,
+            stdout='{"decision":"deny","reason":"blocked"}',
+            stderr="",
+        )
+    )
+    monkeypatch.setattr(hook_handlers.subprocess, "run", run_mock)
+    config = _config(
+        hooks_command_enabled=True,
+        hooks_command_allowlist=("printf",),
+    )
+
+    result = run_command_handler(
+        command='printf \'{"decision":"deny","reason":"blocked"}\'',
+        payload={"x": 1},
+        full_access_enabled=False,
+        config=config,
+    )
+
+    assert result.decision == HookDecision.DENY
+    run_mock.assert_called_once()
+    called_args, called_kwargs = run_mock.call_args
+    assert called_args[0] == ["printf", '{"decision":"deny","reason":"blocked"}']
+    assert called_kwargs["shell"] is False
 
 
 def test_command_handler_parses_non_json_as_additional_context() -> None:
