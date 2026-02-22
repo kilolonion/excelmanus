@@ -2,11 +2,10 @@
 
 from excelmanus.embedding.client import EmbeddingClient
 from excelmanus.embedding.store import VectorStore
-from excelmanus.embedding.search import semantic_search, cosine_top_k
+from excelmanus.embedding.search import cosine_top_k
 
 __all__ = [
     "EmbeddingClient",
     "VectorStore",
-    "semantic_search",
     "cosine_top_k",
 ]

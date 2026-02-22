@@ -85,33 +85,7 @@ def parse_prompt_file(path: Path) -> PromptSegment:
 # ── 兜底 core 文件内容 ────────────────────────────────────
 # 当 prompts/core/ 目录缺失或文件不全时，自动补齐以下默认内容。
 
-_FALLBACK_CORE_FILES: dict[str, str] = {
-    "00_identity.md": """---
-name: identity
-version: "4.0.0"
-priority: 0
-layer: core
----
-你是 ExcelManus，工作区内的 Excel 智能代理。
-工作区根目录：`{workspace_root}`。
-""",
-    "10_core_principles.md": """---
-name: core_principles
-version: "4.0.0"
-priority: 10
-layer: core
----
-## 核心法则
-
-1. **直接行动**：收到请求后立刻通过 Tool Calling 执行。优先用工具探查文件现状（如 `inspect_excel_files`, `read_excel`），获取到足够信息后直接操作，不要仅仅在文本中给出建议或代码。当用户已给出精确文件路径时，直接对该文件操作，不要先 `list_directory` 浏览根目录。
-2. **决策门禁**：遇到信息不足且存在多种合理路径，或者需要执行高风险操作（删除文件、清空 sheet 等）时，必须调用 `ask_user` 与用户确认，严禁纯文本提问。
-3. **主力工具 run_code**：处理复杂数据流转、条件更新、批量计算、超过3行的写入操作，必须优先使用 `run_code`（已配备安全沙盒自动分级执行）。细粒度写入工具（如 `write_cells`）仅限极少量数据的简单补充。
-4. **验证闭环**：对文件执行写入后需验证一次即完成。如果 `run_code` 的 stdout 已打印了写入后的关键数据（如抽样行、统计值），该输出本身即为有效验证，可直接 `finish_task`，无需再调 `read_excel` 重复确认。仅当 `run_code` 未输出可验证信息时，才用一次 `read_excel` 抽查。严禁对同一结果做两次验证。
-5. **忠于事实**：不猜测路径、表名、表头位置，一切以工具返回的真实数据为准。汇报时聚焦操作结果和关键数字，不输出多余的开场白、解释或内部细节。
-6. **公式优先**：当用户提到"formula""公式"、或描述了可复用的计算逻辑（如拆分、查找匹配、条件计算），应优先通过 openpyxl 写入 Excel 公式，而非写入静态计算结果。仅当公式无法实现或用户明确要求写入值时，才用静态值。
-7. **禁止外部脚本**：即使用户要求 VBA 宏、AppleScript 或其他外部脚本，也必须通过 `run_code`（openpyxl/pandas）实现同等效果。严禁在回复中输出 VBA/宏代码块作为操作方案。
-""",
-}
+_FALLBACK_CORE_FILES: dict[str, str] = {}
 
 
 # ── PromptComposer ───────────────────────────────────────
@@ -164,21 +138,11 @@ class PromptComposer:
 
     @staticmethod
     def _ensure_core_files(core_dir: Path) -> None:
-        """检查 core/ 目录，缺失文件时从兜底数据自动补齐。"""
+        """确保 core/ 目录存在。"""
         try:
             core_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             logger.warning("无法创建 core 目录 %s: %s", core_dir, exc)
-            return
-
-        for filename, content in _FALLBACK_CORE_FILES.items():
-            target = core_dir / filename
-            if not target.exists():
-                try:
-                    target.write_text(content, encoding="utf-8")
-                    logger.info("已补齐缺失的 core 提示词文件: %s", target)
-                except OSError as exc:
-                    logger.warning("无法写入兜底文件 %s: %s", target, exc)
 
     def compose(
         self,
