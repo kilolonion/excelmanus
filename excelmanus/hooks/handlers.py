@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -11,6 +12,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.hooks.models import HookAgentAction, HookDecision, HookResult
 
 _SHELL_CONTROL_SPLIT_PATTERN = re.compile(r"(?:&&|\|\||;|\||\n)")
+_SHELL_METACHAR_PATTERN = re.compile(r"\$\(|\$\{|`")
 
 
 def _parse_decision(value: Any) -> HookDecision:
@@ -71,6 +73,8 @@ def _matches_prefix_with_boundary(text: str, prefix: str) -> bool:
 
 def _allowlist_matches_command(*, command: str, allowlist: tuple[str, ...]) -> bool:
     normalized = command.strip()
+    if _SHELL_METACHAR_PATTERN.search(normalized):
+        return False
     segment = _first_command_segment(normalized)
     if not segment:
         return False
@@ -128,9 +132,22 @@ def run_command_handler(
         )
 
     try:
+        args = shlex.split(command)
+    except ValueError as exc:
+        return HookResult(
+            decision=HookDecision.CONTINUE,
+            reason=f"command hook 命令解析失败：{exc}",
+        )
+    if not args:
+        return HookResult(
+            decision=HookDecision.CONTINUE,
+            reason="command hook 未配置命令，已跳过",
+        )
+
+    try:
         completed = subprocess.run(
-            command,
-            shell=True,
+            args,
+            shell=False,
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True,
             text=True,
