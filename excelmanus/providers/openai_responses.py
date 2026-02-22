@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
+from excelmanus.providers.stream_types import StreamDelta
 
 logger = get_logger("openai_responses_provider")
 
@@ -71,14 +72,8 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
-    @dataclass
-    class _StreamDelta:
-        """Responses API 流式 chunk 的标准化表示。"""
-        thinking_delta: str = ""
-        content_delta: str = ""
-        tool_calls_delta: list[Any] = field(default_factory=list)
-        finish_reason: str | None = None
-        usage: _Usage | None = None
+    # 兼容旧引用：保留 _ChatCompletion._StreamDelta 名称。
+    _StreamDelta = StreamDelta
 
 
 
@@ -319,7 +314,7 @@ class _ResponsesChatCompletions:
         **kwargs: Any,
     ) -> _ChatCompletion | Any:
         if stream:
-            return self._client._generate_stream(
+            return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
             )
@@ -433,7 +428,7 @@ class OpenAIResponsesClient:
         tools: Any = None,
         tool_choice: Any = None,
     ) -> Any:
-        """流式执行 Responses API 请求，返回异步生成器 yield _StreamDelta。"""
+        """流式执行 Responses API 请求，返回异步生成器 yield StreamDelta。"""
         instructions, input_items = _chat_messages_to_responses_input(messages)
         body: dict[str, Any] = {
             "model": model,
@@ -482,7 +477,7 @@ class OpenAIResponsesClient:
                     if event_type == "response.output_text.delta":
                         delta_text = event_data.get("delta", "")
                         if delta_text:
-                            yield _StreamDelta(content_delta=delta_text)
+                            yield StreamDelta(content_delta=delta_text)
 
                     elif event_type == "response.output_item.added":
                         item = event_data.get("item", {})
@@ -509,7 +504,7 @@ class OpenAIResponsesClient:
                         output_index = event_data.get("output_index", 0)
                         if output_index in current_tools:
                             tool = current_tools[output_index]
-                            yield _StreamDelta(tool_calls_delta=[{
+                            yield StreamDelta(tool_calls_delta=[{
                                 "index": output_index,
                                 "id": tool["id"],
                                 "name": tool["name"],
@@ -533,7 +528,7 @@ class OpenAIResponsesClient:
                             for item in output
                             if isinstance(item, dict)
                         )
-                        yield _StreamDelta(
+                        yield StreamDelta(
                             finish_reason="tool_calls" if has_tool else "stop",
                             usage=u,
                         )

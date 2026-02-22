@@ -273,25 +273,41 @@ except ImportError:
 # socket 模块允许导入（matplotlib.pyplot 初始化链依赖），
 # 但禁止创建 socket 实例（即禁止实际网络通信）。
 # gethostname/getfqdn 等只读信息函数仍可用。
+def _make_socket_blocker(_label):
+    def _blocked(*a, **kw):
+        raise RuntimeError(
+            _label + " 被安全策略禁止 [等级: " + _TIER + "]。"
+            "允许 import socket/_socket（库内部依赖），但禁止创建网络连接。"
+        )
+    return _blocked
+
+class _BlockedSocket:
+    def __init__(self, *a, **kw):
+        raise RuntimeError(
+            "socket.socket() 被安全策略禁止 [等级: " + _TIER + "]。"
+            "允许 import socket/_socket（库内部依赖），但禁止创建网络连接。"
+        )
+
 try:
     import socket as _socket_mod
-    _original_socket_class = _socket_mod.socket
-    class _BlockedSocket:
-        def __init__(self, *a, **kw):
-            raise RuntimeError(
-                "socket.socket() 被安全策略禁止 [等级: " + _TIER + "]。"
-                "允许 import socket（库内部依赖），但禁止创建网络连接。"
-            )
-    _socket_mod.socket = _BlockedSocket
+    for _ctor in ('socket', 'SocketType'):
+        if hasattr(_socket_mod, _ctor):
+            setattr(_socket_mod, _ctor, _BlockedSocket)
     for _fn in ('create_connection', 'create_server', 'socketpair', 'fromfd'):
         if hasattr(_socket_mod, _fn):
-            def _make_socket_blocker(_name):
-                def _blocked(*a, **kw):
-                    raise RuntimeError(
-                        "socket." + _name + "() 被安全策略禁止 [等级: " + _TIER + "]。"
-                    )
-                return _blocked
-            setattr(_socket_mod, _fn, _make_socket_blocker(_fn))
+            setattr(_socket_mod, _fn, _make_socket_blocker("socket." + _fn + "()"))
+except ImportError:
+    pass
+
+# 低层 _socket 模块同样打补丁，防止绕过 socket 模块封装。
+try:
+    import _socket as _raw_socket_mod
+    for _ctor in ('socket', 'SocketType'):
+        if hasattr(_raw_socket_mod, _ctor):
+            setattr(_raw_socket_mod, _ctor, _BlockedSocket)
+    for _fn in ('socketpair', 'fromfd'):
+        if hasattr(_raw_socket_mod, _fn):
+            setattr(_raw_socket_mod, _fn, _make_socket_blocker("_socket." + _fn + "()"))
 except ImportError:
     pass
 
