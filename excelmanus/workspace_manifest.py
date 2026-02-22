@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from excelmanus.excel_extensions import EXCEL_EXTENSIONS
 from excelmanus.logger import get_logger
 
 logger = get_logger("workspace_manifest")
@@ -33,6 +34,11 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 _INJECT_FULL_THRESHOLD = 20      # ≤20 文件：完整注入
 _INJECT_COMPACT_THRESHOLD = 100  # 20-100 文件：紧凑注入
 # >100 文件：仅注入统计摘要
+
+
+def _excel_glob_patterns() -> tuple[str, ...]:
+    """将共享扩展名集合转换为稳定的 glob 列表。"""
+    return tuple(f"*{suffix}" for suffix in sorted(EXCEL_EXTENSIONS))
 
 
 @dataclass
@@ -150,7 +156,7 @@ def build_manifest(
 
     # 递归收集 Excel 文件
     excel_paths: list[Path] = []
-    for ext in ("*.xlsx", "*.xlsm"):
+    for ext in _excel_glob_patterns():
         for p in root.rglob(ext):
             if p.name.startswith((".", "~$")):
                 continue
@@ -285,7 +291,7 @@ def refresh_manifest(
 
     # 收集当前工作区所有 Excel 文件
     current_paths: list[Path] = []
-    for ext in ("*.xlsx", "*.xlsm"):
+    for ext in _excel_glob_patterns():
         for p in root.rglob(ext):
             if p.name.startswith((".", "~$")):
                 continue
