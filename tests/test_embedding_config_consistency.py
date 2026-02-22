@@ -19,9 +19,10 @@ _README_PATH = _PROJECT_ROOT / "README.md"
 def _extract_env_example_value(key: str) -> str:
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     pattern = re.compile(rf"^\s*#\s*{re.escape(key)}=(.+?)\s*$", re.MULTILINE)
-    match = pattern.search(text)
-    assert match is not None, f".env.example 中缺少 {key} 示例项"
-    return match.group(1).strip()
+    matches = [item.strip() for item in pattern.findall(text)]
+    assert matches, f".env.example 中缺少 {key} 示例项"
+    assert len(matches) == 1, f".env.example 中 {key} 出现多次，需保持唯一"
+    return matches[0]
 
 
 def _extract_readme_default(key: str) -> str:
@@ -30,9 +31,10 @@ def _extract_readme_default(key: str) -> str:
         rf"^\|\s*`{re.escape(key)}`\s*\|.*\|\s*`([^`]+)`\s*\|\s*$",
         re.MULTILINE,
     )
-    match = pattern.search(text)
-    assert match is not None, f"README 中缺少 {key} 默认值"
-    return match.group(1).strip()
+    matches = [item.strip() for item in pattern.findall(text)]
+    assert matches, f"README 中缺少 {key} 默认值"
+    assert len(matches) == 1, f"README 中 {key} 默认值出现多次，需保持唯一"
+    return matches[0]
 
 
 def test_load_config_uses_embedding_defaults(monkeypatch, tmp_path) -> None:

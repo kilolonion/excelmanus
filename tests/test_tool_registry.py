@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from excelmanus.tools import registry as registry_module
 from excelmanus.tools import (
     ToolDef,
     ToolNotAllowedError,
@@ -97,6 +98,14 @@ class TestToolRegistry:
         assert "read_image" in tool_names
         assert "vlookup_write" in tool_names
         assert "computed_column" in tool_names
+
+    def test_builtin_module_manifest_is_single_source(self) -> None:
+        """模块清单应包含关键模块且不重复，作为注册唯一事实源。"""
+        module_paths = registry_module._BUILTIN_TOOL_MODULE_PATHS
+        assert module_paths == tuple(dict.fromkeys(module_paths))
+        assert "excelmanus.tools.macro_tools" in module_paths
+        assert "excelmanus.tools.image_tools" in module_paths
+        assert "excelmanus.tools.memory_tools" in module_paths
 
 
 class TestToolDefTruncate:

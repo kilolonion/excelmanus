@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from excelmanus.cli.commands import HELP_COMMAND_ENTRIES, load_skill_command_rows
+from excelmanus.cli.commands import HELP_COMMAND_ENTRIES, HELP_SHORTCUT_ENTRIES, load_skill_command_rows
 from excelmanus.cli.theme import THEME
 from excelmanus.cli.utils import separator_line
 
@@ -38,12 +38,7 @@ def render_help(
 
     # Shortcuts
     console.print(f"  [{THEME.BOLD}]Shortcuts[/{THEME.BOLD}]")
-    shortcuts = [
-        ("/ for commands", "exit to quit"),
-        ("@ for mentions", "shift+tab auto-accept"),
-        ("? for shortcuts", "ctrl+c to exit"),
-    ]
-    for left, right in shortcuts:
+    for left, right in HELP_SHORTCUT_ENTRIES:
         console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{left:<26}[/{THEME.PRIMARY_LIGHT}]"
             f"[{THEME.DIM}]{right}[/{THEME.DIM}]"

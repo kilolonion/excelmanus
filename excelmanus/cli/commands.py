@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 EXIT_COMMANDS = {"exit", "quit"}
 
 CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
+SHORTCUT_ACTION_SHOW_HELP = "show_help"
+
+
+@dataclass(frozen=True, slots=True)
+class ShortcutSpec:
+    """CLI 快捷提示定义（展示 + 可选输入触发动作）。"""
+
+    label: str
+    hint: str
+    triggers: tuple[str, ...] = ()
+    action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +59,30 @@ class StaticSlashCommand:
     @property
     def all_aliases(self) -> tuple[str, ...]:
         return (self.command, *self.aliases)
+
+
+_SHORTCUT_SPECS: tuple[ShortcutSpec, ...] = (
+    ShortcutSpec("/ for commands", "exit to quit"),
+    ShortcutSpec("@ for mentions", "shift+tab auto-accept"),
+    ShortcutSpec(
+        "? for shortcuts",
+        "ctrl+c to exit",
+        triggers=("?", "？"),
+        action=SHORTCUT_ACTION_SHOW_HELP,
+    ),
+)
+
+HELP_SHORTCUT_ENTRIES: tuple[tuple[str, str], ...] = tuple(
+    (spec.label, spec.hint)
+    for spec in _SHORTCUT_SPECS
+)
+
+_SHORTCUT_ACTION_BY_TRIGGER: dict[str, str] = {
+    trigger: spec.action
+    for spec in _SHORTCUT_SPECS
+    if isinstance(spec.action, str)
+    for trigger in spec.triggers
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +232,11 @@ def build_prompt_command_sync_payload(engine: "AgentEngine") -> PromptCommandSyn
         dynamic_skill_slash_commands=dynamic_skill_slash_commands,
         command_argument_map=build_command_argument_map(model_names=model_names),
     )
+
+
+def resolve_shortcut_action(user_input: str) -> str | None:
+    """解析输入是否命中已注册 shortcut 动作。"""
+    return _SHORTCUT_ACTION_BY_TRIGGER.get(user_input.strip())
 
 
 # ------------------------------------------------------------------

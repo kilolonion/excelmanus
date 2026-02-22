@@ -12,7 +12,9 @@ from excelmanus.cli.commands import (
     DECLARED_SLASH_COMMAND_ALIASES,
     EXIT_COMMANDS,
     HELP_COMMAND_ENTRIES,
+    HELP_SHORTCUT_ENTRIES,
     MODEL_ALIASES,
+    SHORTCUT_ACTION_SHOW_HELP,
     SLASH_COMMANDS,
     SLASH_COMMAND_SUGGESTIONS,
     SESSION_CONTROL_ALIASES,
@@ -23,6 +25,7 @@ from excelmanus.cli.commands import (
     mask_secret,
     parse_image_attachments,
     render_farewell,
+    resolve_shortcut_action,
     resolve_skill_slash_command,
     suggest_similar_commands,
     to_standard_skill_detail,
@@ -78,6 +81,18 @@ class TestConstants:
             alias for spec in CONTROL_COMMAND_SPECS for alias in spec.all_aliases
         }
         assert SESSION_CONTROL_ALIASES == expected_aliases
+
+
+class TestShortcutRegistry:
+    def test_help_shortcuts_contains_question_mark_entry(self):
+        assert ("? for shortcuts", "ctrl+c to exit") in HELP_SHORTCUT_ENTRIES
+
+    def test_resolve_shortcut_action_for_question_mark(self):
+        assert resolve_shortcut_action("?") == SHORTCUT_ACTION_SHOW_HELP
+        assert resolve_shortcut_action("？") == SHORTCUT_ACTION_SHOW_HELP
+
+    def test_resolve_shortcut_action_for_non_shortcut(self):
+        assert resolve_shortcut_action("普通输入") is None
 
 
 class TestPromptCommandSyncContract:
