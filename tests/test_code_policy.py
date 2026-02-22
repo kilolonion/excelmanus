@@ -31,6 +31,7 @@ class TestYellowTier:
         "from urllib.request import urlopen\ndata = urlopen('https://example.com').read()",
         "import httpx\nclient = httpx.Client()",
         "import socket\ns = socket.socket()",
+        "import _socket\ns = _socket.socket()",
     ])
     def test_network_code_is_yellow(self, code: str) -> None:
         result = CodePolicyEngine().analyze(code)

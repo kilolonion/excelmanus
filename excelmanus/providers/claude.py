@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
+from excelmanus.providers.stream_types import StreamDelta
 
 logger = get_logger("claude_provider")
 
@@ -75,14 +76,8 @@ class _ChatCompletion:
     usage: _Usage = field(default_factory=_Usage)
 
 
-    @dataclass
-    class _StreamDelta:
-        """Claude 流式 chunk 的标准化表示。"""
-        thinking_delta: str = ""
-        content_delta: str = ""
-        tool_calls_delta: list[Any] = field(default_factory=list)
-        finish_reason: str | None = None
-        usage: _Usage | None = None
+    # 兼容旧引用：保留 _ChatCompletion._StreamDelta 名称。
+    _StreamDelta = StreamDelta
 
 
 
@@ -365,7 +360,7 @@ class _ClaudeChatCompletions:
         **kwargs: Any,
     ) -> _ChatCompletion | Any:
         if stream:
-            return self._client._generate_stream(
+            return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
             )
@@ -478,7 +473,7 @@ class ClaudeClient:
         tools: Any = None,
         tool_choice: Any = None,
     ) -> Any:
-        """流式执行 Claude Messages API 请求，返回异步生成器 yield _StreamDelta。"""
+        """流式执行 Claude Messages API 请求，返回异步生成器 yield StreamDelta。"""
         system_text, claude_messages = _openai_messages_to_claude(messages)
         body: dict[str, Any] = {
             "model": model,
@@ -541,15 +536,15 @@ class ClaudeClient:
                         delta = event_data.get("delta", {})
                         delta_type = delta.get("type", "")
                         if delta_type == "text_delta":
-                            yield _StreamDelta(content_delta=delta.get("text", ""))
+                            yield StreamDelta(content_delta=delta.get("text", ""))
                         elif delta_type == "thinking_delta":
-                            yield _StreamDelta(thinking_delta=delta.get("thinking", ""))
+                            yield StreamDelta(thinking_delta=delta.get("thinking", ""))
                         elif delta_type == "input_json_delta":
                             current_tool_json += delta.get("partial_json", "")
 
                     elif event_type == "content_block_stop":
                         if current_tool_id and current_tool_name:
-                            yield _StreamDelta(tool_calls_delta=[{
+                            yield StreamDelta(tool_calls_delta=[{
                                 "index": tool_call_index,
                                 "id": current_tool_id,
                                 "name": current_tool_name,
@@ -576,7 +571,7 @@ class ClaudeClient:
                                 total_tokens=usage_data.get("input_tokens", 0)
                                 + usage_data.get("output_tokens", 0),
                             )
-                        yield _StreamDelta(finish_reason=finish, usage=u)
+                        yield StreamDelta(finish_reason=finish, usage=u)
 
         return _stream_generator()
 
