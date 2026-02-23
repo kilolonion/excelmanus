@@ -63,7 +63,10 @@ class ExcelManusConfig:
     tool_result_hard_cap_chars: int = 12000
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
     external_safe_mode: bool = True
-    cors_allow_origins: tuple[str, ...] = ("http://localhost:5173",)
+    cors_allow_origins: tuple[str, ...] = (
+        "http://localhost:3000",
+        "http://localhost:5173",
+    )
     mcp_shared_manager: bool = False
     # 路由子代理配置（可选，默认回退到主模型）
     router_api_key: str | None = None
@@ -159,6 +162,11 @@ class ExcelManusConfig:
     memory_semantic_fallback_recent: int = 5
     manifest_semantic_top_k: int = 5
     manifest_semantic_threshold: float = 0.25
+    # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
+    db_path: str = "~/.excelmanus/excelmanus.db"
+    # 聊天记录持久化
+    chat_history_enabled: bool = True
+    chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
     # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
     cli_layout_mode: str = "dashboard"
     # 多模型配置档案（可选，通过 /model 命令切换）
@@ -460,7 +468,7 @@ def _parse_cors_allow_origins() -> tuple[str, ...]:
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
     if cors_raw is not None:
         return tuple(o.strip() for o in cors_raw.split(",") if o.strip())
-    return ("http://localhost:5173",)
+    return ("http://localhost:3000", "http://localhost:5173")
 
 
 def load_cors_allow_origins() -> tuple[str, ...]:
@@ -945,6 +953,19 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD"), 0.25
     )
 
+    # 聊天记录持久化
+    chat_history_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_CHAT_HISTORY_ENABLED"),
+        "EXCELMANUS_CHAT_HISTORY_ENABLED",
+        True,
+    )
+    db_path = os.environ.get(
+        "EXCELMANUS_DB_PATH", "~/.excelmanus/excelmanus.db"
+    )
+    chat_history_db_path = os.environ.get(
+        "EXCELMANUS_CHAT_HISTORY_DB_PATH", ""
+    )
+
     # CLI 布局模式
     cli_layout_mode = _parse_cli_layout_mode(
         os.environ.get("EXCELMANUS_CLI_LAYOUT_MODE")
@@ -1056,6 +1077,9 @@ def load_config() -> ExcelManusConfig:
         memory_semantic_fallback_recent=memory_semantic_fallback_recent,
         manifest_semantic_top_k=manifest_semantic_top_k,
         manifest_semantic_threshold=manifest_semantic_threshold,
+        db_path=db_path,
+        chat_history_enabled=chat_history_enabled,
+        chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,
         models=models,
     )

@@ -11,7 +11,11 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
+
+if TYPE_CHECKING:
+    from excelmanus.database import Database
+    from excelmanus.stores.approval_store import ApprovalStore
 
 from excelmanus.tools.policy import (
     AUDIT_TARGET_ARG_RULES_ALL,
@@ -108,13 +112,23 @@ class ApprovalManager:
     _AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(MUTATING_AUDIT_ONLY_TOOLS)
     _MUTATING_TOOLS: frozenset[str] = frozenset(MUTATING_ALL_TOOLS)
 
-    def __init__(self, workspace_root: str, audit_root: str = "outputs/approvals") -> None:
+    def __init__(
+        self,
+        workspace_root: str,
+        audit_root: str = "outputs/approvals",
+        *,
+        database: "Database | None" = None,
+    ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.audit_root = (self.workspace_root / audit_root).resolve()
         self.audit_root.mkdir(parents=True, exist_ok=True)
         self._pending: PendingApproval | None = None
         self._applied: dict[str, AppliedApprovalRecord] = {}
         self._mcp_auto_approved: set[str] = set()
+        self._db_store: "ApprovalStore | None" = None
+        if database is not None:
+            from excelmanus.stores.approval_store import ApprovalStore as _AS
+            self._db_store = _AS(database)
 
         # 会话实例级副本，避免类级可变状态污染。
         self._read_only_safe_tools: set[str] = set(self._READ_ONLY_SAFE_TOOLS)
@@ -212,6 +226,19 @@ class ApprovalManager:
         if cached is not None:
             return cached
 
+        # 优先从 DB 查询
+        if self._db_store is not None:
+            try:
+                db_record = self._db_store.get(approval_id)
+                if db_record is not None:
+                    loaded = self._dict_to_applied_record(db_record)
+                    if loaded is not None:
+                        self._applied[approval_id] = loaded
+                        return loaded
+            except Exception:
+                logger.debug("从 DB 加载审批记录失败: %s", approval_id, exc_info=True)
+
+        # 回退到 manifest.json
         loaded = self._load_applied_from_manifest(approval_id)
         if loaded is None:
             return None
@@ -352,6 +379,13 @@ class ApprovalManager:
         )
 
         self._applied[approval_id] = record
+
+        # 同步写入 DB（如果可用）
+        if self._db_store is not None:
+            try:
+                self._db_store.save(record.to_dict())
+            except Exception:
+                logger.warning("审批记录写入 DB 失败: %s", approval_id, exc_info=True)
 
         if execute_error is not None:
             raise execute_error
@@ -802,6 +836,64 @@ class ApprovalManager:
                 else None
             ),
         )
+
+    def _dict_to_applied_record(self, d: dict[str, Any]) -> AppliedApprovalRecord | None:
+        """将 ApprovalStore 返回的 dict 转为 AppliedApprovalRecord。"""
+        try:
+            changes_raw = d.get("changes", [])
+            changes: list[FileChangeRecord] = []
+            if isinstance(changes_raw, list):
+                for item in changes_raw:
+                    if isinstance(item, dict):
+                        changes.append(FileChangeRecord(
+                            path=str(item.get("path", "")),
+                            before_exists=bool(item.get("before_exists", False)),
+                            after_exists=bool(item.get("after_exists", False)),
+                            before_hash=item.get("before_hash"),
+                            after_hash=item.get("after_hash"),
+                            before_size=item.get("before_size"),
+                            after_size=item.get("after_size"),
+                            is_binary=bool(item.get("is_binary", False)),
+                            text_diff_file=item.get("text_diff_file"),
+                            before_snapshot_file=item.get("before_snapshot_file"),
+                        ))
+
+            binary_raw = d.get("binary_snapshots", [])
+            binary_snapshots: list[BinarySnapshotRecord] = []
+            if isinstance(binary_raw, list):
+                for item in binary_raw:
+                    if isinstance(item, dict):
+                        binary_snapshots.append(BinarySnapshotRecord(
+                            path=str(item.get("path", "")),
+                            snapshot_file=str(item.get("snapshot_file", "")),
+                            hash_sha256=str(item.get("hash_sha256", "")),
+                            size_bytes=int(item.get("size_bytes", 0)),
+                        ))
+
+            return AppliedApprovalRecord(
+                approval_id=str(d.get("id", "")),
+                tool_name=str(d.get("tool_name", "")),
+                arguments=d.get("arguments", {}),
+                tool_scope=d.get("tool_scope", []),
+                created_at_utc=str(d.get("created_at_utc", "")),
+                applied_at_utc=str(d.get("applied_at_utc", "")),
+                undoable=bool(d.get("undoable", False)),
+                manifest_file=str(d.get("manifest_file", "")),
+                audit_dir=str(d.get("audit_dir", "")),
+                result_preview=str(d.get("result_preview", "")),
+                execution_status=str(d.get("execution_status", "success")),
+                error_type=d.get("error_type"),
+                error_message=d.get("error_message"),
+                partial_scan=bool(d.get("partial_scan", False)),
+                patch_file=d.get("patch_file"),
+                changes=changes,
+                binary_snapshots=binary_snapshots,
+                repo_diff_before_file=d.get("repo_diff_before"),
+                repo_diff_after_file=d.get("repo_diff_after"),
+            )
+        except Exception:
+            logger.debug("DB 审批记录转换失败", exc_info=True)
+            return None
 
     @staticmethod
     def _sha256(content: bytes) -> str:
