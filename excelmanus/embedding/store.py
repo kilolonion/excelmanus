@@ -9,9 +9,13 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from excelmanus.database import Database
+    from excelmanus.stores.vector_store_db import VectorStoreDB
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +45,23 @@ class VectorStore:
     - 支持增量追加，无需全量重写
     """
 
-    def __init__(self, store_dir: str | Path, dimensions: int = 1536) -> None:
+    def __init__(
+        self,
+        store_dir: str | Path,
+        dimensions: int = 1536,
+        *,
+        database: "Database | None" = None,
+    ) -> None:
         self._store_dir = Path(store_dir).expanduser()
         self._dimensions = dimensions
         self._records: list[VectorRecord] = []
         self._hash_index: dict[str, int] = {}  # content_hash → index
         self._matrix: np.ndarray | None = None  # 缓存的向量矩阵
         self._dirty = False  # 是否有未持久化的变更
+        self._db_store: "VectorStoreDB | None" = None
+        if database is not None:
+            from excelmanus.stores.vector_store_db import VectorStoreDB as _VS
+            self._db_store = _VS(database, dimensions=dimensions)
 
         self._store_dir.mkdir(parents=True, exist_ok=True)
         self._load()
@@ -140,8 +154,14 @@ class VectorStore:
         self._dirty = True
 
     def save(self) -> None:
-        """将内存中的数据持久化到文件。"""
+        """将内存中的数据持久化到文件（或 DB）。"""
         if not self._dirty and self._store_dir.exists():
+            return
+        # DB 模式：内存 records 同步到 DB
+        if self._db_store is not None:
+            for record in self._records:
+                self._db_store.add(record.text, record.vector, record.metadata)
+            self._dirty = False
             return
 
         self._store_dir.mkdir(parents=True, exist_ok=True)
@@ -176,7 +196,10 @@ class VectorStore:
         logger.debug("VectorStore 已持久化: %d 条记录", len(self._records))
 
     def _load(self) -> None:
-        """从文件加载数据到内存。"""
+        """从文件（或 DB）加载数据到内存。"""
+        if self._db_store is not None:
+            self._load_from_db()
+            return
         jsonl_path = self._store_dir / _VECTORS_FILE
         npy_path = self._store_dir / _VECTORS_NPY_FILE
 
@@ -244,6 +267,27 @@ class VectorStore:
 
         self._matrix = None  # 延迟重建
         logger.debug("VectorStore 已加载: %d 条记录", len(self._records))
+
+    def _load_from_db(self) -> None:
+        """从 VectorStoreDB 加载数据到内存记录。"""
+        assert self._db_store is not None
+        db_records = self._db_store.load_all()
+        for rec in db_records:
+            content_hash = rec["content_hash"]
+            if content_hash in self._hash_index:
+                continue
+            record = VectorRecord(
+                content_hash=content_hash,
+                text=rec["text"],
+                vector=rec["vector"],
+                metadata=rec.get("metadata", {}),
+            )
+            idx = len(self._records)
+            self._records.append(record)
+            self._hash_index[content_hash] = idx
+        self._matrix = None
+        if self._records:
+            logger.debug("VectorStore 从 DB 加载: %d 条记录", len(self._records))
 
     def _rebuild_matrix(self) -> None:
         """从 records 重建 numpy 矩阵。"""

@@ -10,8 +10,13 @@ import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from excelmanus.memory_models import CATEGORY_TOPIC_MAP, MemoryCategory, MemoryEntry
+
+if TYPE_CHECKING:
+    from excelmanus.database import Database
+    from excelmanus.stores.memory_store import MemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +34,33 @@ class PersistentMemory:
     管理 MemoryDir 下的核心记忆文件（MEMORY.md）和主题文件的读写。
     """
 
-    def __init__(self, memory_dir: str, auto_load_lines: int = 200) -> None:
-        """初始化，确保目录存在。"""
+    def __init__(
+        self,
+        memory_dir: str,
+        auto_load_lines: int = 200,
+        *,
+        database: "Database | None" = None,
+    ) -> None:
+        """初始化，确保目录存在。
+
+        Args:
+            memory_dir: 记忆文件存储目录（文件模式下使用）。
+            auto_load_lines: 自动加载行数上限。
+            database: 可选统一数据库实例。有 DB 时委托 MemoryStore，
+                      无 DB 时保留旧 Markdown 文件路径。
+        """
         self._memory_dir = Path(memory_dir).expanduser()
         self._auto_load_lines = auto_load_lines
         self._read_only_mode = False
         self._migration_error: str | None = None
-        # 自动创建目录及所有父目录
+        self._db_store: "MemoryStore | None" = None
+        if database is not None:
+            from excelmanus.stores.memory_store import MemoryStore as _MS
+            self._db_store = _MS(database)
+        # 自动创建目录及所有父目录（文件模式仍需要）
         self._memory_dir.mkdir(parents=True, exist_ok=True)
-        self._migrate_layout_if_needed()
+        if self._db_store is None:
+            self._migrate_layout_if_needed()
 
     @property
     def memory_dir(self) -> Path:
@@ -66,6 +89,8 @@ class PersistentMemory:
         文件不存在或为空时返回空字符串。
         为避免从条目中间开始，优先对齐到最近窗口内的条目头。
         """
+        if self._db_store is not None:
+            return self._db_store.load_core(limit=self._auto_load_lines)
         filepath = self._memory_dir / CORE_MEMORY_FILE
         if not filepath.exists():
             return ""
@@ -169,6 +194,14 @@ class PersistentMemory:
 
     def load_topic(self, topic_name: str) -> str:
         """按需读取指定主题文件的全部内容。"""
+        if self._db_store is not None:
+            # 从文件名反推类别
+            cat = self._infer_category_by_filename(topic_name)
+            if cat is not None:
+                entries = self._db_store.load_by_category(cat)
+                if entries:
+                    return self.format_entries(entries)
+            return ""
         filepath = self._memory_dir / topic_name
         if not filepath.exists():
             return ""
@@ -189,6 +222,9 @@ class PersistentMemory:
           content key，作为跨文件去重基准（global_seen_keys）传入每次写入。
         """
         if not entries:
+            return
+        if self._db_store is not None:
+            self._db_store.save_entries(entries)
             return
         if self._read_only_mode:
             logger.warning(
