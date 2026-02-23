@@ -197,6 +197,7 @@ class WindowPerceptionManager:
             model_mode_overrides=adaptive_model_mode_overrides or {},
         )
         self._turn_hint_intent_hint: str = ""
+        self._turn_hint_task_tags: tuple[str, ...] = ()
         self._last_identity_reject_code: str | None = None
 
     @property
@@ -220,12 +221,17 @@ class WindowPerceptionManager:
         user_intent_summary: str = "",
         agent_recent_output: str = "",
         turn_intent_hint: str = "",
+        task_tags: tuple[str, ...] | None = None,
     ) -> None:
         """设置当前轮次提示信息。"""
         self._turn_hint_is_new_task = bool(is_new_task)
         self._turn_hint_user_intent_summary = self._normalize_hint(user_intent_summary, max_chars=200)
         self._turn_hint_agent_recent_output = self._normalize_hint(agent_recent_output, max_chars=200)
         self._turn_hint_intent_hint = self._normalize_hint(turn_intent_hint, max_chars=200)
+        if task_tags is not None:
+            self._turn_hint_task_tags = self._normalize_task_tags(task_tags)
+        elif is_new_task:
+            self._turn_hint_task_tags = ()
 
     def reset(self) -> None:
         """重置状态。"""
@@ -242,6 +248,7 @@ class WindowPerceptionManager:
         self._turn_hint_user_intent_summary = ""
         self._turn_hint_agent_recent_output = ""
         self._turn_hint_intent_hint = ""
+        self._turn_hint_task_tags = ()
         self._cached_small_model_plan = None
         self._repeat_detector = RepeatDetector()
         self._adaptive_selector.reset()
@@ -488,6 +495,77 @@ class WindowPerceptionManager:
             len(ast_write_files),
         )
 
+    def observe_write_tool_call(self, *, tool_name: str, arguments: dict[str, Any]) -> None:
+        """写工具兜底：标记关联窗口 stale 并清空缓存。"""
+        if not self._enabled:
+            return
+
+        normalized_tool = str(tool_name or "").strip()
+        if not normalized_tool:
+            return
+
+        window = self._locate_sheet_window_for_write(arguments)
+        if window is None:
+            return
+
+        target_range = str(
+            arguments.get("range")
+            or arguments.get("cell_range")
+            or arguments.get("cell")
+            or window.viewport_range
+            or "当前视口"
+        ).strip()
+        stale_reason = f"{normalized_tool} 已写入 {target_range}，缓存已清空。请调用 read_excel 刷新数据。"
+
+        self._set_window_field(window, "stale_hint", stale_reason)
+        self._set_window_field(window, "data_buffer", [])
+        self._set_window_field(window, "preview_rows", [])
+        self._set_window_field(window, "cached_ranges", [])
+        self._set_window_field(window, "unfiltered_buffer", None)
+        self._set_window_field(window, "last_op_kind", "write")
+        self._set_window_field(window, "last_write_range", target_range)
+        self._set_window_field(window, "summary", stale_reason)
+        self._reset_repeat_counter_after_write(window)
+        self._wake_window(window)
+        self._touch(window)
+
+    def _locate_sheet_window_for_write(self, arguments: dict[str, Any]) -> Window | None:
+        file_path = normalize_path(extract_file_path(arguments, None))
+        sheet_name = str(extract_sheet_name(arguments, None) or "").strip()
+        lowered_sheet_name = sheet_name.lower()
+
+        if file_path and sheet_name:
+            matched = self._find_sheet_window(file_path=file_path, sheet_name=sheet_name)
+            if matched is not None:
+                return matched
+
+        if self._active_window_id:
+            active = self._windows.get(self._active_window_id)
+            if active is not None and active.type == WindowType.SHEET and not active.dormant:
+                active_file = normalize_path(active.file_path or "")
+                active_sheet = str(active.sheet_name or "").strip().lower()
+                file_ok = (not file_path) or (active_file == file_path)
+                sheet_ok = (not sheet_name) or (active_sheet == lowered_sheet_name)
+                if file_ok and sheet_ok:
+                    return active
+
+        if not file_path:
+            return None
+
+        candidates: list[Window] = []
+        for item in self._windows.values():
+            if item.type != WindowType.SHEET or item.dormant:
+                continue
+            if normalize_path(item.file_path or "") != file_path:
+                continue
+            if sheet_name and str(item.sheet_name or "").strip().lower() != lowered_sheet_name:
+                continue
+            candidates.append(item)
+
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: item.last_access_seq, reverse=True)[0]
+
     @staticmethod
     def _parse_code_execution_summary(stdout_tail: str) -> str:
         """从 stdout 中提取操作摘要（best-effort）。"""
@@ -533,6 +611,7 @@ class WindowPerceptionManager:
             user_intent_summary=self._turn_hint_user_intent_summary,
             agent_recent_output=self._turn_hint_agent_recent_output,
             task_type=self._task_type_from_windows(active_windows),
+            task_tags=self._turn_hint_task_tags,
         )
         cached_small_model_plan = self._get_fresh_small_model_plan(current_turn=context.turn_number)
         lifecycle_plan = self._advisor.advise(
@@ -2166,6 +2245,7 @@ class WindowPerceptionManager:
             user_intent_summary=context.user_intent_summary,
             agent_recent_output=context.agent_recent_output,
             task_type=context.task_type,
+            task_tags=context.task_tags,
         )
         task = loop.create_task(
             self._run_async_advisor(
@@ -2250,6 +2330,16 @@ class WindowPerceptionManager:
         if len(normalized) <= max_chars:
             return normalized
         return normalized[:max_chars]
+
+    @staticmethod
+    def _normalize_task_tags(task_tags: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        for raw_tag in task_tags:
+            tag = str(raw_tag or "").strip().lower()
+            if not tag or tag in normalized:
+                continue
+            normalized.append(tag)
+        return tuple(normalized)
 
     def _truncate_tool_append(self, text: str) -> str:
         max_tokens = max(0, int(self._budget.tool_append_tokens))

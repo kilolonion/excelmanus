@@ -1772,11 +1772,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="outputs/bench",
         help="日志输出目录（默认 outputs/bench）",
     )
-    parser.add_argument(
-        "--no-trace",
+    trace_group = parser.add_mutually_exclusive_group()
+    trace_group.add_argument(
+        "--trace",
         action="store_true",
-        default=False,
-        help="禁用 engine 内部交互轨迹记录（默认开启）。"
+        dest="trace",
+        default=True,
+        help="启用 engine 内部交互轨迹记录（默认行为，可显式指定）",
+    )
+    trace_group.add_argument(
+        "--no-trace",
+        action="store_false",
+        dest="trace",
+        help="禁用 engine 内部交互轨迹记录。"
         "也可通过 EXCELMANUS_BENCH_TRACE=0 环境变量禁用。",
     )
     return parser
@@ -2097,7 +2105,7 @@ async def _main(argv: list[str] | None = None) -> int:
         return 0
 
     # trace 模式：默认开启，可通过 --no-trace 或 EXCELMANUS_BENCH_TRACE=0 禁用
-    trace_enabled = not args.no_trace and os.environ.get("EXCELMANUS_BENCH_TRACE", "1") != "0"
+    trace_enabled = args.trace and os.environ.get("EXCELMANUS_BENCH_TRACE", "1") != "0"
 
     if plan.mode == "message":
         config = load_config()

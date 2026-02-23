@@ -620,49 +620,50 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
         # 启动 chat 任务
         chat_task = asyncio.create_task(_run_chat())
+        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = asyncio.create_task(
+            event_queue.get()
+        )
+
+        async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
+            if task is None or task.done():
+                return
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         try:
             while True:
-                # 优先检查队列中的事件
-                try:
-                    event = event_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    # 队列为空，检查 chat 任务是否已完成
-                    if chat_task.done():
-                        # 排空队列中剩余事件
-                        while not event_queue.empty():
-                            event = event_queue.get_nowait()
-                            if event is not None:
-                                sse = _sse_event_to_sse(event, safe_mode=safe_mode)
-                                if sse is not None:
-                                    yield sse
-                        break
-                    # 等待新事件或任务完成
-                    get_task = asyncio.create_task(event_queue.get())
-                    done, pending = await asyncio.wait(
-                        [get_task, chat_task],
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    # 取消所有 pending tasks，防止 task 泄漏
-                    for t in pending:
-                        t.cancel()
-                        try:
-                            await t
-                        except asyncio.CancelledError:
-                            pass
-                    for task in done:
-                        if task is not chat_task:
-                            event = task.result()
-                            if event is not None:
-                                sse = _sse_event_to_sse(event, safe_mode=safe_mode)
-                                if sse is not None:
-                                    yield sse
-                    continue
+                assert queue_get_task is not None
+                done, _ = await asyncio.wait(
+                    [queue_get_task, chat_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                if event is not None:
-                    sse = _sse_event_to_sse(event, safe_mode=safe_mode)
-                    if sse is not None:
-                        yield sse
+                if queue_get_task in done:
+                    event = queue_get_task.result()
+                    if event is not None:
+                        sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                        if sse is not None:
+                            yield sse
+                    if chat_task.done():
+                        queue_get_task = None
+                    else:
+                        queue_get_task = asyncio.create_task(event_queue.get())
+
+                if chat_task in done:
+                    # 排空队列中剩余事件
+                    while True:
+                        try:
+                            event = event_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if event is not None:
+                            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                            if sse is not None:
+                                yield sse
+                    break
 
             # chat 任务完成：获取结果
             chat_result = chat_task.result()
@@ -702,6 +703,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                     await chat_task
                 except (asyncio.CancelledError, Exception):
                     pass
+        finally:
+            await _cancel_task(queue_get_task)
 
     return StreamingResponse(
         _event_generator(),

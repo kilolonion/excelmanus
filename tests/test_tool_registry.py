@@ -133,6 +133,33 @@ class TestToolDefTruncate:
         assert "[结果已截断，原始长度: 200 字符]" in result
         assert len(result) < len(text)
 
+    def test_long_text_truncated_with_head_tail_preserved(self) -> None:
+        tool = ToolDef(
+            name="t",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            func=lambda: None,
+            max_result_chars=3000,
+            truncate_head_chars=2000,
+            truncate_tail_chars=1000,
+        )
+        text = ("H" * 2500) + "MID" + ("T" * 2500)
+        result = tool.truncate_result(text)
+        assert result.startswith("H" * 2000)
+        assert result.endswith("T" * 1000)
+        assert "[结果中间已截断，保留前 2000 字符和后 1000 字符，原始长度: 5003 字符]" in result
+
+    def test_json_truncation_note_highlights_total_and_preview_rows(self) -> None:
+        tool = self._make_tool(240)
+        payload = {
+            "meta": {"source": "demo"},
+            "data": [{"value": "x" * 40} for _ in range(20)],
+        }
+        result = tool.truncate_result(json.dumps(payload, ensure_ascii=False))
+        parsed = json.loads(result)
+        assert parsed["_data_truncated"] is True
+        assert "完整数据有 20 行，仅展示前" in parsed["_data_note"]
+
     def test_zero_limit_no_truncation(self) -> None:
         tool = self._make_tool(0)
         text = "a" * 5000

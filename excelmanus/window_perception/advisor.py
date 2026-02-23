@@ -19,6 +19,8 @@ _VALID_TASK_TYPES = {
     "GENERAL_BROWSE",
 }
 _VALID_TIERS: set[str] = {"active", "background", "suspended", "terminated"}
+_RELAX_LIFECYCLE_TAGS: frozenset[str] = frozenset({"cross_sheet", "large_data"})
+_RELAXED_THRESHOLDS: tuple[int, int, int] = (4, 7, 11)
 
 
 @dataclass
@@ -73,7 +75,10 @@ class RuleBasedAdvisor:
     ) -> LifecyclePlan:
         del small_model_plan, plan_ttl_turns
 
-        bg_after, suspend_after, terminate_after = self._normalize_thresholds(budget)
+        bg_after, suspend_after, terminate_after = self._thresholds_for_context(
+            budget=budget,
+            context=context,
+        )
         advices: list[WindowAdvice] = []
 
         for window in windows:
@@ -123,6 +128,28 @@ class RuleBasedAdvisor:
         background_after = max(1, int(budget.background_after_idle))
         suspend_after = max(background_after + 1, int(budget.suspend_after_idle))
         terminate_after = max(suspend_after + 1, int(budget.terminate_after_idle))
+        return background_after, suspend_after, terminate_after
+
+    @classmethod
+    def _thresholds_for_context(
+        cls,
+        *,
+        budget: PerceptionBudget,
+        context: AdvisorContext,
+    ) -> tuple[int, int, int]:
+        background_after, suspend_after, terminate_after = cls._normalize_thresholds(budget)
+        tags = {
+            str(tag).strip().lower()
+            for tag in (context.task_tags or ())
+            if str(tag).strip()
+        }
+        if not tags.intersection(_RELAX_LIFECYCLE_TAGS):
+            return background_after, suspend_after, terminate_after
+
+        relaxed_bg, relaxed_suspend, relaxed_terminate = _RELAXED_THRESHOLDS
+        background_after = max(background_after, relaxed_bg)
+        suspend_after = max(suspend_after, relaxed_suspend, background_after + 1)
+        terminate_after = max(terminate_after, relaxed_terminate, suspend_after + 1)
         return background_after, suspend_after, terminate_after
 
     @staticmethod

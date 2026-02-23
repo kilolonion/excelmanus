@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import openpyxl
 import pytest
 from openpyxl import Workbook
 
@@ -116,6 +117,35 @@ class TestBuildFileStructureContext:
         )
         # 应该只包含 2 个文件的信息
         assert result.count("文件:") == 2
+
+    def test_reuse_file_structure_cache_avoids_reopen(
+        self, router: SkillRouter, excel_standard_header: Path
+    ) -> None:
+        """同一文件未变化时应命中缓存，避免重复打开工作簿。"""
+        with patch("openpyxl.load_workbook", wraps=openpyxl.load_workbook) as mocked:
+            router._build_file_structure_context(candidate_file_paths=[str(excel_standard_header)])
+            router._build_file_structure_context(candidate_file_paths=[str(excel_standard_header)])
+
+        assert mocked.call_count == 1
+
+    def test_cache_invalidated_when_file_changes(
+        self, router: SkillRouter, excel_standard_header: Path
+    ) -> None:
+        """文件 mtime/size 变化后应重新读取，不复用旧缓存。"""
+        with patch("openpyxl.load_workbook", wraps=openpyxl.load_workbook) as mocked:
+            router._build_file_structure_context(candidate_file_paths=[str(excel_standard_header)])
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "销售数据"
+            ws.append(["产品", "数量", "单价", "总计"])
+            ws.append(["苹果", 10, 5.0, 50.0])
+            ws.append(["超长文本" * 20, 99, 1.0, 99.0])
+            wb.save(excel_standard_header)
+
+            router._build_file_structure_context(candidate_file_paths=[str(excel_standard_header)])
+
+        assert mocked.call_count == 2
 
 
 class TestGuessHeaderRow:

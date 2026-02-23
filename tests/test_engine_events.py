@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -33,7 +34,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "model": "test-model",
         "max_iterations": 20,
         "max_consecutive_failures": 10,
-        "workspace_root": ".",
+        "workspace_root": str(Path(__file__).resolve().parent),
         "backup_enabled": False,
     }
     defaults.update(overrides)

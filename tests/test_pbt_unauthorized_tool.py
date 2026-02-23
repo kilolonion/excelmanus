@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -55,7 +56,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "model": "test-model",
         "max_iterations": 20,
         "max_consecutive_failures": 3,
-        "workspace_root": ".",
+        "workspace_root": str(Path(__file__).resolve().parent),
         "backup_enabled": False,
     }
     defaults.update(overrides)
@@ -195,4 +196,3 @@ async def test_property_2_unauthorized_tool_error_response_format(
     assert error_data["tool"] == tool_name, (
         f"tool 应为 {tool_name!r}，实际: {error_data['tool']!r}"
     )
-

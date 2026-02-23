@@ -9,6 +9,33 @@ from tests.window_factories import make_window
 class TestRuleBasedAdvisor:
     """规则顾问分层决策测试。"""
 
+    def test_tier_assignment_by_idle_turns_with_default_258(self) -> None:
+        advisor = RuleBasedAdvisor()
+        budget = PerceptionBudget(
+            background_after_idle=2,
+            suspend_after_idle=5,
+            terminate_after_idle=8,
+        )
+        windows = [
+            make_window(id="w1", type=WindowType.SHEET, title="A", idle_turns=1),
+            make_window(id="w2", type=WindowType.SHEET, title="B", idle_turns=2),
+            make_window(id="w5", type=WindowType.SHEET, title="C", idle_turns=5),
+            make_window(id="w8", type=WindowType.SHEET, title="D", idle_turns=8),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id=None,
+            budget=budget,
+            context=AdvisorContext(turn_number=2),
+        )
+        tiers = {item.window_id: item.tier for item in plan.advices}
+
+        assert tiers["w1"] == "active"
+        assert tiers["w2"] == "background"
+        assert tiers["w5"] == "suspended"
+        assert tiers["w8"] == "terminated"
+
     def test_tier_assignment_by_idle_turns(self) -> None:
         advisor = RuleBasedAdvisor()
         budget = PerceptionBudget(
@@ -35,6 +62,49 @@ class TestRuleBasedAdvisor:
         assert tiers["w1"] == "background"
         assert tiers["w3"] == "suspended"
         assert tiers["w5"] == "terminated"
+
+    def test_relax_thresholds_when_task_tags_include_cross_sheet(self) -> None:
+        advisor = RuleBasedAdvisor()
+        budget = PerceptionBudget(
+            background_after_idle=2,
+            suspend_after_idle=5,
+            terminate_after_idle=8,
+        )
+        windows = [
+            make_window(id="w3", type=WindowType.SHEET, title="A", idle_turns=3),
+            make_window(id="w6", type=WindowType.SHEET, title="B", idle_turns=6),
+            make_window(id="w10", type=WindowType.SHEET, title="C", idle_turns=10),
+        ]
+
+        plan = advisor.advise(
+            windows=windows,
+            active_window_id=None,
+            budget=budget,
+            context=AdvisorContext(turn_number=2, task_tags=("cross_sheet",)),
+        )
+        tiers = {item.window_id: item.tier for item in plan.advices}
+
+        assert tiers["w3"] == "active"
+        assert tiers["w6"] == "background"
+        assert tiers["w10"] == "suspended"
+
+    def test_relax_thresholds_do_not_stack_for_multiple_task_tags(self) -> None:
+        advisor = RuleBasedAdvisor()
+        budget = PerceptionBudget(
+            background_after_idle=2,
+            suspend_after_idle=5,
+            terminate_after_idle=8,
+        )
+        window = make_window(id="w11", type=WindowType.SHEET, title="A", idle_turns=11)
+
+        plan = advisor.advise(
+            windows=[window],
+            active_window_id=None,
+            budget=budget,
+            context=AdvisorContext(turn_number=2, task_tags=("cross_sheet", "large_data")),
+        )
+
+        assert plan.advices[0].tier == "terminated"
 
     def test_active_window_always_active(self) -> None:
         advisor = RuleBasedAdvisor()
@@ -103,7 +173,7 @@ class TestHybridAdvisor:
             plan_ttl_turns=2,
         )
         assert plan.source == "rules"
-        assert plan.advices[0].tier == "suspended"
+        assert plan.advices[0].tier == "background"
 
     def test_expired_small_model_plan_falls_back_to_rules(self) -> None:
         advisor = HybridAdvisor()
@@ -126,7 +196,7 @@ class TestHybridAdvisor:
             plan_ttl_turns=2,
         )
         assert plan.source == "rules"
-        assert plan.advices[0].tier == "background"
+        assert plan.advices[0].tier == "active"
 
     def test_valid_plan_with_only_unknown_windows_keeps_base_active_window(self) -> None:
         advisor = HybridAdvisor()

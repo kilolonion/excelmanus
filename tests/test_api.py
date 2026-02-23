@@ -1919,3 +1919,49 @@ class TestImageAttachment:
         assert kwargs["images"] == [
             {"data": "abcd", "media_type": "image/jpeg", "detail": "low"},
         ]
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_keeps_running_until_reply_emitted(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """chat_stream 在消费中间事件时，不应提前取消 chat 任务。"""
+
+        async def chat_with_events(_: str, **kwargs) -> ChatResult:
+            on_event = kwargs.get("on_event")
+            assert on_event is not None
+
+            await asyncio.sleep(0.01)
+            on_event(
+                ToolCallEvent(
+                    event_type=EventType.USER_QUESTION,
+                    question_id="q-1",
+                    question_header="确认",
+                    question_text="请选择方案",
+                    question_options=[
+                        {"label": "A", "description": "方案 A"},
+                    ],
+                    question_multi_select=False,
+                    question_queue_size=1,
+                )
+            )
+            await asyncio.sleep(0.01)
+            return ChatResult(reply="stream-ok")
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            side_effect=chat_with_events,
+        ):
+            resp = await client.post(
+                "/api/v1/chat/stream",
+                json={"message": "验证 stream 生命周期"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "event: user_question" in body
+        assert "event: reply" in body
+        assert '"content": "stream-ok"' in body
+        assert "event: done" in body
+        assert "event: error" not in body

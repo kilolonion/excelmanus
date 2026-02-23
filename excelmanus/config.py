@@ -107,9 +107,9 @@ class ExcelManusConfig:
     window_perception_default_rows: int = 25
     window_perception_default_cols: int = 10
     window_perception_minimized_tokens: int = 80
-    window_perception_background_after_idle: int = 1
-    window_perception_suspend_after_idle: int = 3
-    window_perception_terminate_after_idle: int = 5
+    window_perception_background_after_idle: int = 2
+    window_perception_suspend_after_idle: int = 5
+    window_perception_terminate_after_idle: int = 8
     window_perception_advisor_mode: str = "rules"
     window_perception_advisor_timeout_ms: int = 800
     window_perception_advisor_trigger_window_count: int = 3
@@ -761,17 +761,17 @@ def load_config() -> ExcelManusConfig:
     window_perception_background_after_idle = _parse_int(
         os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE"),
         "EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE",
-        1,
+        2,
     )
     window_perception_suspend_after_idle = _parse_int(
         os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE"),
         "EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE",
-        3,
+        5,
     )
     window_perception_terminate_after_idle = _parse_int(
         os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE"),
         "EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE",
-        5,
+        8,
     )
     window_perception_advisor_mode = _parse_window_perception_advisor_mode(
         os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE")

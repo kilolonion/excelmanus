@@ -72,6 +72,57 @@ def test_builtin_agents_loaded(tmp_path: Path) -> None:
 
     loaded = registry.load_all()
     assert "subagent" in loaded
+    assert "explorer" in loaded
+    assert "verifier" in loaded
+
+
+def test_builtin_explorer_is_readonly_restricted(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+
+    loaded = registry.load_all()
+    explorer = loaded["explorer"]
+    assert explorer.permission_mode == "readOnly"
+    assert explorer.capability_mode == "restricted"
+    assert "read_excel" in explorer.allowed_tools
+    assert explorer.source == "builtin"
+
+
+def test_builtin_verifier_is_readonly_restricted(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+
+    loaded = registry.load_all()
+    verifier = loaded["verifier"]
+    assert verifier.permission_mode == "readOnly"
+    assert verifier.capability_mode == "restricted"
+    assert "read_excel" in verifier.allowed_tools
+    assert verifier.source == "builtin"
+    assert "verdict" in verifier.system_prompt
+
+
+def test_explorer_alias_resolve(tmp_path: Path) -> None:
+    """explore -> explorer（不再回退 subagent）。"""
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
+    registry.load_all()
+
+    result = registry.get("explore")
+    assert result is not None
+    assert result.name == "explorer"
+
+    result2 = registry.get("Explorer")
+    assert result2 is not None
+    assert result2.name == "explorer"
 
 
 def test_project_overrides_user_and_builtin(tmp_path: Path) -> None:

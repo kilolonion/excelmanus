@@ -230,12 +230,13 @@ class TestB1ManifestRefreshOnExit:
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
-        # finish_task 接受退出块中应有 _try_refresh_manifest
+        # 统一出口 helper 中应有 refresh
+        helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
+        assert "_try_refresh_manifest()" in helper_block
+
+        # finish_task 接受退出块应走统一出口
         finish_task_block = source[source.find("finish_task 接受，退出循环"):]
-        return_pos = finish_task_block.find("return ChatResult(")
-        refresh_pos = finish_task_block.find("_try_refresh_manifest()")
-        assert refresh_pos != -1, "_try_refresh_manifest 未在 finish_task 退出路径中找到"
-        assert refresh_pos < return_pos, "_try_refresh_manifest 应在 return ChatResult 之前调用"
+        assert "return _finalize_result(" in finish_task_block
 
     def test_property1_pending_approval_calls_refresh(self) -> None:
         """pending_approval 退出路径调用 _try_refresh_manifest。"""
@@ -244,10 +245,7 @@ class TestB1ManifestRefreshOnExit:
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
         block = source[source.find("工具调用进入待确认队列"):]
-        return_pos = block.find("return ChatResult(")
-        refresh_pos = block.find("_try_refresh_manifest()")
-        assert refresh_pos != -1
-        assert refresh_pos < return_pos
+        assert "return _finalize_result(" in block
 
     def test_property1_pending_plan_calls_refresh(self) -> None:
         """pending_plan 退出路径调用 _try_refresh_manifest。"""
@@ -256,10 +254,7 @@ class TestB1ManifestRefreshOnExit:
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
         block = source[source.find("工具调用进入待审批计划队列"):]
-        return_pos = block.find("return ChatResult(")
-        refresh_pos = block.find("_try_refresh_manifest()")
-        assert refresh_pos != -1
-        assert refresh_pos < return_pos
+        assert "return _finalize_result(" in block
 
     def test_property1_ask_user_calls_refresh(self) -> None:
         """ask_user 退出路径调用 _try_refresh_manifest。"""
@@ -268,10 +263,7 @@ class TestB1ManifestRefreshOnExit:
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
         block = source[source.find("命中 ask_user，进入待回答状态"):]
-        return_pos = block.find("return ChatResult(")
-        refresh_pos = block.find("_try_refresh_manifest()")
-        assert refresh_pos != -1
-        assert refresh_pos < return_pos
+        assert "return _finalize_result(" in block
 
     def test_property1_breaker_calls_refresh(self) -> None:
         """breaker_triggered 退出路径调用 _try_refresh_manifest。"""
@@ -280,22 +272,24 @@ class TestB1ManifestRefreshOnExit:
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
         block = source[source.find("连续 %d 次工具失败，熔断终止"):]
-        return_pos = block.find("return ChatResult(")
-        refresh_pos = block.find("_try_refresh_manifest()")
-        assert refresh_pos != -1
-        assert refresh_pos < return_pos
+        assert "return _finalize_result(" in block
 
     def test_property2_run_code_sets_refresh_needed(self) -> None:
-        """run_code 成功后 _manifest_refresh_needed 置位。"""
+        """run_code 写入信号通过 _record_write_action 统一置位刷新标记。"""
         from excelmanus.engine import AgentEngine
+        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source_engine = inspect.getsource(AgentEngine)
+        source_dispatcher = inspect.getsource(ToolDispatcher.execute)
 
-        # 验证 run_code 置位逻辑存在
-        assert 'tc_result.tool_name == "run_code"' in source
-        # 验证置位在 run_code 判断块内
-        run_code_block = source[source.find('tc_result.tool_name == "run_code"'):]
-        assert "_manifest_refresh_needed = True" in run_code_block[:200]
+        # _record_write_action 负责置位 _manifest_refresh_needed
+        record_block = source_engine[source_engine.find("def _record_write_action"):]
+        assert "_manifest_refresh_needed = True" in record_block
+        # 循环内写入工具走统一写入记录
+        assert "self._record_write_action()" in source
+        # run_code 路径在 dispatcher 中同样走统一写入记录
+        assert "e._record_write_action()" in source_dispatcher
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:
         """Preservation: max_iter 路径仍然调用 _try_refresh_manifest（原有行为不变）。"""
@@ -305,7 +299,9 @@ class TestB1ManifestRefreshOnExit:
 
         # max_iter 路径在函数末尾
         max_iter_block = source[source.rfind("达到迭代上限"):]
-        assert "_try_refresh_manifest()" in max_iter_block
+        assert "return _finalize_result(" in max_iter_block
+        helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
+        assert "_try_refresh_manifest()" in helper_block
 
 
 # ---------------------------------------------------------------------------

@@ -620,9 +620,9 @@ class TestWindowPerceptionConfig:
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS", "25")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS", "10")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS", "80")
-        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE", "1")
-        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE", "3")
-        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "5")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE", "2")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE", "5")
+        monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE", "8")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE", "hybrid")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS", "800")
         monkeypatch.setenv("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT", "3")
@@ -648,9 +648,9 @@ class TestWindowPerceptionConfig:
         assert cfg.window_perception_default_rows == 25
         assert cfg.window_perception_default_cols == 10
         assert cfg.window_perception_minimized_tokens == 80
-        assert cfg.window_perception_background_after_idle == 1
-        assert cfg.window_perception_suspend_after_idle == 3
-        assert cfg.window_perception_terminate_after_idle == 5
+        assert cfg.window_perception_background_after_idle == 2
+        assert cfg.window_perception_suspend_after_idle == 5
+        assert cfg.window_perception_terminate_after_idle == 8
         assert cfg.window_perception_advisor_mode == "hybrid"
         assert cfg.window_perception_advisor_timeout_ms == 800
         assert cfg.window_perception_advisor_trigger_window_count == 3

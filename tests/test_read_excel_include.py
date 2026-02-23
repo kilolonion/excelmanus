@@ -156,6 +156,11 @@ class TestReadExcelRegression:
         assert "style_classes" in result["styles"]
         assert "cell_style_map" in result["styles"]
 
+    def test_tool_def_uses_higher_result_cap(self) -> None:
+        """read_excel ToolDef 应保留更高截断上限，减少关键预览信息丢失。"""
+        tools = {tool.name: tool for tool in data_tools.get_tools()}
+        assert tools["read_excel"].max_result_chars == 6000
+
 
 # ── include=["styles"] ──────────────────────────────────
 

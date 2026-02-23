@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,7 +25,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "model": "test-model",
         "max_iterations": 20,
         "max_consecutive_failures": 3,
-        "workspace_root": ".",
+        "workspace_root": str(Path(__file__).resolve().parent),
         "backup_enabled": False,
     }
     defaults.update(overrides)
@@ -603,6 +604,64 @@ class TestWriteHintSyncOnWriteCall:
 
         assert result.reply == "done"
         assert engine._current_write_hint == "may_write"
+
+
+class TestManifestRefreshOnRecordedWrite:
+    @pytest.mark.asyncio
+    async def test_manifest_refresh_triggered_by_record_write_action(self):
+        """写入标记来自 record_write_action 时，也应触发 manifest refresh。"""
+        engine = _make_engine(max_iterations=2)
+        route_result = _make_route_result(write_hint="read_only")
+
+        first = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "call_1",
+                                "function": {
+                                    "name": "delegate_to_subagent",
+                                    "arguments": '{"task":"sync files"}',
+                                },
+                            }
+                        ],
+                    )
+                )
+            ]
+        )
+        second = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="done", tool_calls=None)
+                )
+            ]
+        )
+        engine._client.chat.completions.create = AsyncMock(side_effect=[first, second])
+
+        async def _execute_and_record_write(*args, **kwargs):
+            engine._record_write_action()
+            return ToolCallResult(
+                tool_name="delegate_to_subagent",
+                arguments={"task": "sync files"},
+                result="ok",
+                success=True,
+            )
+
+        engine._execute_tool_call = AsyncMock(side_effect=_execute_and_record_write)
+        engine._workspace_manifest = types.SimpleNamespace(total_files=1)
+
+        refreshed_manifest = object()
+        with patch(
+            "excelmanus.workspace_manifest.refresh_manifest",
+            return_value=refreshed_manifest,
+        ) as refresh_mock:
+            result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == "done"
+        refresh_mock.assert_called_once()
+        assert engine._workspace_manifest is refreshed_manifest
 
 
 class TestFinishTaskAcceptance:

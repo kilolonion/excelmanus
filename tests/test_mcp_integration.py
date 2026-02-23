@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,7 +28,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "api_key": "test-key",
         "base_url": "https://test.example.com/v1",
         "model": "test-model",
-        "workspace_root": ".",
+        "workspace_root": str(Path(__file__).resolve().parent),
         "backup_enabled": False,
     }
     defaults.update(overrides)

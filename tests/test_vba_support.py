@@ -242,7 +242,7 @@ class TestVbaExemptEngineIntegration:
             "model": "test-model",
             "max_iterations": 20,
             "max_consecutive_failures": 3,
-            "workspace_root": ".",
+            "workspace_root": str(Path(__file__).resolve().parent),
             "backup_enabled": False,
         }
         defaults.update(overrides)
