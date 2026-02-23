@@ -701,6 +701,42 @@ class TestSkillRouter:
         assert hint == "may_write"
 
     @pytest.mark.asyncio
+    async def test_non_slash_lexical_write_hint_without_tags_skips_llm(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """词法已明确写意图时（即使无标签）也不应触发 LLM 分类。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(
+            system_dir,
+            "data_basic",
+            description="分析",
+        )
+
+        config = _make_config(
+            system_dir,
+            user_dir,
+            project_dir,
+            router_model="router-model",
+        )
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        with patch("excelmanus.providers.create_client") as mock_create_client:
+            result = await router.route("请修改这个文件并保存")
+
+        assert result.route_mode == "all_tools"
+        assert result.write_hint == "may_write"
+        assert result.task_tags == ()
+        mock_create_client.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_classify_write_hint_model_parse_failure_falls_back_to_lexical(
         self,
         tmp_path: Path,

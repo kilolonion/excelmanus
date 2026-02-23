@@ -56,6 +56,8 @@ class ToolDef:
     func: Callable[..., Any]
     sensitive_fields: set[str] = field(default_factory=set)
     max_result_chars: int = 3000
+    truncate_head_chars: int | None = None
+    truncate_tail_chars: int = 0
 
     def truncate_result(self, text: str) -> str:
         """若文本超过 max_result_chars 则截断并附加提示。
@@ -77,6 +79,23 @@ class ToolDef:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         # 回退到字符截断
+        return self._truncate_text_fallback(text, limit)
+
+    def _truncate_text_fallback(self, text: str, limit: int) -> str:
+        """纯文本回退截断：默认前缀截断，可配置首尾保留。"""
+        tail_chars = int(self.truncate_tail_chars)
+        if tail_chars > 0:
+            head_chars = self.truncate_head_chars
+            if head_chars is None or head_chars <= 0:
+                head_chars = max(limit - tail_chars, 0)
+            if head_chars > 0 and len(text) > head_chars + tail_chars:
+                return (
+                    f"{text[:head_chars]}\n"
+                    f"[结果中间已截断，保留前 {head_chars} 字符和后 {tail_chars} 字符，"
+                    f"原始长度: {len(text)} 字符]\n"
+                    f"{text[-tail_chars:]}"
+                )
+
         return f"{text[:limit]}\n[结果已截断，原始长度: {len(text)} 字符]"
 
     @staticmethod
@@ -118,7 +137,8 @@ class ToolDef:
             if mid < original_len:
                 working[f"_{target_field}_truncated"] = True
                 working[f"_{target_field}_note"] = (
-                    f"[{target_field} 已截断: 显示 {mid}/{original_len} 条]"
+                    f"⚠️ 完整数据有 {original_len} 行，仅展示前 {mid} 行"
+                    f"（字段: {target_field}）。"
                 )
             else:
                 working.pop(f"_{target_field}_truncated", None)

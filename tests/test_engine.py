@@ -40,7 +40,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "model": "test-model",
         "max_iterations": 20,
         "max_consecutive_failures": 3,
-        "workspace_root": ".",
+        "workspace_root": str(Path(__file__).resolve().parent),
         "backup_enabled": False,
     }
     defaults.update(overrides)
@@ -141,6 +141,11 @@ class TestAgentEngineInit:
         # fork 后是独立实例，但包含相同的基础工具集
         assert engine._registry is not registry
         assert set(engine._registry.get_tool_names()) >= set(registry.get_tool_names())
+
+    def test_make_config_defaults_workspace_root_to_test_dir(self) -> None:
+        """默认 workspace_root 应使用测试目录，避免扫描整个仓库导致慢测。"""
+        config = _make_config()
+        assert Path(config.workspace_root).resolve() == Path(__file__).resolve().parent
 
 
 class TestControlCommandFullAccess:
@@ -2271,6 +2276,33 @@ class TestManualSkillSlashCommand:
     """手动 Skill 斜杠命令解析与路由。"""
 
     @pytest.mark.asyncio
+    async def test_chat_passes_route_task_tags_to_window_turn_hints(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="all_tools",
+            system_contexts=[],
+            task_tags=("cross_sheet",),
+        )
+        mock_router = MagicMock()
+        mock_router.route = AsyncMock(return_value=route_result)
+        engine._skill_router = mock_router
+        engine._tool_calling_loop = AsyncMock(return_value=ChatResult(reply="ok"))
+
+        with patch.object(engine, "_set_window_perception_turn_hints") as mock_set_hints:
+            result = await engine.chat("从Sheet2批量填充到Sheet1")
+
+        assert result.reply == "ok"
+        mock_set_hints.assert_called_once_with(
+            user_message="从Sheet2批量填充到Sheet1",
+            is_new_task=True,
+            task_tags=("cross_sheet",),
+        )
+
+    @pytest.mark.asyncio
     async def test_route_mode_is_all_tools_when_skill_router_missing(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
@@ -2736,6 +2768,94 @@ class TestDelegateSubagent:
         kwargs = engine._subagent_executor.run.await_args.kwargs
         assert "窗口感知上下文" in kwargs["parent_context"]
         assert callable(kwargs["tool_result_enricher"])
+
+    @pytest.mark.asyncio
+    async def test_run_subagent_verifier_falls_back_to_active_model_when_aux_bound_to_other_endpoint(
+        self,
+    ) -> None:
+        config = _make_config(
+            model="main-model",
+            base_url="https://www.right.codes/codex/v1",
+            aux_model="qwen-flash",
+            window_advisor_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_model = "gpt-5.3-codex-high"
+        engine._active_api_key = "active-key"
+        engine._active_base_url = "https://www.right.codes/codex/v1"
+
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.get.return_value = SubagentConfig(
+            name="verifier",
+            description="测试 verifier",
+            permission_mode="readOnly",
+        )
+        engine._subagent_executor.run = AsyncMock(
+            return_value=SubagentResult(
+                success=True,
+                summary="ok",
+                subagent_name="verifier",
+                permission_mode="readOnly",
+                conversation_id="conv_verifier",
+            )
+        )
+
+        result = await engine.run_subagent(agent_name="verifier", prompt="请验证")
+
+        assert result.success is True
+        runtime_cfg = engine._subagent_executor.run.await_args.kwargs["config"]
+        assert runtime_cfg.model == "gpt-5.3-codex-high"
+        assert runtime_cfg.api_key == "active-key"
+        assert runtime_cfg.base_url == "https://www.right.codes/codex/v1"
+
+    @pytest.mark.asyncio
+    async def test_run_subagent_retries_with_active_model_when_aux_model_unavailable(
+        self,
+    ) -> None:
+        config = _make_config(
+            model="main-model",
+            base_url="https://www.right.codes/codex/v1",
+            aux_model="qwen-flash",
+        )
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_model = "gpt-5.3-codex-high"
+        engine._active_api_key = "active-key"
+        engine._active_base_url = "https://www.right.codes/codex/v1"
+
+        engine._subagent_registry = MagicMock()
+        engine._subagent_registry.get.return_value = SubagentConfig(
+            name="verifier",
+            description="测试 verifier",
+            permission_mode="readOnly",
+        )
+
+        first_fail = SubagentResult(
+            success=False,
+            summary="子代理执行失败",
+            error="Error code: 400 - {'error': '端点/codex未配置模型qwen-flash'}",
+            subagent_name="verifier",
+            permission_mode="readOnly",
+            conversation_id="conv_1",
+        )
+        retry_success = SubagentResult(
+            success=True,
+            summary="ok",
+            subagent_name="verifier",
+            permission_mode="readOnly",
+            conversation_id="conv_2",
+        )
+        engine._subagent_executor.run = AsyncMock(side_effect=[first_fail, retry_success])
+
+        result = await engine.run_subagent(agent_name="verifier", prompt="请验证")
+
+        assert result.success is True
+        assert engine._subagent_executor.run.await_count == 2
+        first_cfg = engine._subagent_executor.run.await_args_list[0].kwargs["config"]
+        second_cfg = engine._subagent_executor.run.await_args_list[1].kwargs["config"]
+        assert first_cfg.model == "qwen-flash"
+        assert second_cfg.model == "gpt-5.3-codex-high"
 
     @pytest.mark.asyncio
     async def test_delegate_pending_approval_asks_user_and_supports_fullaccess_retry(

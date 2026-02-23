@@ -742,7 +742,13 @@ class ContextBuilder:
 
 
 
-    def _set_window_perception_turn_hints(self, *, user_message: str, is_new_task: bool) -> None:
+    def _set_window_perception_turn_hints(
+        self,
+        *,
+        user_message: str,
+        is_new_task: bool,
+        task_tags: tuple[str, ...] | None = None,
+    ) -> None:
         """设置窗口感知层的当前轮提示。"""
         e = self._engine
         clipped_hint = self._clip_window_hint(user_message)
@@ -751,6 +757,7 @@ class ContextBuilder:
             user_intent_summary=clipped_hint,
             agent_recent_output=self._clip_window_hint(self._latest_assistant_text()),
             turn_intent_hint=clipped_hint,
+            task_tags=task_tags,
         )
 
     def _latest_assistant_text(self) -> str:

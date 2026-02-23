@@ -1117,6 +1117,11 @@ class AgentEngine:
     def _finish_task_warned(self, value: bool) -> None:
         self._state.finish_task_warned = value
 
+    def _record_write_action(self) -> None:
+        """统一记录写入行为并标记 workspace manifest 需要刷新。"""
+        self._state.record_write_action()
+        self._manifest_refresh_needed = True
+
     async def extract_and_save_memory(self) -> None:
         """会话结束时调用：从对话历史中提取记忆并持久化。
 
@@ -1563,6 +1568,9 @@ class AgentEngine:
                 getattr(route_result, "write_hint", None),
                 self._current_write_hint,
             ),
+            sheet_count=getattr(route_result, "sheet_count", 0),
+            max_total_rows=getattr(route_result, "max_total_rows", 0),
+            task_tags=tuple(getattr(route_result, "task_tags", ()) or ()),
         )
         self._last_route_result = route_result
 
@@ -1745,6 +1753,7 @@ class AgentEngine:
         self._set_window_perception_turn_hints(
             user_message=user_message,
             is_new_task=True,
+            task_tags=route_result.task_tags,
         )
         # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
         self._execution_guard_fired = False
@@ -2737,10 +2746,35 @@ class AgentEngine:
                 permission_mode="default",
                 conversation_id="",
             )
-        # 运行时模型选择：子代理自身 > 全局 aux_model > 当前激活主模型
-        # 这样在未配置“子路由模型”时，可随着 /model 切换正确回退到主模型。
+
+        runtime_api_key = config.api_key or self._active_api_key
+        runtime_base_url = config.base_url or self._active_base_url
+
+        # 运行时模型选择：子代理自身 > 全局 aux_model > 当前激活主模型。
         resolved_model = config.model or self._config.aux_model or self._active_model
-        runtime_config = config if config.model == resolved_model else replace(config, model=resolved_model)
+        # verifier 场景：若 aux_model 明确绑定到 window advisor 的独立端点，
+        # 而当前子代理运行端点不同，则优先回退到 active model，避免端点/模型错配。
+        if (
+            agent_name == "verifier"
+            and config.model is None
+            and self._config.aux_model
+            and self._config.window_advisor_base_url
+            and self._config.window_advisor_base_url != runtime_base_url
+        ):
+            resolved_model = self._active_model
+
+        runtime_config = config
+        if (
+            config.model != resolved_model
+            or config.api_key != runtime_api_key
+            or config.base_url != runtime_base_url
+        ):
+            runtime_config = replace(
+                config,
+                model=resolved_model,
+                api_key=runtime_api_key,
+                base_url=runtime_base_url,
+            )
         parent_context_parts: list[str] = []
         parent_summary = self._build_parent_context_summary()
         if parent_summary:
@@ -2753,7 +2787,7 @@ class AgentEngine:
         if runtime_config.capability_mode == "full":
             enriched_contexts = self._build_full_mode_contexts()
 
-        return await self._subagent_executor.run(
+        result = await self._subagent_executor.run(
             config=runtime_config,
             prompt=prompt,
             parent_context="\n\n".join(parent_context_parts),
@@ -2762,6 +2796,67 @@ class AgentEngine:
             tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
             enriched_contexts=enriched_contexts,
         )
+        if self._should_retry_verifier_with_active_model(
+            agent_name=agent_name,
+            source_config=config,
+            attempted_model=resolved_model,
+            result=result,
+        ):
+            retry_config = replace(runtime_config, model=self._active_model)
+            logger.warning(
+                "verifier 子代理模型 %r 不可用，回退 active model %r 重试一次。",
+                resolved_model,
+                self._active_model,
+            )
+            return await self._subagent_executor.run(
+                config=retry_config,
+                prompt=prompt,
+                parent_context="\n\n".join(parent_context_parts),
+                on_event=on_event,
+                full_access_enabled=self._full_access_enabled,
+                tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
+                enriched_contexts=enriched_contexts,
+            )
+        return result
+
+    @staticmethod
+    def _is_model_unavailable_error(error_text: str) -> bool:
+        lowered = (error_text or "").lower()
+        if not lowered:
+            return False
+        markers = (
+            "未配置模型",
+            "model not found",
+            "model_not_found",
+            "unknown model",
+            "no such model",
+            "does not exist",
+            "invalid model",
+            "unsupported model",
+            "model is not available",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _should_retry_verifier_with_active_model(
+        self,
+        *,
+        agent_name: str,
+        source_config: Any,
+        attempted_model: str,
+        result: SubagentResult,
+    ) -> bool:
+        if agent_name != "verifier":
+            return False
+        if source_config.model is not None:
+            return False
+        if attempted_model == self._active_model:
+            return False
+        error_text = " ".join(
+            part
+            for part in [str(result.error or "").strip(), str(result.summary or "").strip()]
+            if part
+        )
+        return self._is_model_unavailable_error(error_text)
 
     async def _run_finish_verifier_advisory(
         self,
@@ -3527,6 +3622,12 @@ class AgentEngine:
         start_iteration: int = 1,
     ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
+
+        def _finalize_result(**kwargs: Any) -> ChatResult:
+            """统一出口：返回前尝试刷新 manifest，避免路径遗漏。"""
+            self._try_refresh_manifest()
+            return ChatResult(**kwargs)
+
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
@@ -3566,8 +3667,7 @@ class AgentEngine:
                 self._last_failure_count += 1
                 self._memory.add_assistant_message(context_error)
                 logger.warning("系统上下文预算检查失败，终止执行: %s", context_error)
-                self._try_refresh_manifest()
-                return ChatResult(
+                return _finalize_result(
                     reply=context_error,
                     tool_calls=list(all_tool_results),
                     iterations=iteration,
@@ -3714,8 +3814,7 @@ class AgentEngine:
                         self._config.base_url,
                     )
                     logger.info("最终结果摘要: %s", _summarize_text(error_reply))
-                    self._try_refresh_manifest()
-                    return ChatResult(
+                    return _finalize_result(
                         reply=error_reply,
                         tool_calls=list(all_tool_results),
                         iterations=iteration,
@@ -3778,8 +3877,7 @@ class AgentEngine:
                         if diag:
                             diag.guard_events.append("write_guard_exit")
                         logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
-                        self._try_refresh_manifest()
-                        return ChatResult(
+                        return _finalize_result(
                             reply=reply_text,
                             tool_calls=list(all_tool_results),
                             iterations=iteration,
@@ -3792,8 +3890,7 @@ class AgentEngine:
 
                 self._last_iteration_count = iteration
                 logger.info("最终结果摘要: %s", _summarize_text(reply_text))
-                self._try_refresh_manifest()
-                return ChatResult(
+                return _finalize_result(
                     reply=reply_text,
                     tool_calls=list(all_tool_results),
                     iterations=iteration,
@@ -3885,8 +3982,7 @@ class AgentEngine:
                     reply = tc_result.result
                     self._memory.add_assistant_message(reply)
                     logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
-                    self._try_refresh_manifest()
-                    return ChatResult(
+                    return _finalize_result(
                         reply=reply,
                         tool_calls=list(all_tool_results),
                         iterations=iteration,
@@ -3907,8 +4003,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    self._try_refresh_manifest()
-                    return ChatResult(
+                    return _finalize_result(
                         reply=reply,
                         tool_calls=list(all_tool_results),
                         iterations=iteration,
@@ -3924,8 +4019,7 @@ class AgentEngine:
                     self._last_iteration_count = iteration
                     logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
                     logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    self._try_refresh_manifest()
-                    return ChatResult(
+                    return _finalize_result(
                         reply=reply,
                         tool_calls=list(all_tool_results),
                         iterations=iteration,
@@ -3948,17 +4042,16 @@ class AgentEngine:
                     if tc_result.tool_name in _WRITE_TOOL_NAMES:
                         # Batch 1 精简: write_cells advice detection 已移除
                         self._state.record_write_action()
+                        self._window_perception.observe_write_tool_call(
+                            tool_name=tc_result.tool_name,
+                            arguments=tc_result.arguments,
+                        )
                         if write_hint != "may_write":
                             write_hint = "may_write"
                         # Manifest 增量刷新：写入操作后标记需要刷新
                         self._manifest_refresh_needed = True
-                    # run_code 通过 Python 代码间接写入，不在 _WRITE_TOOL_NAMES 中，
-                    # 需单独置位刷新标记
-                    if tc_result.tool_name == "run_code":
-                        self._manifest_refresh_needed = True
-                    # ── 同步 _execute_tool_call 内部的写入传播 ──
-                    # delegate_to_subagent 等工具在 _execute_tool_call 中直接
-                    # 设置 self._has_write_tool_call，此处同步 write_hint 局部变量。
+                    # Batch 1 精简: run_code / delegate_to_subagent 等可在 _execute_tool_call 内
+                    # 通过 _record_write_action 传播写入；此处只负责同步局部 hint。
                     if self._has_write_tool_call and write_hint != "may_write":
                         write_hint = "may_write"
                 else:
@@ -3980,8 +4073,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.info("命中 ask_user，进入待回答状态")
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
-                self._try_refresh_manifest()
-                return ChatResult(
+                return _finalize_result(
                     reply=reply,
                     tool_calls=list(all_tool_results),
                     iterations=iteration,
@@ -4008,8 +4100,7 @@ class AgentEngine:
                 self._last_iteration_count = iteration
                 logger.warning("连续 %d 次工具失败，熔断终止", max_failures)
                 logger.info("最终结果摘要: %s", _summarize_text(reply))
-                self._try_refresh_manifest()
-                return ChatResult(
+                return _finalize_result(
                     reply=reply,
                     tool_calls=list(all_tool_results),
                     iterations=iteration,
@@ -4024,9 +4115,7 @@ class AgentEngine:
         self._memory.add_assistant_message(reply)
         logger.warning("达到迭代上限 %d，截断返回", max_iter)
         logger.info("最终结果摘要: %s", _summarize_text(reply))
-        # Manifest 增量刷新（debounce：整个 loop 结束后刷新一次）
-        self._try_refresh_manifest()
-        return ChatResult(
+        return _finalize_result(
             reply=reply,
             tool_calls=list(all_tool_results),
             iterations=max_iter,
@@ -4721,10 +4810,16 @@ class AgentEngine:
 
     # DEPRECATED: 转发 wrapper，待测试迁移后删除
     def _set_window_perception_turn_hints(
-        self, *, user_message: str, is_new_task: bool,
+        self,
+        *,
+        user_message: str,
+        is_new_task: bool,
+        task_tags: tuple[str, ...] | None = None,
     ) -> None:
         self._context_builder._set_window_perception_turn_hints(
-            user_message=user_message, is_new_task=is_new_task,
+            user_message=user_message,
+            is_new_task=is_new_task,
+            task_tags=task_tags,
         )
 
     # DEPRECATED: 转发 wrapper，待测试迁移后删除

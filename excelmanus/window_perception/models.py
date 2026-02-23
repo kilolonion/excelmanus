@@ -114,9 +114,9 @@ class PerceptionBudget:
     default_rows: int = 25
     default_cols: int = 20
     minimized_tokens: int = 80
-    background_after_idle: int = 1
-    suspend_after_idle: int = 3
-    terminate_after_idle: int = 5
+    background_after_idle: int = 2
+    suspend_after_idle: int = 5
+    terminate_after_idle: int = 8
     window_full_max_rows: int = 25
     window_full_total_budget_tokens: int = 500
     window_data_buffer_max_rows: int = 200

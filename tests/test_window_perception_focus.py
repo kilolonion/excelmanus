@@ -223,6 +223,31 @@ def test_focus_restore_wakes_dormant_window() -> None:
     assert window.detail_level == DetailLevel.FULL
 
 
+def test_observe_write_tool_call_marks_sheet_window_stale() -> None:
+    manager, window = _build_manager_and_window()
+    window.data_buffer = [{"A": 1, "B": 2, "C": 3}]
+    window.preview_rows = [{"A": 1, "B": 2, "C": 3}]
+    window.cached_ranges = [
+        CachedRange(
+            range_ref="A1:C1",
+            rows=[{"A": 1, "B": 2, "C": 3}],
+            is_current_viewport=True,
+            added_at_iteration=1,
+        )
+    ]
+
+    manager.observe_write_tool_call(
+        tool_name="copy_file",
+        arguments={"destination": "backup.xlsx"},
+    )
+
+    assert window.stale_hint is not None
+    assert "copy_file" in window.stale_hint
+    assert window.data_buffer == []
+    assert window.preview_rows == []
+    assert window.cached_ranges == []
+
+
 def test_manager_routes_tool_result_via_classify_locate_apply(monkeypatch) -> None:
     manager = WindowPerceptionManager(
         enabled=True,

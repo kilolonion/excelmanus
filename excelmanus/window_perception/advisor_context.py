@@ -15,4 +15,5 @@ class AdvisorContext:
     user_intent_summary: str = ""
     agent_recent_output: str = ""
     task_type: str = "GENERAL_BROWSE"
+    task_tags: tuple[str, ...] = ()
 

@@ -37,9 +37,9 @@ class TestWindowModels:
         assert budget.system_budget_tokens == 3000
         assert budget.tool_append_tokens == 500
         assert budget.max_windows == 6
-        assert budget.background_after_idle == 1
-        assert budget.suspend_after_idle == 3
-        assert budget.terminate_after_idle == 5
+        assert budget.background_after_idle == 2
+        assert budget.suspend_after_idle == 5
+        assert budget.terminate_after_idle == 8
         assert budget.window_full_max_rows == 25
         assert budget.window_full_total_budget_tokens == 500
         assert budget.window_data_buffer_max_rows == 200

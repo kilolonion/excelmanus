@@ -349,3 +349,10 @@ class TestGetTools:
     def test_tool_names(self) -> None:
         names = {tool.name for tool in code_tools.get_tools()}
         assert names == {"write_text_file", "run_code"}
+
+    def test_run_code_truncation_strategy(self) -> None:
+        tools = {tool.name: tool for tool in code_tools.get_tools()}
+        run_code_tool = tools["run_code"]
+        assert run_code_tool.max_result_chars == 3000
+        assert run_code_tool.truncate_head_chars == 2000
+        assert run_code_tool.truncate_tail_chars == 1000

@@ -2222,7 +2222,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=read_excel,
-            max_result_chars=0,
+            max_result_chars=6000,
         ),
         # write_excel: Batch 1 精简
         # analyze_data: Batch 4 精简，由 run_code + pandas describe() 替代

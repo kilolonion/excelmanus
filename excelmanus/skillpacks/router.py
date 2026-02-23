@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 import re
@@ -73,6 +74,10 @@ class SkillRouter:
         self._loader = loader
         self._router_client: Any = None
         self._fallback_client: Any = None
+        self._file_structure_cache: OrderedDict[
+            tuple[str, int, int], tuple[list[str], int, int]
+        ] = OrderedDict()
+        self._file_structure_cache_limit = 64
 
     def _get_router_client(self) -> Any:
         """懒加载 router 端点客户端，首次调用时创建并缓存。"""
@@ -356,8 +361,9 @@ class SkillRouter:
         lexical_hint = write_hint or self._classify_write_hint_lexical(user_message)
         lexical_tags = self._classify_task_tags_lexical(user_message)
 
-        # 如果词法已能确定 write_hint，且有标签命中，跳过 LLM
-        if lexical_hint and lexical_tags:
+        # write_hint 一旦由词法确定，当前回合无需额外 LLM 分类。
+        # task_tags 主要用于策略增强，缺失不应阻塞首响应。
+        if lexical_hint:
             return lexical_hint, tuple(lexical_tags)
 
         # 无 router_model 时直接返回词法结果
@@ -615,7 +621,22 @@ class SkillRouter:
             try:
                 if not resolved.is_file():
                     continue
+                stat_result = resolved.stat()
             except OSError:
+                continue
+
+            cache_key = (resolved_str, stat_result.st_mtime_ns, stat_result.st_size)
+            cached_entry = self._file_structure_cache.get(cache_key)
+            if cached_entry is not None:
+                cached_sheet_lines, cached_sheet_count, cached_max_total_rows = cached_entry
+                all_sheet_count += cached_sheet_count
+                all_max_total_rows = max(all_max_total_rows, cached_max_total_rows)
+                self._file_structure_cache.move_to_end(cache_key)
+                if cached_sheet_lines:
+                    file_sections.append(
+                        f"文件: {normalized}\n" + "\n".join(cached_sheet_lines)
+                    )
+                    processed += 1
                 continue
 
             try:
@@ -625,15 +646,17 @@ class SkillRouter:
                 continue
 
             sheet_lines: list[str] = []
+            file_sheet_count = 0
+            file_max_total_rows = 0
             try:
-                all_sheet_count += len(wb.sheetnames)
+                file_sheet_count = len(wb.sheetnames)
                 for idx, sn in enumerate(wb.sheetnames):
                     ws = wb[sn]
                     if idx >= max_sheets:
                         # 超出详细预览数量的 sheet：仅输出摘要行（名称+行列数）
                         summary_rows = ws.max_row or 0
                         summary_cols = ws.max_column or 0
-                        all_max_total_rows = max(all_max_total_rows, summary_rows)
+                        file_max_total_rows = max(file_max_total_rows, summary_rows)
                         sheet_lines.append(f"  [{sn}] {summary_rows}行×{summary_cols}列")
                         continue
 
@@ -652,7 +675,7 @@ class SkillRouter:
 
                     total_rows = ws.max_row or 0
                     total_cols = ws.max_column or 0
-                    all_max_total_rows = max(all_max_total_rows, total_rows)
+                    file_max_total_rows = max(file_max_total_rows, total_rows)
                     sheet_lines.append(f"  [{sn}] {total_rows}行×{total_cols}列")
 
                     for ri, row_vals in enumerate(rows_data):
@@ -670,6 +693,15 @@ class SkillRouter:
             finally:
                 wb.close()
 
+            all_sheet_count += file_sheet_count
+            all_max_total_rows = max(all_max_total_rows, file_max_total_rows)
+            self._set_file_structure_cache(
+                cache_key=cache_key,
+                sheet_lines=sheet_lines,
+                sheet_count=file_sheet_count,
+                max_total_rows=file_max_total_rows,
+            )
+
             if sheet_lines:
                 file_sections.append(f"文件: {normalized}\n" + "\n".join(sheet_lines))
                 processed += 1
@@ -682,6 +714,34 @@ class SkillRouter:
             "请基于以上预览直接调用工具执行用户请求，不要重复描述文件结构。"
         )
         return header + "\n" + "\n".join(file_sections), all_sheet_count, all_max_total_rows
+
+    def _set_file_structure_cache(
+        self,
+        *,
+        cache_key: tuple[str, int, int],
+        sheet_lines: list[str],
+        sheet_count: int,
+        max_total_rows: int,
+    ) -> None:
+        """写入文件结构缓存并维护 LRU 容量。"""
+        target_path = cache_key[0]
+        stale_keys = [
+            key
+            for key in self._file_structure_cache.keys()
+            if key[0] == target_path and key != cache_key
+        ]
+        for stale_key in stale_keys:
+            self._file_structure_cache.pop(stale_key, None)
+
+        self._file_structure_cache[cache_key] = (
+            list(sheet_lines),
+            sheet_count,
+            max_total_rows,
+        )
+        self._file_structure_cache.move_to_end(cache_key)
+
+        while len(self._file_structure_cache) > self._file_structure_cache_limit:
+            self._file_structure_cache.popitem(last=False)
 
     @staticmethod
     def _guess_header_row(rows: list[list[Any]], max_scan: int = 12) -> int | None:

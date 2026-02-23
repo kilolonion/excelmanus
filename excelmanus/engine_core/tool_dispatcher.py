@@ -730,8 +730,7 @@ class ToolDispatcher:
                                         and sub_result is not None
                                         and sub_result.structured_changes
                                     ):
-                                        e._has_write_tool_call = True
-                                        e._current_write_hint = "may_write"
+                                        e._record_write_action()
                                         logger.info(
                                             "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
                                             len(sub_result.structured_changes),
@@ -789,7 +788,18 @@ class ToolDispatcher:
                         _has_write = getattr(e, "_has_write_tool_call", False)
                         _hint = getattr(e, "_current_write_hint", "unknown")
                         if _has_write:
-                            result_str = f"✅ 任务完成\n\n{rendered}" if rendered else "✓ 任务完成。"
+                            # ── Verifier advisory：有写入时自动验证 ──
+                            _verifier_suffix = ""
+                            try:
+                                _verifier_suffix = await e._run_finish_verifier_advisory(
+                                    report=report,
+                                    summary=summary,
+                                    on_event=on_event,
+                                ) or ""
+                            except Exception:  # noqa: BLE001
+                                logger.debug("verifier advisory 调用异常，fail-open", exc_info=True)
+                            result_str = (f"✅ 任务完成\n\n{rendered}{_verifier_suffix}" if rendered
+                                          else f"✓ 任务完成。{_verifier_suffix}")
                             success = True
                             error = None
                             finish_accepted = True
@@ -911,7 +921,7 @@ class ToolDispatcher:
                                 or _has_cow
                                 or _has_ast_write
                             ):
-                                e._state.record_write_action()
+                                e._record_write_action()
                             # ── run_code → window 感知桥接 ──
                             _stdout_tail = ""
                             if _rc_json is not None:
@@ -984,7 +994,7 @@ class ToolDispatcher:
                                         or _has_cow_s
                                         or _has_ast_write_s
                                     ):
-                                        e._state.record_write_action()
+                                        e._record_write_action()
                                     _stdout_tail_s = ""
                                     if _rc_json_s is not None:
                                         _stdout_tail_s = _rc_json_s.get("stdout_tail", "")

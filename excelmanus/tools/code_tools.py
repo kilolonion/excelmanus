@@ -713,5 +713,8 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=run_code,
+            max_result_chars=3000,
+            truncate_head_chars=2000,
+            truncate_tail_chars=1000,
         ),
     ]
