@@ -13,14 +13,18 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from excelmanus.excel_extensions import EXCEL_EXTENSIONS
 from excelmanus.logger import get_logger
+
+if TYPE_CHECKING:
+    from excelmanus.database import Database
 
 logger = get_logger("workspace_manifest")
 
@@ -133,28 +137,34 @@ class WorkspaceManifest:
         return "\n".join(lines)
 
 
-def build_manifest(
-    workspace_root: str,
-    *,
-    max_files: int = 500,
-    header_scan_rows: int = 5,
-) -> WorkspaceManifest:
-    """递归扫描工作区，构建 Excel 文件元数据清单。
+def _sheets_to_json(sheets: list[SheetMeta]) -> str:
+    """将 SheetMeta 列表序列化为 JSON 字符串。"""
+    return json.dumps(
+        [{"name": s.name, "rows": s.rows, "columns": s.columns, "headers": s.headers} for s in sheets],
+        ensure_ascii=False,
+    )
 
-    Args:
-        workspace_root: 工作区根目录路径。
-        max_files: 最多扫描文件数，默认 500。
-        header_scan_rows: 每个 sheet 扫描前 N 行用于表头识别。
 
-    Returns:
-        WorkspaceManifest 实例。
-    """
-    from openpyxl import load_workbook
+def _sheets_from_json(raw: str) -> list[SheetMeta]:
+    """从 JSON 字符串反序列化为 SheetMeta 列表。"""
+    try:
+        items = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [
+        SheetMeta(
+            name=item.get("name", ""),
+            rows=item.get("rows", 0),
+            columns=item.get("columns", 0),
+            headers=item.get("headers", []),
+        )
+        for item in items
+        if isinstance(item, dict)
+    ]
 
-    root = Path(workspace_root).resolve()
-    start_ts = time.monotonic()
 
-    # 递归收集 Excel 文件
+def _collect_excel_paths(root: Path, max_files: int) -> list[Path]:
+    """递归收集工作区中的 Excel 文件路径。"""
     excel_paths: list[Path] = []
     for ext in _excel_glob_patterns():
         for p in root.rglob(ext):
@@ -168,11 +178,104 @@ def build_manifest(
                 break
         if len(excel_paths) >= max_files:
             break
-
     excel_paths.sort(key=lambda p: str(p.relative_to(root)).lower())
+    return excel_paths
+
+
+def _scan_file_sheets(fp: Path, header_scan_rows: int) -> list[SheetMeta]:
+    """用 openpyxl 扫描单个 Excel 文件的 sheet 元数据。"""
+    from openpyxl import load_workbook
+
+    sheets: list[SheetMeta] = []
+    wb = load_workbook(fp, read_only=True, data_only=True)
+    try:
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            total_rows = ws.max_row or 0
+            total_cols = ws.max_column or 0
+
+            headers: list[str] = []
+            if total_rows > 0:
+                scan_limit = min(header_scan_rows, total_rows)
+                rows_raw: list[list[Any]] = []
+                for row in ws.iter_rows(
+                    min_row=1,
+                    max_row=scan_limit,
+                    min_col=1,
+                    max_col=min(total_cols, 30),
+                    values_only=True,
+                ):
+                    rows_raw.append(list(row))
+
+                if rows_raw:
+                    best_idx = 0
+                    best_score = -1
+                    for idx, r in enumerate(rows_raw):
+                        non_empty = [v for v in r if v is not None and str(v).strip()]
+                        str_count = sum(1 for v in non_empty if isinstance(v, str))
+                        score = str_count * 2 + len(non_empty)
+                        if score > best_score:
+                            best_score = score
+                            best_idx = idx
+                    header_row = rows_raw[best_idx]
+                    headers = [
+                        str(v).strip()
+                        for v in header_row
+                        if v is not None and str(v).strip()
+                    ]
+
+            sheets.append(SheetMeta(
+                name=sn, rows=total_rows, columns=total_cols, headers=headers,
+            ))
+    finally:
+        wb.close()
+    return sheets
+
+
+def build_manifest(
+    workspace_root: str,
+    *,
+    max_files: int = 500,
+    header_scan_rows: int = 5,
+    silent: bool = False,
+    database: "Database | None" = None,
+) -> WorkspaceManifest:
+    """递归扫描工作区，构建 Excel 文件元数据清单。
+
+    有 DB 时优先从缓存加载，仅扫描 mtime/size 变更的文件（跨会话增量）。
+    无 DB 时行为与旧版完全一致。
+
+    Args:
+        workspace_root: 工作区根目录路径。
+        max_files: 最多扫描文件数，默认 500。
+        header_scan_rows: 每个 sheet 扫描前 N 行用于表头识别。
+        silent: 静默模式（仅 DEBUG 日志）。
+        database: 可选统一数据库实例。
+
+    Returns:
+        WorkspaceManifest 实例。
+    """
+    root = Path(workspace_root).resolve()
+    workspace_key = str(root)
+    start_ts = time.monotonic()
+
+    # 加载 DB 缓存（如果可用）
+    db_cache: dict[str, dict[str, Any]] = {}
+    manifest_store = None
+    if database is not None:
+        try:
+            from excelmanus.stores.manifest_store import ManifestStore
+            manifest_store = ManifestStore(database)
+            db_cache = manifest_store.load_cached(workspace_key)
+        except Exception:
+            logger.debug("加载 manifest DB 缓存失败，回退全量扫描", exc_info=True)
+
+    excel_paths = _collect_excel_paths(root, max_files)
 
     files: list[ExcelFileMeta] = []
     mtime_cache: dict[str, float] = {}
+    db_writes: list[dict[str, Any]] = []  # 需写回 DB 的新/变更记录
+    cache_hits = 0
 
     for fp in excel_paths:
         try:
@@ -182,62 +285,30 @@ def build_manifest(
 
         rel_path = str(fp.relative_to(root))
         mtime_cache[rel_path] = stat.st_mtime
+        mtime_ns = stat.st_mtime_ns
 
-        sheets: list[SheetMeta] = []
+        # DB 缓存命中检查：mtime_ns + size_bytes 均匹配则直接复用
+        cached = db_cache.get(rel_path)
+        if (
+            cached is not None
+            and cached["mtime_ns"] == mtime_ns
+            and cached["size_bytes"] == stat.st_size
+        ):
+            sheets = _sheets_from_json(cached["sheets_json"])
+            files.append(ExcelFileMeta(
+                path=rel_path,
+                name=fp.name,
+                size_bytes=stat.st_size,
+                modified_ts=stat.st_mtime,
+                sheets=sheets,
+            ))
+            cache_hits += 1
+            continue
+
+        # 缓存未命中 → openpyxl 扫描
+        sheets = []
         try:
-            wb = load_workbook(fp, read_only=True, data_only=True)
-            try:
-                for sn in wb.sheetnames:
-                    ws = wb[sn]
-                    total_rows = ws.max_row or 0
-                    total_cols = ws.max_column or 0
-
-                    # 读取前几行识别表头
-                    headers: list[str] = []
-                    if total_rows > 0:
-                        scan_limit = min(header_scan_rows, total_rows)
-                        rows_raw: list[list[Any]] = []
-                        for row in ws.iter_rows(
-                            min_row=1,
-                            max_row=scan_limit,
-                            min_col=1,
-                            max_col=min(total_cols, 30),
-                            values_only=True,
-                        ):
-                            rows_raw.append(list(row))
-
-                        if rows_raw:
-                            # 简单启发式：取非空字符串占比最高的一行作为表头
-                            best_idx = 0
-                            best_score = -1
-                            for idx, row in enumerate(rows_raw):
-                                non_empty = [
-                                    v for v in row
-                                    if v is not None and str(v).strip()
-                                ]
-                                str_count = sum(
-                                    1 for v in non_empty
-                                    if isinstance(v, str)
-                                )
-                                score = str_count * 2 + len(non_empty)
-                                if score > best_score:
-                                    best_score = score
-                                    best_idx = idx
-                            header_row = rows_raw[best_idx]
-                            headers = [
-                                str(v).strip()
-                                for v in header_row
-                                if v is not None and str(v).strip()
-                            ]
-
-                    sheets.append(SheetMeta(
-                        name=sn,
-                        rows=total_rows,
-                        columns=total_cols,
-                        headers=headers,
-                    ))
-            finally:
-                wb.close()
+            sheets = _scan_file_sheets(fp, header_scan_rows)
         except Exception as exc:  # noqa: BLE001
             logger.debug("扫描文件 %s 失败: %s", fp, exc)
 
@@ -249,11 +320,31 @@ def build_manifest(
             sheets=sheets,
         ))
 
+        # 记录需要写回 DB 的条目
+        if manifest_store is not None:
+            db_writes.append({
+                "path": rel_path,
+                "name": fp.name,
+                "size_bytes": stat.st_size,
+                "mtime_ns": mtime_ns,
+                "sheets_json": _sheets_to_json(sheets),
+            })
+
+    # 写回 DB 缓存 & 清理陈旧记录
+    if manifest_store is not None:
+        try:
+            if db_writes:
+                manifest_store.upsert_batch(workspace_key, db_writes)
+            current_rel_paths = {str(fp.relative_to(root)) for fp in excel_paths}
+            manifest_store.remove_stale(workspace_key, current_rel_paths)
+        except Exception:
+            logger.debug("manifest DB 缓存写回失败", exc_info=True)
+
     elapsed_ms = int((time.monotonic() - start_ts) * 1000)
     scan_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     manifest = WorkspaceManifest(
-        workspace_root=str(root),
+        workspace_root=workspace_key,
         scan_time=scan_time,
         scan_duration_ms=elapsed_ms,
         total_files=len(files),
@@ -261,9 +352,11 @@ def build_manifest(
         _mtime_cache=mtime_cache,
     )
 
-    logger.info(
-        "Workspace manifest 构建完成: %d 文件, 耗时 %dms",
-        len(files), elapsed_ms,
+    scanned = len(files) - cache_hits
+    _log = logger.debug if silent else logger.info
+    _log(
+        "Workspace manifest 构建完成: %d 文件 (缓存命中 %d, 扫描 %d), 耗时 %dms",
+        len(files), cache_hits, scanned, elapsed_ms,
     )
     return manifest
 
@@ -273,38 +366,34 @@ def refresh_manifest(
     *,
     max_files: int = 500,
     header_scan_rows: int = 5,
+    database: "Database | None" = None,
 ) -> WorkspaceManifest:
     """增量更新 Manifest：仅重新扫描 mtime 变化或新增的文件。
+
+    有 DB 时同步更新缓存。
 
     Args:
         manifest: 现有 Manifest。
         max_files: 最多扫描文件数。
         header_scan_rows: 表头识别行数。
+        database: 可选统一数据库实例。
 
     Returns:
         更新后的 WorkspaceManifest（新实例）。
     """
-    from openpyxl import load_workbook
-
     root = Path(manifest.workspace_root).resolve()
+    workspace_key = str(root)
     start_ts = time.monotonic()
 
-    # 收集当前工作区所有 Excel 文件
-    current_paths: list[Path] = []
-    for ext in _excel_glob_patterns():
-        for p in root.rglob(ext):
-            if p.name.startswith((".", "~$")):
-                continue
-            rel_parts = p.relative_to(root).parts[:-1]
-            if any(part in _SKIP_DIRS for part in rel_parts):
-                continue
-            current_paths.append(p)
-            if len(current_paths) >= max_files:
-                break
-        if len(current_paths) >= max_files:
-            break
+    manifest_store = None
+    if database is not None:
+        try:
+            from excelmanus.stores.manifest_store import ManifestStore
+            manifest_store = ManifestStore(database)
+        except Exception:
+            logger.debug("ManifestStore 初始化失败", exc_info=True)
 
-    current_paths.sort(key=lambda p: str(p.relative_to(root)).lower())
+    current_paths = _collect_excel_paths(root, max_files)
 
     old_by_path: dict[str, ExcelFileMeta] = {
         fm.path: fm for fm in manifest.files
@@ -314,6 +403,7 @@ def refresh_manifest(
     files: list[ExcelFileMeta] = []
     new_mtime_cache: dict[str, float] = {}
     changed_count = 0
+    db_writes: list[dict[str, Any]] = []
 
     for fp in current_paths:
         try:
@@ -324,7 +414,7 @@ def refresh_manifest(
         rel_path = str(fp.relative_to(root))
         new_mtime_cache[rel_path] = stat.st_mtime
 
-        # mtime 未变且已有缓存 → 复用
+        # mtime 未变且已有内存缓存 → 复用
         if rel_path in old_by_path and old_mtime.get(rel_path) == stat.st_mtime:
             files.append(old_by_path[rel_path])
             continue
@@ -333,36 +423,7 @@ def refresh_manifest(
         changed_count += 1
         sheets: list[SheetMeta] = []
         try:
-            wb = load_workbook(fp, read_only=True, data_only=True)
-            try:
-                for sn in wb.sheetnames:
-                    ws = wb[sn]
-                    total_rows = ws.max_row or 0
-                    total_cols = ws.max_column or 0
-                    headers: list[str] = []
-                    if total_rows > 0:
-                        scan_limit = min(header_scan_rows, total_rows)
-                        for row in ws.iter_rows(
-                            min_row=1,
-                            max_row=scan_limit,
-                            min_col=1,
-                            max_col=min(total_cols, 30),
-                            values_only=True,
-                        ):
-                            non_empty = [
-                                str(v).strip()
-                                for v in row
-                                if v is not None and str(v).strip()
-                            ]
-                            if non_empty:
-                                headers = non_empty
-                                break
-                    sheets.append(SheetMeta(
-                        name=sn, rows=total_rows, columns=total_cols,
-                        headers=headers,
-                    ))
-            finally:
-                wb.close()
+            sheets = _scan_file_sheets(fp, header_scan_rows)
         except Exception as exc:  # noqa: BLE001
             logger.debug("增量扫描文件 %s 失败: %s", fp, exc)
 
@@ -373,6 +434,25 @@ def refresh_manifest(
             modified_ts=stat.st_mtime,
             sheets=sheets,
         ))
+
+        if manifest_store is not None:
+            db_writes.append({
+                "path": rel_path,
+                "name": fp.name,
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "sheets_json": _sheets_to_json(sheets),
+            })
+
+    # 写回 DB 缓存 & 清理
+    if manifest_store is not None:
+        try:
+            if db_writes:
+                manifest_store.upsert_batch(workspace_key, db_writes)
+            current_rel_paths = {str(fp.relative_to(root)) for fp in current_paths}
+            manifest_store.remove_stale(workspace_key, current_rel_paths)
+        except Exception:
+            logger.debug("manifest DB 缓存写回失败", exc_info=True)
 
     elapsed_ms = int((time.monotonic() - start_ts) * 1000)
     scan_time = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")

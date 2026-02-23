@@ -39,12 +39,12 @@ class TestEnsureBackup:
         second = manager.ensure_backup(original)
         assert first == second
 
-    def test_nonexistent_file_returns_backup_path(self, manager: BackupManager, workspace: Path):
-        """目标文件不存在时（新建场景），返回备份路径但不复制。"""
+    def test_nonexistent_file_returns_original_path(self, manager: BackupManager, workspace: Path):
+        """目标文件不存在时，返回原路径（不创建虚假备份映射）。"""
         new_file = str(workspace / "new_report.xlsx")
-        backup_path = manager.ensure_backup(new_file)
-        assert "outputs/backups/" in backup_path
-        assert not Path(backup_path).exists()
+        result_path = manager.ensure_backup(new_file)
+        assert "outputs/backups/" not in result_path
+        assert result_path == str(Path(new_file).resolve())
 
     def test_outside_workspace_rejected(self, manager: BackupManager):
         with pytest.raises(ValueError, match="工作区外"):

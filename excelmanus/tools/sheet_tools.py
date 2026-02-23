@@ -617,6 +617,7 @@ def get_tools() -> list[ToolDef]:
             },
             func=list_sheets,
             max_result_chars=0,
+            write_effect="none",
         ),
         # Batch 3 精简：create_sheet/copy_sheet/rename_sheet/delete_sheet/copy_range_between_sheets 已删除，由 run_code 替代
     ]

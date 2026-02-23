@@ -66,6 +66,11 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(
+        command="/manifest",
+        description="工作区清单构建",
+        arguments=("status", "build"),
+    ),
+    ControlCommandSpec(
         command="/accept",
         description="确认操作",
         help_label="/accept <id>",
@@ -78,7 +83,26 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
     ControlCommandSpec(
         command="/undo",
         description="回滚操作",
-        help_label="/undo <id>",
+        help_label="/undo [list|<id>]",
+        arguments=("list",),
+    ),
+    ControlCommandSpec(
+        command="/rollback",
+        description="回退对话到指定轮次",
+        help_label="/rollback [list|<N>]",
+        arguments=("list",),
+    ),
+    ControlCommandSpec(
+        command="/rules",
+        description="自定义规则管理",
+        help_label="/rules [add|delete|toggle|session]",
+        arguments=("add", "delete", "toggle", "session"),
+    ),
+    ControlCommandSpec(
+        command="/memory",
+        description="持久记忆管理",
+        help_label="/memory [<category>|delete|clear]",
+        arguments=("file_pattern", "user_pref", "error_solution", "general", "delete", "clear"),
     ),
 )
 

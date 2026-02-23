@@ -198,6 +198,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=memory_read_topic,
+            write_effect="none",
         ),
         ToolDef(
             name="memory_save",
@@ -238,5 +239,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=memory_save,
+            write_effect="external_write",
         ),
     ]

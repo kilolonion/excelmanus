@@ -281,14 +281,14 @@ class TestB1ManifestRefreshOnExit:
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
         source_engine = inspect.getsource(AgentEngine)
-        source_dispatcher = inspect.getsource(ToolDispatcher.execute)
+        source_dispatcher = inspect.getsource(ToolDispatcher._dispatch_tool_execution)
 
-        # _record_write_action 负责置位 _manifest_refresh_needed
-        record_block = source_engine[source_engine.find("def _record_write_action"):]
+        # _record_workspace_write_action 负责置位 _manifest_refresh_needed
+        record_block = source_engine[source_engine.find("def _record_workspace_write_action"):]
         assert "_manifest_refresh_needed = True" in record_block
-        # 循环内写入工具走统一写入记录
-        assert "self._record_write_action()" in source
-        # run_code 路径在 dispatcher 中同样走统一写入记录
+        # 循环内写入工具走统一写入记录（_record_workspace_write_action / _record_external_write_action）
+        assert "_record_workspace_write_action()" in source or "_record_external_write_action()" in source
+        # run_code 路径在 dispatcher 的 _dispatch_tool_execution 中同样走统一写入记录
         assert "e._record_write_action()" in source_dispatcher
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:

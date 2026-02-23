@@ -926,6 +926,7 @@ def get_tools() -> list[ToolDef]:
             },
             func=list_directory,
             max_result_chars=0,
+            write_effect="none",
         ),
         # get_file_info, find_files, read_text_file: Batch 5 精简，由 run_code/run_shell 替代
         ToolDef(
@@ -947,6 +948,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=copy_file,
+            write_effect="workspace_write",
         ),
         ToolDef(
             name="rename_file",
@@ -967,6 +969,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=rename_file,
+            write_effect="workspace_write",
         ),
         ToolDef(
             name="delete_file",
@@ -988,5 +991,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=delete_file,
+            write_effect="workspace_write",
         ),
     ]

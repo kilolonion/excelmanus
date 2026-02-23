@@ -132,6 +132,32 @@ class MemoryStore:
         self._conn.commit()
         return to_delete
 
+    def delete_entry(self, entry_id: str) -> bool:
+        """按 MemoryEntry.id 删除条目。
+
+        entry_id 是基于 category+content+timestamp 的 SHA256[:12] 短哈希，
+        需遍历行逐一匹配（条目量有限，性能可接受）。
+        """
+        from excelmanus.memory_models import _compute_entry_id
+
+        rows = self._conn.execute(
+            "SELECT id, category, content, created_at FROM memory_entries"
+        ).fetchall()
+        for row in rows:
+            ts_str = row["created_at"]
+            try:
+                timestamp = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                timestamp = datetime.now()
+            computed_id = _compute_entry_id(row["category"], row["content"], timestamp)
+            if computed_id == entry_id:
+                self._conn.execute(
+                    "DELETE FROM memory_entries WHERE id = ?", (row["id"],)
+                )
+                self._conn.commit()
+                return True
+        return False
+
     @staticmethod
     def _row_to_entry(row: object) -> MemoryEntry:
         """将 sqlite3.Row 转为 MemoryEntry。"""

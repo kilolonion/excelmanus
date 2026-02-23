@@ -187,6 +187,71 @@ class TestEdgeCases:
         assert isinstance(r.mentions, tuple)
 
 
+# ── range_spec 解析 ──────────────────────────────────────
+
+
+class TestRangeSpecParsing:
+    """@file:xxx[Sheet!Range] range_spec 解析测试。"""
+
+    def test_file_with_range_spec(self) -> None:
+        """@file:sales.xlsx[Sheet1!A1:C10] 解析 range_spec。"""
+        r = MentionParser.parse("分析 @file:sales.xlsx[Sheet1!A1:C10]")
+        assert len(r.mentions) == 1
+        m = r.mentions[0]
+        assert m.kind == "file"
+        assert m.value == "sales.xlsx"
+        assert m.range_spec == "Sheet1!A1:C10"
+        assert m.raw == "@file:sales.xlsx[Sheet1!A1:C10]"
+
+    def test_file_with_range_no_sheet(self) -> None:
+        """@file:data.xlsx[A1:B5] 无 sheet 名的 range_spec。"""
+        r = MentionParser.parse("@file:data.xlsx[A1:B5]")
+        assert len(r.mentions) == 1
+        m = r.mentions[0]
+        assert m.value == "data.xlsx"
+        assert m.range_spec == "A1:B5"
+
+    def test_file_with_single_cell_range(self) -> None:
+        """@file:data.xlsx[Sheet1!A1] 单格 range_spec。"""
+        r = MentionParser.parse("@file:data.xlsx[Sheet1!A1]")
+        assert len(r.mentions) == 1
+        assert r.mentions[0].range_spec == "Sheet1!A1"
+
+    def test_file_without_range_spec(self) -> None:
+        """@file:sales.xlsx 无 range_spec 时 range_spec 为 None。"""
+        r = MentionParser.parse("@file:sales.xlsx")
+        assert len(r.mentions) == 1
+        assert r.mentions[0].range_spec is None
+
+    def test_range_spec_clean_text(self) -> None:
+        """带 range_spec 的标记从 clean_text 中完整移除。"""
+        r = MentionParser.parse("查看 @file:sales.xlsx[Sheet1!A1:C10] 的数据")
+        assert "@file" not in r.clean_text
+        assert "Sheet1" not in r.clean_text
+        assert "查看" in r.clean_text
+        assert "的数据" in r.clean_text
+
+    def test_range_spec_position_tracking(self) -> None:
+        """range_spec 标记的 start/end 位置正确。"""
+        text = "看 @file:a.xlsx[Sheet1!A1:B2] 吧"
+        r = MentionParser.parse(text)
+        m = r.mentions[0]
+        assert text[m.start : m.end] == "@file:a.xlsx[Sheet1!A1:B2]"
+
+    def test_multiple_mentions_with_range(self) -> None:
+        """多个标记中混合有 range_spec 和无 range_spec。"""
+        r = MentionParser.parse("@file:a.xlsx[Sheet1!A1:C3] @file:b.xlsx")
+        assert len(r.mentions) == 2
+        assert r.mentions[0].range_spec == "Sheet1!A1:C3"
+        assert r.mentions[1].range_spec is None
+
+    def test_non_file_mention_no_range(self) -> None:
+        """非 file 类型的标记即使后跟 [] 也被正确解析。"""
+        r = MentionParser.parse("@skill:data_basic")
+        assert len(r.mentions) == 1
+        assert r.mentions[0].range_spec is None
+
+
 # ══════════════════════════════════════════════════════════
 # 单元测试：MentionResolver
 # **Validates: Requirements 2.1–2.6, 3.1–3.5, 4.1, 4.5, 5.1, 5.2, 9.1–9.4**
@@ -281,6 +346,138 @@ class TestResolverExcelFile:
         assert result.error is None
         assert "Sheet1" in result.context_block
         assert "Sheet2" in result.context_block
+
+
+# ── Resolver file: Excel 范围读取 ────────────────────────
+
+
+class TestResolverExcelRange:
+    """Excel 范围读取测试。"""
+
+    def test_parse_range_spec_with_sheet(self) -> None:
+        """_parse_range_spec 解析 Sheet1!A1:C10。"""
+        sheet, cell_range = MentionResolver._parse_range_spec("Sheet1!A1:C10")
+        assert sheet == "Sheet1"
+        assert cell_range == "A1:C10"
+
+    def test_parse_range_spec_without_sheet(self) -> None:
+        """_parse_range_spec 解析 A1:C10（无 sheet 名）。"""
+        sheet, cell_range = MentionResolver._parse_range_spec("A1:C10")
+        assert sheet is None
+        assert cell_range == "A1:C10"
+
+    def test_parse_range_spec_single_cell(self) -> None:
+        """_parse_range_spec 单格扩展为 A1:A1。"""
+        sheet, cell_range = MentionResolver._parse_range_spec("Sheet1!A1")
+        assert sheet == "Sheet1"
+        assert cell_range == "A1:A1"
+
+    def test_parse_range_spec_single_cell_no_sheet(self) -> None:
+        """_parse_range_spec 无 sheet 单格。"""
+        sheet, cell_range = MentionResolver._parse_range_spec("B5")
+        assert sheet is None
+        assert cell_range == "B5:B5"
+
+    def test_excel_range_reads_correct_cells(self, tmp_path: Path) -> None:
+        """_resolve_excel_range 读取正确的单元格数据。"""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Data"
+        ws.append(["Name", "Age", "City"])
+        ws.append(["Alice", 25, "Beijing"])
+        ws.append(["Bob", 30, "Shanghai"])
+        ws.append(["Carol", 28, "Guangzhou"])
+        wb.save(str(tmp_path / "test.xlsx"))
+        wb.close()
+
+        resolver = _make_resolver(str(tmp_path))
+        mention = Mention(
+            kind="file", value="test.xlsx",
+            raw="@file:test.xlsx[Data!A1:C3]",
+            start=0, end=27, range_spec="Data!A1:C3",
+        )
+        result = resolver._resolve_file(mention)
+
+        assert result.error is None
+        assert "Data!A1:C3" in result.context_block
+        assert "Name" in result.context_block
+        assert "Alice" in result.context_block
+        assert "Bob" in result.context_block
+        # Row 4 (Carol) should NOT be included (range is A1:C3)
+        assert "Carol" not in result.context_block
+
+    def test_excel_range_single_cell(self, tmp_path: Path) -> None:
+        """单格 range 正确读取。"""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["B2"] = 42
+        wb.save(str(tmp_path / "single.xlsx"))
+        wb.close()
+
+        resolver = _make_resolver(str(tmp_path))
+        mention = Mention(
+            kind="file", value="single.xlsx",
+            raw="@file:single.xlsx[Sheet1!B2]",
+            start=0, end=28, range_spec="Sheet1!B2",
+        )
+        result = resolver._resolve_file(mention)
+
+        assert result.error is None
+        assert "42" in result.context_block
+
+    def test_excel_range_nonexistent_sheet(self, tmp_path: Path) -> None:
+        """不存在的 sheet 返回错误。"""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.append(["A"])
+        wb.save(str(tmp_path / "test.xlsx"))
+        wb.close()
+
+        resolver = _make_resolver(str(tmp_path))
+        mention = Mention(
+            kind="file", value="test.xlsx",
+            raw="@file:test.xlsx[NoSuchSheet!A1:B2]",
+            start=0, end=35, range_spec="NoSuchSheet!A1:B2",
+        )
+        result = resolver._resolve_file(mention)
+
+        assert result.error is not None
+        assert "工作表不存在" in result.error
+
+    def test_excel_range_pipe_table_format(self, tmp_path: Path) -> None:
+        """范围读取结果为管道分隔表格格式。"""
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sales"
+        ws.append(["Product", "Price"])
+        ws.append(["Widget", 9.99])
+        wb.save(str(tmp_path / "sales.xlsx"))
+        wb.close()
+
+        resolver = _make_resolver(str(tmp_path))
+        mention = Mention(
+            kind="file", value="sales.xlsx",
+            raw="@file:sales.xlsx[Sales!A1:B2]",
+            start=0, end=29, range_spec="Sales!A1:B2",
+        )
+        result = resolver._resolve_file(mention)
+
+        assert result.error is None
+        # Should contain pipe-separated table
+        assert "| A | B |" in result.context_block
+        assert "| --- | --- |" in result.context_block
+        assert "Product" in result.context_block
+        assert "Widget" in result.context_block
 
 
 # ── Resolver file: 文本文件 ──────────────────────────────

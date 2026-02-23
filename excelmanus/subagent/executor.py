@@ -13,6 +13,11 @@ import openai
 
 from excelmanus.approval import ApprovalManager
 from excelmanus.config import ExcelManusConfig
+from excelmanus.engine_core.workspace_probe import (
+    collect_workspace_mtime_index,
+    diff_workspace_mtime_paths,
+    has_workspace_mtime_changes,
+)
 from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
@@ -453,6 +458,21 @@ class SubagentExecutor:
 
             # MCP 工具不做本地文件快照审计（由远端系统自行审计）。
             if self._approval.is_mcp_tool(tool_name):
+                mcp_probe_before: dict[str, tuple[int, int]] | None = None
+                mcp_probe_before_partial = False
+                mcp_tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
+                mcp_effect = (
+                    getattr(mcp_tool_def, "write_effect", "unknown")
+                    if mcp_tool_def is not None
+                    else "unknown"
+                )
+                if isinstance(mcp_effect, str) and mcp_effect.strip().lower() == "unknown":
+                    try:
+                        mcp_probe_before, mcp_probe_before_partial = collect_workspace_mtime_index(
+                            self._parent_config.workspace_root
+                        )
+                    except Exception:
+                        logger.debug("subagent mcp unknown 探针前置快照失败", exc_info=True)
                 try:
                     raw_result = await self._call_tool_with_memory_context(
                         registry=registry,
@@ -474,6 +494,26 @@ class SubagentExecutor:
                             return _ExecResult(success=False, result=raw_text, error=_msg)
                     except (json.JSONDecodeError, AttributeError):
                         pass
+                probed_changes: list[str] = []
+                if mcp_probe_before is not None:
+                    try:
+                        mcp_probe_after, mcp_probe_after_partial = collect_workspace_mtime_index(
+                            self._parent_config.workspace_root
+                        )
+                        if has_workspace_mtime_changes(mcp_probe_before, mcp_probe_after):
+                            probed_changes = diff_workspace_mtime_paths(
+                                mcp_probe_before,
+                                mcp_probe_after,
+                            )
+                            logger.info(
+                                "subagent mcp unknown 写入探针命中: tool=%s partial_before=%s partial_after=%s changed_paths=%d",
+                                tool_name,
+                                mcp_probe_before_partial,
+                                mcp_probe_after_partial,
+                                len(probed_changes),
+                            )
+                    except Exception:
+                        logger.debug("subagent mcp unknown 探针后置快照失败", exc_info=True)
                 enriched = self._apply_tool_result_enricher(
                     tool_name=tool_name,
                     arguments=arguments,
@@ -488,6 +528,7 @@ class SubagentExecutor:
                 return _ExecResult(
                     success=True,
                     result=enriched,
+                    file_changes=probed_changes or None,
                     raw_result=raw_text,
                 )
 
@@ -531,6 +572,22 @@ class SubagentExecutor:
                 raw_result=result_text,
             )
 
+        probe_before: dict[str, tuple[int, int]] | None = None
+        probe_before_partial = False
+        tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
+        write_effect = (
+            getattr(tool_def, "write_effect", "unknown")
+            if tool_def is not None
+            else "unknown"
+        )
+        if isinstance(write_effect, str) and write_effect.strip().lower() == "unknown":
+            try:
+                probe_before, probe_before_partial = collect_workspace_mtime_index(
+                    self._parent_config.workspace_root
+                )
+            except Exception:
+                logger.debug("subagent unknown 探针前置快照失败", exc_info=True)
+
         try:
             raw_result = await self._call_tool_with_memory_context(
                 registry=registry,
@@ -549,6 +606,26 @@ class SubagentExecutor:
                         return _ExecResult(success=False, result=raw_text, error=_msg)
                 except (json.JSONDecodeError, AttributeError):
                     pass
+            probed_changes: list[str] = []
+            if probe_before is not None:
+                try:
+                    probe_after, probe_after_partial = collect_workspace_mtime_index(
+                        self._parent_config.workspace_root
+                    )
+                    if has_workspace_mtime_changes(probe_before, probe_after):
+                        probed_changes = diff_workspace_mtime_paths(
+                            probe_before,
+                            probe_after,
+                        )
+                        logger.info(
+                            "subagent unknown 写入探针命中: tool=%s partial_before=%s partial_after=%s changed_paths=%d",
+                            tool_name,
+                            probe_before_partial,
+                            probe_after_partial,
+                            len(probed_changes),
+                        )
+                except Exception:
+                    logger.debug("subagent unknown 探针后置快照失败", exc_info=True)
             text = self._truncate_tool_result(
                 registry=registry,
                 tool_name=tool_name,
@@ -561,7 +638,12 @@ class SubagentExecutor:
                 success=True,
                 tool_result_enricher=tool_result_enricher,
             )
-            return _ExecResult(success=True, result=enriched, raw_result=raw_text)
+            return _ExecResult(
+                success=True,
+                result=enriched,
+                file_changes=probed_changes or None,
+                raw_result=raw_text,
+            )
         except Exception as exc:  # noqa: BLE001
             error = f"工具执行错误: {exc}"
             return _ExecResult(success=False, result=error, error=str(exc))

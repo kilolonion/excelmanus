@@ -82,6 +82,131 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(execution_status)",
         "CREATE INDEX IF NOT EXISTS idx_approvals_created ON approvals(created_at_utc)",
     ],
+    2: [
+        # ── Workspace Manifest 缓存 ──
+        """CREATE TABLE IF NOT EXISTS workspace_files (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace    TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            size_bytes   INTEGER NOT NULL,
+            mtime_ns     INTEGER NOT NULL,
+            sheets_json  TEXT NOT NULL DEFAULT '[]',
+            scanned_at   TEXT NOT NULL,
+            UNIQUE(workspace, path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_wf_workspace ON workspace_files(workspace)",
+        # ── 工具调用审计日志 ──
+        """CREATE TABLE IF NOT EXISTS tool_call_log (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id     TEXT,
+            turn           INTEGER DEFAULT 0,
+            iteration      INTEGER DEFAULT 0,
+            tool_name      TEXT NOT NULL,
+            arguments_hash TEXT,
+            success        INTEGER NOT NULL,
+            duration_ms    REAL DEFAULT 0,
+            result_chars   INTEGER DEFAULT 0,
+            error_type     TEXT,
+            error_preview  TEXT,
+            created_at     TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_session ON tool_call_log(session_id, turn)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_tool ON tool_call_log(tool_name, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
+    ],
+    3: [
+        # ── LLM 调用 / Token 用量追踪 ──
+        """CREATE TABLE IF NOT EXISTS llm_call_log (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id        TEXT,
+            turn              INTEGER DEFAULT 0,
+            iteration         INTEGER DEFAULT 0,
+            model             TEXT NOT NULL,
+            prompt_tokens     INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            cached_tokens     INTEGER DEFAULT 0,
+            total_tokens      INTEGER DEFAULT 0,
+            has_tool_calls    INTEGER DEFAULT 0,
+            thinking_chars    INTEGER DEFAULT 0,
+            stream            INTEGER DEFAULT 0,
+            latency_ms        REAL DEFAULT 0,
+            error             TEXT,
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_llm_session ON llm_call_log(session_id, turn)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_call_log(model, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_created ON llm_call_log(created_at)",
+    ],
+    4: [
+        # ── Excel Diff / 改动文件持久化 ──
+        """CREATE TABLE IF NOT EXISTS session_excel_diffs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            tool_call_id    TEXT NOT NULL,
+            file_path       TEXT NOT NULL,
+            sheet           TEXT DEFAULT '',
+            affected_range  TEXT DEFAULT '',
+            changes_json    TEXT NOT NULL DEFAULT '[]',
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sed_session ON session_excel_diffs(session_id)",
+        """CREATE TABLE IF NOT EXISTS session_affected_files (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            file_path    TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            UNIQUE(session_id, file_path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_saf_session ON session_affected_files(session_id)",
+    ],
+    5: [
+        # ── 会话级自定义规则 ──
+        """CREATE TABLE IF NOT EXISTS session_rules (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id   TEXT NOT NULL,
+            rule_id      TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL,
+            UNIQUE(session_id, rule_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sr_session ON session_rules(session_id)",
+    ],
+    6: [
+        # ── Excel Preview 持久化 ──
+        """CREATE TABLE IF NOT EXISTS session_excel_previews (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            tool_call_id    TEXT NOT NULL UNIQUE,
+            file_path       TEXT NOT NULL,
+            sheet           TEXT DEFAULT '',
+            columns_json    TEXT NOT NULL DEFAULT '[]',
+            rows_json       TEXT NOT NULL DEFAULT '[]',
+            total_rows      INTEGER DEFAULT 0,
+            truncated       INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sep_session ON session_excel_previews(session_id)",
+    ],
+    7: [
+        # ── 模型配置持久化 ──
+        """CREATE TABLE IF NOT EXISTS model_profiles (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            model       TEXT NOT NULL,
+            api_key     TEXT DEFAULT '',
+            base_url    TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS config_kv (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ],
 }
 
 _LATEST_VERSION = max(_MIGRATIONS.keys())

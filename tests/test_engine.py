@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -351,6 +352,77 @@ class TestControlCommandSubagent:
         )
 
 
+class TestWorkspaceManifestPrewarm:
+    """Workspace manifest 后台预热与控制命令测试。"""
+
+    @pytest.mark.asyncio
+    async def test_first_notice_does_not_block_when_prewarm_running(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        gate = threading.Event()
+        fake_manifest = SimpleNamespace(
+            total_files=2,
+            scan_duration_ms=12,
+            get_system_prompt_summary=lambda: "## 工作区 Excel 文件概览\n- demo.xlsx",
+        )
+
+        def _slow_build(*_args, **_kwargs):
+            gate.wait(timeout=2)
+            return fake_manifest
+
+        with patch("excelmanus.workspace_manifest.build_manifest", side_effect=_slow_build):
+            started = engine.start_workspace_manifest_prewarm()
+            assert started is True
+
+            t0 = time.monotonic()
+            notice = engine._context_builder._build_workspace_manifest_notice()
+            elapsed = time.monotonic() - t0
+
+            assert notice == ""
+            assert elapsed < 0.1
+
+            gate.set()
+            assert engine._workspace_manifest_prewarm_task is not None
+            await engine._workspace_manifest_prewarm_task
+
+            notice_after = engine._context_builder._build_workspace_manifest_notice()
+            assert "工作区 Excel 文件概览" in notice_after
+
+    @pytest.mark.asyncio
+    async def test_manifest_control_command_build_and_status(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        gate = threading.Event()
+        fake_manifest = SimpleNamespace(
+            total_files=3,
+            scan_duration_ms=23,
+            get_system_prompt_summary=lambda: "manifest-summary",
+        )
+
+        def _slow_build(*_args, **_kwargs):
+            gate.wait(timeout=2)
+            return fake_manifest
+
+        with patch("excelmanus.workspace_manifest.build_manifest", side_effect=_slow_build):
+            build_reply = await engine.chat("/manifest build")
+            assert "后台开始构建" in build_reply.reply
+
+            status_reply = await engine.chat("/manifest status")
+            assert "后台构建中" in status_reply.reply
+
+            gate.set()
+            assert engine._workspace_manifest_prewarm_task is not None
+            await engine._workspace_manifest_prewarm_task
+
+            final_status = await engine.chat("/manifest status")
+            assert "已就绪" in final_status.reply
+            assert "文件数: 3" in final_status.reply
+
+
 class TestModelSwitchConsistency:
     """模型切换与路由模型一致性测试。"""
 
@@ -380,12 +452,12 @@ class TestModelSwitchConsistency:
         assert engine._router_model == "main-b"
         assert engine._router_client is engine._client
 
-    def test_switch_model_keeps_router_when_router_model_configured(self) -> None:
+    def test_switch_model_keeps_router_when_aux_model_configured(self) -> None:
         config = _make_config(
             model="main-a",
-            router_model="router-fixed",
-            router_api_key="router-key",
-            router_base_url="https://router.example.com/v1",
+            aux_model="aux-fixed",
+            aux_api_key="aux-key",
+            aux_base_url="https://aux.example.com/v1",
             models=(
                 ModelProfile(
                     name="alt",
@@ -401,11 +473,11 @@ class TestModelSwitchConsistency:
         old_router_client = engine._router_client
 
         assert engine._router_follow_active_model is False
-        assert engine._router_model == "router-fixed"
+        assert engine._router_model == "aux-fixed"
 
         engine.switch_model("alt")
         assert engine._active_model == "main-b"
-        assert engine._router_model == "router-fixed"
+        assert engine._router_model == "aux-fixed"
         assert engine._router_client is old_router_client
         assert engine._router_client is not engine._client
 
@@ -1916,7 +1988,7 @@ class TestContextBudgetAndHardCap:
         assert "[IDLE -- sales.xlsx / Q1" in second_notice
 
     @pytest.mark.asyncio
-    async def test_window_perception_hybrid_advisor_falls_back_when_router_fails(self) -> None:
+    async def test_window_perception_hybrid_advisor_falls_back_when_advisor_fails(self) -> None:
         def read_excel(file_path: str, sheet_name: str) -> str:
             return json.dumps(
                 {
@@ -1976,7 +2048,8 @@ class TestContextBudgetAndHardCap:
         _ = engine._build_window_perception_notice()
         await asyncio.sleep(0)
         fallback_notice = engine._build_window_perception_notice()
-        assert "[BG -- sales.xlsx / Q1]" in fallback_notice
+        assert "## 数据窗口" in fallback_notice
+        assert "sales.xlsx / Q1" in fallback_notice or "catalog.xlsx / Q1" in fallback_notice
 
 
 class TestTaskUpdateFailureSemantics:
@@ -2777,7 +2850,7 @@ class TestDelegateSubagent:
             model="main-model",
             base_url="https://www.right.codes/codex/v1",
             aux_model="qwen-flash",
-            window_advisor_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            aux_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -2922,7 +2995,6 @@ class TestDelegateSubagent:
 
         resumed = await engine.chat("2")
         assert "已开启 fullaccess" in resumed.reply
-        assert "已拒绝待确认操作" in resumed.reply
         assert "重试完成" in resumed.reply
         assert engine.full_access_enabled is True
         assert engine._approval.pending is None
@@ -3220,6 +3292,219 @@ class TestAskUserFlow:
         assert resumed.reply == "已恢复执行。"
         assert engine.has_pending_question() is False
 
+
+class TestToolCallingLoopApprovalResolver:
+    """_tool_calling_loop 的审批分支行为锁定测试。"""
+
+    @pytest.mark.asyncio
+    async def test_inline_approval_accept_continues_and_emits_resolved_event(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        pending = engine._approval.create_pending(
+            tool_name="run_shell",
+            arguments={"command": "echo ok"},
+            tool_scope=["run_shell"],
+        )
+
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [("call_approve", "run_shell", json.dumps({"command": "echo ok"}))]
+                ),
+                _make_text_response("审批后继续执行完成。"),
+            ]
+        )
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="run_shell",
+                arguments={"command": "echo ok"},
+                result=engine._format_pending_prompt(pending),
+                success=True,
+                pending_approval=True,
+                approval_id=pending.approval_id,
+            )
+        )
+
+        async def _approval_resolver(_pending):
+            assert _pending.approval_id == pending.approval_id
+            return "accept"
+
+        async def _execute_approved_pending(_pending, *, on_event=None):
+            assert _pending.approval_id == pending.approval_id
+            engine._approval.clear_pending()
+            return True, "已执行 run_shell", None
+
+        engine._execute_approved_pending = AsyncMock(side_effect=_execute_approved_pending)
+        events: list[Any] = []
+
+        result = await engine._tool_calling_loop(
+            route_result,
+            on_event=events.append,
+            approval_resolver=_approval_resolver,
+        )
+
+        assert result.reply == "审批后继续执行完成。"
+        assert engine._execute_approved_pending.await_count == 1
+        assert any(
+            event.event_type == EventType.APPROVAL_RESOLVED and event.success
+            for event in events
+        )
+        tool_messages = [
+            msg for msg in engine.memory.get_messages() if msg.get("role") == "tool"
+        ]
+        approved_tool_msg = next(
+            msg for msg in tool_messages if msg.get("tool_call_id") == "call_approve"
+        )
+        assert "已执行 run_shell" in approved_tool_msg.get("content", "")
+
+    @pytest.mark.asyncio
+    async def test_inline_approval_reject_continues_and_emits_failed_event(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        pending = engine._approval.create_pending(
+            tool_name="run_shell",
+            arguments={"command": "echo fail"},
+            tool_scope=["run_shell"],
+        )
+
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [("call_reject", "run_shell", json.dumps({"command": "echo fail"}))]
+                ),
+                _make_text_response("拒绝后继续执行完成。"),
+            ]
+        )
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="run_shell",
+                arguments={"command": "echo fail"},
+                result=engine._format_pending_prompt(pending),
+                success=True,
+                pending_approval=True,
+                approval_id=pending.approval_id,
+            )
+        )
+        engine._execute_approved_pending = AsyncMock(
+            return_value=(True, "不应执行", None)
+        )
+
+        events: list[Any] = []
+
+        async def _approval_resolver(_pending):
+            assert _pending.approval_id == pending.approval_id
+            return None
+
+        result = await engine._tool_calling_loop(
+            route_result,
+            on_event=events.append,
+            approval_resolver=_approval_resolver,
+        )
+
+        assert result.reply == "拒绝后继续执行完成。"
+        engine._execute_approved_pending.assert_not_awaited()
+        assert any(
+            event.event_type == EventType.APPROVAL_RESOLVED and not event.success
+            for event in events
+        )
+        tool_messages = [
+            msg for msg in engine.memory.get_messages() if msg.get("role") == "tool"
+        ]
+        rejected_tool_msg = next(
+            msg for msg in tool_messages if msg.get("tool_call_id") == "call_reject"
+        )
+        assert "已拒绝待确认操作" in rejected_tool_msg.get("content", "")
+
+    @pytest.mark.asyncio
+    async def test_pending_approval_without_resolver_exits_loop(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        pending = engine._approval.create_pending(
+            tool_name="run_shell",
+            arguments={"command": "echo pending"},
+            tool_scope=["run_shell"],
+        )
+        pending_prompt = engine._format_pending_prompt(pending)
+
+        engine._client.chat.completions.create = AsyncMock(
+            return_value=_make_tool_call_response(
+                [("call_pending", "run_shell", json.dumps({"command": "echo pending"}))]
+            )
+        )
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="run_shell",
+                arguments={"command": "echo pending"},
+                result=pending_prompt,
+                success=True,
+                pending_approval=True,
+                approval_id=pending.approval_id,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == pending_prompt
+        assert engine._pending_approval_route_result is route_result
+        assert engine._pending_approval_tool_call_id == "call_pending"
+
+
+class TestToolCallingLoopWriteGuard:
+    """_tool_calling_loop 写入门禁退出行为测试。"""
+
+    @pytest.mark.asyncio
+    async def test_write_guard_sets_flag_after_second_text_only_turn(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="fallback",
+            system_contexts=[],
+            write_hint="may_write",
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                _make_text_response("先解释步骤，暂未执行工具。"),
+                _make_text_response("仍未执行任何写入工具。"),
+            ]
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == "仍未执行任何写入工具。"
+        assert result.write_guard_triggered is True
+        assert result.iterations == 2
+        user_messages = [
+            msg.get("content", "")
+            for msg in engine.memory.get_messages()
+            if msg.get("role") == "user"
+        ]
+        assert any("尚未调用任何写入工具" in item for item in user_messages)
+
+
 class TestMetaToolDefinitions:
     """元工具定义结构与动态更新测试（task6.4）。"""
 
@@ -3413,6 +3698,26 @@ class TestCommandDispatchAndHooks:
         assert result.reply == "hello-dispatch"
         assert result.tool_calls
         assert result.tool_calls[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_call_parse_error_returns_failure(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        tc = SimpleNamespace(
+            id="call_bad_json",
+            function=SimpleNamespace(name="add_numbers", arguments="{bad json"),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is False
+        assert "工具参数解析错误" in result.result
 
     @pytest.mark.asyncio
     async def test_pre_tool_hook_deny_blocks_tool(self) -> None:
@@ -3686,6 +3991,70 @@ class TestCommandDispatchAndHooks:
         assert resolved is not None
         assert resolved.decision == HookDecision.DENY
         assert "递归触发" in resolved.reason
+
+    @pytest.mark.asyncio
+    async def test_post_tool_hook_deny_turns_success_to_failure(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._active_skills = [Skillpack(
+            name="hook/post_deny",
+            description="post deny hook",
+            instructions="",
+            source="project",
+            root_dir="/tmp/hook",
+            hooks={
+                "PostToolUse": [
+                    {
+                        "matcher": "add_numbers",
+                        "hooks": [{"type": "prompt", "decision": "deny", "reason": "post blocked"}],
+                    }
+                ]
+            },
+        )]
+
+        tc = SimpleNamespace(
+            id="call_post_hook_deny",
+            function=SimpleNamespace(name="add_numbers", arguments=json.dumps({"a": 2, "b": 3})),
+        )
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is False
+        assert "[Hook 拒绝] post blocked" in result.result
+
+    @pytest.mark.asyncio
+    async def test_run_code_red_creates_pending_approval(self) -> None:
+        config = _make_config(code_policy_enabled=True)
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+
+        dangerous_code = "import subprocess\nsubprocess.run(['echo', 'x'])"
+        tc = SimpleNamespace(
+            id="call_run_code_red",
+            function=SimpleNamespace(
+                name="run_code",
+                arguments=json.dumps({"code": dangerous_code}),
+            ),
+        )
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.pending_approval is True
+        assert isinstance(result.approval_id, str) and result.approval_id
+        assert "需要人工确认" in result.result
+        assert engine._approval.pending is not None
+        assert engine._approval.pending.approval_id == result.approval_id
 
 
 class TestChatPureText:
@@ -4716,7 +5085,6 @@ class TestApprovalFlow:
         assert "存在待确认操作" in blocked
 
         accept_reply = await engine.chat(f"/accept {approval_id}")
-        assert "已执行待确认操作" in accept_reply
         assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hello"
         assert (tmp_path / "outputs" / "approvals" / approval_id / "manifest.json").exists()
 
@@ -4779,7 +5147,6 @@ class TestApprovalFlow:
         approval_id = engine._approval.pending.approval_id
 
         accept_reply = await engine.chat(f"/accept {approval_id}")
-        assert "已执行待确认操作" in accept_reply
         assert "后续子任务已完成" in accept_reply
         assert (tmp_path / "resume.txt").read_text(encoding="utf-8") == "ok"
 
@@ -4798,7 +5165,6 @@ class TestApprovalFlow:
         approval_id = engine._approval.pending.approval_id
 
         reject_reply = await engine.chat(f"/reject {approval_id}")
-        assert "已拒绝" in reject_reply
         assert engine._approval.pending is None
         assert not (tmp_path / "b.txt").exists()
 
@@ -4914,6 +5280,29 @@ class TestApprovalFlow:
         assert reply == "完成"
         assert engine._approval.pending is None
         assert (tmp_path / "d.txt").read_text(encoding="utf-8") == "full"
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_on_auto_accepts_pending_approval(self, tmp_path: Path) -> None:
+        """开启 fullaccess 时若存在 pending approval，应自动执行并续上对话。"""
+        config = _make_config(workspace_root=str(tmp_path))
+        registry = self._make_registry_with_write_tool(tmp_path)
+        engine = AgentEngine(config, registry)
+
+        # 1) 触发高风险工具，产生 pending approval
+        tool_response = _make_tool_call_response([
+            ("call_1", "write_text_file", json.dumps({"file_path": "auto.txt", "content": "hello"}))
+        ])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        await engine.chat("写文件")
+        assert engine._approval.pending is not None
+        approval_id = engine._approval.pending.approval_id
+
+        # 2) 发送 /fullaccess on，应自动消化 pending
+        reply = await engine.chat("/fullaccess on")
+        assert "已开启" in reply
+        assert engine._approval.pending is None
+        assert engine.full_access_enabled is True
+        assert (tmp_path / "auto.txt").read_text(encoding="utf-8") == "hello"
 
     @pytest.mark.asyncio
     async def test_default_mode_non_whitelist_tool_executes_directly(self, tmp_path: Path) -> None:

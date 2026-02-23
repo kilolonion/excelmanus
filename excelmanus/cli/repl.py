@@ -147,6 +147,7 @@ async def chat_with_feedback(
     slash_command: str | None = None,
     raw_args: str | None = None,
     mention_contexts: list | None = None,
+    approval_resolver: "Callable[[PendingApproval], Any] | None" = None,
 ) -> tuple[str, bool]:
     """统一封装 chat 调用，增加等待期动态状态反馈。返回 (reply_text, streamed)。"""
     from excelmanus.cli.prompt import is_interactive_terminal
@@ -163,6 +164,8 @@ async def chat_with_feedback(
             chat_kwargs["raw_args"] = raw_args
         if mention_contexts is not None:
             chat_kwargs["mention_contexts"] = mention_contexts
+        if approval_resolver is not None:
+            chat_kwargs["approval_resolver"] = approval_resolver
         reply = _reply_text(await engine.chat(user_input, **chat_kwargs))
         streamed = renderer._streaming_text or renderer._streaming_thinking
         renderer.finish_streaming()
@@ -180,6 +183,7 @@ async def run_chat_turn(
     raw_args: str | None = None,
     mention_contexts: list | None = None,
     error_label: str = "处理请求",
+    approval_resolver: "Callable[[PendingApproval], Any] | None" = None,
 ) -> tuple[str, bool] | None:
     """统一回合执行入口：使用 StreamRenderer 渲染，调用引擎。"""
     renderer = StreamRenderer(console)
@@ -193,6 +197,7 @@ async def run_chat_turn(
             slash_command=slash_command,
             raw_args=raw_args,
             mention_contexts=mention_contexts,
+            approval_resolver=approval_resolver,
         )
 
         _has_pending_q = bool(getattr(engine, "has_pending_question", lambda: False)())
@@ -331,6 +336,38 @@ async def interactive_model_select(engine: "AgentEngine") -> str | None:
 # ------------------------------------------------------------------
 
 
+def _build_approval_resolver(
+    console: Console,
+) -> "Callable[[PendingApproval], Any]":
+    """构造内联审批解析器：包装 interactive_approval_select，返回 engine 约定字符串。"""
+    from excelmanus.cli.approval import (
+        APPROVAL_ACCEPT,
+        APPROVAL_FULLACCESS,
+        APPROVAL_REJECT,
+        interactive_approval_select,
+    )
+
+    _CHOICE_MAP = {
+        APPROVAL_ACCEPT: "accept",
+        APPROVAL_FULLACCESS: "fullaccess",
+        APPROVAL_REJECT: "reject",
+    }
+
+    async def _resolver(pending: "PendingApproval") -> str | None:
+        try:
+            choice = await interactive_approval_select(pending)
+        except (KeyboardInterrupt, EOFError):
+            return "reject"
+        except Exception as exc:
+            logger.warning("内联审批选择器异常，视为 reject：%s", exc)
+            return "reject"
+        if choice is None:
+            return "reject"
+        return _CHOICE_MAP.get(choice, "reject")
+
+    return _resolver
+
+
 async def repl_loop(console: Console, engine: "AgentEngine") -> None:
     """异步 REPL 主循环。"""
     from excelmanus.cli.approval import (
@@ -371,15 +408,22 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
     try:
         from excelmanus.mentions.completer import MentionCompleter
 
-        prompt_mod._MENTION_COMPLETER = MentionCompleter(
+        _mention = MentionCompleter(
             workspace_root=engine._config.workspace_root,
             engine=engine,
         )
+        prompt_mod._MENTION_COMPLETER = _mention
+        # 同步到合并补全器（使 / 和 @ 都通过统一入口）
+        if hasattr(prompt_mod, "_MERGED_COMPLETER") and prompt_mod._MERGED_COMPLETER is not None:
+            prompt_mod._MERGED_COMPLETER.mention_completer = _mention
     except Exception as exc:
         logger.warning("@ 提及补全器初始化失败：%s", exc)
 
     # 同步斜杠命令与参数建议（含模型名）
     _sync_slash_commands(engine)
+
+    # 构造内联审批解析器，使审批在同一轮对话内完成
+    _approval_resolver = _build_approval_resolver(console)
 
     while True:
         has_pending_question = bool(
@@ -474,9 +518,13 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                 if callable(_turn):
                     _turn = _turn()
                 _turn = _turn if isinstance(_turn, int) else 0
+                _full_access = getattr(engine, "full_access_enabled", False)
+                _plan_mode = getattr(engine, "plan_mode_enabled", False)
                 user_input = (await read_user_input(
                     model_hint=_model_hint if isinstance(_model_hint, str) else "",
                     turn_number=_turn if isinstance(_turn, int) else 0,
+                    full_access=bool(_full_access),
+                    plan_mode=bool(_plan_mode),
                 )).strip()
         except (KeyboardInterrupt, EOFError):
             render_farewell(console)
@@ -585,6 +633,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                         console, engine,
                         user_input=user_input,
                         error_label="处理子代理命令",
+                        approval_resolver=_approval_resolver,
                     )
                 except KeyboardInterrupt:
                     render_farewell(console)
@@ -617,6 +666,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                     slash_command=resolved_skill,
                     raw_args=raw_args,
                     error_label="处理技能命令",
+                    approval_resolver=_approval_resolver,
                 )
             except KeyboardInterrupt:
                 render_farewell(console)
@@ -668,6 +718,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                 user_input=user_input,
                 mention_contexts=mention_contexts,
                 error_label="处理请求",
+                approval_resolver=_approval_resolver,
             )
         except KeyboardInterrupt:
             render_farewell(console)

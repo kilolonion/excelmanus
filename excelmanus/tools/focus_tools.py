@@ -85,5 +85,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=focus_window,
+            write_effect="none",
         ),
     ]

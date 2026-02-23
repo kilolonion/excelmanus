@@ -571,6 +571,7 @@ def get_tools() -> list[ToolDef]:
             },
             func=read_image,
             max_result_chars=500,
+            write_effect="none",
         ),
         ToolDef(
             name="rebuild_excel_from_spec",
@@ -592,6 +593,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=rebuild_excel_from_spec,
+            write_effect="workspace_write",
         ),
         ToolDef(
             name="verify_excel_replica",
@@ -617,5 +619,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=verify_excel_replica,
+            write_effect="workspace_write",
         ),
     ]

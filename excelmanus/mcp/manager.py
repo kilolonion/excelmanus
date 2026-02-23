@@ -353,6 +353,7 @@ def make_tool_def(
         input_schema=input_schema,
         func=func,
         max_result_chars=5000,
+        write_effect="unknown",
     )
 
 

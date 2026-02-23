@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
@@ -80,12 +81,12 @@ class SkillRouter:
         self._file_structure_cache_limit = 64
 
     def _get_router_client(self) -> Any:
-        """懒加载 router 端点客户端，首次调用时创建并缓存。"""
+        """懒加载 AUX 端点客户端，首次调用时创建并缓存。"""
         if self._router_client is None:
             from excelmanus.providers import create_client
             self._router_client = create_client(
-                api_key=self._config.router_api_key or self._config.api_key,
-                base_url=self._config.router_base_url or self._config.base_url,
+                api_key=self._config.aux_api_key or self._config.api_key,
+                base_url=self._config.aux_base_url or self._config.base_url,
             )
         return self._router_client
 
@@ -108,6 +109,7 @@ class SkillRouter:
         file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
         write_hint: str | None = None,
+        on_event: EventCallback | None = None,
     ) -> SkillMatchResult:
         """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
         skillpacks = self._loader.get_skillpacks()
@@ -193,7 +195,7 @@ class SkillRouter:
         # ── 2. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
         # 并行调用小模型判断 write_hint + task_tags
         classified_hint, classified_tags = await self._classify_task(
-            user_message, write_hint=write_hint,
+            user_message, write_hint=write_hint, on_event=on_event,
         )
         return self._build_all_tools_result(
             user_message=user_message,
@@ -345,11 +347,25 @@ class SkillRouter:
             task_tags=task_tags,
         )
 
+    @staticmethod
+    def _emit_pipeline(
+        on_event: EventCallback | None,
+        stage: str,
+        message: str,
+    ) -> None:
+        if on_event is not None:
+            on_event(ToolCallEvent(
+                event_type=EventType.PIPELINE_PROGRESS,
+                pipeline_stage=stage,
+                pipeline_message=message,
+            ))
+
     async def _classify_task(
         self,
         user_message: str,
         *,
         write_hint: str | None = None,
+        on_event: EventCallback | None = None,
     ) -> tuple[str, tuple[str, ...]]:
         """综合分类：write_hint + task_tags。
 
@@ -366,11 +382,12 @@ class SkillRouter:
         if lexical_hint:
             return lexical_hint, tuple(lexical_tags)
 
-        # 无 router_model 时直接返回词法结果
-        if not self._config.router_model:
+        # 无 aux_model 时直接返回词法结果
+        if not self._config.aux_model:
             return lexical_hint or "unknown", tuple(lexical_tags)
 
         # 调用 LLM 获取更精确的分类
+        self._emit_pipeline(on_event, "classifying", "正在理解任务类型...")
         llm_hint, llm_tags = await self._classify_task_llm(user_message)
         final_hint = llm_hint or lexical_hint or "unknown"
         # 合并：LLM 标签优先，词法标签补充
@@ -447,9 +464,9 @@ class SkillRouter:
 
         timeout_seconds = 10.0
 
-        # 1) router 端点
+        # 1) AUX 端点
         result = await _try_classify(
-            self._get_router_client(), self._config.router_model, timeout_seconds,
+            self._get_router_client(), self._config.aux_model, timeout_seconds,
         )
         if result is not None:
             return result

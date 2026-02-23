@@ -246,6 +246,62 @@ class ConversationMemory:
                 output.append(msg)
         return system_msgs + output
 
+    def inject_messages(self, messages: list[dict]) -> None:
+        """注入历史消息（用于会话恢复）。不触发截断。"""
+        self._messages.extend(messages)
+
+    def rollback_to_user_turn(self, turn_index: int) -> int:
+        """回退对话到第 turn_index 个用户消息（0-indexed）。
+
+        截断该用户消息之后的所有消息（保留该 user 消息本身）。
+
+        Args:
+            turn_index: 目标用户轮次索引（0 = 第一条用户消息）。
+
+        Returns:
+            被截断的消息数量。
+
+        Raises:
+            IndexError: turn_index 超出范围。
+        """
+        user_indices = [
+            i for i, m in enumerate(self._messages) if m.get("role") == "user"
+        ]
+        if not user_indices or turn_index < 0 or turn_index >= len(user_indices):
+            raise IndexError(
+                f"用户轮次索引 {turn_index} 超出范围（共 {len(user_indices)} 轮）"
+            )
+        cut_after = user_indices[turn_index]  # 保留该 user 消息
+        removed_count = len(self._messages) - cut_after - 1
+        self._messages = self._messages[: cut_after + 1]
+        return removed_count
+
+    def list_user_turns(self) -> list[dict]:
+        """列出所有用户轮次摘要，返回 [{index, content_preview, msg_index}]。"""
+        turns: list[dict] = []
+        turn_idx = 0
+        for i, m in enumerate(self._messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    preview = "[多模态消息]"
+                elif isinstance(content, str):
+                    preview = content[:80] + ("..." if len(content) > 80 else "")
+                else:
+                    preview = str(content)[:80]
+                turns.append({
+                    "index": turn_idx,
+                    "content_preview": preview,
+                    "msg_index": i,
+                })
+                turn_idx += 1
+        return turns
+
+    @property
+    def message_count(self) -> int:
+        """当前消息数量。"""
+        return len(self._messages)
+
     def clear(self) -> None:
         """清除所有对话历史（保留 system prompt 配置）。"""
         self._messages.clear()

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 EXIT_COMMANDS = {"exit", "quit"}
 
-CONFIG_ARGUMENTS = ("list", "set", "get", "delete")
+CONFIG_ARGUMENTS = ("list", "set", "get", "delete", "export", "import")
 SHORTCUT_ACTION_SHOW_HELP = "show_help"
 
 
@@ -540,9 +540,72 @@ def handle_skills_subcommand(
             console.print(f"  [{THEME.RED}]{THEME.FAILURE} 删除失败：{exc}[/{THEME.RED}]")
         return True
 
+    if sub == "import":
+        return _handle_skills_import(
+            console, engine, tokens,
+            sync_callback=sync_callback,
+        )
+
     console.print(
-        f"  [{THEME.GOLD}]未知 /skills 子命令。可用：list/get/create/patch/delete[/{THEME.GOLD}]"
+        f"  [{THEME.GOLD}]未知 /skills 子命令。可用：list/get/create/patch/delete/import[/{THEME.GOLD}]"
     )
+    return True
+
+
+def _handle_skills_import(
+    console: Console,
+    engine: "AgentEngine",
+    tokens: list[str],
+    *,
+    sync_callback: Any = None,
+) -> bool:
+    """处理 `/skills import <path> [--url] [--overwrite]`。"""
+    if len(tokens) < 3:
+        console.print(
+            f"  [{THEME.GOLD}]用法：\n"
+            f"  /skills import /path/to/SKILL.md          本地文件导入\n"
+            f"  /skills import --url <github-url>         GitHub URL 导入\n"
+            f"  追加 --overwrite 可覆盖已存在的同名技能[/{THEME.GOLD}]"
+        )
+        return True
+
+    overwrite = "--overwrite" in tokens
+    remaining = [t for t in tokens[2:] if t != "--overwrite"]
+
+    source: str
+    value: str
+
+    if "--url" in remaining:
+        idx = remaining.index("--url")
+        if idx + 1 >= len(remaining):
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} --url 后需要提供 GitHub URL[/{THEME.RED}]")
+            return True
+        source = "github_url"
+        value = remaining[idx + 1]
+    else:
+        if not remaining:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 请提供 SKILL.md 文件路径或 --url <github-url>[/{THEME.RED}]")
+            return True
+        source = "local_path"
+        value = remaining[0]
+
+    try:
+        result = engine.import_skillpack(
+            source=source, value=value, actor="cli", overwrite=overwrite,
+        )
+        if sync_callback:
+            sync_callback()
+        name = result.get("name", "")
+        files = result.get("files_copied", [])
+        console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 已导入 Skillpack: {name}"
+            f"（{len(files)} 个文件）[/{THEME.PRIMARY_LIGHT}]"
+        )
+        for f in files:
+            console.print(f"    [{THEME.DIM}]• {f}[/{THEME.DIM}]")
+    except Exception as exc:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} 导入失败：{exc}[/{THEME.RED}]")
+
     return True
 
 
@@ -738,7 +801,172 @@ def handle_config_command(
             console.print(f"  [{THEME.GOLD}]未找到变量 {key}[/{THEME.GOLD}]")
         return True
 
-    console.print(f"  [{THEME.GOLD}]未知 /config 子命令。可用：list/set/get/delete[/{THEME.GOLD}]")
+    if lowered.startswith("/config export"):
+        return _handle_config_export(console, stripped, workspace_root)
+
+    if lowered.startswith("/config import"):
+        return _handle_config_import(console, stripped, workspace_root)
+
+    console.print(f"  [{THEME.GOLD}]未知 /config 子命令。可用：list/set/get/delete/export/import[/{THEME.GOLD}]")
+    return True
+
+
+# ------------------------------------------------------------------
+# /config export / import
+# ------------------------------------------------------------------
+
+
+def _handle_config_export(
+    console: Console,
+    user_input: str,
+    workspace_root: str = ".",
+) -> bool:
+    """处理 /config export [--simple] [--sections main,aux,vlm,profiles]。"""
+    from getpass import getpass
+
+    from excelmanus.config import load_config
+    from excelmanus.config_transfer import export_config
+
+    parts = user_input.split()
+    mode = "password"
+    section_names = ["main", "aux", "vlm", "profiles"]
+
+    idx = 2  # skip "/config export"
+    while idx < len(parts):
+        if parts[idx] == "--simple":
+            mode = "simple"
+        elif parts[idx] == "--sections" and idx + 1 < len(parts):
+            idx += 1
+            section_names = [s.strip() for s in parts[idx].split(",") if s.strip()]
+        idx += 1
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} 加载配置失败：{exc}[/{THEME.RED}]")
+        return True
+
+    sections: dict = {}
+    if "main" in section_names:
+        sections["main"] = {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model}
+    if "aux" in section_names:
+        sections["aux"] = {"api_key": cfg.aux_api_key or "", "base_url": cfg.aux_base_url or "", "model": cfg.aux_model or ""}
+    if "vlm" in section_names:
+        sections["vlm"] = {"api_key": cfg.vlm_api_key or "", "base_url": cfg.vlm_base_url or "", "model": cfg.vlm_model or ""}
+    if "profiles" in section_names:
+        profiles = [
+            {"name": p.name, "model": p.model, "api_key": p.api_key, "base_url": p.base_url, "description": p.description}
+            for p in cfg.models
+        ]
+        sections["profiles"] = profiles
+
+    password: str | None = None
+    if mode == "password":
+        try:
+            password = getpass("  设置加密密码: ")
+            confirm = getpass("  确认密码: ")
+        except (EOFError, KeyboardInterrupt):
+            console.print(f"\n  [{THEME.DIM}]已取消。[/{THEME.DIM}]")
+            return True
+        if password != confirm:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 两次密码不一致。[/{THEME.RED}]")
+            return True
+        if not password:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 密码不能为空。[/{THEME.RED}]")
+            return True
+
+    try:
+        token = export_config(sections, password=password, mode=mode)
+    except Exception as exc:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} 导出失败：{exc}[/{THEME.RED}]")
+        return True
+
+    console.print()
+    console.print(f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 配置已导出（{mode} 模式）[/{THEME.PRIMARY_LIGHT}]")
+    console.print(f"  [{THEME.DIM}]包含区块：{', '.join(sections.keys())}[/{THEME.DIM}]")
+    console.print()
+    console.print(f"  [{THEME.CYAN}]{token}[/{THEME.CYAN}]")
+    console.print()
+    if mode == "password":
+        console.print(f"  [{THEME.GOLD}]请将此令牌和密码一起发送给接收方。[/{THEME.GOLD}]")
+    else:
+        console.print(f"  [{THEME.GOLD}]简单分享模式：令牌本身即可导入，无需密码。[/{THEME.GOLD}]")
+    console.print()
+    return True
+
+
+def _handle_config_import(
+    console: Console,
+    user_input: str,
+    workspace_root: str = ".",
+) -> bool:
+    """处理 /config import <token> [--password <pw>]。"""
+    from getpass import getpass
+
+    from excelmanus.config_transfer import detect_token_mode, import_config
+
+    parts = user_input.split(None, 2)  # "/config import <token>"
+    if len(parts) < 3:
+        console.print(f"  [{THEME.GOLD}]用法：/config import <令牌字符串>[/{THEME.GOLD}]")
+        return True
+
+    token = parts[2].strip()
+
+    mode = detect_token_mode(token)
+    if mode is None:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} 无效的令牌格式。[/{THEME.RED}]")
+        return True
+
+    password: str | None = None
+    if mode == "password":
+        try:
+            password = getpass("  输入解密密码: ")
+        except (EOFError, KeyboardInterrupt):
+            console.print(f"\n  [{THEME.DIM}]已取消。[/{THEME.DIM}]")
+            return True
+
+    try:
+        payload = import_config(token, password=password)
+    except ValueError as exc:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} 导入失败：{exc}[/{THEME.RED}]")
+        return True
+
+    sections = payload.get("sections", {})
+    exported_at = payload.get("ts", "")
+
+    df = dotenv_path(workspace_root)
+    imported_items: list[str] = []
+
+    _ENV_KEY_MAP = {
+        "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL"},
+        "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL"},
+        "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL"},
+    }
+
+    for section_key in ("main", "aux", "vlm"):
+        data = sections.get(section_key)
+        if not isinstance(data, dict):
+            continue
+        key_map = _ENV_KEY_MAP.get(section_key, {})
+        for field in ("api_key", "base_url", "model"):
+            val = data.get(field)
+            if val and isinstance(val, str) and field in key_map:
+                dotenv_set(df, key_map[field], val)
+        imported_items.append(section_key)
+
+    profiles = sections.get("profiles")
+    if isinstance(profiles, list) and profiles:
+        imported_items.append(f"profiles({len(profiles)})")
+
+    console.print()
+    console.print(f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 配置已导入[/{THEME.PRIMARY_LIGHT}]")
+    if exported_at:
+        console.print(f"  [{THEME.DIM}]导出时间：{exported_at}[/{THEME.DIM}]")
+    console.print(f"  [{THEME.DIM}]已导入区块：{', '.join(imported_items)}[/{THEME.DIM}]")
+    if isinstance(profiles, list) and profiles:
+        console.print(f"  [{THEME.GOLD}]注意：多模型 profiles 需重启后生效（或通过 API 导入）。[/{THEME.GOLD}]")
+    console.print(f"  [{THEME.DIM}]已写入 {df}[/{THEME.DIM}]")
+    console.print()
     return True
 
 

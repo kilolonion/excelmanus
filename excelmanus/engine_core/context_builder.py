@@ -156,6 +156,19 @@ class ContextBuilder:
         minimal_parts.append("[Skillpack 正文已省略以适配上下文窗口]")
         return "\n".join(minimal_parts)
 
+    def _build_rules_notice(self) -> str:
+        """组装用户自定义规则文本，注入 system prompt。"""
+        e = self._engine
+        rm = getattr(e, "_rules_manager", None)
+        if rm is None:
+            return ""
+        session_id = getattr(e, "_session_id", None)
+        try:
+            return rm.compose_rules_prompt(session_id)
+        except Exception:
+            logger.debug("规则注入失败", exc_info=True)
+            return ""
+
     def _build_meta_cognition_notice(self) -> str:
         """条件性注入进展反思提示，帮助 agent 在困境中调整策略。
 
@@ -231,6 +244,11 @@ class ContextBuilder:
         runtime_line = self._build_runtime_metadata_line()
         base_prompt = base_prompt + "\n\n" + runtime_line
 
+        # 注入用户自定义规则（全局 + 会话级）
+        rules_notice = self._build_rules_notice()
+        if rules_notice:
+            base_prompt = base_prompt + "\n\n" + rules_notice
+
         access_notice = e._build_access_notice()
         if access_notice:
             base_prompt = base_prompt + "\n\n" + access_notice
@@ -295,6 +313,8 @@ class ContextBuilder:
 
         # ── 采集提示词注入快照 ──
         _snapshot_components: dict[str, str] = {}
+        if rules_notice:
+            _snapshot_components["user_rules"] = rules_notice
         if access_notice:
             _snapshot_components["access_notice"] = access_notice
         if backup_notice:
@@ -520,6 +540,12 @@ class ContextBuilder:
             )
         return result
 
+    # Tools that perform destructive actions on the original file itself.
+    # These bypass backup redirection — the approval gate already provides
+    # the safety net, and redirecting would silently create a throwaway
+    # backup copy that the user never intended.
+    _DESTRUCTIVE_NO_REDIRECT_TOOLS = frozenset({"delete_file"})
+
     def _redirect_backup_paths(
         self,
         tool_name: str,
@@ -528,6 +554,9 @@ class ContextBuilder:
         """备份模式下重定向工具参数中的文件路径到备份副本。"""
         e = self._engine
         if not e._backup_enabled or e._backup_manager is None:
+            return arguments
+
+        if tool_name in self._DESTRUCTIVE_NO_REDIRECT_TOOLS:
             return arguments
 
         from excelmanus.tools.policy import (
@@ -652,18 +681,12 @@ class ContextBuilder:
     def _build_workspace_manifest_notice(self) -> str:
         """懒加载构建工作区 Manifest 并生成 system prompt 注入文本。
 
-        首次调用时构建 Manifest（递归扫描工作区 Excel 文件元数据），
-        后续调用复用缓存。注入文本根据文件数量自动选择详细度。
+        优先使用后台预热：若尚未完成则不阻塞当前轮次，直接继续对话。
+        注入文本根据文件数量自动选择详细度。
         """
         e = self._engine
         if not e._workspace_manifest_built:
-            try:
-                from excelmanus.workspace_manifest import build_manifest
-                e._workspace_manifest = build_manifest(e._config.workspace_root)
-                e._workspace_manifest_built = True  # 仅成功时置位，失败保持 False 允许重试
-            except Exception:
-                logger.debug("Workspace manifest 构建失败", exc_info=True)
-                e._workspace_manifest = None
+            e.start_workspace_manifest_prewarm()
         if e._workspace_manifest is None:
             return ""
         return e._workspace_manifest.get_system_prompt_summary()

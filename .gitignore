@@ -19,6 +19,8 @@ build/
 *.whl
 .pytest_cache/
 .hypothesis/
+.mypy_cache/
+.ruff_cache/
 htmlcov/
 .coverage
 .coverage.*
@@ -29,8 +31,10 @@ htmlcov/
 # ==============================
 .vscode/
 .idea/
+.cursor/
 .kiro/
 .windsurf/
+.codex/
 *.swp
 *.swo
 *~
@@ -38,10 +42,16 @@ htmlcov/
 Thumbs.db
 
 # ==============================
+# 虚拟环境
+# ==============================
+.venv/
+
+# ==============================
 # 项目运行产物
 # ==============================
 .excelmanus/
 outputs/
+uploads/
 logs/
 .worktrees/
 
@@ -51,13 +61,17 @@ logs/
 *.png
 *.csv
 *.xlsx
+*.log
 .tmp/
+你好.md
 
 # ==============================
 # 内部开发文档与任务
 # ==============================
 tasks/
 docs/
+README_*.md
+!README.md
 
 # ==============================
 # 锁文件
@@ -73,6 +87,9 @@ scripts/
 scripts/*
 !scripts/__init__.py
 !scripts/migrate_skills_to_standard.py
+!scripts/security/
+scripts/security/*
+!scripts/security/scan_secrets.sh
 
 # ==============================
 # 测试报告
@@ -83,3 +100,15 @@ test_report/
 # 外部工具仓库
 # ==============================
 gemini-cli/
+
+# ==============================
+# Web 前端构建产物
+# ==============================
+web/node_modules/
+web/.next/
+web/.env.local
+
+# ==============================
+# 启动 / 部署脚本（环境相关）
+# ==============================
+start.sh

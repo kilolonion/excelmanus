@@ -243,5 +243,6 @@ def register_introspection_tools(registry: ToolRegistry) -> None:
             description="查询自身工具能力详情，用于决策时确认能力边界。",
             input_schema=INTROSPECT_CAPABILITY_SCHEMA,
             func=introspect_capability,
+            write_effect="none",
         )
     )

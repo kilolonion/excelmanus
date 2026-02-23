@@ -170,3 +170,64 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "rebuild_excel_from_spec": "从 ReplicaSpec JSON 确定性编译为 Excel 文件",
     "verify_excel_replica": "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
 }
+
+
+# ── 审批详情辅助函数 ───────────────────────────────────────
+
+
+import os as _os
+
+
+def get_tool_risk_level(tool_name: str) -> str:
+    """根据工具分层返回风险等级：high / medium / low。"""
+    if tool_name in MUTATING_CONFIRM_TOOLS or tool_name in CODE_POLICY_DYNAMIC_TOOLS:
+        return "high"
+    if tool_name in MUTATING_AUDIT_ONLY_TOOLS:
+        return "medium"
+    return "low"
+
+
+# 路径类参数键（仅保留文件名）
+_PATH_ARG_KEYS: frozenset[str] = frozenset({
+    "file_path", "source", "destination", "output_path", "report_path",
+})
+
+# 长文本参数键（截断到 80 字符）
+_LONG_TEXT_ARG_KEYS: frozenset[str] = frozenset({
+    "command", "script", "code", "content",
+})
+
+
+def sanitize_approval_args_summary(
+    args: dict[str, object],
+    *,
+    path_max: int = 60,
+    long_max: int = 80,
+    default_max: int = 60,
+) -> dict[str, str]:
+    """对审批参数做脱敏摘要，用于 SSE 和前端展示。
+
+    - 路径类参数仅保留文件名
+    - 长文本截断
+    - 其他字符串截断
+    """
+    summary: dict[str, str] = {}
+    for key, val in args.items():
+        if val is None:
+            continue
+        s = str(val)
+        if not s:
+            continue
+        if key in _PATH_ARG_KEYS:
+            s = _os.path.basename(s)
+            if len(s) > path_max:
+                s = s[: path_max - 3] + "..."
+        elif key in _LONG_TEXT_ARG_KEYS:
+            if len(s) > long_max:
+                s = s[: long_max - 3] + "..."
+        else:
+            if len(s) > default_max:
+                s = s[: default_max - 3] + "..."
+        summary[key] = s
+    return summary
+

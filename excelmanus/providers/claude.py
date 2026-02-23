@@ -359,16 +359,22 @@ class _ClaudeChatCompletions:
         stream: bool = False,
         **kwargs: Any,
     ) -> _ChatCompletion | Any:
+        thinking_enabled = kwargs.pop("_thinking_enabled", False)
+        thinking_budget = kwargs.pop("_thinking_budget", 0)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
+                thinking_enabled=thinking_enabled,
+                thinking_budget=thinking_budget,
             )
         return await self._client._generate(
             model=model,
             messages=messages,
             tools=tools,
             tool_choice=kwargs.get("tool_choice"),
+            thinking_enabled=thinking_enabled,
+            thinking_budget=thinking_budget,
         )
 
 
@@ -403,6 +409,8 @@ class ClaudeClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        thinking_enabled: bool = False,
+        thinking_budget: int = 0,
     ) -> _ChatCompletion:
         """执行 Claude Messages API 请求。"""
         system_text, claude_messages = _openai_messages_to_claude(messages)
@@ -412,6 +420,9 @@ class ClaudeClient:
             "messages": claude_messages,
             "max_tokens": _DEFAULT_MAX_TOKENS,
         }
+        if thinking_enabled and thinking_budget > 0:
+            body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
         if system_text:
             body["system"] = system_text
 
@@ -472,6 +483,8 @@ class ClaudeClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        thinking_enabled: bool = False,
+        thinking_budget: int = 0,
     ) -> Any:
         """流式执行 Claude Messages API 请求，返回异步生成器 yield StreamDelta。"""
         system_text, claude_messages = _openai_messages_to_claude(messages)
@@ -481,6 +494,9 @@ class ClaudeClient:
             "max_tokens": _DEFAULT_MAX_TOKENS,
             "stream": True,
         }
+        if thinking_enabled and thinking_budget > 0:
+            body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
         if system_text:
             body["system"] = system_text
         tools_list = tools if isinstance(tools, list) else None

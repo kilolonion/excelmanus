@@ -127,6 +127,34 @@ class ChatHistoryStore:
         self._conn.commit()
         return cur.rowcount > 0
 
+    def delete_all_sessions(self) -> tuple[int, int]:
+        """删除所有会话及消息。返回 (删除的会话数, 删除的消息数)。"""
+        cur_msg = self._conn.execute("SELECT COUNT(*) FROM messages")
+        msg_count = cur_msg.fetchone()[0]
+        cur_sess = self._conn.execute("SELECT COUNT(*) FROM sessions")
+        sess_count = cur_sess.fetchone()[0]
+        self._conn.execute("DELETE FROM messages")
+        self._conn.execute("DELETE FROM sessions")
+        self._conn.commit()
+        return sess_count, msg_count
+
+    def clear_messages(self, session_id: str) -> bool:
+        """清除会话的所有消息，但保留会话记录。返回是否存在该会话。"""
+        if not self.session_exists(session_id):
+            return False
+        now = self._now_iso()
+        self._conn.execute(
+            "DELETE FROM messages WHERE session_id = ?", (session_id,)
+        )
+        self._conn.execute(
+            "UPDATE sessions SET message_count = 0, updated_at = ? WHERE id = ?",
+            (now, session_id),
+        )
+        self._conn.commit()
+        return True
+
+
+
     def list_sessions(
         self,
         limit: int = 100,
@@ -197,3 +225,158 @@ class ChatHistoryStore:
             (session_id,),
         ).fetchone()
         return row["cnt"] if row else 0
+
+    # ── Excel Diff / Affected Files 持久化 ────────────
+
+    def _has_excel_tables(self) -> bool:
+        """检查 session_excel_diffs 表是否存在（兼容旧 DB）。"""
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_excel_diffs'"
+        ).fetchone()
+        return row is not None
+
+    def save_excel_diff(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        file_path: str,
+        sheet: str,
+        affected_range: str,
+        changes: list[dict],
+    ) -> None:
+        """持久化一条 Excel diff 记录。"""
+        if not self._has_excel_tables():
+            return
+        now = self._now_iso()
+        self._conn.execute(
+            "INSERT INTO session_excel_diffs "
+            "(session_id, tool_call_id, file_path, sheet, affected_range, changes_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                tool_call_id,
+                file_path,
+                sheet,
+                affected_range,
+                json.dumps(changes, ensure_ascii=False),
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def save_affected_file(
+        self, session_id: str, file_path: str,
+    ) -> None:
+        """持久化一条改动文件记录（去重）。"""
+        if not self._has_excel_tables():
+            return
+        now = self._now_iso()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO session_affected_files "
+            "(session_id, file_path, created_at) VALUES (?, ?, ?)",
+            (session_id, file_path, now),
+        )
+        self._conn.commit()
+
+    def load_excel_diffs(self, session_id: str) -> list[dict]:
+        """加载会话的所有 Excel diff 记录。"""
+        if not self._has_excel_tables():
+            return []
+        rows = self._conn.execute(
+            "SELECT tool_call_id, file_path, sheet, affected_range, changes_json, created_at "
+            "FROM session_excel_diffs WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                changes = json.loads(r["changes_json"])
+            except (json.JSONDecodeError, TypeError):
+                changes = []
+            result.append({
+                "tool_call_id": r["tool_call_id"],
+                "file_path": r["file_path"],
+                "sheet": r["sheet"],
+                "affected_range": r["affected_range"],
+                "changes": changes,
+                "timestamp": r["created_at"],
+            })
+        return result
+
+    def load_affected_files(self, session_id: str) -> list[str]:
+        """加载会话的所有改动文件路径。"""
+        if not self._has_excel_tables():
+            return []
+        rows = self._conn.execute(
+            "SELECT file_path FROM session_affected_files "
+            "WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        return [r["file_path"] for r in rows]
+
+    # ── Excel Preview 持久化 ─────────────────────────
+
+    def save_excel_preview(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        file_path: str,
+        sheet: str,
+        columns: list[str],
+        rows: list[list],
+        total_rows: int,
+        truncated: bool,
+    ) -> None:
+        """持久化一条 Excel 预览记录（按 tool_call_id 去重）。"""
+        if not self._has_excel_tables():
+            return
+        now = self._now_iso()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO session_excel_previews "
+            "(session_id, tool_call_id, file_path, sheet, columns_json, rows_json, "
+            " total_rows, truncated, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                tool_call_id,
+                file_path,
+                sheet,
+                json.dumps(columns, ensure_ascii=False),
+                json.dumps(rows, ensure_ascii=False),
+                total_rows,
+                1 if truncated else 0,
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def load_excel_previews(self, session_id: str) -> list[dict]:
+        """加载会话的所有 Excel 预览记录。"""
+        if not self._has_excel_tables():
+            return []
+        rows = self._conn.execute(
+            "SELECT tool_call_id, file_path, sheet, columns_json, rows_json, "
+            "       total_rows, truncated "
+            "FROM session_excel_previews WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                columns = json.loads(r["columns_json"])
+            except (json.JSONDecodeError, TypeError):
+                columns = []
+            try:
+                row_data = json.loads(r["rows_json"])
+            except (json.JSONDecodeError, TypeError):
+                row_data = []
+            result.append({
+                "tool_call_id": r["tool_call_id"],
+                "file_path": r["file_path"],
+                "sheet": r["sheet"],
+                "columns": columns,
+                "rows": row_data,
+                "total_rows": r["total_rows"],
+                "truncated": bool(r["truncated"]),
+            })
+        return result

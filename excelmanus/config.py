@@ -36,6 +36,283 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-v3"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
 logger = logging.getLogger(__name__)
 
+# ── 模型 → 上下文窗口大小映射（token 数） ──────────────────────────
+# 键为模型标识符的前缀或完整名称，匹配时优先取最长前缀。
+# 未匹配到的模型回退到 _DEFAULT_CONTEXT_TOKENS。
+_DEFAULT_CONTEXT_TOKENS = 128_000
+
+_MODEL_CONTEXT_WINDOW: dict[str, int] = {
+    # OpenAI
+    "gpt-5": 400_000,
+    "gpt-5-pro": 400_000,
+    "gpt-5-mini": 400_000,
+    "gpt-5-nano": 400_000,
+    "gpt-5.2": 400_000,
+    "gpt-5.3": 400_000,
+    "gpt-5-codex": 400_000,
+    "gpt-5-codex-latest": 400_000,
+    "gpt-5.2-codex": 400_000,
+    "gpt-5.3-codex": 400_000,
+    "gpt-5.3-codex-latest": 400_000,
+    "gpt-5.1-codex-mini": 400_000,
+    "gpt-5.1-codex-max": 400_000,
+    "gpt-5.3-codex-spark": 128_000,
+    "gpt-5.3-codex-spark-latest": 128_000,
+    "gpt-5.1": 400_000,
+    "gpt-5.1-codex": 400_000,
+    "gpt-5-chat-latest": 128_000,
+    "gpt-5.1-chat-latest": 128_000,
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4.1": 1_047_576,
+    "gpt-4.1-mini": 1_047_576,
+    "gpt-4.1-nano": 1_047_576,
+    "o1": 200_000,
+    "o1-mini": 128_000,
+    "o1-pro": 200_000,
+    "o3": 200_000,
+    "o3-mini": 200_000,
+    "o3-pro": 200_000,
+    "o3-deep-research": 200_000,
+    "o4": 200_000,
+    "o4-mini": 200_000,
+    "o4-mini-deep-research": 200_000,
+    "codex-mini-latest": 200_000,
+    # Anthropic / Claude
+    "claude-3-opus": 200_000,
+    "claude-3-sonnet": 200_000,
+    "claude-3-haiku": 200_000,
+    "claude-3-5-sonnet": 200_000,
+    "claude-3.5-sonnet": 200_000,
+    "claude-3-5-haiku": 200_000,
+    "claude-3.5-haiku": 200_000,
+    "claude-3-7-sonnet": 200_000,
+    "claude-3.7-sonnet": 200_000,
+    "claude-4-sonnet": 200_000,
+    "claude-4-opus": 200_000,
+    "claude-sonnet-4": 200_000,
+    "claude-opus-4": 200_000,
+    "claude-opus-4.1": 200_000,
+    "claude-opus-4.6": 200_000,
+    "claude-sonnet-4.6": 200_000,
+    "claude-haiku-4.5": 200_000,
+    # Google Gemini
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-2.5-pro-preview": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
+    "gemini-2.5-flash-preview": 1_048_576,
+    "gemini-2.5-flash-image-preview": 1_048_576,
+    "gemini-2.5-flash-lite": 1_048_576,
+    "gemini-2.5-flash-lite-preview": 1_048_576,
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.0-flash-live": 1_048_576,
+    "gemini-2.0-flash-thinking-exp": 1_048_576,
+    "gemini-2.0-flash-lite": 1_048_576,
+    "gemini-2.0-flash-001": 1_048_576,
+    "gemini-2.0-flash-lite-001": 1_048_576,
+    "gemini-1.5-pro": 2_097_152,
+    "gemini-1.5-flash": 1_048_576,
+    # Qwen
+    "qwen-max": 262_144,
+    "qwen-max-latest": 262_144,
+    "qwen-plus": 1_000_000,
+    "qwen-plus-us": 1_000_000,
+    "qwen-plus-latest": 1_000_000,
+    "qwen3.5-plus": 1_000_000,
+    "qwq-plus": 131_072,
+    "qwq-plus-latest": 131_072,
+    "qwen-flash": 1_000_000,
+    "qwen-flash-latest": 1_000_000,
+    "qwen-turbo": 1_000_000,
+    "qwen-long": 1_000_000,
+    "qwen-long-latest": 10_000_000,
+    "qwen-coder": 1_000_000,
+    "qwen-coder-plus": 131_072,
+    "qwen-coder-plus-latest": 131_072,
+    "qwen-coder-turbo": 131_072,
+    "qwen3-coder-plus": 1_000_000,
+    "qwen3-235b": 131_072,
+    "qwen3-30b": 131_072,
+    "qwen3-32b": 131_072,
+    "qvq-72b-preview": 32_768,
+    "qwen-vl-ocr": 38_192,
+    "qwen-vl-ocr-2025-08-28": 34_096,
+    "qwen2.5-omni-7b": 32_768,
+    "qwen2.5-72b": 131_072,
+    "qwen2.5-32b": 131_072,
+    # DeepSeek
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    "deepseek-v3": 128_000,
+    "deepseek-r1": 128_000,
+    "deepseek-v3.2": 131_072,
+    "deepseek-v3.2-exp": 131_072,
+    # Mistral
+    "mistral-large-2512": 256_000,
+    "mistral-large-latest": 256_000,
+    "mistral-medium-2508": 128_000,
+    "mistral-medium-latest": 128_000,
+    "mistral-small-2506": 128_000,
+    "mistral-small-latest": 128_000,
+    "devstral-2512": 256_000,
+    "labs-devstral-small-2512": 256_000,
+    "labs-devstral-small-latest": 256_000,
+    "devstral-small-2505": 128_000,
+    "codestral-2508": 128_000,
+    "codestral-latest": 128_000,
+    "magistral-small-2509": 128_000,
+    "magistral-medium-2509": 128_000,
+    "magistral-small-2507": 40_000,
+    "magistral-small-2506": 40_000,
+    "pixtral-large-2411": 128_000,
+    "pixtral-large-latest": 128_000,
+    "voxtral-mini-2507": 128_000,
+    "voxtral-mini-latest": 128_000,
+    "voxtral-small-2507": 32_000,
+    "voxtral-small-latest": 32_000,
+    "labs-mistral-small-creative": 32_000,
+    "mistral-small-2503": 128_000,
+    "ministral-14b-2512": 256_000,
+    "ministral-8b-2512": 256_000,
+    "ministral-3b-2512": 256_000,
+    # AI21 Jamba
+    "jamba-large": 256_000,
+    "jamba-mini": 256_000,
+    "jamba-3b": 256_000,
+    # Amazon Nova
+    "amazon.nova-premier": 1_000_000,
+    "amazon.nova-pro": 300_000,
+    "amazon.nova-lite": 300_000,
+    "amazon.nova-micro": 128_000,
+    "amazon.nova-sonic": 300_000,
+    "us.amazon.nova-premier": 1_000_000,
+    "us.amazon.nova-pro": 300_000,
+    "us.amazon.nova-lite": 300_000,
+    "us.amazon.nova-micro": 128_000,
+    "us.amazon.nova-sonic": 300_000,
+    "eu.amazon.nova-premier": 1_000_000,
+    "eu.amazon.nova-pro": 300_000,
+    "eu.amazon.nova-lite": 300_000,
+    "eu.amazon.nova-micro": 128_000,
+    "eu.amazon.nova-sonic": 300_000,
+    "apac.amazon.nova-premier": 1_000_000,
+    "apac.amazon.nova-pro": 300_000,
+    "apac.amazon.nova-lite": 300_000,
+    "apac.amazon.nova-micro": 128_000,
+    "apac.amazon.nova-sonic": 300_000,
+    "amazon.nova-2-lite": 1_000_000,
+    "amazon.nova-2-sonic": 1_000_000,
+    "nova-2-lite": 1_000_000,
+    "nova-2-sonic": 1_000_000,
+    # MiniMax
+    "minimax-m2.5": 204_800,
+    "minimax-m2.5-highspeed": 204_800,
+    "minimax-m2.1": 204_800,
+    "minimax-m2.1-highspeed": 204_800,
+    "minimax-m2.1-lightning": 204_800,
+    "minimax-m2": 204_800,
+    "m2-her": 64_000,
+    # Moonshot / Kimi
+    "kimi-k2": 262_144,
+    "kimi-k2-thinking": 262_144,
+    "kimi-k2.5": 262_144,
+    "kimi-k2.5-thinking": 262_144,
+    "moonshot-kimi-k2.5": 262_144,
+    "moonshot-kimi-k2.5-thinking": 262_144,
+    "moonshot-kimi-k2-instruct": 131_072,
+    "moonshotai/kimi-k2": 262_144,
+    "moonshotai/kimi-k2-thinking": 262_144,
+    "moonshotai/kimi-k2.5": 262_144,
+    # Cohere
+    "command-a": 256_000,
+    "command-a-03-2025": 256_000,
+    "command-a-reasoning": 256_000,
+    "command-r-plus": 128_000,
+    "command-r-plus-08-2024": 128_000,
+    "command-r7b": 128_000,
+    "command-r7b-12-2024": 128_000,
+    "c4ai-command-r7b-12-2024": 128_000,
+    "command-r": 128_000,
+    "command-r-08-2024": 128_000,
+    # xAI Grok
+    "grok-4-fast-reasoning": 2_000_000,
+    "grok-4-fast-non-reasoning": 2_000_000,
+    "grok-4-1-fast-reasoning": 2_000_000,
+    "grok-4-1-fast-non-reasoning": 2_000_000,
+    "grok-code-fast-1": 256_000,
+    "grok-4": 256_000,
+    "xai.grok-4-fast-reasoning": 2_000_000,
+    "xai.grok-4-fast-non-reasoning": 2_000_000,
+    "xai.grok-4-1-fast-reasoning": 2_000_000,
+    "xai.grok-4-1-fast-non-reasoning": 2_000_000,
+    "xai.grok-code-fast-1": 256_000,
+    "xai.grok-4": 256_000,
+    # Meta Llama
+    "llama-4-scout": 10_000_000,
+    "llama-4-maverick": 1_000_000,
+    "llama-3.3": 131_072,
+    "llama-3.2": 131_072,
+    "llama-3.1": 131_072,
+    "meta-llama/llama-4-scout": 10_000_000,
+    "meta-llama/llama-4-maverick": 1_000_000,
+    "meta-llama/llama-3.3": 131_072,
+    "meta-llama/llama-3.2": 131_072,
+    "meta-llama/llama-3.1": 131_072,
+    "moonshot-v1-128k": 128_000,
+    "moonshot-v1-32k": 32_000,
+    "moonshot-v1-8k": 8_000,
+}
+
+
+def _normalize_model_identifier(model: str) -> str:
+    """归一化模型标识，兼容空格/下划线命名。"""
+    normalized = model.strip().lower().replace("_", "-")
+    normalized = re.sub(r"\s+", "-", normalized)
+    normalized = re.sub(r"-+", "-", normalized)
+    return normalized
+
+
+def _infer_context_tokens_for_model(model: str) -> int:
+    """根据模型名推断上下文窗口大小，最长前缀匹配优先。"""
+    model_normalized = _normalize_model_identifier(model)
+    candidates = [model_normalized]
+    if "/" in model_normalized:
+        tail = model_normalized.rsplit("/", 1)[-1]
+        if tail and tail not in candidates:
+            candidates.append(tail)
+
+    best_key = ""
+    best_val = _DEFAULT_CONTEXT_TOKENS
+    best_candidate = ""
+    for candidate in candidates:
+        for key, val in _MODEL_CONTEXT_WINDOW.items():
+            if candidate.startswith(key.lower()) and len(key) > len(best_key):
+                best_key = key
+                best_val = val
+                best_candidate = candidate
+
+    if not best_key:
+        for candidate in candidates:
+            # 兜底：未来 gpt-5.x-codex 变体，默认继承 GPT-5 Codex 400k。
+            if candidate.startswith("gpt-5") and "codex" in candidate:
+                best_key = "gpt-5*-codex(fallback)"
+                best_val = 400_000
+                best_candidate = candidate
+                break
+
+    if best_key:
+        logger.debug(
+            "模型 %r 匹配上下文窗口映射 %r（候选=%r）→ %d tokens",
+            model, best_key, best_candidate or model_normalized, best_val,
+        )
+    else:
+        logger.debug(
+            "模型 %r 未匹配到已知映射，使用默认 %d tokens",
+            model, _DEFAULT_CONTEXT_TOKENS,
+        )
+    return best_val
+
 
 @dataclass(frozen=True)
 class ExcelManusConfig:
@@ -68,11 +345,9 @@ class ExcelManusConfig:
         "http://localhost:5173",
     )
     mcp_shared_manager: bool = False
-    # 路由子代理配置（可选，默认回退到主模型）
-    router_api_key: str | None = None
-    router_base_url: str | None = None
-    router_model: str | None = None
-    # 辅助模型（统一用于子代理默认模型 + 窗口感知顾问模型）
+    # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
+    aux_api_key: str | None = None
+    aux_base_url: str | None = None
     aux_model: str | None = None
     # subagent 执行配置
     subagent_enabled: bool = True
@@ -84,6 +359,7 @@ class ExcelManusConfig:
     memory_enabled: bool = True
     memory_dir: str = "~/.excelmanus/memory"
     memory_auto_load_lines: int = 200
+    memory_auto_extract_interval: int = 15  # 每 N 轮后台静默提取记忆（0 = 禁用）
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
     # Prompt Cache 优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
@@ -128,9 +404,6 @@ class ExcelManusConfig:
     window_intent_repeat_warn_threshold: int = 2
     window_intent_repeat_trip_threshold: int = 3
     window_rule_engine_version: str = "v1"
-    # 窗口感知顾问独立 API 配置（可选，未配置时回退到主配置）
-    window_advisor_api_key: str | None = None
-    window_advisor_base_url: str | None = None
     # VLM（视觉语言模型）独立模型配置（可选，未配置时回退到主模型）
     vlm_api_key: str | None = None
     vlm_base_url: str | None = None
@@ -486,14 +759,22 @@ def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def _load_context_optimization_config() -> _ContextOptimizationConfig:
-    """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。"""
+def _load_context_optimization_config(model: str = "") -> _ContextOptimizationConfig:
+    """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。
+
+    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 环境变量 > 模型自动推断 > 默认 128k。
+    """
+    env_max_ctx = os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS")
+    if env_max_ctx:
+        # 用户显式配置，尊重用户意愿
+        max_context_tokens = _parse_int(env_max_ctx, "EXCELMANUS_MAX_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS)
+    elif model:
+        # 根据模型名自动推断
+        max_context_tokens = _infer_context_tokens_for_model(model)
+    else:
+        max_context_tokens = _DEFAULT_CONTEXT_TOKENS
     return _ContextOptimizationConfig(
-        max_context_tokens=_parse_int(
-            os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"),
-            "EXCELMANUS_MAX_CONTEXT_TOKENS",
-            128_000,
-        ),
+        max_context_tokens=max_context_tokens,
         prompt_cache_key_enabled=_parse_bool(
             os.environ.get("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED"),
             "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
@@ -666,13 +947,11 @@ def load_config() -> ExcelManusConfig:
         False,
     )
 
-    # 路由子代理配置（可选）
-    router_api_key = os.environ.get("EXCELMANUS_ROUTER_API_KEY") or None
-    router_base_url = os.environ.get("EXCELMANUS_ROUTER_BASE_URL") or None
-    if router_base_url:
-        _validate_base_url(router_base_url)
-    router_model = os.environ.get("EXCELMANUS_ROUTER_MODEL") or None
-    # 辅助模型（统一配置）
+    # AUX 配置（统一配置）
+    aux_api_key = os.environ.get("EXCELMANUS_AUX_API_KEY") or None
+    aux_base_url = os.environ.get("EXCELMANUS_AUX_BASE_URL") or None
+    if aux_base_url:
+        _validate_base_url(aux_base_url)
     aux_model = os.environ.get("EXCELMANUS_AUX_MODEL") or None
 
     # subagent 执行配置
@@ -712,7 +991,12 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
         200,
     )
-    context_optimization = _load_context_optimization_config()
+    memory_auto_extract_interval = _parse_int(
+        os.environ.get("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL"),
+        "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
+        15,
+    )
+    context_optimization = _load_context_optimization_config(model=model)
     hooks_command_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
         "EXCELMANUS_HOOKS_COMMAND_ENABLED",
@@ -848,12 +1132,6 @@ def load_config() -> ExcelManusConfig:
     window_rule_engine_version = _parse_window_rule_engine_version(
         os.environ.get("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION")
     )
-
-    # 窗口感知顾问独立小模型配置（可选）
-    window_advisor_api_key = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_API_KEY") or None
-    window_advisor_base_url = os.environ.get("EXCELMANUS_WINDOW_ADVISOR_BASE_URL") or None
-    if window_advisor_base_url:
-        _validate_base_url(window_advisor_base_url)
 
     # VLM 独立模型配置（可选）
     vlm_api_key = os.environ.get("EXCELMANUS_VLM_API_KEY") or None
@@ -1003,9 +1281,8 @@ def load_config() -> ExcelManusConfig:
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
-        router_api_key=router_api_key,
-        router_base_url=router_base_url,
-        router_model=router_model,
+        aux_api_key=aux_api_key,
+        aux_base_url=aux_base_url,
         aux_model=aux_model,
         subagent_enabled=subagent_enabled,
         subagent_max_iterations=subagent_max_iterations,
@@ -1015,6 +1292,7 @@ def load_config() -> ExcelManusConfig:
         memory_enabled=memory_enabled,
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
+        memory_auto_extract_interval=memory_auto_extract_interval,
         max_context_tokens=context_optimization.max_context_tokens,
         prompt_cache_key_enabled=context_optimization.prompt_cache_key_enabled,
         summarization_enabled=context_optimization.summarization_enabled,
@@ -1053,8 +1331,6 @@ def load_config() -> ExcelManusConfig:
         window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
         window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
         window_rule_engine_version=window_rule_engine_version,
-        window_advisor_api_key=window_advisor_api_key,
-        window_advisor_base_url=window_advisor_base_url,
         vlm_api_key=vlm_api_key,
         vlm_base_url=vlm_base_url,
         vlm_model=vlm_model,

@@ -2223,6 +2223,7 @@ def get_tools() -> list[ToolDef]:
             },
             func=read_excel,
             max_result_chars=6000,
+            write_effect="none",
         ),
         # write_excel: Batch 1 精简
         # analyze_data: Batch 4 精简，由 run_code + pandas describe() 替代
@@ -2306,6 +2307,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=filter_data,
+            write_effect="none",
         ),
         ToolDef(
             name="inspect_excel_files",
@@ -2371,6 +2373,7 @@ def get_tools() -> list[ToolDef]:
             },
             func=inspect_excel_files,
             max_result_chars=0,
+            write_effect="none",
         ),
         # transform_data: Batch 1 精简
         # group_aggregate: Batch 4 精简，由 run_code + pandas groupby() 替代

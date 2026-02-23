@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -12,6 +12,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.session import (
     SessionBusyError,
     SessionLimitExceededError,
+    SessionNotFoundError,
     SessionManager,
 )
 from excelmanus.tools import ToolRegistry
@@ -87,6 +88,20 @@ class TestGetOrCreate:
         assert len(sid) == 36  # UUID4 格式
         assert engine is not None
         assert await manager.get_active_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_create_new_session_starts_manifest_prewarm(
+        self, manager: SessionManager
+    ) -> None:
+        """创建新会话时应触发 engine 的后台 manifest 预热。"""
+        with patch(
+            "excelmanus.session.AgentEngine.start_workspace_manifest_prewarm",
+            return_value=True,
+        ) as prewarm_mock:
+            sid, _engine = await manager.acquire_for_chat(None)
+            await manager.release_for_chat(sid)
+
+        prewarm_mock.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_create_new_session_with_unknown_id(
@@ -184,6 +199,102 @@ class TestAcquireForChat:
         sid, _ = await manager.acquire_for_chat("release-session")
         await manager.release_for_chat(sid)
         assert manager._sessions[sid].in_flight is False
+
+
+class TestSessionDetail:
+    """get_session_detail 方法测试。"""
+
+    @pytest.mark.asyncio
+    async def test_get_session_detail_includes_mode_and_model_state(
+        self, manager: SessionManager
+    ) -> None:
+        """活跃会话详情应返回模式开关与当前模型信息。"""
+        sid, _ = await _create_session(manager, "detail-session")
+
+        detail = await manager.get_session_detail(sid)
+
+        assert detail["full_access_enabled"] is False
+        assert detail["plan_mode_enabled"] is False
+        assert detail["current_model"] == manager._sessions[sid].engine.current_model
+        assert (
+            detail["current_model_name"]
+            == manager._sessions[sid].engine.current_model_name
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_session_detail_sqlite_fallback_has_default_mode_and_model_state(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """SQLite 历史回退详情也应保持与活跃会话一致的字段形状。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = True
+        chat_history.load_messages.return_value = [{"role": "user", "content": "历史消息"}]
+
+        manager = SessionManager(
+            max_sessions=config.max_sessions,
+            ttl_seconds=config.session_ttl_seconds,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        detail = await manager.get_session_detail("history-only")
+
+        assert detail["full_access_enabled"] is False
+        assert detail["plan_mode_enabled"] is False
+        assert detail["current_model"] is None
+        assert detail["current_model_name"] is None
+
+
+class TestRollbackSession:
+    """rollback_session 方法测试。"""
+
+    @pytest.mark.asyncio
+    async def test_rollback_sqlite_only_session_rebuilds_persisted_messages(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """SQLite 历史会话回退后，应清空并重建持久化消息。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = True
+        chat_history.load_messages.return_value = [
+            {"role": "user", "content": "原始问题"},
+            {"role": "assistant", "content": "原始回复"},
+            {"role": "user", "content": "第二轮问题"},
+            {"role": "assistant", "content": "第二轮回复"},
+        ]
+
+        manager = SessionManager(
+            max_sessions=config.max_sessions,
+            ttl_seconds=config.session_ttl_seconds,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        result = await manager.rollback_session(
+            "history-only",
+            0,
+            new_message="编辑后问题",
+        )
+
+        assert result["turn_index"] == 0
+        assert result["removed_messages"] == 3
+        chat_history.clear_messages.assert_called_once_with("history-only")
+        chat_history.save_turn_messages.assert_called_once()
+
+        save_call = chat_history.save_turn_messages.call_args
+        assert save_call.args[0] == "history-only"
+        persisted_messages = save_call.args[1]
+        assert persisted_messages == [{"role": "user", "content": "编辑后问题"}]
+        assert save_call.kwargs["turn_number"] == 0
+
+    @pytest.mark.asyncio
+    async def test_rollback_missing_session_raises_not_found(
+        self, manager: SessionManager
+    ) -> None:
+        """不存在的会话回退应抛出 SessionNotFoundError。"""
+        with pytest.raises(SessionNotFoundError, match="不存在"):
+            await manager.rollback_session("missing-session", 0)
 
 
 class TestDelete:
@@ -520,3 +631,128 @@ class TestProperty18SessionTTLCleanup:
 
         assert removed == 0
         assert await mgr.get_active_count() == n_sessions
+
+
+class TestArchiveSession:
+    """archive_session 方法测试。"""
+
+    @pytest.mark.asyncio
+    async def test_archive_sqlite_only_session(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """仅存在于 SQLite 中的历史会话可被归档。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = True
+        chat_history.update_session = MagicMock()
+
+        mgr = SessionManager(
+            max_sessions=5,
+            ttl_seconds=60,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        result = await mgr.archive_session("sqlite-only", archive=True)
+        assert result is True
+        chat_history.update_session.assert_called_once_with("sqlite-only", status="archived")
+
+    @pytest.mark.asyncio
+    async def test_unarchive_sqlite_only_session(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """仅存在于 SQLite 中的归档会话可被取消归档。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = True
+        chat_history.update_session = MagicMock()
+
+        mgr = SessionManager(
+            max_sessions=5,
+            ttl_seconds=60,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        result = await mgr.archive_session("sqlite-only", archive=False)
+        assert result is True
+        chat_history.update_session.assert_called_once_with("sqlite-only", status="active")
+
+    @pytest.mark.asyncio
+    async def test_archive_in_memory_session(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """内存中的活跃会话可被归档（通过 SQLite 持久化状态）。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = False
+        chat_history.update_session = MagicMock()
+
+        mgr = SessionManager(
+            max_sessions=5,
+            ttl_seconds=60,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        sid, _ = await _create_session(mgr)
+        result = await mgr.archive_session(sid, archive=True)
+        assert result is True
+        chat_history.update_session.assert_called_once_with(sid, status="archived")
+
+    @pytest.mark.asyncio
+    async def test_archive_nonexistent_session_returns_false(
+        self, manager: SessionManager
+    ) -> None:
+        """归档不存在的会话应返回 False。"""
+        result = await manager.archive_session("nonexistent", archive=True)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_archive_without_chat_history_returns_false(
+        self, manager: SessionManager
+    ) -> None:
+        """无 ChatHistoryStore 时，归档内存会话应返回 False。"""
+        sid, _ = await _create_session(manager)
+        # manager 默认无 chat_history
+        result = await manager.archive_session(sid, archive=True)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_archive_persists_messages_before_status_update(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """归档内存会话时，应先持久化消息再更新状态。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = False
+        chat_history.update_session = MagicMock()
+
+        call_order: list[str] = []
+        orig_save = chat_history.save_turn_messages
+        orig_update = chat_history.update_session
+
+        def track_save(*a, **kw):
+            call_order.append("save")
+            return orig_save(*a, **kw)
+
+        def track_update(*a, **kw):
+            call_order.append("update")
+            return orig_update(*a, **kw)
+
+        chat_history.save_turn_messages = track_save
+        chat_history.update_session = track_update
+
+        mgr = SessionManager(
+            max_sessions=5,
+            ttl_seconds=60,
+            config=config,
+            registry=registry,
+            chat_history=chat_history,
+        )
+
+        sid, _ = await _create_session(mgr)
+        await mgr.archive_session(sid, archive=True)
+
+        # update_session（状态更新）应在 save_turn_messages 之后
+        if "save" in call_order:
+            assert call_order.index("save") < call_order.index("update")

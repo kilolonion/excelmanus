@@ -100,6 +100,62 @@ def _resolve_merged_cell(ws: Any, row: int, col: int) -> tuple[int, int, bool]:
 
 
 
+def _capture_range_snapshot(
+    ws: Any,
+    min_row: int,
+    min_col: int,
+    max_row: int,
+    max_col: int,
+) -> list[dict[str, Any]]:
+    """捕获指定范围内所有非空单元格的值快照。
+
+    Returns:
+        列表，每项为 {"cell": "A1", "value": ...}
+    """
+    snapshot: list[dict[str, Any]] = []
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            cell_obj = ws.cell(row=r, column=c)
+            ref = f"{get_column_letter(c)}{r}"
+            val = cell_obj.value
+            snapshot.append({"cell": ref, "value": val})
+    return snapshot
+
+
+def _compute_cell_diff(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """对比写入前后快照，返回变化的单元格列表。
+
+    Returns:
+        列表，每项为 {"cell": "A1", "old": ..., "new": ...}
+    """
+    before_map = {item["cell"]: item["value"] for item in before}
+    after_map = {item["cell"]: item["value"] for item in after}
+    all_cells = sorted(set(before_map) | set(after_map))
+    changes: list[dict[str, Any]] = []
+    for cell_ref in all_cells:
+        old_val = before_map.get(cell_ref)
+        new_val = after_map.get(cell_ref)
+        if old_val != new_val:
+            changes.append({
+                "cell": cell_ref,
+                "old": _serialize_cell_value(old_val),
+                "new": _serialize_cell_value(new_val),
+            })
+    return changes
+
+
+def _serialize_cell_value(val: Any) -> Any:
+    """将单元格值序列化为 JSON 安全类型。"""
+    if val is None:
+        return None
+    if isinstance(val, (int, float, bool)):
+        return val
+    return str(val)
+
+
 # ── 工具函数 ──────────────────────────────────────────────
 
 
@@ -154,6 +210,34 @@ def write_cells(
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
+    # 计算受影响范围，用于写入前快照
+    _snap_min_row = _snap_min_col = _snap_max_row = _snap_max_col = 0
+    try:
+        if single_mode:
+            row, col = _parse_single_cell(cell)  # type: ignore[arg-type]
+            _snap_min_row, _snap_min_col = row, col
+            _snap_max_row, _snap_max_col = row, col
+        else:
+            if values is None or not values:
+                return json.dumps(
+                    {"error": "范围模式下 values 不能为空"},
+                    ensure_ascii=False,
+                )
+            start_ref = cell_range or "A1"
+            if ":" in start_ref:
+                start_ref = start_ref.split(":")[0]
+            _snap_min_row, _snap_min_col = _parse_single_cell(start_ref)
+            _snap_max_row = _snap_min_row + len(values) - 1
+            _max_cols = max(len(r) if isinstance(r, list) else 1 for r in values)
+            _snap_max_col = _snap_min_col + _max_cols - 1
+
+        # 写入前快照
+        before_snapshot = _capture_range_snapshot(
+            ws, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
+        )
+    except Exception:
+        before_snapshot = []
+
     try:
         if single_mode:
             # 单元格模式
@@ -175,14 +259,7 @@ def write_cells(
                 )
         else:
             # 范围模式
-            if values is None or not values:
-                return json.dumps(
-                    {"error": "范围模式下 values 不能为空"},
-                    ensure_ascii=False,
-                )
-            # 解析起始位置
             start_ref = cell_range or "A1"
-            # 如果是范围（如 A1:C3），取左上角
             if ":" in start_ref:
                 start_ref = start_ref.split(":")[0]
             start_row, start_col = _parse_single_cell(start_ref)
@@ -228,6 +305,29 @@ def write_cells(
                 result["skipped_merged_cells"] = skipped_merged
     finally:
         wb.close()
+
+    # 写入后快照并计算 diff
+    try:
+        wb_after = load_workbook(safe_path)
+        ws_after = get_worksheet(wb_after, sheet_name)
+        after_snapshot = _capture_range_snapshot(
+            ws_after, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
+        )
+        wb_after.close()
+        excel_diff = _compute_cell_diff(before_snapshot, after_snapshot)
+        if excel_diff:
+            affected_range = (
+                f"{get_column_letter(_snap_min_col)}{_snap_min_row}"
+                f":{get_column_letter(_snap_max_col)}{_snap_max_row}"
+            )
+            result["_excel_diff"] = {
+                "file_path": file_path,
+                "sheet": sheet_name or "",
+                "affected_range": affected_range,
+                "changes": excel_diff,
+            }
+    except Exception as exc:
+        logger.debug("写入后 diff 捕获失败: %s", exc)
 
     # 检测是否写入了公式
     has_formulas = False

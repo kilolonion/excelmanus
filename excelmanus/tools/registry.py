@@ -13,6 +13,13 @@ from excelmanus.logger import get_logger
 logger = get_logger("tools")
 
 OpenAISchemaMode = Literal["responses", "chat_completions"]
+WriteEffect = Literal[
+    "none",
+    "workspace_write",
+    "external_write",
+    "dynamic",
+    "unknown",
+]
 
 # 内置工具模块清单（单一事实源）：
 # 1) 该顺序即注册顺序；
@@ -58,6 +65,8 @@ class ToolDef:
     max_result_chars: int = 3000
     truncate_head_chars: int | None = None
     truncate_tail_chars: int = 0
+    # 写入语义声明（用于写入追踪，不用于审批/审计策略判定）
+    write_effect: WriteEffect = "unknown"
 
     def truncate_result(self, text: str) -> str:
         """若文本超过 max_result_chars 则截断并附加提示。

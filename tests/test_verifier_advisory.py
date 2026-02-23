@@ -179,7 +179,7 @@ class TestVerifierAdvisorySkip:
 
 
 class TestFinishTaskWithVerifierAdvisory:
-    """finish_task 有写入时应触发 verifier 并拼接结果。"""
+    """finish_task 有写入时直接完成，不触发 verifier。"""
 
     @staticmethod
     def _finish_task_call(report: dict | None = None, summary: str = "done") -> types.SimpleNamespace:
@@ -197,13 +197,14 @@ class TestFinishTaskWithVerifierAdvisory:
         )
 
     @pytest.mark.asyncio
-    async def test_finish_with_write_triggers_verifier_and_appends_result(self):
+    async def test_finish_with_write_skips_verifier(self):
+        """有写入操作时直接完成，不调用 verifier。"""
         engine = _make_engine()
         engine._has_write_tool_call = True
         engine._current_write_hint = "may_write"
 
-        mock_result = _make_verifier_result(verdict="pass", checks=["数据正确"])
-        with patch.object(engine, "run_subagent", new_callable=AsyncMock, return_value=mock_result):
+        run_subagent_mock = AsyncMock()
+        with patch.object(engine, "run_subagent", run_subagent_mock):
             result = await engine._execute_tool_call(
                 self._finish_task_call(
                     report={"operations": "写入数据", "key_findings": "100行"},
@@ -215,51 +216,7 @@ class TestFinishTaskWithVerifierAdvisory:
 
         assert result.finish_accepted is True
         assert "任务完成" in result.result
-        assert "验证通过" in result.result
-
-    @pytest.mark.asyncio
-    async def test_finish_with_write_verifier_fail_still_accepted(self):
-        """verifier fail 时 finish 仍应 accepted（advisory 模式）。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-        engine._current_write_hint = "may_write"
-
-        mock_result = _make_verifier_result(verdict="fail", issues=["文件缺失"])
-        with patch.object(engine, "run_subagent", new_callable=AsyncMock, return_value=mock_result):
-            result = await engine._execute_tool_call(
-                self._finish_task_call(
-                    report={"operations": "写入数据", "key_findings": "100行"},
-                ),
-                tool_scope=None,
-                on_event=None,
-                iteration=1,
-            )
-
-        assert result.finish_accepted is True
-        assert "验证发现问题" in result.result
-        assert "文件缺失" in result.result
-
-    @pytest.mark.asyncio
-    async def test_finish_with_write_verifier_exception_still_accepted(self):
-        """verifier 异常时 finish 仍应 accepted（fail-open）。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-        engine._current_write_hint = "may_write"
-
-        with patch.object(
-            engine, "run_subagent",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("verifier boom"),
-        ):
-            result = await engine._execute_tool_call(
-                self._finish_task_call(summary="done"),
-                tool_scope=None,
-                on_event=None,
-                iteration=1,
-            )
-
-        assert result.finish_accepted is True
-        assert "任务完成" in result.result
+        run_subagent_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_finish_without_write_does_not_trigger_verifier(self):

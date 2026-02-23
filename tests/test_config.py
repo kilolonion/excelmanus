@@ -410,8 +410,9 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.aux_model is None
 
-    def test_default_external_safe_mode_enabled(self, monkeypatch) -> None:
+    def test_default_external_safe_mode_enabled(self, monkeypatch, tmp_path) -> None:
         """默认开启对外安全模式。"""
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
         monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
         monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
@@ -902,9 +903,9 @@ class TestModelsRouterHooksAndMcpConfig:
         assert cfg.models[0].api_key == "test-key"
         assert cfg.models[0].base_url == "https://example.com/v1"
 
-    def test_router_base_url_invalid_raises_error(self, monkeypatch) -> None:
+    def test_aux_base_url_invalid_raises_error(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)
-        monkeypatch.setenv("EXCELMANUS_ROUTER_BASE_URL", "ftp://invalid")
+        monkeypatch.setenv("EXCELMANUS_AUX_BASE_URL", "ftp://invalid")
         with pytest.raises(ConfigError, match="EXCELMANUS_BASE_URL"):
             load_config()
 
@@ -967,3 +968,73 @@ class TestModelsRouterHooksAndMcpConfig:
         monkeypatch.setenv("EXCELMANUS_MCP_SHARED_MANAGER", "maybe")
         with pytest.raises(ConfigError, match="EXCELMANUS_MCP_SHARED_MANAGER"):
             load_config()
+
+
+class TestContextWindowInference:
+    def test_infers_mainstream_model_context_window(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.delenv("EXCELMANUS_MAX_CONTEXT_TOKENS", raising=False)
+
+        model_to_expected_tokens = {
+            "gpt-5": 400_000,
+            "gpt-5-chat-latest": 128_000,
+            "gpt-5.2-codex": 400_000,
+            "gpt-5.3-codex": 400_000,
+            "gpt-5.3-codex-spark": 128_000,
+            "gpt 5.3 codex": 400_000,
+            "gpt_5_1_codex_max": 400_000,
+            "openai/gpt-5.2-codex": 400_000,
+            "codex-mini-latest": 200_000,
+            "openai/codex-mini-latest": 200_000,
+            "o4": 200_000,
+            "claude-opus-4.1": 200_000,
+            "claude-sonnet-4.6": 200_000,
+            "gemini-2.5-flash-lite": 1_048_576,
+            "qwen-plus": 1_000_000,
+            "qwen3.5-plus": 1_000_000,
+            "qwen-flash": 1_000_000,
+            "qwen3-coder-plus": 1_000_000,
+            "qwen-coder-plus": 131_072,
+            "qwen-long-latest": 10_000_000,
+            "qwq-plus": 131_072,
+            "qvq-72b-preview": 32_768,
+            "qwen-vl-ocr": 38_192,
+            "qwen2.5-omni-7b": 32_768,
+            "kimi-k2-turbo-preview": 262_144,
+            "moonshot-kimi-k2-instruct-v1": 131_072,
+            "moonshot-kimi-k2.5": 262_144,
+            "deepseek-v3.2-exp": 131_072,
+            "mistral-large-2512": 256_000,
+            "mistral-medium-2508": 128_000,
+            "ministral-8b-2512": 256_000,
+            "mistral/mistral-large-2512": 256_000,
+            "devstral-2512": 256_000,
+            "labs-devstral-small-2512": 256_000,
+            "magistral-small-2509": 128_000,
+            "magistral-small-2507": 40_000,
+            "voxtral-small-2507": 32_000,
+            "labs-mistral-small-creative": 32_000,
+            "jamba-mini": 256_000,
+            "jamba-3b": 256_000,
+            "amazon.nova-pro-v1:0": 300_000,
+            "us.amazon.nova-premier-v1:0": 1_000_000,
+            "eu.amazon.nova-pro-v1:0": 300_000,
+            "apac.amazon.nova-lite-v1:0": 300_000,
+            "amazon.nova-sonic-v1:0": 300_000,
+            "amazon.nova-2-sonic": 1_000_000,
+            "minimax-m2.5-highspeed": 204_800,
+            "minimax-m2.1-lightning": 204_800,
+            "m2-her": 64_000,
+            "command-a-reasoning-08-2025": 256_000,
+            "grok-4-fast-reasoning": 2_000_000,
+            "xai.grok-4-1-fast-reasoning": 2_000_000,
+            "xai.grok-code-fast-1": 256_000,
+            "llama-4-scout-17b-16e-instruct": 10_000_000,
+        }
+
+        for model, expected_tokens in model_to_expected_tokens.items():
+            monkeypatch.setenv("EXCELMANUS_MODEL", model)
+            cfg = load_config()
+            assert cfg.max_context_tokens == expected_tokens

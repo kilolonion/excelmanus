@@ -514,6 +514,76 @@ async def test_default_mode_audit_only_tool_executes_without_pending(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_mcp_unknown_tool_workspace_probe_propagates_structured_changes(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    registry = ToolRegistry()
+
+    def mcp_writer(path: str) -> str:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ok", encoding="utf-8")
+        return "写入完成"
+
+    registry.register_tool(
+        ToolDef(
+            name="mcp_demo_write",
+            description="MCP unknown write tool",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            func=mcp_writer,
+            write_effect="unknown",
+        )
+    )
+
+    approval = ApprovalManager(str(tmp_path))
+    executor = SubagentExecutor(
+        parent_config=config,
+        parent_registry=registry,
+        approval_manager=approval,
+    )
+    sub_cfg = SubagentConfig(
+        name="writer",
+        description="mcp unknown 探针测试",
+        allowed_tools=["mcp_demo_write"],
+        permission_mode="default",
+        max_iterations=2,
+        max_consecutive_failures=2,
+    )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    side_effect=[
+                        _response_from_message(
+                            _tool_call_message(
+                                "mcp_demo_write",
+                                {"path": "out/mcp_probe.xlsx"},
+                            )
+                        ),
+                        _response_from_message(_text_message("执行完成")),
+                    ]
+                )
+            )
+        )
+    )
+
+    with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
+        result = await executor.run(
+            config=sub_cfg,
+            prompt="执行 mcp 写入",
+            full_access_enabled=True,
+        )
+
+    assert result.success is True
+    assert any(change.path == "out/mcp_probe.xlsx" for change in result.structured_changes)
+
+
+@pytest.mark.asyncio
 async def test_audit_only_tool_failure_still_writes_audit_manifest(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     registry = ToolRegistry()

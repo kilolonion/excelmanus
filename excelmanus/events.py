@@ -26,8 +26,15 @@ class EventType(Enum):
     TASK_ITEM_UPDATED = "task_item_updated"
     USER_QUESTION = "user_question"
     PENDING_APPROVAL = "pending_approval"
+    APPROVAL_RESOLVED = "approval_resolved"
     THINKING_DELTA = "thinking_delta"
     TEXT_DELTA = "text_delta"
+    MODE_CHANGED = "mode_changed"
+    EXCEL_PREVIEW = "excel_preview"
+    EXCEL_DIFF = "excel_diff"
+    FILES_CHANGED = "files_changed"
+    PIPELINE_PROGRESS = "pipeline_progress"
+    MEMORY_EXTRACTED = "memory_extracted"
 
 
 @dataclass
@@ -39,6 +46,7 @@ class ToolCallEvent:
     """
 
     event_type: EventType
+    tool_call_id: str = ""
     tool_name: str = ""
     arguments: Dict[str, Any] = field(default_factory=dict)
     result: str = ""
@@ -87,9 +95,32 @@ class ToolCallEvent:
     approval_id: str = ""
     approval_tool_name: str = ""
     approval_arguments: Dict[str, Any] = field(default_factory=dict)
+    approval_risk_level: str = ""
+    approval_args_summary: Dict[str, str] = field(default_factory=dict)
+    approval_undoable: bool = False
     # 流式 delta 字段
     text_delta: str = ""
     thinking_delta: str = ""
+    # 模式变更事件字段
+    mode_name: str = ""        # "full_access" | "plan_mode"
+    mode_enabled: bool = False
+    # Excel 预览/Diff 事件字段
+    excel_file_path: str = ""
+    excel_sheet: str = ""
+    excel_columns: List[str] = field(default_factory=list)
+    excel_rows: List[List[Any]] = field(default_factory=list)
+    excel_total_rows: int = 0
+    excel_truncated: bool = False
+    excel_affected_range: str = ""
+    excel_changes: List[Dict[str, Any]] = field(default_factory=list)
+    # files_changed 事件字段
+    changed_files: List[str] = field(default_factory=list)
+    # pipeline_progress 事件字段
+    pipeline_stage: str = ""
+    pipeline_message: str = ""
+    # memory_extracted 事件字段
+    memory_entries: List[Dict[str, Any]] = field(default_factory=list)
+    memory_trigger: str = ""  # "periodic" | "pre_compaction" | "session_end"
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""
