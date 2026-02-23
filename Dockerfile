@@ -7,6 +7,9 @@ COPY excelmanus /app/excelmanus
 
 RUN pip install --no-cache-dir .
 
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
 EXPOSE 8000
 
 CMD ["excelmanus-api"]
