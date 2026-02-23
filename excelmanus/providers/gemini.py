@@ -459,10 +459,12 @@ class _GeminiChatCompletions:
         **kwargs: Any,
     ) -> _ChatCompletion | Any:
         """将 OpenAI chat.completions.create 调用转发到 Gemini API。"""
+        thinking_budget = kwargs.pop("_thinking_budget", 0)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
+                thinking_budget=thinking_budget,
             )
         return await self._client._generate(
             model=model,
@@ -590,6 +592,7 @@ class GeminiClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        thinking_budget: int = 0,
     ) -> Any:
         """流式执行 Gemini generateContent 请求，返回异步生成器 yield StreamDelta。"""
         effective_model = self._default_model or model
@@ -604,6 +607,10 @@ class GeminiClient:
         mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
         if mapped_tool_config is not None:
             body["toolConfig"] = mapped_tool_config
+        if thinking_budget > 0:
+            gen_config = body.get("generationConfig", {})
+            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+            body["generationConfig"] = gen_config
 
         url = f"{self._base_url}/models/{effective_model}:streamGenerateContent?alt=sse"
         headers = {"Content-Type": "application/json"}

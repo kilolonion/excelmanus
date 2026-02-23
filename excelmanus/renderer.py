@@ -93,8 +93,10 @@ class StreamRenderer:
             EventType.TASK_ITEM_UPDATED: self._render_task_update,
             EventType.USER_QUESTION: self._render_question,
             EventType.PENDING_APPROVAL: self._render_approval,
+            EventType.APPROVAL_RESOLVED: self._render_approval_resolved,
             EventType.THINKING_DELTA: self._render_thinking_delta,
             EventType.TEXT_DELTA: self._render_text_delta,
+            EventType.MODE_CHANGED: self._render_mode_changed,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -149,6 +151,19 @@ class StreamRenderer:
     # ------------------------------------------------------------------
     # 迭代与思考
     # ------------------------------------------------------------------
+
+    def _render_mode_changed(self, event: ToolCallEvent) -> None:
+        """渲染模式变更提示。"""
+        label_map = {
+            "full_access": ("FULL ACCESS", THEME.GOLD),
+            "plan_mode": ("PLAN MODE", THEME.CYAN),
+        }
+        label, color = label_map.get(event.mode_name, (event.mode_name, THEME.DIM))
+        action = "已开启" if event.mode_enabled else "已关闭"
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{color}]{action} {label}[/{color}]"
+        )
 
     def _render_iteration(self, event: ToolCallEvent) -> None:
         self._console.print()
@@ -327,25 +342,37 @@ class StreamRenderer:
     def _render_approval(self, event: ToolCallEvent) -> None:
         tool_name = event.approval_tool_name or "未知工具"
         args = event.approval_arguments or {}
+        risk_level = event.approval_risk_level or "high"
 
+        # 风险等级颜色映射
+        risk_colors = {"high": THEME.RED, "medium": "yellow", "low": "green"}
+        risk_labels = {"high": "高风险", "medium": "中风险", "low": "低风险"}
+        risk_color = risk_colors.get(risk_level, THEME.RED)
+        risk_label = risk_labels.get(risk_level, "高风险")
+
+        # 遍历所有参数构建摘要
         args_parts: list[str] = []
-        for key in ("file_path", "sheet_name", "script", "command"):
-            val = args.get(key)
-            if val is not None:
-                display = str(val)
-                if len(display) > 60:
-                    display = display[:57] + "..."
-                args_parts.append(f"{key}={display}")
+        for key, val in args.items():
+            if val is None:
+                continue
+            display = str(val)
+            if len(display) > 60:
+                display = display[:57] + "..."
+            args_parts.append(f"{key}={display}")
         args_text = ", ".join(args_parts) if args_parts else ""
 
         self._console.print()
         self._console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{risk_color}][{risk_label}][/{risk_color}]"
             f" [{THEME.BOLD}]{rich_escape(tool_name)}[/{THEME.BOLD}]"
-            f"({rich_escape(args_text)})"
         )
         sep = separator_line(50)
         self._console.print(f"  [{THEME.DIM}]{sep}[/{THEME.DIM}]")
+        if args_text:
+            self._console.print(
+                f"  [{THEME.DIM}]{rich_escape(args_text)}[/{THEME.DIM}]"
+            )
         self._console.print(
             f"  Do you want to execute this tool?"
         )
@@ -363,6 +390,24 @@ class StreamRenderer:
         self._console.print(
             f"  [{THEME.DIM}]Esc to cancel · Tab to amend[/{THEME.DIM}]"
         )
+
+    def _render_approval_resolved(self, event: ToolCallEvent) -> None:
+        """渲染审批已解决事件，作为工具调用链的一部分展示。"""
+        tool_name = event.approval_tool_name or "未知工具"
+        ok = event.success
+        icon = THEME.SUCCESS if ok else THEME.FAILURE
+        status = "已执行" if ok else "已拒绝"
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" {icon} [{THEME.BOLD}]{rich_escape(tool_name)}[/{THEME.BOLD}]"
+            f" [{THEME.DIM}]{status}[/{THEME.DIM}]"
+        )
+        result_text = (event.result or "").strip()
+        if result_text:
+            preview = result_text[:200] + ("…" if len(result_text) > 200 else "")
+            self._console.print(
+                f"    [{THEME.DIM}]{rich_escape(preview)}[/{THEME.DIM}]"
+            )
 
     # ------------------------------------------------------------------
     # 子代理

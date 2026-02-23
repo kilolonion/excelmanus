@@ -21,6 +21,7 @@ class Mention:
     raw: str    # 原始文本（如 "@file:sales.xlsx"）
     start: int  # 在原始输入中的起始位置（字符索引）
     end: int    # 在原始输入中的结束位置（字符索引）
+    range_spec: str | None = None  # Excel 区域选取（如 "Sheet1!A1:C10"）
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class ParseResult:
 
     mentions: tuple[Mention, ...]  # 按出现顺序排列的 Mention 元组（不可变）
     clean_text: str                # 移除所有 @ 标记后的文本
+    display_text: str              # 将 @ 标记替换为其 value（保留引用名称，去除 @type: 前缀）
     original: str                  # 原始输入（保留标记）
 
 
@@ -43,9 +45,10 @@ class ResolvedMention:
 
 # ── 正则常量 ──────────────────────────────────────────────
 
-# 统一匹配 @type:value 格式
+# 统一匹配 @type:value 格式，可选 [range_spec] 后缀
+# 示例：@file:sales.xlsx  或  @file:sales.xlsx[Sheet1!A1:C10]
 _MENTION_PATTERN = re.compile(
-    r"@(file|folder|skill|mcp):(\S+)",
+    r"@(file|folder|skill|mcp):([^\s,;!?\[\]]+)(?:\[([^\]]+)\])?",
     re.IGNORECASE,
 )
 
@@ -73,10 +76,11 @@ class MentionParser:
         """
         mentions: list[Mention] = []
 
-        # 收集所有 @type:value 匹配
+        # 收集所有 @type:value[range] 匹配
         for m in _MENTION_PATTERN.finditer(text):
             kind = m.group(1).lower()
             value = m.group(2)
+            range_spec = m.group(3)  # None if no [range] suffix
             mentions.append(
                 Mention(
                     kind=kind,
@@ -84,6 +88,7 @@ class MentionParser:
                     raw=m.group(0),
                     start=m.start(),
                     end=m.end(),
+                    range_spec=range_spec,
                 )
             )
 
@@ -112,8 +117,17 @@ class MentionParser:
         # 清理多余空格（连续空格合并为单个）
         clean_text = re.sub(r"  +", " ", clean_text).strip()
 
+        # 生成 display_text：将 @type:value 替换为 value（保留引用名称）
+        display_text = text
+        for mention in reversed(mentions):
+            before = display_text[: mention.start]
+            after = display_text[mention.end :]
+            display_text = before + mention.value + after
+        display_text = re.sub(r"  +", " ", display_text).strip()
+
         return ParseResult(
             mentions=tuple(mentions),
             clean_text=clean_text,
+            display_text=display_text,
             original=text,
         )

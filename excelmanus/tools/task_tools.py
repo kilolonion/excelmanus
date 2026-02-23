@@ -119,6 +119,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=task_create,
+            write_effect="none",
         ),
         ToolDef(
             name="task_update",
@@ -152,5 +153,6 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=task_update,
+            write_effect="none",
         ),
     ]

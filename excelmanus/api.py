@@ -16,6 +16,9 @@
 - DELETE /api/v1/mcp/servers/{name}          删除 MCP Server
 - POST   /api/v1/mcp/reload                  热重载所有 MCP 连接
 - POST   /api/v1/mcp/servers/{name}/test     测试单个 MCP Server 连接
+- GET    /api/v1/files/excel                  返回 xlsx 文件二进制流（Univer 加载）
+- GET    /api/v1/files/excel/snapshot         返回 Excel 轻量 JSON 快照（聊天内嵌预览）
+- POST   /api/v1/files/excel/write            侧边面板编辑回写单元格
 - DELETE /api/v1/sessions/{session_id}        删除会话
 - GET    /api/v1/health                       健康检查
 """
@@ -27,6 +30,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Literal
 
 import uvicorn
@@ -39,12 +43,15 @@ import excelmanus
 from excelmanus.config import (
     ConfigError,
     ExcelManusConfig,
+    ModelProfile,
     load_config,
     load_cors_allow_origins,
 )
 from excelmanus.engine import ChatResult, ToolCallResult
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger, setup_logging
+from excelmanus.mentions import MentionParser, MentionResolver
+from excelmanus.mentions.parser import ResolvedMention
 from excelmanus.mcp.manager import MCPManager
 from excelmanus.output_guard import (
     guard_public_reply,
@@ -235,6 +242,9 @@ _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _config: ExcelManusConfig | None = None
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
+_rules_manager: Any = None  # RulesManager | None
+_api_persistent_memory: Any = None  # PersistentMemory | None (shared for API)
+_config_store: Any = None  # ConfigStore | None
 _router = APIRouter()
 
 
@@ -264,6 +274,80 @@ def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: li
     if _is_external_safe_mode():
         return "hidden", [], []
     return route_mode, skills_used, tool_scope
+
+
+def _public_excel_path(path: str, *, safe_mode: bool) -> str:
+    """将 Excel 路径规范化为前端可直接回传的形式。
+
+    - 优先返回 workspace 相对路径（`./subdir/file.xlsx`），避免泄露绝对路径且保持可用。
+    - 已被脱敏为 `<path>/name.xlsx` 的历史值，降级为 `./name.xlsx` 以兼容旧数据。
+    - 对工作区外绝对路径，safe_mode 下仍保留脱敏行为。
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("<path>/"):
+        basename = raw.removeprefix("<path>/").strip()
+        return f"./{basename}" if basename else ""
+
+    from pathlib import Path
+
+    if _config is not None:
+        workspace = Path(_config.workspace_root).resolve()
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            try:
+                rel = candidate.resolve().relative_to(workspace)
+                return f"./{rel.as_posix()}"
+            except Exception:
+                return sanitize_external_text(raw, max_len=500) if safe_mode else raw
+
+    normalized = raw.replace("\\", "/")
+    if normalized.startswith("./"):
+        return normalized
+    if normalized.startswith("/"):
+        return sanitize_external_text(normalized, max_len=500) if safe_mode else normalized
+    return f"./{normalized}"
+
+
+def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
+    """将 EXCEL_DIFF / EXCEL_PREVIEW / FILES_CHANGED 事件持久化到 SQLite。"""
+    if _session_manager is None or _session_manager._chat_history is None:
+        return
+    ch = _session_manager._chat_history
+    try:
+        if event.event_type == EventType.EXCEL_DIFF:
+            pub_path = _public_excel_path(event.excel_file_path, safe_mode=False)
+            ch.save_excel_diff(
+                session_id=session_id,
+                tool_call_id=event.tool_call_id or "",
+                file_path=pub_path,
+                sheet=event.excel_sheet or "",
+                affected_range=event.excel_affected_range or "",
+                changes=list(event.excel_changes or [])[:200],
+            )
+            ch.save_affected_file(session_id, pub_path)
+        elif event.event_type == EventType.EXCEL_PREVIEW:
+            pub_path = _public_excel_path(event.excel_file_path, safe_mode=False)
+            ch.save_excel_preview(
+                session_id=session_id,
+                tool_call_id=event.tool_call_id or "",
+                file_path=pub_path,
+                sheet=event.excel_sheet or "",
+                columns=list(event.excel_columns or [])[:100],
+                rows=list(event.excel_rows or [])[:50],
+                total_rows=event.excel_total_rows or 0,
+                truncated=bool(event.excel_truncated),
+            )
+            ch.save_affected_file(session_id, pub_path)
+        elif event.event_type == EventType.FILES_CHANGED:
+            for f in (event.changed_files or [])[:50]:
+                pub = _public_excel_path(f, safe_mode=False)
+                if pub:
+                    ch.save_affected_file(session_id, pub)
+    except Exception:
+        logger.debug("持久化 Excel 事件失败", exc_info=True)
 
 
 def _error_json_response(status_code: int, message: str) -> JSONResponse:
@@ -450,6 +534,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         chat_history = ChatHistoryStore.from_database(_database)
         logger.info("统一数据库已启用: %s", resolved_db_path)
 
+    # 初始化 ConfigStore 并从 .env 迁移已有 profiles
+    global _config_store
+    if _database is not None:
+        from excelmanus.stores.config_store import ConfigStore
+        _config_store = ConfigStore(_database)
+        existing = _config_store.list_profiles()
+        if not existing:
+            env_models_raw = os.environ.get("EXCELMANUS_MODELS", "")
+            if env_models_raw:
+                n = _config_store.import_profiles_from_env(
+                    env_models_raw, _config.api_key, _config.base_url,
+                )
+                if n:
+                    logger.info("已从 EXCELMANUS_MODELS 迁移 %d 个模型 profile 到数据库", n)
+                    # 迁移完成后清除 .env 中的 EXCELMANUS_MODELS，避免双数据源
+                    try:
+                        env_path = _find_env_file()
+                        lines = _read_env_file(env_path)
+                        cleaned = [
+                            ln for ln in lines
+                            if not ln.strip().startswith("EXCELMANUS_MODELS=")
+                        ]
+                        if len(cleaned) != len(lines):
+                            _write_env_file(env_path, cleaned)
+                            logger.info("已从 .env 清除 EXCELMANUS_MODELS（数据库为唯一来源）")
+                    except Exception:
+                        logger.debug("清除 .env 中 EXCELMANUS_MODELS 失败", exc_info=True)
+                    os.environ.pop("EXCELMANUS_MODELS", None)
+        _sync_config_profiles_from_db()
+        logger.info("ConfigStore 已初始化")
+
     # 初始化会话管理器
     shared_mcp_manager: MCPManager | None = None
     if _config.mcp_shared_manager:
@@ -463,8 +578,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         skill_router=_skill_router,
         shared_mcp_manager=shared_mcp_manager,
         chat_history=chat_history,
+        database=_database,
+        config_store=_config_store,
     )
     await _session_manager.start_background_cleanup()
+
+    # 初始化全局 RulesManager + 共享 PersistentMemory（供 API 层直接使用）
+    global _rules_manager, _api_persistent_memory
+    try:
+        from excelmanus.rules import RulesManager as _RM
+        from excelmanus.stores.rules_store import RulesStore as _RS
+        _rules_db_store = _RS(_database) if _database is not None else None
+        _rules_manager = _RM(db_store=_rules_db_store)
+    except Exception:
+        logger.debug("RulesManager 初始化失败", exc_info=True)
+
+    if _config.memory_enabled:
+        try:
+            from excelmanus.persistent_memory import PersistentMemory as _PM
+            _api_persistent_memory = _PM(
+                memory_dir=_config.memory_dir,
+                auto_load_lines=_config.memory_auto_load_lines,
+                database=_database,
+            )
+        except Exception:
+            logger.debug("API PersistentMemory 初始化失败", exc_info=True)
 
     loaded_skillpacks = (
         sorted(_skillpack_loader.get_skillpacks().keys())
@@ -584,6 +722,87 @@ _error_responses: dict = {
 }
 
 
+def _is_save_command(message: str) -> bool:
+    """判断消息是否为 /save 命令（含 /save 或 /save <路径>）。
+
+    支持带文件上传前缀的消息格式（如 "[已上传: x]\\n\\n/save"）。
+    """
+    stripped = message.strip()
+    # 若有 \\n\\n，取最后一段作为用户输入（网页端上传文件时会在前加前缀）
+    if "\n\n" in stripped:
+        cmd_part = stripped.split("\n\n")[-1].strip()
+    else:
+        cmd_part = stripped
+    if not cmd_part.lower().startswith("/save"):
+        return False
+    parts = cmd_part.split(None, 1)
+    return parts[0].lower() == "/save"
+
+
+async def _handle_save_command(
+    session_manager: SessionManager,
+    session_id: str,
+    engine: Any,
+    message: str,
+) -> str:
+    """执行 /save：将对话导出为 JSON 文件，返回保存路径作为回复。"""
+    path: str | None = None
+    stripped = message.strip()
+    cmd_part = stripped.split("\n\n")[-1].strip() if "\n\n" in stripped else stripped
+    parts = cmd_part.split(None, 1)
+    if len(parts) > 1:
+        path = parts[1].strip() or None
+
+    engine._memory.add_user_message(message)
+    if hasattr(engine, "state") and engine.state is not None:
+        engine._state.increment_turn()
+
+    saved_path = engine.save_conversation(path)
+    if saved_path:
+        reply = f"对话已保存至：`{saved_path}`"
+    else:
+        reply = "当前对话为空，未生成文件。"
+
+    engine._memory.add_assistant_message(reply)
+    await session_manager.release_for_chat(session_id)
+    return reply
+
+
+async def _resolve_mentions(
+    message: str,
+    engine: Any,
+) -> tuple[str, list[ResolvedMention] | None]:
+    """解析用户消息中的 @ 提及标记，返回 (display_text, mention_contexts)。
+
+    display_text 将 ``@file:name`` 替换为 ``name``，确保 LLM 看到的文本不含 @ 前缀。
+    """
+    try:
+        parse_result = MentionParser.parse(message)
+        if not parse_result.mentions:
+            return message, None
+
+        from excelmanus.security.guard import FileAccessGuard
+
+        guard = FileAccessGuard(engine._config.workspace_root)
+        skill_loader = getattr(engine, "_skill_loader", None)
+        if skill_loader is None:
+            _router = getattr(engine, "_skill_router", None)
+            if _router is not None:
+                skill_loader = getattr(_router, "_loader", None)
+        mcp_manager = getattr(engine, "_mcp_manager", None)
+        resolver = MentionResolver(
+            workspace_root=engine._config.workspace_root,
+            guard=guard,
+            skill_loader=skill_loader,
+            mcp_manager=mcp_manager,
+        )
+        mention_contexts = await resolver.resolve(list(parse_result.mentions))
+        return parse_result.display_text, mention_contexts
+    except Exception:
+        logger.debug("API 层 @ 提及解析失败，回退到原始消息", exc_info=True)
+        return message, None
+
+
 @_router.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
 async def chat(request: ChatRequest) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
@@ -592,10 +811,31 @@ async def chat(request: ChatRequest) -> ChatResponse:
     session_id, engine = await _session_manager.acquire_for_chat(
         request.session_id
     )
+
+    if _is_save_command(request.message):
+        reply_text = await _handle_save_command(
+            _session_manager, session_id, engine, request.message
+        )
+        return ChatResponse(
+            session_id=session_id,
+            reply=guard_public_reply(reply_text),
+            skills_used=[],
+            route_mode="control_command",
+        )
+
     try:
+        display_text, mention_contexts = await _resolve_mentions(
+            request.message, engine,
+        )
+
+        def _on_event_sync(event: ToolCallEvent) -> None:
+            _persist_excel_event(session_id, event)
+
         chat_result = _normalize_chat_result(
             await engine.chat(
-                request.message,
+                display_text,
+                on_event=_on_event_sync,
+                mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
             )
         )
@@ -633,19 +873,65 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         request.session_id
     )
 
+    if _is_save_command(request.message):
+        async def _save_stream() -> AsyncIterator[str]:
+            yield _sse_format("session_init", {"session_id": session_id})
+            try:
+                reply_text = await _handle_save_command(
+                    _session_manager, session_id, engine, request.message
+                )
+                yield _sse_format("reply", {
+                    "content": guard_public_reply(reply_text),
+                    "skills_used": [],
+                    "tool_scope": [],
+                    "route_mode": "control_command",
+                    "iterations": 0,
+                    "truncated": False,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                })
+            except Exception as exc:
+                error_id = str(uuid.uuid4())
+                logger.error("SSE /save 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True)
+                yield _sse_format("error", {
+                    "error": "保存对话失败，请联系管理员。",
+                    "error_id": error_id,
+                })
+            else:
+                yield _sse_format("done", {})
+
+        return StreamingResponse(
+            _save_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     # 用 asyncio.Queue 桥接同步回调与异步生成器
     event_queue: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
+    stream_attached = True
 
     def _on_event(event: ToolCallEvent) -> None:
-        """引擎事件回调：将事件放入队列。"""
-        event_queue.put_nowait(event)
+        """引擎事件回调：将事件放入队列，同时持久化 Excel 事件。"""
+        if stream_attached:
+            event_queue.put_nowait(event)
+        _persist_excel_event(session_id, event)
+
+    display_text, mention_contexts = await _resolve_mentions(
+        request.message, engine,
+    )
 
     async def _run_chat() -> ChatResult:
         """后台执行 engine.chat，完成后向队列发送结束信号。"""
         try:
             result = await engine.chat(
-                request.message,
+                display_text,
                 on_event=_on_event,
+                mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
             )
             return _normalize_chat_result(result)
@@ -656,6 +942,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
     async def _event_generator() -> AsyncIterator[str]:
         """SSE 事件生成器：从队列消费事件并格式化为 SSE 文本。"""
+        nonlocal stream_attached
         safe_mode = _is_external_safe_mode()
         # 先推送 session_id
         yield _sse_format("session_init", {"session_id": session_id})
@@ -663,6 +950,24 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         # 启动 chat 任务
         chat_task = asyncio.create_task(_run_chat())
         _active_chat_tasks[session_id] = chat_task
+
+        def _cleanup_active_chat_task(done_task: asyncio.Task[Any]) -> None:
+            """后台 chat 任务完成后清理活跃任务映射，避免刷新断连导致状态丢失。"""
+            if _active_chat_tasks.get(session_id) is done_task:
+                _active_chat_tasks.pop(session_id, None)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                # 用户手动停止或 abort 取消属于预期路径。
+                pass
+            except Exception:
+                logger.warning(
+                    "会话 %s 的后台聊天任务异常结束",
+                    session_id,
+                    exc_info=True,
+                )
+
+        chat_task.add_done_callback(_cleanup_active_chat_task)
         queue_get_task: asyncio.Task[ToolCallEvent | None] | None = asyncio.create_task(
             event_queue.get()
         )
@@ -731,14 +1036,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
-            # 客户端断开或 abort 端点取消：终止 chat 任务
-            logger.info("会话 %s 的流式请求被取消", session_id)
-            if not chat_task.done():
-                chat_task.cancel()
-                try:
-                    await chat_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            # 客户端断开（如页面刷新）时允许 chat 在后台继续。
+            stream_attached = False
+            logger.info("会话 %s 的流式连接已断开，后台任务继续执行", session_id)
         except Exception as exc:
             error_id = str(uuid.uuid4())
             logger.error(
@@ -756,7 +1056,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 except (asyncio.CancelledError, Exception):
                     pass
         finally:
-            _active_chat_tasks.pop(session_id, None)
+            stream_attached = False
+            if chat_task.done() and _active_chat_tasks.get(session_id) is chat_task:
+                _active_chat_tasks.pop(session_id, None)
             await _cancel_task(queue_get_task)
 
     return StreamingResponse(
@@ -778,6 +1080,142 @@ class AbortRequest(BaseModel):
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ]
+
+
+class BackupApplyRequest(BaseModel):
+    """Apply backup files back to originals."""
+    session_id: str
+    files: list[str] | None = Field(default=None, description="要应用的原始文件路径列表。为空或 null 时应用全部。")
+
+
+class BackupDiscardRequest(BaseModel):
+    """Discard backup files."""
+    session_id: str
+    files: list[str] | None = Field(default=None, description="要丢弃的原始文件路径列表。为空或 null 时丢弃全部。")
+
+
+class RollbackRequest(BaseModel):
+    """对话回退请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    turn_index: int = Field(..., ge=0, description="目标用户轮次索引（0-indexed）")
+    rollback_files: bool = Field(default=False, description="是否同时回滚文件变更")
+    new_message: str | None = Field(default=None, description="替换该轮用户消息内容（可选）")
+
+
+@_router.get("/api/v1/backup/list")
+async def backup_list(session_id: str) -> JSONResponse:
+    """列出指定会话的待应用备份文件。"""
+    assert _session_manager is not None, "服务未初始化"
+    engine = _session_manager.get_engine(session_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+    bm = engine.backup_manager
+    if bm is None:
+        return JSONResponse(status_code=200, content={"files": [], "backup_enabled": False})
+    backups = bm.list_backups()
+    files = []
+    for b in backups:
+        bp = Path(b["backup"])
+        files.append({
+            "original_path": b["original"],
+            "backup_path": b["backup"],
+            "exists": b["exists"] == "True",
+            "modified_at": bp.stat().st_mtime if bp.exists() else None,
+        })
+    return JSONResponse(status_code=200, content={"files": files, "backup_enabled": True})
+
+
+@_router.post("/api/v1/backup/apply")
+async def backup_apply(request: BackupApplyRequest) -> JSONResponse:
+    """将备份副本应用回原始文件。"""
+    assert _session_manager is not None, "服务未初始化"
+    engine = _session_manager.get_engine(request.session_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    bm = engine.backup_manager
+    if bm is None:
+        return _error_json_response(400, "该会话未启用备份模式。")
+    if request.files:
+        applied = []
+        for fp in request.files:
+            result = bm.apply_one(fp)
+            if result:
+                applied.append(result)
+        return JSONResponse(status_code=200, content={"status": "ok", "applied": applied, "count": len(applied)})
+    else:
+        applied = bm.apply_all()
+        bm.discard_all()
+        return JSONResponse(status_code=200, content={"status": "ok", "applied": applied, "count": len(applied)})
+
+
+@_router.post("/api/v1/backup/discard")
+async def backup_discard(request: BackupDiscardRequest) -> JSONResponse:
+    """丢弃备份映射。"""
+    assert _session_manager is not None, "服务未初始化"
+    engine = _session_manager.get_engine(request.session_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    bm = engine.backup_manager
+    if bm is None:
+        return _error_json_response(400, "该会话未启用备份模式。")
+    if request.files:
+        count = 0
+        for fp in request.files:
+            if bm.discard_one(fp):
+                count += 1
+        return JSONResponse(status_code=200, content={"status": "ok", "discarded": count})
+    else:
+        bm.discard_all()
+        return JSONResponse(status_code=200, content={"status": "ok", "discarded": "all"})
+
+
+@_router.post("/api/v1/chat/rollback")
+async def chat_rollback(request: RollbackRequest) -> JSONResponse:
+    """回退对话到指定用户轮次，可选回滚文件变更。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    try:
+        result = await _session_manager.rollback_session(
+            request.session_id,
+            request.turn_index,
+            rollback_files=request.rollback_files,
+            new_message=request.new_message,
+        )
+    except SessionNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+    except IndexError as exc:
+        return _error_json_response(400, str(exc))
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "removed_messages": result["removed_messages"],
+            "file_rollback_results": result["file_rollback_results"],
+            "turn_index": result["turn_index"],
+        },
+    )
+
+
+@_router.get("/api/v1/chat/turns")
+async def chat_turns(session_id: str) -> JSONResponse:
+    """列出指定会话的用户轮次摘要。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    engine = _session_manager.get_engine(session_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+
+    turns = engine._memory.list_user_turns()
+    return JSONResponse(
+        status_code=200,
+        content={"turns": turns},
+    )
 
 
 @_router.post("/api/v1/chat/abort")
@@ -836,6 +1274,11 @@ def _sse_event_to_sse(
         EventType.USER_QUESTION: "user_question",
         EventType.THINKING_DELTA: "thinking_delta",
         EventType.TEXT_DELTA: "text_delta",
+        EventType.EXCEL_PREVIEW: "excel_preview",
+        EventType.EXCEL_DIFF: "excel_diff",
+        EventType.FILES_CHANGED: "files_changed",
+        EventType.PIPELINE_PROGRESS: "pipeline_progress",
+        EventType.MEMORY_EXTRACTED: "memory_extracted",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -976,15 +1419,59 @@ def _sse_event_to_sse(
         data = {
             "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
             "approval_tool_name": sanitize_external_text(event.approval_tool_name or "", max_len=100),
-            # 不输出 approval_arguments，防止敏感信息泄露
+            "tool_call_id": sanitize_external_text(event.tool_call_id or "", max_len=160),
+            "risk_level": sanitize_external_text(event.approval_risk_level or "high", max_len=20),
+            "args_summary": sanitize_external_data(
+                event.approval_args_summary if isinstance(event.approval_args_summary, dict) else {},
+                max_len=1000,
+            ),
         }
     elif event.event_type == EventType.APPROVAL_RESOLVED:
         data = {
             "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
             "approval_tool_name": sanitize_external_text(event.approval_tool_name or "", max_len=100),
+            "tool_call_id": sanitize_external_text(event.tool_call_id or "", max_len=160),
+            "result": sanitize_external_text(event.result or "", max_len=2000),
             "success": event.success,
+            "undoable": event.approval_undoable,
         }
         sse_type = "approval_resolved"
+    elif event.event_type == EventType.EXCEL_PREVIEW:
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "file_path": _public_excel_path(event.excel_file_path, safe_mode=safe_mode),
+            "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
+            "columns": event.excel_columns[:100],
+            "rows": event.excel_rows[:50],
+            "total_rows": event.excel_total_rows,
+            "truncated": event.excel_truncated,
+        }
+    elif event.event_type == EventType.EXCEL_DIFF:
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "file_path": _public_excel_path(event.excel_file_path, safe_mode=safe_mode),
+            "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
+            "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
+            "changes": event.excel_changes[:200],
+        }
+    elif event.event_type == EventType.FILES_CHANGED:
+        data = {
+            "files": [
+                _public_excel_path(f, safe_mode=safe_mode)
+                for f in (event.changed_files or [])[:50]
+            ],
+        }
+    elif event.event_type == EventType.PIPELINE_PROGRESS:
+        data = {
+            "stage": sanitize_external_text(event.pipeline_stage, max_len=60),
+            "message": sanitize_external_text(event.pipeline_message, max_len=200),
+        }
+    elif event.event_type == EventType.MEMORY_EXTRACTED:
+        data = {
+            "entries": (event.memory_entries or [])[:50],
+            "trigger": event.memory_trigger or "session_end",
+            "count": len(event.memory_entries or []),
+        }
     else:
         data = event.to_dict()
 
@@ -1201,6 +1688,381 @@ async def delete_session(session_id: str) -> dict:
     return {"status": "ok", "session_id": session_id}
 
 
+@_router.patch("/api/v1/sessions/{session_id}/archive", responses={
+    404: _error_responses[404],
+    500: _error_responses[500],
+})
+async def archive_session(session_id: str, request: Request) -> dict:
+    """归档或取消归档会话。
+
+    请求体: {"archive": true}  归档
+    请求体: {"archive": false} 取消归档
+    """
+    assert _session_manager is not None, "服务未初始化"
+
+    body = await request.json()
+    archive = body.get("archive", True)
+
+    updated = await _session_manager.archive_session(session_id, archive=archive)
+    if not updated:
+        raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "archived": archive,
+    }
+
+
+# ── Approvals / Undo ─────────────────────────────────────
+
+
+@_router.get("/api/v1/approvals")
+async def list_approvals(request: Request) -> JSONResponse:
+    """列出已执行的审批记录（支持分页与筛选）。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    limit = int(request.query_params.get("limit", "50"))
+    undoable_only = request.query_params.get("undoable_only", "false").lower() == "true"
+    session_id = request.query_params.get("session_id")
+
+    # 从活跃会话获取 ApprovalManager
+    engine = None
+    if session_id:
+        engine = _session_manager.get_engine(session_id)
+    else:
+        engine = _session_manager.get_any_engine()
+
+    if engine is None:
+        return JSONResponse(content={"approvals": []})
+
+    records = engine._approval.list_applied(limit=limit, undoable_only=undoable_only)
+    items = []
+    for rec in records:
+        item: dict = {
+            "id": rec.approval_id,
+            "tool_name": rec.tool_name,
+            "created_at_utc": rec.created_at_utc,
+            "applied_at_utc": rec.applied_at_utc,
+            "execution_status": rec.execution_status,
+            "undoable": rec.undoable,
+            "result_preview": sanitize_external_text(rec.result_preview or "", max_len=200),
+        }
+        if not _is_external_safe_mode():
+            item["arguments"] = sanitize_external_data(rec.arguments)
+            item["changes"] = [
+                {"path": c.path, "before_exists": c.before_exists, "after_exists": c.after_exists}
+                for c in (rec.changes or [])
+            ]
+        items.append(item)
+    return JSONResponse(content={"approvals": items})
+
+
+@_router.post("/api/v1/approvals/{approval_id}/undo")
+async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
+    """回滚指定审批操作。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    session_id = request.query_params.get("session_id")
+    engine = None
+    if session_id:
+        engine = _session_manager.get_engine(session_id)
+    else:
+        engine = _session_manager.get_any_engine()
+
+    if engine is None:
+        return _error_json_response(404, "没有活跃会话。")
+
+    result_msg = engine._approval.undo(approval_id)
+    success = "已回滚" in result_msg
+    return JSONResponse(content={
+        "status": "ok" if success else "error",
+        "message": result_msg,
+        "approval_id": approval_id,
+    })
+
+
+# ── Excel 预览 API ────────────────────────────────────────
+
+
+def _resolve_excel_path(path: str, session_id: str | None = None) -> str | None:
+    """将相对/绝对路径解析为安全的绝对路径（基于 workspace_root）。
+
+    支持的路径形式：
+    - 相对路径: ``./foo.xlsx``, ``foo.xlsx``, ``subdir/foo.xlsx``
+    - 绝对路径: ``/Users/.../workspace/foo.xlsx`` (已在 workspace 内)
+    """
+    if _config is None:
+        return None
+    from pathlib import Path
+
+    workspace = Path(_config.workspace_root).resolve()
+    workspace_str = str(workspace)
+
+    # 如果已经是绝对路径且位于 workspace 内，直接使用
+    candidate = Path(path)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if str(resolved).startswith(workspace_str) and resolved.is_file():
+            return str(resolved)
+
+    # 作为相对路径解析
+    target = (workspace / path).resolve()
+    if not str(target).startswith(workspace_str):
+        return None
+    if not target.is_file():
+        return None
+    return str(target)
+
+
+@_router.get("/api/v1/files/excel/list")
+async def list_excel_files() -> JSONResponse:
+    """扫描 workspace 中所有 Excel 文件，返回路径列表。"""
+    assert _config is not None, "服务未初始化"
+    from pathlib import Path as _Path
+
+    workspace = _Path(_config.workspace_root).resolve()
+    excel_exts = {".xlsx", ".xls", ".csv"}
+    skip_dirs = {"node_modules", "__pycache__", ".venv", ".git", ".next"}
+    results: list[dict[str, Any]] = []
+
+    for root, dirs, filenames in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in excel_exts:
+                continue
+            full = os.path.join(root, fname)
+            try:
+                rel = os.path.relpath(full, workspace)
+                mtime = os.path.getmtime(full)
+            except OSError:
+                continue
+            results.append({
+                "path": f"./{rel}",
+                "filename": fname,
+                "modified_at": mtime,
+            })
+
+    results.sort(key=lambda x: x["modified_at"], reverse=True)
+    return JSONResponse(content={"files": results})
+
+
+_MAX_WORKSPACE_FILES = 2000
+
+@_router.get("/api/v1/files/workspace/list")
+async def list_workspace_files() -> JSONResponse:
+    """扫描 workspace 中所有文件（用于文件树视图）。"""
+    assert _config is not None, "服务未初始化"
+    from pathlib import Path as _Path
+
+    workspace = _Path(_config.workspace_root).resolve()
+    skip_dirs = {
+        "node_modules", "__pycache__", ".venv", ".git", ".next",
+        ".tox", "dist", "build", ".eggs", ".mypy_cache", ".pytest_cache",
+        "excelmanus.egg-info",
+    }
+    skip_exts = {".pyc", ".pyo", ".so", ".dylib", ".dll", ".o", ".a"}
+    results: list[dict[str, Any]] = []
+
+    for root, dirs, filenames in os.walk(workspace):
+        dirs[:] = sorted(d for d in dirs if d not in skip_dirs and not d.startswith("."))
+        for fname in sorted(filenames):
+            if fname.startswith("."):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in skip_exts:
+                continue
+            full = os.path.join(root, fname)
+            try:
+                rel = os.path.relpath(full, workspace)
+                mtime = os.path.getmtime(full)
+            except OSError:
+                continue
+            results.append({
+                "path": f"./{rel}",
+                "filename": fname,
+                "modified_at": mtime,
+            })
+            if len(results) >= _MAX_WORKSPACE_FILES:
+                break
+        if len(results) >= _MAX_WORKSPACE_FILES:
+            break
+
+    results.sort(key=lambda x: x["modified_at"], reverse=True)
+    return JSONResponse(content={"files": results, "truncated": len(results) >= _MAX_WORKSPACE_FILES})
+
+
+@_router.get("/api/v1/files/excel")
+async def get_excel_file(request: Request) -> StreamingResponse:
+    """返回 xlsx 文件二进制流供前端 Univer 加载。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    session_id = request.query_params.get("session_id")
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
+
+    resolved = _resolve_excel_path(path, session_id)
+    if resolved is None:
+        return _error_json_response(404, f"文件不存在或路径非法: {path}")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+
+    file_path = _Path(resolved)
+    suffix = file_path.suffix.lower()
+    if suffix not in {".xlsx", ".xls", ".csv"}:
+        return _error_json_response(400, f"不支持的文件格式: {suffix}")  # type: ignore[return-value]
+
+    content_type = (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if suffix == ".xlsx"
+        else "application/vnd.ms-excel" if suffix == ".xls"
+        else "text/csv"
+    )
+
+    def _iter_file():
+        with open(resolved, "rb") as f:  # type: ignore[arg-type]
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter_file(),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_path.name}"',
+        },
+    )
+
+
+@_router.get("/api/v1/files/excel/snapshot")
+async def get_excel_snapshot(request: Request) -> JSONResponse:
+    """返回 Excel 文件的轻量 JSON 快照（供聊天内嵌预览）。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    sheet = request.query_params.get("sheet")
+    max_rows = int(request.query_params.get("max_rows", "50"))
+    session_id = request.query_params.get("session_id")
+
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    resolved = _resolve_excel_path(path, session_id)
+    if resolved is None:
+        return _error_json_response(404, f"文件不存在或路径非法: {path}")
+
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+
+        wb = load_workbook(resolved, data_only=True, read_only=True)
+        sheet_names = wb.sheetnames
+        ws = wb[sheet] if sheet and sheet in sheet_names else wb.active
+        if ws is None:
+            wb.close()
+            return _error_json_response(404, "工作表不存在")
+
+        active_sheet = ws.title or sheet_names[0]
+        total_rows = ws.max_row or 0
+        total_cols = ws.max_column or 0
+
+        # 读取列头（第一行）
+        headers: list[str] = []
+        col_letters: list[str] = []
+        for c in range(1, min(total_cols + 1, 101)):  # 最多 100 列
+            col_letters.append(get_column_letter(c))
+            cell_val = ws.cell(row=1, column=c).value
+            headers.append(str(cell_val) if cell_val is not None else "")
+
+        # 读取数据行
+        rows: list[list[Any]] = []
+        row_limit = min(max_rows, total_rows, 200)
+        for r in range(2, row_limit + 2):  # 从第 2 行开始（跳过表头）
+            if r > total_rows:
+                break
+            row_data: list[Any] = []
+            for c in range(1, min(total_cols + 1, 101)):
+                val = ws.cell(row=r, column=c).value
+                if val is None:
+                    row_data.append(None)
+                elif isinstance(val, (int, float, bool)):
+                    row_data.append(val)
+                else:
+                    row_data.append(str(val))
+            rows.append(row_data)
+
+        wb.close()
+
+        snapshot = {
+            "file": os.path.basename(resolved),
+            "sheet": active_sheet,
+            "sheets": sheet_names,
+            "shape": {"rows": total_rows, "columns": total_cols},
+            "column_letters": col_letters,
+            "headers": headers,
+            "rows": rows,
+            "total_rows": total_rows,
+            "truncated": total_rows > row_limit,
+        }
+
+        return JSONResponse(content=snapshot)
+    except Exception as exc:
+        logger.error("Excel snapshot 生成失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"读取文件失败: {exc}")
+
+
+class ExcelWriteRequest(BaseModel):
+    """Excel 单元格写入请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+    session_id: str | None = None
+    path: str
+    sheet: str | None = None
+    changes: list[dict[str, Any]]
+
+
+@_router.post("/api/v1/files/excel/write")
+async def write_excel_cells(request: ExcelWriteRequest) -> JSONResponse:
+    """侧边面板编辑回写：将单元格变更写入文件。"""
+    assert _config is not None, "服务未初始化"
+
+    resolved = _resolve_excel_path(request.path, request.session_id)
+    if resolved is None:
+        return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
+
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.utils.cell import coordinate_to_tuple
+
+        wb = load_workbook(resolved)
+        sheet_names = wb.sheetnames
+        ws = wb[request.sheet] if request.sheet and request.sheet in sheet_names else wb.active
+        if ws is None:
+            wb.close()
+            return _error_json_response(404, "工作表不存在")
+
+        cells_written = 0
+        for change in request.changes:
+            cell_ref = change.get("cell", "")
+            value = change.get("value")
+            if not cell_ref:
+                continue
+            row, col = coordinate_to_tuple(cell_ref.upper())
+            ws.cell(row=row, column=col, value=value)
+            cells_written += 1
+
+        wb.save(resolved)
+        wb.close()
+
+        return JSONResponse(content={
+            "status": "success",
+            "cells_written": cells_written,
+        })
+    except Exception as exc:
+        logger.error("Excel write 失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"写入失败: {exc}")
+
+
 _ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
 
 
@@ -1231,6 +2093,37 @@ async def upload_file(file: UploadFile = FastAPIFile(...)) -> JSONResponse:
     })
 
 
+@_router.post("/api/v1/files/reveal")
+async def reveal_file(request: Request) -> JSONResponse:
+    """在本地文件管理器中打开文件所在目录。"""
+    import platform
+    import subprocess
+
+    body = await request.json()
+    file_path = body.get("path", "").strip()
+    if not file_path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    target = os.path.abspath(file_path)
+    if not os.path.exists(target):
+        return _error_json_response(404, f"路径不存在: {target}")
+
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", "-R", target])
+        elif system == "Windows":
+            subprocess.Popen(["explorer", "/select,", target])
+        else:
+            parent = os.path.dirname(target) if os.path.isfile(target) else target
+            subprocess.Popen(["xdg-open", parent])
+    except Exception as exc:
+        logger.warning("打开文件管理器失败: %s", exc)
+        return _error_json_response(500, f"打开失败: {exc}")
+
+    return JSONResponse(content={"status": "ok", "path": target})
+
+
 @_router.get("/api/v1/sessions")
 async def list_sessions(request: Request) -> JSONResponse:
     """列出所有会话（含历史）。"""
@@ -1238,6 +2131,18 @@ async def list_sessions(request: Request) -> JSONResponse:
     include_archived = request.query_params.get("include_archived", "false").lower() == "true"
     sessions = await _session_manager.list_sessions(include_archived=include_archived)
     return JSONResponse(content={"sessions": sessions})
+
+
+@_router.delete("/api/v1/sessions", responses={409: _error_responses[409]})
+async def clear_all_sessions() -> JSONResponse:
+    """清空所有会话历史。若有会话正在处理中则返回 409。"""
+    assert _session_manager is not None, "服务未初始化"
+    sess_count, msg_count = await _session_manager.clear_all_sessions()
+    return JSONResponse(content={
+        "status": "ok",
+        "sessions_deleted": sess_count,
+        "messages_deleted": msg_count,
+    })
 
 
 @_router.get("/api/v1/sessions/{session_id}/messages")
@@ -1248,6 +2153,251 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
     offset = int(request.query_params.get("offset", "0"))
     messages = await _session_manager.get_session_messages(session_id, limit=limit, offset=offset)
     return JSONResponse(content={"messages": messages, "session_id": session_id})
+
+
+@_router.get("/api/v1/sessions/{session_id}/excel-events")
+async def get_session_excel_events(session_id: str) -> JSONResponse:
+    """返回持久化的 Excel diff 和改动文件列表，供前端重启后恢复。"""
+    assert _session_manager is not None, "服务未初始化"
+    ch = _session_manager._chat_history
+    if ch is None:
+        return JSONResponse(content={"diffs": [], "affected_files": []})
+    diffs = ch.load_excel_diffs(session_id)
+    affected_files = ch.load_affected_files(session_id)
+    previews = ch.load_excel_previews(session_id)
+    safe_mode = _is_external_safe_mode()
+    safe_diffs = []
+    for d in diffs:
+        safe_diffs.append({
+            "tool_call_id": d["tool_call_id"],
+            "file_path": _public_excel_path(d["file_path"], safe_mode=safe_mode),
+            "sheet": d["sheet"],
+            "affected_range": d["affected_range"],
+            "changes": d["changes"],
+            "timestamp": d["timestamp"],
+        })
+    safe_previews = []
+    for p in previews:
+        safe_previews.append({
+            "tool_call_id": p["tool_call_id"],
+            "file_path": _public_excel_path(p["file_path"], safe_mode=safe_mode),
+            "sheet": p["sheet"],
+            "columns": p["columns"],
+            "rows": p["rows"],
+            "total_rows": p["total_rows"],
+            "truncated": p["truncated"],
+        })
+    safe_files = [
+        _public_excel_path(f, safe_mode=safe_mode)
+        for f in affected_files if f
+    ]
+    return JSONResponse(content={
+        "diffs": safe_diffs,
+        "previews": safe_previews,
+        "affected_files": safe_files,
+    })
+
+
+@_router.get("/api/v1/sessions/{session_id}/status")
+async def get_session_status(session_id: str) -> JSONResponse:
+    """获取会话运行时状态（上下文压缩 + 工作区清单）。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    def _normalize_manifest_status(manifest: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(manifest)
+        state = str(normalized.get("state") or "idle").lower()
+        if state == "ready":
+            state = "built"
+        if state not in {"idle", "building", "built", "error"}:
+            state = "idle"
+        normalized["state"] = state
+
+        # 兼容前端旧字段约定：将 total_files 回填到 sheet_count。
+        total_files = normalized.get("total_files")
+        if normalized.get("sheet_count") is None and total_files is not None:
+            try:
+                normalized["sheet_count"] = int(total_files)
+            except (TypeError, ValueError):
+                pass
+        return normalized
+
+    engine = _session_manager.get_engine(session_id)
+
+    # 会话存在于 SQLite 历史但尚未加载到内存：状态查询时懒恢复，
+    # 以便无需先发送消息也能触发 manifest 预热并显示构建进度。
+    if engine is None and _session_manager.session_exists(session_id):
+        acquired_session_id: str | None = None
+        try:
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+        except SessionBusyError:
+            # 可能是并发 chat 已抢先恢复并持锁，退化为读取当前内存状态。
+            engine = _session_manager.get_engine(session_id)
+        except Exception:
+            logger.debug(
+                "状态查询懒恢复会话失败: %s",
+                session_id,
+                exc_info=True,
+            )
+            engine = None
+        finally:
+            if acquired_session_id is not None:
+                await _session_manager.release_for_chat(acquired_session_id)
+
+    if engine is None:
+        if _session_manager.session_exists(session_id):
+            return JSONResponse(content={
+                "session_id": session_id,
+                "compaction": {"enabled": False},
+                "manifest": _normalize_manifest_status({"state": "idle"}),
+            })
+        return _error_json_response(404, f"会话不存在: {session_id}")
+
+    # 上下文压缩状态
+    compaction: dict[str, Any] = {"enabled": False}
+    try:
+        cm = engine._compaction_manager
+        sys_msgs = engine._memory._build_system_messages(
+            engine._build_system_prompts()
+        ) if hasattr(engine, "_build_system_prompts") else None
+        compaction = cm.get_status(engine._memory, sys_msgs)
+    except Exception:
+        pass
+
+    # 工作区清单状态
+    manifest: dict[str, Any] = {"state": "idle"}
+    try:
+        manifest = engine.workspace_manifest_build_status()
+    except Exception:
+        pass
+    manifest = _normalize_manifest_status(manifest)
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "compaction": compaction,
+        "manifest": manifest,
+    })
+
+
+@_router.post("/api/v1/sessions/{session_id}/compact")
+async def compact_session_context(session_id: str) -> JSONResponse:
+    """在指定会话内执行 /compact，并返回执行结果。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    engine = _session_manager.get_engine(session_id)
+
+    # 会话存在但尚未加载到内存：尝试懒恢复后再执行。
+    if engine is None and _session_manager.session_exists(session_id):
+        acquired_session_id: str | None = None
+        try:
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+        except SessionBusyError:
+            engine = _session_manager.get_engine(session_id)
+        except Exception:
+            logger.debug(
+                "compact 懒恢复会话失败: %s",
+                session_id,
+                exc_info=True,
+            )
+            engine = None
+        finally:
+            if acquired_session_id is not None:
+                await _session_manager.release_for_chat(acquired_session_id)
+
+    if engine is None:
+        return _error_json_response(404, f"会话不存在: {session_id}")
+
+    try:
+        result = await engine._handle_control_command("/compact")
+    except Exception as exc:
+        logger.warning("会话 %s 执行 /compact 失败: %s", session_id, exc)
+        return _error_json_response(500, f"压缩执行失败: {exc}")
+
+    if not result:
+        result = "压缩命令已执行，但未返回可展示结果。"
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "result": result,
+    })
+
+
+@_router.post("/api/v1/sessions/{session_id}/memory/extract")
+async def extract_session_memory(session_id: str) -> JSONResponse:
+    """手动触发指定会话的记忆提取。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    engine = _session_manager.get_engine(session_id)
+
+    if engine is None and _session_manager.session_exists(session_id):
+        acquired_session_id: str | None = None
+        try:
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+        except SessionBusyError:
+            engine = _session_manager.get_engine(session_id)
+        except Exception:
+            logger.debug("memory extract 懒恢复会话失败: %s", session_id, exc_info=True)
+            engine = None
+        finally:
+            if acquired_session_id is not None:
+                await _session_manager.release_for_chat(acquired_session_id)
+
+    if engine is None:
+        return _error_json_response(404, f"会话不存在: {session_id}")
+
+    try:
+        entries = await engine.extract_and_save_memory(trigger="manual")
+    except Exception as exc:
+        logger.warning("会话 %s 手动记忆提取失败: %s", session_id, exc)
+        return _error_json_response(500, f"记忆提取失败: {exc}")
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "count": len(entries),
+        "entries": [
+            {"id": e.id, "content": e.content, "category": e.category.value}
+            for e in entries
+        ],
+    })
+
+
+@_router.post("/api/v1/sessions/{session_id}/manifest/rebuild")
+async def rebuild_session_manifest(session_id: str) -> JSONResponse:
+    """触发指定会话的工作区清单后台重建（force=True）。"""
+    assert _session_manager is not None, "服务未初始化"
+
+    engine = _session_manager.get_engine(session_id)
+
+    if engine is None and _session_manager.session_exists(session_id):
+        acquired_session_id: str | None = None
+        try:
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+        except SessionBusyError:
+            engine = _session_manager.get_engine(session_id)
+        except Exception:
+            logger.debug(
+                "manifest rebuild 懒恢复会话失败: %s",
+                session_id,
+                exc_info=True,
+            )
+            engine = None
+        finally:
+            if acquired_session_id is not None:
+                await _session_manager.release_for_chat(acquired_session_id)
+
+    if engine is None:
+        return _error_json_response(404, f"会话不存在: {session_id}")
+
+    try:
+        started = engine.start_workspace_manifest_prewarm(force=True)
+    except Exception as exc:
+        logger.warning("会话 %s 触发 manifest rebuild 失败: %s", session_id, exc)
+        return _error_json_response(500, f"清单重建失败: {exc}")
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "started": started,
+        "message": "清单重建已启动" if started else "清单正在构建中，请稍候",
+    })
 
 
 @_router.get("/api/v1/sessions/{session_id}")
@@ -1267,45 +2417,76 @@ class ModelSwitchRequest(BaseModel):
 async def list_models() -> JSONResponse:
     """获取可用模型列表（含多模型配置档案）。"""
     assert _config is not None, "服务未初始化"
-    # 使用 engine 的 list_models() 获取完整多模型配置
-    try:
-        engine = _require_skill_engine()
-        rows = engine.list_models()
-        models = [
-            {
-                "name": row["name"],
-                "model": row["model"],
-                "description": row.get("description", ""),
-                "active": row.get("active") == "yes",
-                "base_url": row.get("base_url", ""),
-            }
-            for row in rows
-        ]
-    except Exception:
-        # 回退到仅返回主模型
-        models = [{"name": "default", "model": _config.model, "description": "默认模型", "active": True, "base_url": _config.base_url}]
+
+    active_name = _config_store.get_active_model() if _config_store else None
+    models: list[dict] = [{
+        "name": "default",
+        "model": _config.model,
+        "description": "默认模型（主配置）",
+        "active": active_name is None,
+        "base_url": _config.base_url,
+    }]
+    db_profiles = _config_store.list_profiles() if _config_store else []
+    for p in db_profiles:
+        models.append({
+            "name": p["name"],
+            "model": p["model"],
+            "description": p.get("description", ""),
+            "active": p["name"] == active_name,
+            "base_url": p.get("base_url", ""),
+        })
     return JSONResponse(content={"models": models})
 
 
 @_router.put("/api/v1/models/active")
 async def switch_model(request: ModelSwitchRequest) -> JSONResponse:
-    """切换当前活跃模型（支持智能匹配）。"""
+    """切换当前活跃模型并持久化到数据库，同时同步所有活跃会话的 engine。"""
     assert _session_manager is not None, "服务未初始化"
-    # 对所有活跃会话的引擎执行模型切换
+    assert _config is not None, "服务未初始化"
+
+    name = request.name.strip()
+    if not name:
+        return _error_json_response(400, "请指定模型名称。")
+
+    # 验证目标模型存在
+    if name.lower() != "default":
+        profile = _config_store.get_profile(name) if _config_store else None
+        if profile is None:
+            available = ", ".join(p["name"] for p in (_config_store.list_profiles() if _config_store else []))
+            return _error_json_response(404, f"未找到模型 {name!r}。可用模型：default" + (f", {available}" if available else ""))
+
+    # 持久化到数据库
+    if _config_store is not None:
+        _config_store.set_active_model(None if name.lower() == "default" else name)
+
+    # 同步所有活跃会话的 engine
+    result_msg = f"模型已切换为 {name}"
     sessions = await _session_manager.list_sessions()
-    result_msg = f"模型已切换为 {request.name}"
     for session_info in sessions:
         try:
-            detail = await _session_manager.get_session_detail(session_info["id"])
-            # 直接访问 session entry 的 engine
+            engine = _session_manager.get_engine(session_info["id"])
+            if engine is not None:
+                result_msg = engine.switch_model(name)
         except Exception:
             pass
-    # 使用临时 engine 执行切换（演示返回）
-    try:
-        engine = _require_skill_engine()
-        result_msg = engine.switch_model(request.name)
-    except Exception:
-        pass
+
+    # 模型切换后尝试从缓存加载新模型的能力探测结果
+    db = getattr(_session_manager, "_database", None)
+    if db is not None:
+        try:
+            from excelmanus.model_probe import load_capabilities
+
+            for session_info in sessions:
+                engine = _session_manager.get_engine(session_info["id"])
+                if engine is not None:
+                    caps = load_capabilities(
+                        db, engine.current_model, engine._active_base_url,
+                    )
+                    if caps is not None:
+                        engine.set_model_capabilities(caps)
+        except Exception:
+            logger.debug("模型切换后加载能力缓存失败", exc_info=True)
+
     return JSONResponse(content={"message": result_msg})
 
 
@@ -1313,10 +2494,8 @@ async def switch_model(request: ModelSwitchRequest) -> JSONResponse:
 
 _MODEL_ENV_KEYS = {
     "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL"},
-    "aux": {"model": "EXCELMANUS_AUX_MODEL"},
-    "router": {"api_key": "EXCELMANUS_ROUTER_API_KEY", "base_url": "EXCELMANUS_ROUTER_BASE_URL", "model": "EXCELMANUS_ROUTER_MODEL"},
+    "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL"},
     "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL"},
-    "window_advisor": {"api_key": "EXCELMANUS_WINDOW_ADVISOR_API_KEY", "base_url": "EXCELMANUS_WINDOW_ADVISOR_BASE_URL"},
 }
 
 
@@ -1384,7 +2563,7 @@ class ModelProfileCreate(BaseModel):
 
 @_router.get("/api/v1/config/models")
 async def get_model_config() -> JSONResponse:
-    """获取全部模型配置（main/aux/router/vlm/window_advisor + profiles）。"""
+    """获取全部模型配置（main/aux/vlm + profiles）。"""
     assert _config is not None, "服务未初始化"
     result: dict = {
         "main": {
@@ -1393,31 +2572,24 @@ async def get_model_config() -> JSONResponse:
             "model": _config.model,
         },
         "aux": {
+            "api_key": _mask_key(_config.aux_api_key or ""),
+            "base_url": _config.aux_base_url or "",
             "model": _config.aux_model or "",
-        },
-        "router": {
-            "api_key": _mask_key(_config.router_api_key or ""),
-            "base_url": _config.router_base_url or "",
-            "model": _config.router_model or "",
         },
         "vlm": {
             "api_key": _mask_key(_config.vlm_api_key or ""),
             "base_url": _config.vlm_base_url or "",
             "model": _config.vlm_model or "",
         },
-        "window_advisor": {
-            "api_key": _mask_key(_config.window_advisor_api_key or ""),
-            "base_url": _config.window_advisor_base_url or "",
-        },
         "profiles": [
             {
-                "name": p.name,
-                "model": p.model,
-                "api_key": _mask_key(p.api_key),
-                "base_url": p.base_url,
-                "description": p.description,
+                "name": p["name"],
+                "model": p["model"],
+                "api_key": _mask_key(p.get("api_key", "")),
+                "base_url": p.get("base_url", ""),
+                "description": p.get("description", ""),
             }
-            for p in _config.models
+            for p in (_config_store.list_profiles() if _config_store else [])
         ],
     }
     return JSONResponse(content=result)
@@ -1428,6 +2600,25 @@ def _mask_key(key: str) -> str:
     if not key or len(key) <= 12:
         return "****" if key else ""
     return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+
+
+def _sync_config_profiles_from_db() -> None:
+    """从数据库读取 model_profiles 并同步到 _config.models。"""
+    if _config is None or _config_store is None:
+        return
+    rows = _config_store.list_profiles()
+    default_api_key = _config.api_key
+    default_base_url = _config.base_url
+    profiles: list[ModelProfile] = []
+    for row in rows:
+        profiles.append(ModelProfile(
+            name=row["name"],
+            model=row["model"],
+            api_key=row.get("api_key") or default_api_key,
+            base_url=row.get("base_url") or default_base_url,
+            description=row.get("description", ""),
+        ))
+    object.__setattr__(_config, "models", tuple(profiles))
 
 
 @_router.put("/api/v1/config/models/{section}")
@@ -1463,111 +2654,587 @@ async def update_model_config(section: str, request: ModelConfigUpdate) -> JSONR
         elif env_key in os.environ:
             del os.environ[env_key]
 
+    # 同步更新内存中的 _config 实例
+    if _config is not None:
+        _SECTION_CONFIG_FIELDS = {
+            "main": {"api_key": "api_key", "base_url": "base_url", "model": "model"},
+            "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model"},
+            "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model"},
+        }
+        field_map = _SECTION_CONFIG_FIELDS.get(section, {})
+        for req_field, config_attr in field_map.items():
+            val = getattr(request, req_field, None)
+            if val is not None:
+                object.__setattr__(_config, config_attr, val)
+
     return JSONResponse(content={"status": "ok", "section": section, "updated": list(updates.keys())})
 
 
 @_router.post("/api/v1/config/models/profiles")
 async def add_model_profile(request: ModelProfileCreate) -> JSONResponse:
-    """新增多模型条目并持久化到 .env。"""
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
+    """新增多模型条目并持久化到数据库。"""
+    if _config_store is None:
+        return _error_json_response(503, "配置存储未初始化")
 
-    # 读取当前 EXCELMANUS_MODELS
-    current_raw = os.environ.get("EXCELMANUS_MODELS", "")
-    profiles: list = []
-    if current_raw:
-        try:
-            profiles = json.loads(current_raw)
-        except json.JSONDecodeError:
-            profiles = []
+    if _config_store.get_profile(request.name):
+        return _error_json_response(409, f"模型名称已存在: {request.name}")
 
-    # 检查名称重复
-    for p in profiles:
-        if isinstance(p, dict) and p.get("name") == request.name:
-            return _error_json_response(409, f"模型名称已存在: {request.name}")
-
-    new_entry: dict = {"name": request.name, "model": request.model}
-    if request.api_key:
-        new_entry["api_key"] = request.api_key
-    if request.base_url:
-        new_entry["base_url"] = request.base_url
-    if request.description:
-        new_entry["description"] = request.description
-    profiles.append(new_entry)
-
-    new_json = json.dumps(profiles, ensure_ascii=False)
-    lines = _update_env_var(lines, "EXCELMANUS_MODELS", new_json)
-    _write_env_file(env_path, lines)
-    os.environ["EXCELMANUS_MODELS"] = new_json
+    _config_store.add_profile(
+        name=request.name,
+        model=request.model,
+        api_key=request.api_key or "",
+        base_url=request.base_url or "",
+        description=request.description or "",
+    )
+    _sync_config_profiles_from_db()
 
     return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
 
 
 @_router.delete("/api/v1/config/models/profiles/{name}")
 async def delete_model_profile(name: str) -> JSONResponse:
-    """删除多模型条目并持久化到 .env。"""
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
+    """删除多模型条目。"""
+    if _config_store is None:
+        return _error_json_response(503, "配置存储未初始化")
 
-    current_raw = os.environ.get("EXCELMANUS_MODELS", "")
-    profiles: list = []
-    if current_raw:
-        try:
-            profiles = json.loads(current_raw)
-        except json.JSONDecodeError:
-            profiles = []
-
-    new_profiles = [p for p in profiles if not (isinstance(p, dict) and p.get("name") == name)]
-    if len(new_profiles) == len(profiles):
+    if not _config_store.delete_profile(name):
         return _error_json_response(404, f"未找到模型: {name}")
 
-    new_json = json.dumps(new_profiles, ensure_ascii=False) if new_profiles else ""
-    lines = _update_env_var(lines, "EXCELMANUS_MODELS", new_json)
-    _write_env_file(env_path, lines)
-    if new_json:
-        os.environ["EXCELMANUS_MODELS"] = new_json
-    elif "EXCELMANUS_MODELS" in os.environ:
-        del os.environ["EXCELMANUS_MODELS"]
-
+    _sync_config_profiles_from_db()
     return JSONResponse(content={"status": "deleted", "name": name})
 
 
 @_router.put("/api/v1/config/models/profiles/{name}")
 async def update_model_profile(name: str, request: ModelProfileCreate) -> JSONResponse:
-    """更新多模型条目并持久化到 .env。"""
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
+    """更新多模型条目。"""
+    if _config_store is None:
+        return _error_json_response(503, "配置存储未初始化")
 
-    current_raw = os.environ.get("EXCELMANUS_MODELS", "")
-    profiles: list = []
-    if current_raw:
-        try:
-            profiles = json.loads(current_raw)
-        except json.JSONDecodeError:
-            profiles = []
-
-    found = False
-    for i, p in enumerate(profiles):
-        if isinstance(p, dict) and p.get("name") == name:
-            profiles[i] = {
-                "name": request.name,
-                "model": request.model,
-                **(({"api_key": request.api_key} if request.api_key else {})),
-                **(({"base_url": request.base_url} if request.base_url else {})),
-                **(({"description": request.description} if request.description else {})),
-            }
-            found = True
-            break
-
-    if not found:
+    if not _config_store.get_profile(name):
         return _error_json_response(404, f"未找到模型: {name}")
 
-    new_json = json.dumps(profiles, ensure_ascii=False)
-    lines = _update_env_var(lines, "EXCELMANUS_MODELS", new_json)
-    _write_env_file(env_path, lines)
-    os.environ["EXCELMANUS_MODELS"] = new_json
+    _config_store.update_profile(
+        name,
+        new_name=request.name if request.name != name else None,
+        model=request.model,
+        api_key=request.api_key or None,
+        base_url=request.base_url or None,
+        description=request.description or None,
+    )
+    _sync_config_profiles_from_db()
 
     return JSONResponse(content={"status": "updated", "name": request.name})
+
+
+# ── 模型配置导出/导入 API ──────────────────────────────
+
+
+class ConfigExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sections: list[str] = ["main", "aux", "vlm", "profiles"]
+    mode: Literal["password", "simple"] = "password"
+    password: str | None = None
+
+
+class ConfigImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str
+    password: str | None = None
+
+
+def _collect_raw_sections(section_names: list[str]) -> dict[str, Any]:
+    """收集指定区块的原始（未脱敏）配置数据。"""
+    assert _config is not None
+    result: dict[str, Any] = {}
+    if "main" in section_names:
+        result["main"] = {
+            "api_key": _config.api_key,
+            "base_url": _config.base_url,
+            "model": _config.model,
+        }
+    if "aux" in section_names:
+        result["aux"] = {
+            "api_key": _config.aux_api_key or "",
+            "base_url": _config.aux_base_url or "",
+            "model": _config.aux_model or "",
+        }
+    if "vlm" in section_names:
+        result["vlm"] = {
+            "api_key": _config.vlm_api_key or "",
+            "base_url": _config.vlm_base_url or "",
+            "model": _config.vlm_model or "",
+        }
+    if "profiles" in section_names and _config_store is not None:
+        result["profiles"] = _config_store.list_profiles()
+    return result
+
+
+@_router.post("/api/v1/config/export")
+async def export_model_config(request: ConfigExportRequest) -> JSONResponse:
+    """将模型配置加密导出为令牌字符串。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    valid_sections = {"main", "aux", "vlm", "profiles"}
+    invalid = set(request.sections) - valid_sections
+    if invalid:
+        return _error_json_response(400, f"无效的配置区块: {', '.join(invalid)}")
+
+    sections = _collect_raw_sections(request.sections)
+
+    try:
+        from excelmanus.config_transfer import export_config
+        token = export_config(sections, password=request.password, mode=request.mode)
+    except ValueError as exc:
+        return _error_json_response(400, str(exc))
+
+    return JSONResponse(content={"token": token, "sections": list(sections.keys()), "mode": request.mode})
+
+
+@_router.post("/api/v1/config/import")
+async def import_model_config(request: ConfigImportRequest) -> JSONResponse:
+    """解密并导入模型配置令牌。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    try:
+        from excelmanus.config_transfer import import_config
+        payload = import_config(request.token, password=request.password)
+    except ValueError as exc:
+        return _error_json_response(400, str(exc))
+
+    sections = payload.get("sections", {})
+    imported: dict[str, Any] = {}
+
+    env_path = _find_env_file()
+    lines = _read_env_file(env_path)
+    env_dirty = False
+
+    for section_key in ("main", "aux", "vlm"):
+        section_data = sections.get(section_key)
+        if not isinstance(section_data, dict):
+            continue
+        key_map = _MODEL_ENV_KEYS.get(section_key)
+        if not key_map:
+            continue
+
+        updated_fields: list[str] = []
+        for field_name in ("api_key", "base_url", "model"):
+            val = section_data.get(field_name)
+            if val is None or not isinstance(val, str):
+                continue
+            env_key = key_map.get(field_name)
+            if not env_key:
+                continue
+            lines = _update_env_var(lines, env_key, val)
+            os.environ[env_key] = val if val else os.environ.get(env_key, "")
+            if val:
+                os.environ[env_key] = val
+            elif env_key in os.environ:
+                del os.environ[env_key]
+            updated_fields.append(field_name)
+            env_dirty = True
+
+        if _config is not None and updated_fields:
+            field_map = {
+                "main": {"api_key": "api_key", "base_url": "base_url", "model": "model"},
+                "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model"},
+                "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model"},
+            }.get(section_key, {})
+            for f in updated_fields:
+                config_attr = field_map.get(f)
+                if config_attr:
+                    object.__setattr__(_config, config_attr, section_data.get(f) or None)
+
+        if updated_fields:
+            imported[section_key] = updated_fields
+
+    if env_dirty:
+        _write_env_file(env_path, lines)
+
+    profiles_data = sections.get("profiles")
+    if isinstance(profiles_data, list) and _config_store is not None:
+        profile_names: list[str] = []
+        for p in profiles_data:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name", "").strip()
+            model = p.get("model", "").strip()
+            if not name or not model:
+                continue
+            existing = _config_store.get_profile(name)
+            if existing:
+                _config_store.update_profile(
+                    name,
+                    model=model,
+                    api_key=p.get("api_key", ""),
+                    base_url=p.get("base_url", ""),
+                    description=p.get("description", ""),
+                )
+            else:
+                _config_store.add_profile(
+                    name=name,
+                    model=model,
+                    api_key=p.get("api_key", ""),
+                    base_url=p.get("base_url", ""),
+                    description=p.get("description", ""),
+                )
+            profile_names.append(name)
+        if profile_names:
+            imported["profiles"] = profile_names
+            _sync_config_profiles_from_db()
+
+    return JSONResponse(content={
+        "status": "ok",
+        "imported": imported,
+        "exported_at": payload.get("ts", ""),
+    })
+
+
+@_router.post("/api/v1/config/transfer/detect")
+async def detect_config_token(request: Request) -> JSONResponse:
+    """检测令牌的加密模式（用于前端判断是否需要密码输入框）。"""
+    body = await request.json()
+    token = body.get("token", "")
+    if not token:
+        return _error_json_response(400, "缺少 token 字段")
+
+    from excelmanus.config_transfer import detect_token_mode
+    mode = detect_token_mode(token)
+    return JSONResponse(content={"mode": mode, "needs_password": mode == "password"})
+
+
+# ── 模型能力探测 API ──────────────────────────────────
+
+
+def _resolve_active_engine_info() -> tuple[str, str, str]:
+    """返回最新的主模型配置（始终从 _config 读取，不用引擎缓存）。"""
+    assert _config is not None
+    return _config.model, _config.base_url, _config.api_key
+
+
+def _resolve_model_info(
+    req_name: str | None,
+    req_model: str | None,
+    req_base_url: str | None,
+) -> tuple[str, str, str]:
+    """根据请求参数解析模型信息。
+
+    优先级：profile name > model ID 匹配 profile > 直接使用 model+base_url。
+    """
+    assert _config is not None
+
+    # 1) 无参数：返回主模型配置
+    if not req_name and not req_model:
+        return _resolve_active_engine_info()
+
+    # 1.5) 内置 section 名称直接返回对应配置
+    if req_name == "main":
+        return _config.model, _config.base_url, _config.api_key
+    if req_name == "aux":
+        return (_config.aux_model or _config.model,
+                _config.aux_base_url or _config.base_url,
+                _config.aux_api_key or _config.api_key)
+    if req_name == "vlm":
+        return (_config.vlm_model or _config.model,
+                _config.vlm_base_url or _config.base_url,
+                _config.vlm_api_key or _config.api_key)
+
+    # 2) 按 profile name 精确查找
+    lookup_name = req_name or req_model
+    if _config_store is not None and lookup_name:
+        profile = _config_store.get_profile(lookup_name)
+        if profile is not None:
+            p_base_url = profile.get("base_url") or _config.base_url
+            p_api_key = profile.get("api_key") or _config.api_key
+            return profile["model"], p_base_url, p_api_key
+
+    # 3) 按 model ID 在所有 profiles 中查找（处理前端传 model ID 而非 name 的情况）
+    if _config_store is not None and req_model:
+        for p in _config_store.list_profiles():
+            if p["model"] == req_model:
+                p_base_url = p.get("base_url") or _config.base_url
+                p_api_key = p.get("api_key") or _config.api_key
+                # 如果也指定了 base_url，需要匹配
+                if req_base_url and p_base_url != req_base_url:
+                    continue
+                return p["model"], p_base_url, p_api_key
+
+    # 4) 兜底：直接使用参数，API key 从最新 _config 取
+    model = req_model or _config.model
+    base_url = req_base_url or _config.base_url
+    return model, base_url, _config.api_key
+
+
+@_router.get("/api/v1/config/models/capabilities")
+async def get_model_capabilities(request: Request) -> JSONResponse:
+    """获取模型能力探测结果。支持 ?model=xxx 查询指定模型，否则返回当前活跃模型。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.model_probe import load_capabilities
+
+    db = _session_manager._database if _session_manager else None
+    if db is None:
+        return JSONResponse(content={"capabilities": None, "reason": "数据库未启用"})
+
+    req_name = request.query_params.get("name")
+    req_model = request.query_params.get("model")
+    req_base_url = request.query_params.get("base_url")
+    model, base_url, _ = _resolve_model_info(req_name, req_model, req_base_url)
+
+    caps = load_capabilities(db, model, base_url)
+    return JSONResponse(content={
+        "capabilities": caps.to_dict() if caps else None,
+        "model": model,
+        "base_url": base_url,
+    })
+
+
+@_router.get("/api/v1/config/models/capabilities/all")
+async def get_all_model_capabilities() -> JSONResponse:
+    """获取所有已配置模型的能力探测结果（主模型 + profiles）。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.model_probe import load_capabilities
+
+    db = _session_manager._database if _session_manager else None
+    if db is None:
+        return JSONResponse(content={"items": []})
+
+    result: list[dict] = []
+
+    # 主模型
+    main_caps = load_capabilities(db, _config.model, _config.base_url)
+    result.append({
+        "name": "main",
+        "model": _config.model,
+        "base_url": _config.base_url,
+        "capabilities": main_caps.to_dict() if main_caps else None,
+    })
+
+    # Profiles
+    profiles = _config_store.list_profiles() if _config_store else []
+    for p in profiles:
+        p_model = p["model"]
+        p_base_url = p.get("base_url") or _config.base_url
+        caps = load_capabilities(db, p_model, p_base_url)
+        result.append({
+            "name": p["name"],
+            "model": p_model,
+            "base_url": p_base_url,
+            "capabilities": caps.to_dict() if caps else None,
+        })
+
+    return JSONResponse(content={"items": result})
+
+
+@_router.post("/api/v1/config/models/capabilities/probe")
+async def probe_model_capabilities(request: Request) -> JSONResponse:
+    """手动触发模型能力探测。支持 body 指定 model/base_url/api_key，否则探测当前活跃模型。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.model_probe import delete_capabilities, run_full_probe
+    from excelmanus.providers import create_client
+
+    db = _session_manager._database if _session_manager else None
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    req_name = body.get("name")
+    req_model = body.get("model")
+    req_base_url = body.get("base_url")
+    model, base_url, api_key = _resolve_model_info(req_name, req_model, req_base_url)
+    if body.get("api_key"):
+        api_key = body["api_key"]
+
+    if db is not None:
+        delete_capabilities(db, model, base_url)
+
+    client = create_client(api_key=api_key, base_url=base_url)
+
+    try:
+        caps = await run_full_probe(
+            client=client,
+            model=model,
+            base_url=base_url,
+            skip_if_cached=False,
+            db=db,
+        )
+    except Exception as exc:
+        return _error_json_response(500, f"探测失败: {exc}")
+
+    # 同步到所有活跃会话的引擎
+    if _session_manager is not None:
+        for entry in _session_manager._sessions.values():
+            if entry.engine.current_model == model:
+                entry.engine.set_model_capabilities(caps)
+
+    return JSONResponse(content={"capabilities": caps.to_dict(), "model": model})
+
+
+@_router.post("/api/v1/config/models/capabilities/probe-all")
+async def probe_all_model_capabilities() -> JSONResponse:
+    """一键探测所有已配置模型的能力。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.model_probe import delete_capabilities, run_full_probe
+    from excelmanus.providers import create_client
+
+    db = _session_manager._database if _session_manager else None
+
+    # 收集所有需要探测的 (name, model, base_url, api_key) 元组
+    targets: list[tuple[str, str, str, str]] = []
+    targets.append(("main", _config.model, _config.base_url, _config.api_key))
+
+    profiles = _config_store.list_profiles() if _config_store else []
+    for p in profiles:
+        p_base_url = p.get("base_url") or _config.base_url
+        p_api_key = p.get("api_key") or _config.api_key
+        targets.append((p["name"], p["model"], p_base_url, p_api_key))
+
+    results: list[dict] = []
+    for name, model, base_url, api_key in targets:
+        if db is not None:
+            delete_capabilities(db, model, base_url)
+        client = create_client(api_key=api_key, base_url=base_url)
+        try:
+            caps = await run_full_probe(
+                client=client, model=model, base_url=base_url,
+                skip_if_cached=False, db=db,
+            )
+            results.append({
+                "name": name, "model": model,
+                "capabilities": caps.to_dict(),
+            })
+            if _session_manager is not None:
+                for entry in _session_manager._sessions.values():
+                    if entry.engine.current_model == model:
+                        entry.engine.set_model_capabilities(caps)
+        except Exception as exc:
+            results.append({
+                "name": name, "model": model,
+                "error": str(exc)[:200],
+            })
+
+    return JSONResponse(content={"results": results})
+
+
+@_router.put("/api/v1/config/models/capabilities")
+async def update_model_capabilities(request: Request) -> JSONResponse:
+    """手动覆盖模型能力标记（前端设置用）。"""
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.model_probe import update_capabilities_override
+
+    db = _session_manager._database if _session_manager else None
+    if db is None:
+        return _error_json_response(503, "数据库未启用")
+
+    body = await request.json()
+    overrides = body.get("overrides", {})
+    if not overrides:
+        return _error_json_response(400, "缺少 overrides 字段")
+
+    req_name = body.get("name")
+    req_model = body.get("model")
+    req_base_url = body.get("base_url")
+    model, base_url, _ = _resolve_model_info(req_name, req_model, req_base_url)
+
+    caps = update_capabilities_override(db, model, base_url, overrides)
+
+    if caps is not None and _session_manager is not None:
+        for entry in _session_manager._sessions.values():
+            if entry.engine.current_model == model:
+                entry.engine.set_model_capabilities(caps)
+
+    return JSONResponse(content={
+        "capabilities": caps.to_dict() if caps else None,
+    })
+
+
+# ── 运行时配置管理 API ──────────────────────────────────
+
+_RUNTIME_ENV_KEYS: dict[str, str] = {
+    "subagent_enabled": "EXCELMANUS_SUBAGENT_ENABLED",
+    "backup_enabled": "EXCELMANUS_BACKUP_ENABLED",
+    "external_safe_mode": "EXCELMANUS_EXTERNAL_SAFE_MODE",
+    "max_iterations": "EXCELMANUS_MAX_ITERATIONS",
+    "compaction_enabled": "EXCELMANUS_COMPACTION_ENABLED",
+    "compaction_threshold_ratio": "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
+    "code_policy_enabled": "EXCELMANUS_CODE_POLICY_ENABLED",
+}
+
+
+@_router.get("/api/v1/config/runtime")
+async def get_runtime_config() -> JSONResponse:
+    """读取运行时行为配置。"""
+    assert _config is not None, "服务未初始化"
+    return JSONResponse(content={
+        "subagent_enabled": _config.subagent_enabled,
+        "backup_enabled": _config.backup_enabled,
+        "external_safe_mode": _config.external_safe_mode,
+        "max_iterations": _config.max_iterations,
+        "compaction_enabled": _config.compaction_enabled,
+        "compaction_threshold_ratio": _config.compaction_threshold_ratio,
+        "code_policy_enabled": _config.code_policy_enabled,
+    })
+
+
+class RuntimeConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    subagent_enabled: bool | None = None
+    backup_enabled: bool | None = None
+    external_safe_mode: bool | None = None
+    max_iterations: int | None = None
+    compaction_enabled: bool | None = None
+    compaction_threshold_ratio: float | None = None
+    code_policy_enabled: bool | None = None
+
+
+@_router.put("/api/v1/config/runtime")
+async def update_runtime_config(request: RuntimeConfigUpdate) -> JSONResponse:
+    """更新运行时行为配置并持久化到 .env。"""
+    assert _config is not None, "服务未初始化"
+
+    env_path = _find_env_file()
+    lines = _read_env_file(env_path)
+    updates: dict[str, str] = {}
+
+    payload = request.model_dump(exclude_none=True)
+    if not payload:
+        return _error_json_response(400, "无有效更新字段")
+
+    for field, value in payload.items():
+        env_key = _RUNTIME_ENV_KEYS.get(field)
+        if env_key is None:
+            continue
+        if isinstance(value, bool):
+            str_val = "true" if value else "false"
+        else:
+            str_val = str(value)
+        updates[env_key] = str_val
+        lines = _update_env_var(lines, env_key, str_val)
+
+    _write_env_file(env_path, lines)
+
+    for env_key, env_val in updates.items():
+        os.environ[env_key] = env_val
+
+    # 同步更新内存中的 config 实例
+    for field, value in payload.items():
+        if hasattr(_config, field):
+            object.__setattr__(_config, field, value)
+
+    return JSONResponse(content={"status": "ok", "updated": list(payload.keys())})
 
 
 # ── MCP Server 管理 API ──────────────────────────────────
@@ -1929,7 +3596,7 @@ async def execute_command(request: Request) -> JSONResponse:
         lines.append(f"- **工作区**: `{_config.workspace_root}`")
         lines.append(f"- **最大迭代**: {_config.max_iterations}")
         lines.append(f"- **辅助模型**: `{_config.aux_model or '未配置'}`")
-        lines.append(f"- **路由模型**: `{_config.router_model or '未配置'}`")
+        lines.append(f"- **AUX Base URL**: `{_config.aux_base_url or '继承主配置'}`")
         lines.append(f"- **VLM 模型**: `{_config.vlm_model or '未配置'}`")
         lines.append(f"- **子代理**: {'开启' if _config.subagent_enabled else '关闭'}")
         lines.append(f"- **备份模式**: {'开启' if _config.backup_enabled else '关闭'}")
@@ -2006,6 +3673,145 @@ async def execute_command(request: Request) -> JSONResponse:
             return JSONResponse(content={"result": "会话状态获取失败", "format": "text"})
 
     return JSONResponse(content={"result": f"未知命令: {command}", "format": "text"})
+
+
+# ── Rules API ───────────────────────────────────────────
+
+
+class RuleCreateRequest(BaseModel):
+    content: str
+
+
+class RuleUpdateRequest(BaseModel):
+    content: str | None = None
+    enabled: bool | None = None
+
+
+@_router.get("/api/v1/rules")
+async def list_global_rules() -> list[dict]:
+    """列出全局自定义规则。"""
+    if _rules_manager is None:
+        return []
+    return [
+        {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+        for r in _rules_manager.list_global_rules()
+    ]
+
+
+@_router.post("/api/v1/rules")
+async def create_global_rule(req: RuleCreateRequest) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    if not req.content.strip():
+        return JSONResponse(status_code=400, content={"detail": "规则内容不能为空"})  # type: ignore[return-value]
+    r = _rules_manager.add_global_rule(req.content)
+    return {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+
+
+@_router.patch("/api/v1/rules/{rule_id}")
+async def update_global_rule(rule_id: str, req: RuleUpdateRequest) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    r = _rules_manager.update_global_rule(rule_id, content=req.content, enabled=req.enabled)
+    if r is None:
+        return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
+    return {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+
+
+@_router.delete("/api/v1/rules/{rule_id}")
+async def delete_global_rule(rule_id: str) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    ok = _rules_manager.delete_global_rule(rule_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
+    return {"status": "deleted"}
+
+
+# ── Session Rules API ───────────────────────────────────
+
+
+@_router.get("/api/v1/sessions/{session_id}/rules")
+async def list_session_rules(session_id: str) -> list[dict]:
+    if _rules_manager is None:
+        return []
+    return [
+        {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+        for r in _rules_manager.list_session_rules(session_id)
+    ]
+
+
+@_router.post("/api/v1/sessions/{session_id}/rules")
+async def create_session_rule(session_id: str, req: RuleCreateRequest) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    if not req.content.strip():
+        return JSONResponse(status_code=400, content={"detail": "规则内容不能为空"})  # type: ignore[return-value]
+    r = _rules_manager.add_session_rule(session_id, req.content)
+    if r is None:
+        return JSONResponse(status_code=503, content={"detail": "会话级规则需要数据库支持"})  # type: ignore[return-value]
+    return {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+
+
+@_router.patch("/api/v1/sessions/{session_id}/rules/{rule_id}")
+async def update_session_rule(session_id: str, rule_id: str, req: RuleUpdateRequest) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    r = _rules_manager.update_session_rule(session_id, rule_id, content=req.content, enabled=req.enabled)
+    if r is None:
+        return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
+    return {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
+
+
+@_router.delete("/api/v1/sessions/{session_id}/rules/{rule_id}")
+async def delete_session_rule(session_id: str, rule_id: str) -> dict:
+    if _rules_manager is None:
+        return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    ok = _rules_manager.delete_session_rule(session_id, rule_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
+    return {"status": "deleted"}
+
+
+# ── Memory API ──────────────────────────────────────────
+
+
+@_router.get("/api/v1/memory")
+async def list_memory_entries(category: str | None = None) -> list[dict]:
+    """列出持久记忆条目，可按类别筛选。"""
+    if _api_persistent_memory is None:
+        return []
+    from excelmanus.memory_models import MemoryCategory
+    cat = None
+    if category:
+        try:
+            cat = MemoryCategory(category)
+        except ValueError:
+            return JSONResponse(  # type: ignore[return-value]
+                status_code=400,
+                content={"detail": f"不支持的类别: {category}"},
+            )
+    entries = _api_persistent_memory.list_entries(cat)
+    return [
+        {
+            "id": e.id,
+            "content": e.content,
+            "category": e.category.value,
+            "timestamp": e.timestamp.isoformat(),
+            "source": e.source,
+        }
+        for e in entries
+    ]
+
+
+@_router.delete("/api/v1/memory/{entry_id}")
+async def delete_memory_entry(entry_id: str) -> dict:
+    if _api_persistent_memory is None:
+        return JSONResponse(status_code=503, content={"detail": "记忆功能未启用"})  # type: ignore[return-value]
+    ok = _api_persistent_memory.delete_entry(entry_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"detail": "记忆条目不存在"})  # type: ignore[return-value]
+    return {"status": "deleted"}
 
 
 @_router.get("/api/v1/health")

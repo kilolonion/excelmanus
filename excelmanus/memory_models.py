@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
@@ -26,6 +27,12 @@ CATEGORY_TOPIC_MAP: dict[MemoryCategory, str] = {
 }
 
 
+def _compute_entry_id(category: str, content: str, timestamp: datetime) -> str:
+    """基于 category + content 前 50 字符 + timestamp 生成稳定短 ID。"""
+    raw = f"{category}:{content[:50]}:{timestamp.isoformat()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 @dataclass
 class MemoryEntry:
     """单条记忆条目。"""
@@ -34,3 +41,10 @@ class MemoryEntry:
     category: MemoryCategory  # 所属类别
     timestamp: datetime  # 创建时间
     source: str = ""  # 来源描述（可选）
+    id: str = field(default="")  # 稳定短 ID（自动生成）
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = _compute_entry_id(
+                self.category.value, self.content, self.timestamp,
+            )

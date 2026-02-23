@@ -76,6 +76,23 @@ async def _async_main() -> None:
         highlight=False,
     )
 
+    # ── 3.5. 统一数据库 ──
+    _database = None
+    if config.chat_history_enabled:
+        import os
+        from excelmanus.database import Database
+
+        resolved_db_path = os.path.expanduser(
+            config.chat_history_db_path or config.db_path
+        )
+        _database = Database(resolved_db_path)
+        console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.DIM}]统一数据库[/{THEME.DIM}]"
+            f" [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]已启用[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]",
+            highlight=False,
+        )
+
     # ── 4. 持久记忆 ──
     persistent_memory = None
     memory_extractor = None
@@ -87,12 +104,17 @@ async def _async_main() -> None:
         persistent_memory = PersistentMemory(
             memory_dir=config.memory_dir,
             auto_load_lines=config.memory_auto_load_lines,
+            database=_database,
         )
+        # 记忆提取优先使用 aux 模型，节省主模型 token
+        _mem_model = config.aux_model or config.model
+        _mem_api_key = config.aux_api_key or config.api_key
+        _mem_base_url = config.aux_base_url or config.base_url
         _client = _create_client(
-            api_key=config.api_key,
-            base_url=config.base_url,
+            api_key=_mem_api_key,
+            base_url=_mem_base_url,
         )
-        memory_extractor = MemoryExtractor(client=_client, model=config.model)
+        memory_extractor = MemoryExtractor(client=_client, model=_mem_model)
         console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
             f" [{THEME.DIM}]持久记忆[/{THEME.DIM}]"
@@ -112,7 +134,9 @@ async def _async_main() -> None:
         skill_router=router,
         persistent_memory=persistent_memory,
         memory_extractor=memory_extractor,
+        database=_database,
     )
+    engine.start_workspace_manifest_prewarm()
 
     # ── 6. MCP 连接 ──
     mcp_count = 0
@@ -189,6 +213,8 @@ async def _async_main() -> None:
             await engine.shutdown_mcp()
         except Exception:
             logger.warning("CLI 退出时 MCP 关闭失败，已跳过", exc_info=True)
+        if _database is not None:
+            _database.close()
 
 
 def main() -> None:

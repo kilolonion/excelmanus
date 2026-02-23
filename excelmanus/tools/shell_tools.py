@@ -524,5 +524,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=run_shell,
+            write_effect="dynamic",
         ),
     ]

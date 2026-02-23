@@ -10,7 +10,7 @@ import asyncio
 import json
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -90,7 +90,7 @@ async def test_lifespan_uses_bootstrap_config_without_reloading(
 
 
 @contextmanager
-def _setup_api_globals(config=None):
+def _setup_api_globals(config=None, *, chat_history=None):
     """上下文管理器：注入 API 全局状态，退出时清理。"""
     if config is None:
         config = _test_config()
@@ -110,6 +110,7 @@ def _setup_api_globals(config=None):
         config=config,
         registry=registry,
         skill_router=router,
+        chat_history=chat_history,
     )
 
     old_config = api_module._config
@@ -470,6 +471,331 @@ class TestProperty14SessionDeletion:
         assert delete_resp.status_code == 409
         assert "error" in delete_resp.json()
 
+    @pytest.mark.asyncio
+    async def test_get_session_detail_includes_mode_and_model_fields(
+        self, client: AsyncClient
+    ) -> None:
+        """会话详情端点应返回前端展示所需的模式/模型字段。"""
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value="会话详情测试",
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+
+        detail_resp = await client.get(f"/api/v1/sessions/{sid}")
+        assert detail_resp.status_code == 200
+        detail = detail_resp.json()
+        assert "full_access_enabled" in detail
+        assert "plan_mode_enabled" in detail
+        assert "current_model" in detail
+        assert "current_model_name" in detail
+
+    @pytest.mark.asyncio
+    async def test_get_session_detail_includes_pending_approval(
+        self, client: AsyncClient
+    ) -> None:
+        """会话详情端点应在存在待确认审批时返回 pending_approval 字段。"""
+        from excelmanus.approval import PendingApproval
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value="审批测试",
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+
+        # 无 pending 时应为 null
+        detail_resp = await client.get(f"/api/v1/sessions/{sid}")
+        assert detail_resp.status_code == 200
+        assert detail_resp.json()["pending_approval"] is None
+        assert detail_resp.json()["pending_question"] is None
+
+        # 注入 pending approval
+        fake_pa = PendingApproval(
+            approval_id="test-approval-001",
+            tool_name="run_code",
+            arguments={"code": "print('hello')"},
+            tool_scope=["run_code"],
+            created_at_utc="2026-02-23T14:00:00Z",
+        )
+        with (
+            patch("excelmanus.engine.AgentEngine.has_pending_approval", return_value=True),
+            patch("excelmanus.engine.AgentEngine.current_pending_approval", return_value=fake_pa),
+        ):
+            detail_resp2 = await client.get(f"/api/v1/sessions/{sid}")
+        assert detail_resp2.status_code == 200
+        pa = detail_resp2.json()["pending_approval"]
+        assert pa is not None
+        assert pa["approval_id"] == "test-approval-001"
+        assert pa["tool_name"] == "run_code"
+        assert "risk_level" in pa
+        assert "args_summary" in pa
+
+    @pytest.mark.asyncio
+    async def test_get_session_detail_includes_pending_question(
+        self, client: AsyncClient
+    ) -> None:
+        """会话详情端点应在存在待回答问题时返回 pending_question 字段。"""
+        from excelmanus.question_flow import PendingQuestion, QuestionOption
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value="问题测试",
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+
+        fake_pq = PendingQuestion(
+            question_id="test-question-001",
+            tool_call_id="tc-001",
+            header="确认操作",
+            text="你确定要执行此操作吗？",
+            options=[
+                QuestionOption(label="是", description="确认执行", value="yes"),
+                QuestionOption(label="否", description="取消", value="no"),
+            ],
+            multi_select=False,
+            created_at_utc="2026-02-23T14:00:00Z",
+        )
+        with (
+            patch("excelmanus.engine.AgentEngine.has_pending_question", return_value=True),
+            patch("excelmanus.engine.AgentEngine.current_pending_question", return_value=fake_pq),
+        ):
+            detail_resp = await client.get(f"/api/v1/sessions/{sid}")
+        assert detail_resp.status_code == 200
+        pq = detail_resp.json()["pending_question"]
+        assert pq is not None
+        assert pq["id"] == "test-question-001"
+        assert pq["header"] == "确认操作"
+        assert pq["text"] == "你确定要执行此操作吗？"
+        assert len(pq["options"]) == 2
+        assert pq["options"][0]["label"] == "是"
+        assert pq["multi_select"] is False
+
+    @pytest.mark.asyncio
+    async def test_session_status_manifest_ready_is_normalized_to_built(
+        self, client: AsyncClient
+    ) -> None:
+        """会话状态端点应将内部 ready 态标准化为前端契约 built 态。"""
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value="会话状态测试",
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+
+        with patch(
+            "excelmanus.engine.AgentEngine.workspace_manifest_build_status",
+            return_value={
+                "state": "ready",
+                "total_files": 7,
+                "scan_duration_ms": 15,
+                "error": None,
+            },
+        ):
+            status_resp = await client.get(f"/api/v1/sessions/{sid}/status")
+
+        assert status_resp.status_code == 200
+        manifest = status_resp.json()["manifest"]
+        assert manifest["state"] == "built"
+        assert manifest["sheet_count"] == 7
+        assert manifest["total_files"] == 7
+
+    @pytest.mark.asyncio
+    async def test_session_status_lazily_restores_history_session(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """状态查询应懒恢复仅存在于历史存储的会话，无需先发消息。"""
+        manager: SessionManager = setup_api_state["manager"]
+        restored_engine = MagicMock()
+        restored_engine._compaction_manager.get_status.return_value = {"enabled": False}
+        restored_engine.workspace_manifest_build_status.return_value = {
+            "state": "building",
+            "total_files": None,
+            "scan_duration_ms": None,
+            "error": None,
+        }
+
+        with patch.object(manager, "get_engine", return_value=None), patch.object(
+            manager, "session_exists", return_value=True
+        ), patch.object(
+            manager,
+            "acquire_for_chat",
+            new_callable=AsyncMock,
+            return_value=("history-only", restored_engine),
+        ) as acquire_mock, patch.object(
+            manager,
+            "release_for_chat",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as release_mock:
+            status_resp = await client.get("/api/v1/sessions/history-only/status")
+
+        assert status_resp.status_code == 200
+        manifest = status_resp.json()["manifest"]
+        assert manifest["state"] == "building"
+        acquire_mock.assert_awaited_once_with("history-only")
+        release_mock.assert_awaited_once_with("history-only")
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_include_archived_query_passed_to_manager(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """include_archived=true 查询参数应透传到 SessionManager。"""
+        manager: SessionManager = setup_api_state["manager"]
+        with patch.object(
+            manager,
+            "list_sessions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as list_mock:
+            resp = await client.get("/api/v1/sessions?include_archived=true")
+
+        assert resp.status_code == 200
+        list_mock.assert_awaited_once_with(include_archived=True)
+
+
+class TestArchiveSessionAPI:
+    """归档/取消归档 API 端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_archive_session_returns_200(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """归档已有会话应返回 200。"""
+        manager: SessionManager = setup_api_state["manager"]
+        with patch.object(
+            manager,
+            "archive_session",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as archive_mock:
+            resp = await client.patch(
+                "/api/v1/sessions/test-sid/archive",
+                json={"archive": True},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["session_id"] == "test-sid"
+        assert data["archived"] is True
+        archive_mock.assert_awaited_once_with("test-sid", archive=True)
+
+    @pytest.mark.asyncio
+    async def test_unarchive_session_returns_200(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """取消归档已有会话应返回 200。"""
+        manager: SessionManager = setup_api_state["manager"]
+        with patch.object(
+            manager,
+            "archive_session",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as archive_mock:
+            resp = await client.patch(
+                "/api/v1/sessions/test-sid/archive",
+                json={"archive": False},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["archived"] is False
+        archive_mock.assert_awaited_once_with("test-sid", archive=False)
+
+    @pytest.mark.asyncio
+    async def test_archive_nonexistent_returns_404(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """归档不存在的会话应返回 404。"""
+        manager: SessionManager = setup_api_state["manager"]
+        with patch.object(
+            manager,
+            "archive_session",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            resp = await client.patch(
+                "/api/v1/sessions/nonexistent/archive",
+                json={"archive": True},
+            )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_archive_defaults_to_true(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """请求体省略 archive 字段时，默认归档。"""
+        manager: SessionManager = setup_api_state["manager"]
+        with patch.object(
+            manager,
+            "archive_session",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as archive_mock:
+            resp = await client.patch(
+                "/api/v1/sessions/test-sid/archive",
+                json={},
+            )
+        assert resp.status_code == 200
+        archive_mock.assert_awaited_once_with("test-sid", archive=True)
+
+
+class TestSessionCompactAPI:
+    """会话级 compact API 端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_session_compact_executes_control_command(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """调用会话 compact 端点应在对应 engine 上执行 /compact。"""
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value="创建会话",
+        ):
+            create_resp = await client.post("/api/v1/chat", json={"message": "创建会话"})
+        sid = create_resp.json()["session_id"]
+
+        manager: SessionManager = setup_api_state["manager"]
+        engine = manager.get_engine(sid)
+        assert engine is not None
+
+        with patch.object(
+            engine,
+            "_handle_control_command",
+            new_callable=AsyncMock,
+            return_value="✅ 上下文压缩完成。",
+        ) as compact_mock:
+            resp = await client.post(f"/api/v1/sessions/{sid}/compact")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == sid
+        assert data["result"] == "✅ 上下文压缩完成。"
+        compact_mock.assert_awaited_once_with("/compact")
+
+    @pytest.mark.asyncio
+    async def test_session_compact_returns_404_when_session_not_found(
+        self, client: AsyncClient
+    ) -> None:
+        """会话不存在时 compact 端点应返回 404。"""
+        resp = await client.post("/api/v1/sessions/not-found/compact")
+        assert resp.status_code == 404
+        assert "error" in resp.json()
+
 
 # ── 单元测试：Property 15 - API 异常不泄露 ───────────────
 
@@ -562,6 +888,21 @@ class TestExternalSafeMode:
             resp = await client.post("/api/v1/chat", json={"message": "你好"})
         assert resp.status_code == 200
         data = resp.json()
+        assert data["route_mode"] == "hidden"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
+    async def test_manifest_command_keep_safe_mode_hidden(
+        self, client: AsyncClient
+    ) -> None:
+        """默认安全模式下，/manifest 命令可执行且路由元信息仍隐藏。"""
+        resp = await client.post(
+            "/api/v1/chat", json={"message": "/manifest status"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "Workspace manifest" in data["reply"]
         assert data["route_mode"] == "hidden"
         assert data["skills_used"] == []
         assert data["tool_scope"] == []
@@ -685,6 +1026,26 @@ class TestExternalSafeMode:
             ) as c:
                 resp = await c.post(
                     "/api/v1/chat", json={"message": "/fullAccess"},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["route_mode"] == "control_command"
+        assert data["skills_used"] == []
+        assert data["tool_scope"] == []
+
+    @pytest.mark.asyncio
+    async def test_manifest_route_mode_control_command_when_safe_mode_disabled(
+        self,
+    ) -> None:
+        """关闭安全模式后，/manifest 请求应返回 control_command 路由模式。"""
+        config = _test_config(external_safe_mode=False)
+        with _setup_api_globals(config=config):
+            transport = _make_transport()
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as c:
+                resp = await c.post(
+                    "/api/v1/chat", json={"message": "/manifest status"},
                 )
         assert resp.status_code == 200
         data = resp.json()
@@ -868,6 +1229,7 @@ class TestExternalSafeMode:
     def test_sse_tool_call_start_masks_arguments_when_safe_mode_disabled(self) -> None:
         event = ToolCallEvent(
             event_type=EventType.TOOL_CALL_START,
+            tool_call_id="call_123",
             tool_name="read_excel",
             arguments={
                 "file_path": "/Users/demo/private.xlsx",
@@ -881,6 +1243,38 @@ class TestExternalSafeMode:
         assert "<path>/private.xlsx" in sse
         assert "abcdef123456" not in sse
         assert "Bearer ***" in sse
+        assert '"tool_call_id": "call_123"' in sse
+
+    def test_sse_excel_diff_uses_workspace_relative_path(self) -> None:
+        """Excel diff 事件中的路径应可直接回传给文件接口。"""
+        cfg = _test_config(workspace_root="/tmp/excelmanus-test-api")
+        with _setup_api_globals(config=cfg):
+            event = ToolCallEvent(
+                event_type=EventType.EXCEL_DIFF,
+                tool_call_id="call_excel",
+                excel_file_path="/tmp/excelmanus-test-api/data/sales.xlsx",
+                excel_sheet="Sheet1",
+                excel_affected_range="A1:A1",
+                excel_changes=[{"cell": "A1", "old": "x", "new": "y"}],
+            )
+            sse = api_module._sse_event_to_sse(event, safe_mode=True)
+        assert sse is not None
+        assert '"file_path": "./data/sales.xlsx"' in sse
+        assert "<path>/sales.xlsx" not in sse
+
+    def test_sse_excel_diff_recovers_masked_placeholder_path(self) -> None:
+        """历史 `<path>/file.xlsx` 占位值应降级为 `./file.xlsx`。"""
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_DIFF,
+            tool_call_id="call_excel",
+            excel_file_path="<path>/sales.xlsx",
+            excel_sheet="Sheet1",
+            excel_affected_range="A1:A1",
+            excel_changes=[{"cell": "A1", "old": "x", "new": "y"}],
+        )
+        sse = api_module._sse_event_to_sse(event, safe_mode=True)
+        assert sse is not None
+        assert '"file_path": "./sales.xlsx"' in sse
 
     def test_sse_task_update_contract_stable_in_safe_mode_on_off(self) -> None:
         """TASK_LIST_CREATED 在 safe_mode 开关下都应映射为 task_update。"""
@@ -1921,6 +2315,110 @@ class TestImageAttachment:
         ]
 
     @pytest.mark.asyncio
+    async def test_chat_abort_no_active_task(self, client: AsyncClient) -> None:
+        """abort 请求在无活跃任务时返回 no_active_task。"""
+        resp = await client.post(
+            "/api/v1/chat/abort",
+            json={"session_id": "nonexistent-session"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "no_active_task"
+
+    @pytest.mark.asyncio
+    async def test_chat_rollback_restores_sqlite_only_session(self) -> None:
+        """rollback 应支持仅存在于 SQLite 历史中的会话（无需预加载到内存）。"""
+        chat_history = MagicMock()
+        chat_history.session_exists.return_value = True
+        chat_history.load_messages.return_value = [
+            {"role": "user", "content": "原始问题"},
+            {"role": "assistant", "content": "原始回复"},
+            {"role": "user", "content": "第二轮问题"},
+            {"role": "assistant", "content": "第二轮回复"},
+        ]
+
+        with _setup_api_globals(chat_history=chat_history):
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                resp = await c.post(
+                    "/api/v1/chat/rollback",
+                    json={
+                        "session_id": "history-only",
+                        "turn_index": 0,
+                        "rollback_files": False,
+                        "new_message": "编辑后问题",
+                    },
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["turn_index"] == 0
+        assert data["removed_messages"] == 3
+
+        chat_history.clear_messages.assert_called_once_with("history-only")
+        chat_history.save_turn_messages.assert_called_once()
+        save_call = chat_history.save_turn_messages.call_args
+        assert save_call.args[0] == "history-only"
+        assert save_call.args[1] == [{"role": "user", "content": "编辑后问题"}]
+        assert save_call.kwargs["turn_number"] == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_abort_cancels_active_task(self, client: AsyncClient) -> None:
+        """abort 请求应取消活跃的 chat 任务并返回 cancelled。"""
+        chat_started = asyncio.Event()
+        chat_cancelled = asyncio.Event()
+
+        async def slow_chat(_: str, **kwargs) -> ChatResult:
+            on_event = kwargs.get("on_event")
+            if on_event:
+                on_event(ToolCallEvent(
+                    event_type=EventType.THINKING,
+                    thinking="thinking...",
+                ))
+            chat_started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                chat_cancelled.set()
+                raise
+            return ChatResult(reply="should-not-reach")
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            side_effect=slow_chat,
+        ):
+            # 启动流式请求（后台）
+            stream_task = asyncio.create_task(
+                client.post(
+                    "/api/v1/chat/stream",
+                    json={"message": "长任务"},
+                )
+            )
+            # 等待 chat 实际开始
+            await asyncio.wait_for(chat_started.wait(), timeout=5)
+
+            # 从 _active_chat_tasks 获取 session_id
+            from excelmanus.api import _active_chat_tasks
+            assert len(_active_chat_tasks) == 1
+            session_id = next(iter(_active_chat_tasks))
+
+            # 发送 abort 请求
+            abort_resp = await client.post(
+                "/api/v1/chat/abort",
+                json={"session_id": session_id},
+            )
+            assert abort_resp.status_code == 200
+            assert abort_resp.json()["status"] == "cancelled"
+
+            # 等待 stream 请求完成
+            stream_resp = await asyncio.wait_for(stream_task, timeout=5)
+            assert stream_resp.status_code == 200
+
+            # 确认 chat 任务被取消
+            await asyncio.wait_for(chat_cancelled.wait(), timeout=2)
+
+    @pytest.mark.asyncio
     async def test_chat_stream_keeps_running_until_reply_emitted(
         self,
         client: AsyncClient,
@@ -1965,3 +2463,55 @@ class TestImageAttachment:
         assert '"content": "stream-ok"' in body
         assert "event: done" in body
         assert "event: error" not in body
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_disconnect_does_not_cancel_background_chat(
+        self,
+    ) -> None:
+        """流消费者断开后，后台 chat 任务应继续执行（用于页面刷新续跑）。"""
+        chat_started = asyncio.Event()
+        allow_finish = asyncio.Event()
+        chat_cancelled = asyncio.Event()
+
+        async def slow_chat(_: str, **kwargs) -> ChatResult:
+            chat_started.set()
+            try:
+                await allow_finish.wait()
+                return ChatResult(reply="background-ok")
+            except asyncio.CancelledError:
+                chat_cancelled.set()
+                raise
+
+        with _setup_api_globals():
+            with patch(
+                "excelmanus.engine.AgentEngine.chat",
+                new_callable=AsyncMock,
+                side_effect=slow_chat,
+            ):
+                response = await api_module.chat_stream(
+                    api_module.ChatRequest(message="simulate-disconnect")
+                )
+                stream_iter = response.body_iterator
+
+                first_chunk = await anext(stream_iter)
+                first_payload = json.loads(first_chunk.split("data:", 1)[1].strip())
+                session_id = first_payload["session_id"]
+
+                # 继续消费下一块以启动后台 chat，然后取消该消费任务，模拟客户端断开。
+                next_chunk_task = asyncio.create_task(anext(stream_iter))
+                await asyncio.wait_for(chat_started.wait(), timeout=2)
+                next_chunk_task.cancel()
+                with pytest.raises((StopAsyncIteration, asyncio.CancelledError)):
+                    await next_chunk_task
+
+                await asyncio.sleep(0.02)
+                active_task = api_module._active_chat_tasks.get(session_id)
+                assert active_task is not None
+                assert not active_task.done()
+                assert chat_cancelled.is_set() is False
+
+                # 放行后台任务并等待收尾，避免测试泄露挂起 task。
+                allow_finish.set()
+                await asyncio.wait_for(active_task, timeout=2)
+                await asyncio.sleep(0.02)
+                assert session_id not in api_module._active_chat_tasks

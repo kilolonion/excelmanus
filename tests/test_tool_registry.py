@@ -107,9 +107,40 @@ class TestToolRegistry:
         assert "excelmanus.tools.image_tools" in module_paths
         assert "excelmanus.tools.memory_tools" in module_paths
 
+    def test_builtin_tools_declare_write_effect_contract(self, tmp_path) -> None:
+        registry = ToolRegistry()
+        registry.register_builtin_tools(str(tmp_path))
+
+        assert registry.get_tool("read_excel") is not None
+        assert registry.get_tool("read_excel").write_effect == "none"
+
+        assert registry.get_tool("write_text_file") is not None
+        assert registry.get_tool("write_text_file").write_effect == "workspace_write"
+
+        assert registry.get_tool("run_code") is not None
+        assert registry.get_tool("run_code").write_effect == "dynamic"
+
+        assert registry.get_tool("run_shell") is not None
+        assert registry.get_tool("run_shell").write_effect == "dynamic"
+
+        assert registry.get_tool("list_sheets") is not None
+        assert registry.get_tool("list_sheets").write_effect == "none"
+
+        assert registry.get_tool("memory_save") is not None
+        assert registry.get_tool("memory_save").write_effect == "external_write"
+
 
 class TestToolDefTruncate:
     """ToolDef.truncate_result 截断逻辑测试。"""
+
+    def test_write_effect_default_unknown(self) -> None:
+        tool = ToolDef(
+            name="t",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            func=lambda: None,
+        )
+        assert tool.write_effect == "unknown"
 
     def _make_tool(self, max_chars: int = 3000) -> ToolDef:
         return ToolDef(

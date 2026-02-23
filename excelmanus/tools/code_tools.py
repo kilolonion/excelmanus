@@ -656,6 +656,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=write_text_file,
+            write_effect="workspace_write",
         ),
         ToolDef(
             name="run_code",
@@ -716,5 +717,6 @@ def get_tools() -> list[ToolDef]:
             max_result_chars=3000,
             truncate_head_chars=2000,
             truncate_tail_chars=1000,
+            write_effect="dynamic",
         ),
     ]

@@ -11,7 +11,7 @@ import random
 import re as _re
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 import openai
 
@@ -59,7 +59,6 @@ from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
-from excelmanus.tools.policy import MUTATING_ALL_TOOLS
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
     AdvisorContext,
@@ -71,6 +70,7 @@ from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
+    from excelmanus.database import Database
     from excelmanus.persistent_memory import PersistentMemory
     from excelmanus.memory_extractor import MemoryExtractor
 
@@ -117,6 +117,11 @@ _READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
     "read", "analyze", "inspect", "list", "search", "find", "explore",
     "preview", "scan", "count", "structure",
 })
+
+# ── 审批解析器回调类型 ──────────────────────────────────────
+# 返回 "accept" / "reject" / "fullaccess" / None（等同 reject）。
+# CLI 传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
+ApprovalResolver = Callable[[PendingApproval], Awaitable[str | None]]
 
 
 def _normalize_write_hint(value: Any) -> str:
@@ -477,8 +482,10 @@ def _detect_write_intent(text: str) -> bool:
     return has_file and has_action
 
 
-# 写入类工具集合统一复用策略层 SSOT，避免与 policy 漂移
-_WRITE_TOOL_NAMES = MUTATING_ALL_TOOLS
+# 写入语义枚举：工具通过 ToolDef.write_effect 声明副作用类型。
+_WRITE_EFFECT_VALUES: frozenset[str] = frozenset(
+    {"none", "workspace_write", "external_write", "dynamic", "unknown"}
+)
 
 
 def _summarize_text(text: str, max_len: int = 120) -> str:
@@ -640,6 +647,8 @@ class AgentEngine:
         memory_extractor: MemoryExtractor | None = None,
         mcp_manager: MCPManager | None = None,
         own_mcp_manager: bool = True,
+        database: "Database | None" = None,
+        shared_backup_path_map: dict[str, str] | None = None,
     ) -> None:
         # ── 核心组件初始化（必须在所有 property 代理字段赋值之前）──
         self._state = SessionState()
@@ -647,21 +656,24 @@ class AgentEngine:
             api_key=config.api_key,
             base_url=config.base_url,
         )
-        # 路由子代理：优先使用独立的小模型，未配置时回退到主模型
-        if config.router_model:
+        # AUX：统一用于路由小模型 + 窗口感知顾问（未配置 aux_model 时回退主模型）
+        _aux_api_key = config.aux_api_key or config.api_key
+        _aux_base_url = config.aux_base_url or config.base_url
+        # 路由子代理：aux_model 已配置则固定 aux；否则跟随主模型
+        if config.aux_model:
             self._router_client = create_client(
-                api_key=config.router_api_key or config.api_key,
-                base_url=config.router_base_url or config.base_url,
+                api_key=_aux_api_key,
+                base_url=_aux_base_url,
             )
-            self._router_model = config.router_model
+            self._router_model = config.aux_model
             self._router_follow_active_model = False
         else:
             self._router_client = self._client
             self._router_model = config.model
             self._router_follow_active_model = True
-        # 窗口感知顾问小模型：window_advisor_* + aux_model → 主模型
-        _adv_api_key = config.window_advisor_api_key or config.api_key
-        _adv_base_url = config.window_advisor_base_url or config.base_url
+        # 窗口感知顾问小模型：aux_* + aux_model → 主模型
+        _adv_api_key = _aux_api_key
+        _adv_base_url = _aux_base_url
         _adv_model = config.aux_model or config.model
         # 始终创建独立 client，避免与 _client 共享对象导致测试 mock 互相干扰
         self._advisor_client = create_client(
@@ -761,11 +773,14 @@ class AgentEngine:
         # _execution_guard_fired, _vba_exempt, _finish_task_warned
         self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
-        self._approval = ApprovalManager(config.workspace_root)
+        self._approval = ApprovalManager(config.workspace_root, database=database)
         # ── 备份沙盒模式 ──────────────────────────────────
         self._backup_enabled: bool = config.backup_enabled
         self._backup_manager: BackupManager | None = (
-            BackupManager(workspace_root=config.workspace_root)
+            BackupManager(
+                workspace_root=config.workspace_root,
+                shared_path_map=shared_backup_path_map,
+            )
             if config.backup_enabled
             else None
         )
@@ -843,9 +858,19 @@ class AgentEngine:
             logger.debug("PromptComposer 初始化失败，策略注入不可用", exc_info=True)
 
         # ── Workspace Manifest（工作区文件清单） ─────────────
+        self._database = database
+        self._llm_call_store: Any = None  # LLMCallStore | None
+        if database is not None:
+            try:
+                from excelmanus.stores.llm_call_store import LLMCallStore as _LCS
+                self._llm_call_store = _LCS(database)
+            except Exception:
+                logger.debug("LLM 调用日志初始化失败", exc_info=True)
         self._workspace_manifest: Any = None  # WorkspaceManifest | None
         self._workspace_manifest_built: bool = False
         self._manifest_refresh_needed: bool = False
+        self._workspace_manifest_prewarm_task: asyncio.Task[Any] | None = None
+        self._workspace_manifest_last_error: str | None = None
 
         # ── 持久记忆集成 ────────────────────────
         self._persistent_memory = persistent_memory
@@ -873,6 +898,7 @@ class AgentEngine:
                     top_k=config.memory_semantic_top_k,
                     threshold=config.memory_semantic_threshold,
                     fallback_recent=config.memory_semantic_fallback_recent,
+                    database=database,
                 )
             except Exception:
                 logger.debug("语义记忆初始化失败，回退到传统加载", exc_info=True)
@@ -887,6 +913,16 @@ class AgentEngine:
                     f"{original}\n\n## 持久记忆\n{core_memory}"
                 )
 
+        # ── 用户自定义规则 ─────────────────────────────────
+        self._rules_manager: Any = None  # RulesManager | None
+        try:
+            from excelmanus.rules import RulesManager as _RM
+            from excelmanus.stores.rules_store import RulesStore as _RS
+            _rules_db_store = _RS(database) if database is not None else None
+            self._rules_manager = _RM(db_store=_rules_db_store)
+        except Exception:
+            logger.debug("RulesManager 初始化失败", exc_info=True)
+
         # ── MCP Client 集成 ──────────────────────────────────
         self._mcp_manager = mcp_manager or MCPManager(config.workspace_root)
         self._own_mcp_manager = own_mcp_manager
@@ -896,6 +932,11 @@ class AgentEngine:
         self._active_api_key: str = config.api_key
         self._active_base_url: str = config.base_url
         self._active_model_name: str | None = None  # 当前激活的 profile name
+
+        # ── 模型能力探测结果（由 API 层或启动时注入） ──
+        from excelmanus.model_probe import ModelCapabilities
+        self._model_capabilities: ModelCapabilities | None = None
+        self._thinking_budget: int = 10000
 
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
@@ -1117,33 +1158,220 @@ class AgentEngine:
     def _finish_task_warned(self, value: bool) -> None:
         self._state.finish_task_warned = value
 
-    def _record_write_action(self) -> None:
-        """统一记录写入行为并标记 workspace manifest 需要刷新。"""
+    def _get_tool_write_effect(self, tool_name: str) -> str:
+        """读取工具声明的写入语义；缺失时回退 unknown。"""
+        tool = self._registry.get_tool(tool_name)
+        effect = getattr(tool, "write_effect", "unknown") if tool is not None else "unknown"
+        if not isinstance(effect, str):
+            return "unknown"
+        normalized = effect.strip().lower()
+        if normalized in _WRITE_EFFECT_VALUES:
+            return normalized
+        return "unknown"
+
+    def _record_workspace_write_action(self) -> None:
+        """记录工作区写入：写入态 + manifest 刷新标记。"""
         self._state.record_write_action()
         self._manifest_refresh_needed = True
 
-    async def extract_and_save_memory(self) -> None:
-        """会话结束时调用：从对话历史中提取记忆并持久化。
+    def _record_external_write_action(self) -> None:
+        """记录工作区外写入：仅写入态，不触发 manifest 刷新。"""
+        self._state.record_write_action()
 
+    def _record_write_action(self) -> None:
+        """兼容入口：等价于工作区写入记录。"""
+        self._record_workspace_write_action()
+
+    def rollback_conversation(
+        self,
+        turn_index: int,
+        *,
+        rollback_files: bool = False,
+    ) -> dict:
+        """回退对话到第 turn_index 个用户轮次。
+
+        Args:
+            turn_index: 目标用户轮次索引（0-indexed）。
+            rollback_files: 是否同时回滚该轮之后产生的文件变更。
+
+        Returns:
+            {removed_messages, file_rollback_results, turn_index}
+        """
+        removed = self._memory.rollback_to_user_turn(turn_index)
+
+        file_results: list[str] = []
+        if rollback_files:
+            # 逆序回滚该轮次之后产生的审批记录
+            applied = self._approval.list_applied(limit=100)
+            # 获取目标轮次对应的 session_turn（近似：turn_index 即 session turn）
+            for record in applied:
+                if record.undoable:
+                    result = self._approval.undo(record.approval_id)
+                    file_results.append(result)
+
+        # 重置 session turn 到目标轮次
+        self._state.session_turn = turn_index
+        self._state.has_write_tool_call = False
+        self._state.current_write_hint = "unknown"
+
+        # 清理所有 pending 状态，避免 rollback 后 chat() 误入旧的
+        # pending question/approval/plan 处理路径，导致孤立 tool_call_id 400 错误
+        self._question_flow.clear()
+        self._system_question_actions.clear()
+        self._pending_question_route_result = None
+        self._approval.clear_pending()
+        self._pending_approval_route_result = None
+        self._pending_approval_tool_call_id = None
+        self._pending_plan = None
+        self._approved_plan_context = None
+
+        return {
+            "removed_messages": removed,
+            "file_rollback_results": file_results,
+            "turn_index": turn_index,
+        }
+
+    async def _build_workspace_manifest_prewarm(self, *, silent: bool = True) -> None:
+        """后台构建 workspace manifest，完成后写入缓存。"""
+        try:
+            from excelmanus.workspace_manifest import build_manifest
+
+            manifest = await asyncio.to_thread(
+                build_manifest,
+                self._config.workspace_root,
+                silent=silent,
+                database=self._database,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._workspace_manifest = None
+            self._workspace_manifest_built = False
+            self._workspace_manifest_last_error = str(exc) or exc.__class__.__name__
+            logger.debug("Workspace manifest 后台预热失败", exc_info=True)
+            return
+
+        self._workspace_manifest = manifest
+        self._workspace_manifest_built = True
+        self._workspace_manifest_last_error = None
+
+    def start_workspace_manifest_prewarm(self, *, force: bool = False) -> bool:
+        """启动 workspace manifest 后台预热（非阻塞）。"""
+        task = self._workspace_manifest_prewarm_task
+        if task is not None and not task.done():
+            return False
+
+        if not force and self._workspace_manifest_built and self._workspace_manifest is not None:
+            return False
+
+        if force:
+            self._workspace_manifest = None
+            self._workspace_manifest_built = False
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("当前线程无运行中的事件循环，跳过 workspace manifest 预热")
+            return False
+
+        self._workspace_manifest_last_error = None
+        self._workspace_manifest_prewarm_task = loop.create_task(
+            self._build_workspace_manifest_prewarm(silent=True)
+        )
+        return True
+
+    def workspace_manifest_build_status(self) -> dict[str, Any]:
+        """返回 workspace manifest 后台构建状态。"""
+        if self._workspace_manifest_built and self._workspace_manifest is not None:
+            return {
+                "state": "ready",
+                "total_files": int(getattr(self._workspace_manifest, "total_files", 0)),
+                "scan_duration_ms": int(getattr(self._workspace_manifest, "scan_duration_ms", 0)),
+                "error": None,
+            }
+
+        task = self._workspace_manifest_prewarm_task
+        if task is not None and not task.done():
+            return {
+                "state": "building",
+                "total_files": None,
+                "scan_duration_ms": None,
+                "error": None,
+            }
+
+        if self._workspace_manifest_last_error:
+            return {
+                "state": "error",
+                "total_files": None,
+                "scan_duration_ms": None,
+                "error": self._workspace_manifest_last_error,
+            }
+
+        return {
+            "state": "idle",
+            "total_files": None,
+            "scan_duration_ms": None,
+            "error": None,
+        }
+
+    async def _cancel_workspace_manifest_prewarm(self) -> None:
+        """取消进行中的 workspace manifest 后台预热任务。"""
+        task = self._workspace_manifest_prewarm_task
+        if task is None or task.done():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("取消 workspace manifest 预热任务时发生异常", exc_info=True)
+        finally:
+            if self._workspace_manifest_prewarm_task is task:
+                self._workspace_manifest_prewarm_task = None
+
+    async def extract_and_save_memory(
+        self,
+        *,
+        trigger: str = "session_end",
+        on_event: EventCallback | None = None,
+    ) -> list:
+        """从对话历史中提取记忆并持久化。
+
+        trigger: "session_end" | "periodic" | "pre_compaction"
         若 MemoryExtractor 或 PersistentMemory 未配置则静默跳过。
         所有异常均被捕获并记录日志，不影响会话正常结束。
+        返回提取到的 MemoryEntry 列表（可能为空）。
         """
         if self._memory_extractor is None or self._persistent_memory is None:
-            return
+            return []
         try:
             messages = self._memory.get_messages()
             entries = await self._memory_extractor.extract(messages)
             if entries:
                 self._persistent_memory.save_entries(entries)
-                logger.info("持久记忆提取完成，保存了 %d 条记忆条目", len(entries))
-                # 增量建立向量索引
+                logger.info("持久记忆提取完成 (trigger=%s)，保存了 %d 条记忆条目", trigger, len(entries))
                 if self._semantic_memory is not None:
                     try:
                         await self._semantic_memory.index_entries(entries)
                     except Exception:
                         logger.debug("增量向量索引失败", exc_info=True)
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.MEMORY_EXTRACTED,
+                        memory_entries=[
+                            {"id": e.id, "content": e.content, "category": e.category.value}
+                            for e in entries
+                        ],
+                        memory_trigger=trigger,
+                    ),
+                )
+            return entries
         except Exception:
             logger.exception("持久记忆提取或保存失败，已跳过")
+            return []
 
     async def initialize_mcp(self) -> None:
         """异步初始化 MCP 连接（需在 event loop 中调用）。
@@ -1164,6 +1392,8 @@ class AgentEngine:
 
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
+        await self._cancel_workspace_manifest_prewarm()
+
         if self._active_skills:
             _primary = self._active_skills[-1]
             self._run_skill_hook(
@@ -1390,6 +1620,34 @@ class AgentEngine:
             reason=reason,
         )
 
+    def import_skillpack(
+        self,
+        *,
+        source: str,
+        value: str,
+        actor: str,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """从本地路径导入 SKILL.md 及附属资源（同步）。"""
+        manager = self._require_skillpack_manager()
+        return manager.import_skillpack(
+            source=source, value=value, actor=actor, overwrite=overwrite,
+        )
+
+    async def import_skillpack_async(
+        self,
+        *,
+        source: str,
+        value: str,
+        actor: str,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """从本地路径或 GitHub URL 导入 SKILL.md（异步）。"""
+        manager = self._require_skillpack_manager()
+        return await manager.import_skillpack_async(
+            source=source, value=value, actor=actor, overwrite=overwrite,
+        )
+
     def _require_skillpack_manager(self) -> SkillpackManager:
         if self._skillpack_manager is None:
             raise RuntimeError("skillpack 管理器不可用。")
@@ -1412,6 +1670,7 @@ class AgentEngine:
         raw_args: str | None = None,
         mention_contexts: list[ResolvedMention] | None = None,
         images: list[dict[str, Any]] | None = None,
+        approval_resolver: ApprovalResolver | None = None,
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
         normalized_images: list[dict[str, str]] = []
@@ -1512,6 +1771,14 @@ class AgentEngine:
             on_event,
             ToolCallEvent(event_type=EventType.ROUTE_START),
         )
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.PIPELINE_PROGRESS,
+                pipeline_stage="routing",
+                pipeline_message="正在分析任务意图...",
+            ),
+        )
 
         effective_slash_command = slash_command
         effective_raw_args = raw_args or ""
@@ -1538,6 +1805,7 @@ class AgentEngine:
             user_message,
             slash_command=effective_slash_command,
             raw_args=effective_raw_args if effective_slash_command else None,
+            on_event=on_event,
         )
 
         route_result, user_message = await self._adapt_guidance_only_slash_route(
@@ -1760,7 +2028,9 @@ class AgentEngine:
         self._vba_exempt = _user_requests_vba(user_message)
         # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
         self._mention_contexts = mention_contexts
-        chat_result = await self._tool_calling_loop(route_result, on_event)
+        chat_result = await self._tool_calling_loop(
+            route_result, on_event, approval_resolver=approval_resolver,
+        )
 
         # 注入路由诊断信息到 ChatResult
         chat_result.write_hint = self._current_write_hint
@@ -1790,6 +2060,20 @@ class AgentEngine:
             "turn_diagnostics": [d.to_dict() for d in self._turn_diagnostics],
             "prompt_injection_summary": _injection_summary_for_diag,
         })
+
+        # 周期性后台记忆提取：每 N 轮静默提取一次
+        _extract_interval = self._config.memory_auto_extract_interval
+        if (
+            _extract_interval > 0
+            and self._session_turn > 0
+            and self._session_turn % _extract_interval == 0
+        ):
+            try:
+                await self.extract_and_save_memory(
+                    trigger="periodic", on_event=on_event,
+                )
+            except Exception:
+                logger.debug("周期性记忆提取失败，已跳过", exc_info=True)
 
         # 发出执行摘要事件
         elapsed = time.monotonic() - chat_start
@@ -2312,45 +2596,23 @@ class AgentEngine:
                         "name": "finish_task",
                         "description": (
                             "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
-                            "优先使用 report 参数进行结构化汇报（详细讲解模式），"
-                            "像向同事汇报工作一样清晰易懂地说明操作、发现和建议。"
-                            "如任务仅涉及筛选/统计/分析/查找且无需写回文件，可直接调用并在 report 中说明。"
+                            "用自然语言在 summary 中向用户汇报：做了什么、关键结果、涉及的文件，"
+                            "有价值时可附带后续建议。语气自然，像同事间的简洁对话，不要套模板。"
                         ),
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "report": {
-                                    "type": "object",
-                                    "description": "结构化任务汇报（推荐）。用详细讲解语言填写各字段。",
-                                    "properties": {
-                                        "operations": {
-                                            "type": "string",
-                                            "description": "执行了哪些操作（按步骤简述，每步说清做了什么）",
-                                        },
-                                        "key_findings": {
-                                            "type": "string",
-                                            "description": "关键发现和数据结果（具体数字、行数、匹配率等）",
-                                        },
-                                        "explanation": {
-                                            "type": "string",
-                                            "description": "为什么这样做、结果的含义解读",
-                                        },
-                                        "suggestions": {
-                                            "type": "string",
-                                            "description": "后续使用建议或注意事项",
-                                        },
-                                        "affected_files": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                            "description": "涉及修改的文件路径列表",
-                                        },
-                                    },
-                                    "required": ["operations", "key_findings"],
-                                    "additionalProperties": False,
-                                },
                                 "summary": {
                                     "type": "string",
-                                    "description": "（兼容旧格式）简要完成摘要。优先使用 report。",
+                                    "description": (
+                                        "用自然语言汇报任务结果。内容应涵盖：做了什么、关键数据/发现、涉及哪些文件。"
+                                        "如有必要可附带后续建议。不要逐条罗列，用流畅的段落表达即可。"
+                                    ),
+                                },
+                                "affected_files": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "涉及修改的文件路径列表（用于触发文件刷新事件）",
                                 },
                             },
                             "required": [],
@@ -2752,14 +3014,14 @@ class AgentEngine:
 
         # 运行时模型选择：子代理自身 > 全局 aux_model > 当前激活主模型。
         resolved_model = config.model or self._config.aux_model or self._active_model
-        # verifier 场景：若 aux_model 明确绑定到 window advisor 的独立端点，
+        # verifier 场景：若 aux_model 明确绑定到 AUX 独立端点，
         # 而当前子代理运行端点不同，则优先回退到 active model，避免端点/模型错配。
         if (
             agent_name == "verifier"
             and config.model is None
             and self._config.aux_model
-            and self._config.window_advisor_base_url
-            and self._config.window_advisor_base_url != runtime_base_url
+            and self._config.aux_base_url
+            and self._config.aux_base_url != runtime_base_url
         ):
             resolved_model = self._active_model
 
@@ -3300,15 +3562,21 @@ class AgentEngine:
         pending: "PendingApproval",
         on_event: EventCallback | None,
         iteration: int,
+        tool_call_id: str = "",
     ) -> None:
         """发射待确认审批事件，供 CLI 渲染审批卡片。"""
+        from excelmanus.tools.policy import get_tool_risk_level, sanitize_approval_args_summary
+
         self._emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.PENDING_APPROVAL,
+                tool_call_id=tool_call_id,
                 approval_id=pending.approval_id,
                 approval_tool_name=pending.tool_name,
                 approval_arguments=dict(pending.arguments),
+                approval_risk_level=get_tool_risk_level(pending.tool_name),
+                approval_args_summary=sanitize_approval_args_summary(pending.arguments),
                 iteration=iteration,
             ),
         )
@@ -3431,7 +3699,7 @@ class AgentEngine:
             else:
                 lines.append("fullaccess 已开启。")
 
-            reject_reply = self._handle_reject_command(["/reject", approval_id])
+            reject_reply = self._handle_reject_command(["/reject", approval_id], on_event=on_event)
             lines.append(reject_reply)
 
             rerun_reply = await self._handle_delegate_to_subagent(
@@ -3445,9 +3713,9 @@ class AgentEngine:
             return ChatResult(reply="\n".join(lines))
 
         if selected_label == _SUBAGENT_APPROVAL_OPTION_REJECT:
-            reject_reply = self._handle_reject_command(["/reject", approval_id])
+            self._handle_reject_command(["/reject", approval_id], on_event=on_event)
             reply = (
-                f"{reject_reply}\n"
+                "已拒绝该操作。\n"
                 "如需自动执行高风险步骤，可先使用 `/fullaccess on` 后重新发起任务。"
             )
             return ChatResult(reply=reply)
@@ -3620,6 +3888,7 @@ class AgentEngine:
         on_event: EventCallback | None,
         *,
         start_iteration: int = 1,
+        approval_resolver: ApprovalResolver | None = None,
     ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
 
@@ -3658,6 +3927,16 @@ class AgentEngine:
                 ),
             )
 
+            if iteration == start_iteration:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="preparing_context",
+                        pipeline_message="正在准备上下文...",
+                    ),
+                )
+
             system_prompts, context_error = self._prepare_system_prompts_for_request(
                 current_route_result.system_contexts,
                 route_result=current_route_result,
@@ -3689,6 +3968,13 @@ class AgentEngine:
             if iteration > 1:
                 _sys_msgs = self._memory._build_system_messages(system_prompts)
                 if self._compaction_manager.should_compact(self._memory, _sys_msgs):
+                    # 压缩前先提取记忆，避免早期对话被丢弃后信息丢失
+                    try:
+                        await self.extract_and_save_memory(
+                            trigger="pre_compaction", on_event=on_event,
+                        )
+                    except Exception:
+                        logger.debug("压缩前记忆提取失败，继续压缩", exc_info=True)
                     _summary_model = self._config.aux_model or self._active_model
                     try:
                         await self._compaction_manager.auto_compact(
@@ -3734,12 +4020,46 @@ class AgentEngine:
             if tools:
                 kwargs["tools"] = tools
 
+            # 注入 thinking 参数（根据探测到的 thinking_type）
+            caps = self._model_capabilities
+            if caps and caps.supports_thinking and self._thinking_budget > 0:
+                ttype = caps.thinking_type
+                if ttype == "claude":
+                    kwargs["_thinking_enabled"] = True
+                    kwargs["_thinking_budget"] = self._thinking_budget
+                elif ttype == "gemini":
+                    kwargs["_thinking_budget"] = self._thinking_budget
+                elif ttype == "enable_thinking":
+                    extra = kwargs.get("extra_body", {})
+                    extra["enable_thinking"] = True
+                    extra["thinking_budget"] = self._thinking_budget
+                    kwargs["extra_body"] = extra
+                elif ttype == "glm_thinking":
+                    extra = kwargs.get("extra_body", {})
+                    extra["thinking"] = {"type": "enabled"}
+                    kwargs["extra_body"] = extra
+                elif ttype == "openrouter":
+                    extra = kwargs.get("extra_body", {})
+                    extra["reasoning"] = {"max_tokens": self._thinking_budget}
+                    kwargs["extra_body"] = extra
+                # "deepseek" → 模型自动输出推理内容，无需额外参数
+
             # Prompt Cache 优化：同一 session_turn 内共享 cache key，
             # 确保 OpenAI 路由到同一缓存机器，最大化系统提示前缀 cache hit。
             if self._config.prompt_cache_key_enabled:
                 kwargs["prompt_cache_key"] = f"em_s{self._session_turn}"
 
             # 尝试流式调用
+            if iteration == start_iteration:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="calling_llm",
+                        pipeline_message="正在与模型通信...",
+                    ),
+                )
+            _llm_start_ts = time.monotonic()
             stream_kwargs = dict(kwargs)
             stream_kwargs["stream"] = True
             if isinstance(self._client, openai.AsyncOpenAI):
@@ -3802,103 +4122,46 @@ class AgentEngine:
             )
             self._turn_diagnostics.append(diag)
 
-            # 无工具调用 → 返回文本回复
+            # ── LLM 调用审计日志 ──
+            if self._llm_call_store is not None:
+                try:
+                    _llm_latency = (time.monotonic() - _llm_start_ts) * 1000 if _llm_start_ts else 0.0
+                    self._llm_call_store.log(
+                        session_id=getattr(self, "_session_id", None),
+                        turn=self._session_turn,
+                        iteration=iteration,
+                        model=self._active_model,
+                        prompt_tokens=iter_prompt,
+                        completion_tokens=iter_completion,
+                        cached_tokens=iter_cached,
+                        has_tool_calls=bool(tool_calls),
+                        thinking_chars=len(thinking_content),
+                        stream=True,
+                        latency_ms=_llm_latency,
+                    )
+                except Exception:
+                    pass
+
+            # 无工具调用 → 纯文本回复处理（含 HTML 检测、执行守卫、写入门禁）
             if not tool_calls:
-                reply_text = _message_content_to_text(getattr(message, "content", None))
-                if _looks_like_html_document(reply_text):
-                    error_reply = self._format_html_endpoint_error(reply_text)
-                    self._memory.add_assistant_message(error_reply)
-                    self._last_iteration_count = iteration
-                    logger.error(
-                        "检测到疑似 HTML 页面响应，base_url=%s，已返回配置提示",
-                        self._config.base_url,
-                    )
-                    logger.info("最终结果摘要: %s", _summarize_text(error_reply))
-                    return _finalize_result(
-                        reply=error_reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
-                    )
-
-            if not tool_calls:
-                self._memory.add_assistant_message(reply_text)
-
-                # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
-                # 当 write_hint=="may_write" 时，由下方 write_guard 统一处理，
-                # 避免两个 guard 连续触发注入语义重叠的提示（P2 修复）。
-                # 当用户主动请求 VBA 帮助时，豁免 VBA 代码模式检测。
-                if (
-                    write_hint != "may_write"
-                    and not self._active_skills
-                    and iteration < max_iter - 1
-                    and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
-                    and not self._execution_guard_fired
-                ):
-                    self._execution_guard_fired = True
-                    guard_msg = (
-                        "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
-                        "你拥有完整的 Excel 工具集可直接操作数据。"
-                        "请立即调用对应工具执行操作。"
-                        "严禁给出 VBA 宏代码、AppleScript 或外部脚本替代执行。"
-                        "你的所有能力均可通过内置工具实现，无需用户离开本系统。"
-                    )
-                    self._memory.add_user_message(guard_msg)
-                    if diag:
-                        diag.guard_events.append("execution_guard")
-                    logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
-                    continue
-
-                # ── 写入门禁：write_hint == "may_write" 时检查是否有实际写入 ──
-                if write_hint == "may_write" and not self._has_write_tool_call:
-                    consecutive_text_only += 1
-                    if consecutive_text_only < 2 and iteration < max_iter:
-                        guard_msg = (
-                            "你尚未调用任何写入工具完成实际操作。"
-                            "如果当前任务确实仅涉及筛选/统计/分析/查找且无需写回文件，"
-                            "请直接调用 finish_task 并在 report 中说明分析结果。"
-                            "如果任务需要写入，请立即调用对应写入/格式化/图表工具执行。"
-                            "注意：你拥有完整的 Excel 工具集可直接操作数据，"
-                            "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
-                            "严禁在文本中输出 VBA 代码块作为操作方案。"
-                            "禁止以文本建议替代工具执行。"
-                        )
-                        self._memory.add_user_message(guard_msg)
-                        if diag:
-                            diag.guard_events.append("write_guard")
-                        logger.info("写入门禁触发：无写入工具调用，注入继续执行提示 (consecutive=%d)", consecutive_text_only)
-                        continue
-                    else:
-                        # 连续两次纯文本或已接近迭代上限，强制退出
-                        self._last_iteration_count = iteration
-                        if diag:
-                            diag.guard_events.append("write_guard_exit")
-                        logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
-                        return _finalize_result(
-                            reply=reply_text,
-                            tool_calls=list(all_tool_results),
-                            iterations=iteration,
-                            truncated=False,
-                            prompt_tokens=total_prompt_tokens,
-                            completion_tokens=total_completion_tokens,
-                            total_tokens=total_prompt_tokens + total_completion_tokens,
-                            write_guard_triggered=True,
-                        )
-
-                self._last_iteration_count = iteration
-                logger.info("最终结果摘要: %s", _summarize_text(reply_text))
-                return _finalize_result(
-                    reply=reply_text,
-                    tool_calls=list(all_tool_results),
-                    iterations=iteration,
-                    truncated=False,
-                    prompt_tokens=total_prompt_tokens,
-                    completion_tokens=total_completion_tokens,
-                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                text_action, text_result = self._handle_text_reply(
+                    message=message,
+                    iteration=iteration,
+                    max_iter=max_iter,
+                    write_hint=write_hint,
+                    consecutive_text_only=consecutive_text_only,
+                    diag=diag,
+                    all_tool_results=all_tool_results,
+                    total_prompt_tokens=total_prompt_tokens,
+                    total_completion_tokens=total_completion_tokens,
+                    _finalize_result=_finalize_result,
                 )
+                if text_action == "return":
+                    return text_result
+                if text_action == "continue":
+                    consecutive_text_only = text_result  # 回传更新后的计数
+                    continue
+                # text_action == "impossible" — 不应到达这里
 
             assistant_msg = _assistant_message_to_dict(message)
             if tool_calls:
@@ -3996,22 +4259,108 @@ class AgentEngine:
                     self._memory.add_tool_result(tool_call_id, tc_result.result)
 
                 if tc_result.pending_approval:
-                    self._pending_approval_route_result = current_route_result
-                    self._pending_approval_tool_call_id = tool_call_id
-                    reply = tc_result.result
-                    self._memory.add_assistant_message(reply)
-                    self._last_iteration_count = iteration
-                    logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
-                    logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    return _finalize_result(
-                        reply=reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
-                    )
+                    pending = self._approval.pending
+                    if approval_resolver is not None and pending is not None:
+                        # ── 内联审批：在同一轮对话内等待用户决策 ──
+                        logger.info("内联审批等待决策: %s", tc_result.approval_id)
+                        try:
+                            decision = await approval_resolver(pending)
+                        except Exception as _resolver_exc:  # noqa: BLE001
+                            logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
+                            decision = None
+
+                        if decision in ("accept", "fullaccess"):
+                            if decision == "fullaccess":
+                                self._full_access_enabled = True
+                                logger.info("内联审批: fullaccess 已开启")
+                            # 执行已批准的工具
+                            exec_ok, exec_result, exec_record = await self._execute_approved_pending(
+                                pending, on_event=on_event,
+                            )
+                            # 用真实结果替换之前写入 memory 的审批提示
+                            if tool_call_id:
+                                self._memory.replace_tool_result(tool_call_id, exec_result)
+                            # 发射审批已解决事件
+                            self._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.APPROVAL_RESOLVED,
+                                    approval_id=tc_result.approval_id or "",
+                                    approval_tool_name=pending.tool_name,
+                                    result=exec_result,
+                                    success=exec_ok,
+                                    iteration=iteration,
+                                    approval_undoable=bool(
+                                        exec_record is not None and exec_record.undoable
+                                    ),
+                                ),
+                            )
+                            # 更新 tc_result 统计信息
+                            tc_result = replace(
+                                tc_result,
+                                pending_approval=False,
+                                success=exec_ok,
+                                result=exec_result,
+                                error=None if exec_ok else exec_result,
+                            )
+                            # 写入追踪：审批执行的工具如果是写入工具则标记
+                            if exec_ok and exec_record is not None:
+                                _effect = self._get_tool_write_effect(pending.tool_name)
+                                if exec_record.changes or _effect == "workspace_write":
+                                    self._record_workspace_write_action()
+                                elif _effect == "external_write":
+                                    self._record_external_write_action()
+                                if self._has_write_tool_call and write_hint != "may_write":
+                                    write_hint = "may_write"
+                            logger.info(
+                                "内联审批完成: decision=%s ok=%s tool=%s",
+                                decision, exec_ok, pending.tool_name,
+                            )
+                        else:
+                            # reject / None → 拒绝
+                            reject_msg = self._approval.reject_pending(
+                                tc_result.approval_id or (pending.approval_id if pending else ""),
+                            )
+                            if tool_call_id:
+                                self._memory.replace_tool_result(tool_call_id, reject_msg)
+                            self._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.APPROVAL_RESOLVED,
+                                    approval_id=tc_result.approval_id or "",
+                                    approval_tool_name=pending.tool_name if pending else "",
+                                    result=reject_msg,
+                                    success=False,
+                                    iteration=iteration,
+                                ),
+                            )
+                            tc_result = replace(
+                                tc_result,
+                                pending_approval=False,
+                                success=False,
+                                result=reject_msg,
+                                error=reject_msg,
+                            )
+                            logger.info("内联审批拒绝: %s", tc_result.approval_id)
+                        # 内联审批完成，不退出循环，继续处理后续工具调用
+                    else:
+                        # ── 无 resolver（Web API 等）：保持现有行为，退出循环 ──
+                        self._pending_approval_route_result = current_route_result
+                        self._pending_approval_tool_call_id = tool_call_id
+                        reply = tc_result.result
+                        self._memory.add_assistant_message(reply)
+                        self._last_iteration_count = iteration
+                        logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
+                        logger.info("最终结果摘要: %s", _summarize_text(reply))
+                        return _finalize_result(
+                            reply=reply,
+                            tool_calls=list(all_tool_results),
+                            iterations=iteration,
+                            truncated=False,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            total_tokens=total_prompt_tokens + total_completion_tokens,
+                        )
 
                 if tc_result.pending_plan:
                     reply = tc_result.result
@@ -4039,17 +4388,19 @@ class AgentEngine:
                 if tc_result.success:
                     self._last_success_count += 1
                     consecutive_failures = 0
-                    if tc_result.tool_name in _WRITE_TOOL_NAMES:
-                        # Batch 1 精简: write_cells advice detection 已移除
-                        self._state.record_write_action()
+                    _write_effect = self._get_tool_write_effect(tc_result.tool_name)
+                    if _write_effect == "workspace_write":
+                        self._record_workspace_write_action()
                         self._window_perception.observe_write_tool_call(
                             tool_name=tc_result.tool_name,
                             arguments=tc_result.arguments,
                         )
                         if write_hint != "may_write":
                             write_hint = "may_write"
-                        # Manifest 增量刷新：写入操作后标记需要刷新
-                        self._manifest_refresh_needed = True
+                    elif _write_effect == "external_write":
+                        self._record_external_write_action()
+                        if write_hint != "may_write":
+                            write_hint = "may_write"
                     # Batch 1 精简: run_code / delegate_to_subagent 等可在 _execute_tool_call 内
                     # 通过 _record_write_action 传播写入；此处只负责同步局部 hint。
                     if self._has_write_tool_call and write_hint != "may_write":
@@ -4125,6 +4476,119 @@ class AgentEngine:
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
+    def _handle_text_reply(
+        self,
+        *,
+        message: Any,
+        iteration: int,
+        max_iter: int,
+        write_hint: str,
+        consecutive_text_only: int,
+        diag: Any,
+        all_tool_results: list,
+        total_prompt_tokens: int,
+        total_completion_tokens: int,
+        _finalize_result: Any,
+    ) -> tuple[str, Any]:
+        """处理 LLM 返回纯文本（无 tool_calls）的情况。
+
+        返回 (action, payload):
+        - ("return", ChatResult) — 调用方应 return 该结果
+        - ("continue", updated_consecutive_text_only) — 调用方应 continue 迭代
+        """
+        reply_text = _message_content_to_text(getattr(message, "content", None))
+
+        # HTML 页面检测
+        if _looks_like_html_document(reply_text):
+            error_reply = self._format_html_endpoint_error(reply_text)
+            self._memory.add_assistant_message(error_reply)
+            self._last_iteration_count = iteration
+            logger.error(
+                "检测到疑似 HTML 页面响应，base_url=%s，已返回配置提示",
+                self._config.base_url,
+            )
+            logger.info("最终结果摘要: %s", _summarize_text(error_reply))
+            return "return", _finalize_result(
+                reply=error_reply,
+                tool_calls=list(all_tool_results),
+                iterations=iteration,
+                truncated=False,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
+
+        self._memory.add_assistant_message(reply_text)
+
+        # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
+        if (
+            write_hint != "may_write"
+            and not self._active_skills
+            and iteration < max_iter - 1
+            and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
+            and not self._execution_guard_fired
+        ):
+            self._execution_guard_fired = True
+            guard_msg = (
+                "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
+                "你拥有完整的 Excel 工具集可直接操作数据。"
+                "请立即调用对应工具执行操作。"
+                "严禁给出 VBA 宏代码、AppleScript 或外部脚本替代执行。"
+                "你的所有能力均可通过内置工具实现，无需用户离开本系统。"
+            )
+            self._memory.add_user_message(guard_msg)
+            if diag:
+                diag.guard_events.append("execution_guard")
+            logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
+            return "continue", consecutive_text_only
+
+        # ── 写入门禁：write_hint == "may_write" 时检查是否有实际写入 ──
+        if write_hint == "may_write" and not self._has_write_tool_call:
+            consecutive_text_only += 1
+            if consecutive_text_only < 2 and iteration < max_iter:
+                guard_msg = (
+                    "你尚未调用任何写入工具完成实际操作。"
+                    "如果当前任务确实仅涉及筛选/统计/分析/查找且无需写回文件，"
+                    "请直接调用 finish_task 并在 summary 中说明分析结果。"
+                    "如果任务需要写入，请立即调用对应写入/格式化/图表工具执行。"
+                    "注意：你拥有完整的 Excel 工具集可直接操作数据，"
+                    "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
+                    "严禁在文本中输出 VBA 代码块作为操作方案。"
+                    "禁止以文本建议替代工具执行。"
+                )
+                self._memory.add_user_message(guard_msg)
+                if diag:
+                    diag.guard_events.append("write_guard")
+                logger.info("写入门禁触发：无写入工具调用，注入继续执行提示 (consecutive=%d)", consecutive_text_only)
+                return "continue", consecutive_text_only
+            else:
+                self._last_iteration_count = iteration
+                if diag:
+                    diag.guard_events.append("write_guard_exit")
+                logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
+                return "return", _finalize_result(
+                    reply=reply_text,
+                    tool_calls=list(all_tool_results),
+                    iterations=iteration,
+                    truncated=False,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                    write_guard_triggered=True,
+                )
+
+        self._last_iteration_count = iteration
+        logger.info("最终结果摘要: %s", _summarize_text(reply_text))
+        return "return", _finalize_result(
+            reply=reply_text,
+            tool_calls=list(all_tool_results),
+            iterations=iteration,
+            truncated=False,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_prompt_tokens + total_completion_tokens,
+        )
+
     def _try_refresh_manifest(self) -> None:
         """写入操作后增量刷新 Workspace Manifest（debounce：每轮最多一次）。"""
         if not self._manifest_refresh_needed or self._workspace_manifest is None:
@@ -4132,7 +4596,9 @@ class AgentEngine:
         self._manifest_refresh_needed = False
         try:
             from excelmanus.workspace_manifest import refresh_manifest
-            self._workspace_manifest = refresh_manifest(self._workspace_manifest)
+            self._workspace_manifest = refresh_manifest(
+                self._workspace_manifest, database=self._database,
+            )
             logger.info("Workspace manifest 增量刷新完成")
         except Exception:
             logger.debug("Workspace manifest 增量刷新失败", exc_info=True)
@@ -4321,6 +4787,96 @@ class AgentEngine:
                 raise
             raise _AuditedExecutionError(cause=exc, record=record) from exc
 
+    async def _execute_approved_pending(
+        self,
+        pending: PendingApproval,
+        *,
+        on_event: EventCallback | None = None,
+    ) -> tuple[bool, str, AppliedApprovalRecord | None]:
+        """执行待确认操作并处理副作用（写入追踪、CoW 映射等）。
+
+        返回 (success, result_text, record)。
+        共享逻辑：同时被 _handle_accept_command 和 _tool_calling_loop 内联审批使用。
+        """
+        try:
+            _, record = await self._execute_tool_with_audit(
+                tool_name=pending.tool_name,
+                arguments=pending.arguments,
+                tool_scope=None,
+                approval_id=pending.approval_id,
+                created_at_utc=pending.created_at_utc,
+                undoable=pending.tool_name not in {"run_code", "run_shell"},
+                force_delete_confirm=True,
+            )
+        except ToolNotAllowedError:
+            self._approval.clear_pending()
+            msg = f"accept 执行失败：工具 `{pending.tool_name}` 当前不在授权范围内。"
+            return False, msg, None
+        except Exception as exc:  # noqa: BLE001
+            self._approval.clear_pending()
+            return False, f"accept 执行失败：{exc}", None
+
+        # ── run_code RED 路径 → 写入追踪 ──
+        if pending.tool_name == "run_code":
+            from excelmanus.security.code_policy import extract_excel_targets
+            _rc_code = pending.arguments.get("code") or ""
+            _rc_result_json: dict | None = None
+            try:
+                _rc_result_json = json.loads(record.result_preview or "")
+                if not isinstance(_rc_result_json, dict):
+                    _rc_result_json = None
+            except (json.JSONDecodeError, TypeError):
+                pass
+            _has_cow = bool(_rc_result_json and _rc_result_json.get("cow_mapping"))
+            _has_ast_write = any(
+                t.operation == "write"
+                for t in extract_excel_targets(_rc_code)
+            )
+            if record.changes or _has_cow or _has_ast_write:
+                self._record_workspace_write_action()
+        # ── run_code RED 路径 → window 感知桥接 ──
+        if pending.tool_name == "run_code" and self._window_perception is not None:
+            _rc_code = pending.arguments.get("code") or ""
+            _rc_stdout = ""
+            try:
+                _rc_result_json2 = json.loads(record.result_preview or "")
+                _rc_stdout = _rc_result_json2.get("stdout_tail", "") if isinstance(_rc_result_json2, dict) else ""
+            except (json.JSONDecodeError, TypeError):
+                pass
+            self._window_perception.observe_code_execution(
+                code=_rc_code,
+                audit_changes=record.changes,
+                stdout_tail=_rc_stdout,
+                iteration=0,
+            )
+        # ── run_code RED 路径 → files_changed 事件 ──
+        if pending.tool_name == "run_code" and on_event is not None:
+            self._tool_dispatcher._emit_files_changed_from_audit(
+                self, on_event, pending.approval_id,
+                pending.arguments.get("code") or "",
+                record.changes,
+                0,
+            )
+
+        # ── 通用 CoW 映射提取 ──
+        if record.result_preview:
+            try:
+                _accept_result = json.loads(record.result_preview)
+                if isinstance(_accept_result, dict):
+                    _accept_cow = _accept_result.get("cow_mapping")
+                    if _accept_cow and isinstance(_accept_cow, dict):
+                        self._state.register_cow_mappings(_accept_cow)
+                        logger.info(
+                            "审批 CoW 映射已注册: tool=%s mappings=%s",
+                            pending.tool_name, _accept_cow,
+                        )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        self._approval.clear_pending()
+        result_text = record.result_preview or f"已执行 `{pending.tool_name}`。"
+        return True, result_text, record
+
     def clear_memory(self) -> None:
         """清除对话历史。"""
         if self._active_skills:
@@ -4415,6 +4971,20 @@ class AgentEngine:
         )
         return str(save_path)
 
+    # ── 模型能力 ──────────────────────────────────
+
+    def set_model_capabilities(self, caps: Any) -> None:
+        """设置当前模型的能力探测结果。"""
+        self._model_capabilities = caps
+
+    def get_model_capabilities(self) -> Any:
+        """返回当前模型的能力探测结果。"""
+        return self._model_capabilities
+
+    def set_thinking_budget(self, budget: int) -> None:
+        """设置 thinking token 预算。"""
+        self._thinking_budget = max(0, budget)
+
     # ── 多模型切换 ──────────────────────────────────
 
     @property
@@ -4475,6 +5045,7 @@ class AgentEngine:
                 base_url=self._active_base_url,
             )
             self._sync_router_model_runtime()
+            self._model_capabilities = None
             return f"已切换到默认模型：{self._config.model}"
 
         # 在 profiles 中查找：精确匹配 > 前缀匹配 > 包含匹配
@@ -4510,6 +5081,7 @@ class AgentEngine:
             base_url=self._active_base_url,
         )
         self._sync_router_model_runtime()
+        self._model_capabilities = None
         desc = f"（{matched.description}）" if matched.description else ""
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
 
@@ -4585,6 +5157,7 @@ class AgentEngine:
         slash_command: str | None = None,
         raw_args: str | None = None,
         write_hint: str | None = None,
+        on_event: EventCallback | None = None,
     ) -> SkillMatchResult:
         if self._skill_router is None:
             return SkillMatchResult(
@@ -4604,6 +5177,7 @@ class AgentEngine:
             raw_args=raw_args,
             blocked_skillpacks=blocked_skillpacks,
             write_hint=write_hint,
+            on_event=on_event,
         )
 
     @staticmethod
@@ -4746,8 +5320,8 @@ class AgentEngine:
         return await self._command_handler._handle_accept_command(parts, on_event=on_event)
 
     # DEPRECATED: 转发 wrapper，待测试迁移后删除
-    def _handle_reject_command(self, parts: list[str]) -> str:
-        return self._command_handler._handle_reject_command(parts)
+    def _handle_reject_command(self, parts: list[str], *, on_event: EventCallback | None = None) -> str:
+        return self._command_handler._handle_reject_command(parts, on_event=on_event)
 
     # DEPRECATED: 转发 wrapper，待测试迁移后删除
     async def _handle_plan_approve(
@@ -5063,6 +5637,7 @@ class AgentEngine:
         tool_calls_accumulated: dict[int, dict] = {}
         finish_reason: str | None = None
         usage = None
+        _tool_call_notified = False
 
         async for chunk in stream:
             # ── 自定义 provider 的 _StreamDelta ──
@@ -5082,6 +5657,13 @@ class AgentEngine:
                         iteration=iteration,
                     ))
                 if chunk.tool_calls_delta:
+                    if not _tool_call_notified:
+                        _tool_call_notified = True
+                        self._emit(on_event, ToolCallEvent(
+                            event_type=EventType.PIPELINE_PROGRESS,
+                            pipeline_stage="generating_tool_call",
+                            pipeline_message="正在生成工具调用...",
+                        ))
                     for tc in chunk.tool_calls_delta:
                         idx = tc.get("index", 0)
                         tool_calls_accumulated[idx] = tc
@@ -5125,6 +5707,13 @@ class AgentEngine:
 
             delta_tool_calls = getattr(delta, "tool_calls", None)
             if delta_tool_calls:
+                if not _tool_call_notified:
+                    _tool_call_notified = True
+                    self._emit(on_event, ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="generating_tool_call",
+                        pipeline_message="正在生成工具调用...",
+                    ))
                 for tc_delta in delta_tool_calls:
                     idx = getattr(tc_delta, "index", 0)
                     if idx not in tool_calls_accumulated:

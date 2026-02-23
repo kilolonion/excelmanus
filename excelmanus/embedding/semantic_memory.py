@@ -18,6 +18,7 @@ from excelmanus.embedding.store import VectorStore
 from excelmanus.memory_models import MemoryEntry
 
 if TYPE_CHECKING:
+    from excelmanus.database import Database
     from excelmanus.embedding.client import EmbeddingClient
     from excelmanus.persistent_memory import PersistentMemory
 
@@ -39,6 +40,7 @@ class SemanticMemory:
         top_k: int = 10,
         threshold: float = 0.3,
         fallback_recent: int = 5,
+        database: "Database | None" = None,
     ) -> None:
         self._pm = persistent_memory
         self._client = embedding_client
@@ -51,6 +53,7 @@ class SemanticMemory:
         self._store = VectorStore(
             store_dir=vectors_dir,
             dimensions=embedding_client.dimensions,
+            database=database,
         )
         self._synced = False
 

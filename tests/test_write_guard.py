@@ -10,10 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult, _WRITE_TOOL_NAMES
+from excelmanus.engine import AgentEngine, ChatResult, ToolCallResult
 from excelmanus.skillpacks.models import SkillMatchResult
-from excelmanus.tools.policy import MUTATING_ALL_TOOLS
-from excelmanus.tools.registry import ToolRegistry
+from excelmanus.tools.registry import ToolDef, ToolRegistry
 
 
 # ── helpers ──────────────────────────────────────────────────
@@ -223,7 +222,7 @@ class TestRunCodeWritePropagation:
     """run_code GREEN/YELLOW 自动执行成功后应正确追踪写入状态。
 
     回归测试：conversation_20260220T162730 中 run_code 通过 CoW 实际写入文件，
-    但 finish_task 被永久拒绝（3 次），因为 run_code 不在 _WRITE_TOOL_NAMES 中，
+    但 finish_task 被永久拒绝（3 次），因为 run_code 的 write_effect 为 dynamic，
     且 tool_dispatcher 的 code_policy 路径也未调用 record_write_action()。
     """
 
@@ -395,11 +394,6 @@ class TestRunCodeWritePropagation:
         assert engine._has_write_tool_call is True
 
 
-class TestWriteToolNamesSourceOfTruth:
-    def test_write_tool_names_match_policy_mutating_all_tools(self):
-        assert _WRITE_TOOL_NAMES == MUTATING_ALL_TOOLS
-
-
 # ── _build_meta_tools finish_task 注入测试 ──
 
 class TestFinishTaskInjection:
@@ -438,8 +432,8 @@ class TestFinishTaskInjection:
         tools = engine._build_meta_tools()
         ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
         params = ft["function"]["parameters"]
-        assert "report" in params["properties"]
         assert "summary" in params["properties"]
+        assert "affected_files" in params["properties"]
         assert params["required"] == []
 
     def test_finish_task_reaches_model_tools_when_may_write(self):
@@ -561,9 +555,18 @@ class TestExecutionGuardState:
 class TestWriteHintSyncOnWriteCall:
     @pytest.mark.asyncio
     async def test_write_hint_upgrades_after_successful_write_tool_call(self):
-        engine = _make_engine(max_iterations=2)
+        engine = _make_engine(max_iterations=1)
         route_result = _make_route_result(write_hint="read_only")
         engine._current_write_hint = "read_only"
+        engine._registry.register_tool(
+            ToolDef(
+                name="write_text_file",
+                description="test",
+                input_schema={"type": "object", "properties": {}},
+                func=lambda **kwargs: "ok",
+                write_effect="workspace_write",
+            )
+        )
 
         first = types.SimpleNamespace(
             choices=[
@@ -583,14 +586,7 @@ class TestWriteHintSyncOnWriteCall:
                 )
             ]
         )
-        second = types.SimpleNamespace(
-            choices=[
-                types.SimpleNamespace(
-                    message=types.SimpleNamespace(content="done", tool_calls=None)
-                )
-            ]
-        )
-        engine._client.chat.completions.create = AsyncMock(side_effect=[first, second])
+        engine._client.chat.completions.create = AsyncMock(side_effect=[first])
         engine._execute_tool_call = AsyncMock(
             return_value=ToolCallResult(
                 tool_name="write_text_file",
@@ -602,7 +598,7 @@ class TestWriteHintSyncOnWriteCall:
 
         result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        assert result.reply == "done"
+        assert "已达到最大迭代次数" in result.reply
         assert engine._current_write_hint == "may_write"
 
 
@@ -610,7 +606,7 @@ class TestManifestRefreshOnRecordedWrite:
     @pytest.mark.asyncio
     async def test_manifest_refresh_triggered_by_record_write_action(self):
         """写入标记来自 record_write_action 时，也应触发 manifest refresh。"""
-        engine = _make_engine(max_iterations=2)
+        engine = _make_engine(max_iterations=1)
         route_result = _make_route_result(write_hint="read_only")
 
         first = types.SimpleNamespace(
@@ -650,7 +646,10 @@ class TestManifestRefreshOnRecordedWrite:
             )
 
         engine._execute_tool_call = AsyncMock(side_effect=_execute_and_record_write)
-        engine._workspace_manifest = types.SimpleNamespace(total_files=1)
+        engine._workspace_manifest = types.SimpleNamespace(
+            total_files=1,
+            get_system_prompt_summary=lambda: "",
+        )
 
         refreshed_manifest = object()
         with patch(
@@ -659,9 +658,29 @@ class TestManifestRefreshOnRecordedWrite:
         ) as refresh_mock:
             result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        assert result.reply == "done"
+        assert "已达到最大迭代次数" in result.reply
         refresh_mock.assert_called_once()
         assert engine._workspace_manifest is refreshed_manifest
+
+
+class TestWriteTrackingApis:
+    def test_record_workspace_write_action_marks_manifest_refresh(self):
+        engine = _make_engine()
+        engine._manifest_refresh_needed = False
+
+        engine._record_workspace_write_action()
+
+        assert engine._has_write_tool_call is True
+        assert engine._manifest_refresh_needed is True
+
+    def test_record_external_write_action_does_not_mark_manifest_refresh(self):
+        engine = _make_engine()
+        engine._manifest_refresh_needed = False
+
+        engine._record_external_write_action()
+
+        assert engine._has_write_tool_call is True
+        assert engine._manifest_refresh_needed is False
 
 
 class TestFinishTaskAcceptance:
@@ -830,7 +849,7 @@ class TestFinishTaskAcceptance:
 
 
 class TestFinishTaskStructuredReport:
-    """finish_task 结构化 report 渲染测试。"""
+    """finish_task report 兼容 & summary 渲染测试。"""
 
     @staticmethod
     def _finish_task_call_with_report(report: dict) -> types.SimpleNamespace:
@@ -845,7 +864,7 @@ class TestFinishTaskStructuredReport:
 
     @pytest.mark.asyncio
     async def test_report_renders_all_fields(self):
-        """report 包含全部 5 个字段时，渲染为完整结构化文本。"""
+        """旧格式 report dict 兼容：各字段内容以自然段落拼接。"""
         engine = _make_engine()
         engine._has_write_tool_call = True
 
@@ -864,20 +883,15 @@ class TestFinishTaskStructuredReport:
         )
         assert result.success is True
         assert result.finish_accepted is True
-        assert "**执行操作**" in result.result
         assert "步骤1: 读取数据" in result.result
-        assert "**关键发现**" in result.result
         assert "匹配率 95%" in result.result
-        assert "**结果解读**" in result.result
         assert "ID 列" in result.result
-        assert "**后续建议**" in result.result
         assert "未匹配的 5 行" in result.result
-        assert "**涉及文件**" in result.result
-        assert "- output.xlsx" in result.result
+        assert "output.xlsx" in result.result
 
     @pytest.mark.asyncio
     async def test_report_renders_required_fields_only(self):
-        """report 仅包含必填字段时，可选字段不渲染。"""
+        """旧格式 report 仅包含部分字段时，缺失字段不渲染。"""
         engine = _make_engine()
         engine._has_write_tool_call = True
 
@@ -892,11 +906,8 @@ class TestFinishTaskStructuredReport:
             iteration=1,
         )
         assert result.finish_accepted is True
-        assert "**执行操作**" in result.result
-        assert "**关键发现**" in result.result
-        assert "**结果解读**" not in result.result
-        assert "**后续建议**" not in result.result
-        assert "**涉及文件**" not in result.result
+        assert "写入了 A 列公式" in result.result
+        assert "共 50 行" in result.result
 
     @pytest.mark.asyncio
     async def test_summary_fallback_when_no_report(self):

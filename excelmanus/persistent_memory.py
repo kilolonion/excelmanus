@@ -556,3 +556,58 @@ class PersistentMemory:
     def _write_layout_version(self) -> None:
         version_path = self._memory_dir / _LAYOUT_VERSION_FILE
         self._atomic_write(version_path, _LAYOUT_VERSION + "\n")
+
+    # ── 条目列表与删除（Memory 管理 UI 使用）─────────────
+
+    def list_entries(
+        self,
+        category: MemoryCategory | None = None,
+    ) -> list[MemoryEntry]:
+        """列出所有记忆条目（可按类别筛选），按时间正序排列。"""
+        if self._db_store is not None:
+            if category is not None:
+                return self._db_store.load_by_category(category)
+            return self._db_store.load_all()
+
+        filepath = self._memory_dir / CORE_MEMORY_FILE
+        if not filepath.exists():
+            return []
+        try:
+            raw = filepath.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        entries = self._parse_entries(raw)
+        if category is not None:
+            entries = [e for e in entries if e.category == category]
+        return entries
+
+    def delete_entry(self, entry_id: str) -> bool:
+        """按 ID 删除指定记忆条目。
+
+        文件模式下需遍历所有相关文件找到并移除匹配条目后重写。
+        """
+        if self._db_store is not None:
+            return self._db_store.delete_entry(entry_id)
+
+        if self._read_only_mode:
+            return False
+
+        target_files = [CORE_MEMORY_FILE] + list(CATEGORY_TOPIC_MAP.values())
+        deleted = False
+        for filename in target_files:
+            filepath = self._memory_dir / filename
+            if not filepath.exists():
+                continue
+            try:
+                raw = filepath.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            entries = self._parse_entries(raw)
+            filtered = [e for e in entries if e.id != entry_id]
+            if len(filtered) < len(entries):
+                deleted = True
+                if filtered:
+                    self._atomic_write(filepath, self.format_entries(filtered))
+                else:
+                    filepath.unlink(missing_ok=True)
+        return deleted

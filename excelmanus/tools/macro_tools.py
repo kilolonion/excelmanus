@@ -476,6 +476,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=vlookup_write,
+            write_effect="workspace_write",
         ),
         ToolDef(
             name="computed_column",
@@ -521,5 +522,6 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=computed_column,
+            write_effect="workspace_write",
         ),
     ]

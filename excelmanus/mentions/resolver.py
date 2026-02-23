@@ -123,6 +123,8 @@ class MentionResolver:
         # 根据文件类型选择解析方式
         suffix = resolved_path.suffix.lower()
         if suffix in _EXCEL_EXTENSIONS:
+            if mention.range_spec:
+                return self._resolve_excel_range(mention, resolved_path)
             return self._resolve_excel_file(mention, resolved_path)
         else:
             return self._resolve_text_file(mention, resolved_path)
@@ -173,6 +175,105 @@ class MentionResolver:
             return ResolvedMention(
                 mention=mention,
                 error=f"文件读取失败：{mention.value}：{exc}",
+            )
+
+    @staticmethod
+    def _parse_range_spec(range_spec: str) -> tuple[str | None, str]:
+        """解析 range_spec 为 (sheet_name, cell_range)。
+
+        支持格式：
+        - "Sheet1!A1:C10" → ("Sheet1", "A1:C10")
+        - "A1:C10" → (None, "A1:C10")
+        - "Sheet1!A1" → ("Sheet1", "A1:A1")
+        - "A1" → (None, "A1:A1")
+        """
+        if "!" in range_spec:
+            sheet_name, cell_range = range_spec.split("!", 1)
+        else:
+            sheet_name = None
+            cell_range = range_spec
+        # 单格 → 扩展为 A1:A1
+        if ":" not in cell_range:
+            cell_range = f"{cell_range}:{cell_range}"
+        return sheet_name, cell_range
+
+    def _resolve_excel_range(
+        self, mention: Mention, path: Path
+    ) -> ResolvedMention:
+        """读取 Excel 文件指定 range 的单元格数据，格式化为表格文本。"""
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.utils import column_index_from_string, get_column_letter
+            from openpyxl.utils.cell import range_boundaries
+
+            sheet_name, cell_range = self._parse_range_spec(mention.range_spec)  # type: ignore[arg-type]
+
+            wb = load_workbook(str(path), read_only=True, data_only=True)
+            try:
+                # 定位 sheet
+                if sheet_name:
+                    if sheet_name not in wb.sheetnames:
+                        return ResolvedMention(
+                            mention=mention,
+                            error=f"工作表不存在：{sheet_name}",
+                        )
+                    ws = wb[sheet_name]
+                else:
+                    ws = wb.active
+                    sheet_name = ws.title if ws else wb.sheetnames[0]
+                    if ws is None:
+                        ws = wb[wb.sheetnames[0]]
+
+                # 解析单元格范围
+                min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+
+                # 构建列头（字母标识）
+                col_headers = [
+                    get_column_letter(c) for c in range(min_col, max_col + 1)
+                ]
+
+                # 读取单元格数据
+                data_rows: list[list[str]] = []
+                for row in ws.iter_rows(
+                    min_row=min_row,
+                    max_row=max_row,
+                    min_col=min_col,
+                    max_col=max_col,
+                    values_only=True,
+                ):
+                    data_rows.append(
+                        [str(v) if v is not None else "" for v in row]
+                    )
+
+                # 格式化为管道分隔表格
+                range_label = f"{sheet_name}!{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+                num_rows = len(data_rows)
+                num_cols = len(col_headers)
+
+                lines: list[str] = [
+                    f"Range: {range_label} ({num_cols}列×{num_rows}行)",
+                ]
+
+                # 表头行
+                lines.append("| " + " | ".join(col_headers) + " |")
+                lines.append("| " + " | ".join("---" for _ in col_headers) + " |")
+
+                # 数据行
+                for row_data in data_rows:
+                    lines.append("| " + " | ".join(row_data) + " |")
+
+                context = "\n".join(lines)
+            finally:
+                wb.close()
+
+            # token 预算限制
+            context = _truncate_to_tokens(context, self._max_file_tokens)
+            return ResolvedMention(mention=mention, context_block=context)
+
+        except Exception as exc:
+            return ResolvedMention(
+                mention=mention,
+                error=f"范围读取失败：{mention.value}[{mention.range_spec}]：{exc}",
             )
 
     def _resolve_text_file(

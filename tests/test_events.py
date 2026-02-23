@@ -44,6 +44,7 @@ timestamp_st = st.datetimes(
 tool_call_event_st = st.builds(
     ToolCallEvent,
     event_type=event_type_st,
+    tool_call_id=st.text(max_size=80),
     tool_name=st.text(max_size=50),
     arguments=arguments_st,
     result=st.text(max_size=200),
@@ -73,6 +74,7 @@ class TestToolCallEventRoundTrip:
         restored = ToolCallEvent.from_dict(serialized)
 
         assert restored.event_type == event.event_type
+        assert restored.tool_call_id == event.tool_call_id
         assert restored.tool_name == event.tool_name
         assert restored.arguments == event.arguments
         assert restored.result == event.result
@@ -114,6 +116,10 @@ class TestEventTypeEnum:
             "TASK_ITEM_UPDATED",
             "USER_QUESTION",
             "PENDING_APPROVAL",
+            "APPROVAL_RESOLVED",
+            "MODE_CHANGED",
+            "EXCEL_PREVIEW",
+            "EXCEL_DIFF",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -146,8 +152,12 @@ class TestEventTypeEnum:
             ("TASK_ITEM_UPDATED", "task_item_updated"),
             ("USER_QUESTION", "user_question"),
             ("PENDING_APPROVAL", "pending_approval"),
+            ("APPROVAL_RESOLVED", "approval_resolved"),
             ("THINKING_DELTA", "thinking_delta"),
             ("TEXT_DELTA", "text_delta"),
+            ("MODE_CHANGED", "mode_changed"),
+            ("EXCEL_PREVIEW", "excel_preview"),
+            ("EXCEL_DIFF", "excel_diff"),
         ]
 
 
@@ -162,6 +172,7 @@ class TestToolCallEventFields:
         event = ToolCallEvent(event_type=EventType.TOOL_CALL_START)
 
         assert event.event_type == EventType.TOOL_CALL_START
+        assert event.tool_call_id == ""
         assert event.tool_name == ""
         assert event.arguments == {}
         assert event.result == ""
@@ -221,6 +232,7 @@ class TestToolCallEventFields:
         annotations = ToolCallEvent.__dataclass_fields__
         expected_fields = {
             "event_type",
+            "tool_call_id",
             "tool_name",
             "arguments",
             "result",
@@ -262,7 +274,20 @@ class TestToolCallEventFields:
             "approval_id",
             "approval_tool_name",
             "approval_arguments",
+            "approval_undoable",
+            "approval_risk_level",
+            "approval_args_summary",
             "text_delta",
             "thinking_delta",
+            "mode_name",
+            "mode_enabled",
+            "excel_file_path",
+            "excel_sheet",
+            "excel_columns",
+            "excel_rows",
+            "excel_total_rows",
+            "excel_truncated",
+            "excel_affected_range",
+            "excel_changes",
         }
         assert set(annotations.keys()) == expected_fields

@@ -683,7 +683,7 @@ class TestSkillRouter:
         assert result.skills_used == []
 
     @pytest.mark.asyncio
-    async def test_classify_write_hint_uses_lexical_fallback_without_router_model(
+    async def test_classify_write_hint_uses_lexical_fallback_without_aux_model(
         self,
         tmp_path: Path,
     ) -> None:
@@ -693,7 +693,7 @@ class TestSkillRouter:
         for d in (system_dir, user_dir, project_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-        config = _make_config(system_dir, user_dir, project_dir, router_model=None)
+        config = _make_config(system_dir, user_dir, project_dir, aux_model=None)
         loader = SkillpackLoader(config, _tool_registry())
         router = SkillRouter(config, loader)
 
@@ -722,7 +722,7 @@ class TestSkillRouter:
             system_dir,
             user_dir,
             project_dir,
-            router_model="router-model",
+            aux_model="aux-model",
         )
         loader = SkillpackLoader(config, _tool_registry())
         loader.load_all()
@@ -751,7 +751,7 @@ class TestSkillRouter:
             system_dir,
             user_dir,
             project_dir,
-            router_model="router-model",
+            aux_model="aux-model",
         )
         loader = SkillpackLoader(config, _tool_registry())
         router = SkillRouter(config, loader)
@@ -785,7 +785,7 @@ class TestSkillRouter:
             system_dir,
             user_dir,
             project_dir,
-            router_model="router-model",
+            aux_model="aux-model",
         )
         loader = SkillpackLoader(config, _tool_registry())
         router = SkillRouter(config, loader)
@@ -793,12 +793,12 @@ class TestSkillRouter:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
         with patch("excelmanus.providers.create_client", return_value=mock_client) as mock_create_client:
-            hint, tags = await router._classify_task("请读取这个文件并做统计分析")
-        assert hint in ("read_only", "unknown")
+            hint, tags = await router._classify_task("请帮我处理这个任务")
+        assert hint == "unknown"
         assert mock_create_client.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_classify_write_hint_router_error_falls_back_to_main_model(
+    async def test_classify_write_hint_aux_error_falls_back_to_main_model(
         self,
         tmp_path: Path,
     ) -> None:
@@ -812,7 +812,7 @@ class TestSkillRouter:
             system_dir,
             user_dir,
             project_dir,
-            router_model="router-model",
+            aux_model="aux-model",
             model="main-model",
         )
         loader = SkillpackLoader(config, _tool_registry())
@@ -835,7 +835,7 @@ class TestSkillRouter:
             "excelmanus.providers.create_client",
             side_effect=[router_client, main_client],
         ) as mock_create_client:
-            hint, tags = await router._classify_task("请读取这个文件并做统计分析")
+            hint, tags = await router._classify_task("请帮我处理这个任务")
 
         assert hint == "may_write"
         assert mock_create_client.call_count == 2

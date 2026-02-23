@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from rich.console import Console
 
@@ -27,6 +27,8 @@ _PROMPT_TOOLKIT_ENABLED = False
 try:
     from prompt_toolkit import ANSI, PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
+    from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+    from prompt_toolkit.document import Document
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
@@ -81,6 +83,8 @@ def build_prompt_badges(
     *,
     model_hint: str = "",
     turn_number: int = 0,
+    full_access: bool = False,
+    plan_mode: bool = False,
 ) -> str:
     """构建 prompt 徽章字符串。"""
     parts: list[str] = []
@@ -88,6 +92,10 @@ def build_prompt_badges(
         parts.append(model_hint)
     if turn_number > 0:
         parts.append(f"#{turn_number}")
+    if full_access:
+        parts.append("[FULL]")
+    if plan_mode:
+        parts.append("[PLAN]")
     return " ".join(parts)
 
 
@@ -143,10 +151,131 @@ _PROMPT_SESSION = None
 
 if _PROMPT_TOOLKIT_ENABLED:
 
+    # ── 斜杠命令下拉补全器 ─────────────────────────────────
+
+    class _SlashCommandCompleter(Completer):
+        """prompt_toolkit 下拉补全器：输入 / 时弹出命令列表。
+
+        两阶段补全：
+        - 阶段一：输入 / 后显示所有命令
+        - 阶段二：选中有参数的命令后显示可用参数
+        """
+
+        def get_completions(
+            self, document: Document, complete_event: CompleteEvent
+        ) -> Iterable[Completion]:
+            text = document.text_before_cursor
+
+            # 仅当整行以 / 开头时激活
+            if not text.startswith("/"):
+                return
+
+            parts = text.split(" ", 1)
+            cmd_part = parts[0]  # e.g. "/config"
+
+            if len(parts) == 1:
+                # 阶段一：补全命令本体
+                yield from self._command_completions(cmd_part)
+            else:
+                # 阶段二：补全参数
+                arg_partial = parts[1]
+                yield from self._argument_completions(cmd_part, arg_partial)
+
+        def _command_completions(self, partial: str) -> Iterable[Completion]:
+            """列出匹配的斜杠命令。"""
+            lower_partial = partial.lower()
+            # 静态命令
+            from excelmanus.cli.commands import _STATIC_SLASH_COMMANDS
+            seen: set[str] = set()
+            for spec in _STATIC_SLASH_COMMANDS:
+                if not spec.include_in_suggestions:
+                    continue
+                cmd = spec.command
+                if cmd in seen:
+                    continue
+                seen.add(cmd)
+                if cmd.lower().startswith(lower_partial):
+                    suffix = " " if spec.arguments else ""
+                    yield Completion(
+                        text=cmd + suffix,
+                        start_position=-len(partial),
+                        display=cmd,
+                        display_meta=spec.description,
+                    )
+            # 动态技能命令
+            for dyn_cmd in _DYNAMIC_SKILL_SLASH_COMMANDS:
+                if dyn_cmd in seen:
+                    continue
+                seen.add(dyn_cmd)
+                if dyn_cmd.lower().startswith(lower_partial):
+                    yield Completion(
+                        text=dyn_cmd + " ",
+                        start_position=-len(partial),
+                        display=dyn_cmd,
+                        display_meta="技能",
+                    )
+
+        def _argument_completions(
+            self, command: str, partial: str
+        ) -> Iterable[Completion]:
+            """列出命令的可用参数。"""
+            args = _COMMAND_ARGUMENT_MAP.get(command.lower())
+            if not args:
+                return
+            lower_partial = partial.lower().strip()
+            for arg in args:
+                if arg.lower().startswith(lower_partial):
+                    yield Completion(
+                        text=arg,
+                        start_position=-len(partial),
+                        display=arg,
+                    )
+
+    _SLASH_COMMAND_COMPLETER = _SlashCommandCompleter()
+
+    # ── 合并补全器 ──────────────────────────────────────────
+
+    class _MergedCompleter(Completer):
+        """根据输入上下文分发到 SlashCommand 或 Mention 补全器。"""
+
+        def __init__(
+            self,
+            slash_completer: Completer,
+            mention_completer: Completer | None = None,
+        ) -> None:
+            self._slash = slash_completer
+            self._mention = mention_completer
+
+        @property
+        def mention_completer(self) -> Completer | None:
+            return self._mention
+
+        @mention_completer.setter
+        def mention_completer(self, value: Completer | None) -> None:
+            self._mention = value
+
+        def get_completions(
+            self, document: Document, complete_event: CompleteEvent
+        ) -> Iterable[Completion]:
+            text = document.text_before_cursor
+            if text.startswith("/"):
+                yield from self._slash.get_completions(document, complete_event)
+            elif self._mention is not None:
+                yield from self._mention.get_completions(
+                    document, complete_event
+                )
+
+    _MERGED_COMPLETER = _MergedCompleter(_SLASH_COMMAND_COMPLETER)
+
+    # ── 内联灰色建议器（保留） ──────────────────────────────
+
     class _SlashCommandAutoSuggest(AutoSuggest):
         """基于斜杠命令的内联补全建议器。"""
 
         def get_suggestion(self, buffer, document):  # type: ignore[override]
+            # 下拉菜单打开时不显示灰色建议，避免干扰
+            if buffer.complete_state is not None:
+                return None
             suffix = compute_inline_suggestion(document.text_before_cursor)
             if suffix is None:
                 return None
@@ -177,20 +306,36 @@ if _PROMPT_TOOLKIT_ENABLED:
         return buf.complete_state is not None
 
     def _accept_and_maybe_retrigger(event) -> None:
-        """确认补全项，若结果以 @type: 或目录 / 结尾则自动触发下一级补全。"""
+        """确认补全项，若结果以 @type:、目录 / 结尾或斜杠命令带参数则自动触发下一级补全。"""
         buf = event.current_buffer
         buf.complete_state = None
         text = buf.text[:buf.cursor_position]
         import re as _re
+        # @ 提及二级触发
         if _re.search(r"@(?:file|folder|skill|mcp):\s*$", text) or _re.search(r"@img\s+$", text):
             buf.start_completion()
         elif _re.search(r"@(?:file|folder):\S*/$", text) or _re.search(r"@img\s+\S*/$", text):
             buf.start_completion()
+        # / 命令参数二级触发：选中有参数的命令后自动弹出参数列表
+        elif text.startswith("/") and text.endswith(" "):
+            cmd = text.strip().split()[0].lower() if text.strip() else ""
+            if cmd and cmd in _COMMAND_ARGUMENT_MAP:
+                buf.start_completion()
 
     @_PROMPT_KEY_BINDINGS.add("enter", filter=_completion_menu_is_open)
     def _accept_completion(event) -> None:
         """补全菜单打开时，回车选择当前补全项而非提交。"""
         _accept_and_maybe_retrigger(event)
+
+    @_PROMPT_KEY_BINDINGS.add("/")
+    def _trigger_slash_completion(event) -> None:
+        """输入 / 后立即插入字符并触发斜杠命令补全菜单。"""
+        buf = event.current_buffer
+        buf.insert_text("/")
+        # 仅在行首 / 时触发（即 buf 内容恰好为 "/"）
+        text = buf.text[:buf.cursor_position]
+        if text == "/":
+            buf.start_completion()
 
     @_PROMPT_KEY_BINDINGS.add("@")
     def _trigger_mention_completion(event) -> None:
@@ -202,7 +347,7 @@ if _PROMPT_TOOLKIT_ENABLED:
 
     @_PROMPT_KEY_BINDINGS.add("tab")
     def _accept_inline_suggestion(event) -> None:
-        """按 Tab 接受灰色补全建议。"""
+        """按 Tab 接受灰色补全建议或选中补全项。"""
         buf = event.current_buffer
         if buf.complete_state is not None:
             _accept_and_maybe_retrigger(event)
@@ -228,11 +373,15 @@ async def read_user_input(
     *,
     model_hint: str = "",
     turn_number: int = 0,
+    full_access: bool = False,
+    plan_mode: bool = False,
 ) -> str:
     """读取用户输入：› 前缀提示符。"""
     badges = build_prompt_badges(
         model_hint=model_hint,
         turn_number=turn_number,
+        full_access=full_access,
+        plan_mode=plan_mode,
     )
     # 绿色 › 前缀
     if badges:
@@ -251,7 +400,7 @@ async def read_user_input(
         try:
             return await _PROMPT_SESSION.prompt_async(
                 ANSI(ansi_prompt),
-                completer=_MENTION_COMPLETER,
+                completer=_MERGED_COMPLETER,
                 complete_while_typing=False,
             )
         except (KeyboardInterrupt, EOFError):

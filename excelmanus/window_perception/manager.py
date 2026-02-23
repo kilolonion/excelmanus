@@ -746,11 +746,11 @@ class WindowPerceptionManager:
 
         parsed = parse_json_payload(result_text)
         result_json = parsed if isinstance(parsed, dict) else None
-        repeat_count = 0
         repeat_warning = False
         canonical_name = classification.canonical_name or tool_name
-        intent_tag = IntentTag.GENERAL
+        is_adaptive_requested = str(requested_mode or "").strip().lower() == "adaptive"
         payload: dict[str, Any] | None = None
+        window: Window | None = None
 
         try:
             payload = self.update_from_tool_call(
@@ -774,6 +774,7 @@ class WindowPerceptionManager:
                     success=success,
                     payload=payload,
                 )
+
             intent_tag = window.intent_tag
 
             if self._is_repeat_read_tool(canonical_name):
@@ -784,12 +785,12 @@ class WindowPerceptionManager:
                         window=window,
                     )
                     if repeat_identity is not None:
-                        repeat_count = self._repeat_detector.record_read(
+                        self._repeat_detector.record_read(
                             *repeat_identity,
                             intent_tag=intent_tag.value,
                         )
                 except Exception:
-                    repeat_count = 0
+                    pass
                 # 仅记录用于审计，不阻断或降级。
                 # 重新读取是 agent 验证写入结果、消除幻觉的主要机制，不应干预。
 
@@ -801,21 +802,45 @@ class WindowPerceptionManager:
             )
             if self._is_write_like_tool(canonical_name):
                 self._reset_repeat_counter_after_write(window)
-            if str(requested_mode or "").strip().lower() == "adaptive":
-                self._adaptive_selector.mark_ingest_success()
 
+        except Exception:
+            if is_adaptive_requested:
+                self._adaptive_selector.mark_ingest_failure()
+            logger.warning(
+                "window.ingest_and_confirm ingest failed: tool=%s window_type=%s adaptive=%s",
+                tool_name,
+                classification.window_type.value if classification.window_type else "-",
+                is_adaptive_requested,
+                exc_info=True,
+            )
+            return self._enriched_fallback(
+                tool_name=tool_name,
+                arguments=arguments,
+                result_text=result_text,
+                success=success,
+                payload=payload,
+            )
+
+        if is_adaptive_requested:
+            self._adaptive_selector.mark_ingest_success()
+
+        try:
             # 策略分发：仅 explorer 使用策略的 inline confirmation
             strategy = get_strategy(classification.window_type)
             if (
                 strategy is not None
                 and classification.window_type == WindowType.EXPLORER
                 and strategy.should_replace_result()
+                and window is not None
             ):
                 return strategy.build_inline_confirmation(
                     window=window,
                     tool_name=canonical_name,
                     result_json=result_json,
                 )
+
+            if window is None:
+                return result_text
 
             return self.generate_confirmation(
                 window=window,
@@ -824,8 +849,14 @@ class WindowPerceptionManager:
                 repeat_warning=repeat_warning,
             )
         except Exception:
-            if str(requested_mode or "").strip().lower() == "adaptive":
-                self._adaptive_selector.mark_ingest_failure()
+            logger.warning(
+                "window.ingest_and_confirm confirmation failed, fallback to enriched: "
+                "tool=%s window_type=%s mode=%s",
+                tool_name,
+                classification.window_type.value if classification.window_type else "-",
+                mode,
+                exc_info=True,
+            )
             return self._enriched_fallback(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -1132,12 +1163,6 @@ class WindowPerceptionManager:
         """根据工具类别将结果写入 WURM 数据容器。"""
         iteration = self._operation_seq
         self._set_window_field(window, "current_iteration", iteration)
-        rows = extract_data_rows(result_json, canonical_tool_name)
-        columns = extract_columns(result_json, rows)
-        if columns:
-            self._set_window_field(window, "columns", columns)
-            self._set_window_field(window, "schema", list(columns))
-        self._sync_window_schema_columns(window)
 
         if window.type == WindowType.EXPLORER:
             # 委托给 ExplorerStrategy
@@ -1165,6 +1190,13 @@ class WindowPerceptionManager:
                 ),
             )
             return
+
+        rows = extract_data_rows(result_json, canonical_tool_name)
+        columns = extract_columns(result_json, rows)
+        if columns:
+            self._set_window_field(window, "columns", columns)
+            self._set_window_field(window, "schema", list(columns))
+        self._sync_window_schema_columns(window)
 
         range_ref = extract_range_ref(
             arguments,
@@ -2126,6 +2158,8 @@ class WindowPerceptionManager:
         return max(1, int(self._notice_turn))
 
     def _sync_window_schema_columns(self, window: Window) -> None:
+        if not isinstance(window, SheetWindow):
+            return
         if window.schema and not window.columns:
             self._set_window_field(window, "columns", list(window.schema))
         elif window.columns and not window.schema:

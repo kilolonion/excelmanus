@@ -12,6 +12,12 @@ import threading
 from typing import Any
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.skillpacks.importer import (
+    SkillImportError,
+    SkillImportResult,
+    import_from_github_url,
+    import_from_local_path,
+)
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import Skillpack
 
@@ -232,6 +238,73 @@ class SkillpackManager:
             "deleted_at_utc": deleted_at.isoformat(),
             "actor": actor,
         }
+
+    def import_skillpack(
+        self,
+        *,
+        source: str,
+        value: str,
+        actor: str,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """从本地路径导入 SKILL.md 及附属资源（同步）。
+
+        Args:
+            source: 必须为 "local_path"。
+            value: SKILL.md 文件的绝对路径。
+            actor: 操作者标识。
+            overwrite: 是否覆盖已存在的同名技能。
+
+        Returns:
+            导入结果字典。
+        """
+        if source != "local_path":
+            raise SkillpackInputError(
+                f"同步导入仅支持 local_path，收到：{source}"
+            )
+        with self._lock:
+            result = import_from_local_path(
+                skill_md_path=value,
+                project_skills_dir=str(self._project_dir),
+                overwrite=overwrite,
+            )
+            self._loader.load_all()
+        return result.to_dict()
+
+    async def import_skillpack_async(
+        self,
+        *,
+        source: str,
+        value: str,
+        actor: str,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """从本地路径或 GitHub URL 导入 SKILL.md 及附属资源（异步）。
+
+        Args:
+            source: "local_path" 或 "github_url"。
+            value: SKILL.md 路径或 GitHub URL。
+            actor: 操作者标识。
+            overwrite: 是否覆盖已存在的同名技能。
+
+        Returns:
+            导入结果字典。
+        """
+        if source == "local_path":
+            return self.import_skillpack(
+                source=source, value=value, actor=actor, overwrite=overwrite,
+            )
+        if source == "github_url":
+            result = await import_from_github_url(
+                url=value,
+                project_skills_dir=str(self._project_dir),
+                overwrite=overwrite,
+            )
+            self._loader.load_all()
+            return result.to_dict()
+        raise SkillpackInputError(
+            f"不支持的导入来源：{source}（支持 local_path / github_url）"
+        )
 
     def _ensure_loaded(self) -> dict[str, Skillpack]:
         skillpacks = self._loader.get_skillpacks()

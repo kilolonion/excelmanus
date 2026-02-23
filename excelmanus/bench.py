@@ -1223,8 +1223,8 @@ async def run_case(
     _config_snapshot = {
         "model": config.model,
         "base_url": config.base_url,
-        "router_model": config.router_model,
-        "router_base_url": config.router_base_url,
+        "aux_model": config.aux_model,
+        "aux_base_url": config.aux_base_url,
     }
 
     result = BenchResult(

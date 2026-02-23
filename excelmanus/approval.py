@@ -17,6 +17,10 @@ if TYPE_CHECKING:
     from excelmanus.database import Database
     from excelmanus.stores.approval_store import ApprovalStore
 
+from excelmanus.logger import get_logger
+
+logger = get_logger("approval")
+
 from excelmanus.tools.policy import (
     AUDIT_TARGET_ARG_RULES_ALL,
     AUDIT_TARGET_ARG_RULES_FIRST,
@@ -84,7 +88,9 @@ class AppliedApprovalRecord:
     repo_diff_after_file: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["id"] = d.pop("approval_id")
+        return d
 
 
 @dataclass
@@ -244,6 +250,57 @@ class ApprovalManager:
             return None
         self._applied[approval_id] = loaded
         return loaded
+
+    def list_applied(
+        self,
+        *,
+        limit: int = 50,
+        undoable_only: bool = False,
+    ) -> list[AppliedApprovalRecord]:
+        """列出已执行的审批记录（最近在前）。
+
+        优先从 DB 查询；无 DB 时回退到内存缓存 + 文件系统扫描。
+        """
+        records: dict[str, AppliedApprovalRecord] = {}
+
+        # 1) DB 查询
+        if self._db_store is not None:
+            try:
+                rows = self._db_store.list_approvals(limit=limit)
+                for row in rows:
+                    rec = self._dict_to_applied_record(row)
+                    if rec is not None:
+                        records[rec.approval_id] = rec
+            except Exception:
+                logger.debug("list_applied: DB 查询失败", exc_info=True)
+
+        # 2) 内存缓存补充
+        for aid, rec in self._applied.items():
+            if aid not in records:
+                records[aid] = rec
+
+        # 3) 文件系统扫描（audit_root 下每个子目录即一个 approval_id）
+        if self.audit_root.is_dir():
+            for entry in sorted(self.audit_root.iterdir(), reverse=True):
+                if not entry.is_dir():
+                    continue
+                aid = entry.name
+                if aid in records:
+                    continue
+                loaded = self._load_applied_from_manifest(aid)
+                if loaded is not None:
+                    records[aid] = loaded
+                if len(records) >= limit:
+                    break
+
+        result = sorted(
+            records.values(),
+            key=lambda r: r.applied_at_utc or r.created_at_utc,
+            reverse=True,
+        )
+        if undoable_only:
+            result = [r for r in result if r.undoable and r.changes]
+        return result[:limit]
 
     def pending_block_message(self) -> str:
         if self._pending is None:

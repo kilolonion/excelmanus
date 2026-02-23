@@ -144,6 +144,87 @@ def test_manager_adaptive_ingest_failures_downgrade() -> None:
     assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "anchored"
 
 
+def test_manager_adaptive_explorer_ingest_does_not_downgrade() -> None:
+    manager = WindowPerceptionManager(
+        enabled=True,
+        budget=PerceptionBudget(),
+    )
+    payload = json.dumps(
+        {
+            "directory": ".",
+            "entries": [
+                {"name": "sales.xlsx", "type": "file"},
+                {"name": "notes.txt", "type": "file"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    arguments = {"directory": "."}
+
+    for _ in range(3):
+        result = manager.enrich_tool_result(
+            tool_name="list_directory",
+            arguments=arguments,
+            result_text=payload,
+            success=True,
+            mode="adaptive",
+            model_id="gpt-5.3",
+        )
+        assert isinstance(result, str) and result.strip()
+
+    assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "unified"
+    assert manager._adaptive_selector.consecutive_ingest_failures == 0
+
+
+def test_manager_adaptive_confirmation_failure_does_not_downgrade() -> None:
+    manager = WindowPerceptionManager(
+        enabled=True,
+        budget=PerceptionBudget(),
+    )
+    payload = json.dumps(
+        {
+            "file": "sales.xlsx",
+            "sheet": "Q1",
+            "shape": {"rows": 20, "columns": 5},
+            "columns": ["日期", "产品", "数量", "单价", "金额"],
+            "preview": [{"日期": "2024-01-01", "产品": "A", "数量": 1, "单价": 100, "金额": 100}],
+        },
+        ensure_ascii=False,
+    )
+    arguments = {"file_path": "sales.xlsx", "sheet_name": "Q1", "range": "A1:E10"}
+
+    original_generate = manager.generate_confirmation
+
+    def _raise_generate(*_args, **_kwargs):
+        raise RuntimeError("confirm boom")
+
+    manager.generate_confirmation = _raise_generate  # type: ignore[assignment]
+    try:
+        first = manager.enrich_tool_result(
+            tool_name="read_excel",
+            arguments=arguments,
+            result_text=payload,
+            success=True,
+            mode="adaptive",
+            model_id="gpt-5.3",
+        )
+        second = manager.enrich_tool_result(
+            tool_name="read_excel",
+            arguments=arguments,
+            result_text=payload,
+            success=True,
+            mode="adaptive",
+            model_id="gpt-5.3",
+        )
+    finally:
+        manager.generate_confirmation = original_generate  # type: ignore[assignment]
+
+    assert "--- perception ---" in first
+    assert "--- perception ---" in second
+    assert manager.resolve_effective_mode(requested_mode="adaptive", model_id="gpt-5.3") == "unified"
+    assert manager._adaptive_selector.consecutive_ingest_failures == 0
+
+
 def test_manager_ingest_exception_preserves_payload_without_locals_dependency() -> None:
     manager = WindowPerceptionManager(
         enabled=True,
