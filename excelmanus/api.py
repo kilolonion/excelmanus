@@ -614,6 +614,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if _tool_registry is not None
         else []
     )
+    # 初始化认证模块（UserStore）
+    _user_store = None
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    if _database is not None:
+        try:
+            from excelmanus.auth.store import UserStore
+            _user_store = UserStore(_database)
+            app.state.user_store = _user_store
+            app.state.auth_enabled = auth_enabled
+            if auth_enabled:
+                logger.info("认证系统已启用")
+            else:
+                logger.info("认证系统已初始化（未强制启用，设置 EXCELMANUS_AUTH_ENABLED=true 启用）")
+        except Exception:
+            logger.warning("认证模块初始化失败", exc_info=True)
+
     logger.info(
         "API 服务启动完成，已加载 %d 个工具、%d 个 Skillpack",
         len(tool_names),
@@ -701,10 +717,21 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(bootstrap_config.cors_allow_origins),
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
     )
+
+    # Auth middleware (runs after CORS so preflight OPTIONS pass through)
+    from excelmanus.auth.middleware import AuthMiddleware
+    application.add_middleware(AuthMiddleware)
+
     _register_exception_handlers(application)
+
+    # Register auth router
+    from excelmanus.auth.router import router as auth_router
+    application.include_router(auth_router)
+
     application.include_router(_router)
     return application
 
