@@ -12,6 +12,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _get_oauth_proxy() -> str | None:
+    """Read optional SOCKS5/HTTP proxy for OAuth requests (e.g. Google from China)."""
+    return os.environ.get("EXCELMANUS_OAUTH_PROXY") or None
+
+
 @dataclass(frozen=True)
 class OAuthUserInfo:
     provider: str
@@ -143,7 +148,8 @@ async def google_exchange_code(code: str) -> OAuthUserInfo | None:
         logger.warning("Google OAuth not configured")
         return None
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    proxy = _get_oauth_proxy()
+    async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
         resp = await client.post(
             GOOGLE_TOKEN_URL,
             data={

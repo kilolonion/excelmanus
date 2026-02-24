@@ -79,6 +79,24 @@ class RateLimiter:
             )
         entry.record()
 
+    def check_send_code(self, email: str) -> None:
+        """Check email code-sending rate limit (keyed by email address).
+
+        Limits: 1 per minute, 5 per hour.
+        """
+        entry = self._general[f"send_code:{email.lower()}"]
+        if entry.count_in_window(60) >= 1:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="发送过于频繁，请 1 分钟后再试",
+            )
+        if entry.count_in_window(3600) >= 5:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="今日发送次数过多，请稍后再试",
+            )
+        entry.record()
+
     def cleanup_stale(self, max_age_seconds: float = 7200) -> int:
         """Remove entries with no recent activity. Returns count removed."""
         now = time.monotonic()

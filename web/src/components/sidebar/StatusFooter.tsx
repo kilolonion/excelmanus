@@ -3,13 +3,13 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { Circle, Wrench, Package, Activity, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock } from "lucide-react";
+import { Circle, Wrench, Package, Activity, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiGet } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
-import { logout } from "@/lib/auth-api";
+import { logout, fetchMyWorkspaceUsage, type WorkspaceUsage } from "@/lib/auth-api";
 import {
   Tooltip,
   TooltipContent,
@@ -214,12 +214,45 @@ function Avatar({ src, name, size = 5 }: { src?: string | null; name: string; si
   );
 }
 
+function WorkspaceIndicator({ usage }: { usage: WorkspaceUsage | null }) {
+  if (!usage) return null;
+  const pct = usage.max_size_mb > 0
+    ? Math.min((usage.size_mb / usage.max_size_mb) * 100, 100)
+    : 0;
+  const isOver = usage.over_size || usage.over_files;
+  const color = isOver ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "bg-[var(--em-primary)]";
+
+  return (
+    <div className="px-3 py-1.5">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1">
+        <HardDrive className="h-3 w-3" />
+        <span>工作空间</span>
+        <span className="ml-auto">
+          {usage.size_mb.toFixed(1)} / {usage.max_size_mb} MB · {usage.file_count} / {usage.max_files} 文件
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${color}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function UserBadge() {
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
   const recentAccounts = useRecentAccountsStore((s) => s.accounts);
   const removeAccount = useRecentAccountsStore((s) => s.removeAccount);
+  const [wsUsage, setWsUsage] = useState<WorkspaceUsage | null>(null);
+
+  useEffect(() => {
+    if (!authEnabled || !user) return;
+    fetchMyWorkspaceUsage().then(setWsUsage).catch(() => {});
+  }, [authEnabled, user]);
 
   if (!authEnabled) return null;
 
@@ -310,6 +343,22 @@ function UserBadge() {
                 </DropdownMenuItem>
               ))}
             </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+          </>
+        )}
+
+        <WorkspaceIndicator usage={wsUsage} />
+        <DropdownMenuSeparator />
+
+        {user.role === "admin" && (
+          <>
+            <DropdownMenuItem
+              onClick={() => router.push("/admin")}
+              className="gap-2 cursor-pointer"
+            >
+              <Users className="h-4 w-4" />
+              用户管理
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
           </>
         )}

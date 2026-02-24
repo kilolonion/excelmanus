@@ -207,12 +207,70 @@ python -m excelmanus.bench --message "读取前10行"          # 单条测试
 
 支持多轮对话用例、自动断言校验、结构化 JSON 日志、`--trace` 引擎内部追踪，以及 Suite 级并发执行。
 
-## Docker
+## 部署
+
+### Docker Compose（推荐）
 
 ```bash
-docker build -t excelmanus .
-docker run --env-file .env -v $(pwd)/workspace:/workspace excelmanus
+cp .env.example .env
+# 编辑 .env 配置 API Key、模型等
+
+docker compose up -d                          # 启动（后端 + 前端 + PostgreSQL）
+docker compose --profile production up -d     # 带 Nginx 反向代理
 ```
+
+服务启动后访问 `http://localhost`（Nginx）或 `http://localhost:3000`（直接前端）。
+
+### 手动部署（宝塔面板 / 裸机）
+
+适用于不使用 Docker 的场景，详见 [docs/deployment-baota.md](docs/deployment-baota.md)。
+
+### 一键更新
+
+项目提供 `deploy.sh` 脚本，在本地执行即可同步代码并重启远程服务器：
+
+```bash
+./deploy.sh                  # 完整部署（后端 + 前端）
+./deploy.sh --backend-only   # 只更新后端（最快）
+./deploy.sh --frontend-only  # 只更新前端
+./deploy.sh --skip-build     # 跳过前端构建，仅重启
+```
+
+> 脚本自动排除 `.env`、`data/`、`workspace/` 等数据目录，不会覆盖服务器上的配置和用户数据。
+
+## 多用户与认证
+
+ExcelManus 支持多用户模式，启用后所有 API 请求需携带 JWT token。
+
+```dotenv
+EXCELMANUS_AUTH_ENABLED=true
+EXCELMANUS_JWT_SECRET=your-random-secret-key-at-least-64-chars
+```
+
+支持三种登录方式：
+
+- **邮箱 + 密码** — 注册后直接使用
+- **GitHub OAuth** — 需在 [GitHub Developer Settings](https://github.com/settings/developers) 创建 OAuth App
+- **Google OAuth** — 需在 [Google Cloud Console](https://console.cloud.google.com) 创建 OAuth 凭据
+
+OAuth 配置：
+
+```dotenv
+# GitHub
+EXCELMANUS_GITHUB_CLIENT_ID=your-client-id
+EXCELMANUS_GITHUB_CLIENT_SECRET=your-client-secret
+EXCELMANUS_GITHUB_REDIRECT_URI=https://your-domain/api/v1/auth/oauth/github/callback
+
+# Google
+EXCELMANUS_GOOGLE_CLIENT_ID=your-client-id
+EXCELMANUS_GOOGLE_CLIENT_SECRET=your-client-secret
+EXCELMANUS_GOOGLE_REDIRECT_URI=https://your-domain/api/v1/auth/oauth/google/callback
+
+# 国内服务器访问 Google API 需配置代理
+# EXCELMANUS_OAUTH_PROXY=socks5://127.0.0.1:1080
+```
+
+多用户模式下，每个用户拥有独立的工作区、对话历史和 token 用量追踪，首个注册用户自动成为管理员。
 
 ## 配置参考
 

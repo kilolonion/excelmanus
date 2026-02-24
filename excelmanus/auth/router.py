@@ -11,15 +11,20 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from excelmanus.auth.dependencies import get_current_user, require_admin
 from excelmanus.auth.models import (
+    ForgotPasswordRequest,
     LoginRequest,
     OAuthCallbackParams,
     RefreshRequest,
+    RegisterPendingResponse,
     RegisterRequest,
+    ResendCodeRequest,
+    ResetPasswordRequest,
     TokenResponse,
     UserPublic,
     UserRecord,
     UserRole,
     UserUpdateRequest,
+    VerifyEmailRequest,
 )
 from excelmanus.auth.oauth import (
     github_authorize_url,
@@ -27,6 +32,7 @@ from excelmanus.auth.oauth import (
     google_authorize_url,
     google_exchange_code,
 )
+from excelmanus.auth.email import is_email_configured, send_verification_email
 from excelmanus.auth.security import (
     create_token_pair,
     decode_token,
@@ -34,6 +40,11 @@ from excelmanus.auth.security import (
     verify_password,
 )
 from excelmanus.auth.store import UserStore
+from excelmanus.auth.workspace import (
+    enforce_quota,
+    get_user_workspace,
+    get_workspace_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +58,14 @@ def _get_store(request: Request) -> UserStore:
     return store
 
 
+def _get_workspace_root(request: Request) -> str:
+    ws = getattr(request.app.state, "workspace_root", None)
+    if ws:
+        return ws
+    import os
+    return os.environ.get("EXCELMANUS_WORKSPACE_ROOT", "./workspace")
+
+
 def _build_token_response(user: UserRecord) -> TokenResponse:
     access, refresh, expires_in = create_token_pair(user.id, user.role)
     return TokenResponse(
@@ -57,14 +76,38 @@ def _build_token_response(user: UserRecord) -> TokenResponse:
     )
 
 
+def _is_verify_required() -> bool:
+    """Email verification is required when the env flag is set AND an email backend is configured."""
+    import os
+    flag = os.environ.get("EXCELMANUS_EMAIL_VERIFY_REQUIRED", "").strip().lower()
+    return flag in ("1", "true", "yes") and is_email_configured()
+
+
+def _get_rate_limiter(request: Request):
+    return getattr(request.app.state, "rate_limiter", None)
+
+
 # ── Registration & Login ──────────────────────────────────
 
 
-@router.post("/register", response_model=TokenResponse, status_code=201)
+@router.post("/register", status_code=201)
 async def register(body: RegisterRequest, request: Request) -> Any:
     store = _get_store(request)
 
-    if store.email_exists(body.email):
+    existing = store.get_by_email(body.email)
+    if existing is not None:
+        # If already registered but inactive (pending verification), allow resend
+        if not existing.is_active and _is_verify_required():
+            rate_limiter = _get_rate_limiter(request)
+            if rate_limiter:
+                rate_limiter.check_send_code(body.email)
+            store.invalidate_verifications(body.email, "register")
+            _, code = store.create_verification(body.email, "register")
+            await send_verification_email(body.email, code, "register")
+            return RegisterPendingResponse(
+                message=f"验证码已重新发送至 {body.email}",
+                email=body.email,
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="该邮箱已被注册",
@@ -72,16 +115,121 @@ async def register(body: RegisterRequest, request: Request) -> Any:
 
     # First user becomes admin
     role = UserRole.ADMIN if store.count_users() == 0 else UserRole.USER
+    verify_required = _is_verify_required()
 
     user = UserRecord(
         email=body.email,
         display_name=body.display_name or body.email.split("@")[0],
         password_hash=hash_password(body.password),
         role=role,
+        is_active=not verify_required,
     )
     store.create_user(user)
-    logger.info("用户注册成功: %s (role=%s)", user.email, role)
+    logger.info("用户注册: %s (role=%s, active=%s)", user.email, role, user.is_active)
+
+    if verify_required:
+        rate_limiter = _get_rate_limiter(request)
+        if rate_limiter:
+            rate_limiter.check_send_code(body.email)
+        _, code = store.create_verification(body.email, "register")
+        await send_verification_email(body.email, code, "register")
+        return RegisterPendingResponse(
+            message=f"验证码已发送至 {body.email}，请在 10 分钟内完成验证",
+            email=body.email,
+        )
+
     return _build_token_response(user)
+
+
+@router.post("/verify-email", response_model=TokenResponse)
+async def verify_email(body: VerifyEmailRequest, request: Request) -> Any:
+    store = _get_store(request)
+    record = store.get_valid_verification(body.email, body.code, "register")
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="验证码无效或已过期",
+        )
+
+    store.mark_verification_used(record["id"])
+    user = store.get_by_email(body.email)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    if not user.is_active:
+        store.update_user(user.id, is_active=True)
+        user = store.get_by_id(user.id) or user
+
+    logger.info("邮箱验证成功: %s", body.email)
+    return _build_token_response(user)
+
+
+@router.post("/resend-code")
+async def resend_code(body: ResendCodeRequest, request: Request) -> Any:
+    store = _get_store(request)
+
+    if body.purpose not in ("register", "reset_password"):
+        raise HTTPException(status_code=400, detail="无效的 purpose")
+
+    # Rate limit by email
+    rate_limiter = _get_rate_limiter(request)
+    if rate_limiter:
+        rate_limiter.check_send_code(body.email)
+
+    if body.purpose == "register":
+        user = store.get_by_email(body.email)
+        if user is None or user.is_active:
+            # Don't leak whether email exists
+            return {"message": "如果该邮箱待验证，验证码将重新发送"}
+    else:
+        user = store.get_by_email(body.email)
+        if user is None:
+            return {"message": "如果该邮箱已注册，验证码将重新发送"}
+
+    store.invalidate_verifications(body.email, body.purpose)
+    _, code = store.create_verification(body.email, body.purpose)
+    await send_verification_email(body.email, code, body.purpose)  # type: ignore[arg-type]
+    return {"message": "验证码已重新发送，请检查邮箱"}
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: ForgotPasswordRequest, request: Request) -> Any:
+    store = _get_store(request)
+
+    rate_limiter = _get_rate_limiter(request)
+    if rate_limiter:
+        rate_limiter.check_send_code(body.email)
+
+    user = store.get_by_email(body.email)
+    if user is not None and user.is_active and user.password_hash is not None:
+        store.invalidate_verifications(body.email, "reset_password")
+        _, code = store.create_verification(body.email, "reset_password")
+        await send_verification_email(body.email, code, "reset_password")
+        logger.info("密码重置验证码已发送: %s", body.email)
+
+    # Always return same message to prevent email enumeration
+    return {"message": "如果该邮箱已注册，验证码将在几秒内发送到您的邮箱"}
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordRequest, request: Request) -> Any:
+    store = _get_store(request)
+    record = store.get_valid_verification(body.email, body.code, "reset_password")
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="验证码无效或已过期",
+        )
+
+    user = store.get_by_email(body.email)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=404, detail="用户不存在或已禁用")
+
+    store.mark_verification_used(record["id"])
+    new_hash = hash_password(body.new_password)
+    store.update_user(user.id, password_hash=new_hash)
+    logger.info("密码重置成功: %s", body.email)
+    return {"message": "密码重置成功，请使用新密码登录"}
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -183,6 +331,18 @@ async def get_my_usage(
         "daily_remaining": max(0, user.daily_token_limit - daily) if user.daily_token_limit > 0 else -1,
         "monthly_remaining": max(0, user.monthly_token_limit - monthly) if user.monthly_token_limit > 0 else -1,
     }
+
+
+@router.get("/me/workspace")
+async def get_my_workspace_usage(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """Return workspace usage stats for the current user."""
+    ws_root = _get_workspace_root(request)
+    ws_dir = get_user_workspace(ws_root, user.id)
+    usage = get_workspace_usage(ws_dir)
+    return usage.to_dict()
 
 
 # ── OAuth: GitHub ─────────────────────────────────────────
@@ -301,10 +461,26 @@ async def admin_list_users(
 ) -> Any:
     store = _get_store(request)
     users = store.list_users(include_inactive=True)
-    return {
-        "users": [UserPublic.from_record(u) for u in users],
-        "total": len(users),
-    }
+    ws_root = _get_workspace_root(request)
+
+    result = []
+    for u in users:
+        pub = UserPublic.from_record(u)
+        ws_dir = get_user_workspace(ws_root, u.id)
+        usage = get_workspace_usage(ws_dir)
+        daily = store.get_daily_usage(u.id)
+        monthly = store.get_monthly_usage(u.id)
+        result.append({
+            **pub.model_dump(),
+            "is_active": u.is_active,
+            "daily_token_limit": u.daily_token_limit,
+            "monthly_token_limit": u.monthly_token_limit,
+            "daily_tokens_used": daily,
+            "monthly_tokens_used": monthly,
+            "workspace": usage.to_dict(),
+        })
+
+    return {"users": result, "total": len(result)}
 
 
 @router.patch("/admin/users/{user_id}")
@@ -327,3 +503,57 @@ async def admin_update_user(
     store.update_user(user_id, **updates)
     updated = store.get_by_id(user_id)
     return {"status": "ok", "user": UserPublic.from_record(updated or target)}
+
+
+@router.delete("/admin/users/{user_id}/workspace")
+async def admin_clear_user_workspace(
+    user_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """Delete all files in a user's workspace."""
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    ws_root = _get_workspace_root(request)
+    ws_dir = get_user_workspace(ws_root, user_id)
+
+    import shutil
+    from pathlib import Path
+    ws_path = Path(ws_dir)
+    deleted_count = 0
+    if ws_path.is_dir():
+        for item in list(ws_path.rglob("*")):
+            if item.is_file():
+                item.unlink(missing_ok=True)
+                deleted_count += 1
+        for item in sorted(ws_path.rglob("*"), reverse=True):
+            if item.is_dir() and item != ws_path:
+                try:
+                    item.rmdir()
+                except OSError:
+                    pass
+
+    logger.info("Admin cleared workspace for user %s: %d files deleted", user_id, deleted_count)
+    return {"status": "ok", "deleted_files": deleted_count}
+
+
+@router.post("/admin/users/{user_id}/enforce-quota")
+async def admin_enforce_user_quota(
+    user_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """Force enforce quota on a user's workspace."""
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    ws_root = _get_workspace_root(request)
+    ws_dir = get_user_workspace(ws_root, user_id)
+    deleted = enforce_quota(ws_dir)
+    usage = get_workspace_usage(ws_dir)
+    return {"status": "ok", "deleted": deleted, "workspace": usage.to_dict()}
