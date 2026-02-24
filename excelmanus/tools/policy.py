@@ -131,7 +131,16 @@ WORKSPACE_SCAN_MAX_HASH_BYTES: int = 256 * 1024 * 1024
 WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
     ".git",
     ".venv",
+    "venv",
     "__pycache__",
+    "node_modules",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    ".worktrees",
     "outputs/approvals",
 )
 

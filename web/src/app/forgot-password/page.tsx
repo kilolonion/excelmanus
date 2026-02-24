@@ -161,7 +161,7 @@ export default function ForgotPasswordPage() {
             exit={{ opacity: 0, y: -16, transition: { duration: 0.2 } }}
           >
             <div className="text-center space-y-2">
-              <img src="/logo.svg" alt="ExcelManus" className="h-12 w-12 mx-auto rounded-xl shadow-md" />
+              <img src="/logo.svg" alt="ExcelManus" className="h-12 w-auto mx-auto" />
               <h1 className="text-2xl font-bold tracking-tight">找回密码</h1>
               <p className="text-muted-foreground text-sm">输入您的注册邮箱，我们将发送验证码</p>
             </div>

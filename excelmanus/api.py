@@ -269,6 +269,20 @@ def _is_external_safe_mode() -> bool:
     return bool(_config.external_safe_mode)
 
 
+def _get_isolation_user_id(request: Request) -> str | None:
+    """当会话隔离功能启用时返回当前用户 ID，否则返回 None。
+
+    会话隔离同时依赖认证启用（auth_enabled）和隔离开关（session_isolation_enabled）。
+    两者均为 True 时才传递 user_id 给 SessionManager 做归属校验。
+    """
+    if not getattr(request.app.state, "auth_enabled", False):
+        return None
+    if not getattr(request.app.state, "session_isolation_enabled", False):
+        return None
+    from excelmanus.auth.dependencies import extract_user_id
+    return extract_user_id(request)
+
+
 def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: list[str]) -> tuple[str, list[str], list[str]]:
     """根据安全模式裁剪路由元信息。"""
     if _is_external_safe_mode():
@@ -629,6 +643,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.user_store = _user_store
             app.state.auth_enabled = auth_enabled
             app.state.workspace_root = _config.workspace_root
+            # 会话隔离开关：默认关闭，管理员可通过 config_kv 或环境变量开启
+            _isolation_env = os.environ.get(
+                "EXCELMANUS_SESSION_ISOLATION", ""
+            ).strip().lower() in ("1", "true", "yes")
+            if _config_store is not None:
+                _isolation_db = _config_store.get("session_isolation_enabled")
+                if _isolation_db:
+                    _isolation_env = _isolation_db.lower() in ("1", "true", "yes")
+            app.state.session_isolation_enabled = _isolation_env
+            if _isolation_env:
+                logger.info("会话用户隔离已启用")
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -643,6 +668,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("速率限制器已启用")
         except Exception:
             logger.warning("速率限制器初始化失败", exc_info=True)
+
+    # Docker 沙盒开关：默认关闭，管理员可通过 config_kv 或环境变量开启
+    _docker_env = os.environ.get(
+        "EXCELMANUS_DOCKER_SANDBOX", ""
+    ).strip().lower() in ("1", "true", "yes")
+    if _config_store is not None:
+        _docker_db = _config_store.get("docker_sandbox_enabled")
+        if _docker_db:
+            _docker_env = _docker_db.lower() in ("1", "true", "yes")
+    if _docker_env:
+        from excelmanus.security.docker_sandbox import is_docker_available, is_sandbox_image_ready
+        if not is_docker_available():
+            logger.warning("Docker 沙盒已开启但 Docker daemon 不可用，已自动关闭")
+            _docker_env = False
+        elif not is_sandbox_image_ready():
+            logger.warning(
+                "Docker 沙盒已开启但镜像 excelmanus-sandbox:latest 未找到，"
+                "请运行 docker build -t excelmanus-sandbox:latest -f Dockerfile.sandbox ."
+            )
+        else:
+            logger.info("Docker 沙盒已启用")
+    app.state.docker_sandbox_enabled = _docker_env
+    from excelmanus.tools.code_tools import init_docker_sandbox
+    init_docker_sandbox(_docker_env)
 
     logger.info(
         "API 服务启动完成，已加载 %d 个工具、%d 个 Skillpack",
@@ -850,14 +899,15 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     assert _session_manager is not None, "服务未初始化"
 
     from excelmanus.auth.dependencies import extract_user_id
-    user_id = extract_user_id(raw_request)
+    auth_user_id = extract_user_id(raw_request)
+    isolation_user_id = _get_isolation_user_id(raw_request)
 
     rate_limiter = getattr(raw_request.app.state, "rate_limiter", None)
-    if rate_limiter is not None and user_id:
-        rate_limiter.check_chat(user_id)
+    if rate_limiter is not None and auth_user_id:
+        rate_limiter.check_chat(auth_user_id)
 
     session_id, engine = await _session_manager.acquire_for_chat(
-        request.session_id, user_id=user_id,
+        request.session_id, user_id=isolation_user_id,
     )
 
     if _is_save_command(request.message):
@@ -918,14 +968,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     assert _session_manager is not None, "服务未初始化"
 
     from excelmanus.auth.dependencies import extract_user_id
-    user_id = extract_user_id(raw_request)
+    auth_user_id = extract_user_id(raw_request)
+    isolation_user_id = _get_isolation_user_id(raw_request)
 
     rate_limiter = getattr(raw_request.app.state, "rate_limiter", None)
-    if rate_limiter is not None and user_id:
-        rate_limiter.check_chat(user_id)
+    if rate_limiter is not None and auth_user_id:
+        rate_limiter.check_chat(auth_user_id)
 
     session_id, engine = await _session_manager.acquire_for_chat(
-        request.session_id, user_id=user_id,
+        request.session_id, user_id=isolation_user_id,
     )
 
     if _is_save_command(request.message):
@@ -1089,11 +1140,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 "total_tokens": chat_result.total_tokens,
             })
             # Record token usage for authenticated users
-            if user_id and chat_result.total_tokens > 0:
+            if auth_user_id and chat_result.total_tokens > 0:
                 try:
                     _user_store = getattr(raw_request.app.state, "user_store", None)
                     if _user_store is not None:
-                        _user_store.record_token_usage(user_id, chat_result.total_tokens)
+                        _user_store.record_token_usage(auth_user_id, chat_result.total_tokens)
                 except Exception:
                     logger.debug("记录用户 token 用量失败", exc_info=True)
             yield _sse_format("done", {})
@@ -1238,9 +1289,10 @@ async def backup_discard(request: BackupDiscardRequest) -> JSONResponse:
 
 
 @_router.post("/api/v1/chat/rollback")
-async def chat_rollback(request: RollbackRequest) -> JSONResponse:
+async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONResponse:
     """回退对话到指定用户轮次，可选回滚文件变更。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(raw_request)
 
     try:
         result = await _session_manager.rollback_session(
@@ -1248,6 +1300,7 @@ async def chat_rollback(request: RollbackRequest) -> JSONResponse:
             request.turn_index,
             rollback_files=request.rollback_files,
             new_message=request.new_message,
+            user_id=user_id,
         )
     except SessionNotFoundError as exc:
         return _error_json_response(404, str(exc))
@@ -1741,11 +1794,12 @@ async def import_skill(
     404: _error_responses[404],
     500: _error_responses[500],
 })
-async def delete_session(session_id: str) -> dict:
+async def delete_session(session_id: str, request: Request) -> dict:
     """删除指定会话并释放资源。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
 
-    deleted = await _session_manager.delete(session_id)
+    deleted = await _session_manager.delete(session_id, user_id=user_id)
     if not deleted:
         raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
     return {"status": "ok", "session_id": session_id}
@@ -1765,8 +1819,11 @@ async def archive_session(session_id: str, request: Request) -> dict:
 
     body = await request.json()
     archive = body.get("archive", True)
+    user_id = _get_isolation_user_id(request)
 
-    updated = await _session_manager.archive_session(session_id, archive=archive)
+    updated = await _session_manager.archive_session(
+        session_id, archive=archive, user_id=user_id
+    )
     if not updated:
         raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
     return {
@@ -2208,10 +2265,13 @@ async def reveal_file(request: Request) -> JSONResponse:
 
 @_router.get("/api/v1/sessions")
 async def list_sessions(request: Request) -> JSONResponse:
-    """列出所有会话（含历史）。"""
+    """列出所有会话（含历史）。认证启用时仅返回当前用户的会话。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
     include_archived = request.query_params.get("include_archived", "false").lower() == "true"
-    sessions = await _session_manager.list_sessions(include_archived=include_archived)
+    sessions = await _session_manager.list_sessions(
+        include_archived=include_archived, user_id=user_id
+    )
     return JSONResponse(content={"sessions": sessions})
 
 
@@ -2231,19 +2291,25 @@ async def clear_all_sessions() -> JSONResponse:
 async def get_session_messages(session_id: str, request: Request) -> JSONResponse:
     """分页获取会话消息。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
     limit = int(request.query_params.get("limit", "50"))
     offset = int(request.query_params.get("offset", "0"))
-    messages = await _session_manager.get_session_messages(session_id, limit=limit, offset=offset)
+    messages = await _session_manager.get_session_messages(
+        session_id, limit=limit, offset=offset, user_id=user_id
+    )
     return JSONResponse(content={"messages": messages, "session_id": session_id})
 
 
 @_router.get("/api/v1/sessions/{session_id}/excel-events")
-async def get_session_excel_events(session_id: str) -> JSONResponse:
+async def get_session_excel_events(session_id: str, request: Request) -> JSONResponse:
     """返回持久化的 Excel diff 和改动文件列表，供前端重启后恢复。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
     ch = _session_manager._chat_history
     if ch is None:
-        return JSONResponse(content={"diffs": [], "affected_files": []})
+        return JSONResponse(content={"diffs": [], "affected_files": [], "previews": []})
+    if user_id is not None and not ch.session_owned_by(session_id, user_id):
+        return JSONResponse(content={"diffs": [], "affected_files": [], "previews": []})
     diffs = ch.load_excel_diffs(session_id)
     affected_files = ch.load_affected_files(session_id)
     previews = ch.load_excel_previews(session_id)
@@ -2281,9 +2347,10 @@ async def get_session_excel_events(session_id: str) -> JSONResponse:
 
 
 @_router.get("/api/v1/sessions/{session_id}/status")
-async def get_session_status(session_id: str) -> JSONResponse:
+async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     """获取会话运行时状态（上下文压缩 + 工作区清单）。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
 
     def _normalize_manifest_status(manifest: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(manifest)
@@ -2307,10 +2374,17 @@ async def get_session_status(session_id: str) -> JSONResponse:
 
     # 会话存在于 SQLite 历史但尚未加载到内存：状态查询时懒恢复，
     # 以便无需先发送消息也能触发 manifest 预热并显示构建进度。
-    if engine is None and _session_manager.session_exists(session_id):
+    can_restore = (
+        _session_manager._chat_history.session_owned_by(session_id, user_id)
+        if user_id is not None and _session_manager._chat_history is not None
+        else _session_manager.session_exists(session_id)
+    )
+    if engine is None and can_restore:
         acquired_session_id: str | None = None
         try:
-            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(
+                session_id, user_id=user_id
+            )
         except SessionBusyError:
             # 可能是并发 chat 已抢先恢复并持锁，退化为读取当前内存状态。
             engine = _session_manager.get_engine(session_id)
@@ -2326,7 +2400,7 @@ async def get_session_status(session_id: str) -> JSONResponse:
                 await _session_manager.release_for_chat(acquired_session_id)
 
     if engine is None:
-        if _session_manager.session_exists(session_id):
+        if can_restore:
             return JSONResponse(content={
                 "session_id": session_id,
                 "compaction": {"enabled": False},
@@ -2361,17 +2435,25 @@ async def get_session_status(session_id: str) -> JSONResponse:
 
 
 @_router.post("/api/v1/sessions/{session_id}/compact")
-async def compact_session_context(session_id: str) -> JSONResponse:
+async def compact_session_context(session_id: str, request: Request) -> JSONResponse:
     """在指定会话内执行 /compact，并返回执行结果。"""
     assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
 
     engine = _session_manager.get_engine(session_id)
 
     # 会话存在但尚未加载到内存：尝试懒恢复后再执行。
-    if engine is None and _session_manager.session_exists(session_id):
+    can_restore = (
+        _session_manager._chat_history.session_owned_by(session_id, user_id)
+        if user_id is not None and _session_manager._chat_history is not None
+        else _session_manager.session_exists(session_id)
+    )
+    if engine is None and can_restore:
         acquired_session_id: str | None = None
         try:
-            acquired_session_id, engine = await _session_manager.acquire_for_chat(session_id)
+            acquired_session_id, engine = await _session_manager.acquire_for_chat(
+                session_id, user_id=user_id
+            )
         except SessionBusyError:
             engine = _session_manager.get_engine(session_id)
         except Exception:
@@ -2483,10 +2565,11 @@ async def rebuild_session_manifest(session_id: str) -> JSONResponse:
 
 
 @_router.get("/api/v1/sessions/{session_id}")
-async def get_session(session_id: str) -> JSONResponse:
+async def get_session(session_id: str, request: Request) -> JSONResponse:
     """获取会话详情含消息历史。"""
     assert _session_manager is not None, "服务未初始化"
-    detail = await _session_manager.get_session_detail(session_id)
+    user_id = _get_isolation_user_id(request)
+    detail = await _session_manager.get_session_detail(session_id, user_id=user_id)
     return JSONResponse(content=detail)
 
 
@@ -3898,7 +3981,7 @@ async def delete_memory_entry(entry_id: str) -> dict:
 
 
 @_router.get("/api/v1/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
     """健康检查：返回版本号和已加载的工具/技能包。"""
     if _is_external_safe_mode():
         return {
@@ -3930,7 +4013,130 @@ async def health() -> dict:
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
         "auth_enabled": auth_enabled,
+        "session_isolation_enabled": getattr(request.app.state, "session_isolation_enabled", False),
+        "docker_sandbox_enabled": getattr(request.app.state, "docker_sandbox_enabled", False),
     }
+
+
+@_router.get("/api/v1/settings/session-isolation")
+async def get_session_isolation(request: Request) -> JSONResponse:
+    """查询会话用户隔离开关状态。"""
+    return JSONResponse(content={
+        "session_isolation_enabled": getattr(
+            request.app.state, "session_isolation_enabled", False
+        ),
+    })
+
+
+@_router.put("/api/v1/settings/session-isolation")
+async def set_session_isolation(request: Request) -> JSONResponse:
+    """管理员切换会话用户隔离开关（持久化到 config_kv）。
+
+    请求体: {"enabled": true}  启用
+    请求体: {"enabled": false} 关闭
+    需要管理员权限（auth 启用时校验 admin role）。
+    """
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user
+        user = await get_current_user(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+
+    if _config_store is not None:
+        _config_store.set("session_isolation_enabled", "true" if enabled else "false")
+    request.app.state.session_isolation_enabled = enabled
+
+    logger.info("会话用户隔离已%s（管理员操作）", "启用" if enabled else "关闭")
+    return JSONResponse(content={
+        "status": "ok",
+        "session_isolation_enabled": enabled,
+    })
+
+
+@_router.get("/api/v1/settings/docker-sandbox")
+async def get_docker_sandbox(request: Request) -> JSONResponse:
+    """查询 Docker 沙盒状态（含 daemon / 镜像可用性）。"""
+    from excelmanus.security.docker_sandbox import is_docker_available, is_sandbox_image_ready
+
+    return JSONResponse(content={
+        "docker_sandbox_enabled": getattr(
+            request.app.state, "docker_sandbox_enabled", False
+        ),
+        "docker_available": is_docker_available(),
+        "sandbox_image_ready": is_sandbox_image_ready(),
+    })
+
+
+@_router.put("/api/v1/settings/docker-sandbox")
+async def set_docker_sandbox(request: Request) -> JSONResponse:
+    """管理员切换 Docker 沙盒开关（持久化到 config_kv）。
+
+    请求体: {"enabled": true}  启用
+    请求体: {"enabled": false} 关闭
+    启用时自动检测 Docker 可用性和镜像状态。
+    """
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user
+        user = await get_current_user(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+
+    if enabled:
+        from excelmanus.security.docker_sandbox import (
+            is_docker_available,
+            is_sandbox_image_ready,
+            build_sandbox_image,
+        )
+
+        if not is_docker_available():
+            return _error_json_response(
+                400, "Docker daemon 不可用，无法启用 Docker 沙盒。"
+            )
+        if not is_sandbox_image_ready():
+            ok, msg = build_sandbox_image()
+            if not ok:
+                return _error_json_response(
+                    400, f"沙盒镜像构建失败: {msg}"
+                )
+
+    if _config_store is not None:
+        _config_store.set("docker_sandbox_enabled", "true" if enabled else "false")
+    request.app.state.docker_sandbox_enabled = enabled
+
+    from excelmanus.tools.code_tools import init_docker_sandbox
+    init_docker_sandbox(enabled)
+
+    logger.info("Docker 沙盒已%s（管理员操作）", "启用" if enabled else "关闭")
+    return JSONResponse(content={
+        "status": "ok",
+        "docker_sandbox_enabled": enabled,
+    })
+
+
+@_router.post("/api/v1/settings/docker-sandbox/build")
+async def build_docker_sandbox_image(request: Request) -> JSONResponse:
+    """管理员触发构建/重建 Docker 沙盒镜像。"""
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user
+        user = await get_current_user(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    force = bool(body.get("force", False))
+
+    from excelmanus.security.docker_sandbox import build_sandbox_image
+
+    ok, msg = build_sandbox_image(force=force)
+    if ok:
+        return JSONResponse(content={"status": "ok", "message": msg})
+    return _error_json_response(500, f"镜像构建失败: {msg}")
 
 
 # 默认 ASGI app（供 `uvicorn excelmanus.api:app` 与测试直接导入）

@@ -86,7 +86,7 @@ function LoginForm() {
       >
         {/* Header */}
         <div className="text-center space-y-2">
-          <img src="/logo.svg" alt="ExcelManus" className="h-12 w-12 mx-auto rounded-xl shadow-md" />
+          <img src="/logo.svg" alt="ExcelManus" className="h-12 w-auto mx-auto" />
           <h1 className="text-2xl font-bold tracking-tight">登录 ExcelManus</h1>
           <p className="text-muted-foreground text-sm">基于大语言模型的 Excel 智能代理</p>
         </div>
