@@ -1,16 +1,24 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Circle, Wrench, Package, Activity } from "lucide-react";
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
+import { Circle, Wrench, Package, Activity, LogOut, User } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiGet } from "@/lib/api";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
+import { useAuthStore } from "@/stores/auth-store";
+import { logout } from "@/lib/auth-api";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+const SettingsDialog = dynamic(
+  () => import("@/components/settings/SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
+  { ssr: false, loading: () => <div className="h-7 w-7" /> }
+);
 
 interface HealthData {
   status: string;
@@ -206,11 +214,54 @@ export function StatusFooter() {
           </div>
         </TooltipProvider>
 
-        {/* 设置按钮：hover 旋转 90deg */}
-        <div className="transition-transform duration-300 ease-out hover:rotate-90">
-          <SettingsDialog />
+        <div className="flex items-center gap-1.5">
+          {/* User avatar & logout (only when authenticated) */}
+          <UserBadge />
+          {/* 设置按钮：hover 旋转 90deg */}
+          <div className="transition-transform duration-300 ease-out hover:rotate-90">
+            <SettingsDialog />
+          </div>
         </div>
       </div>
     </>
+  );
+}
+
+function UserBadge() {
+  const router = useRouter();
+  const user = useAuthStore((s) => s.user);
+  if (!user) return null;
+
+  const initial = (user.displayName || user.email)[0]?.toUpperCase() || "U";
+
+  return (
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={() => {
+              logout();
+              router.push("/login");
+            }}
+            className="flex items-center gap-1 rounded-full px-1.5 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          >
+            {user.avatarUrl ? (
+              <img src={user.avatarUrl} alt="" className="h-5 w-5 rounded-full" />
+            ) : (
+              <span
+                className="h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-medium text-white"
+                style={{ backgroundColor: "var(--em-primary)" }}
+              >
+                {initial}
+              </span>
+            )}
+            <LogOut className="h-3 w-3 ml-0.5 opacity-60" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="text-xs">
+          {user.displayName || user.email} · 点击退出
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

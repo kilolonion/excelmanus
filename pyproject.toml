@@ -27,6 +27,13 @@ dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.24.0",
     "cryptography>=41.0.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.0.0",
+    "python-multipart>=0.0.6",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.0",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
