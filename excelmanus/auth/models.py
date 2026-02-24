@@ -152,3 +152,37 @@ class UserUpdateRequest(BaseModel):
 class OAuthCallbackParams(BaseModel):
     code: str
     state: str | None = None
+
+
+# ── Email verification schemas ─────────────────────────────
+
+
+class RegisterPendingResponse(BaseModel):
+    """Returned when email verification is required after registration."""
+    requires_verification: bool = True
+    message: str
+    email: str
+
+
+class VerifyEmailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3)]
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=6)]
+
+
+class ResendCodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3)]
+    purpose: Annotated[str, StringConstraints(strip_whitespace=True)] = "register"
+
+
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3)]
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3)]
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=6)]
+    new_password: Annotated[str, StringConstraints(min_length=8, max_length=128)]

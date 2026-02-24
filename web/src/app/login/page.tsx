@@ -202,7 +202,15 @@ function LoginForm() {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="password">密码</label>
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium" htmlFor="password">密码</label>
+                <Link
+                  href="/forgot-password"
+                  className="text-xs text-muted-foreground hover:text-[var(--em-primary)] transition-colors"
+                >
+                  忘记密码？
+                </Link>
+              </div>
               <div className="relative">
                 <input
                   id="password"

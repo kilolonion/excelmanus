@@ -6,7 +6,10 @@ Provides CRUD for users, integrating with the existing Database class.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import random
+import string
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from excelmanus.auth.models import UserRecord
@@ -45,6 +48,16 @@ _SQLITE_USERS_DDL = [
         UNIQUE(user_id, date)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_utu_user_date ON user_token_usage(user_id, date)",
+    """CREATE TABLE IF NOT EXISTS email_verifications (
+        id          TEXT PRIMARY KEY,
+        email       TEXT NOT NULL,
+        code        TEXT NOT NULL,
+        purpose     TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        used_at     TEXT,
+        created_at  TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_ev_email_purpose ON email_verifications(email, purpose)",
 ]
 
 _PG_USERS_DDL = [
@@ -76,6 +89,16 @@ _PG_USERS_DDL = [
         UNIQUE(user_id, date)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_utu_user_date ON user_token_usage(user_id, date)",
+    """CREATE TABLE IF NOT EXISTS email_verifications (
+        id          TEXT PRIMARY KEY,
+        email       TEXT NOT NULL,
+        purpose     TEXT NOT NULL,
+        code        TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        used_at     TEXT,
+        created_at  TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_ev_email_purpose ON email_verifications(email, purpose)",
 ]
 
 
@@ -206,6 +229,65 @@ class UserStore:
             (user_id, f"{year_month}%"),
         ).fetchone()
         return row["total"] if row else 0  # type: ignore[index]
+
+    # ── Email verification ────────────────────────────────
+
+    @staticmethod
+    def _generate_code(length: int = 6) -> str:
+        return "".join(random.choices(string.digits, k=length))
+
+    def create_verification(
+        self,
+        email: str,
+        purpose: str,
+        expires_minutes: int = 10,
+    ) -> tuple[str, str]:
+        """Create a new verification record. Returns (id, code)."""
+        code = self._generate_code()
+        vid = str(uuid.uuid4())
+        now = datetime.now(tz=timezone.utc)
+        expires_at = (now + timedelta(minutes=expires_minutes)).isoformat()
+        self._conn.execute(
+            """INSERT INTO email_verifications
+               (id, email, purpose, code, expires_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (vid, email.lower(), purpose, code, expires_at, now.isoformat()),
+        )
+        self._conn.commit()
+        return vid, code
+
+    def get_valid_verification(
+        self, email: str, code: str, purpose: str
+    ) -> dict | None:
+        """Return verification record if code is valid and not expired/used."""
+        now = datetime.now(tz=timezone.utc).isoformat()
+        row = self._conn.execute(
+            """SELECT * FROM email_verifications
+               WHERE email = ? AND purpose = ? AND code = ?
+                 AND used_at IS NULL AND expires_at > ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (email.lower(), purpose, code, now),
+        ).fetchone()
+        return dict(row) if row else None  # type: ignore[arg-type]
+
+    def mark_verification_used(self, verification_id: str) -> None:
+        used_at = datetime.now(tz=timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE email_verifications SET used_at = ? WHERE id = ?",
+            (used_at, verification_id),
+        )
+        self._conn.commit()
+
+    def invalidate_verifications(self, email: str, purpose: str) -> None:
+        """Mark all unused verifications for this email+purpose as used (prevents reuse)."""
+        used_at = datetime.now(tz=timezone.utc).isoformat()
+        self._conn.execute(
+            """UPDATE email_verifications
+               SET used_at = ?
+               WHERE email = ? AND purpose = ? AND used_at IS NULL""",
+            (used_at, email.lower(), purpose),
+        )
+        self._conn.commit()
 
     # ── Helpers ────────────────────────────────────────────
 

@@ -5,6 +5,7 @@
 .env.*
 !.env.example
 mcp.json
+*.pem
 
 # ==============================
 # Python

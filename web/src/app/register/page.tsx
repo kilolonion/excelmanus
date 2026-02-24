@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X } from "lucide-react";
-import { motion } from "framer-motion";
+import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X, MailCheck } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { register, getOAuthUrl } from "@/lib/auth-api";
+import { register, verifyEmail, resendCode, getOAuthUrl } from "@/lib/auth-api";
 
 const cardVariants = {
   hidden: { opacity: 0, y: 24 },
@@ -29,6 +29,219 @@ function getPasswordStrength(pw: string): { score: number; label: string; color:
   return { score: 5, label: "很强", color: "bg-emerald-500" };
 }
 
+// ── Verification code input ──────────────────────────────
+
+function CodeInput({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const digits = value.padEnd(6, " ").split("");
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value.replace(/\D/g, "").slice(0, 6);
+    onChange(raw);
+  };
+
+  return (
+    <div className="relative">
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        maxLength={6}
+        value={value}
+        onChange={handleChange}
+        disabled={disabled}
+        className="absolute inset-0 opacity-0 w-full cursor-text"
+        autoComplete="one-time-code"
+      />
+      <div
+        className="flex gap-2 justify-center"
+        onClick={() => inputRef.current?.focus()}
+      >
+        {digits.map((ch, i) => (
+          <div
+            key={i}
+            className={`w-11 h-13 flex items-center justify-center text-xl font-bold rounded-lg border-2 transition-all select-none
+              ${i === value.length
+                ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 shadow-sm"
+                : ch.trim()
+                  ? "border-border bg-background"
+                  : "border-border/50 bg-muted/30"
+              }`}
+            style={{ height: "52px" }}
+          >
+            {ch.trim() || ""}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Verify step ──────────────────────────────────────────
+
+function VerifyStep({ email, onBack }: { email: string; onBack: () => void }) {
+  const router = useRouter();
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(60);
+  const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    cooldownRef.current = setInterval(() => {
+      setResendCooldown((s) => {
+        if (s <= 1) {
+          clearInterval(cooldownRef.current!);
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(cooldownRef.current!);
+  }, []);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (code.length !== 6) return;
+    setError("");
+    setLoading(true);
+    try {
+      await verifyEmail(email, code);
+      router.push("/");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "验证失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [code, email, router]);
+
+  // Auto-submit when 6 digits entered
+  useEffect(() => {
+    if (code.length === 6 && !loading) {
+      const timer = setTimeout(() => {
+        const form = document.getElementById("verify-form") as HTMLFormElement;
+        form?.requestSubmit();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [code, loading]);
+
+  const handleResend = useCallback(async () => {
+    if (resendCooldown > 0 || resendLoading) return;
+    setResendLoading(true);
+    setError("");
+    try {
+      await resendCode(email, "register");
+      setResendCooldown(60);
+      cooldownRef.current = setInterval(() => {
+        setResendCooldown((s) => {
+          if (s <= 1) { clearInterval(cooldownRef.current!); return 0; }
+          return s - 1;
+        });
+      }, 1000);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "发送失败");
+    } finally {
+      setResendLoading(false);
+    }
+  }, [email, resendCooldown, resendLoading]);
+
+  return (
+    <motion.div
+      className="w-full max-w-[400px] space-y-6 my-auto sm:my-0"
+      variants={cardVariants}
+      initial="hidden"
+      animate="visible"
+    >
+      <div className="text-center space-y-3">
+        <div className="flex items-center justify-center w-16 h-16 mx-auto rounded-2xl bg-[var(--em-primary)]/10">
+          <MailCheck className="h-8 w-8 text-[var(--em-primary)]" />
+        </div>
+        <h1 className="text-2xl font-bold tracking-tight">验证您的邮箱</h1>
+        <p className="text-muted-foreground text-sm leading-relaxed">
+          验证码已发送至<br />
+          <span className="font-medium text-foreground">{email}</span>
+        </p>
+      </div>
+
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2.5 text-sm text-destructive flex items-start gap-2"
+          >
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <span>{error}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <form id="verify-form" onSubmit={handleSubmit} className="space-y-5">
+        <div className="space-y-2">
+          <p className="text-sm text-center text-muted-foreground">输入 6 位验证码</p>
+          <CodeInput value={code} onChange={setCode} disabled={loading} />
+        </div>
+
+        <Button
+          type="submit"
+          disabled={code.length !== 6 || loading}
+          className="w-full h-11 text-white font-medium"
+          style={{ backgroundColor: "var(--em-primary)" }}
+        >
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "验证并登录"}
+        </Button>
+      </form>
+
+      <div className="text-center space-y-2">
+        <p className="text-sm text-muted-foreground">
+          没有收到邮件？{" "}
+          <button
+            type="button"
+            onClick={handleResend}
+            disabled={resendCooldown > 0 || resendLoading}
+            className={`font-medium transition-colors ${
+              resendCooldown > 0 || resendLoading
+                ? "text-muted-foreground cursor-not-allowed"
+                : "text-[var(--em-primary)] hover:underline"
+            }`}
+          >
+            {resendLoading
+              ? "发送中..."
+              : resendCooldown > 0
+              ? `重新发送 (${resendCooldown}s)`
+              : "重新发送"}
+          </button>
+        </p>
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          ← 返回修改邮箱
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Register form ────────────────────────────────────────
+
 export default function RegisterPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -41,6 +254,7 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [agreed, setAgreed] = useState(false);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
 
   const strength = useMemo(() => getPasswordStrength(password), [password]);
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -63,19 +277,17 @@ export default function RegisterPage() {
     e.preventDefault();
     setError("");
 
-    if (password.length < 8) {
-      setError("密码至少 8 个字符");
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError("两次输入的密码不一致");
-      return;
-    }
+    if (password.length < 8) { setError("密码至少 8 个字符"); return; }
+    if (password !== confirmPassword) { setError("两次输入的密码不一致"); return; }
 
     setLoading(true);
     try {
-      await register(email.trim(), password, displayName.trim());
-      router.push("/");
+      const result = await register(email.trim(), password, displayName.trim());
+      if (result.requires_verification) {
+        setPendingEmail(result.email);
+      } else {
+        router.push("/");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "注册失败");
     } finally {
@@ -94,6 +306,15 @@ export default function RegisterPage() {
       setOauthLoading(null);
     }
   }, []);
+
+  // Verification step
+  if (pendingEmail) {
+    return (
+      <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto">
+        <VerifyStep email={pendingEmail} onBack={() => setPendingEmail(null)} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto">
@@ -126,7 +347,9 @@ export default function RegisterPage() {
         <form onSubmit={handleSubmit} className="space-y-3.5">
           {/* Display name */}
           <div className="space-y-1.5">
-            <label className="block text-sm font-medium" htmlFor="displayName">昵称 <span className="text-muted-foreground font-normal">(可选)</span></label>
+            <label className="block text-sm font-medium" htmlFor="displayName">
+              昵称 <span className="text-muted-foreground font-normal">(可选)</span>
+            </label>
             <input
               id="displayName"
               type="text"
@@ -189,7 +412,6 @@ export default function RegisterPage() {
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
-            {/* Strength bar */}
             {password.length > 0 && (
               <div className="space-y-1">
                 <div className="flex gap-1 h-1">
@@ -203,7 +425,10 @@ export default function RegisterPage() {
                   ))}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  密码强度：<span className={strength.score >= 3 ? "text-green-600" : strength.score >= 2 ? "text-yellow-600" : "text-red-600"}>{strength.label}</span>
+                  密码强度：
+                  <span className={strength.score >= 3 ? "text-green-600" : strength.score >= 2 ? "text-yellow-600" : "text-red-600"}>
+                    {strength.label}
+                  </span>
                 </p>
               </div>
             )}
@@ -255,7 +480,10 @@ export default function RegisterPage() {
               className="mt-0.5 h-4 w-4 rounded border-border accent-[var(--em-primary)]"
             />
             <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
-              我已阅读并同意 <span className="text-[var(--em-primary)] cursor-pointer hover:underline">服务条款</span> 和 <span className="text-[var(--em-primary)] cursor-pointer hover:underline">隐私政策</span>
+              我已阅读并同意{" "}
+              <span className="text-[var(--em-primary)] cursor-pointer hover:underline">服务条款</span>{" "}
+              和{" "}
+              <span className="text-[var(--em-primary)] cursor-pointer hover:underline">隐私政策</span>
             </span>
           </label>
 

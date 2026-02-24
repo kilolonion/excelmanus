@@ -628,6 +628,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _user_store = UserStore(_database)
             app.state.user_store = _user_store
             app.state.auth_enabled = auth_enabled
+            app.state.workspace_root = _config.workspace_root
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -2139,10 +2140,21 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
         return _error_json_response(400, f"不支持的文件格式: {ext}")
 
     from excelmanus.auth.dependencies import extract_user_id
-    from excelmanus.auth.workspace import resolve_workspace_for_request
+    from excelmanus.auth.workspace import (
+        check_upload_allowed,
+        enforce_quota,
+        resolve_workspace_for_request,
+    )
     user_id = extract_user_id(raw_request)
     auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
     ws_root = resolve_workspace_for_request(_config.workspace_root, user_id, auth_enabled)
+
+    content = await file.read()
+
+    if auth_enabled and user_id:
+        allowed, reason = check_upload_allowed(ws_root, len(content))
+        if not allowed:
+            return _error_json_response(413, reason)
 
     upload_dir = os.path.join(ws_root, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
@@ -2150,9 +2162,11 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
     dest_path = os.path.join(upload_dir, safe_name)
 
-    content = await file.read()
     with open(dest_path, "wb") as f:
         f.write(content)
+
+    if auth_enabled and user_id:
+        enforce_quota(ws_root)
 
     return JSONResponse(content={
         "filename": filename,

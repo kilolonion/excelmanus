@@ -7,6 +7,7 @@ import { AuthProvider } from "@/components/providers/AuthProvider";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback"];
+const STANDALONE_PATHS = ["/admin"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -28,6 +29,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (isBypass) {
     return <>{children}</>;
+  }
+
+  const isStandalone = STANDALONE_PATHS.some((p) => pathname.startsWith(p));
+
+  if (isStandalone) {
+    return (
+      <AuthProvider authEnabled={checked && authEnabled === true}>
+        {children}
+      </AuthProvider>
+    );
   }
 
   return (
