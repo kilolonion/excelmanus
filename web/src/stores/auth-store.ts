@@ -8,6 +8,7 @@ export interface AuthUser {
   role: string;
   avatarUrl?: string | null;
   hasCustomLlmKey: boolean;
+  allowedModels: string[];
   createdAt: string;
 }
 

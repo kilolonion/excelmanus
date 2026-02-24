@@ -2,10 +2,11 @@
 
 import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { ArrowLeft, Maximize2, MousePointerSquareDashed, Check, XCircle } from "lucide-react";
+import { ArrowLeft, Maximize2, MousePointerSquareDashed, Check, XCircle, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useExcelStore } from "@/stores/excel-store";
-import { buildExcelFileUrl } from "@/lib/api";
+import { useSessionStore } from "@/stores/session-store";
+import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -28,6 +29,7 @@ export function ExcelFullView() {
   const enterSelectionMode = useExcelStore((s) => s.enterSelectionMode);
   const exitSelectionMode = useExcelStore((s) => s.exitSelectionMode);
   const confirmSelection = useExcelStore((s) => s.confirmSelection);
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
 
@@ -61,8 +63,8 @@ export function ExcelFullView() {
   }, [selectionMode, enterSelectionMode, handleCancelRange]);
 
   const fileUrl = useMemo(
-    () => (fullViewPath ? buildExcelFileUrl(fullViewPath) : ""),
-    [fullViewPath]
+    () => (fullViewPath ? buildExcelFileUrl(fullViewPath, activeSessionId ?? undefined) : ""),
+    [fullViewPath, activeSessionId]
   );
 
   const fileName = fullViewPath?.split("/").pop() || "未知文件";
@@ -106,6 +108,16 @@ export function ExcelFullView() {
         >
           <MousePointerSquareDashed className="h-3.5 w-3.5" />
           选区引用
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => fullViewPath && downloadFile(fullViewPath, fileName, activeSessionId ?? undefined).catch(() => {})}
+          className="h-7 gap-1.5 text-xs text-muted-foreground"
+          title="下载文件"
+        >
+          <Download className="h-3.5 w-3.5" />
+          下载
         </Button>
         <Button
           variant="ghost"

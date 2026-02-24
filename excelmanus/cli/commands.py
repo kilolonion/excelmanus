@@ -831,7 +831,7 @@ def _handle_config_export(
     mode = "password"
     section_names = ["main", "aux", "vlm", "profiles"]
 
-    idx = 2  # skip "/config export"
+    idx = 2  # 跳过 "/config export"
     while idx < len(parts):
         if parts[idx] == "--simple":
             mode = "simple"

@@ -24,7 +24,7 @@ def extract_data_rows(result_json: dict[str, Any] | None, tool_name: str) -> lis
         if rows:
             return rows
 
-    # metadata-only 工具可不返回数据行
+    # 仅元数据类工具可不返回数据行
     _ = tool_name
     return []
 

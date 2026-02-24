@@ -101,7 +101,7 @@ class TestImageToExcelPipeline:
         assert "低置信项" in report_content
 
     def test_read_image_returns_injection(self, tmp_path: Path) -> None:
-        """read_image → _image_injection 结构正确。"""
+        """read_image → __tool_result_image__ 结构正确。"""
         from excelmanus.tools.image_tools import read_image, init_guard
 
         png_data = base64.b64decode(_MINIMAL_PNG_B64)
@@ -111,7 +111,7 @@ class TestImageToExcelPipeline:
 
         result = json.loads(read_image(file_path=str(img_path)))
         assert result["status"] == "ok"
-        injection = result["_image_injection"]
+        injection = result["__tool_result_image__"]
         assert injection["mime_type"] == "image/png"
         # base64 应能解码回原始数据
         decoded = base64.b64decode(injection["base64"])
@@ -123,13 +123,27 @@ class TestImageToExcelPipeline:
         from openpyxl import load_workbook
 
         init_guard(str(tmp_path))
-        spec = dict(_FULL_SPEC)
-        spec["sheets"] = [{
-            **_FULL_SPEC["sheets"][0],
-            "merged_ranges": [{"range": "A1:C1", "confidence": 0.95}],
-        }]
+        # 构建合并友好的 spec：只有锚点 A1 有值，B1/C1 无值，合并不会丢数据
+        merge_spec = {
+            **_FULL_SPEC,
+            "sheets": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 3, "cols": 3},
+                "freeze_panes": "A2",
+                "cells": [
+                    {"address": "A1", "value": "标题", "value_type": "string", "style_id": "header", "confidence": 0.98},
+                    {"address": "A2", "value": "苹果", "value_type": "string", "confidence": 1.0},
+                    {"address": "B2", "value": 100, "value_type": "number", "confidence": 1.0},
+                    {"address": "C2", "value": 500.5, "value_type": "number", "confidence": 0.95},
+                ],
+                "merged_ranges": [{"range": "A1:C1", "confidence": 0.95}],
+                "styles": _FULL_SPEC["sheets"][0]["styles"],
+                "column_widths": [15, 10, 12],
+                "row_heights": {"1": 28},
+            }],
+        }
         spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        spec_path.write_text(json.dumps(merge_spec), encoding="utf-8")
         excel_path = tmp_path / "complex.xlsx"
 
         result = json.loads(rebuild_excel_from_spec(

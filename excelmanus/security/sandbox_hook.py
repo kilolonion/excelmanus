@@ -94,7 +94,7 @@ _real_exec = builtins.exec
 _real_compile = builtins.compile
 
 # ── Layer 1: Import Guard ──
-# Remove already-cached blocked modules from sys.modules FIRST
+# 先移除 sys.modules 中已缓存的被封禁模块
 _to_remove = []
 for _name in list(sys.modules):
     for _blocked in _BLOCKED_MODULES:
@@ -133,7 +133,7 @@ def _apply_cow(resolved):
     os.makedirs(redirect_dir, exist_ok=True)
     redirect_path = os.path.join(redirect_dir, os.path.basename(resolved))
     
-    # Copy on write
+    # 写时复制
     if os.path.exists(resolved):
         try:
             with _original_open(resolved, "rb") as src, _original_open(redirect_path, "wb") as dst:
@@ -200,8 +200,8 @@ if hasattr(os, "popen"):
     os.popen = _b2
 
 # ── Layer 4: Build restricted __builtins__ for user code ──
-# We do NOT patch builtins.exec/eval globally (breaks import machinery).
-# Instead we provide a restricted __builtins__ dict to the user script.
+# 不全局 patch builtins.exec/eval（会破坏 import 机制）。
+# 改为向用户脚本提供受限的 __builtins__ 字典。
 def _blocked_exec(*args, **kwargs):
     raise RuntimeError("exec() 被安全策略禁止 [等级: " + _TIER + "]")
 

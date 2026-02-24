@@ -132,38 +132,41 @@ class MentionResolver:
     def _resolve_excel_file(
         self, mention: Mention, path: Path
     ) -> ResolvedMention:
-        """解析 Excel 文件：sheet 列表 + 行列数 + 首个 sheet 表头。"""
+        """解析 Excel 文件：丰富的结构化摘要（工作表列表、行列数、列结构、数据类型）。"""
         try:
             from openpyxl import load_workbook
 
             wb = load_workbook(str(path), read_only=True, data_only=True)
             try:
                 lines: list[str] = []
-                first_sheet_headers: list[str] | None = None
+                total_sheets = len(wb.sheetnames)
+                lines.append(f"[File] {mention.value} ({total_sheets}个工作表)")
 
                 for i, name in enumerate(wb.sheetnames):
                     ws = wb[name]
                     rows = ws.max_row or 0
                     cols = ws.max_column or 0
-                    lines.append(f"  {name} ({rows}行×{cols}列)")
+                    lines.append(f"  [{i + 1}] \"{name}\" ({rows}行×{cols}列)")
 
-                    # 首个 sheet 的表头行
+                    # 首个 sheet 提供列结构描述
                     if i == 0 and rows > 0:
                         header_row = next(ws.iter_rows(max_row=1, values_only=True), None)
                         if header_row:
-                            first_sheet_headers = [
+                            from openpyxl.utils import get_column_letter
+                            headers = [
                                 str(c) if c is not None else "" for c in header_row
                             ]
+                            # 列结构：字母+表头名
+                            col_descs = []
+                            for ci, h in enumerate(headers):
+                                col_letter = get_column_letter(ci + 1)
+                                if h:
+                                    col_descs.append(f"{col_letter}(\"{h}\")")
+                                else:
+                                    col_descs.append(col_letter)
+                            lines.append(f"      Columns: {' | '.join(col_descs)}")
 
-                summary_parts = [f"Sheets: {len(wb.sheetnames)}"]
-                summary_parts.extend(lines)
-                if first_sheet_headers:
-                    headers_str = ", ".join(first_sheet_headers)
-                    summary_parts.append(
-                        f"  Headers({wb.sheetnames[0]}): {headers_str}"
-                    )
-
-                context = "\n".join(summary_parts)
+                context = "\n".join(lines)
             finally:
                 wb.close()
 
@@ -197,10 +200,43 @@ class MentionResolver:
             cell_range = f"{cell_range}:{cell_range}"
         return sheet_name, cell_range
 
+    @staticmethod
+    def _infer_col_type(values: list[str]) -> str:
+        """推断列数据类型（采样非空值）。"""
+        non_empty = [v for v in values if v]
+        if not non_empty:
+            return "empty"
+        nums = 0
+        dates = 0
+        for v in non_empty[:20]:  # 采样前 20 个
+            try:
+                float(v.replace(",", ""))
+                nums += 1
+                continue
+            except ValueError:
+                pass
+            # 简单日期检测
+            if any(sep in v for sep in ("-", "/")) and any(c.isdigit() for c in v):
+                dates += 1
+        total = len(non_empty[:20])
+        if nums > total * 0.7:
+            return "numeric"
+        if dates > total * 0.7:
+            return "date"
+        return "text"
+
     def _resolve_excel_range(
         self, mention: Mention, path: Path
     ) -> ResolvedMention:
-        """读取 Excel 文件指定 range 的单元格数据，格式化为表格文本。"""
+        """读取 Excel 文件指定 range 的单元格数据，生成浏览器检查器风格的富上下文描述。
+
+        生成的上下文包含：
+        - 选区定位：文件路径、工作表名、单元格范围
+        - 工作表全局信息：总行列数、选区在表中的位置
+        - 列结构描述：列字母、首行值（可能是表头）、推断数据类型
+        - 数据内容：管道分隔表格
+        - 空值统计
+        """
         try:
             from openpyxl import load_workbook
             from openpyxl.utils import column_index_from_string, get_column_letter
@@ -224,6 +260,12 @@ class MentionResolver:
                     if ws is None:
                         ws = wb[wb.sheetnames[0]]
 
+                # ── 工作表全局信息 ──
+                sheet_total_rows = ws.max_row or 0
+                sheet_total_cols = ws.max_column or 0
+                sheet_index = wb.sheetnames.index(sheet_name) if sheet_name in wb.sheetnames else 0
+                total_sheets = len(wb.sheetnames)
+
                 # 解析单元格范围
                 min_col, min_row, max_col, max_row = range_boundaries(cell_range)
 
@@ -245,20 +287,85 @@ class MentionResolver:
                         [str(v) if v is not None else "" for v in row]
                     )
 
-                # 格式化为管道分隔表格
+                # ── 选区元数据 ──
                 range_label = f"{sheet_name}!{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
                 num_rows = len(data_rows)
                 num_cols = len(col_headers)
 
-                lines: list[str] = [
-                    f"Range: {range_label} ({num_cols}列×{num_rows}行)",
-                ]
+                # 首行值（可能是表头）
+                first_row_values = data_rows[0] if data_rows else []
+                # 判断首行是否为表头：全部非空且非纯数字
+                has_header = bool(first_row_values) and all(
+                    v and not v.replace(".", "").replace(",", "").lstrip("-").isdigit()
+                    for v in first_row_values
+                )
 
-                # 表头行
+                # 列类型推断（跳过首行如果是表头）
+                col_types: list[str] = []
+                for ci in range(num_cols):
+                    col_values = [
+                        data_rows[ri][ci]
+                        for ri in range(1 if has_header else 0, num_rows)
+                        if ci < len(data_rows[ri])
+                    ]
+                    col_types.append(self._infer_col_type(col_values))
+
+                # 空值统计
+                empty_count = sum(
+                    1 for row in data_rows for v in row if not v
+                )
+                total_cells = num_rows * num_cols
+
+                # ── 组装富上下文 ──
+                lines: list[str] = []
+
+                # 1) 选区定位摘要
+                lines.append(f"[Selection] {range_label} ({num_cols}列×{num_rows}行)")
+                lines.append(
+                    f"[Sheet] \"{sheet_name}\" (第{sheet_index + 1}/{total_sheets}个工作表, "
+                    f"全表{sheet_total_rows}行×{sheet_total_cols}列)"
+                )
+
+                # 2) 选区在表中的位置描述
+                pos_parts: list[str] = []
+                if min_row == 1:
+                    pos_parts.append("从第1行开始（含表头行）")
+                else:
+                    pos_parts.append(f"从第{min_row}行开始")
+                if max_row == sheet_total_rows:
+                    pos_parts.append("到最后一行")
+                else:
+                    pos_parts.append(f"到第{max_row}行")
+                if min_col == 1 and max_col == sheet_total_cols:
+                    pos_parts.append("覆盖全部列")
+                else:
+                    pos_parts.append(
+                        f"列{get_column_letter(min_col)}-{get_column_letter(max_col)}"
+                        f"(全表共{get_column_letter(sheet_total_cols)}列)"
+                    )
+                lines.append(f"[Position] {', '.join(pos_parts)}")
+
+                # 3) 列结构描述
+                col_descs: list[str] = []
+                for ci, col_letter in enumerate(col_headers):
+                    header_label = first_row_values[ci] if has_header and ci < len(first_row_values) else ""
+                    ctype = col_types[ci] if ci < len(col_types) else "unknown"
+                    type_label = {"numeric": "数值", "date": "日期", "text": "文本", "empty": "空"}.get(ctype, ctype)
+                    if header_label:
+                        col_descs.append(f"{col_letter}(\"{header_label}\",{type_label})")
+                    else:
+                        col_descs.append(f"{col_letter}({type_label})")
+                lines.append(f"[Columns] {' | '.join(col_descs)}")
+
+                # 4) 数据质量提示
+                if empty_count > 0:
+                    pct = round(empty_count / total_cells * 100)
+                    lines.append(f"[DataQuality] {empty_count}/{total_cells}个单元格为空({pct}%)")
+
+                # 5) 数据内容表格
+                lines.append("")
                 lines.append("| " + " | ".join(col_headers) + " |")
                 lines.append("| " + " | ".join("---" for _ in col_headers) + " |")
-
-                # 数据行
                 for row_data in data_rows:
                     lines.append("| " + " | ".join(row_data) + " |")
 

@@ -25,8 +25,8 @@ _MODE_SIMPLE = "S"
 
 _PBKDF2_ITERATIONS = 600_000
 _SALT_LENGTH = 16
-_KEY_LENGTH = 32  # AES-256
-_NONCE_LENGTH = 12  # AES-GCM standard
+_KEY_LENGTH = 32  # AES-256 密钥长度
+_NONCE_LENGTH = 12  # AES-GCM 标准随机数长度
 
 _SIMPLE_KEY_MATERIAL = b"ExcelManus-SimpleShare-v1-obfuscated-key-material"
 

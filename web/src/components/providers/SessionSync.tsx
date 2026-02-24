@@ -78,7 +78,6 @@ export function SessionSync() {
 
   useEffect(() => {
     let cancelled = false;
-    let firstLoad = true;
 
     const syncSessions = async () => {
       try {
@@ -96,13 +95,14 @@ export function SessionSync() {
         }));
         mergeSessions(mapped);
 
-        // On first load, if activeSessionId (restored from localStorage)
-        // doesn't match any known backend session, clear it to avoid
-        // showing stale toolbar data for a non-existent session.
-        if (firstLoad) {
-          firstLoad = false;
-          const currentActive = useSessionStore.getState().activeSessionId;
-          if (currentActive && !mapped.some((s) => s.id === currentActive)) {
+        // If activeSessionId (restored from localStorage) doesn't match
+        // any known backend session, clear it to avoid stale 404 polling
+        // storms.  Skip if there's an active SSE stream (optimistic create
+        // that hasn't reached the server yet).
+        const currentActive = useSessionStore.getState().activeSessionId;
+        if (currentActive && !mapped.some((s) => s.id === currentActive)) {
+          const hasActiveStream = useChatStore.getState().abortController !== null;
+          if (!hasActiveStream) {
             setActiveSession(null);
           }
         }
@@ -158,7 +158,7 @@ export function SessionSync() {
     const prevInFlightRef = { current: false };
     let initialLoadDone = false;
     let notFoundCount = 0;
-    const NOT_FOUND_THRESHOLD = 3;
+    const NOT_FOUND_THRESHOLD = 2;
     const pollDetail = async () => {
       try {
         const detail = await fetchSessionDetail(activeSessionId);
@@ -259,14 +259,25 @@ export function SessionSync() {
       }
     };
 
-    void pollDetail();
-    const timer = window.setInterval(() => {
-      void pollDetail();
-    }, 2000);
+    // 自适应轮询：inFlight 时 2s 高频同步，空闲时 5s 低频检查
+    const POLL_FAST = 2000;
+    const POLL_IDLE = 5000;
+    let currentInterval = POLL_FAST;
+    let timer = window.setTimeout(function schedule() {
+      void pollDetail().then(() => {
+        if (cancelled) return;
+        const isActive = prevInFlightRef.current;
+        const nextInterval = isActive ? POLL_FAST : POLL_IDLE;
+        if (nextInterval !== currentInterval) {
+          currentInterval = nextInterval;
+        }
+        timer = window.setTimeout(schedule, currentInterval);
+      });
+    }, 0); // 首次立即触发
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [
     activeSessionId,

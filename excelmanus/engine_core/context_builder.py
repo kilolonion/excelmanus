@@ -39,11 +39,11 @@ class ContextBuilder:
 
     def _all_tool_names(self) -> list[str]:
         e = self._engine
-        get_tool_names = getattr(e._registry, "get_tool_names", None)
+        get_tool_names = getattr(e.registry, "get_tool_names", None)
         if callable(get_tool_names):
             return list(get_tool_names())
 
-        get_all_tools = getattr(e._registry, "get_all_tools", None)
+        get_all_tools = getattr(e.registry, "get_all_tools", None)
         if callable(get_all_tools):
             return [tool.name for tool in get_all_tools()]
 
@@ -81,7 +81,7 @@ class ContextBuilder:
                     "range": range_ref,
                 }
                 result_text = str(
-                    e._registry.call_tool(
+                    e.registry.call_tool(
                         tool_name,
                         arguments,
                     )
@@ -106,7 +106,7 @@ class ContextBuilder:
                 pass
             try:
                 result_text = str(
-                    e._registry.call_tool(
+                    e.registry.call_tool(
                         "read_excel",
                         arguments,
                     )
@@ -177,8 +177,8 @@ class ContextBuilder:
         否则返回空字符串（零 token 开销）。
         """
         e = self._engine
-        state = e._state
-        max_iter = e._config.max_iterations
+        state = e.state
+        max_iter = e.config.max_iterations
         iteration = state.last_iteration_count
         failures = state.last_failure_count
         successes = state.last_success_count
@@ -219,15 +219,15 @@ class ContextBuilder:
         """
         e = self._engine
         parts: list[str] = [
-            f"model={e._active_model}",
-            f"turn={e._session_turn}/{e._config.max_iterations}",
-            f"write_hint={e._state.current_write_hint}",
-            f"fullaccess={'on' if e._full_access_enabled else 'off'}",
-            f"backup={'on' if e._backup_enabled else 'off'}",
+            f"model={e.active_model}",
+            f"turn={e._session_turn}/{e.config.max_iterations}",
+            f"write_hint={e.state.current_write_hint}",
+            f"fullaccess={'on' if e.full_access_enabled else 'off'}",
+            f"backup={'on' if e.workspace.transaction_enabled else 'off'}",
             f"mcp={e.mcp_connected_count}",
         ]
-        if e._workspace_manifest is not None:
-            parts.append(f"files={e._workspace_manifest.total_files}")
+        if e.workspace_manifest is not None:
+            parts.append(f"files={e.workspace_manifest.total_files}")
         return "Runtime: " + " | ".join(parts)
 
     def _prepare_system_prompts_for_request(
@@ -236,15 +236,17 @@ class ContextBuilder:
         *,
         route_result: SkillMatchResult | None = None,
     ) -> tuple[list[str], str | None]:
-        """构建用于本轮请求的 system prompts，并在必要时压缩上下文。"""
+        """构建用于本轮请求的 system prompts，并在必要时压缩上下文。
+
+        Prompt Cache 优化：静态内容（identity prompt、规则、权限等）放在前面，
+        动态内容（runtime_metadata、meta_cognition 等）放在末尾，
+        确保 Anthropic prompt caching 的前缀稳定性。
+        """
         e = self._engine
-        base_prompt = e._memory.system_prompt
+        base_prompt = e.memory.system_prompt
 
-        # 注入运行时元数据（紧凑单行，~30 token）
-        runtime_line = self._build_runtime_metadata_line()
-        base_prompt = base_prompt + "\n\n" + runtime_line
+        # ── 静态/半静态内容（前缀区域，最大化 cache 命中） ──
 
-        # 注入用户自定义规则（全局 + 会话级）
         rules_notice = self._build_rules_notice()
         if rules_notice:
             base_prompt = base_prompt + "\n\n" + rules_notice
@@ -274,8 +276,11 @@ class ContextBuilder:
         if prefetch_context:
             base_prompt = base_prompt + "\n\n" + prefetch_context
 
-        # 工具索引已合并到 {auto_generated_capability_map}（identity prompt），
-        # 不再独立注入，避免重复消耗 ~200-400 token/轮。
+        # ── 动态内容（放在末尾，不破坏前缀稳定性） ──
+
+        # 注入运行时元数据（每轮变化的 turn/write_hint 等）
+        runtime_line = self._build_runtime_metadata_line()
+        base_prompt = base_prompt + "\n\n" + runtime_line
 
         # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
         meta_cognition = self._build_meta_cognition_notice()
@@ -292,7 +297,7 @@ class ContextBuilder:
                     sheet_count=route_result.sheet_count,
                     total_rows=route_result.max_total_rows,
                     task_tags=list(route_result.task_tags),
-                    full_access=e._full_access_enabled,
+                    full_access=e.full_access_enabled,
                 )
                 _strategy_text = e._prompt_composer.compose_strategies_text(_p_ctx)
                 if _strategy_text:
@@ -355,7 +360,7 @@ class ContextBuilder:
             ).encode()
         ).hexdigest()[:12]
 
-        _snapshots = e._state.prompt_injection_snapshots
+        _snapshots = e.state.prompt_injection_snapshots
         _last_fp = _snapshots[-1].get("_fingerprint") if _snapshots else None
 
         if _last_fp != _content_fingerprint:
@@ -399,7 +404,7 @@ class ContextBuilder:
                 prompts.extend(current_skill_contexts)
             return prompts
 
-        threshold = max(1, int(e._config.max_context_tokens * 0.9))
+        threshold = max(1, int(e.config.max_context_tokens * 0.9))
         prompts = _compose_prompts()
         total_tokens = self._system_prompts_token_count(prompts)
         if total_tokens <= threshold:
@@ -516,7 +521,7 @@ class ContextBuilder:
             if not self._has_incomplete_tasks():
                 break
             # 遇到待确认/待回答/待审批时不续跑，交还用户控制
-            if e._approval.has_pending():
+            if e.approval.has_pending():
                 break
             if e._question_flow.has_pending():
                 break
@@ -528,7 +533,7 @@ class ContextBuilder:
                 attempt + 1,
                 _MAX_PLAN_AUTO_CONTINUE,
             )
-            e._memory.add_user_message(
+            e.memory.add_user_message(
                 "请继续执行剩余的未完成子任务，直到全部完成。"
             )
             e._set_window_perception_turn_hints(
@@ -547,10 +552,9 @@ class ContextBuilder:
             )
         return result
 
-    # Tools that perform destructive actions on the original file itself.
-    # These bypass backup redirection — the approval gate already provides
-    # the safety net, and redirecting would silently create a throwaway
-    # backup copy that the user never intended.
+    # 对原始文件本身执行破坏性操作的工具。
+    # 这些工具绕过备份重定向 — 审批门禁已提供安全保障，
+    # 重定向会静默创建一个用户从未打算使用的一次性备份副本。
     _DESTRUCTIVE_NO_REDIRECT_TOOLS = frozenset({"delete_file"})
 
     def _redirect_backup_paths(
@@ -560,7 +564,8 @@ class ContextBuilder:
     ) -> dict[str, Any]:
         """备份模式下重定向工具参数中的文件路径到备份副本。"""
         e = self._engine
-        if not e._backup_enabled or e._backup_manager is None:
+        tx = e.transaction
+        if not e.workspace.transaction_enabled or tx is None:
             return arguments
 
         if tool_name in self._DESTRUCTIVE_NO_REDIRECT_TOOLS:
@@ -599,17 +604,17 @@ class ContextBuilder:
                 continue
             try:
                 if tool_name in READ_ONLY_SAFE_TOOLS:
-                    redirected[field_name] = e._backup_manager.resolve_path(raw_str)
+                    redirected[field_name] = tx.resolve_read(raw_str)
                 else:
-                    redirected[field_name] = e._backup_manager.ensure_backup(raw_str)
+                    redirected[field_name] = tx.stage_for_write(raw_str)
             except ValueError:
-                pass  # 工作区外路径，不重定向
+                pass
         return redirected
 
     def _build_access_notice(self) -> str:
         """当 fullaccess 关闭时，生成权限限制说明注入 system prompt。"""
         e = self._engine
-        if e._full_access_enabled:
+        if e.full_access_enabled:
             return ""
         restricted = e._restricted_code_skillpacks
         if not restricted:
@@ -624,19 +629,25 @@ class ContextBuilder:
         )
 
     def _build_backup_notice(self) -> str:
-        """备份模式启用时，生成提示词注入。
+        """备份模式（workspace transaction）启用时，生成提示词注入。
 
         注意：此文本必须在整个 turn 内保持稳定（不含动态计数等），
         以确保系统提示前缀一致性，最大化 provider prompt cache 命中率。
         """
         e = self._engine
-        if not e._backup_enabled or e._backup_manager is None:
+        if not e.workspace.transaction_enabled or e.transaction is None:
             return ""
         lines = [
-            "## ⚠️ 备份沙盒模式已启用",
+            "## ⚠️ 工作区事务模式已启用",
             "所有文件读写操作已自动重定向到 `outputs/backups/` 下的工作副本。",
             "原始文件不会被修改。操作完成后用户可通过 `/backup apply` 将修改应用到原文件。",
         ]
+        # 统一版本管理器可用时，追加版本追踪信息
+        fvm = getattr(e, "_fvm", None)
+        if fvm is not None:
+            tracked = fvm.list_all_tracked()
+            if tracked:
+                lines.append(f"当前有 {len(tracked)} 个文件受版本追踪保护，支持精确回滚到原始版本。")
         return "\n".join(lines)
 
     def _build_mcp_context_notice(self) -> str:
@@ -665,7 +676,7 @@ class ContextBuilder:
         确保 agent 始终知道应使用副本路径而非原始路径。
         """
         e = self._engine
-        registry = e._state.cow_path_registry
+        registry = e.state.cow_path_registry
         if not registry:
             return ""
         lines = [
@@ -692,11 +703,11 @@ class ContextBuilder:
         注入文本根据文件数量自动选择详细度。
         """
         e = self._engine
-        if not e._workspace_manifest_built:
+        if e.workspace_manifest is None:
             e.start_workspace_manifest_prewarm()
-        if e._workspace_manifest is None:
+        if e.workspace_manifest is None:
             return ""
-        return e._workspace_manifest.get_system_prompt_summary()
+        return e.workspace_manifest.get_system_prompt_summary()
 
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
@@ -704,7 +715,7 @@ class ContextBuilder:
         requested_mode = e._requested_window_return_mode()
         return e._window_perception.build_system_notice(
             mode=requested_mode,
-            model_id=e._active_model,
+            model_id=e.active_model,
         )
     def _build_tool_index_notice(
         self,
@@ -793,7 +804,7 @@ class ContextBuilder:
     def _latest_assistant_text(self) -> str:
         """提取最近一条 assistant 文本。"""
         e = self._engine
-        for item in reversed(e._memory.get_messages()):
+        for item in reversed(e.memory.get_messages()):
             if str(item.get("role", "")).strip() != "assistant":
                 continue
             from excelmanus.engine import _message_content_to_text

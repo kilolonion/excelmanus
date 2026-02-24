@@ -827,10 +827,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           e.dataTransfer.dropEffect = "copy";
         }
       }}
-      className={`relative rounded-[24px] border bg-background transition-all duration-200 chat-input-ring ${
+      className={`relative rounded-[20px] border bg-background transition-all duration-200 chat-input-ring ${
         isDragActive
           ? "border-[var(--em-primary-light)] bg-[var(--em-primary)]/5 shadow-lg shadow-[var(--em-primary)]/10"
-          : "border-border/60 shadow-[0_2px_12px_rgba(0,0,0,0.08)] dark:shadow-[0_2px_12px_rgba(0,0,0,0.3)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.12)] dark:hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.14)] dark:focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.5)] focus-within:border-border"
+          : "border-border/60 shadow-[0_1px_8px_rgba(0,0,0,0.06)] dark:shadow-[0_1px_8px_rgba(0,0,0,0.25)] hover:shadow-[0_2px_12px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_2px_12px_rgba(0,0,0,0.35)] focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.12)] dark:focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.45)] focus-within:border-border"
       }`}
     >
       <input {...getInputProps()} />
@@ -902,7 +902,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                   className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-sm text-left transition-colors ${
                     item.command ? (i === selectedIndex ? "bg-[var(--em-primary-alpha-10)]" : "hover:bg-accent/40") : "opacity-50 cursor-default"
                   }`}
-                  onMouseEnter={() => item.command && setSelectedIndex(i)}
+                  onPointerEnter={() => item.command && setSelectedIndex(i)}
                   onClick={() => item.command && selectPopoverItem(item)}
                 >
                   <span className="text-muted-foreground flex-shrink-0">
@@ -952,15 +952,15 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       )}
 
       {/* Main input row: [+] textarea [send] */}
-      <div className="flex items-end gap-1 px-1.5 py-1.5">
+      <div className="flex items-end gap-1 px-1.5 py-1">
         {/* Attach button (left) */}
         <Button
           variant="ghost"
           size="icon"
-          className="h-10 w-10 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+          className="h-8 w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
           onClick={() => fileInputRef.current?.click()}
         >
-          <Plus className="h-5 w-5" />
+          <Plus className="h-4 w-4" />
         </Button>
         <input
           ref={fileInputRef}
@@ -983,7 +983,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             ref={backdropRef}
             aria-hidden="true"
             className="absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words
-              px-2 py-2 text-base md:text-sm leading-normal"
+              px-2 py-[8px] text-[13px] leading-normal"
             style={{ color: "var(--foreground)" }}
           >
             {renderHighlightedText(text)}
@@ -999,32 +999,32 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             onCompositionEnd={() => { isComposingRef.current = false; }}
             placeholder="有问题，尽管问"
             disabled={disabled}
-            className="min-h-[36px] max-h-[200px] resize-none border-0 bg-transparent shadow-none
-              focus-visible:ring-0 focus-visible:ring-offset-0 px-2 py-2
+            className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
+              focus-visible:ring-0 focus-visible:ring-offset-0 px-2 py-[8px] text-[13px]
               text-transparent caret-foreground selection:bg-[var(--em-primary)]/20 relative z-10"
             rows={1}
           />
         </div>
 
         {/* Send / Stop button (right) */}
-        <div className="flex-shrink-0 pb-0.5">
+        <div className="flex-shrink-0">
           {isStreaming ? (
             <Button
               size="icon"
-              className="h-10 w-10 rounded-full bg-foreground hover:bg-foreground/80"
+              className="h-8 w-8 rounded-full bg-foreground hover:bg-foreground/80"
               onClick={onStop}
             >
-              <Square className="h-3.5 w-3.5 fill-background text-background" />
+              <Square className="h-3 w-3 fill-background text-background" />
             </Button>
           ) : (
             <Button
               size="icon"
-              className="h-10 w-10 rounded-full text-white transition-opacity"
+              className="h-8 w-8 rounded-full text-white transition-opacity"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleSend}
               disabled={disabled || (!text.trim() && files.length === 0)}
             >
-              <ArrowUp className="h-4 w-4" />
+              <ArrowUp className="h-3.5 w-3.5" />
             </Button>
           )}
         </div>

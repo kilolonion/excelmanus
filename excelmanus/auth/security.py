@@ -1,4 +1,4 @@
-"""Password hashing and JWT token creation / verification."""
+"""密码哈希和 JWT 令牌创建 / 验证。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 import bcrypt
 from jose import JWTError, jwt
 
-# ── Password hashing ──────────────────────────────────────
+# ── 密码哈希 ──────────────────────────────────────
 
 
 def hash_password(plain: str) -> str:
@@ -21,7 +21,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
-# ── JWT configuration ─────────────────────────────────────
+# ── JWT 配置 ─────────────────────────────────────
 
 _JWT_SECRET_KEY: str | None = None
 JWT_ALGORITHM = "HS256"
@@ -30,12 +30,12 @@ REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
 
 
 def _get_jwt_secret() -> str:
-    """Lazy-load JWT secret from env; generate a random one if not set.
+    """延迟加载 JWT 密钥；未设置时生成随机密钥。
 
-    WARNING: If EXCELMANUS_JWT_SECRET is not set, a random secret is generated.
-    This means all tokens are invalidated on every server restart, and
-    multi-worker deployments will fail token validation across workers.
-    Always set EXCELMANUS_JWT_SECRET in production.
+    警告：如果未设置 EXCELMANUS_JWT_SECRET，将生成随机密钥。
+    这意味着每次服务重启后所有令牌都会失效，
+    且多 worker 部署时跨 worker 的令牌验证会失败。
+    生产环境请务必设置 EXCELMANUS_JWT_SECRET。
     """
     global _JWT_SECRET_KEY
     if _JWT_SECRET_KEY is None:
@@ -78,7 +78,7 @@ def create_refresh_token(
 
 
 def decode_token(token: str) -> dict[str, Any] | None:
-    """Decode and validate a JWT token.  Returns claims dict or None."""
+    """解码并验证 JWT 令牌。返回 claims 字典或 None。"""
     try:
         payload = jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         return payload
@@ -87,7 +87,7 @@ def decode_token(token: str) -> dict[str, Any] | None:
 
 
 def create_token_pair(user_id: str, role: str) -> tuple[str, str, int]:
-    """Create an (access_token, refresh_token, expires_in_seconds) tuple."""
+    """创建 (access_token, refresh_token, expires_in_seconds) 元组。"""
     data = {"sub": user_id, "role": role}
     access = create_access_token(data)
     refresh = create_refresh_token(data)

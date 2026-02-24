@@ -289,7 +289,7 @@ class TestB1ManifestRefreshOnExit:
         # 循环内写入工具走统一写入记录（_record_workspace_write_action / _record_external_write_action）
         assert "_record_workspace_write_action()" in source or "_record_external_write_action()" in source
         # run_code 路径在 dispatcher 的 _dispatch_tool_execution 中同样走统一写入记录
-        assert "e._record_write_action()" in source_dispatcher
+        assert "e.record_write_action()" in source_dispatcher
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:
         """Preservation: max_iter 路径仍然调用 _try_refresh_manifest（原有行为不变）。"""

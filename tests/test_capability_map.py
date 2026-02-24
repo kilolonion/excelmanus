@@ -230,4 +230,8 @@ class TestMissingDescription:
         gen = CapabilityMapGenerator(reg, categories=categories, descriptions=descriptions)
         with caplog.at_level(logging.WARNING, logger="excelmanus.introspection"):
             gen.generate()
-        assert "tool_a" not in caplog.text
+        # 只检查 WARNING 及以上级别，排除 INFO 注册日志
+        warning_text = "\n".join(
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        )
+        assert "tool_a" not in warning_text

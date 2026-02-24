@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import excelmanus.persistent_memory as persistent_memory_module
+import excelmanus.stores.file_memory_backend as file_backend_module
 from excelmanus.persistent_memory import CORE_MEMORY_FILE, PersistentMemory
 
 
@@ -120,18 +121,20 @@ class TestLoadTopic:
         assert pm.load_topic("file_patterns.md") == ""
 
     def test_loads_full_content(self, tmp_path: Path) -> None:
-        """正常读取主题文件全部内容。"""
-        content = "### [2025-01-15] file_pattern\n\n列名: 日期, 产品\n\n---"
+        """正常读取主题文件中的结构化条目。"""
+        content = "### [2025-01-15 14:30] file_pattern\n\n列名: 日期, 产品\n\n---"
         (tmp_path / "file_patterns.md").write_text(content, encoding="utf-8")
         pm = PersistentMemory(str(tmp_path))
-        assert pm.load_topic("file_patterns.md") == content
+        result = pm.load_topic("file_patterns.md")
+        assert "列名: 日期, 产品" in result
 
     def test_loads_user_prefs(self, tmp_path: Path) -> None:
-        """读取 user_prefs.md 主题文件。"""
-        content = "用户偏好深色图表"
+        """读取 user_prefs.md 主题文件中的结构化条目。"""
+        content = "### [2025-01-15 14:30] user_pref\n\n用户偏好深色图表\n\n---"
         (tmp_path / "user_prefs.md").write_text(content, encoding="utf-8")
         pm = PersistentMemory(str(tmp_path))
-        assert pm.load_topic("user_prefs.md") == content
+        result = pm.load_topic("user_prefs.md")
+        assert "用户偏好深色图表" in result
 
     def test_empty_topic_file_returns_empty(self, tmp_path: Path) -> None:
         """空主题文件返回空字符串。"""
@@ -212,11 +215,12 @@ class TestFormatEntries:
 class TestParseEntries:
     """parse_entries 方法测试。"""
 
-    def test_public_api_matches_internal_parser(self, tmp_path: Path) -> None:
-        """公开兼容入口与内部解析实现结果一致。"""
+    def test_public_api_matches_format_module(self, tmp_path: Path) -> None:
+        """公开入口与 memory_format 模块解析结果一致。"""
+        from excelmanus.memory_format import parse_entries as mf_parse
         pm = PersistentMemory(str(tmp_path))
         md = "### [2025-01-15 14:30] general\n\n测试内容\n\n---"
-        assert pm.parse_entries(md) == pm._parse_entries(md)
+        assert pm.parse_entries(md) == mf_parse(md)
 
     def test_empty_string_returns_empty(self, tmp_path: Path) -> None:
         """空字符串返回空列表。"""
@@ -505,7 +509,7 @@ class TestSaveEntries:
         ]
         import logging
 
-        target_logger = logging.getLogger("excelmanus.persistent_memory")
+        target_logger = logging.getLogger("excelmanus.stores.file_memory_backend")
         parent_logger = logging.getLogger("excelmanus")
         # 临时确保整条传播链畅通，使 caplog 可捕获
         old_child_prop = target_logger.propagate
@@ -513,7 +517,7 @@ class TestSaveEntries:
         target_logger.propagate = True
         parent_logger.propagate = True
         try:
-            with caplog.at_level(logging.WARNING, logger="excelmanus.persistent_memory"):
+            with caplog.at_level(logging.WARNING, logger="excelmanus.stores.file_memory_backend"):
                 pm.save_entries(entries)  # 不应抛异常
             assert "写入记忆文件失败" in caplog.text
         finally:
@@ -556,7 +560,7 @@ class TestSaveEntries:
         pm = PersistentMemory(str(tmp_path))
         target = tmp_path / "sync_target.md"
         events: list[str] = []
-        original_replace = persistent_memory_module.os.replace
+        original_replace = file_backend_module.os.replace
 
         def _spy_fsync(fd: int) -> None:
             assert fd >= 0
@@ -566,10 +570,10 @@ class TestSaveEntries:
             events.append("replace")
             original_replace(src, dst)
 
-        monkeypatch.setattr(persistent_memory_module.os, "fsync", _spy_fsync)
-        monkeypatch.setattr(persistent_memory_module.os, "replace", _spy_replace)
+        monkeypatch.setattr(file_backend_module.os, "fsync", _spy_fsync)
+        monkeypatch.setattr(file_backend_module.os, "replace", _spy_replace)
 
-        pm._atomic_write(target, "sync-check")
+        pm._backend._atomic_write(target, "sync-check")
 
         assert events == ["fsync", "replace"]
         assert target.read_text(encoding="utf-8") == "sync-check"
@@ -593,7 +597,7 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text(content, encoding="utf-8")
         original = filepath.read_text(encoding="utf-8")
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
         assert filepath.read_text(encoding="utf-8") == original
 
     def test_trims_to_under_400_lines(self, tmp_path: Path) -> None:
@@ -608,7 +612,7 @@ class TestEnforceCapacity:
         line_count_before = len(content.split("\n"))
         assert line_count_before > 500  # 确认前置条件
 
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
 
         result = filepath.read_text(encoding="utf-8")
         line_count_after = len(result.split("\n"))
@@ -622,7 +626,7 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text(content, encoding="utf-8")
 
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
 
         result = filepath.read_text(encoding="utf-8")
         # 最后一个条目应该被保留
@@ -637,12 +641,13 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text(content, encoding="utf-8")
 
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
 
         result = filepath.read_text(encoding="utf-8")
         # 结果应该以条目头开始
         first_line = result.split("\n")[0]
-        assert pm._ENTRY_HEADER_RE.match(first_line), f"文件应以条目头开始，实际: {first_line!r}"
+        from excelmanus.memory_format import ENTRY_HEADER_RE
+        assert ENTRY_HEADER_RE.match(first_line), f"文件应以条目头开始，实际: {first_line!r}"
         # 所有保留的条目应可被正确解析
         parsed = pm.parse_entries(result)
         assert len(parsed) > 0
@@ -657,7 +662,7 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text(content, encoding="utf-8")
 
-        target_logger = logging.getLogger("excelmanus.persistent_memory")
+        target_logger = logging.getLogger("excelmanus.stores.file_memory_backend")
         parent_logger = logging.getLogger("excelmanus")
         # 临时确保整条传播链畅通，使 caplog 可捕获
         old_child_prop = target_logger.propagate
@@ -665,8 +670,8 @@ class TestEnforceCapacity:
         target_logger.propagate = True
         parent_logger.propagate = True
         try:
-            with caplog.at_level(logging.INFO, logger="excelmanus.persistent_memory"):
-                pm._enforce_capacity(filepath)
+            with caplog.at_level(logging.INFO, logger="excelmanus.stores.file_memory_backend"):
+                pm._backend._enforce_capacity(filepath)
 
             assert "容量管理" in caplog.text
             assert "移除" in caplog.text
@@ -678,7 +683,7 @@ class TestEnforceCapacity:
         """文件不存在时不报错。"""
         pm = PersistentMemory(str(tmp_path))
         filepath = tmp_path / "nonexistent.md"
-        pm._enforce_capacity(filepath)  # 不应抛异常
+        pm._backend._enforce_capacity(filepath)  # 不应抛异常
 
     def test_exactly_500_lines_no_action(self, tmp_path: Path) -> None:
         """恰好 500 行时不触发清理。"""
@@ -688,7 +693,7 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text("\n".join(lines), encoding="utf-8")
         original = filepath.read_text(encoding="utf-8")
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
         assert filepath.read_text(encoding="utf-8") == original
 
     def test_501_lines_triggers_cleanup(self, tmp_path: Path) -> None:
@@ -709,7 +714,7 @@ class TestEnforceCapacity:
                 content = "\n\n".join(blocks)
             filepath.write_text(content, encoding="utf-8")
 
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
         result_lines = len(filepath.read_text(encoding="utf-8").split("\n"))
         assert result_lines <= 400
 
@@ -741,7 +746,7 @@ class TestEnforceCapacity:
         filepath = tmp_path / CORE_MEMORY_FILE
         filepath.write_text(content, encoding="utf-8")
 
-        pm._enforce_capacity(filepath)
+        pm._backend._enforce_capacity(filepath)
 
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert len(tmp_files) == 0
@@ -805,7 +810,8 @@ class TestLayoutMigration:
         def _raise(*_args, **_kwargs):
             raise RuntimeError("mock migration failure")
 
-        monkeypatch.setattr(PersistentMemory, "_rewrite_layout_files", _raise)
+        from excelmanus.stores.file_memory_backend import FileMemoryBackend
+        monkeypatch.setattr(FileMemoryBackend, "_rewrite_layout_files", _raise)
 
         # 不应抛异常，且原文件内容保留，并降级只读模式
         pm = PersistentMemory(str(tmp_path))

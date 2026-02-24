@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
 
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
@@ -22,7 +23,10 @@ _guard: FileAccessGuard | None = None
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard 单例。"""
+    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
+    ctx_guard = _get_ctx_guard()
+    if ctx_guard is not None:
+        return ctx_guard
     global _guard
     if _guard is None:
         _guard = FileAccessGuard(".")
@@ -35,15 +39,44 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
-# ── Docker 沙盒开关（模块级） ────────────────────────────
+# ── Docker 沙盒开关 ──────────────────────────────────────
+# 全局标志为部署级设置（非用户级）。
+# 每会话 SandboxEnv contextvar 在工具调度器设置后优先生效。
+
+import contextvars as _contextvars
 
 _docker_sandbox_enabled: bool = False
+
+_current_sandbox_env: _contextvars.ContextVar[Any] = _contextvars.ContextVar(
+    "_current_sandbox_env", default=None,
+)
 
 
 def init_docker_sandbox(enabled: bool) -> None:
     """设置 Docker 沙盒模式开关（由 API 层在 lifespan 中调用）。"""
     global _docker_sandbox_enabled
     _docker_sandbox_enabled = enabled
+
+
+def set_sandbox_env(env: Any) -> _contextvars.Token:
+    """Set the per-session SandboxEnv for the current async context.
+
+    Returns a token that can be used to reset the contextvar.
+    """
+    return _current_sandbox_env.set(env)
+
+
+def _get_active_sandbox_env() -> Any:
+    """Return the active SandboxEnv, or None."""
+    return _current_sandbox_env.get(None)
+
+
+def _is_docker_sandbox() -> bool:
+    """Check if Docker sandbox is active, preferring per-session env."""
+    env = _get_active_sandbox_env()
+    if env is not None:
+        return getattr(env, "docker_enabled", False)
+    return _docker_sandbox_enabled
 
 
 # ── 解释器探测 ───────────────────────────────────────────
@@ -426,7 +459,6 @@ def run_code(
             sandbox_tier=sandbox_tier,
         )
     finally:
-        # 内联模式清理临时文件
         if temp_script is not None and temp_script.exists():
             try:
                 temp_script.unlink()
@@ -639,7 +671,7 @@ def _execute_script(
     sandbox_tier: str = "RED",
 ) -> str:
     """内部执行脚本核心逻辑（供 run_code 调用）。"""
-    if _docker_sandbox_enabled:
+    if _is_docker_sandbox():
         return _execute_script_docker(
             guard=guard,
             script_safe=script_safe,

@@ -120,6 +120,9 @@ class TestEventTypeEnum:
             "MODE_CHANGED",
             "EXCEL_PREVIEW",
             "EXCEL_DIFF",
+            "FILES_CHANGED",
+            "MEMORY_EXTRACTED",
+            "PIPELINE_PROGRESS",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -158,6 +161,9 @@ class TestEventTypeEnum:
             ("MODE_CHANGED", "mode_changed"),
             ("EXCEL_PREVIEW", "excel_preview"),
             ("EXCEL_DIFF", "excel_diff"),
+            ("FILES_CHANGED", "files_changed"),
+            ("PIPELINE_PROGRESS", "pipeline_progress"),
+            ("MEMORY_EXTRACTED", "memory_extracted"),
         ]
 
 
@@ -289,5 +295,10 @@ class TestToolCallEventFields:
             "excel_truncated",
             "excel_affected_range",
             "excel_changes",
+            "changed_files",
+            "memory_entries",
+            "memory_trigger",
+            "pipeline_message",
+            "pipeline_stage",
         }
         assert set(annotations.keys()) == expected_fields

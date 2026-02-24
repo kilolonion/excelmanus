@@ -639,7 +639,7 @@ def render_window_wurm_full(
             f"COUNT={_format_int(status_bar.get('count'))} | "
             f"AVG={_format_number(status_bar.get('average'))}"
         )
-        # intent=aggregate 时输出分类列 top-N 分布
+        # intent=aggregate 时输出分类列 top-N 频次分布
         if profile["intent"] == IntentTag.AGGREGATE.value:
             cat = status_bar.get("categorical")
             if isinstance(cat, dict) and cat:

@@ -47,6 +47,15 @@ def assistant_message_to_dict(message: Any) -> dict[str, Any]:
     if "content" not in payload:
         payload["content"] = str(getattr(message, "content", "") or "")
     payload["role"] = "assistant"
+
+    # DeepSeek thinking 模式要求 assistant 消息中包含 reasoning_content；
+    # 当 reasoning_content 丢失时，从 thinking/reasoning 字段中恢复。
+    _rc = payload.get("reasoning_content")
+    if not _rc:
+        _fallback = payload.get("thinking") or payload.get("reasoning")
+        if _fallback:
+            payload["reasoning_content"] = _fallback
+
     return payload
 
 

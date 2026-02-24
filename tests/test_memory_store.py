@@ -121,3 +121,20 @@ class TestMemoryStoreCount:
         assert store.count_by_category(MemoryCategory.GENERAL) == 2
         assert store.count_by_category(MemoryCategory.FILE_PATTERN) == 1
         assert store.count_by_category(MemoryCategory.ERROR_SOLUTION) == 0
+
+
+class TestMemoryStoreUserIsolation:
+    def test_isolates_entries_by_user_id(self, tmp_path: Path) -> None:
+        db = Database(str(tmp_path / "shared.db"))
+        user_a = MemoryStore(db, user_id="user-a")
+        user_b = MemoryStore(db, user_id="user-b")
+
+        user_a.save_entries([_entry("only-a")])
+        user_b.save_entries([_entry("only-b")])
+
+        assert user_a.count() == 1
+        assert user_b.count() == 1
+        assert "only-a" in user_a.load_core(limit=10)
+        assert "only-b" not in user_a.load_core(limit=10)
+        assert "only-b" in user_b.load_core(limit=10)
+        assert "only-a" not in user_b.load_core(limit=10)

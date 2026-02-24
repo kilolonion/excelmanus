@@ -200,6 +200,48 @@
   overflow-wrap: anywhere;
 }
 
+/* Compact prose typography for chat messages */
+.prose.prose-sm {
+  font-size: 13px;
+  line-height: 1.625;
+}
+
+.prose.prose-sm p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose.prose-sm ul,
+.prose.prose-sm ol {
+  margin-top: 0.4em;
+  margin-bottom: 0.4em;
+  padding-left: 1.25em;
+}
+
+.prose.prose-sm li {
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+}
+
+.prose.prose-sm h1,
+.prose.prose-sm h2,
+.prose.prose-sm h3,
+.prose.prose-sm h4 {
+  margin-top: 0.75em;
+  margin-bottom: 0.35em;
+}
+
+.prose.prose-sm pre {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  font-size: 12px;
+}
+
+.prose.prose-sm blockquote {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
 /* Hide scrollbar while keeping scroll functional */
 .scrollbar-none {
   scrollbar-width: none;
@@ -268,6 +310,87 @@ button:active:not(:disabled),
 [role="button"]:active:not(:disabled) {
   transform: scale(0.97);
   transition: transform 75ms ease;
+}
+
+/* ── Mobile Touch Enhancements ── */
+
+/* Ensure minimum 44×44px touch targets on coarse-pointer devices (WCAG 2.5.8) */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  a,
+  input[type="checkbox"],
+  input[type="radio"],
+  select,
+  [tabindex="0"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Exceptions: icon-only buttons that already have explicit sizing */
+  button.h-5, button.h-6, button.h-7, button.h-8,
+  [role="button"].h-5, [role="button"].h-6, [role="button"].h-7, [role="button"].h-8 {
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  /* Dropdown menu items need adequate touch height */
+  [role="menuitem"],
+  [role="option"] {
+    min-height: 44px;
+  }
+}
+
+/* Smooth momentum scrolling for all scrollable containers on touch */
+@media (pointer: coarse) {
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .overflow-auto,
+  [data-radix-scroll-area-viewport] {
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+  }
+}
+
+/* Prevent text selection on interactive elements during touch */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  [role="menuitem"],
+  [role="tab"],
+  .cursor-pointer {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* Long-press context menu prevention on interactive elements */
+@media (pointer: coarse) {
+  button,
+  [role="button"],
+  img {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* ── Pipeline Stepper chip enter ── */
+@keyframes chipEnter {
+  0%   { opacity: 0; transform: translateX(8px) scale(0.92); }
+  60%  { opacity: 1; transform: translateX(-2px) scale(1.02); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+.animate-chip-enter {
+  animation: chipEnter 0.35s ease-out;
+}
+
+/* Hide scrollbar utility */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
 }
 
 /* ── Streaming Typing Cursor ── */

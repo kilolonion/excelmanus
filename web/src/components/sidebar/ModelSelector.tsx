@@ -20,6 +20,7 @@ export function ModelSelector() {
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [switching, setSwitching] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   const fetchModels = () => {
     apiGet<{ models: ModelInfo[] }>("/models")
@@ -39,12 +40,15 @@ export function ModelSelector() {
   const handleSwitch = async (name: string) => {
     if (name === currentModel || switching) return;
     setSwitching(true);
+    setSwitchError(null);
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
       fetchModels();
-    } catch {
-      // ignore
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "切换失败";
+      setSwitchError(msg);
+      setTimeout(() => setSwitchError(null), 3000);
     } finally {
       setSwitching(false);
     }
@@ -130,6 +134,11 @@ export function ModelSelector() {
         })}
         {models.length === 0 && (
           <DropdownMenuItem disabled>暂无可用模型</DropdownMenuItem>
+        )}
+        {switchError && (
+          <div className="px-2 py-1.5 text-[11px] text-destructive">
+            {switchError}
+          </div>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

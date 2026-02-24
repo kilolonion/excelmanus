@@ -233,3 +233,74 @@ def test_mixed_write_and_read_returns_may_write(message: str) -> None:
     """同时包含写入和只读关键词时，may_write 应优先。"""
     result = SkillRouter._classify_write_hint_lexical(message)
     assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"
+
+
+# ── 9. 身份/元问题 chitchat 短路 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "你是谁",
+        "你是什么",
+        "你叫什么",
+        "介绍一下自己",
+        "你能做什么",
+        "你会什么",
+        "你有什么功能",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "introduce yourself",
+        "what is your name",
+        "怎么用",
+        "如何使用",
+        "help",
+        "帮助",
+        "使用说明",
+        "who are you?",
+        "你是谁？",
+    ],
+)
+def test_identity_faq_matches_chitchat(message: str) -> None:
+    """身份/FAQ/元问题应被 _CHITCHAT_RE 匹配，走短路 read_only。"""
+    assert _CHITCHAT_RE.match(message.strip()), f"Expected chitchat match for: {message!r}"
+
+
+# ── 10. 短消息无关键词 → None（交由 LLM 分类） ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "干嘛呢",
+        "test",
+        "嗯",
+        "?",
+        "啥意思",
+        "能干啥",
+    ],
+)
+def test_short_no_keyword_returns_none(message: str) -> None:
+    """短消息无读/写关键词时，词法返回 None，交由 LLM 分类。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result is None, f"Expected None for short msg: {message!r}, got {result!r}"
+
+
+# ── 11. 短写入命令不被兜底误伤 ──
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "排序",
+        "合并",
+        "删除",
+        "创建",
+        "sort",
+        "merge",
+        "fix",
+        "create",
+    ],
+)
+def test_short_write_commands_not_affected_by_fallback(message: str) -> None:
+    """短写入命令应被 _MAY_WRITE_HINT_RE 优先匹配，不受兜底规则影响。"""
+    result = SkillRouter._classify_write_hint_lexical(message)
+    assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"

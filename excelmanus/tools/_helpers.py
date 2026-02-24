@@ -29,7 +29,7 @@ def resolve_sheet_name(
     if requested in available:
         return requested
 
-    # case-insensitive fallback
+    # 大小写不敏感回退匹配
     lower = requested.lower()
     for name in available:
         if name.lower() == lower:

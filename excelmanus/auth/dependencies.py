@@ -1,4 +1,4 @@
-"""FastAPI dependencies for extracting and validating the current user."""
+"""FastAPI 依赖项：提取和验证当前用户。"""
 
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> UserRecord:
-    """Extract and validate the current user from the Authorization header.
+    """从 Authorization 请求头中提取并验证当前用户。
 
-    Injects the user into ``request.state.user`` for downstream handlers.
+    将用户注入 ``request.state.user`` 供下游处理器使用。
     """
     if credentials is None:
         raise HTTPException(
@@ -68,11 +68,20 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_from_request(request: Request) -> UserRecord:
+    """从 Request 中解析 Bearer 凭据，用于手动调用场景。
+
+    适用于未使用 FastAPI 依赖注入的场景。
+    """
+    credentials = await _bearer_scheme(request)
+    return await get_current_user(request, credentials)
+
+
 async def get_current_user_optional(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> UserRecord | None:
-    """Like get_current_user but returns None instead of raising 401."""
+    """类似 get_current_user，但未认证时返回 None 而非抛出 401。"""
     if credentials is None:
         return None
     try:
@@ -84,7 +93,7 @@ async def get_current_user_optional(
 async def require_admin(
     user: UserRecord = Depends(get_current_user),
 ) -> UserRecord:
-    """Require the current user to have admin role."""
+    """要求当前用户具有管理员角色。"""
     if user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -94,8 +103,8 @@ async def require_admin(
 
 
 def extract_user_id(request: Request) -> str | None:
-    """Extract user_id from request state (set by AuthMiddleware).
+    """从 request state 中提取 user_id（由 AuthMiddleware 设置）。
 
-    Returns None when auth is disabled — callers should handle gracefully.
+    认证未启用时返回 None，调用方应妥善处理。
     """
     return getattr(request.state, "user_id", None)

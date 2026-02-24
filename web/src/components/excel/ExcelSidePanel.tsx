@@ -1,15 +1,15 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2 } from "lucide-react";
+import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download } from "lucide-react";
 import { panelSlideVariants, panelSlideVariantsMobile } from "@/lib/sidebar-motion";
 import { useShallow } from "zustand/react/shallow";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -40,7 +40,11 @@ export function ExcelSidePanel() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
   const hasBackupForFile = useMemo(
-    () => pendingBackups.some((b) => b.original_path === activeFilePath),
+    () => {
+      if (!activeFilePath) return false;
+      const norm = normalizeExcelPath(activeFilePath);
+      return pendingBackups.some((b) => normalizeExcelPath(b.original_path) === norm);
+    },
     [pendingBackups, activeFilePath]
   );
 
@@ -57,6 +61,22 @@ export function ExcelSidePanel() {
 
   // Pending range from Univer selection (not yet confirmed)
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
+
+  // Swipe-down to close on mobile
+  const touchRef = useRef<{ startY: number; startTime: number } | null>(null);
+  const handlePanelTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!isMobile) return;
+    touchRef.current = { startY: e.touches[0].clientY, startTime: Date.now() };
+  }, [isMobile]);
+  const handlePanelTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (!isMobile || !touchRef.current) return;
+    const dy = e.changedTouches[0].clientY - touchRef.current.startY;
+    const dt = Date.now() - touchRef.current.startTime;
+    touchRef.current = null;
+    if (dy > 80 && dt < 400) {
+      closePanel();
+    }
+  }, [isMobile, closePanel]);
 
   const handleRangeSelected = useCallback((range: string, sheet: string) => {
     setPendingRange({ range, sheet });
@@ -88,8 +108,8 @@ export function ExcelSidePanel() {
   }, [selectionMode, enterSelectionMode, handleCancelRange]);
 
   const fileUrl = useMemo(
-    () => (activeFilePath ? buildExcelFileUrl(activeFilePath) : ""),
-    [activeFilePath]
+    () => (activeFilePath ? buildExcelFileUrl(activeFilePath, activeSessionId ?? undefined) : ""),
+    [activeFilePath, activeSessionId]
   );
 
   const fileName = activeFilePath?.split("/").pop() || "未知文件";
@@ -121,7 +141,15 @@ export function ExcelSidePanel() {
               : "flex flex-col h-full border-l border-border bg-background"
           }
           style={isMobile ? undefined : { width: 520 }}
+          onTouchStart={handlePanelTouchStart}
+          onTouchEnd={handlePanelTouchEnd}
         >
+      {/* Swipe indicator for mobile */}
+      {isMobile && (
+        <div className="flex justify-center py-1.5 flex-shrink-0">
+          <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2 min-w-0">
@@ -148,6 +176,13 @@ export function ExcelSidePanel() {
             title="刷新"
           >
             <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => activeFilePath && downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => {})}
+            className="p-2 md:p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+            title="下载文件"
+          >
+            <Download className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => openFullView(activeFilePath!, activeSheet ?? undefined)}

@@ -27,12 +27,12 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <div className="flex items-center h-12 px-3 flex-shrink-0 border-b border-border">
           <SidebarToggle />
           <TopModelSelector />
-          <div className="hidden sm:flex">
+          <div className="flex">
             <ModeBadges />
           </div>
           <div className="flex-1" />
           <BackupApplyBadge />
-          <div className="hidden md:flex">
+          <div className="flex">
             <SessionStatusBar />
           </div>
         </div>

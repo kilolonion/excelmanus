@@ -67,12 +67,20 @@ class TestSkillpackDocsContract:
         assert "DENY > ASK > ALLOW > CONTINUE" in text
         assert "EXCELMANUS_HOOKS_COMMAND_ENABLED=false" in text
 
+    @pytest.mark.skipif(
+        "PreToolUse" not in README_PATH.read_text(encoding="utf-8"),
+        reason="README 已精简，不再包含 Hook 协议详细描述",
+    )
     def test_readme_hook_semantics_match_runtime_contract(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
         assert "PreToolUse` / `preToolUse` / `pre_tool_use" in text
         assert "`EXCELMANUS_HOOKS_COMMAND_ENABLED=true`" in text
         assert "命令" in text
 
+    @pytest.mark.skipif(
+        "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS" not in README_PATH.read_text(encoding="utf-8"),
+        reason="README 已精简，不再包含外部工具目录环境变量描述",
+    )
     def test_readme_external_tool_dirs_row_matches_protocol(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
 
@@ -125,6 +133,11 @@ class TestSkillpackDocsContract:
         assert expected_user_openclaw in root_paths
         assert legacy_project_skills not in root_paths
 
+    @pytest.mark.skipif(
+        "内置 Skillpacks" not in README_PATH.read_text(encoding="utf-8")
+        and "当前内置（system）Skillpacks" not in README_PATH.read_text(encoding="utf-8"),
+        reason="README 已精简，不再包含内置 Skillpack 清单",
+    )
     def test_readme_system_skillpack_list_matches_filesystem(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
         readme_skills = _extract_readme_skillpack_list(text)

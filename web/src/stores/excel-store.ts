@@ -4,6 +4,7 @@ import {
   fetchBackupList,
   applyBackup,
   discardBackup,
+  normalizeExcelPath,
   type BackupFile,
 } from "@/lib/api";
 
@@ -67,6 +68,10 @@ interface ExcelState {
   selectionMode: boolean;
   pendingSelection: { filePath: string; sheet: string; range: string } | null;
 
+  // Paths the user explicitly dismissed — survives across remounts so that
+  // auto-discovery (workspace scan / session recovery) won't re-add them.
+  dismissedPaths: Set<string>;
+
   // Backup apply
   pendingBackups: BackupFile[];
   backupEnabled: boolean;
@@ -79,7 +84,10 @@ interface ExcelState {
   setActiveSheet: (sheet: string) => void;
   addDiff: (diff: ExcelDiffEntry) => void;
   addPreview: (preview: ExcelPreviewData) => void;
+  /** Add a file explicitly opened/uploaded by the user (clears dismissal). */
   addRecentFile: (file: { path: string; filename: string }) => void;
+  /** System-initiated add that respects dismissedPaths. */
+  addRecentFileIfNotDismissed: (file: { path: string; filename: string }) => void;
   removeRecentFile: (path: string) => void;
   removeRecentFiles: (paths: string[]) => void;
   clearAllRecentFiles: () => void;
@@ -113,6 +121,7 @@ export const useExcelStore = create<ExcelState>()(
   fullViewSheet: null,
   selectionMode: false,
   pendingSelection: null,
+  dismissedPaths: new Set<string>(),
   pendingBackups: [],
   backupEnabled: false,
   backupLoading: false,
@@ -146,6 +155,25 @@ export const useExcelStore = create<ExcelState>()(
 
   addRecentFile: (file) =>
     set((state) => {
+      const normPath = normalizeExcelPath(file.path);
+      const filtered = state.recentFiles.filter(
+        (f) => normalizeExcelPath(f.path) !== normPath,
+      );
+      const entry: ExcelFileRef = {
+        path: file.path,
+        filename: file.filename,
+        lastUsedAt: Date.now(),
+      };
+      const updated = [entry, ...filtered].slice(0, MAX_RECENT_FILES);
+      const newDismissed = new Set(state.dismissedPaths);
+      newDismissed.delete(file.path);
+      newDismissed.delete(normPath);
+      return { recentFiles: updated, dismissedPaths: newDismissed };
+    }),
+
+  addRecentFileIfNotDismissed: (file) =>
+    set((state) => {
+      if (state.dismissedPaths.has(file.path)) return {};
       const filtered = state.recentFiles.filter((f) => f.path !== file.path);
       const entry: ExcelFileRef = {
         path: file.path,
@@ -157,28 +185,41 @@ export const useExcelStore = create<ExcelState>()(
     }),
 
   removeRecentFile: (path) =>
-    set((state) => ({
-      recentFiles: state.recentFiles.filter((f) => f.path !== path),
-    })),
+    set((state) => {
+      const newDismissed = new Set(state.dismissedPaths);
+      newDismissed.add(path);
+      return {
+        recentFiles: state.recentFiles.filter((f) => f.path !== path),
+        dismissedPaths: newDismissed,
+      };
+    }),
 
   removeRecentFiles: (paths) =>
     set((state) => {
       const pathSet = new Set(paths);
-      return { recentFiles: state.recentFiles.filter((f) => !pathSet.has(f.path)) };
+      const newDismissed = new Set(state.dismissedPaths);
+      for (const p of paths) newDismissed.add(p);
+      return {
+        recentFiles: state.recentFiles.filter((f) => !pathSet.has(f.path)),
+        dismissedPaths: newDismissed,
+      };
     }),
 
-  clearAllRecentFiles: () => set({ recentFiles: [] }),
+  clearAllRecentFiles: () =>
+    set((state) => {
+      const newDismissed = new Set(state.dismissedPaths);
+      for (const f of state.recentFiles) newDismissed.add(f.path);
+      return { recentFiles: [], dismissedPaths: newDismissed };
+    }),
 
   mergeRecentFiles: (files) =>
     set((state) => {
       const map = new Map<string, ExcelFileRef>();
-      // existing local entries first (higher priority for lastUsedAt)
       for (const f of state.recentFiles) {
         map.set(f.path, f);
       }
-      // merge backend files — only add if not already present
       for (const f of files) {
-        if (!map.has(f.path)) {
+        if (!map.has(f.path) && !state.dismissedPaths.has(f.path)) {
           map.set(f.path, {
             path: f.path,
             filename: f.filename,
@@ -232,12 +273,13 @@ export const useExcelStore = create<ExcelState>()(
     try {
       const result = await applyBackup({ sessionId, files: [filePath] });
       if (result.count > 0) {
+        const normPath = normalizeExcelPath(filePath);
         set((state) => {
           const newApplied = new Set(state.appliedPaths);
-          newApplied.add(filePath);
+          newApplied.add(normPath);
           return {
             pendingBackups: state.pendingBackups.filter(
-              (b) => b.original_path !== filePath
+              (b) => normalizeExcelPath(b.original_path) !== normPath
             ),
             appliedPaths: newApplied,
             refreshCounter: state.refreshCounter + 1,
@@ -274,9 +316,10 @@ export const useExcelStore = create<ExcelState>()(
   discardFile: async (sessionId, filePath) => {
     try {
       await discardBackup({ sessionId, files: [filePath] });
+      const normPath = normalizeExcelPath(filePath);
       set((state) => ({
         pendingBackups: state.pendingBackups.filter(
-          (b) => b.original_path !== filePath
+          (b) => normalizeExcelPath(b.original_path) !== normPath
         ),
       }));
     } catch {
@@ -294,7 +337,7 @@ export const useExcelStore = create<ExcelState>()(
   },
 
   isFileApplied: (filePath) => {
-    return get().appliedPaths.has(filePath);
+    return get().appliedPaths.has(normalizeExcelPath(filePath));
   },
 
   clearSession: () =>
@@ -317,7 +360,20 @@ export const useExcelStore = create<ExcelState>()(
       partialize: (state) => ({
         recentFiles: state.recentFiles,
         diffs: state.diffs.slice(-MAX_PERSISTED_DIFFS),
+        dismissedPaths: Array.from(state.dismissedPaths),
       }),
+      merge: (persisted, current) => {
+        const p = persisted as Record<string, unknown> | undefined;
+        const dismissed = Array.isArray(p?.dismissedPaths)
+          ? new Set<string>(p.dismissedPaths as string[])
+          : new Set<string>();
+        return {
+          ...current,
+          ...(p ?? {}),
+          dismissedPaths: dismissed,
+          appliedPaths: new Set<string>(),
+        };
+      },
     }
   )
 );

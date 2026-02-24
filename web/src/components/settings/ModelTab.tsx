@@ -36,6 +36,8 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { apiGet, apiPut, apiPost, apiDelete } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
+import { useAuthConfigStore } from "@/stores/auth-config-store";
 
 interface ModelSection {
   api_key?: string;
@@ -149,6 +151,10 @@ export function ModelTab() {
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
 
+  const user = useAuthStore((s) => s.user);
+  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
+  const isAdmin = !authEnabled || !user || user.role === "admin";
+
   const fetchAllCapabilities = useCallback(async () => {
     try {
       const data = await apiGet<{ items: { name: string; model: string; base_url: string; capabilities: ModelCapabilities | null }[] }>("/config/models/capabilities/all");
@@ -232,9 +238,11 @@ export function ModelTab() {
   }, []);
 
   useEffect(() => {
-    fetchConfig();
-    fetchAllCapabilities();
-  }, [fetchConfig, fetchAllCapabilities]);
+    if (isAdmin) {
+      fetchConfig();
+      fetchAllCapabilities();
+    }
+  }, [fetchConfig, fetchAllCapabilities, isAdmin]);
 
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);
@@ -298,6 +306,38 @@ export function ModelTab() {
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-lg border border-border p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Lock className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+            <h3 className="font-semibold text-sm">模型配置</h3>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            模型配置由管理员管理。您可以通过顶部模型选择器切换可用模型。
+          </p>
+          {user?.allowedModels && user.allowedModels.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs text-muted-foreground mb-1.5">您可使用的模型：</p>
+              <div className="flex flex-wrap gap-1.5">
+                <Badge variant="secondary" className="text-[10px]">default</Badge>
+                {user.allowedModels.map((m) => (
+                  <Badge key={m} variant="secondary" className="text-[10px]">{m}</Badge>
+                ))}
+              </div>
+            </div>
+          )}
+          {(!user?.allowedModels || user.allowedModels.length === 0) && (
+            <p className="text-xs text-muted-foreground mt-2">
+              您可以使用所有已配置的模型。
+            </p>
+          )}
+        </div>
       </div>
     );
   }
@@ -687,6 +727,10 @@ export function ModelTab() {
 }
 
 function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
+  const user = useAuthStore((s) => s.user);
+  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
+  const isAdminScope = !authEnabled || !user || user.role === "admin";
+
   const [mode, setMode] = useState<"idle" | "export" | "import">("idle");
   const [exportMode, setExportMode] = useState<"password" | "simple">("password");
   const [exportSections, setExportSections] = useState<Record<string, boolean>>({
@@ -694,6 +738,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     aux: true,
     vlm: true,
     profiles: true,
+    user: true,
   });
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -728,9 +773,11 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     }
     setExporting(true);
     try {
-      const sections = Object.entries(exportSections)
-        .filter(([, v]) => v)
-        .map(([k]) => k);
+      const sections = isAdminScope
+        ? Object.entries(exportSections)
+            .filter(([k, v]) => ["main", "aux", "vlm", "profiles"].includes(k) && v)
+            .map(([k]) => k)
+        : ["user"];
       const data = await apiPost<{ token: string }>("/config/export", {
         sections,
         mode: exportMode,
@@ -781,7 +828,9 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const sectionLabels: Record<string, string> = { main: "主模型", aux: "辅助模型", vlm: "VLM 视觉模型", profiles: "多模型配置" };
+  const sectionLabels: Record<string, string> = isAdminScope
+    ? { main: "主模型", aux: "辅助模型", vlm: "VLM 视觉模型", profiles: "多模型配置" }
+    : { user: "个人 LLM 配置" };
 
   return (
     <div>
@@ -792,7 +841,9 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
             配置导出 / 导入
           </h3>
           <p className="text-xs text-muted-foreground">
-            一键导出所有模型配置（含 Key），加密分享给他人
+            {isAdminScope
+              ? "一键导出全局模型配置（含 Key），加密分享给他人"
+              : "导出个人 LLM 配置（API Key、Base URL、模型），加密备份或迁移"}
           </p>
         </div>
         <div className="flex gap-1.5">
@@ -897,7 +948,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
               className="h-7 text-xs gap-1 text-white"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleExport}
-              disabled={exporting || !Object.values(exportSections).some(Boolean)}
+              disabled={exporting || (isAdminScope && !Object.entries(exportSections).some(([k, v]) => ["main","aux","vlm","profiles"].includes(k) && v))}
             >
               {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
               {exporting ? "加密中..." : "生成令牌"}

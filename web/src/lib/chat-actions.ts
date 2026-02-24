@@ -129,6 +129,13 @@ export async function sendMessage(
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
+  // Immediately show pipeline progress so the user sees feedback before the
+  // SSE connection is even established (covers network RTT + acquire_for_chat).
+  store.setPipelineStatus({
+    stage: "connecting",
+    message: "正在连接...",
+    startedAt: Date.now(),
+  });
 
   // Helper: get fresh store state
   const S = () => useChatStore.getState();
@@ -212,6 +219,7 @@ export async function sendMessage(
   };
 
   let thinkingInProgress = false;
+  let _hadStreamError = false;
 
   const finalizeThinking = () => {
     if (!thinkingInProgress) return;
@@ -567,7 +575,7 @@ export async function sendMessage(
             });
             if (epFilePath) {
               const epFilename = epFilePath.split("/").pop() || epFilePath;
-              useExcelStore.getState().addRecentFile({ path: epFilePath, filename: epFilename });
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath, filename: epFilename });
             }
             break;
           }
@@ -584,7 +592,7 @@ export async function sendMessage(
             });
             if (edFilePath) {
               const edFilename = edFilePath.split("/").pop() || edFilePath;
-              useExcelStore.getState().addRecentFile({ path: edFilePath, filename: edFilename });
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: edFilename });
               S().addAffectedFiles(assistantMsgId, [edFilePath]);
             }
             break;
@@ -596,7 +604,7 @@ export async function sendMessage(
             for (const filePath of changedFiles) {
               if (filePath) {
                 const filename = filePath.split("/").pop() || filePath;
-                excelStore.addRecentFile({ path: filePath, filename });
+                excelStore.addRecentFileIfNotDismissed({ path: filePath, filename });
               }
             }
             if (changedFiles.length > 0) {
@@ -629,8 +637,9 @@ export async function sendMessage(
               S().pendingApproval !== null || S().pendingQuestion !== null;
             if (content && !hasPendingInteraction) {
               const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-              const lastBlock = msg?.blocks[msg.blocks.length - 1];
-              if (!lastBlock || lastBlock.type !== "text") {
+              // Skip if a text block already exists (populated by streaming text_delta events)
+              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
+              if (!hasTextBlock) {
                 S().appendBlock(assistantMsgId, { type: "text", content });
               }
             }
@@ -696,14 +705,16 @@ export async function sendMessage(
           }
 
           case "error": {
+            // Non-fatal: append the error message but do NOT kill streaming
+            // state. The SSE connection may still deliver subsequent events
+            // (tool calls, text, done). Cleanup is handled by "done" or the
+            // finally block when the connection actually closes.
+            _hadStreamError = true;
             S().setPipelineStatus(null);
             S().appendBlock(assistantMsgId, {
               type: "text",
               content: `⚠️ ${(data.error as string) || "发生未知错误"}`,
             });
-            S().saveCurrentSession();
-            S().setStreaming(false);
-            S().setAbortController(null);
             break;
           }
 
@@ -716,6 +727,7 @@ export async function sendMessage(
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
+      _hadStreamError = true;
       S().appendBlock(assistantMsgId, {
         type: "text",
         content: `⚠️ 连接错误: ${(err as Error).message}`,
@@ -727,6 +739,25 @@ export async function sendMessage(
     S().saveCurrentSession();
     S().setStreaming(false);
     S().setAbortController(null);
+
+    // Auto-recovery: if errors occurred during the stream, schedule a
+    // backend refresh so the user sees the authoritative conversation
+    // state without needing a manual page reload.
+    if (_hadStreamError && effectiveSessionId) {
+      const sid = effectiveSessionId;
+      setTimeout(async () => {
+        try {
+          const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+          const chat = useChatStore.getState();
+          // Only refresh if we're still on the same session and not streaming
+          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+            await refreshSessionMessagesFromBackend(sid);
+          }
+        } catch {
+          // silent — SessionSync polling will eventually recover
+        }
+      }, 1500);
+    }
   }
 }
 
@@ -761,6 +792,11 @@ export async function sendContinuation(
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
+  store.setPipelineStatus({
+    stage: "connecting",
+    message: "正在连接...",
+    startedAt: Date.now(),
+  });
 
   const S = () => useChatStore.getState();
 
@@ -838,6 +874,7 @@ export async function sendContinuation(
 
   const msgId = assistantMsgId;
   let thinkingInProgress = false;
+  let _hadStreamError = false;
 
   const finalizeThinking = () => {
     if (!thinkingInProgress) return;
@@ -1130,7 +1167,7 @@ export async function sendContinuation(
             });
             if (epFilePath2) {
               const fn = epFilePath2.split("/").pop() || epFilePath2;
-              useExcelStore.getState().addRecentFile({ path: epFilePath2, filename: fn });
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath2, filename: fn });
             }
             break;
           }
@@ -1147,7 +1184,7 @@ export async function sendContinuation(
             });
             if (edFilePath2) {
               const fn = edFilePath2.split("/").pop() || edFilePath2;
-              useExcelStore.getState().addRecentFile({ path: edFilePath2, filename: fn });
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath2, filename: fn });
               S().addAffectedFiles(msgId, [edFilePath2]);
             }
             break;
@@ -1159,7 +1196,7 @@ export async function sendContinuation(
             for (const filePath of changedFiles2) {
               if (filePath) {
                 const filename = filePath.split("/").pop() || filePath;
-                excelStore2.addRecentFile({ path: filePath, filename });
+                excelStore2.addRecentFileIfNotDismissed({ path: filePath, filename });
               }
             }
             if (changedFiles2.length > 0) {
@@ -1278,14 +1315,12 @@ export async function sendContinuation(
           }
 
           case "error": {
+            _hadStreamError = true;
             S().setPipelineStatus(null);
             S().appendBlock(msgId, {
               type: "text",
               content: `⚠️ ${(data.error as string) || "发生未知错误"}`,
             });
-            S().saveCurrentSession();
-            S().setStreaming(false);
-            S().setAbortController(null);
             break;
           }
 
@@ -1297,6 +1332,7 @@ export async function sendContinuation(
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
+      _hadStreamError = true;
       S().appendBlock(msgId, {
         type: "text",
         content: `⚠️ 连接错误: ${(err as Error).message}`,
@@ -1308,6 +1344,21 @@ export async function sendContinuation(
     S().saveCurrentSession();
     S().setStreaming(false);
     S().setAbortController(null);
+
+    if (_hadStreamError && effectiveSessionId) {
+      const sid = effectiveSessionId;
+      setTimeout(async () => {
+        try {
+          const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+          const chat = useChatStore.getState();
+          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+            await refreshSessionMessagesFromBackend(sid);
+          }
+        } catch {
+          // silent — SessionSync polling will eventually recover
+        }
+      }, 1500);
+    }
   }
 }
 

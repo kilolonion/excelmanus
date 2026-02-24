@@ -30,7 +30,7 @@ class TestReadImage:
         assert result["status"] == "ok"
         assert result["mime_type"] == "image/png"
         assert result["size_bytes"] > 0
-        assert "_image_injection" in result
+        assert "__tool_result_image__" in result
 
     def test_read_nonexistent_file(self, tmp_path: Path) -> None:
         """读取不存在的文件返回错误。"""
@@ -62,7 +62,7 @@ class TestReadImage:
         assert "超限" in result["message"] or "size" in result["message"].lower()
 
     def test_image_injection_structure(self, tmp_path: Path) -> None:
-        """_image_injection 结构正确。"""
+        """__tool_result_image__ 结构正确。"""
         from excelmanus.tools.image_tools import read_image, init_guard
 
         png_data = base64.b64decode(_MINIMAL_PNG_B64)
@@ -70,7 +70,7 @@ class TestReadImage:
         img_path.write_bytes(png_data)
         init_guard(str(tmp_path))
         result = json.loads(read_image(file_path=str(img_path)))
-        injection = result["_image_injection"]
+        injection = result["__tool_result_image__"]
         assert injection["mime_type"] == "image/png"
         assert injection["detail"] == "auto"
         assert len(injection["base64"]) > 0
@@ -106,45 +106,57 @@ class TestTryInjectImage:
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 
         engine = MagicMock()
-        engine._memory = MagicMock()
+        engine.memory = MagicMock()
+        engine._database = None
+        engine.config = MagicMock()
+        engine.config.code_policy_enabled = False
+        engine.state = MagicMock()
+        engine.approval = MagicMock()
+        engine.approval.is_audit_only_tool = MagicMock(return_value=False)
+        engine.approval.is_high_risk_tool = MagicMock(return_value=False)
+        engine.full_access_enabled = False
+        engine._plan_intercept_task_create = False
         dispatcher = ToolDispatcher.__new__(ToolDispatcher)
         dispatcher._engine = engine
+        dispatcher._pending_vlm_image = None
+        dispatcher._tool_call_store = None
+        dispatcher._handlers = []
         return dispatcher, engine
 
     def test_inject_image_from_result(self) -> None:
-        """含 _image_injection 的结果触发 memory 注入并移除字段。"""
+        """含 __tool_result_image__ 的结果触发 memory 注入并移除字段。"""
         dispatcher, engine = self._make_dispatcher()
         result = json.dumps({
             "status": "ok",
             "hint": "图片已加载",
-            "_image_injection": {"base64": "abc", "mime_type": "image/png", "detail": "auto"},
+            "__tool_result_image__": {"base64": "abc", "mime_type": "image/png", "detail": "auto"},
         })
         cleaned = dispatcher._try_inject_image(result)
         parsed = json.loads(cleaned)
-        assert "_image_injection" not in parsed
+        assert "__tool_result_image__" not in parsed
         assert parsed["status"] == "ok"
-        engine._memory.add_image_message.assert_called_once_with(
+        engine.memory.add_image_message.assert_called_once_with(
             base64_data="abc", mime_type="image/png", detail="auto",
         )
 
     def test_no_injection_without_marker(self) -> None:
-        """无 _image_injection 时不触发注入。"""
+        """无 __tool_result_image__ 时不触发注入。"""
         dispatcher, engine = self._make_dispatcher()
         result = json.dumps({"status": "ok", "data": "test"})
         cleaned = dispatcher._try_inject_image(result)
         assert cleaned == result
-        engine._memory.add_image_message.assert_not_called()
+        engine.memory.add_image_message.assert_not_called()
 
     def test_no_injection_for_non_json(self) -> None:
         """非 JSON 字符串不触发注入。"""
         dispatcher, engine = self._make_dispatcher()
         cleaned = dispatcher._try_inject_image("not json")
         assert cleaned == "not json"
-        engine._memory.add_image_message.assert_not_called()
+        engine.memory.add_image_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_call_registry_tool_injects_before_truncate(self) -> None:
-        """read_image 结果应先注入 _image_injection 再截断，避免截断破坏 JSON。"""
+        """read_image 结果应先注入 __tool_result_image__ 再截断，避免截断破坏 JSON。"""
         from unittest.mock import MagicMock
 
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
@@ -152,7 +164,7 @@ class TestTryInjectImage:
         payload = json.dumps({
             "status": "ok",
             "hint": "图片已加载",
-            "_image_injection": {
+            "__tool_result_image__": {
                 "base64": "A" * 5000,
                 "mime_type": "image/png",
                 "detail": "auto",
@@ -168,8 +180,18 @@ class TestTryInjectImage:
 
         engine = MagicMock()
         engine._registry = registry
-        engine._memory = MagicMock()
+        engine.registry = registry
+        engine.memory = MagicMock()
         engine._persistent_memory = None
+        engine._database = None
+        engine.config = MagicMock()
+        engine.config.code_policy_enabled = False
+        engine.state = MagicMock()
+        engine.approval = MagicMock()
+        engine.approval.is_audit_only_tool = MagicMock(return_value=False)
+        engine.approval.is_high_risk_tool = MagicMock(return_value=False)
+        engine.full_access_enabled = False
+        engine._plan_intercept_task_create = False
 
         dispatcher = ToolDispatcher(engine)
         out = await dispatcher.call_registry_tool(
@@ -180,8 +202,8 @@ class TestTryInjectImage:
         # 截断后依然应是可解析 JSON 且已移除注入字段
         parsed = json.loads(out)
         assert parsed["status"] == "ok"
-        assert "_image_injection" not in parsed
-        engine._memory.add_image_message.assert_called_once()
+        assert "__tool_result_image__" not in parsed
+        engine.memory.add_image_message.assert_called_once()
 
 
 _BASIC_SPEC = {

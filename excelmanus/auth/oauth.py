@@ -1,4 +1,4 @@
-"""OAuth2 helpers for GitHub and Google login."""
+"""OAuth2 辅助工具：GitHub 和 Google 登录。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_oauth_proxy() -> str | None:
-    """Read optional SOCKS5/HTTP proxy for OAuth requests (e.g. Google from China)."""
+    """读取可选的 SOCKS5/HTTP 代理，用于 OAuth 请求（如中国地区访问 Google）。"""
     return os.environ.get("EXCELMANUS_OAUTH_PROXY") or None
 
 
@@ -61,7 +61,7 @@ async def github_exchange_code(code: str) -> OAuthUserInfo | None:
         return None
 
     async with httpx.AsyncClient(timeout=15) as client:
-        # Exchange code for access token
+        # 用授权码换取访问令牌
         resp = await client.post(
             GITHUB_TOKEN_URL,
             json={
@@ -84,13 +84,13 @@ async def github_exchange_code(code: str) -> OAuthUserInfo | None:
 
         headers = {"Authorization": f"Bearer {access_token}"}
 
-        # Fetch user profile
+        # 获取用户资料
         user_resp = await client.get(GITHUB_USER_URL, headers=headers)
         if user_resp.status_code != 200:
             return None
         user_data = user_resp.json()
 
-        # Fetch primary email
+        # 获取主邮箱
         email = user_data.get("email")
         if not email:
             emails_resp = await client.get(GITHUB_EMAILS_URL, headers=headers)

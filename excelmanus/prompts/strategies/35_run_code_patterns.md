@@ -316,7 +316,22 @@ while r <= ws.max_row:
 
 ## 图片表格复刻工作流
 
-当用户提供图片并要求复刻表格时，遵循以下流程：
+当用户提供图片并要求复刻表格时，**优先使用自动化流水线**：
+
+### 推荐：自动化流水线
+
+1. **提取结构**：用 `extract_table_spec` 从图片自动提取 ReplicaSpec JSON
+   - 自动识别表格结构、数据、样式（两阶段 VLM 调用）
+   - 支持多表格检测（每个表格生成独立 Sheet）
+   - 输出到 `outputs/replica_spec.json`
+2. **编译 Excel**：用 `rebuild_excel_from_spec` 从 spec 编译为 Excel 文件
+3. **验证**：用 `verify_excel_replica` 验证一致性，生成差异报告
+4. **人工修正**：根据验证报告用 `run_code` 修正差异
+5. **交付**：将构建结果和已知差异汇总到 finish_task 的 summary 中
+
+### 降级：手动模式
+
+当 `extract_table_spec` 失败（VLM 不可用等）时，回退到手动模式：
 
 1. **读取图片**：用 `read_image` 加载图片。系统会自动处理：
    - 若主模型支持视觉（C 通道）：图片注入对话上下文，你可以直接看到图片

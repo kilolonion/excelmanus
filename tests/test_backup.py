@@ -1,4 +1,4 @@
-"""Backup 沙盒模式单元测试。"""
+"""WorkspaceTransaction 单元测试（原 BackupManager 测试的迁移版本）。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from excelmanus.backup import BackupManager
+from excelmanus.workspace import WorkspaceTransaction
 
 
 @pytest.fixture
@@ -19,111 +19,126 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def manager(workspace: Path) -> BackupManager:
-    return BackupManager(workspace_root=str(workspace))
+def tx(workspace: Path) -> WorkspaceTransaction:
+    staging = workspace / "outputs" / "backups"
+    return WorkspaceTransaction(
+        workspace_root=workspace,
+        staging_dir=staging,
+        tx_id="test-tx",
+    )
 
 
-class TestEnsureBackup:
-    def test_first_touch_copies_file(self, manager: BackupManager, workspace: Path):
+class TestStageForWrite:
+    def test_first_touch_copies_file(self, tx: WorkspaceTransaction, workspace: Path):
         original = workspace / "data" / "销售.xlsx"
-        backup_path = manager.ensure_backup(str(original))
-        assert Path(backup_path).exists()
-        assert Path(backup_path).read_bytes() == b"fake-excel-content"
-        assert "outputs/backups/" in backup_path
-        # 原始文件仍存在
+        staged_path = tx.stage_for_write(str(original))
+        assert Path(staged_path).exists()
+        assert Path(staged_path).read_bytes() == b"fake-excel-content"
+        assert "outputs/backups/" in staged_path
         assert original.exists()
 
-    def test_second_touch_returns_cached(self, manager: BackupManager, workspace: Path):
+    def test_second_touch_returns_cached(self, tx: WorkspaceTransaction, workspace: Path):
         original = str(workspace / "data" / "销售.xlsx")
-        first = manager.ensure_backup(original)
-        second = manager.ensure_backup(original)
+        first = tx.stage_for_write(original)
+        second = tx.stage_for_write(original)
         assert first == second
 
-    def test_nonexistent_file_returns_original_path(self, manager: BackupManager, workspace: Path):
-        """目标文件不存在时，返回原路径（不创建虚假备份映射）。"""
+    def test_nonexistent_file_returns_original_path(self, tx: WorkspaceTransaction, workspace: Path):
+        """目标文件不存在时，返回原路径（不创建虚假映射）。"""
         new_file = str(workspace / "new_report.xlsx")
-        result_path = manager.ensure_backup(new_file)
+        result_path = tx.stage_for_write(new_file)
         assert "outputs/backups/" not in result_path
         assert result_path == str(Path(new_file).resolve())
 
-    def test_outside_workspace_rejected(self, manager: BackupManager):
+    def test_outside_workspace_rejected(self, tx: WorkspaceTransaction):
         with pytest.raises(ValueError, match="工作区外"):
-            manager.ensure_backup("/tmp/outside.xlsx")
+            tx.stage_for_write("/tmp/outside.xlsx")
 
 
-class TestResolvePath:
-    def test_returns_backup_if_exists(self, manager: BackupManager, workspace: Path):
+class TestResolveRead:
+    def test_returns_staged_if_exists(self, tx: WorkspaceTransaction, workspace: Path):
         original = str(workspace / "data" / "销售.xlsx")
-        backup = manager.ensure_backup(original)
-        assert manager.resolve_path(original) == backup
+        staged = tx.stage_for_write(original)
+        assert tx.resolve_read(original) == staged
 
-    def test_returns_original_if_no_backup(self, manager: BackupManager, workspace: Path):
+    def test_returns_original_if_not_staged(self, tx: WorkspaceTransaction, workspace: Path):
         original = str(workspace / "data" / "销售.xlsx")
-        assert manager.resolve_path(original) == original
+        assert tx.resolve_read(original) == original
 
 
-class TestApplyAll:
-    def test_apply_copies_back(self, manager: BackupManager, workspace: Path):
+class TestCommitAll:
+    def test_commit_copies_back(self, tx: WorkspaceTransaction, workspace: Path):
         original = workspace / "data" / "销售.xlsx"
-        backup_path = manager.ensure_backup(str(original))
-        # 修改备份
-        Path(backup_path).write_bytes(b"modified-content")
-        results = manager.apply_all()
+        staged_path = tx.stage_for_write(str(original))
+        Path(staged_path).write_bytes(b"modified-content")
+        results = tx.commit_all()
         assert len(results) == 1
         assert original.read_bytes() == b"modified-content"
 
-    def test_apply_new_file(self, manager: BackupManager, workspace: Path):
+    def test_commit_new_file(self, tx: WorkspaceTransaction, workspace: Path):
         new_file = workspace / "new.xlsx"
-        backup_path = manager.ensure_backup(str(new_file))
-        Path(backup_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(backup_path).write_bytes(b"new-content")
-        manager.apply_all()
+        staged_path = tx.stage_for_write(str(new_file))
+        Path(staged_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(staged_path).write_bytes(b"new-content")
+        tx.commit_all()
         assert new_file.read_bytes() == b"new-content"
 
 
-class TestListBackups:
-    def test_empty_initially(self, manager: BackupManager):
-        assert manager.list_backups() == []
+class TestListStaged:
+    def test_empty_initially(self, tx: WorkspaceTransaction):
+        assert tx.list_staged() == []
 
-    def test_lists_after_ensure(self, manager: BackupManager, workspace: Path):
-        manager.ensure_backup(str(workspace / "data" / "销售.xlsx"))
-        backups = manager.list_backups()
-        assert len(backups) == 1
-        assert backups[0]["original"].endswith("销售.xlsx")
+    def test_lists_after_stage(self, tx: WorkspaceTransaction, workspace: Path):
+        tx.stage_for_write(str(workspace / "data" / "销售.xlsx"))
+        staged = tx.list_staged()
+        assert len(staged) == 1
+        assert staged[0]["original"].endswith("销售.xlsx")
 
 
 class TestScope:
     def test_excel_only_skips_txt(self, workspace: Path):
         txt = workspace / "notes.txt"
         txt.write_text("hello")
-        mgr = BackupManager(workspace_root=str(workspace), scope="excel_only")
-        result = mgr.ensure_backup(str(txt))
+        staging = workspace / "outputs" / "backups"
+        tx = WorkspaceTransaction(
+            workspace_root=workspace,
+            staging_dir=staging,
+            tx_id="scope-test",
+            scope="excel_only",
+        )
+        result = tx.stage_for_write(str(txt))
         assert result == str(txt.resolve())
 
-    def test_excel_only_backs_up_xlsx(self, workspace: Path):
-        mgr = BackupManager(workspace_root=str(workspace), scope="excel_only")
-        result = mgr.ensure_backup(str(workspace / "data" / "销售.xlsx"))
+    def test_excel_only_stages_xlsx(self, workspace: Path):
+        staging = workspace / "outputs" / "backups"
+        tx = WorkspaceTransaction(
+            workspace_root=workspace,
+            staging_dir=staging,
+            tx_id="scope-test",
+            scope="excel_only",
+        )
+        result = tx.stage_for_write(str(workspace / "data" / "销售.xlsx"))
         assert "outputs/backups/" in result
 
 
-class TestDiscard:
-    def test_discard_clears_mapping(self, manager: BackupManager, workspace: Path):
-        manager.ensure_backup(str(workspace / "data" / "销售.xlsx"))
-        manager.discard_all()
-        assert manager.list_backups() == []
+class TestRollback:
+    def test_rollback_all_clears_mapping(self, tx: WorkspaceTransaction, workspace: Path):
+        tx.stage_for_write(str(workspace / "data" / "销售.xlsx"))
+        tx.rollback_all()
+        assert tx.list_staged() == []
 
 
-class TestBackupPathRedirection:
+class TestPathRedirection:
     """测试路径重定向逻辑。"""
 
-    def test_redirect_write_tool(self, manager: BackupManager, workspace: Path):
+    def test_redirect_write(self, tx: WorkspaceTransaction, workspace: Path):
         original = str(workspace / "data" / "销售.xlsx")
-        backup = manager.ensure_backup(original)
-        assert backup != original
-        assert "outputs/backups" in backup
+        staged = tx.stage_for_write(original)
+        assert staged != original
+        assert "outputs/backups" in staged
 
-    def test_redirect_read_tool_after_write(self, manager: BackupManager, workspace: Path):
+    def test_redirect_read_after_write(self, tx: WorkspaceTransaction, workspace: Path):
         original = str(workspace / "data" / "销售.xlsx")
-        backup = manager.ensure_backup(original)
-        resolved = manager.resolve_path(original)
-        assert resolved == backup
+        staged = tx.stage_for_write(original)
+        resolved = tx.resolve_read(original)
+        assert resolved == staged

@@ -52,7 +52,8 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
     ),
     ControlCommandSpec(
         command="/backup",
-        description="备份沙盒控制",
+        description="工作区事务控制（备份沙盒）",
+        aliases=("/workspace",),
         arguments=("status", "on", "off", "apply", "list"),
     ),
     ControlCommandSpec(

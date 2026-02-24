@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from excelmanus.security import FileAccessGuard, SecurityViolationError
+from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
 
 _guard: FileAccessGuard | None = None
@@ -16,6 +17,10 @@ _MAX_SIZE_BYTES = 20_000_000
 
 
 def _get_guard() -> FileAccessGuard:
+    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
+    ctx_guard = _get_ctx_guard()
+    if ctx_guard is not None:
+        return ctx_guard
     global _guard
     if _guard is None:
         _guard = FileAccessGuard(".")
@@ -83,7 +88,7 @@ def read_image(*, file_path: str, detail: str = "auto") -> str:
             "size_bytes": size,
             "file_path": str(path),
             "hint": "图片已加载到视觉上下文，你现在可以看到这张图片。",
-            "_image_injection": {
+            "__tool_result_image__": {
                 "base64": b64,
                 "mime_type": mime,
                 "detail": detail,
@@ -180,6 +185,17 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
     # 删除默认 sheet
     if wb.sheetnames:
         del wb[wb.sheetnames[0]]
+
+    # 应用 WorkbookSpec 全局默认字体（替换 openpyxl 内置的 Calibri 11pt）
+    if spec.workbook and spec.workbook.default_font:
+        df = spec.workbook.default_font
+        wb._fonts[0] = Font(
+            name=df.name or "Calibri",
+            size=df.size or 11,
+            bold=df.bold or False,
+            italic=df.italic or False,
+            color=df.color.lstrip("#") if df.color else None,
+        )
 
     cells_written = 0
     styles_applied = 0
@@ -298,7 +314,7 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
         # 构建 spec 中有值的 cell 地址集合
         from openpyxl.utils import range_boundaries
 
-        valued_cells: dict[str, str] = {}  # address → value repr
+        valued_cells: dict[str, str] = {}  # 地址 → 值的 repr
         for cs in sheet_spec.cells:
             if cs.value is not None and cs.value_type != "empty":
                 valued_cells[cs.address.upper()] = repr(cs.value)
@@ -570,7 +586,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=read_image,
-            max_result_chars=500,
+            max_result_chars=2000,  # 注入后 base64 已移除，仅剩元数据
             write_effect="none",
         ),
         ToolDef(
@@ -620,5 +636,37 @@ def get_tools() -> list[ToolDef]:
             },
             func=verify_excel_replica,
             write_effect="workspace_write",
+        ),
+        ToolDef(
+            name="extract_table_spec",
+            description=(
+                "从图片中自动提取表格结构和样式，生成 ReplicaSpec JSON 文件。"
+                "支持多表格检测（每个表格生成独立 Sheet）。"
+                "这是图片→Excel 复刻流水线的自动化第一步。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "图片文件路径",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "输出 ReplicaSpec JSON 路径",
+                        "default": "outputs/replica_spec.json",
+                    },
+                    "skip_style": {
+                        "type": "boolean",
+                        "description": "跳过样式提取（仅提取数据结构，速度更快）",
+                        "default": False,
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=lambda **kw: json.dumps({"__extract_pending__": True}),
+            write_effect="workspace_write",
+            max_result_chars=5000,
         ),
     ]

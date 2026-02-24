@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
+
+from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -18,8 +20,18 @@ class ApprovalStore:
     此处仅持久化元数据。
     """
 
-    def __init__(self, database: "Database") -> None:
-        self._conn = database.conn
+    @overload
+    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+
+    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+        if isinstance(conn, ConnectionAdapter):
+            self._conn = conn
+        else:
+            self._conn = conn.conn
+        self._user_id = user_id
+        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     def save(self, record: dict[str, Any]) -> None:
         """保存或更新审批记录（upsert）。"""
@@ -30,8 +42,8 @@ class ApprovalStore:
             "  result_preview, error_type, error_message, partial_scan,"
             "  audit_dir, manifest_file, patch_file,"
             "  repo_diff_before, repo_diff_after,"
-            "  changes, binary_snapshots"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  changes, binary_snapshots, user_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record["id"],
                 record.get("tool_name", ""),
@@ -52,6 +64,7 @@ class ApprovalStore:
                 record.get("repo_diff_after"),
                 json.dumps(record.get("changes", []), ensure_ascii=False),
                 json.dumps(record.get("binary_snapshots", []), ensure_ascii=False),
+                self._user_id,
             ),
         )
         self._conn.commit()
@@ -59,7 +72,8 @@ class ApprovalStore:
     def get(self, approval_id: str) -> dict[str, Any] | None:
         """按 ID 获取审批记录。"""
         row = self._conn.execute(
-            "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            f"SELECT * FROM approvals WHERE id = ? AND {self._uid_clause}",
+            (approval_id, *self._uid_params),
         ).fetchone()
         if row is None:
             return None
@@ -74,15 +88,15 @@ class ApprovalStore:
         """列出审批记录，可按状态过滤。"""
         if status:
             rows = self._conn.execute(
-                "SELECT * FROM approvals WHERE execution_status = ? "
+                f"SELECT * FROM approvals WHERE execution_status = ? AND {self._uid_clause} "
                 "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
-                (status, limit, offset),
+                (status, *self._uid_params, limit, offset),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM approvals "
+                f"SELECT * FROM approvals WHERE {self._uid_clause} "
                 "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                (*self._uid_params, limit, offset),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 

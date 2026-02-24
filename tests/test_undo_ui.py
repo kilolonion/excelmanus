@@ -114,6 +114,7 @@ def test_undo_command_no_args_shows_list(tmp_path: Path) -> None:
 
     engine = MagicMock()
     engine._approval = manager
+    engine.approval = manager
 
     handler = CommandHandler(engine)
     result = handler._handle_undo_command(["/undo"])
@@ -131,6 +132,7 @@ def test_undo_command_list_arg(tmp_path: Path) -> None:
 
     engine = MagicMock()
     engine._approval = manager
+    engine.approval = manager
 
     handler = CommandHandler(engine)
     result = handler._handle_undo_command(["/undo", "list"])
@@ -147,6 +149,7 @@ def test_undo_command_with_id_performs_undo(tmp_path: Path) -> None:
 
     engine = MagicMock()
     engine._approval = manager
+    engine.approval = manager
 
     handler = CommandHandler(engine)
     result = handler._handle_undo_command(["/undo", aid])
@@ -161,6 +164,7 @@ def test_undo_command_empty_history(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     engine = MagicMock()
     engine._approval = manager
+    engine.approval = manager
 
     handler = CommandHandler(engine)
     result = handler._handle_undo_command(["/undo"])

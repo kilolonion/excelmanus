@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 _PREFIX = "mcp_"
 
-# prefixed_name -> (normalized_server_name, original_tool_name)
+# prefixed_name -> (normalized_server_name, original_tool_name) 的映射注册表
 _prefix_registry: dict[str, tuple[str, str]] = {}
 
 

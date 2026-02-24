@@ -1,7 +1,7 @@
-"""Rate limiting for multi-user API endpoints.
+"""多用户 API 端点的速率限制。
 
-Uses an in-memory sliding window counter. For production deployments
-with multiple workers, switch to Redis-backed storage.
+使用内存滑动窗口计数器。生产环境多 worker 部署时，
+应切换为 Redis 后端存储。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _WindowEntry:
-    """Tracks request timestamps in a sliding window."""
+    """在滑动窗口中追踪请求时间戳。"""
     timestamps: list[float] = field(default_factory=list)
 
     def count_in_window(self, window_seconds: float) -> int:
@@ -32,7 +32,7 @@ class _WindowEntry:
 
 
 class RateLimiter:
-    """In-memory per-user rate limiter with configurable limits."""
+    """基于内存的按用户速率限制器，支持可配置的限制参数。"""
 
     def __init__(
         self,
@@ -50,7 +50,7 @@ class RateLimiter:
         self._chat: dict[str, _WindowEntry] = defaultdict(_WindowEntry)
 
     def check_general(self, user_id: str) -> None:
-        """Check general API rate limit. Raises 429 if exceeded."""
+        """检查通用 API 速率限制。超限时抛出 429。"""
         entry = self._general[user_id]
         if entry.count_in_window(60) >= self._rpm:
             raise HTTPException(
@@ -65,7 +65,7 @@ class RateLimiter:
         entry.record()
 
     def check_chat(self, user_id: str) -> None:
-        """Check chat-specific rate limit. Raises 429 if exceeded."""
+        """检查对话专用速率限制。超限时抛出 429。"""
         entry = self._chat[user_id]
         if entry.count_in_window(60) >= self._cpm:
             raise HTTPException(
@@ -80,9 +80,9 @@ class RateLimiter:
         entry.record()
 
     def check_send_code(self, email: str) -> None:
-        """Check email code-sending rate limit (keyed by email address).
+        """检查邮件验证码发送速率限制（按邮箱地址限流）。
 
-        Limits: 1 per minute, 5 per hour.
+        限制：每分钟 1 次，每小时 5 次。
         """
         entry = self._general[f"send_code:{email.lower()}"]
         if entry.count_in_window(60) >= 1:
@@ -98,7 +98,7 @@ class RateLimiter:
         entry.record()
 
     def cleanup_stale(self, max_age_seconds: float = 7200) -> int:
-        """Remove entries with no recent activity. Returns count removed."""
+        """移除无近期活动的条目。返回移除数量。"""
         now = time.monotonic()
         removed = 0
         for store in (self._general, self._chat):

@@ -1,6 +1,6 @@
-"""User persistence layer — supports SQLite and PostgreSQL backends.
+"""用户持久化层 — 支持 SQLite 和 PostgreSQL 后端。
 
-Provides CRUD for users, integrating with the existing Database class.
+提供用户 CRUD 操作，集成现有的 Database 类。
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ _SQLITE_USERS_DDL = [
         llm_model        TEXT,
         daily_token_limit   INTEGER DEFAULT 0,
         monthly_token_limit INTEGER DEFAULT 0,
+        allowed_models   TEXT,
         is_active        INTEGER NOT NULL DEFAULT 1,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -75,6 +76,7 @@ _PG_USERS_DDL = [
         llm_model        TEXT,
         daily_token_limit   INTEGER DEFAULT 0,
         monthly_token_limit INTEGER DEFAULT 0,
+        allowed_models   TEXT,
         is_active        INTEGER NOT NULL DEFAULT 1,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -103,7 +105,7 @@ _PG_USERS_DDL = [
 
 
 class UserStore:
-    """User storage supporting SQLite and PostgreSQL backends."""
+    """用户存储，支持 SQLite 和 PostgreSQL 后端。"""
 
     def __init__(self, db: "Database") -> None:
         self._conn = db.conn
@@ -115,8 +117,22 @@ class UserStore:
         for ddl in ddl_list:
             self._conn.execute(ddl)
         self._conn.commit()
+        # 迁移：为已有数据库添加 allowed_models 列
+        self._migrate_allowed_models()
 
     # ── CRUD ───────────────────────────────────────────────
+
+    def _migrate_allowed_models(self) -> None:
+        """为已有数据库添加 allowed_models 列（幂等）。"""
+        try:
+            self._conn.execute("SELECT allowed_models FROM users LIMIT 1")
+        except Exception:
+            try:
+                self._conn.execute("ALTER TABLE users ADD COLUMN allowed_models TEXT")
+                self._conn.commit()
+                logger.info("迁移：已添加 users.allowed_models 列")
+            except Exception:
+                pass  # 列已存在或其他错误
 
     def create_user(self, user: UserRecord) -> UserRecord:
         self._conn.execute(
@@ -125,13 +141,15 @@ class UserStore:
                 oauth_provider, oauth_id, avatar_url,
                 llm_api_key, llm_base_url, llm_model,
                 daily_token_limit, monthly_token_limit,
+                allowed_models,
                 is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user.id, user.email, user.display_name, user.password_hash,
                 user.role, user.oauth_provider, user.oauth_id, user.avatar_url,
                 user.llm_api_key, user.llm_base_url, user.llm_model,
                 user.daily_token_limit, user.monthly_token_limit,
+                user.allowed_models,
                 1 if user.is_active else 0,
                 user.created_at, user.updated_at,
             ),
@@ -198,7 +216,7 @@ class UserStore:
             ).fetchone()
         return row is not None
 
-    # ── Token usage tracking ──────────────────────────────
+    # ── 令牌用量追踪 ──────────────────────────────
 
     def record_token_usage(self, user_id: str, tokens: int) -> None:
         today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
@@ -230,7 +248,7 @@ class UserStore:
         ).fetchone()
         return row["total"] if row else 0  # type: ignore[index]
 
-    # ── Email verification ────────────────────────────────
+    # ── 邮箱验证 ────────────────────────────────
 
     @staticmethod
     def _generate_code(length: int = 6) -> str:
@@ -242,7 +260,7 @@ class UserStore:
         purpose: str,
         expires_minutes: int = 10,
     ) -> tuple[str, str]:
-        """Create a new verification record. Returns (id, code)."""
+        """创建新的验证记录。返回 (id, code)。"""
         code = self._generate_code()
         vid = str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
@@ -259,7 +277,7 @@ class UserStore:
     def get_valid_verification(
         self, email: str, code: str, purpose: str
     ) -> dict | None:
-        """Return verification record if code is valid and not expired/used."""
+        """返回有效且未过期/未使用的验证记录。"""
         now = datetime.now(tz=timezone.utc).isoformat()
         row = self._conn.execute(
             """SELECT * FROM email_verifications
@@ -279,7 +297,7 @@ class UserStore:
         self._conn.commit()
 
     def invalidate_verifications(self, email: str, purpose: str) -> None:
-        """Mark all unused verifications for this email+purpose as used (prevents reuse)."""
+        """将该邮箱+用途的所有未使用验证记录标记为已使用（防止重用）。"""
         used_at = datetime.now(tz=timezone.utc).isoformat()
         self._conn.execute(
             """UPDATE email_verifications
@@ -289,7 +307,7 @@ class UserStore:
         )
         self._conn.commit()
 
-    # ── Helpers ────────────────────────────────────────────
+    # ── 辅助方法 ────────────────────────────────────────────
 
     @staticmethod
     def _row_to_record(row: object) -> UserRecord:

@@ -250,7 +250,7 @@ function _mergeRecoveredExcelState(
     const normalized = _normalizeRecoveredPath(filePath);
     if (!normalized) continue;
     const filename = normalized.split("/").pop() || normalized;
-    excelStore.addRecentFile({ path: normalized, filename });
+    excelStore.addRecentFileIfNotDismissed({ path: normalized, filename });
   }
   if (recoveredDiffs.length === 0) return;
   useExcelStore.setState((state) => {
@@ -284,7 +284,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
     for (const fp of affected_files) {
       if (!fp) continue;
       const filename = fp.split("/").pop() || fp;
-      excelStore.addRecentFile({ path: fp, filename });
+      excelStore.addRecentFileIfNotDismissed({ path: fp, filename });
     }
 
     if (diffs.length > 0) {
@@ -360,7 +360,9 @@ function _restoreAffectedFilesOnMessages(
       if (block.type !== "tool_call" || !block.toolCallId) continue;
       const files = toolCallFileMap.get(block.toolCallId);
       if (files) {
-        for (const f of files) existing.add(f);
+        for (const f of files) {
+          if (f.length <= 260 && !/[\n\r\t]/.test(f)) existing.add(f);
+        }
       }
     }
 
@@ -600,7 +602,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (m.id !== messageId || m.role !== "assistant") return m;
         const existing = new Set(m.affectedFiles ?? []);
         for (const f of files) {
-          if (f) existing.add(f);
+          if (f && f.length <= 260 && !/[\n\r\t]/.test(f)) existing.add(f);
         }
         return { ...m, affectedFiles: Array.from(existing) };
       }),
