@@ -34,7 +34,7 @@ export function SubagentBlock({
           className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
         />
         <Bot className="h-4 w-4 text-muted-foreground shrink-0" />
-        <Badge variant="secondary" className="text-xs font-mono">
+        <Badge variant="secondary" className="text-xs font-mono truncate max-w-[120px] sm:max-w-none">
           {name}
         </Badge>
         {status === "running" ? (
@@ -42,8 +42,11 @@ export function SubagentBlock({
         ) : (
           <CheckCircle2 className="h-3 w-3 shrink-0" style={{ color: "var(--em-primary)" }} />
         )}
-        <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
+        <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap hidden sm:inline">
           {iterations} 轮 · {toolCalls} 工具调用
+        </span>
+        <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap sm:hidden">
+          {iterations}轮·{toolCalls}调用
         </span>
       </button>
       {expanded && (

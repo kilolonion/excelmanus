@@ -97,7 +97,7 @@ export function TopModelSelector() {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" className="gap-1 px-2 h-9 text-base font-semibold">
-          <span className="truncate max-w-[200px]">{displayName}</span>
+          <span className="truncate max-w-[100px] sm:max-w-[200px]">{displayName}</span>
           {switching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
           ) : (

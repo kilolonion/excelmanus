@@ -28,8 +28,8 @@ from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
 _SUMMARY_MAX_CHARS = 4000
 _FULL_MODE_SUMMARY_MAX_CHARS = 12000
-_SUBAGENT_BLOCKED_META_TOOLS = {"activate_skill", "delegate_to_subagent", "list_subagents"}
-_FULL_MODE_BLOCKED_META_TOOLS = {"delegate_to_subagent", "list_subagents"}
+_SUBAGENT_BLOCKED_META_TOOLS = {"activate_skill", "delegate_to_subagent", "parallel_delegate", "list_subagents"}
+_FULL_MODE_BLOCKED_META_TOOLS = {"delegate_to_subagent", "parallel_delegate", "list_subagents"}
 logger = get_logger("subagent.executor")
 
 ToolResultEnricher = Callable[[str, dict[str, Any], str, bool], str]

@@ -353,6 +353,9 @@ class ExcelManusConfig:
     subagent_enabled: bool = True
     subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 6
+    # 同一轮次中相邻只读工具并发执行（asyncio.gather）
+    parallel_readonly_tools: bool = True
+    prefetch_explorer: bool = True
     subagent_user_dir: str = "~/.excelmanus/agents"
     subagent_project_dir: str = ".excelmanus/agents"
     # 跨会话持久记忆配置
@@ -437,6 +440,8 @@ class ExcelManusConfig:
     manifest_semantic_threshold: float = 0.25
     # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
     db_path: str = "~/.excelmanus/excelmanus.db"
+    # PostgreSQL 连接 URL（设置后优先使用 PG，忽略 db_path）
+    database_url: str = ""
     # 聊天记录持久化
     chat_history_enabled: bool = True
     chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
@@ -960,6 +965,16 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SUBAGENT_ENABLED",
         True,
     )
+    parallel_readonly_tools = _parse_bool(
+        os.environ.get("EXCELMANUS_PARALLEL_READONLY_TOOLS"),
+        "EXCELMANUS_PARALLEL_READONLY_TOOLS",
+        True,
+    )
+    prefetch_explorer = _parse_bool(
+        os.environ.get("EXCELMANUS_PREFETCH_EXPLORER"),
+        "EXCELMANUS_PREFETCH_EXPLORER",
+        True,
+    )
     subagent_max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
@@ -1240,6 +1255,7 @@ def load_config() -> ExcelManusConfig:
     db_path = os.environ.get(
         "EXCELMANUS_DB_PATH", "~/.excelmanus/excelmanus.db"
     )
+    database_url = os.environ.get("EXCELMANUS_DATABASE_URL", "")
     chat_history_db_path = os.environ.get(
         "EXCELMANUS_CHAT_HISTORY_DB_PATH", ""
     )
@@ -1285,6 +1301,8 @@ def load_config() -> ExcelManusConfig:
         aux_base_url=aux_base_url,
         aux_model=aux_model,
         subagent_enabled=subagent_enabled,
+        parallel_readonly_tools=parallel_readonly_tools,
+        prefetch_explorer=prefetch_explorer,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
         subagent_user_dir=subagent_user_dir,
@@ -1354,6 +1372,7 @@ def load_config() -> ExcelManusConfig:
         manifest_semantic_top_k=manifest_semantic_top_k,
         manifest_semantic_threshold=manifest_semantic_threshold,
         db_path=db_path,
+        database_url=database_url,
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,

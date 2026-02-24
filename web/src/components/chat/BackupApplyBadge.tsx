@@ -41,7 +41,7 @@ export function BackupApplyBadge() {
           <TooltipTrigger asChild>
             <button
               onClick={() => setPanelOpen(true)}
-              className="relative flex items-center gap-1.5 mr-3 px-2 py-1 rounded-md text-xs font-medium transition-colors hover:bg-muted/50"
+              className="relative flex items-center gap-1 sm:gap-1.5 mr-1 sm:mr-3 px-1.5 sm:px-2 py-1 rounded-md text-xs font-medium transition-colors hover:bg-muted/50"
               style={{ color: "var(--em-primary)" }}
             >
               <Upload className="h-3.5 w-3.5" />

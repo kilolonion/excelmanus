@@ -30,10 +30,26 @@ REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
 
 
 def _get_jwt_secret() -> str:
-    """Lazy-load JWT secret from env; generate a random one if not set."""
+    """Lazy-load JWT secret from env; generate a random one if not set.
+
+    WARNING: If EXCELMANUS_JWT_SECRET is not set, a random secret is generated.
+    This means all tokens are invalidated on every server restart, and
+    multi-worker deployments will fail token validation across workers.
+    Always set EXCELMANUS_JWT_SECRET in production.
+    """
     global _JWT_SECRET_KEY
     if _JWT_SECRET_KEY is None:
-        _JWT_SECRET_KEY = os.environ.get("EXCELMANUS_JWT_SECRET") or secrets.token_urlsafe(64)
+        env_secret = os.environ.get("EXCELMANUS_JWT_SECRET", "").strip()
+        if env_secret:
+            _JWT_SECRET_KEY = env_secret
+        else:
+            import logging
+            logging.getLogger(__name__).warning(
+                "EXCELMANUS_JWT_SECRET 未设置，使用随机密钥。"
+                "服务重启后所有已登录用户的 token 将失效。"
+                "请在生产环境中设置 EXCELMANUS_JWT_SECRET 环境变量。"
+            )
+            _JWT_SECRET_KEY = secrets.token_urlsafe(64)
     return _JWT_SECRET_KEY
 
 

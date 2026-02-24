@@ -827,7 +827,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           e.dataTransfer.dropEffect = "copy";
         }
       }}
-      className={`relative rounded-[24px] border bg-background transition-all duration-200 ${
+      className={`relative rounded-[24px] border bg-background transition-all duration-200 chat-input-ring ${
         isDragActive
           ? "border-[var(--em-primary-light)] bg-[var(--em-primary)]/5 shadow-lg shadow-[var(--em-primary)]/10"
           : "border-border/60 shadow-[0_2px_12px_rgba(0,0,0,0.08)] dark:shadow-[0_2px_12px_rgba(0,0,0,0.3)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.12)] dark:hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.14)] dark:focus-within:shadow-[0_4px_20px_rgba(0,0,0,0.5)] focus-within:border-border"
@@ -888,9 +888,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 <span className="font-medium text-foreground">切换模型</span>
               </>
             )}
-            <span className="ml-auto text-[10px] opacity-60">↑↓ 导航 · Tab 选择 · Esc 关闭</span>
+            <span className="ml-auto text-[10px] opacity-60 hidden sm:inline">↑↓ 导航 · Tab 选择 · Esc 关闭</span>
           </div>
-          <div className="max-h-60 overflow-y-auto py-1">
+          <div className="max-h-48 sm:max-h-60 overflow-y-auto py-1">
             {popoverItems.map((item, i) => {
               const isActive = "isActive" in item && (item as { isActive?: boolean }).isActive;
               const hasChildren = "hasChildren" in item && (item as { hasChildren?: boolean }).hasChildren;
@@ -932,7 +932,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
       {/* File attachment chips */}
       {files.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-14 pt-2.5 pb-0">
+        <div className="flex flex-wrap gap-1.5 px-4 sm:px-14 pt-2.5 pb-0">
           {files.map((f, i) => (
             <span
               key={`${f.name}-${i}`}
@@ -957,7 +957,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         <Button
           variant="ghost"
           size="icon"
-          className="h-9 w-9 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+          className="h-10 w-10 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
           onClick={() => fileInputRef.current?.click()}
         >
           <Plus className="h-5 w-5" />
@@ -1011,7 +1011,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           {isStreaming ? (
             <Button
               size="icon"
-              className="h-9 w-9 rounded-full bg-foreground hover:bg-foreground/80"
+              className="h-10 w-10 rounded-full bg-foreground hover:bg-foreground/80"
               onClick={onStop}
             >
               <Square className="h-3.5 w-3.5 fill-background text-background" />
@@ -1019,7 +1019,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           ) : (
             <Button
               size="icon"
-              className="h-9 w-9 rounded-full text-white transition-opacity"
+              className="h-10 w-10 rounded-full text-white transition-opacity"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleSend}
               disabled={disabled || (!text.trim() && files.length === 0)}

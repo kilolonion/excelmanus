@@ -1,7 +1,6 @@
-"""User persistence layer — SQLite-backed (same unified DB).
+"""User persistence layer — supports SQLite and PostgreSQL backends.
 
 Provides CRUD for users, integrating with the existing Database class.
-Will be swapped to PostgreSQL via SQLAlchemy async in Phase 2.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_USERS_DDL = [
+_SQLITE_USERS_DDL = [
     """CREATE TABLE IF NOT EXISTS users (
         id               TEXT PRIMARY KEY,
         email            TEXT NOT NULL UNIQUE,
@@ -38,7 +37,6 @@ _USERS_DDL = [
     )""",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)",
     "CREATE INDEX IF NOT EXISTS idx_users_oauth ON users(oauth_provider, oauth_id)",
-    # Per-user daily token usage tracking
     """CREATE TABLE IF NOT EXISTS user_token_usage (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -49,16 +47,49 @@ _USERS_DDL = [
     "CREATE INDEX IF NOT EXISTS idx_utu_user_date ON user_token_usage(user_id, date)",
 ]
 
+_PG_USERS_DDL = [
+    """CREATE TABLE IF NOT EXISTS users (
+        id               TEXT PRIMARY KEY,
+        email            TEXT NOT NULL UNIQUE,
+        display_name     TEXT NOT NULL DEFAULT '',
+        password_hash    TEXT,
+        role             TEXT NOT NULL DEFAULT 'user',
+        oauth_provider   TEXT,
+        oauth_id         TEXT,
+        avatar_url       TEXT,
+        llm_api_key      TEXT,
+        llm_base_url     TEXT,
+        llm_model        TEXT,
+        daily_token_limit   INTEGER DEFAULT 0,
+        monthly_token_limit INTEGER DEFAULT 0,
+        is_active        INTEGER NOT NULL DEFAULT 1,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+    "CREATE INDEX IF NOT EXISTS idx_users_oauth ON users(oauth_provider, oauth_id)",
+    """CREATE TABLE IF NOT EXISTS user_token_usage (
+        id          SERIAL PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        date        TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(user_id, date)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_utu_user_date ON user_token_usage(user_id, date)",
+]
+
 
 class UserStore:
-    """SQLite-backed user storage."""
+    """User storage supporting SQLite and PostgreSQL backends."""
 
     def __init__(self, db: "Database") -> None:
         self._conn = db.conn
+        self._is_pg = db.is_pg
         self._ensure_tables()
 
     def _ensure_tables(self) -> None:
-        for ddl in _USERS_DDL:
+        ddl_list = _PG_USERS_DDL if self._is_pg else _SQLITE_USERS_DDL
+        for ddl in ddl_list:
             self._conn.execute(ddl)
         self._conn.commit()
 
@@ -92,9 +123,14 @@ class UserStore:
         return self._row_to_record(row) if row else None
 
     def get_by_email(self, email: str) -> UserRecord | None:
-        row = self._conn.execute(
-            "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)
-        ).fetchone()
+        if self._is_pg:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE LOWER(email) = LOWER(%s)", (email,)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)
+            ).fetchone()
         return self._row_to_record(row) if row else None
 
     def get_by_oauth(self, provider: str, oauth_id: str) -> UserRecord | None:
@@ -126,12 +162,17 @@ class UserStore:
 
     def count_users(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) as c FROM users WHERE is_active = 1").fetchone()
-        return row["c"] if row else 0
+        return row["c"] if row else 0  # type: ignore[index]
 
     def email_exists(self, email: str) -> bool:
-        row = self._conn.execute(
-            "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE", (email,)
-        ).fetchone()
+        if self._is_pg:
+            row = self._conn.execute(
+                "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s)", (email,)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE", (email,)
+            ).fetchone()
         return row is not None
 
     # ── Token usage tracking ──────────────────────────────
@@ -142,7 +183,7 @@ class UserStore:
             """INSERT INTO user_token_usage (user_id, date, tokens_used)
                VALUES (?, ?, ?)
                ON CONFLICT(user_id, date)
-               DO UPDATE SET tokens_used = tokens_used + ?""",
+               DO UPDATE SET tokens_used = user_token_usage.tokens_used + ?""",
             (user_id, today, tokens, tokens),
         )
         self._conn.commit()
@@ -154,7 +195,7 @@ class UserStore:
             "SELECT tokens_used FROM user_token_usage WHERE user_id = ? AND date = ?",
             (user_id, date),
         ).fetchone()
-        return row["tokens_used"] if row else 0
+        return row["tokens_used"] if row else 0  # type: ignore[index]
 
     def get_monthly_usage(self, user_id: str, year_month: str | None = None) -> int:
         if year_month is None:
@@ -164,7 +205,7 @@ class UserStore:
             "WHERE user_id = ? AND date LIKE ?",
             (user_id, f"{year_month}%"),
         ).fetchone()
-        return row["total"] if row else 0
+        return row["total"] if row else 0  # type: ignore[index]
 
     # ── Helpers ────────────────────────────────────────────
 

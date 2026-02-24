@@ -1,4 +1,4 @@
-"""统一 SQLite 连接管理与 schema 迁移。"""
+"""统一数据库连接管理与 schema 迁移（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import hashlib
@@ -12,12 +12,19 @@ from typing import Any
 
 import numpy as np
 
+from excelmanus.db_adapter import (
+    Backend,
+    ConnectionAdapter,
+    create_pg_adapter,
+    create_sqlite_adapter,
+)
+
 logger = logging.getLogger(__name__)
 
-# 各版本的增量 DDL。key = 版本号，value = SQL 语句列表。
-_MIGRATIONS: dict[int, list[str]] = {
+# ── SQLite 迁移 DDL ──────────────────────────────────────────
+
+_SQLITE_MIGRATIONS: dict[int, list[str]] = {
     1: [
-        # ── 对话历史（与 chat_history.py 保持一致） ──
         """CREATE TABLE IF NOT EXISTS sessions (
             id            TEXT PRIMARY KEY,
             title         TEXT NOT NULL DEFAULT '',
@@ -35,7 +42,6 @@ _MIGRATIONS: dict[int, list[str]] = {
             created_at  TEXT NOT NULL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)",
-        # ── 持久记忆 ──
         """CREATE TABLE IF NOT EXISTS memory_entries (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             category     TEXT NOT NULL,
@@ -47,7 +53,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_entries(category)",
         "CREATE INDEX IF NOT EXISTS idx_memory_created ON memory_entries(created_at)",
-        # ── 向量记录 ──
         """CREATE TABLE IF NOT EXISTS vector_records (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             content_hash TEXT UNIQUE NOT NULL,
@@ -57,7 +62,6 @@ _MIGRATIONS: dict[int, list[str]] = {
             dimensions   INTEGER NOT NULL DEFAULT 1536,
             created_at   TEXT NOT NULL
         )""",
-        # ── 审批审计 ──
         """CREATE TABLE IF NOT EXISTS approvals (
             id               TEXT PRIMARY KEY,
             tool_name        TEXT NOT NULL,
@@ -83,7 +87,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_approvals_created ON approvals(created_at_utc)",
     ],
     2: [
-        # ── Workspace Manifest 缓存 ──
         """CREATE TABLE IF NOT EXISTS workspace_files (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             workspace    TEXT NOT NULL,
@@ -96,7 +99,6 @@ _MIGRATIONS: dict[int, list[str]] = {
             UNIQUE(workspace, path)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_wf_workspace ON workspace_files(workspace)",
-        # ── 工具调用审计日志 ──
         """CREATE TABLE IF NOT EXISTS tool_call_log (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id     TEXT,
@@ -116,7 +118,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
     ],
     3: [
-        # ── LLM 调用 / Token 用量追踪 ──
         """CREATE TABLE IF NOT EXISTS llm_call_log (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id        TEXT,
@@ -139,7 +140,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_llm_created ON llm_call_log(created_at)",
     ],
     4: [
-        # ── Excel Diff / 改动文件持久化 ──
         """CREATE TABLE IF NOT EXISTS session_excel_diffs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -161,7 +161,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_saf_session ON session_affected_files(session_id)",
     ],
     5: [
-        # ── 会话级自定义规则 ──
         """CREATE TABLE IF NOT EXISTS session_rules (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id   TEXT NOT NULL,
@@ -174,7 +173,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_sr_session ON session_rules(session_id)",
     ],
     6: [
-        # ── Excel Preview 持久化 ──
         """CREATE TABLE IF NOT EXISTS session_excel_previews (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -190,7 +188,6 @@ _MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_sep_session ON session_excel_previews(session_id)",
     ],
     7: [
-        # ── 模型配置持久化 ──
         """CREATE TABLE IF NOT EXISTS model_profiles (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             name        TEXT NOT NULL UNIQUE,
@@ -209,64 +206,293 @@ _MIGRATIONS: dict[int, list[str]] = {
     ],
 }
 
-_LATEST_VERSION = max(_MIGRATIONS.keys())
+# ── PostgreSQL 迁移 DDL ──────────────────────────────────────
+
+_PG_MIGRATIONS: dict[int, list[str]] = {
+    1: [
+        """CREATE TABLE IF NOT EXISTS sessions (
+            id            TEXT PRIMARY KEY,
+            title         TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            status        TEXT DEFAULT 'active'
+        )""",
+        """CREATE TABLE IF NOT EXISTS messages (
+            id          SERIAL PRIMARY KEY,
+            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            role        TEXT NOT NULL,
+            content     TEXT,
+            turn_number INTEGER DEFAULT 0,
+            created_at  TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)",
+        """CREATE TABLE IF NOT EXISTS memory_entries (
+            id           SERIAL PRIMARY KEY,
+            category     TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            source       TEXT DEFAULT '',
+            created_at   TEXT NOT NULL,
+            UNIQUE(category, content_hash)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_entries(category)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_created ON memory_entries(created_at)",
+        """CREATE TABLE IF NOT EXISTS vector_records (
+            id           SERIAL PRIMARY KEY,
+            content_hash TEXT UNIQUE NOT NULL,
+            text         TEXT NOT NULL,
+            metadata     TEXT,
+            vector       BYTEA,
+            dimensions   INTEGER NOT NULL DEFAULT 1536,
+            created_at   TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS approvals (
+            id               TEXT PRIMARY KEY,
+            tool_name        TEXT NOT NULL,
+            arguments        TEXT NOT NULL,
+            tool_scope       TEXT DEFAULT '[]',
+            created_at_utc   TEXT NOT NULL,
+            applied_at_utc   TEXT,
+            execution_status TEXT DEFAULT 'pending',
+            undoable         INTEGER DEFAULT 0,
+            result_preview   TEXT,
+            error_type       TEXT,
+            error_message    TEXT,
+            partial_scan     INTEGER DEFAULT 0,
+            audit_dir        TEXT,
+            manifest_file    TEXT,
+            patch_file       TEXT,
+            repo_diff_before TEXT,
+            repo_diff_after  TEXT,
+            changes          TEXT,
+            binary_snapshots TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(execution_status)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_created ON approvals(created_at_utc)",
+    ],
+    2: [
+        """CREATE TABLE IF NOT EXISTS workspace_files (
+            id           SERIAL PRIMARY KEY,
+            workspace    TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            size_bytes   BIGINT NOT NULL,
+            mtime_ns     BIGINT NOT NULL,
+            sheets_json  TEXT NOT NULL DEFAULT '[]',
+            scanned_at   TEXT NOT NULL,
+            UNIQUE(workspace, path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_wf_workspace ON workspace_files(workspace)",
+        """CREATE TABLE IF NOT EXISTS tool_call_log (
+            id             SERIAL PRIMARY KEY,
+            session_id     TEXT,
+            turn           INTEGER DEFAULT 0,
+            iteration      INTEGER DEFAULT 0,
+            tool_name      TEXT NOT NULL,
+            arguments_hash TEXT,
+            success        INTEGER NOT NULL,
+            duration_ms    DOUBLE PRECISION DEFAULT 0,
+            result_chars   INTEGER DEFAULT 0,
+            error_type     TEXT,
+            error_preview  TEXT,
+            created_at     TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_session ON tool_call_log(session_id, turn)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_tool ON tool_call_log(tool_name, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
+    ],
+    3: [
+        """CREATE TABLE IF NOT EXISTS llm_call_log (
+            id                SERIAL PRIMARY KEY,
+            session_id        TEXT,
+            turn              INTEGER DEFAULT 0,
+            iteration         INTEGER DEFAULT 0,
+            model             TEXT NOT NULL,
+            prompt_tokens     INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            cached_tokens     INTEGER DEFAULT 0,
+            total_tokens      INTEGER DEFAULT 0,
+            has_tool_calls    INTEGER DEFAULT 0,
+            thinking_chars    INTEGER DEFAULT 0,
+            stream            INTEGER DEFAULT 0,
+            latency_ms        DOUBLE PRECISION DEFAULT 0,
+            error             TEXT,
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_llm_session ON llm_call_log(session_id, turn)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_call_log(model, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_llm_created ON llm_call_log(created_at)",
+    ],
+    4: [
+        """CREATE TABLE IF NOT EXISTS session_excel_diffs (
+            id              SERIAL PRIMARY KEY,
+            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            tool_call_id    TEXT NOT NULL,
+            file_path       TEXT NOT NULL,
+            sheet           TEXT DEFAULT '',
+            affected_range  TEXT DEFAULT '',
+            changes_json    TEXT NOT NULL DEFAULT '[]',
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sed_session ON session_excel_diffs(session_id)",
+        """CREATE TABLE IF NOT EXISTS session_affected_files (
+            id           SERIAL PRIMARY KEY,
+            session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            file_path    TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            UNIQUE(session_id, file_path)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_saf_session ON session_affected_files(session_id)",
+    ],
+    5: [
+        """CREATE TABLE IF NOT EXISTS session_rules (
+            id           SERIAL PRIMARY KEY,
+            session_id   TEXT NOT NULL,
+            rule_id      TEXT NOT NULL,
+            content      TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL,
+            UNIQUE(session_id, rule_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sr_session ON session_rules(session_id)",
+    ],
+    6: [
+        """CREATE TABLE IF NOT EXISTS session_excel_previews (
+            id              SERIAL PRIMARY KEY,
+            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            tool_call_id    TEXT NOT NULL UNIQUE,
+            file_path       TEXT NOT NULL,
+            sheet           TEXT DEFAULT '',
+            columns_json    TEXT NOT NULL DEFAULT '[]',
+            rows_json       TEXT NOT NULL DEFAULT '[]',
+            total_rows      INTEGER DEFAULT 0,
+            truncated       INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sep_session ON session_excel_previews(session_id)",
+    ],
+    7: [
+        """CREATE TABLE IF NOT EXISTS model_profiles (
+            id          SERIAL PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            model       TEXT NOT NULL,
+            api_key     TEXT DEFAULT '',
+            base_url    TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS config_kv (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+    ],
+}
+
+_LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())
 
 
 class Database:
-    """统一 SQLite 连接管理，支持增量 schema 迁移。"""
+    """统一数据库连接管理，支持增量 schema 迁移。
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+    支持两种后端：
+    - ``db_path`` → SQLite（默认，向后兼容）
+    - ``database_url`` → PostgreSQL（以 ``postgresql://`` 开头的 URL）
+    """
+
+    def __init__(
+        self,
+        db_path: str = "",
+        *,
+        database_url: str = "",
+    ) -> None:
+        if database_url:
+            self._backend = Backend.POSTGRES
+            self._adapter = create_pg_adapter(database_url)
+            self._db_path = ""
+            self._database_url = database_url
+        else:
+            self._backend = Backend.SQLITE
+            self._adapter = create_sqlite_adapter(db_path)
+            self._db_path = db_path
+            self._database_url = ""
         self._ensure_schema_version_table()
         self._migrate()
 
     @property
-    def conn(self) -> sqlite3.Connection:
-        """返回底层 SQLite 连接。"""
-        return self._conn
+    def conn(self) -> ConnectionAdapter:
+        """返回统一连接适配器。"""
+        return self._adapter
+
+    @property
+    def backend(self) -> str:
+        return self._backend
+
+    @property
+    def is_pg(self) -> bool:
+        return self._backend == Backend.POSTGRES
 
     @property
     def db_path(self) -> str:
-        """返回数据库文件路径。"""
+        """返回数据库文件路径（仅 SQLite 有意义）。"""
         return self._db_path
 
     def close(self) -> None:
         """关闭数据库连接。"""
-        self._conn.close()
+        self._adapter.close()
 
     def _ensure_schema_version_table(self) -> None:
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_version ("
-            "  version INTEGER PRIMARY KEY,"
-            "  applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
-            ")"
-        )
-        self._conn.commit()
+        if self._backend == Backend.SQLITE:
+            self._adapter.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version ("
+                "  version INTEGER PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+                ")"
+            )
+        else:
+            self._adapter.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version ("
+                "  version INTEGER PRIMARY KEY,"
+                "  applied_at TEXT NOT NULL DEFAULT (NOW()::TEXT)"
+                ")"
+            )
+        self._adapter.commit()
 
     def _current_version(self) -> int:
-        row = self._conn.execute(
+        row = self._adapter.execute(
             "SELECT MAX(version) as v FROM schema_version"
         ).fetchone()
-        return row["v"] if row["v"] is not None else 0
+        if row is None:
+            return 0
+        v = row["v"]
+        return v if v is not None else 0
 
     def _migrate(self) -> None:
         current = self._current_version()
         if current >= _LATEST_VERSION:
             return
+        migrations = (
+            _PG_MIGRATIONS if self._backend == Backend.POSTGRES
+            else _SQLITE_MIGRATIONS
+        )
         for version in range(current + 1, _LATEST_VERSION + 1):
-            statements = _MIGRATIONS.get(version, [])
+            statements = migrations.get(version, [])
             for sql in statements:
-                self._conn.execute(sql)
-            self._conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?)", (version,)
-            )
-            self._conn.commit()
-            logger.info("数据库 schema 迁移到 v%d", version)
+                self._adapter.execute(sql)
+            if self._backend == Backend.SQLITE:
+                self._adapter.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (version,),
+                )
+            else:
+                self._adapter.execute(
+                    "INSERT INTO schema_version (version) VALUES (%s)",
+                    (version,),
+                )
+            self._adapter.commit()
+            logger.info("数据库 schema 迁移到 v%d（%s）", version, self._backend)
 
 
 # ── 旧数据迁移工具 ──────────────────────────────────────────
@@ -290,36 +516,31 @@ def migrate_legacy_data(
     audit_dir: str | None = None,
     old_chat_db_path: str | None = None,
 ) -> None:
-    """从旧文件格式迁移数据到统一 SQLite 数据库。
+    """从旧文件格式迁移数据到统一数据库。
 
     各参数均可选，仅传入需要迁移的路径。迁移是幂等的（通过 UNIQUE 约束去重）。
     """
     conn = db.conn
 
-    # 1. 迁移旧 chat_history.db 中的 sessions/messages
     if old_chat_db_path and Path(old_chat_db_path).exists():
         _migrate_chat_history(conn, old_chat_db_path)
 
-    # 2. 迁移 Markdown 记忆文件
     if memory_dir:
         _migrate_memory_files(conn, memory_dir)
 
-    # 3. 迁移 JSONL + npy 向量文件
     if vectors_dir:
         _migrate_vector_files(conn, vectors_dir)
 
-    # 4. 迁移 manifest.json 审批文件
     if audit_dir:
         _migrate_approval_manifests(conn, audit_dir)
 
 
-def _migrate_chat_history(conn: sqlite3.Connection, old_db_path: str) -> None:
+def _migrate_chat_history(conn: ConnectionAdapter, old_db_path: str) -> None:
     """从旧 chat_history.db 复制 sessions 和 messages 数据。"""
     try:
         old_conn = sqlite3.connect(old_db_path)
         old_conn.row_factory = sqlite3.Row
 
-        # 迁移 sessions
         for row in old_conn.execute("SELECT * FROM sessions").fetchall():
             conn.execute(
                 "INSERT OR IGNORE INTO sessions "
@@ -335,7 +556,6 @@ def _migrate_chat_history(conn: sqlite3.Connection, old_db_path: str) -> None:
                 ),
             )
 
-        # 迁移 messages
         for row in old_conn.execute("SELECT * FROM messages").fetchall():
             conn.execute(
                 "INSERT OR IGNORE INTO messages "
@@ -358,7 +578,7 @@ def _migrate_chat_history(conn: sqlite3.Connection, old_db_path: str) -> None:
         logger.warning("迁移旧 chat_history.db 失败", exc_info=True)
 
 
-def _migrate_memory_files(conn: sqlite3.Connection, memory_dir: str) -> None:
+def _migrate_memory_files(conn: ConnectionAdapter, memory_dir: str) -> None:
     """从 Markdown 记忆文件迁移到 memory_entries 表。"""
     mem_path = Path(memory_dir)
     if not mem_path.exists():
@@ -443,7 +663,7 @@ def _parse_markdown_entries(content: str) -> list[dict[str, str]]:
     return entries
 
 
-def _migrate_vector_files(conn: sqlite3.Connection, vectors_dir: str) -> None:
+def _migrate_vector_files(conn: ConnectionAdapter, vectors_dir: str) -> None:
     """从 JSONL + npy 向量文件迁移到 vector_records 表。"""
     vec_path = Path(vectors_dir)
     jsonl_path = vec_path / "vectors.jsonl"
@@ -470,7 +690,6 @@ def _migrate_vector_files(conn: sqlite3.Connection, vectors_dir: str) -> None:
     if not records:
         return
 
-    # 尝试加载向量矩阵
     vectors: np.ndarray | None = None
     if npy_path.exists():
         try:
@@ -498,6 +717,11 @@ def _migrate_vector_files(conn: sqlite3.Connection, vectors_dir: str) -> None:
             vec_blob = vec.tobytes()
             dimensions = vec.shape[0]
 
+        # 对 PG，需要用 psycopg2.Binary 包装 bytes
+        if conn.is_pg and vec_blob is not None:
+            import psycopg2
+            vec_blob = psycopg2.Binary(vec_blob)  # type: ignore[assignment]
+
         try:
             conn.execute(
                 "INSERT OR IGNORE INTO vector_records "
@@ -521,7 +745,7 @@ def _migrate_vector_files(conn: sqlite3.Connection, vectors_dir: str) -> None:
         logger.info("已从 JSONL 文件迁移 %d 条向量记录", migrated)
 
 
-def _migrate_approval_manifests(conn: sqlite3.Connection, audit_dir: str) -> None:
+def _migrate_approval_manifests(conn: ConnectionAdapter, audit_dir: str) -> None:
     """从 manifest.json 审批文件迁移到 approvals 表。"""
     audit_path = Path(audit_dir)
     if not audit_path.exists():
