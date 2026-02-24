@@ -175,7 +175,7 @@ export function SessionStatusBar() {
   return (
     <>
       <TooltipProvider delayDuration={300}>
-        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5 md:gap-3 text-[11px] text-muted-foreground">
           {/* ── Compaction Bar ── */}
           {c.enabled && c.max_tokens > 0 && (
             <Tooltip>
@@ -198,7 +198,7 @@ export function SessionStatusBar() {
                       <Shrink className="h-3 w-3 flex-shrink-0" />
                     )}
                   </Button>
-                  <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
+                  <div className="w-14 md:w-20 h-1.5 rounded-full bg-muted overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all ${usageColor(c.usage_ratio, c.threshold_ratio)}`}
                       style={{ width: `${Math.min(c.usage_ratio * 100, 100)}%` }}

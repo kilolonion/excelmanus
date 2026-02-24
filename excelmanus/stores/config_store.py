@@ -1,4 +1,4 @@
-"""ConfigStore：基于 SQLite 的模型配置与运行时状态存储。"""
+"""ConfigStore：模型配置与运行时状态存储（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigStore:
-    """SQLite 后端的模型 profile 管理与 KV 配置存储。"""
+    """模型 profile 管理与 KV 配置存储（支持 SQLite / PostgreSQL）。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn

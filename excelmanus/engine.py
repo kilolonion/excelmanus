@@ -56,6 +56,7 @@ from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
+from excelmanus.engine_core.prefetch_orchestrator import PrefetchOrchestrator
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
@@ -77,7 +78,7 @@ if TYPE_CHECKING:
 logger = get_logger("engine")
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "ask_user", "delegate_to_subagent",
-    "memory_save", "memory_read_topic",
+    "parallel_delegate", "memory_save", "memory_read_topic",
 )
 _ALWAYS_AVAILABLE_TOOLS_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS)
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
@@ -297,6 +298,7 @@ def _normalize_tool_calls(raw_tool_calls: Any) -> list[Any]:
             normalized.append(
                 SimpleNamespace(
                     id=str(item.get("id", "") or ""),
+                    type=item.get("type", "function"),
                     function=function_obj,
                 )
             )
@@ -525,6 +527,39 @@ class _AuditedExecutionError(Exception):
         super().__init__(str(cause))
         self.cause = cause
         self.record = record
+
+
+@dataclass
+class _ToolCallBatch:
+    """一组连续的工具调用，标记是否可并行执行。"""
+
+    tool_calls: list[Any]
+    parallel: bool
+
+
+def _split_tool_call_batches(
+    tool_calls: list[Any],
+    parallelizable_names: frozenset[str],
+) -> list[_ToolCallBatch]:
+    """将 tool_calls 拆分为连续的并行/串行批次。
+
+    相邻的可并行工具合并为一个 parallel batch（≥2 个时标记 parallel=True），
+    非并行工具各自独立为 sequential batch。
+    """
+    batches: list[_ToolCallBatch] = []
+    current_parallel: list[Any] = []
+    for tc in tool_calls:
+        name = getattr(getattr(tc, "function", None), "name", "")
+        if name in parallelizable_names:
+            current_parallel.append(tc)
+        else:
+            if current_parallel:
+                batches.append(_ToolCallBatch(current_parallel, len(current_parallel) > 1))
+                current_parallel = []
+            batches.append(_ToolCallBatch([tc], False))
+    if current_parallel:
+        batches.append(_ToolCallBatch(current_parallel, len(current_parallel) > 1))
+    return batches
 
 
 @dataclass
@@ -941,6 +976,8 @@ class AgentEngine:
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
+        self._prefetch_orchestrator: PrefetchOrchestrator | None = None  # 延迟初始化
+        self._prefetch_context: str = ""  # 当前轮预取结果注入文本
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
 
@@ -2028,6 +2065,22 @@ class AgentEngine:
         self._vba_exempt = _user_requests_vba(user_message)
         # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
         self._mention_contexts = mention_contexts
+
+        # ── 预取：在主 LLM 调用前启动 explorer 子代理预取文件上下文 ──
+        self._prefetch_context = ""
+        if self._prefetch_orchestrator is None:
+            self._prefetch_orchestrator = PrefetchOrchestrator(self)
+        prefetch_result = await self._prefetch_orchestrator.maybe_prefetch(
+            user_message=user_message,
+            write_hint=route_result.write_hint or "unknown",
+            task_tags=route_result.task_tags,
+            on_event=on_event,
+        )
+        if prefetch_result is not None and prefetch_result.success:
+            self._prefetch_context = self._prefetch_orchestrator.build_system_context(
+                prefetch_result,
+            )
+
         chat_result = await self._tool_calling_loop(
             route_result, on_event, approval_resolver=approval_resolver,
         )
@@ -2715,6 +2768,56 @@ class AgentEngine:
             {
                 "type": "function",
                 "function": {
+                    "name": "parallel_delegate",
+                    "description": (
+                        "并行委派多个独立子任务给不同子代理同时执行。\n"
+                        "⚠️ 仅适用于多个彼此独立、不操作同一文件的任务。\n"
+                        "典型场景：同时分析 A.xlsx 销售数据 + 格式化 B.xlsx 报表。\n"
+                        "⚠️ 禁止将有依赖关系的任务并行（如：先分析再基于结果修改）。\n"
+                        "每个子任务的 file_paths 不能有交集，否则会被拒绝。\n"
+                        "最多同时并行 5 个子任务。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "description": "并行子任务列表",
+                                "minItems": 2,
+                                "maxItems": 5,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": {
+                                            "type": "string",
+                                            "description": "子任务描述",
+                                        },
+                                        "agent_name": {
+                                            "type": "string",
+                                            "description": "可选，指定子代理名称；不传则自动选择",
+                                            **({
+                                                "enum": subagent_names,
+                                            } if subagent_names else {}),
+                                        },
+                                        "file_paths": {
+                                            "type": "array",
+                                            "description": "该子任务涉及的文件路径",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                    "required": ["task"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["tasks"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "ask_user",
                     "description": ask_user_description,
                     "parameters": {
@@ -3309,6 +3412,47 @@ class AgentEngine:
             on_event=on_event,
         )
         return outcome.reply
+
+    async def _parallel_delegate_to_subagents(
+        self,
+        *,
+        tasks: list[dict[str, Any]],
+        on_event: EventCallback | None = None,
+    ) -> "ParallelDelegateOutcome":
+        """执行 parallel_delegate 并返回聚合结果。
+
+        委托给 SubagentOrchestrator.delegate_parallel。
+        """
+        from excelmanus.engine_core.subagent_orchestrator import (
+            ParallelDelegateOutcome,
+            ParallelDelegateTask,
+        )
+
+        parsed_tasks: list[ParallelDelegateTask] = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                return ParallelDelegateOutcome(
+                    reply="工具参数错误: tasks 中每个元素必须为对象。",
+                    success=False,
+                )
+            task_text = item.get("task", "")
+            if not isinstance(task_text, str) or not task_text.strip():
+                return ParallelDelegateOutcome(
+                    reply="工具参数错误: 每个子任务的 task 必须为非空字符串。",
+                    success=False,
+                )
+            raw_paths = item.get("file_paths")
+            normalized = self._normalize_subagent_file_paths(raw_paths)
+            parsed_tasks.append(ParallelDelegateTask(
+                task=task_text.strip(),
+                agent_name=item.get("agent_name"),
+                file_paths=normalized,
+            ))
+
+        return await self._subagent_orchestrator.delegate_parallel(
+            tasks=parsed_tasks,
+            on_event=on_event,
+        )
 
     def _handle_list_subagents(self) -> str:
         """列出可用子代理。"""
@@ -4176,248 +4320,338 @@ class AgentEngine:
             )
             question_started = False
 
-            for tc in tool_calls:
-                function = getattr(tc, "function", None)
-                tool_name = getattr(function, "name", "")
-                tool_call_id = getattr(tc, "id", "")
+            # ── 批次拆分：相邻只读工具合并为并行批次 ──
+            if self._config.parallel_readonly_tools:
+                from excelmanus.tools.policy import PARALLELIZABLE_READONLY_TOOLS
+                _batches = _split_tool_call_batches(tool_calls, PARALLELIZABLE_READONLY_TOOLS)
+            else:
+                _batches = [_ToolCallBatch([tc], False) for tc in tool_calls]
 
+            for _batch in _batches:
+                # ── breaker / question 跳过逻辑（适用于整个批次） ──
                 if breaker_triggered:
-                    all_tool_results.append(
-                        ToolCallResult(
-                            tool_name=tool_name,
-                            arguments={},
-                            result=breaker_skip_error,
-                            success=False,
-                            error=breaker_skip_error,
-                        )
-                    )
-                    if tool_call_id:
-                        self._memory.add_tool_result(tool_call_id, breaker_skip_error)
-                    continue
-
-                if question_started and tool_name != "ask_user":
-                    skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
-                    skipped_result = ToolCallResult(
-                        tool_name=tool_name,
-                        arguments={},
-                        result=skipped_msg,
-                        success=True,
-                        error=None,
-                    )
-                    all_tool_results.append(skipped_result)
-                    if tool_call_id:
-                        self._memory.add_tool_result(tool_call_id, skipped_msg)
-                    self._last_tool_call_count += 1
-                    self._last_success_count += 1
-                    continue
-
-                tc_result = await self._execute_tool_call(
-                    tc,
-                    tool_scope,
-                    on_event,
-                    iteration,
-                    route_result=current_route_result,
-                )
-
-                consecutive_text_only = 0
-                all_tool_results.append(tc_result)
-
-                # Stuck Detection：记录工具调用到滑动窗口
-                try:
-                    _tc_args, _ = self._tool_dispatcher.parse_arguments(
-                        getattr(function, "arguments", None)
-                    )
-                except Exception:
-                    _tc_args = {}
-                self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
-
-                # finish_task 成功接受时退出循环
-                if (
-                    tc_result.tool_name == "finish_task"
-                    and tc_result.success
-                    and tc_result.finish_accepted
-                ):
-                    if tool_call_id:
-                        self._memory.add_tool_result(tool_call_id, tc_result.result)
-                    self._last_iteration_count = iteration
-                    self._last_tool_call_count += 1
-                    self._last_success_count += 1
-                    reply = tc_result.result
-                    self._memory.add_assistant_message(reply)
-                    logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
-                    return _finalize_result(
-                        reply=reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
-                    )
-
-                if not tc_result.defer_tool_result and tool_call_id:
-                    self._memory.add_tool_result(tool_call_id, tc_result.result)
-
-                if tc_result.pending_approval:
-                    pending = self._approval.pending
-                    if approval_resolver is not None and pending is not None:
-                        # ── 内联审批：在同一轮对话内等待用户决策 ──
-                        logger.info("内联审批等待决策: %s", tc_result.approval_id)
-                        try:
-                            decision = await approval_resolver(pending)
-                        except Exception as _resolver_exc:  # noqa: BLE001
-                            logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
-                            decision = None
-
-                        if decision in ("accept", "fullaccess"):
-                            if decision == "fullaccess":
-                                self._full_access_enabled = True
-                                logger.info("内联审批: fullaccess 已开启")
-                            # 执行已批准的工具
-                            exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                pending, on_event=on_event,
-                            )
-                            # 用真实结果替换之前写入 memory 的审批提示
-                            if tool_call_id:
-                                self._memory.replace_tool_result(tool_call_id, exec_result)
-                            # 发射审批已解决事件
-                            self._emit(
-                                on_event,
-                                ToolCallEvent(
-                                    event_type=EventType.APPROVAL_RESOLVED,
-                                    approval_id=tc_result.approval_id or "",
-                                    approval_tool_name=pending.tool_name,
-                                    result=exec_result,
-                                    success=exec_ok,
-                                    iteration=iteration,
-                                    approval_undoable=bool(
-                                        exec_record is not None and exec_record.undoable
-                                    ),
-                                ),
-                            )
-                            # 更新 tc_result 统计信息
-                            tc_result = replace(
-                                tc_result,
-                                pending_approval=False,
-                                success=exec_ok,
-                                result=exec_result,
-                                error=None if exec_ok else exec_result,
-                            )
-                            # 写入追踪：审批执行的工具如果是写入工具则标记
-                            if exec_ok and exec_record is not None:
-                                _effect = self._get_tool_write_effect(pending.tool_name)
-                                if exec_record.changes or _effect == "workspace_write":
-                                    self._record_workspace_write_action()
-                                elif _effect == "external_write":
-                                    self._record_external_write_action()
-                                if self._has_write_tool_call and write_hint != "may_write":
-                                    write_hint = "may_write"
-                            logger.info(
-                                "内联审批完成: decision=%s ok=%s tool=%s",
-                                decision, exec_ok, pending.tool_name,
-                            )
-                        else:
-                            # reject / None → 拒绝
-                            reject_msg = self._approval.reject_pending(
-                                tc_result.approval_id or (pending.approval_id if pending else ""),
-                            )
-                            if tool_call_id:
-                                self._memory.replace_tool_result(tool_call_id, reject_msg)
-                            self._emit(
-                                on_event,
-                                ToolCallEvent(
-                                    event_type=EventType.APPROVAL_RESOLVED,
-                                    approval_id=tc_result.approval_id or "",
-                                    approval_tool_name=pending.tool_name if pending else "",
-                                    result=reject_msg,
-                                    success=False,
-                                    iteration=iteration,
-                                ),
-                            )
-                            tc_result = replace(
-                                tc_result,
-                                pending_approval=False,
+                    for tc in _batch.tool_calls:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
+                        all_tool_results.append(
+                            ToolCallResult(
+                                tool_name=tool_name,
+                                arguments={},
+                                result=breaker_skip_error,
                                 success=False,
-                                result=reject_msg,
-                                error=reject_msg,
+                                error=breaker_skip_error,
                             )
-                            logger.info("内联审批拒绝: %s", tc_result.approval_id)
-                        # 内联审批完成，不退出循环，继续处理后续工具调用
-                    else:
-                        # ── 无 resolver（Web API 等）：保持现有行为，退出循环 ──
-                        self._pending_approval_route_result = current_route_result
-                        self._pending_approval_tool_call_id = tool_call_id
-                        reply = tc_result.result
-                        self._memory.add_assistant_message(reply)
-                        self._last_iteration_count = iteration
-                        logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
-                        logger.info("最终结果摘要: %s", _summarize_text(reply))
-                        return _finalize_result(
-                            reply=reply,
-                            tool_calls=list(all_tool_results),
-                            iterations=iteration,
-                            truncated=False,
-                            prompt_tokens=total_prompt_tokens,
-                            completion_tokens=total_completion_tokens,
-                            total_tokens=total_prompt_tokens + total_completion_tokens,
                         )
+                        if tool_call_id:
+                            self._memory.add_tool_result(tool_call_id, breaker_skip_error)
+                    continue
 
-                if tc_result.pending_plan:
-                    reply = tc_result.result
-                    self._memory.add_assistant_message(reply)
-                    self._last_iteration_count = iteration
-                    logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
-                    logger.info("最终结果摘要: %s", _summarize_text(reply))
-                    return _finalize_result(
-                        reply=reply,
-                        tool_calls=list(all_tool_results),
-                        iterations=iteration,
-                        truncated=False,
-                        prompt_tokens=total_prompt_tokens,
-                        completion_tokens=total_completion_tokens,
-                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                if question_started:
+                    for tc in _batch.tool_calls:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
+                        skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
+                        all_tool_results.append(ToolCallResult(
+                            tool_name=tool_name, arguments={},
+                            result=skipped_msg, success=True, error=None,
+                        ))
+                        if tool_call_id:
+                            self._memory.add_tool_result(tool_call_id, skipped_msg)
+                        self._last_tool_call_count += 1
+                        self._last_success_count += 1
+                    continue
+
+                if _batch.parallel:
+                    # ── 并行路径：只读工具并发执行 ──
+                    _parallel_results = await self._execute_tool_calls_parallel(
+                        _batch.tool_calls, tool_scope, on_event, iteration,
+                        route_result=current_route_result,
                     )
+                    for tc, tc_result in _parallel_results:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
 
-                if tc_result.pending_question:
-                    question_started = True
-                    if self._pending_question_route_result is None:
-                        self._pending_question_route_result = current_route_result
+                        consecutive_text_only = 0
+                        all_tool_results.append(tc_result)
 
-                # 更新统计
-                self._last_tool_call_count += 1
-                if tc_result.success:
-                    self._last_success_count += 1
-                    consecutive_failures = 0
-                    _write_effect = self._get_tool_write_effect(tc_result.tool_name)
-                    if _write_effect == "workspace_write":
-                        self._record_workspace_write_action()
-                        self._window_perception.observe_write_tool_call(
-                            tool_name=tc_result.tool_name,
-                            arguments=tc_result.arguments,
-                        )
-                        if write_hint != "may_write":
-                            write_hint = "may_write"
-                    elif _write_effect == "external_write":
-                        self._record_external_write_action()
-                        if write_hint != "may_write":
-                            write_hint = "may_write"
-                    # Batch 1 精简: run_code / delegate_to_subagent 等可在 _execute_tool_call 内
-                    # 通过 _record_write_action 传播写入；此处只负责同步局部 hint。
-                    if self._has_write_tool_call and write_hint != "may_write":
-                        write_hint = "may_write"
+                        # Stuck Detection
+                        try:
+                            _tc_args, _ = self._tool_dispatcher.parse_arguments(
+                                getattr(function, "arguments", None)
+                            )
+                        except Exception:
+                            _tc_args = {}
+                        self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
+
+                        # 按序写入 memory
+                        if not tc_result.defer_tool_result and tool_call_id:
+                            self._memory.add_tool_result(tool_call_id, tc_result.result)
+
+                        # 统计更新（只读工具不触发 write_effect 分支）
+                        self._last_tool_call_count += 1
+                        if tc_result.success:
+                            self._last_success_count += 1
+                            consecutive_failures = 0
+                        else:
+                            self._last_failure_count += 1
+                            consecutive_failures += 1
+
+                        # 熔断检测
+                        if (not breaker_triggered) and consecutive_failures >= max_failures:
+                            recent_errors = [
+                                f"- {r.tool_name}: {r.error}"
+                                for r in all_tool_results[-max_failures:]
+                                if not r.success
+                            ]
+                            breaker_summary = "\n".join(recent_errors)
+                            breaker_triggered = True
                 else:
-                    self._last_failure_count += 1
-                    consecutive_failures += 1
+                    # ── 串行路径（保留完整原有逻辑） ──
+                    for tc in _batch.tool_calls:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
 
-                # 熔断检测
-                if (not breaker_triggered) and consecutive_failures >= max_failures:
-                    recent_errors = [
-                        f"- {r.tool_name}: {r.error}"
-                        for r in all_tool_results[-max_failures:]
-                        if not r.success
-                    ]
-                    breaker_summary = "\n".join(recent_errors)
-                    breaker_triggered = True
+                        if breaker_triggered:
+                            all_tool_results.append(
+                                ToolCallResult(
+                                    tool_name=tool_name,
+                                    arguments={},
+                                    result=breaker_skip_error,
+                                    success=False,
+                                    error=breaker_skip_error,
+                                )
+                            )
+                            if tool_call_id:
+                                self._memory.add_tool_result(tool_call_id, breaker_skip_error)
+                            continue
+
+                        if question_started and tool_name != "ask_user":
+                            skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
+                            skipped_result = ToolCallResult(
+                                tool_name=tool_name,
+                                arguments={},
+                                result=skipped_msg,
+                                success=True,
+                                error=None,
+                            )
+                            all_tool_results.append(skipped_result)
+                            if tool_call_id:
+                                self._memory.add_tool_result(tool_call_id, skipped_msg)
+                            self._last_tool_call_count += 1
+                            self._last_success_count += 1
+                            continue
+
+                        tc_result = await self._execute_tool_call(
+                            tc,
+                            tool_scope,
+                            on_event,
+                            iteration,
+                            route_result=current_route_result,
+                        )
+
+                        consecutive_text_only = 0
+                        all_tool_results.append(tc_result)
+
+                        # Stuck Detection：记录工具调用到滑动窗口
+                        try:
+                            _tc_args, _ = self._tool_dispatcher.parse_arguments(
+                                getattr(function, "arguments", None)
+                            )
+                        except Exception:
+                            _tc_args = {}
+                        self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
+
+                        # finish_task 成功接受时退出循环
+                        if (
+                            tc_result.tool_name == "finish_task"
+                            and tc_result.success
+                            and tc_result.finish_accepted
+                        ):
+                            if tool_call_id:
+                                self._memory.add_tool_result(tool_call_id, tc_result.result)
+                            self._last_iteration_count = iteration
+                            self._last_tool_call_count += 1
+                            self._last_success_count += 1
+                            reply = tc_result.result
+                            self._memory.add_assistant_message(reply)
+                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                            return _finalize_result(
+                                reply=reply,
+                                tool_calls=list(all_tool_results),
+                                iterations=iteration,
+                                truncated=False,
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                total_tokens=total_prompt_tokens + total_completion_tokens,
+                            )
+
+                        if not tc_result.defer_tool_result and tool_call_id:
+                            self._memory.add_tool_result(tool_call_id, tc_result.result)
+
+                        if tc_result.pending_approval:
+                            pending = self._approval.pending
+                            if approval_resolver is not None and pending is not None:
+                                # ── 内联审批：在同一轮对话内等待用户决策 ──
+                                logger.info("内联审批等待决策: %s", tc_result.approval_id)
+                                try:
+                                    decision = await approval_resolver(pending)
+                                except Exception as _resolver_exc:  # noqa: BLE001
+                                    logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
+                                    decision = None
+
+                                if decision in ("accept", "fullaccess"):
+                                    if decision == "fullaccess":
+                                        self._full_access_enabled = True
+                                        logger.info("内联审批: fullaccess 已开启")
+                                    # 执行已批准的工具
+                                    exec_ok, exec_result, exec_record = await self._execute_approved_pending(
+                                        pending, on_event=on_event,
+                                    )
+                                    # 用真实结果替换之前写入 memory 的审批提示
+                                    if tool_call_id:
+                                        self._memory.replace_tool_result(tool_call_id, exec_result)
+                                    # 发射审批已解决事件
+                                    self._emit(
+                                        on_event,
+                                        ToolCallEvent(
+                                            event_type=EventType.APPROVAL_RESOLVED,
+                                            approval_id=tc_result.approval_id or "",
+                                            approval_tool_name=pending.tool_name,
+                                            result=exec_result,
+                                            success=exec_ok,
+                                            iteration=iteration,
+                                            approval_undoable=bool(
+                                                exec_record is not None and exec_record.undoable
+                                            ),
+                                        ),
+                                    )
+                                    # 更新 tc_result 统计信息
+                                    tc_result = replace(
+                                        tc_result,
+                                        pending_approval=False,
+                                        success=exec_ok,
+                                        result=exec_result,
+                                        error=None if exec_ok else exec_result,
+                                    )
+                                    # 写入追踪：审批执行的工具如果是写入工具则标记
+                                    if exec_ok and exec_record is not None:
+                                        _effect = self._get_tool_write_effect(pending.tool_name)
+                                        if exec_record.changes or _effect == "workspace_write":
+                                            self._record_workspace_write_action()
+                                        elif _effect == "external_write":
+                                            self._record_external_write_action()
+                                        if self._has_write_tool_call and write_hint != "may_write":
+                                            write_hint = "may_write"
+                                    logger.info(
+                                        "内联审批完成: decision=%s ok=%s tool=%s",
+                                        decision, exec_ok, pending.tool_name,
+                                    )
+                                else:
+                                    # reject / None → 拒绝
+                                    reject_msg = self._approval.reject_pending(
+                                        tc_result.approval_id or (pending.approval_id if pending else ""),
+                                    )
+                                    if tool_call_id:
+                                        self._memory.replace_tool_result(tool_call_id, reject_msg)
+                                    self._emit(
+                                        on_event,
+                                        ToolCallEvent(
+                                            event_type=EventType.APPROVAL_RESOLVED,
+                                            approval_id=tc_result.approval_id or "",
+                                            approval_tool_name=pending.tool_name if pending else "",
+                                            result=reject_msg,
+                                            success=False,
+                                            iteration=iteration,
+                                        ),
+                                    )
+                                    tc_result = replace(
+                                        tc_result,
+                                        pending_approval=False,
+                                        success=False,
+                                        result=reject_msg,
+                                        error=reject_msg,
+                                    )
+                                    logger.info("内联审批拒绝: %s", tc_result.approval_id)
+                                # 内联审批完成，不退出循环，继续处理后续工具调用
+                            else:
+                                # ── 无 resolver（Web API 等）：保持现有行为，退出循环 ──
+                                self._pending_approval_route_result = current_route_result
+                                self._pending_approval_tool_call_id = tool_call_id
+                                reply = tc_result.result
+                                self._memory.add_assistant_message(reply)
+                                self._last_iteration_count = iteration
+                                logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
+                                logger.info("最终结果摘要: %s", _summarize_text(reply))
+                                return _finalize_result(
+                                    reply=reply,
+                                    tool_calls=list(all_tool_results),
+                                    iterations=iteration,
+                                    truncated=False,
+                                    prompt_tokens=total_prompt_tokens,
+                                    completion_tokens=total_completion_tokens,
+                                    total_tokens=total_prompt_tokens + total_completion_tokens,
+                                )
+
+                        if tc_result.pending_plan:
+                            reply = tc_result.result
+                            self._memory.add_assistant_message(reply)
+                            self._last_iteration_count = iteration
+                            logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
+                            logger.info("最终结果摘要: %s", _summarize_text(reply))
+                            return _finalize_result(
+                                reply=reply,
+                                tool_calls=list(all_tool_results),
+                                iterations=iteration,
+                                truncated=False,
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                total_tokens=total_prompt_tokens + total_completion_tokens,
+                            )
+
+                        if tc_result.pending_question:
+                            question_started = True
+                            if self._pending_question_route_result is None:
+                                self._pending_question_route_result = current_route_result
+
+                        # 更新统计
+                        self._last_tool_call_count += 1
+                        if tc_result.success:
+                            self._last_success_count += 1
+                            consecutive_failures = 0
+                            _write_effect = self._get_tool_write_effect(tc_result.tool_name)
+                            if _write_effect == "workspace_write":
+                                self._record_workspace_write_action()
+                                self._window_perception.observe_write_tool_call(
+                                    tool_name=tc_result.tool_name,
+                                    arguments=tc_result.arguments,
+                                )
+                                if write_hint != "may_write":
+                                    write_hint = "may_write"
+                            elif _write_effect == "external_write":
+                                self._record_external_write_action()
+                                if write_hint != "may_write":
+                                    write_hint = "may_write"
+                            # Batch 1 精简: run_code / delegate_to_subagent 等可在 _execute_tool_call 内
+                            # 通过 _record_write_action 传播写入；此处只负责同步局部 hint。
+                            if self._has_write_tool_call and write_hint != "may_write":
+                                write_hint = "may_write"
+                        else:
+                            self._last_failure_count += 1
+                            consecutive_failures += 1
+
+                        # 熔断检测
+                        if (not breaker_triggered) and consecutive_failures >= max_failures:
+                            recent_errors = [
+                                f"- {r.tool_name}: {r.error}"
+                                for r in all_tool_results[-max_failures:]
+                                if not r.success
+                            ]
+                            breaker_summary = "\n".join(recent_errors)
+                            breaker_triggered = True
 
             if self._question_flow.has_pending():
                 reply = self._question_flow.format_prompt()
@@ -4610,11 +4844,78 @@ class AgentEngine:
         on_event: EventCallback | None,
         iteration: int,
         route_result: SkillMatchResult | None = None,
+        skip_start_event: bool = False,
     ) -> ToolCallResult:
         """单个工具调用：委托给 ToolDispatcher.execute()。"""
         return await self._tool_dispatcher.execute(
-            tc, tool_scope, on_event, iteration, route_result=route_result,
+            tc, tool_scope, on_event, iteration,
+            route_result=route_result,
+            skip_start_event=skip_start_event,
         )
+
+    async def _execute_tool_calls_parallel(
+        self,
+        batch: list[Any],
+        tool_scope: Sequence[str] | None,
+        on_event: EventCallback | None,
+        iteration: int,
+        route_result: SkillMatchResult | None,
+    ) -> list[tuple[Any, ToolCallResult]]:
+        """并发执行一批只读工具调用，返回与输入同序的 (tc, result) 列表。
+
+        1. 按序预发射所有 TOOL_CALL_START 事件（保证前端展示顺序）
+        2. asyncio.gather 并发执行（skip_start_event=True 避免重复发射）
+        3. 异常转为失败 ToolCallResult，不影响其他工具
+        """
+        from excelmanus.events import EventType, ToolCallEvent
+
+        # 按序预发射 TOOL_CALL_START
+        for tc in batch:
+            func = getattr(tc, "function", None)
+            args, _ = self._tool_dispatcher.parse_arguments(
+                getattr(func, "arguments", None),
+            )
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.TOOL_CALL_START,
+                    tool_call_id=getattr(tc, "id", ""),
+                    tool_name=getattr(func, "name", ""),
+                    arguments=args,
+                    iteration=iteration,
+                ),
+            )
+
+        # 并发执行
+        async def _run_one(tc: Any) -> tuple[Any, ToolCallResult]:
+            result = await self._execute_tool_call(
+                tc, tool_scope, on_event, iteration,
+                route_result=route_result,
+                skip_start_event=True,
+            )
+            return (tc, result)
+
+        raw_results = await asyncio.gather(
+            *[_run_one(tc) for tc in batch],
+            return_exceptions=True,
+        )
+
+        # 异常转为失败结果，保持位置顺序
+        ordered: list[tuple[Any, ToolCallResult]] = []
+        for i, r in enumerate(raw_results):
+            if isinstance(r, BaseException):
+                tc = batch[i]
+                name = getattr(getattr(tc, "function", None), "name", "")
+                ordered.append((tc, ToolCallResult(
+                    tool_name=name,
+                    arguments={},
+                    result=f"并行执行异常: {r}",
+                    success=False,
+                    error=str(r),
+                )))
+            else:
+                ordered.append(r)
+        return ordered
 
     def _enrich_tool_result_with_window_perception(
         self,
@@ -5752,6 +6053,7 @@ class AgentEngine:
                 tc = tool_calls_accumulated[idx]
                 tool_calls_list.append(SimpleNamespace(
                     id=tc["id"],
+                    type="function",
                     function=SimpleNamespace(
                         name=tc["name"],
                         arguments=tc["arguments"],

@@ -1,7 +1,13 @@
 import type { SessionDetail } from "@/lib/types";
+import { useAuthStore } from "@/stores/auth-store";
 
 const API_BASE_PATH = "/api/v1";
 const DEFAULT_BACKEND_PORT = "8000";
+
+function getAuthHeaders(): Record<string, string> {
+  const token = useAuthStore.getState().accessToken;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
@@ -19,6 +25,13 @@ function resolveDirectBackendOrigin(): string {
 }
 
 function resolveApiBase(opts?: { direct?: boolean }): string {
+  // In browser context, always route through the Next.js rewrite proxy so
+  // that requests stay same-origin.  This avoids CORS failures when the
+  // page is accessed from other devices on the LAN (port 3000 → 8000 is
+  // cross-origin).  Server-side code may still use the direct backend URL.
+  if (typeof window !== "undefined") {
+    return API_BASE_PATH;
+  }
   if (opts?.direct) {
     return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
   }
@@ -30,12 +43,29 @@ export function buildApiUrl(path: string, opts?: { direct?: boolean }): string {
   return `${resolveApiBase(opts)}${normalizedPath}`;
 }
 
-export async function apiGet<T = unknown>(path: string): Promise<T> {
-  const res = await fetch(buildApiUrl(path));
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `API error: ${res.status}`);
+async function handleAuthError(res: Response): Promise<never> {
+  if (res.status === 401) {
+    const { refreshToken, logout } = useAuthStore.getState();
+    if (refreshToken) {
+      const { refreshAccessToken } = await import("./auth-api");
+      const ok = await refreshAccessToken();
+      if (!ok) {
+        if (typeof window !== "undefined") window.location.href = "/login";
+      }
+    } else {
+      logout();
+      if (typeof window !== "undefined") window.location.href = "/login";
+    }
   }
+  const data = await res.json().catch(() => ({}));
+  throw new Error(data.error || data.detail || `API error: ${res.status}`);
+}
+
+export async function apiGet<T = unknown>(path: string): Promise<T> {
+  const res = await fetch(buildApiUrl(path), {
+    headers: { ...getAuthHeaders() },
+  });
+  if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
@@ -45,13 +75,10 @@ export async function apiPost<T = unknown>(
 ): Promise<T> {
   const res = await fetch(buildApiUrl(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `API error: ${res.status}`);
-  }
+  if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
@@ -61,13 +88,10 @@ export async function apiPut<T = unknown>(
 ): Promise<T> {
   const res = await fetch(buildApiUrl(path), {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `API error: ${res.status}`);
-  }
+  if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
@@ -77,22 +101,19 @@ export async function apiPatch<T = unknown>(
 ): Promise<T> {
   const res = await fetch(buildApiUrl(path), {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `API error: ${res.status}`);
-  }
+  if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
 export async function apiDelete(path: string): Promise<void> {
-  const res = await fetch(buildApiUrl(path), { method: "DELETE" });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `API error: ${res.status}`);
-  }
+  const res = await fetch(buildApiUrl(path), {
+    method: "DELETE",
+    headers: { ...getAuthHeaders() },
+  });
+  if (!res.ok) return handleAuthError(res);
 }
 
 export async function fetchSessions(opts?: {
@@ -436,6 +457,7 @@ export async function uploadFile(file: File): Promise<{
   formData.append("file", file);
   const res = await fetch(buildApiUrl("/upload"), {
     method: "POST",
+    headers: { ...getAuthHeaders() },
     body: formData,
   });
   if (!res.ok) {

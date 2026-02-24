@@ -10,6 +10,7 @@ import asyncio
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2515,3 +2516,57 @@ class TestImageAttachment:
                 await asyncio.wait_for(active_task, timeout=2)
                 await asyncio.sleep(0.02)
                 assert session_id not in api_module._active_chat_tasks
+
+
+class TestMCPServerEndpoints:
+    """MCP 服务器管理相关端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_test_mcp_server_returns_discovered_tools(
+        self, client: AsyncClient
+    ) -> None:
+        """POST /api/v1/mcp/servers/{name}/test 成功时返回工具列表。"""
+        with (
+            patch(
+                "excelmanus.api._find_mcp_config_path",
+                return_value=Path("/tmp/mcp.json"),
+            ),
+            patch(
+                "excelmanus.api._read_mcp_json",
+                return_value={
+                    "mcpServers": {
+                        "excel": {
+                            "transport": "stdio",
+                            "command": "python",
+                            "args": ["-m", "fake_mcp_server"],
+                        }
+                    }
+                },
+            ),
+            patch(
+                "excelmanus.mcp.client.MCPClientWrapper.connect",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "excelmanus.mcp.client.MCPClientWrapper.discover_tools",
+                new=AsyncMock(
+                    return_value=[
+                        SimpleNamespace(name="read_sheet"),
+                        SimpleNamespace(name="write_cell"),
+                    ]
+                ),
+            ),
+            patch(
+                "excelmanus.mcp.client.MCPClientWrapper.close",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            resp = await client.post("/api/v1/mcp/servers/excel/test")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "status": "ok",
+            "name": "excel",
+            "tool_count": 2,
+            "tools": ["read_sheet", "write_cell"],
+        }

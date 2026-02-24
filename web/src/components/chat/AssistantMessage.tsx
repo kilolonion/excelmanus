@@ -43,6 +43,38 @@ function processChildren(children: React.ReactNode): React.ReactNode {
 
 const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 
+// ── Stable references for ReactMarkdown to avoid re-parsing on every render ──
+
+const remarkPluginsStable = [remarkGfm];
+
+const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components"] = {
+  p({ children }) {
+    return <p>{processChildren(children)}</p>;
+  },
+  li({ children }) {
+    return <li>{processChildren(children)}</li>;
+  },
+};
+
+const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
+  content,
+  isStreamingText,
+}: {
+  content: string;
+  isStreamingText?: boolean;
+}) {
+  return (
+    <div className={`prose prose-sm max-w-none text-foreground${isStreamingText ? " streaming-cursor" : ""}`}>
+      <ReactMarkdown
+        remarkPlugins={remarkPluginsStable}
+        components={markdownComponents}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
 function SaveResultCard({ path }: { path: string }) {
   const filename = path.split("/").pop() || path;
   const dir = path.substring(0, path.length - filename.length);
@@ -119,12 +151,14 @@ interface AssistantMessageProps {
   messageId: string;
   blocks: AssistantBlock[];
   affectedFiles?: string[];
+  isLastMessage?: boolean;
 }
 
-export function AssistantMessage({ messageId, blocks, affectedFiles }: AssistantMessageProps) {
+export const AssistantMessage = React.memo(function AssistantMessage({ messageId, blocks, affectedFiles, isLastMessage }: AssistantMessageProps) {
   const [collapsed, setCollapsed] = useState(false);
-  const pipelineStatus = useChatStore((s) => s.pipelineStatus);
-  const isStreaming = useChatStore((s) => s.isStreaming);
+  // Only the last message needs to subscribe to streaming-related state
+  const pipelineStatus = useChatStore((s) => isLastMessage ? s.pipelineStatus : null);
+  const isStreaming = useChatStore((s) => isLastMessage ? s.isStreaming : false);
 
   const { chainBlocks, tailBlocks, hasChain } = useMemo(
     () => splitToolChain(blocks),
@@ -142,7 +176,7 @@ export function AssistantMessage({ messageId, blocks, affectedFiles }: Assistant
     && lastBlock.duration == null;
 
   return (
-    <div className="flex gap-3 py-4">
+    <div className="flex gap-2 sm:gap-3 py-4">
       <div
         className="flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center text-white text-xs"
         style={{ backgroundColor: "var(--em-accent)" }}
@@ -179,6 +213,7 @@ export function AssistantMessage({ messageId, blocks, affectedFiles }: Assistant
               blockIndex={origIndex}
               messageId={messageId}
               isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
+              isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
             />
           ))
         )}
@@ -190,6 +225,7 @@ export function AssistantMessage({ messageId, blocks, affectedFiles }: Assistant
             blockIndex={origIndex}
             messageId={messageId}
             isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
+            isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
           />
         ))}
 
@@ -202,7 +238,7 @@ export function AssistantMessage({ messageId, blocks, affectedFiles }: Assistant
       </div>
     </div>
   );
-}
+});
 
 function AffectedFilesBadges({ files }: { files: string[] }) {
   const openPanel = useExcelStore((s) => s.openPanel);
@@ -266,7 +302,7 @@ function PipelineIndicator({ status }: { status: PipelineStatus | null }) {
   );
 }
 
-function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive }: { block: AssistantBlock; blockIndex: number; messageId: string; isThinkingActive?: boolean }) {
+const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive, isStreamingText }: { block: AssistantBlock; blockIndex: number; messageId: string; isThinkingActive?: boolean; isStreamingText?: boolean }) {
   switch (block.type) {
     case "thinking":
       return (
@@ -282,23 +318,7 @@ function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive
       if (saveMatch) {
         return <SaveResultCard path={saveMatch[1]} />;
       }
-      return (
-        <div className="prose prose-sm max-w-none text-foreground">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              p({ children }) {
-                return <p>{processChildren(children)}</p>;
-              },
-              li({ children }) {
-                return <li>{processChildren(children)}</li>;
-              },
-            }}
-          >
-            {block.content}
-          </ReactMarkdown>
-        </div>
-      );
+      return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} />;
     }
     case "tool_call":
       return (
@@ -366,7 +386,7 @@ function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive
       );
     case "token_stats":
       return (
-        <div className="flex items-center gap-3 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground">
           <Zap className="h-3 w-3" />
           <span>{block.iterations} 轮迭代</span>
           <span>·</span>
@@ -382,7 +402,7 @@ function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive
     default:
       return null;
   }
-}
+});
 
 function ApprovalActionBlock({
   block,

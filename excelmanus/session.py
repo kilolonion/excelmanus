@@ -46,6 +46,7 @@ class _SessionEntry:
     engine: AgentEngine
     last_access: float
     in_flight: bool = field(default=False)
+    user_id: str | None = field(default=None)
 
 
 # ── SessionManager ────────────────────────────────────────
@@ -269,12 +270,13 @@ class SessionManager:
         engine._history_snapshot_index = len(messages)  # type: ignore[attr-defined]
 
     async def acquire_for_chat(
-        self, session_id: str | None
+        self, session_id: str | None, *, user_id: str | None = None,
     ) -> tuple[str, AgentEngine]:
         """获取会话并标记为处理中。
 
         同一会话在同一时刻仅允许一个请求执行。
         支持从 SQLite 历史记录按需恢复会话。
+        当 user_id 不为 None 时，会验证会话归属并记录用户 ID。
         """
         created = False
         restored = False
@@ -282,6 +284,10 @@ class SessionManager:
             now = time.monotonic()
             if session_id is not None and session_id in self._sessions:
                 entry = self._sessions[session_id]
+                if user_id is not None and entry.user_id is not None and entry.user_id != user_id:
+                    raise SessionNotFoundError(
+                        f"会话 '{session_id}' 不属于当前用户。"
+                    )
                 if entry.in_flight:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，请稍后重试。"
@@ -315,6 +321,7 @@ class SessionManager:
                 engine=engine,
                 last_access=now,
                 in_flight=True,
+                user_id=user_id,
             )
             created = True
             if restored:
@@ -626,6 +633,11 @@ class SessionManager:
         """获取当前活跃会话数量（锁保护）。"""
         async with self._lock:
             return len(self._sessions)
+
+    async def get_user_active_count(self, user_id: str) -> int:
+        """获取指定用户的活跃会话数量。"""
+        async with self._lock:
+            return sum(1 for e in self._sessions.values() if e.user_id == user_id)
 
     async def list_sessions(self, include_archived: bool = False) -> list[dict]:
         """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。"""

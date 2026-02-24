@@ -44,7 +44,7 @@ export default function ChatPage() {
         />
       )}
 
-      <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none">
+      <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">
           {pendingQuestion && <QuestionPanel />}
           <ChatInput

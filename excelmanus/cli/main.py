@@ -85,10 +85,15 @@ async def _async_main() -> None:
         resolved_db_path = os.path.expanduser(
             config.chat_history_db_path or config.db_path
         )
-        _database = Database(resolved_db_path)
+        if config.database_url:
+            _database = Database(database_url=config.database_url)
+            db_label = "PostgreSQL"
+        else:
+            _database = Database(resolved_db_path)
+            db_label = "SQLite"
         console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.DIM}]统一数据库[/{THEME.DIM}]"
+            f" [{THEME.DIM}]统一数据库 ({db_label})[/{THEME.DIM}]"
             f" [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]已启用[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]",
             highlight=False,
         )

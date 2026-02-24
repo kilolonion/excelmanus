@@ -67,6 +67,7 @@ export function SessionSync() {
   const mergeSessions = useSessionStore((s) => s.mergeSessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const abortController = useChatStore((s) => s.abortController);
   const switchSession = useChatStore((s) => s.switchSession);
   const setStreaming = useChatStore((s) => s.setStreaming);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
@@ -122,6 +123,10 @@ export function SessionSync() {
   }, [mergeSessions, setActiveSession]);
 
   useEffect(() => {
+    // Never auto-switch while a local SSE stream is active; let the stream
+    // settle first to avoid wiping optimistic in-flight messages.
+    if (abortController) return;
+
     if (!activeSessionId) {
       if (currentSessionId !== null) {
         switchSession(null);
@@ -131,7 +136,7 @@ export function SessionSync() {
     if (currentSessionId !== activeSessionId) {
       switchSession(activeSessionId);
     }
-  }, [activeSessionId, currentSessionId, switchSession]);
+  }, [activeSessionId, currentSessionId, abortController, switchSession]);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -141,13 +146,19 @@ export function SessionSync() {
       // manages the global active model name via /models API.  Clearing
       // it causes a visual flash where the toolbar briefly shows "模型"
       // before TopModelSelector re-fetches the value.
-      setStreaming(false);
+      // Only kill streaming state if there is no active SSE connection.
+      // Otherwise the stream callback will keep writing to a "stopped" store.
+      if (!useChatStore.getState().abortController) {
+        setStreaming(false);
+      }
       return;
     }
 
     let cancelled = false;
     const prevInFlightRef = { current: false };
     let initialLoadDone = false;
+    let notFoundCount = 0;
+    const NOT_FOUND_THRESHOLD = 3;
     const pollDetail = async () => {
       try {
         const detail = await fetchSessionDetail(activeSessionId);
@@ -159,14 +170,29 @@ export function SessionSync() {
           // Session not yet known to backend (created locally, first message
           // hasn't reached the server). Silently skip — do NOT remove the
           // session or it will break the optimistic-create flow.
+          // 但如果连续多次 404，说明会话确实不存在（如后端重启），清理 activeSessionId。
+          // 如果存在活跃的 SSE 流（abortController !== null），说明消息正在发送中，
+          // 后端可能还未来得及注册该会话，不要重置。
+          notFoundCount++;
+          const hasActiveStream = useChatStore.getState().abortController !== null;
+          if (notFoundCount >= NOT_FOUND_THRESHOLD && !hasActiveStream) {
+            setActiveSession(null);
+          }
           return;
         }
+
+        // 收到有效响应，重置计数器
+        notFoundCount = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
         setPlanModeEnabled(detail.planModeEnabled);
         const modelName = detail.currentModelName || detail.currentModel;
         setCurrentModel(modelName ?? "");
 
+        // IMPORTANT:
+        // pollDetail is async and can race with optimistic local sendMessage().
+        // Always re-read latest chat state before any destructive refresh to
+        // avoid wiping freshly appended local user/assistant bubbles.
         const chat = useChatStore.getState();
         const hasLocalLiveStream = chat.abortController !== null;
 
@@ -189,7 +215,12 @@ export function SessionSync() {
           initialLoadDone = true;
 
           if (shouldRefresh) {
-            await refreshSessionMessagesFromBackend(activeSessionId);
+            const latestChat = useChatStore.getState();
+            // If local streaming starts while this poll is in-flight, skip
+            // backend replacement to preserve optimistic local messages.
+            if (latestChat.abortController === null && !latestChat.isStreaming) {
+              await refreshSessionMessagesFromBackend(activeSessionId);
+            }
           }
 
           // 注意：refreshSessionMessagesFromBackend 已更新 store，需重新获取最新状态
@@ -239,6 +270,7 @@ export function SessionSync() {
     };
   }, [
     activeSessionId,
+    setActiveSession,
     setStreaming,
     setCurrentModel,
     setFullAccessEnabled,

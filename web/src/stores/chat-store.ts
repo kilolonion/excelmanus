@@ -278,6 +278,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
   try {
     const { diffs, previews, affected_files } = await fetchSessionExcelEvents(sessionId);
     if (diffs.length === 0 && previews.length === 0 && affected_files.length === 0) return;
+    if (useChatStore.getState().currentSessionId !== sessionId) return;
 
     const excelStore = useExcelStore.getState();
     for (const fp of affected_files) {
@@ -318,7 +319,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
     }
 
     // 恢复消息上的 affectedFiles 徽章
-    _restoreAffectedFilesOnMessages(diffs, affected_files);
+    _restoreAffectedFilesOnMessages(diffs, affected_files, sessionId);
   } catch {
     // 端点不可用或格式错误时静默降级
   }
@@ -331,7 +332,11 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
 function _restoreAffectedFilesOnMessages(
   diffs: { tool_call_id: string; file_path: string }[],
   allAffectedFiles: string[],
+  sessionId: string,
 ): void {
+  const current = useChatStore.getState().currentSessionId;
+  if (current !== sessionId) return;
+
   const toolCallFileMap = new Map<string, Set<string>>();
   for (const d of diffs) {
     if (!d.tool_call_id || !d.file_path) continue;
@@ -365,10 +370,14 @@ function _restoreAffectedFilesOnMessages(
   });
 
   if (changed) {
+    // Session may have changed while async recovery was in flight.
+    const latest = useChatStore.getState().currentSessionId;
+    if (latest !== sessionId) return;
+
     useChatStore.setState({ messages: updated });
     const store = useChatStore.getState();
-    if (store.currentSessionId) {
-      saveCachedMessages(store.currentSessionId, updated).catch(() => {});
+    if (store.currentSessionId === sessionId) {
+      saveCachedMessages(sessionId, updated).catch(() => {});
     }
   }
 }
@@ -411,6 +420,7 @@ async function _loadMessagesAsyncWithOptions(
       if (
         store.currentSessionId === sessionId
         && !store.isStreaming
+        && !store.abortController
         && (store.messages.length === 0 || shouldReplaceVisibleMessages)
       ) {
         useChatStore.setState({ messages: cached });
@@ -438,6 +448,7 @@ async function _loadMessagesAsyncWithOptions(
     if (
       store.currentSessionId === sessionId
       && !store.isStreaming
+      && !store.abortController
       && (store.messages.length === 0 || shouldReplaceVisibleMessages)
     ) {
       useChatStore.setState({ messages });
@@ -655,6 +666,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (sessionId) => {
     const state = get();
+
+    // If we're already on this session and have messages (or an active
+    // stream), don't discard them — the caller is a redundant sync.
+    if (sessionId && sessionId === state.currentSessionId) {
+      if (state.messages.length > 0 || state.abortController) return;
+    }
+
     // Save current session messages to both caches
     if (state.currentSessionId && state.messages.length > 0) {
       _sessionMessages.set(state.currentSessionId, [...state.messages]);

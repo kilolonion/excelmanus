@@ -609,6 +609,7 @@ class ToolDispatcher:
         on_event: "EventCallback | None",
         iteration: int,
         route_result: Any | None = None,
+        skip_start_event: bool = False,
     ) -> Any:
         """单个工具调用：参数解析 → 执行 → 事件发射 → 返回结果。
 
@@ -628,17 +629,18 @@ class ToolDispatcher:
         # 参数解析
         arguments, parse_error = self.parse_arguments(raw_args)
 
-        # 发射 TOOL_CALL_START 事件
-        e._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.TOOL_CALL_START,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                iteration=iteration,
-            ),
-        )
+        # 发射 TOOL_CALL_START 事件（并行路径已预发射，跳过避免重复）
+        if not skip_start_event:
+            e._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.TOOL_CALL_START,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    iteration=iteration,
+                ),
+            )
 
         pending_approval = False
         approval_id: str | None = None
@@ -964,6 +966,50 @@ class ToolDispatcher:
                     tool_name,
                     arguments,
                     result=result_str,
+                )
+            elif tool_name == "parallel_delegate":
+                raw_tasks = arguments.get("tasks")
+                if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
+                    result_str = "工具参数错误: tasks 必须为包含至少 2 个子任务的数组。"
+                    success = False
+                    error = result_str
+                else:
+                    try:
+                        pd_outcome = await e._parallel_delegate_to_subagents(
+                            tasks=raw_tasks,
+                            on_event=on_event,
+                        )
+                        result_str = pd_outcome.reply
+                        success = pd_outcome.success
+                        error = None if success else result_str
+
+                        # ── 写入传播：并行子代理有文件变更时视为主 agent 写入 ──
+                        for pd_sub_outcome in pd_outcome.outcomes:
+                            sub_result = pd_sub_outcome.subagent_result
+                            if (
+                                pd_sub_outcome.success
+                                and sub_result is not None
+                                and sub_result.structured_changes
+                            ):
+                                e._record_workspace_write_action(
+                                    tool_name="parallel_delegate",
+                                    arguments={"task": pd_sub_outcome.task_text},
+                                )
+                                logger.info(
+                                    "parallel_delegate 写入传播: agent=%s, changes=%d",
+                                    pd_sub_outcome.picked_agent,
+                                    len(sub_result.structured_changes),
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        result_str = f"parallel_delegate 执行异常: {exc}"
+                        success = False
+                        error = str(exc)
+                log_tool_call(
+                    logger,
+                    tool_name,
+                    arguments,
+                    result=result_str if success else None,
+                    error=error if not success else None,
                 )
             elif tool_name == "finish_task":
                 report = arguments.get("report")
