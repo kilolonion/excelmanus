@@ -1,10 +1,69 @@
 import { consumeSSE } from "./sse";
 import { buildApiUrl, uploadFile } from "./api";
+import { uuid } from "@/lib/utils";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
+
+// ---------------------------------------------------------------------------
+// RAF-based delta batcher: buffers high-frequency text_delta / thinking_delta
+// events and flushes them once per animation frame to avoid excessive re-renders.
+// ---------------------------------------------------------------------------
+class DeltaBatcher {
+  private _textBuf = "";
+  private _thinkingBuf = "";
+  private _rafId: number | null = null;
+
+  constructor(private _onFlush: (text: string, thinking: string) => void) {}
+
+  pushText(delta: string) {
+    this._textBuf += delta;
+    this._schedule();
+  }
+
+  pushThinking(delta: string) {
+    this._thinkingBuf += delta;
+    this._schedule();
+  }
+
+  flush() {
+    if (this._rafId !== null) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+    this._doFlush();
+  }
+
+  dispose() {
+    if (this._rafId !== null) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+    }
+    this._textBuf = "";
+    this._thinkingBuf = "";
+  }
+
+  private _schedule() {
+    if (this._rafId !== null) return;
+    this._rafId = requestAnimationFrame(() => {
+      this._rafId = null;
+      this._doFlush();
+    });
+  }
+
+  private _doFlush() {
+    const text = this._textBuf;
+    const thinking = this._thinkingBuf;
+    this._textBuf = "";
+    this._thinkingBuf = "";
+    if (text || thinking) {
+      this._onFlush(text, thinking);
+    }
+  }
+}
 
 // Token stats deferred from a call that ended with a pending interaction
 // (askuser / approval). sendContinuation accumulates these into its final stats.
@@ -44,24 +103,62 @@ export async function sendMessage(
     messageContent = `${fileList}\n\n${text}`;
   }
 
-  const userMsgId = crypto.randomUUID();
+  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
+
+  // Synchronise currentSessionId BEFORE adding messages so that
+  // SessionSync's useEffect (which fires after the next render) sees
+  // currentSessionId === activeSessionId and skips the destructive
+  // switchSession() call that would wipe the messages we're about to add.
+  if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
+    if (store.currentSessionId && store.messages.length > 0) {
+      store.saveCurrentSession();
+    }
+    useChatStore.setState({ currentSessionId: effectiveSessionId });
+  }
+
+  const userMsgId = uuid();
   store.addUserMessage(
     userMsgId,
     text,
     files?.map((f) => ({ filename: f.name, path: "", size: f.size }))
   );
 
-  const assistantMsgId = crypto.randomUUID();
+  const assistantMsgId = uuid();
   store.addAssistantMessage(assistantMsgId);
 
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
 
-  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
-
   // Helper: get fresh store state
   const S = () => useChatStore.getState();
+
+  // RAF-batched delta flusher: accumulates text_delta / thinking_delta and
+  // applies them to the store at most once per animation frame.
+  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
+    if (textDelta) {
+      const msg = getLastAssistantMessage(S().messages, assistantMsgId);
+      const lastBlock = msg?.blocks[msg.blocks.length - 1];
+      if (lastBlock && lastBlock.type === "text") {
+        S().updateLastBlock(assistantMsgId, (b) => {
+          if (b.type === "text") {
+            return { ...b, content: b.content + textDelta };
+          }
+          return b;
+        });
+      } else {
+        S().appendBlock(assistantMsgId, { type: "text", content: textDelta });
+      }
+    }
+    if (thinkingDelta) {
+      S().updateBlockByType(assistantMsgId, "thinking", (b) => {
+        if (b.type === "thinking") {
+          return { ...b, content: b.content + thinkingDelta };
+        }
+        return b;
+      });
+    }
+  });
 
   // Helper: get last block of specific type from current assistant message
   const getLastBlockOfType = (type: string) => {
@@ -119,6 +216,8 @@ export async function sendMessage(
   const finalizeThinking = () => {
     if (!thinkingInProgress) return;
     thinkingInProgress = false;
+    // Flush any buffered thinking deltas before finalizing duration
+    batcher.flush();
     S().updateBlockByType(assistantMsgId, "thinking", (b) => {
       if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
         return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
@@ -139,6 +238,10 @@ export async function sendMessage(
 
         if (event.event !== "thinking_delta" && event.event !== "thinking") {
           finalizeThinking();
+        }
+        // Flush buffered deltas before any non-delta event to preserve block order
+        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
+          batcher.flush();
         }
 
         switch (event.event) {
@@ -220,13 +323,12 @@ export async function sendMessage(
             S().setPipelineStatus(null);
             const lastThinking = getLastBlockOfType("thinking");
             if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              S().updateBlockByType(assistantMsgId, "thinking", (b) => {
-                if (b.type === "thinking") {
-                  return { ...b, content: b.content + (data.content as string) };
-                }
-                return b;
-              });
+              // Existing open thinking block — batch the delta
+              batcher.pushThinking((data.content as string) || "");
             } else {
+              // No open thinking block yet — flush any pending text first,
+              // then create a new thinking block synchronously.
+              batcher.flush();
               S().appendBlock(assistantMsgId, {
                 type: "thinking",
                 content: (data.content as string) || "",
@@ -250,21 +352,16 @@ export async function sendMessage(
           // ── Text ───────────────────────────────────
           case "text_delta": {
             S().setPipelineStatus(null);
+            // Ensure a text block exists for the batcher to append into.
             const msg = getLastAssistantMessage(S().messages, assistantMsgId);
             const lastBlock = msg?.blocks[msg.blocks.length - 1];
-            if (lastBlock && lastBlock.type === "text") {
-              S().updateLastBlock(assistantMsgId, (b) => {
-                if (b.type === "text") {
-                  return { ...b, content: b.content + (data.content as string) };
-                }
-                return b;
-              });
-            } else {
+            if (!lastBlock || lastBlock.type !== "text") {
               S().appendBlock(assistantMsgId, {
                 type: "text",
-                content: (data.content as string) || "",
+                content: "",
               });
             }
+            batcher.pushText((data.content as string) || "");
             break;
           }
 
@@ -625,6 +722,7 @@ export async function sendMessage(
       });
     }
   } finally {
+    batcher.dispose();
     S().setPipelineStatus(null);
     S().saveCurrentSession();
     S().setStreaming(false);
@@ -665,6 +763,32 @@ export async function sendContinuation(
   store.setStreaming(true);
 
   const S = () => useChatStore.getState();
+
+  // RAF-batched delta flusher for continuation stream
+  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
+    if (textDelta) {
+      const msg = getLastAssistantMessage(S().messages, msgId);
+      const lastBlock = msg?.blocks[msg.blocks.length - 1];
+      if (lastBlock && lastBlock.type === "text") {
+        S().updateLastBlock(msgId, (b) => {
+          if (b.type === "text") {
+            return { ...b, content: b.content + textDelta };
+          }
+          return b;
+        });
+      } else {
+        S().appendBlock(msgId, { type: "text", content: textDelta });
+      }
+    }
+    if (thinkingDelta) {
+      S().updateBlockByType(msgId, "thinking", (b) => {
+        if (b.type === "thinking") {
+          return { ...b, content: b.content + thinkingDelta };
+        }
+        return b;
+      });
+    }
+  });
 
   const getLastBlockOfType = (type: string) => {
     const msg = getLastAssistantMessage(S().messages, assistantMsgId!);
@@ -718,6 +842,7 @@ export async function sendContinuation(
   const finalizeThinking = () => {
     if (!thinkingInProgress) return;
     thinkingInProgress = false;
+    batcher.flush();
     S().updateBlockByType(msgId, "thinking", (b) => {
       if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
         return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
@@ -738,6 +863,10 @@ export async function sendContinuation(
 
         if (event.event !== "thinking_delta" && event.event !== "thinking") {
           finalizeThinking();
+        }
+        // Flush buffered deltas before any non-delta event to preserve block order
+        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
+          batcher.flush();
         }
 
         switch (event.event) {
@@ -780,13 +909,9 @@ export async function sendContinuation(
             S().setPipelineStatus(null);
             const lastThinking = getLastBlockOfType("thinking");
             if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              S().updateBlockByType(msgId, "thinking", (b) => {
-                if (b.type === "thinking") {
-                  return { ...b, content: b.content + (data.content as string) };
-                }
-                return b;
-              });
+              batcher.pushThinking((data.content as string) || "");
             } else {
+              batcher.flush();
               S().appendBlock(msgId, {
                 type: "thinking",
                 content: (data.content as string) || "",
@@ -811,19 +936,10 @@ export async function sendContinuation(
             S().setPipelineStatus(null);
             const msg = getLastAssistantMessage(S().messages, msgId);
             const lastBlock = msg?.blocks[msg.blocks.length - 1];
-            if (lastBlock && lastBlock.type === "text") {
-              S().updateLastBlock(msgId, (b) => {
-                if (b.type === "text") {
-                  return { ...b, content: b.content + (data.content as string) };
-                }
-                return b;
-              });
-            } else {
-              S().appendBlock(msgId, {
-                type: "text",
-                content: (data.content as string) || "",
-              });
+            if (!lastBlock || lastBlock.type !== "text") {
+              S().appendBlock(msgId, { type: "text", content: "" });
             }
+            batcher.pushText((data.content as string) || "");
             break;
           }
 
@@ -1187,6 +1303,7 @@ export async function sendContinuation(
       });
     }
   } finally {
+    batcher.dispose();
     S().setPipelineStatus(null);
     S().saveCurrentSession();
     S().setStreaming(false);
@@ -1252,9 +1369,12 @@ export function stopGeneration() {
   // 1. Tell the backend to cancel the server-side task
   const sessionId = store.currentSessionId;
   if (sessionId) {
+    const token = useAuthStore.getState().accessToken;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     fetch(buildApiUrl("/chat/abort", { direct: true }), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ session_id: sessionId }),
     }).catch(() => {});
   }
