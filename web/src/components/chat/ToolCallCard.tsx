@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   Wrench,
   CheckCircle2,
@@ -41,7 +41,7 @@ interface ToolCallCardProps {
   error?: string;
 }
 
-export function ToolCallCard({ toolCallId, name, args, status, result, error }: ToolCallCardProps) {
+export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name, args, status, result, error }: ToolCallCardProps) {
   const [open, setOpen] = useState(false);
   const [applyingInline, setApplyingInline] = useState(false);
   const [appliedInline, setAppliedInline] = useState(false);
@@ -169,4 +169,4 @@ export function ToolCallCard({ toolCallId, name, args, status, result, error }: 
       )}
     </div>
   );
-}
+});

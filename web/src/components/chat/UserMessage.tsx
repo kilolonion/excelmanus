@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { User, Check, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
@@ -20,7 +20,7 @@ interface UserMessageProps {
   isStreaming?: boolean;
 }
 
-export function UserMessage({ content, files, onEditAndResend, isStreaming }: UserMessageProps) {
+export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming }: UserMessageProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -143,4 +143,4 @@ export function UserMessage({ content, files, onEditAndResend, isStreaming }: Us
       </div>
     </div>
   );
-}
+});

@@ -1,4 +1,5 @@
 import { useAuthStore, type AuthUser } from "@/stores/auth-store";
+import { useRecentAccountsStore } from "@/stores/recent-accounts-store";
 import { buildApiUrl } from "./api";
 
 // ── Types ─────────────────────────────────────────────────
@@ -34,7 +35,14 @@ function mapUser(raw: TokenResponse["user"]): AuthUser {
 function handleTokenResponse(data: TokenResponse) {
   const { setTokens, setUser } = useAuthStore.getState();
   setTokens(data.access_token, data.refresh_token);
-  setUser(mapUser(data.user));
+  const user = mapUser(data.user);
+  setUser(user);
+
+  useRecentAccountsStore.getState().recordLogin({
+    email: user.email,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl ?? null,
+  });
 }
 
 // ── Auth API ──────────────────────────────────────────────

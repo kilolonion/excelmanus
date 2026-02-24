@@ -34,6 +34,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "redis>=5.0.0",
     "slowapi>=0.1.9",
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]

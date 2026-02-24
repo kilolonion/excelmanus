@@ -64,9 +64,9 @@ export function ApprovalModal() {
         initial={{ y: 100, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 100, opacity: 0 }}
-        className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 w-[520px] max-w-[90vw]"
+        className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] sm:bottom-24 left-1/2 -translate-x-1/2 z-50 w-[calc(100vw-2rem)] sm:w-[520px] max-w-[90vw]"
       >
-        <div className="bg-card border border-border rounded-2xl shadow-lg p-4">
+        <div className="bg-card border border-border rounded-2xl shadow-lg p-4" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
           {/* 标题行：风险等级 + 工具名 */}
           <div className="flex items-center gap-2 mb-3">
             <ShieldAlert className={`h-5 w-5 ${risk.color}`} />
@@ -124,10 +124,10 @@ export function ApprovalModal() {
           )}
 
           {/* 操作按钮 */}
-          <div className="flex items-center gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <Button
               size="sm"
-              className="flex-1 gap-1 text-white"
+              className="gap-1 text-white"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={() => handleAction("accept")}
             >
@@ -137,7 +137,7 @@ export function ApprovalModal() {
             <Button
               size="sm"
               variant="destructive"
-              className="flex-1 gap-1"
+              className="gap-1"
               onClick={() => handleAction("reject")}
             >
               <ShieldX className="h-4 w-4" />
@@ -146,7 +146,7 @@ export function ApprovalModal() {
             <Button
               size="sm"
               variant="secondary"
-              className="flex-1 gap-1"
+              className="gap-1"
               onClick={() => handleAction("fullaccess")}
             >
               全部允许

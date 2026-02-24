@@ -1,4 +1,4 @@
-"""ToolCallStore：基于 SQLite 的工具调用审计日志。"""
+"""ToolCallStore：工具调用审计日志（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class ToolCallStore:
-    """SQLite 后端的工具调用审计日志。"""
+    """工具调用审计日志（支持 SQLite / PostgreSQL）。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn

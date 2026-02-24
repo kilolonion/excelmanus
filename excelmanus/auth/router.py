@@ -203,10 +203,10 @@ async def oauth_github_callback(
 ) -> Any:
     info = await github_exchange_code(code)
     if info is None:
-        raise HTTPException(400, "GitHub 认证失败")
+        return _oauth_error_redirect("GitHub 认证失败")
 
     store = _get_store(request)
-    return _handle_oauth_user(store, info)
+    return _oauth_success_redirect(store, info)
 
 
 # ── OAuth: Google ─────────────────────────────────────────
@@ -227,10 +227,32 @@ async def oauth_google_callback(
 ) -> Any:
     info = await google_exchange_code(code)
     if info is None:
-        raise HTTPException(400, "Google 认证失败")
+        return _oauth_error_redirect("Google 认证失败")
 
     store = _get_store(request)
-    return _handle_oauth_user(store, info)
+    return _oauth_success_redirect(store, info)
+
+
+def _oauth_error_redirect(message: str) -> RedirectResponse:
+    """Redirect browser to frontend callback page with error."""
+    from urllib.parse import quote
+    return RedirectResponse(f"/auth/callback?error={quote(message)}")
+
+
+def _oauth_success_redirect(store: UserStore, info: Any) -> RedirectResponse:
+    """Exchange OAuth info for JWT tokens, then redirect to frontend."""
+    try:
+        token_resp = _handle_oauth_user(store, info)
+    except HTTPException as exc:
+        return _oauth_error_redirect(exc.detail or "认证失败")
+
+    from urllib.parse import urlencode
+    params = urlencode({
+        "access_token": token_resp.access_token,
+        "refresh_token": token_resp.refresh_token,
+        "provider": info.provider,
+    })
+    return RedirectResponse(f"/auth/callback?{params}")
 
 
 def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:

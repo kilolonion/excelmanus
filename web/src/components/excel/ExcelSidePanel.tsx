@@ -2,7 +2,11 @@
 
 import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
+import { motion, AnimatePresence } from "framer-motion";
 import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2 } from "lucide-react";
+import { panelSlideVariants, panelSlideVariantsMobile } from "@/lib/sidebar-motion";
+import { useShallow } from "zustand/react/shallow";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl } from "@/lib/api";
@@ -13,21 +17,27 @@ const UniverSheet = dynamic(
 );
 
 export function ExcelSidePanel() {
-  const panelOpen = useExcelStore((s) => s.panelOpen);
-  const activeFilePath = useExcelStore((s) => s.activeFilePath);
-  const activeSheet = useExcelStore((s) => s.activeSheet);
-  const diffs = useExcelStore((s) => s.diffs);
-  const closePanel = useExcelStore((s) => s.closePanel);
-  const openFullView = useExcelStore((s) => s.openFullView);
-  const refreshCounter = useExcelStore((s) => s.refreshCounter);
-  const selectionMode = useExcelStore((s) => s.selectionMode);
-  const enterSelectionMode = useExcelStore((s) => s.enterSelectionMode);
-  const exitSelectionMode = useExcelStore((s) => s.exitSelectionMode);
-  const confirmSelection = useExcelStore((s) => s.confirmSelection);
+  const isMobile = useIsMobile();
+  const {
+    panelOpen, activeFilePath, activeSheet, diffs, closePanel,
+    openFullView, selectionMode, enterSelectionMode,
+    exitSelectionMode, confirmSelection, pendingBackups, applyFile,
+  } = useExcelStore(useShallow((s) => ({
+    panelOpen: s.panelOpen,
+    activeFilePath: s.activeFilePath,
+    activeSheet: s.activeSheet,
+    diffs: s.diffs,
+    closePanel: s.closePanel,
+    openFullView: s.openFullView,
+    selectionMode: s.selectionMode,
+    enterSelectionMode: s.enterSelectionMode,
+    exitSelectionMode: s.exitSelectionMode,
+    confirmSelection: s.confirmSelection,
+    pendingBackups: s.pendingBackups,
+    applyFile: s.applyFile,
+  })));
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const pendingBackups = useExcelStore((s) => s.pendingBackups);
-  const applyFile = useExcelStore((s) => s.applyFile);
 
   const hasBackupForFile = useMemo(
     () => pendingBackups.some((b) => b.original_path === activeFilePath),
@@ -94,10 +104,24 @@ export function ExcelSidePanel() {
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
   }, []);
 
-  if (!panelOpen || !activeFilePath) return null;
+  const isOpen = panelOpen && !!activeFilePath;
 
   return (
-    <div className="flex flex-col h-full border-l border-border bg-background" style={{ width: 520 }}>
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          key="excel-side-panel"
+          variants={isMobile ? panelSlideVariantsMobile : panelSlideVariants}
+          initial="initial"
+          animate="animate"
+          exit="exit"
+          className={
+            isMobile
+              ? "fixed inset-0 z-50 flex flex-col bg-background"
+              : "flex flex-col h-full border-l border-border bg-background"
+          }
+          style={isMobile ? undefined : { width: 520 }}
+        >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
         <div className="flex items-center gap-2 min-w-0">
@@ -109,7 +133,7 @@ export function ExcelSidePanel() {
         <div className="flex items-center gap-1">
           <button
             onClick={toggleSelectionMode}
-            className={`p-1.5 rounded transition-colors ${
+            className={`p-2 md:p-1.5 rounded transition-colors ${
               selectionMode
                 ? "bg-[var(--em-primary)]/20 text-[var(--em-primary)]"
                 : "hover:bg-muted text-muted-foreground hover:text-foreground"
@@ -120,21 +144,21 @@ export function ExcelSidePanel() {
           </button>
           <button
             onClick={handleRefresh}
-            className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+            className="p-2 md:p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
             title="刷新"
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => openFullView(activeFilePath!, activeSheet ?? undefined)}
-            className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+            className="p-2 md:p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
             title="展开到聊天区域"
           >
             <Maximize2 className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={closePanel}
-            className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+            className="p-2 md:p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
             title="关闭"
           >
             <X className="h-3.5 w-3.5" />
@@ -231,6 +255,8 @@ export function ExcelSidePanel() {
           })}
         </div>
       )}
-    </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

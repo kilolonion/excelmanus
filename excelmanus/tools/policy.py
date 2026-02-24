@@ -34,6 +34,25 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# ── 可并行执行的只读工具 ──────────────────────────────────────
+# READ_ONLY_SAFE_TOOLS 的子集，排除有特殊调度路径的元工具
+# （task_create 有 plan 拦截、task_update 有 task list 事件、introspect_capability 极少出现）。
+# 同一轮次中相邻的可并行工具将通过 asyncio.gather 并发执行。
+PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_excel",
+        "filter_data",
+        "list_sheets",
+        "list_directory",
+        "inspect_excel_files",
+        "memory_read_topic",
+        "read_image",
+    }
+)
+
+if not PARALLELIZABLE_READONLY_TOOLS <= READ_ONLY_SAFE_TOOLS:
+    raise AssertionError("PARALLELIZABLE_READONLY_TOOLS 必须是 READ_ONLY_SAFE_TOOLS 子集")
+
 # ── 写入类工具分层 ──────────────────────────────────────────
 
 # Tier A：需要进入 /accept 门禁确认后才能执行

@@ -269,6 +269,11 @@ class ContextBuilder:
         if workspace_manifest_notice:
             base_prompt = base_prompt + "\n\n" + workspace_manifest_notice
 
+        # 注入预取上下文（explorer 子代理预取的文件摘要）
+        prefetch_context = getattr(e, "_prefetch_context", "") or ""
+        if prefetch_context:
+            base_prompt = base_prompt + "\n\n" + prefetch_context
+
         # 工具索引已合并到 {auto_generated_capability_map}（identity prompt），
         # 不再独立注入，避免重复消耗 ~200-400 token/轮。
 
@@ -325,6 +330,8 @@ class ContextBuilder:
             _snapshot_components["mcp_context"] = mcp_context
         if workspace_manifest_notice:
             _snapshot_components["workspace_manifest"] = workspace_manifest_notice
+        if prefetch_context:
+            _snapshot_components["prefetch_context"] = prefetch_context
         if runtime_line:
             _snapshot_components["runtime_metadata"] = runtime_line
         if _strategy_text_captured:

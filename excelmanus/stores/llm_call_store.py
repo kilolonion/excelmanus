@@ -1,4 +1,4 @@
-"""LLMCallStore：基于 SQLite 的 LLM 调用 / Token 用量追踪。"""
+"""LLMCallStore：LLM 调用 / Token 用量追踪（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import logging
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMCallStore:
-    """SQLite 后端的 LLM 调用审计日志。"""
+    """LLM 调用审计日志（支持 SQLite / PostgreSQL）。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn

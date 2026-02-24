@@ -1,4 +1,4 @@
-"""ApprovalStore：基于 SQLite 的审批审计记录存储。"""
+"""ApprovalStore：审批审计记录存储（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class ApprovalStore:
-    """SQLite 后端的审批记录 CRUD。
+    """审批记录 CRUD（支持 SQLite / PostgreSQL）。
 
     文件产物（diff/patch/binary snapshot）仍保留在文件系统，
     此处仅持久化元数据。
@@ -96,7 +96,7 @@ class ApprovalStore:
 
     @staticmethod
     def _row_to_dict(row: object) -> dict[str, Any]:
-        """将 sqlite3.Row 转为标准 dict。"""
+        """将数据库行转为标准 dict。"""
         d: dict[str, Any] = {}
         d["id"] = row["id"]  # type: ignore[index]
         d["tool_name"] = row["tool_name"]  # type: ignore[index]

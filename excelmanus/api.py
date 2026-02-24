@@ -524,15 +524,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     _database = None
     chat_history = None
-    if _config.chat_history_enabled:
-        from excelmanus.chat_history import ChatHistoryStore
-
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    need_database = _config.chat_history_enabled or auth_enabled
+    if need_database:
         resolved_db_path = os.path.expanduser(
             _config.chat_history_db_path or _config.db_path
         )
-        _database = Database(resolved_db_path)
-        chat_history = ChatHistoryStore.from_database(_database)
-        logger.info("统一数据库已启用: %s", resolved_db_path)
+        if _config.database_url:
+            _database = Database(database_url=_config.database_url)
+            logger.info("统一数据库已启用 (PostgreSQL)")
+        else:
+            _database = Database(resolved_db_path)
+            logger.info("统一数据库已启用: %s", resolved_db_path)
+        if _config.chat_history_enabled:
+            from excelmanus.chat_history import ChatHistoryStore
+            chat_history = ChatHistoryStore.from_database(_database)
 
     # 初始化 ConfigStore 并从 .env 迁移已有 profiles
     global _config_store
@@ -616,7 +622,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     # 初始化认证模块（UserStore）+ 速率限制器
     _user_store = None
-    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
     if _database is not None:
         try:
             from excelmanus.auth.store import UserStore
@@ -3512,6 +3517,7 @@ async def test_mcp_server(name: str) -> JSONResponse:
     if name not in data["mcpServers"]:
         return _error_json_response(404, f"Server '{name}' 不存在")
 
+    from excelmanus.mcp.client import MCPClientWrapper
     from excelmanus.mcp.config import MCPConfigLoader
 
     # 解析该 server 的配置
@@ -3900,6 +3906,8 @@ async def health() -> dict:
     if _session_manager is not None:
         active_sessions = await _session_manager.get_active_count()
 
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
     return {
         "status": "ok",
         "version": excelmanus.__version__,
@@ -3907,6 +3915,7 @@ async def health() -> dict:
         "tools": tools,
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
+        "auth_enabled": auth_enabled,
     }
 
 

@@ -215,3 +215,82 @@
 [data-radix-scroll-area-viewport] > div {
   display: block !important;
 }
+
+/* ── Mobile Adaptations ── */
+
+/* Safe area insets for notch/home indicator devices */
+:root {
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sal: env(safe-area-inset-left);
+  --sar: env(safe-area-inset-right);
+}
+
+/* On touch devices, always show elements that rely on hover for visibility */
+@media (hover: none) {
+  .md\:opacity-0,
+  .touch-show {
+    opacity: 1 !important;
+  }
+}
+
+/* Prevent 300ms tap delay and remove tap highlight on mobile */
+@media (pointer: coarse) {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+/* Prevent pull-to-refresh, overscroll bounce, and iOS Safari swipe-back */
+body {
+  overscroll-behavior: none;
+  overscroll-behavior-x: none;
+}
+
+/* Prevent horizontal swipe from triggering browser back/forward on iOS */
+@supports (-webkit-touch-callout: none) {
+  html, body {
+    overflow-x: hidden;
+  }
+}
+
+/* Viewport height that adapts to mobile browser chrome (address bar).
+   Two declarations ensure dvh overrides vh in the same block,
+   regardless of Tailwind's class generation order. */
+.h-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ── Button Active (Press) Feedback ── */
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled) {
+  transform: scale(0.97);
+  transition: transform 75ms ease;
+}
+
+/* ── Streaming Typing Cursor ── */
+@keyframes blink-caret {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.streaming-cursor::after {
+  content: "▌";
+  display: inline;
+  animation: blink-caret 1s step-end infinite;
+  color: var(--em-primary);
+  font-weight: 300;
+  margin-left: 1px;
+}
+
+/* ── Chat Input Focus Ring ── */
+.chat-input-ring {
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.chat-input-ring:focus-within {
+  border-color: var(--em-primary);
+  box-shadow: 0 0 0 2px var(--em-primary-alpha-15);
+}
