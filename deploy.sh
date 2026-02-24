@@ -10,17 +10,22 @@ set -euo pipefail
 #    --frontend-only  只更新前端
 #    --full           完整部署（默认）
 #    --skip-build     跳过前端构建（仅同步+重启）
+#    --from-local     从本地 rsync 同步（默认从 GitHub 拉取）
 # ═══════════════════════════════════════════════════════════
 
 # ── 配置 ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SSH_KEY="${SCRIPT_DIR}/id_excelmanus.pem"
 SERVER="frontend-host"
 SERVER_USER="root"
-SERVER_PASS="a060727jwx@0"
 REMOTE_DIR="/opt/excelmanus"
 NODE_BIN="/www/server/nodejs/v22.22.0/bin"
+REPO_URL="https://github.com/kilolonion/excelmanus"
+REPO_BRANCH="main"
 
 MODE="full"
 SKIP_BUILD=false
+FROM_LOCAL=false
 
 for arg in "$@"; do
   case $arg in
@@ -28,18 +33,19 @@ for arg in "$@"; do
     --frontend-only) MODE="frontend" ;;
     --full)          MODE="full" ;;
     --skip-build)    SKIP_BUILD=true ;;
+    --from-local)    FROM_LOCAL=true ;;
     -h|--help)
-      echo "用法: ./deploy.sh [--backend-only|--frontend-only|--full] [--skip-build]"
+      echo "用法: ./deploy.sh [--backend-only|--frontend-only|--full] [--skip-build] [--from-local]"
+      echo "  默认从 GitHub (${REPO_URL}) 拉取更新，--from-local 则从本地 rsync 同步"
       exit 0 ;;
     *) echo "未知参数: $arg"; exit 1 ;;
   esac
 done
 
-SSH_CMD="sshpass -p '${SERVER_PASS}' ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER}"
-SCP_CMD="sshpass -p '${SERVER_PASS}' scp -o StrictHostKeyChecking=no"
+SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 _remote() {
-  eval "SSHPASS='${SERVER_PASS}' sshpass -e ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER} '$1'"
+  ssh ${SSH_OPTS} ${SERVER_USER}@${SERVER} "$1"
 }
 
 echo "══════════════════════════════════════"
@@ -47,43 +53,58 @@ echo "  ExcelManus 部署 (模式: ${MODE})"
 echo "══════════════════════════════════════"
 echo ""
 
-# ── 检查 sshpass ──
-if ! command -v sshpass &>/dev/null; then
-  echo "❌ 请先安装 sshpass: brew install sshpass"
+# ── 检查 SSH 密钥 ──
+if [[ ! -f "${SSH_KEY}" ]]; then
+  echo "❌ 未找到私钥: ${SSH_KEY}"
+  echo "   请将 id_excelmanus.pem 放在脚本同目录下"
   exit 1
 fi
+chmod 600 "${SSH_KEY}" 2>/dev/null || true
 
 # ── 同步代码 ──
-echo "📦 同步代码到服务器..."
-SSHPASS="${SERVER_PASS}" sshpass -e rsync -az \
-  --exclude='.git' \
-  --exclude='node_modules' \
-  --exclude='web/node_modules' \
-  --exclude='web/.next' \
-  --exclude='__pycache__' \
-  --exclude='*.pyc' \
-  --exclude='.env' \
-  --exclude='data/' \
-  --exclude='workspace/' \
-  --exclude='*.pem' \
-  --exclude='.venv' \
-  --exclude='venv' \
-  --exclude='.worktrees' \
-  --exclude='.excelmanus' \
-  --exclude='.cursor' \
-  --exclude='.codex' \
-  --exclude='.agents' \
-  --exclude='build' \
-  --exclude='dist' \
-  --exclude='*.egg-info' \
-  --exclude='.pytest_cache' \
-  --exclude='.mypy_cache' \
-  --exclude='bench_results' \
-  --exclude='agent-transcripts' \
-  --exclude='.DS_Store' \
-  --info=progress2 \
-  -e "ssh -o StrictHostKeyChecking=no" \
-  ./ "${SERVER_USER}@${SERVER}:${REMOTE_DIR}/"
+if [[ "$FROM_LOCAL" == true ]]; then
+  echo "📦 从本地 rsync 同步代码到服务器..."
+  rsync -az \
+    --exclude='.git' \
+    --exclude='node_modules' \
+    --exclude='web/node_modules' \
+    --exclude='web/.next' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='.env' \
+    --exclude='data/' \
+    --exclude='workspace/' \
+    --exclude='*.pem' \
+    --exclude='.venv' \
+    --exclude='venv' \
+    --exclude='.worktrees' \
+    --exclude='.excelmanus' \
+    --exclude='.cursor' \
+    --exclude='.codex' \
+    --exclude='.agents' \
+    --exclude='build' \
+    --exclude='dist' \
+    --exclude='*.egg-info' \
+    --exclude='.pytest_cache' \
+    --exclude='.mypy_cache' \
+    --exclude='bench_results' \
+    --exclude='agent-transcripts' \
+    --exclude='.DS_Store' \
+    --progress \
+    -e "ssh ${SSH_OPTS}" \
+    "${SCRIPT_DIR}/" "${SERVER_USER}@${SERVER}:${REMOTE_DIR}/"
+else
+  echo "📦 从 GitHub 拉取更新 (${REPO_URL})..."
+  _remote "
+    set -e
+    cd ${REMOTE_DIR}
+    if [[ ! -d .git ]]; then
+      echo '❌ 远程目录不是 git 仓库，请先克隆: git clone ${REPO_URL} .'
+      exit 1
+    fi
+    git fetch ${REPO_URL} ${REPO_BRANCH} && git reset --hard FETCH_HEAD
+  "
+fi
 echo "✅ 代码同步完成"
 echo ""
 
@@ -135,7 +156,7 @@ if [[ "$STATUS" == "ok" ]]; then
   echo ""
 else
   echo "⚠️  健康检查未通过，请检查日志:"
-  echo "   ssh root@${SERVER} 'pm2 logs --lines 20 --nostream'"
+  echo "   ssh -i ${SSH_KEY} ${SERVER_USER}@${SERVER} 'pm2 logs --lines 20 --nostream'"
 fi
 
 echo "══════════════════════════════════════"
