@@ -98,7 +98,10 @@ class TestExtractAndRegisterCowMapping:
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 
         engine = MagicMock()
-        engine._state = SessionState()
+        _state = SessionState()
+        engine._state = _state
+        engine.state = _state
+        engine.transaction = None
         dispatcher = ToolDispatcher(engine)
         return dispatcher, engine
 
@@ -162,10 +165,12 @@ class TestRedirectCowPaths:
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 
         engine = MagicMock()
-        engine._state = SessionState()
+        _state = SessionState()
+        engine._state = _state
+        engine.state = _state
         if registry:
-            engine._state.register_cow_mappings(registry)
-        engine._config.workspace_root = workspace_root
+            _state.register_cow_mappings(registry)
+        engine.config.workspace_root = workspace_root
         dispatcher = ToolDispatcher(engine)
         return dispatcher
 
@@ -235,9 +240,11 @@ class TestBuildCowPathNotice:
         from excelmanus.engine_core.context_builder import ContextBuilder
 
         engine = MagicMock()
-        engine._state = SessionState()
+        _state = SessionState()
+        engine._state = _state
+        engine.state = _state
         if registry:
-            engine._state.register_cow_mappings(registry)
+            _state.register_cow_mappings(registry)
         builder = ContextBuilder(engine)
         return builder
 

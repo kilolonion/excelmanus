@@ -1,4 +1,4 @@
-"""User data models and Pydantic schemas for auth flows."""
+"""用户数据模型和认证流程的 Pydantic schema。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
 from typing import Annotated
 
 
-# ── Enums ──────────────────────────────────────────────────
+# ── 枚举 ──────────────────────────────────────────────────
 
 
 class UserRole(str, Enum):
@@ -25,17 +25,18 @@ class OAuthProvider(str, Enum):
     GOOGLE = "google"
 
 
-# ── Database record (dict-based, used before SQLAlchemy migration) ─────
+# ── 数据库记录（基于 dict，SQLAlchemy 迁移前使用） ─────
 
 
 class UserRecord:
-    """Plain user record stored in the database."""
+    """存储在数据库中的用户记录。"""
 
     __slots__ = (
         "id", "email", "display_name", "password_hash", "role",
         "oauth_provider", "oauth_id", "avatar_url",
         "llm_api_key", "llm_base_url", "llm_model",
         "daily_token_limit", "monthly_token_limit",
+        "allowed_models",
         "is_active", "created_at", "updated_at",
     )
 
@@ -55,6 +56,7 @@ class UserRecord:
         llm_model: str | None = None,
         daily_token_limit: int = 0,
         monthly_token_limit: int = 0,
+        allowed_models: str | None = None,
         is_active: bool = True,
         created_at: str | None = None,
         updated_at: str | None = None,
@@ -73,6 +75,7 @@ class UserRecord:
         self.llm_model = llm_model
         self.daily_token_limit = daily_token_limit
         self.monthly_token_limit = monthly_token_limit
+        self.allowed_models = allowed_models
         self.is_active = is_active
         self.created_at = created_at or now
         self.updated_at = updated_at or now
@@ -85,7 +88,7 @@ class UserRecord:
         return cls(**{k: v for k, v in data.items() if k in cls.__slots__})
 
 
-# ── Request / Response schemas ─────────────────────────────
+# ── 请求 / 响应 schema ─────────────────────────────
 
 
 class RegisterRequest(BaseModel):
@@ -117,17 +120,31 @@ class RefreshRequest(BaseModel):
 
 
 class UserPublic(BaseModel):
-    """Safe user representation exposed to the frontend."""
+    """暴露给前端的安全用户表示。"""
     id: str
     email: str
     display_name: str
     role: str
     avatar_url: str | None = None
     has_custom_llm_key: bool = False
+    allowed_models: list[str] = []
     created_at: str
 
     @classmethod
     def from_record(cls, rec: UserRecord) -> "UserPublic":
+        import json as _json
+        raw = getattr(rec, "allowed_models", None)
+        if isinstance(raw, list):
+            am = raw
+        elif isinstance(raw, str) and raw:
+            try:
+                am = _json.loads(raw)
+                if not isinstance(am, list):
+                    am = []
+            except Exception:
+                am = []
+        else:
+            am = []
         return cls(
             id=rec.id,
             email=rec.email,
@@ -135,6 +152,7 @@ class UserPublic(BaseModel):
             role=rec.role,
             avatar_url=rec.avatar_url,
             has_custom_llm_key=bool(rec.llm_api_key),
+            allowed_models=am,
             created_at=rec.created_at,
         )
 
@@ -154,11 +172,11 @@ class OAuthCallbackParams(BaseModel):
     state: str | None = None
 
 
-# ── Email verification schemas ─────────────────────────────
+# ── 邮箱验证 schema ─────────────────────────────
 
 
 class RegisterPendingResponse(BaseModel):
-    """Returned when email verification is required after registration."""
+    """注册后需要邮箱验证时返回的响应。"""
     requires_verification: bool = True
     message: str
     email: str

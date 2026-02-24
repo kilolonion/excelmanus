@@ -11,6 +11,7 @@ from typing import Any
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.file")
@@ -40,7 +41,10 @@ _DEFAULT_EXCLUDE_PATTERNS = (
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard 单例。"""
+    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
+    ctx_guard = _get_ctx_guard()
+    if ctx_guard is not None:
+        return ctx_guard
     global _guard
     if _guard is None:
         _guard = FileAccessGuard(".")

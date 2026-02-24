@@ -4,8 +4,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, overload
 
+from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 
 if TYPE_CHECKING:
@@ -19,14 +20,26 @@ _TIMESTAMP_FMT = "%Y-%m-%d %H:%M"
 class MemoryStore:
     """持久记忆 CRUD（支持 SQLite / PostgreSQL）。"""
 
-    def __init__(self, database: "Database") -> None:
-        self._conn = database.conn
+    @overload
+    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+
+    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+        # 兼容旧签名：接收 Database 实例时自动取 .conn
+        if isinstance(conn, ConnectionAdapter):
+            self._conn = conn
+        else:
+            self._conn = conn.conn  # Database 实例
+        self._user_id = user_id
+        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @staticmethod
-    def _hash_content(text: str) -> str:
+    def _hash_content(text: str, user_id: str | None = None) -> str:
         """SHA-256[:16] 内容哈希，用于去重。"""
         normalized = " ".join((text or "").split())
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+        scoped = f"{user_id}::{normalized}" if user_id else normalized
+        return hashlib.sha256(scoped.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _now_iso() -> str:
@@ -38,19 +51,20 @@ class MemoryStore:
             return 0
         added = 0
         for entry in entries:
-            content_hash = self._hash_content(entry.content)
+            content_hash = self._hash_content(entry.content, self._user_id)
             created_at = entry.timestamp.isoformat() if entry.timestamp else self._now_iso()
             try:
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO memory_entries "
-                    "(category, content, content_hash, source, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(category, content, content_hash, source, created_at, user_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         entry.category.value,
                         entry.content,
                         content_hash,
                         entry.source or "",
                         created_at,
+                        self._user_id,
                     ),
                 )
                 if cur.rowcount > 0:
@@ -64,8 +78,9 @@ class MemoryStore:
         """加载最近 N 条记忆，返回格式化 Markdown 文本。"""
         rows = self._conn.execute(
             "SELECT category, content, created_at FROM memory_entries "
+            f"WHERE {self._uid_clause} "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (limit,),
+            (*self._uid_params, limit),
         ).fetchall()
         if not rows:
             return ""
@@ -89,8 +104,8 @@ class MemoryStore:
         """按类别加载所有记忆条目。"""
         rows = self._conn.execute(
             "SELECT category, content, source, created_at FROM memory_entries "
-            "WHERE category = ? ORDER BY created_at ASC",
-            (category.value,),
+            f"WHERE category = ? AND {self._uid_clause} ORDER BY created_at ASC",
+            (category.value, *self._uid_params),
         ).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
@@ -98,22 +113,25 @@ class MemoryStore:
         """加载所有记忆条目，按时间正序。"""
         rows = self._conn.execute(
             "SELECT category, content, source, created_at FROM memory_entries "
-            "ORDER BY created_at ASC"
+            f"WHERE {self._uid_clause} ORDER BY created_at ASC",
+            self._uid_params,
         ).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
     def count(self) -> int:
         """返回记忆条目总数。"""
         row = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM memory_entries"
+            f"SELECT COUNT(*) as cnt FROM memory_entries WHERE {self._uid_clause}",
+            self._uid_params,
         ).fetchone()
         return row["cnt"] if row else 0
 
     def count_by_category(self, category: MemoryCategory) -> int:
         """按类别返回记忆条目数。"""
         row = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM memory_entries WHERE category = ?",
-            (category.value,),
+            "SELECT COUNT(*) as cnt FROM memory_entries "
+            f"WHERE category = ? AND {self._uid_clause}",
+            (category.value, *self._uid_params),
         ).fetchone()
         return row["cnt"] if row else 0
 
@@ -125,9 +143,10 @@ class MemoryStore:
         to_delete = current - max_entries
         self._conn.execute(
             "DELETE FROM memory_entries WHERE id IN ("
-            "  SELECT id FROM memory_entries ORDER BY created_at ASC, id ASC LIMIT ?"
+            f"  SELECT id FROM memory_entries WHERE {self._uid_clause} "
+            "  ORDER BY created_at ASC, id ASC LIMIT ?"
             ")",
-            (to_delete,),
+            (*self._uid_params, to_delete),
         )
         self._conn.commit()
         return to_delete
@@ -141,7 +160,9 @@ class MemoryStore:
         from excelmanus.memory_models import _compute_entry_id
 
         rows = self._conn.execute(
-            "SELECT id, category, content, created_at FROM memory_entries"
+            "SELECT id, category, content, created_at FROM memory_entries "
+            f"WHERE {self._uid_clause}",
+            self._uid_params,
         ).fetchall()
         for row in rows:
             ts_str = row["created_at"]

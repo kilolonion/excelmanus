@@ -1,4 +1,4 @@
-"""Auth API router — registration, login, OAuth, profile management."""
+"""认证 API 路由 — 注册、登录、OAuth、用户资料管理。"""
 
 from __future__ import annotations
 
@@ -40,11 +40,7 @@ from excelmanus.auth.security import (
     verify_password,
 )
 from excelmanus.auth.store import UserStore
-from excelmanus.auth.workspace import (
-    enforce_quota,
-    get_user_workspace,
-    get_workspace_usage,
-)
+from excelmanus.workspace import IsolatedWorkspace
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +73,7 @@ def _build_token_response(user: UserRecord) -> TokenResponse:
 
 
 def _is_verify_required() -> bool:
-    """Email verification is required when the env flag is set AND an email backend is configured."""
+    """当环境变量标志已设置且邮件后端已配置时，需要邮箱验证。"""
     import os
     flag = os.environ.get("EXCELMANUS_EMAIL_VERIFY_REQUIRED", "").strip().lower()
     return flag in ("1", "true", "yes") and is_email_configured()
@@ -87,7 +83,7 @@ def _get_rate_limiter(request: Request):
     return getattr(request.app.state, "rate_limiter", None)
 
 
-# ── Registration & Login ──────────────────────────────────
+# ── 注册与登录 ──────────────────────────────────
 
 
 @router.post("/register", status_code=201)
@@ -96,7 +92,7 @@ async def register(body: RegisterRequest, request: Request) -> Any:
 
     existing = store.get_by_email(body.email)
     if existing is not None:
-        # If already registered but inactive (pending verification), allow resend
+        # 如果已注册但未激活（待验证），允许重新发送
         if not existing.is_active and _is_verify_required():
             rate_limiter = _get_rate_limiter(request)
             if rate_limiter:
@@ -113,7 +109,7 @@ async def register(body: RegisterRequest, request: Request) -> Any:
             detail="该邮箱已被注册",
         )
 
-    # First user becomes admin
+    # 第一个用户成为管理员
     role = UserRole.ADMIN if store.count_users() == 0 else UserRole.USER
     verify_required = _is_verify_required()
 
@@ -171,7 +167,7 @@ async def resend_code(body: ResendCodeRequest, request: Request) -> Any:
     if body.purpose not in ("register", "reset_password"):
         raise HTTPException(status_code=400, detail="无效的 purpose")
 
-    # Rate limit by email
+    # 按邮箱限流
     rate_limiter = _get_rate_limiter(request)
     if rate_limiter:
         rate_limiter.check_send_code(body.email)
@@ -179,7 +175,7 @@ async def resend_code(body: ResendCodeRequest, request: Request) -> Any:
     if body.purpose == "register":
         user = store.get_by_email(body.email)
         if user is None or user.is_active:
-            # Don't leak whether email exists
+            # 不泄露邮箱是否存在
             return {"message": "如果该邮箱待验证，验证码将重新发送"}
     else:
         user = store.get_by_email(body.email)
@@ -207,7 +203,7 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request) -> Any:
         await send_verification_email(body.email, code, "reset_password")
         logger.info("密码重置验证码已发送: %s", body.email)
 
-    # Always return same message to prevent email enumeration
+    # 始终返回相同消息，防止邮箱枚举
     return {"message": "如果该邮箱已注册，验证码将在几秒内发送到您的邮箱"}
 
 
@@ -279,7 +275,7 @@ async def refresh_token(body: RefreshRequest, request: Request) -> Any:
     return _build_token_response(user)
 
 
-# ── Current User ──────────────────────────────────────────
+# ── 当前用户 ──────────────────────────────────────────
 
 
 @router.get("/me", response_model=UserPublic)
@@ -338,11 +334,10 @@ async def get_my_workspace_usage(
     request: Request,
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
-    """Return workspace usage stats for the current user."""
+    """返回当前用户的工作区使用统计。"""
     ws_root = _get_workspace_root(request)
-    ws_dir = get_user_workspace(ws_root, user.id)
-    usage = get_workspace_usage(ws_dir)
-    return usage.to_dict()
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True)
+    return ws.get_usage().to_dict()
 
 
 # ── OAuth: GitHub ─────────────────────────────────────────
@@ -394,13 +389,13 @@ async def oauth_google_callback(
 
 
 def _oauth_error_redirect(message: str) -> RedirectResponse:
-    """Redirect browser to frontend callback page with error."""
+    """将浏览器重定向到前端回调页面并携带错误信息。"""
     from urllib.parse import quote
     return RedirectResponse(f"/auth/callback?error={quote(message)}")
 
 
 def _oauth_success_redirect(store: UserStore, info: Any) -> RedirectResponse:
-    """Exchange OAuth info for JWT tokens, then redirect to frontend."""
+    """将 OAuth 信息换取 JWT 令牌，然后重定向到前端。"""
     try:
         token_resp = _handle_oauth_user(store, info)
     except HTTPException as exc:
@@ -416,15 +411,15 @@ def _oauth_success_redirect(store: UserStore, info: Any) -> RedirectResponse:
 
 
 def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
-    """Find or create user from OAuth info, return token pair."""
-    # Check if user already linked by OAuth
+    """根据 OAuth 信息查找或创建用户，返回令牌对。"""
+    # 检查用户是否已通过 OAuth 关联
     user = store.get_by_oauth(info.provider, info.oauth_id)
     if user is not None:
         if not user.is_active:
             raise HTTPException(403, "账户已被禁用")
         return _build_token_response(user)
 
-    # Check if email already registered (link OAuth)
+    # 检查邮箱是否已注册（关联 OAuth）
     user = store.get_by_email(info.email)
     if user is not None:
         store.update_user(
@@ -436,7 +431,7 @@ def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
         updated = store.get_by_id(user.id)
         return _build_token_response(updated or user)
 
-    # Create new user
+    # 创建新用户
     role = UserRole.ADMIN if store.count_users() == 0 else UserRole.USER
     user = UserRecord(
         email=info.email,
@@ -451,7 +446,7 @@ def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
     return _build_token_response(user)
 
 
-# ── Admin: User Management ────────────────────────────────
+# ── 管理员：用户管理 ────────────────────────────────
 
 
 @router.get("/admin/users")
@@ -466,8 +461,8 @@ async def admin_list_users(
     result = []
     for u in users:
         pub = UserPublic.from_record(u)
-        ws_dir = get_user_workspace(ws_root, u.id)
-        usage = get_workspace_usage(ws_dir)
+        ws = IsolatedWorkspace.resolve(ws_root, user_id=u.id, auth_enabled=True)
+        usage = ws.get_usage()
         daily = store.get_daily_usage(u.id)
         monthly = store.get_monthly_usage(u.id)
         result.append({
@@ -495,10 +490,19 @@ async def admin_update_user(
     if target is None:
         raise HTTPException(404, "用户不存在")
 
-    allowed_fields = {"role", "is_active", "daily_token_limit", "monthly_token_limit", "display_name"}
+    allowed_fields = {"role", "is_active", "daily_token_limit", "monthly_token_limit", "display_name", "allowed_models"}
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if not updates:
         raise HTTPException(400, "无有效更新字段")
+
+    # allowed_models: 前端传 list，存储为 JSON 字符串
+    if "allowed_models" in updates:
+        import json as _json
+        val = updates["allowed_models"]
+        if isinstance(val, list):
+            updates["allowed_models"] = _json.dumps(val) if val else None
+        elif val is None or val == "":
+            updates["allowed_models"] = None
 
     store.update_user(user_id, **updates)
     updated = store.get_by_id(user_id)
@@ -511,18 +515,18 @@ async def admin_clear_user_workspace(
     request: Request,
     _admin: UserRecord = Depends(require_admin),
 ) -> Any:
-    """Delete all files in a user's workspace."""
+    """删除用户工作区中的所有文件。"""
     store = _get_store(request)
     target = store.get_by_id(user_id)
     if target is None:
         raise HTTPException(404, "用户不存在")
 
     ws_root = _get_workspace_root(request)
-    ws_dir = get_user_workspace(ws_root, user_id)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
 
     import shutil
     from pathlib import Path
-    ws_path = Path(ws_dir)
+    ws_path = ws.root_dir
     deleted_count = 0
     if ws_path.is_dir():
         for item in list(ws_path.rglob("*")):
@@ -546,14 +550,14 @@ async def admin_enforce_user_quota(
     request: Request,
     _admin: UserRecord = Depends(require_admin),
 ) -> Any:
-    """Force enforce quota on a user's workspace."""
+    """强制执行用户工作区配额。"""
     store = _get_store(request)
     target = store.get_by_id(user_id)
     if target is None:
         raise HTTPException(404, "用户不存在")
 
     ws_root = _get_workspace_root(request)
-    ws_dir = get_user_workspace(ws_root, user_id)
-    deleted = enforce_quota(ws_dir)
-    usage = get_workspace_usage(ws_dir)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    deleted = ws.enforce_quota()
+    usage = ws.get_usage()
     return {"status": "ok", "deleted": deleted, "workspace": usage.to_dict()}

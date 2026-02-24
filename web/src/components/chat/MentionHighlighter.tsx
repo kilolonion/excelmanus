@@ -2,6 +2,7 @@
 
 import { useCallback } from "react";
 import { useExcelStore } from "@/stores/excel-store";
+import { normalizeExcelPath } from "@/lib/api";
 
 const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
 
@@ -90,12 +91,21 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
 
   const handleExcelClick = useCallback(
     (value: string, rangeSpec?: string) => {
-      const filename = value.split("/").pop() || value;
-      addRecentFile({ path: value, filename });
+      const normalized = normalizeExcelPath(value);
+      const filename = normalized.split("/").pop() || normalized;
+
+      // Look up existing file by normalized path to avoid creating duplicates
+      const recentFiles = useExcelStore.getState().recentFiles;
+      const existing = recentFiles.find(
+        (f) => normalizeExcelPath(f.path) === normalized,
+      );
+      const resolvedPath = existing ? existing.path : normalized;
+
+      addRecentFile({ path: resolvedPath, filename });
       const sheet = rangeSpec?.split("!")[0];
-      openPanel(value, sheet);
+      openPanel(resolvedPath, sheet);
     },
-    [openPanel, addRecentFile]
+    [openPanel, addRecentFile],
   );
 
   const tokens = extractMentions(text);

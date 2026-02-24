@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -49,6 +50,33 @@ if TYPE_CHECKING:
 
 logger = get_logger("tool_dispatcher")
 
+# JSON fence 提取正则（复用 small_model 的逻辑，避免跨模块依赖）
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_vlm_json(text: str) -> dict[str, Any] | None:
+    """从 VLM 输出中提取 JSON dict，支持 fence 包裹和前后缀污染。"""
+    content = (text or "").strip()
+    if not content:
+        return None
+    candidates = [content]
+    for match in _JSON_FENCE_RE.finditer(content):
+        body = (match.group(1) or "").strip()
+        if body:
+            candidates.append(body)
+    left = content.find("{")
+    right = content.rfind("}")
+    if left >= 0 and right > left:
+        candidates.append(content[left: right + 1].strip())
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
 
 def _render_finish_task_report(
     report: dict[str, Any] | None,
@@ -86,6 +114,7 @@ class ToolDispatcher:
 
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
+        self._pending_vlm_image: dict | None = None
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
         if db is not None:
@@ -95,9 +124,35 @@ class ToolDispatcher:
             except Exception:
                 logger.debug("工具调用审计日志初始化失败", exc_info=True)
 
+        # ── 策略处理器表（Phase 4d）──
+        from excelmanus.engine_core.tool_handlers import (
+            AskUserHandler,
+            AuditOnlyHandler,
+            CodePolicyHandler,
+            DefaultToolHandler,
+            DelegationHandler,
+            ExtractTableSpecHandler,
+            FinishTaskHandler,
+            HighRiskApprovalHandler,
+            PlanInterceptHandler,
+            SkillActivationHandler,
+        )
+        self._handlers = [
+            SkillActivationHandler(engine, self),
+            DelegationHandler(engine, self),
+            FinishTaskHandler(engine, self),
+            AskUserHandler(engine, self),
+            PlanInterceptHandler(engine, self),
+            ExtractTableSpecHandler(engine, self),
+            CodePolicyHandler(engine, self),
+            AuditOnlyHandler(engine, self),
+            HighRiskApprovalHandler(engine, self),
+            DefaultToolHandler(engine, self),  # 兜底，必须放最后
+        ]
+
     @property
     def _registry(self) -> Any:
-        return self._engine._registry
+        return self._engine.registry
 
     @property
     def _persistent_memory(self) -> Any:
@@ -106,10 +161,10 @@ class ToolDispatcher:
     def _capture_unknown_write_probe(self, tool_name: str) -> tuple[dict[str, tuple[int, int]] | None, bool]:
         """为 unknown 写入语义工具采集执行前快照。"""
         e = self._engine
-        if e._get_tool_write_effect(tool_name) != "unknown":
+        if e.get_tool_write_effect(tool_name) != "unknown":
             return None, False
         try:
-            return collect_workspace_mtime_index(e._config.workspace_root)
+            return collect_workspace_mtime_index(e.config.workspace_root)
         except Exception:
             logger.debug("unknown 写入探针前置快照失败", exc_info=True)
             return None, False
@@ -126,13 +181,13 @@ class ToolDispatcher:
             return
         e = self._engine
         try:
-            after_snapshot, after_partial = collect_workspace_mtime_index(e._config.workspace_root)
+            after_snapshot, after_partial = collect_workspace_mtime_index(e.config.workspace_root)
         except Exception:
             logger.debug("unknown 写入探针后置快照失败", exc_info=True)
             return
 
         if has_workspace_mtime_changes(before_snapshot, after_snapshot):
-            e._record_workspace_write_action()
+            e.record_workspace_write_action()
             logger.info(
                 "unknown 写入探针命中: tool=%s partial_before=%s partial_after=%s",
                 tool_name,
@@ -140,60 +195,76 @@ class ToolDispatcher:
                 after_partial,
             )
 
-    # ── CoW 路径拦截与提取 ──────────────────────────────────
+    # ── 结构化结果提取（统一 JSON 解析） ──────────────────────
 
-    def _extract_and_register_cow_mapping(self, result_str: str) -> dict[str, str] | None:
-        """从工具结果 JSON 中提取 cow_mapping 并注册到会话级 registry。"""
-        try:
-            parsed = json.loads(result_str)
-            if not isinstance(parsed, dict):
-                return None
-        except (json.JSONDecodeError, TypeError):
-            return None
-        cow_mapping = parsed.get("cow_mapping")
-        if not cow_mapping or not isinstance(cow_mapping, dict):
-            return None
-        self._engine._state.register_cow_mappings(cow_mapping)
-        return cow_mapping
+    def _extract_structured_result(self, result_str: str) -> tuple[str, dict[str, str] | None]:
+        """从工具结果 JSON 中统一提取结构化字段（单次 json.loads）。
 
-    def _try_inject_image(self, result_str: str) -> str:
-        """从工具返回值中提取 _image_injection，根据 B+C 模式路由。
+        处理：
+        - ``__tool_result_image__``: 图片注入（B+C 通道路由）
+        - ``cow_mapping``: CoW 路径映射注册
 
-        - C 通道（主模型有视觉）：注入 base64 图片到 memory
-        - B 通道（VLM enhance）：缓存图片数据，供后续异步 VLM 描述使用
-        - 主模型无视觉且无 VLM：仅返回文件元信息
+        Returns:
+            (cleaned_result_str, cow_mapping_or_none)
         """
         try:
             parsed = json.loads(result_str)
-            if not isinstance(parsed, dict) or "_image_injection" not in parsed:
-                return result_str
+            if not isinstance(parsed, dict):
+                return result_str, None
         except (json.JSONDecodeError, TypeError):
-            return result_str
+            return result_str, None
 
-        injection = parsed.pop("_image_injection")
-        e = self._engine
+        mutated = False
 
-        # C 通道：主模型支持视觉 → 注入图片到对话 memory
-        if e._is_vision_capable:
-            e._memory.add_image_message(
-                base64_data=injection["base64"],
-                mime_type=injection.get("mime_type", "image/png"),
-                detail=injection.get("detail", "auto"),
-            )
-            logger.info("C 通道: 图片已注入 memory (mime=%s)", injection.get("mime_type"))
-            parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
-        else:
-            logger.info("主模型无视觉能力，跳过图片注入")
-            parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
+        # ── CoW 映射提取 ──
+        cow_mapping: dict[str, str] | None = None
+        raw_cow = parsed.get("cow_mapping")
+        if raw_cow and isinstance(raw_cow, dict):
+            cow_mapping = raw_cow
+            self._engine.state.register_cow_mappings(cow_mapping)
+            tx = self._engine.transaction
+            if tx is not None:
+                tx.register_cow_mappings(cow_mapping)
 
-        # B 通道：缓存图片数据供异步 VLM 描述
-        if e._vlm_enhance_available:
-            self._pending_vlm_image = injection
-            parsed["vlm_enhance"] = "VLM 增强描述将自动生成并追加到下方。"
-        elif not e._is_vision_capable:
-            parsed["hint"] += "且未配置 VLM 增强，无法分析图片内容。建议配置 EXCELMANUS_VLM_* 环境变量。"
+        # ── 图片注入提取 ──
+        if "__tool_result_image__" in parsed:
+            injection = parsed.pop("__tool_result_image__")
+            mutated = True
+            e = self._engine
 
-        return json.dumps(parsed, ensure_ascii=False)
+            # C 通道：主模型支持视觉 → 注入图片到对话 memory
+            if e.is_vision_capable:
+                e.memory.add_image_message(
+                    base64_data=injection["base64"],
+                    mime_type=injection.get("mime_type", "image/png"),
+                    detail=injection.get("detail", "auto"),
+                )
+                logger.info("C 通道: 图片已注入 memory (mime=%s)", injection.get("mime_type"))
+                parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
+            else:
+                logger.info("主模型无视觉能力，跳过图片注入")
+                parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
+
+            # B 通道：缓存图片数据供异步 VLM 描述
+            if e.vlm_enhance_available:
+                self._pending_vlm_image = injection
+                parsed["vlm_enhance"] = "VLM 增强描述将自动生成并追加到下方。"
+            elif not e.is_vision_capable:
+                parsed["hint"] += "且未配置 VLM 增强，无法分析图片内容。建议配置 EXCELMANUS_VLM_* 环境变量。"
+
+        cleaned = json.dumps(parsed, ensure_ascii=False) if mutated else result_str
+        return cleaned, cow_mapping
+
+    # 向后兼容别名（测试中可能直接调用）
+    def _try_inject_image(self, result_str: str) -> str:
+        """向后兼容：提取图片注入，返回清理后的 result_str。"""
+        cleaned, _ = self._extract_structured_result(result_str)
+        return cleaned
+
+    def _extract_and_register_cow_mapping(self, result_str: str) -> dict[str, str] | None:
+        """向后兼容：提取 cow_mapping。"""
+        _, cow = self._extract_structured_result(result_str)
+        return cow
 
     async def _run_vlm_describe(self) -> str | None:
         """B 通道：调用小 VLM 生成图片的 Markdown 描述。
@@ -205,21 +276,21 @@ class ToolDispatcher:
 
         from excelmanus.vision_extractor import build_describe_prompt
 
-        injection = getattr(self, "_pending_vlm_image", None)
+        injection = self._pending_vlm_image
         if injection is None:
             return None
         self._pending_vlm_image = None
 
         e = self._engine
-        vlm_client = e._vlm_client
-        vlm_model = e._vlm_model
+        vlm_client = e.vlm_client
+        vlm_model = e.vlm_model
 
         # 预处理图片（data 模式：增强文字可读性）
         raw_bytes = base64.b64decode(injection["base64"])
         compressed, mime = self._prepare_image_for_vlm(
             raw_bytes,
-            max_long_edge=e._config.vlm_image_max_long_edge,
-            jpeg_quality=e._config.vlm_image_jpeg_quality,
+            max_long_edge=e.config.vlm_image_max_long_edge,
+            jpeg_quality=e.config.vlm_image_jpeg_quality,
             mode="data",
         )
         b64 = base64.b64encode(compressed).decode("ascii")
@@ -240,9 +311,9 @@ class ToolDispatcher:
             messages=messages,
             vlm_client=vlm_client,
             vlm_model=vlm_model,
-            vlm_timeout=e._config.vlm_timeout_seconds,
-            vlm_max_retries=e._config.vlm_max_retries,
-            vlm_base_delay=e._config.vlm_retry_base_delay_seconds,
+            vlm_timeout=e.config.vlm_timeout_seconds,
+            vlm_max_retries=e.config.vlm_max_retries,
+            vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
             phase_label="B通道描述",
         )
 
@@ -381,9 +452,13 @@ class ToolDispatcher:
         # 如果背景偏灰（中值亮度在 180-230 之间），将灰底白化
         try:
             if 180 <= mean_brightness <= 230 and stddev < 60:
-                # 浅灰背景：将接近背景色的像素白化
-                gray_thresh = img.point(lambda p: 255 if p > mean_brightness - 20 else p)
-                img = gray_thresh
+                # 用灰度图判断哪些像素属于背景，生成 mask，
+                # 再对 RGB 图统一白化，避免逐通道独立比较导致颜色失真
+                from PIL import ImageChops
+                thresh = int(mean_brightness - 20)
+                bg_mask = gray.point(lambda p: 255 if p > thresh else 0, "1")
+                white = Image.new("RGB", img.size, (255, 255, 255))
+                img = Image.composite(white, img, bg_mask)
                 logger.debug("图片预处理: 检测到灰色背景，已白化")
         except Exception:
             pass
@@ -476,6 +551,154 @@ class ToolDispatcher:
             "file_path": file_path,
         }, ensure_ascii=False)
 
+    async def _run_vlm_extract_spec(
+        self,
+        *,
+        image_b64: str,
+        mime: str,
+        file_path: str,
+        output_path: str,
+        skip_style: bool = False,
+    ) -> str:
+        """两阶段 VLM 结构化提取：image → ReplicaSpec JSON 文件。
+
+        Phase 1 (data mode): 提取表格结构和数据
+        Phase 2 (style mode): 提取样式信息（可选，失败时优雅降级）
+        """
+        import base64
+        import hashlib
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from excelmanus.vision_extractor import (
+            build_extract_data_prompt,
+            build_extract_style_prompt,
+            build_table_summary,
+            postprocess_extraction_to_spec,
+        )
+
+        e = self._engine
+        vlm_client = e.vlm_client
+        vlm_model = e.vlm_model
+        raw_bytes = base64.b64decode(image_b64)
+
+        # ── Phase 1: 数据提取 ──
+        compressed_data, mime_data = self._prepare_image_for_vlm(
+            raw_bytes,
+            max_long_edge=e.config.vlm_image_max_long_edge,
+            jpeg_quality=e.config.vlm_image_jpeg_quality,
+            mode="data",
+        )
+        b64_data = base64.b64encode(compressed_data).decode("ascii")
+        messages_p1 = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {
+                "url": f"data:{mime_data};base64,{b64_data}", "detail": "high",
+            }},
+            {"type": "text", "text": build_extract_data_prompt()},
+        ]}]
+
+        raw_p1, err_p1 = await self._call_vlm_with_retry(
+            messages=messages_p1,
+            vlm_client=vlm_client,
+            vlm_model=vlm_model,
+            vlm_timeout=e.config.vlm_timeout_seconds,
+            vlm_max_retries=e.config.vlm_max_retries,
+            vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
+            phase_label="结构化提取Phase1",
+            response_format={"type": "json_object"},
+        )
+
+        if raw_p1 is None:
+            return self._build_vlm_failure_result(err_p1, e.config.vlm_max_retries + 1, file_path)
+
+        data_json = _parse_vlm_json(raw_p1)
+        if data_json is None:
+            return json.dumps({
+                "status": "error",
+                "message": "Phase 1 VLM 返回内容无法解析为 JSON",
+                "raw_preview": raw_p1[:500],
+            }, ensure_ascii=False)
+
+        logger.info("Phase 1 提取完成: %d 表格", len(data_json.get("tables") or []))
+
+        # ── Phase 2: 样式提取（可选）──
+        style_json: dict | None = None
+        if not skip_style:
+            try:
+                summary = build_table_summary(data_json)
+                compressed_style, mime_style = self._prepare_image_for_vlm(
+                    raw_bytes,
+                    max_long_edge=e.config.vlm_image_max_long_edge,
+                    jpeg_quality=e.config.vlm_image_jpeg_quality,
+                    mode="style",
+                )
+                b64_style = base64.b64encode(compressed_style).decode("ascii")
+                messages_p2 = [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{mime_style};base64,{b64_style}", "detail": "high",
+                    }},
+                    {"type": "text", "text": build_extract_style_prompt(summary)},
+                ]}]
+
+                raw_p2, err_p2 = await self._call_vlm_with_retry(
+                    messages=messages_p2,
+                    vlm_client=vlm_client,
+                    vlm_model=vlm_model,
+                    vlm_timeout=e.config.vlm_timeout_seconds,
+                    vlm_max_retries=e.config.vlm_max_retries,
+                    vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
+                    phase_label="结构化提取Phase2",
+                    response_format={"type": "json_object"},
+                )
+
+                if raw_p2:
+                    style_json = _parse_vlm_json(raw_p2)
+                    if style_json:
+                        logger.info("Phase 2 样式提取完成")
+                    else:
+                        logger.warning("Phase 2 返回内容无法解析为 JSON，跳过样式")
+                else:
+                    logger.warning("Phase 2 VLM 调用失败，跳过样式: %s",
+                                   self._sanitize_vlm_error(err_p2) if err_p2 else "未知")
+            except Exception:
+                logger.warning("Phase 2 样式提取异常，跳过", exc_info=True)
+
+        # ── 后处理 → ReplicaSpec ──
+        image_hash = f"sha256:{hashlib.sha256(raw_bytes).hexdigest()[:16]}"
+        provenance = {
+            "source_image_hash": image_hash,
+            "model": vlm_model,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            spec = postprocess_extraction_to_spec(data_json, style_json, provenance)
+        except Exception as exc:
+            return json.dumps({
+                "status": "error",
+                "message": f"ReplicaSpec 后处理失败: {exc}",
+            }, ensure_ascii=False)
+
+        # ── 写入文件 ──
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        spec_text = spec.model_dump_json(indent=2, exclude_none=True)
+        out.write_text(spec_text, encoding="utf-8")
+
+        total_cells = sum(len(s.cells) for s in spec.sheets)
+        return json.dumps({
+            "status": "ok",
+            "output_path": str(out),
+            "table_count": len(spec.sheets),
+            "cell_count": total_cells,
+            "uncertainties_count": len(spec.uncertainties),
+            "has_styles": style_json is not None,
+            "hint": (
+                f"已生成 ReplicaSpec ({len(spec.sheets)} 个表格, {total_cells} 个单元格)。"
+                "下一步请调用 rebuild_excel_from_spec 编译为 Excel 文件。"
+            ),
+        }, ensure_ascii=False)
+
     def _redirect_cow_paths(
         self,
         tool_name: str,
@@ -491,7 +714,7 @@ class ToolDispatcher:
             READ_ONLY_SAFE_TOOLS,
         )
 
-        registry = self._engine._state.cow_path_registry
+        registry = self._engine.state.cow_path_registry
         if not registry:
             return arguments, []
 
@@ -513,7 +736,7 @@ class ToolDispatcher:
         if not path_fields:
             return arguments, []
 
-        workspace_root = self._engine._config.workspace_root
+        workspace_root = self._engine.config.workspace_root
         redirected = dict(arguments)
         reminders: list[str] = []
         for field_name in path_fields:
@@ -589,8 +812,9 @@ class ToolDispatcher:
         result_value = await asyncio.to_thread(_call)
         result_str = str(result_value)
 
-        # 先处理图片注入，再做截断，避免截断破坏 JSON 导致注入失败。
-        if tool_name == "read_image" and result_str:
+        # 先处理图片注入（移除 base64 载荷），再做截断，
+        # 避免截断破坏 JSON 导致注入失败。
+        if result_str:
             result_str = self._try_inject_image(result_str)
 
         # 工具结果截断
@@ -618,8 +842,38 @@ class ToolDispatcher:
         """
         from excelmanus.engine import ToolCallResult, _AuditedExecutionError
         from excelmanus.events import EventType, ToolCallEvent
+        from excelmanus.tools.code_tools import set_sandbox_env as _set_sandbox_env
+        from excelmanus.tools._guard_ctx import set_guard as _set_guard, reset_guard as _reset_guard
 
         e = self._engine  # 引擎快捷引用
+
+        # 注入每会话的沙盒环境和 FileAccessGuard 到 contextvars。
+        _sandbox_token = _set_sandbox_env(e.sandbox_env)
+        _guard_token = _set_guard(e.file_access_guard)
+        try:
+            return await self._execute_inner(
+                tc, tool_scope, on_event, iteration, route_result, skip_start_event,
+                _sandbox_token,
+            )
+        finally:
+            from excelmanus.tools.code_tools import _current_sandbox_env
+            _current_sandbox_env.reset(_sandbox_token)
+            _reset_guard(_guard_token)
+
+    async def _execute_inner(
+        self,
+        tc: Any,
+        tool_scope: Sequence[str] | None,
+        on_event: "EventCallback | None",
+        iteration: int,
+        route_result: Any | None,
+        skip_start_event: bool,
+        _sandbox_token: Any,
+    ) -> Any:
+        from excelmanus.engine import ToolCallResult, _AuditedExecutionError
+        from excelmanus.events import EventType, ToolCallEvent
+
+        e = self._engine
 
         function = getattr(tc, "function", None)
         tool_name = getattr(function, "name", "")
@@ -631,7 +885,7 @@ class ToolDispatcher:
 
         # 发射 TOOL_CALL_START 事件（并行路径已预发射，跳过避免重复）
         if not skip_start_event:
-            e._emit(
+            e.emit(
                 on_event,
                 ToolCallEvent(
                     event_type=EventType.TOOL_CALL_START,
@@ -654,7 +908,7 @@ class ToolDispatcher:
         _cow_reminders: list[str] = []
 
         # 执行工具调用
-        hook_skill = e._pick_route_skill(route_result)
+        hook_skill = e.pick_route_skill(route_result)
         if parse_error is not None:
             result_str = f"工具参数解析错误: {parse_error}"
             success = False
@@ -667,12 +921,12 @@ class ToolDispatcher:
             )
         else:
             # ── 备份沙盒模式：重定向文件路径 ──
-            arguments = e._redirect_backup_paths(tool_name, arguments)
+            arguments = e.redirect_backup_paths(tool_name, arguments)
 
             # ── CoW 路径拦截：将原始保护路径重定向到 outputs/ 副本 ──
             arguments, _cow_reminders = self._redirect_cow_paths(tool_name, arguments)
 
-            pre_hook_raw = e._run_skill_hook(
+            pre_hook_raw = e.run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.PRE_TOOL_USE,
                 payload={
@@ -682,7 +936,7 @@ class ToolDispatcher:
                 },
                 tool_name=tool_name,
             )
-            pre_hook = await e._resolve_hook_result(
+            pre_hook = await e.resolve_hook_result(
                 event=HookEvent.PRE_TOOL_USE,
                 hook_result=pre_hook_raw,
                 on_event=on_event,
@@ -707,23 +961,23 @@ class ToolDispatcher:
                 log_tool_call(logger, tool_name, arguments, error=error)
             elif pre_hook is not None and pre_hook.decision == HookDecision.ASK:
                 try:
-                    pending = e._approval.create_pending(
+                    pending = e.approval.create_pending(
                         tool_name=tool_name,
                         arguments=arguments,
                         tool_scope=tool_scope,
                     )
                     pending_approval = True
                     approval_id = pending.approval_id
-                    result_str = e._format_pending_prompt(pending)
+                    result_str = e.format_pending_prompt(pending)
                     success = True
                     error = None
-                    e._emit_pending_approval_event(
+                    e.emit_pending_approval_event(
                         pending=pending, on_event=on_event, iteration=iteration,
                         tool_call_id=tool_call_id,
                     )
                     log_tool_call(logger, tool_name, arguments, result=result_str)
                 except ValueError:
-                    result_str = e._approval.pending_block_message()
+                    result_str = e.approval.pending_block_message()
                     success = False
                     error = result_str
                     log_tool_call(logger, tool_name, arguments, error=error)
@@ -752,7 +1006,7 @@ class ToolDispatcher:
                 finish_accepted = outcome.finish_accepted
 
             # ── 检测 registry 层返回的结构化错误 JSON ──
-            if success and e._registry.is_error_result(result_str):
+            if success and e.registry.is_error_result(result_str):
                 success = False
                 try:
                     _err = json.loads(result_str)
@@ -761,7 +1015,7 @@ class ToolDispatcher:
                     error = result_str
 
             post_hook_event = HookEvent.POST_TOOL_USE if success else HookEvent.POST_TOOL_USE_FAILURE
-            post_hook_raw = e._run_skill_hook(
+            post_hook_raw = e.run_skill_hook(
                 skill=hook_skill,
                 event=post_hook_event,
                 payload={
@@ -774,7 +1028,7 @@ class ToolDispatcher:
                 },
                 tool_name=tool_name,
             )
-            post_hook = await e._resolve_hook_result(
+            post_hook = await e.resolve_hook_result(
                 event=post_hook_event,
                 hook_result=post_hook_raw,
                 on_event=on_event,
@@ -818,6 +1072,32 @@ class ToolDispatcher:
             defer_tool_result=defer_tool_result,
             finish_accepted=finish_accepted,
         )
+
+    async def _dispatch_via_handlers(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        *,
+        tool_scope: Sequence[str] | None = None,
+        on_event: "EventCallback | None" = None,
+        iteration: int = 0,
+        route_result: Any = None,
+        skip_high_risk_approval_by_hook: bool = False,
+    ) -> "_ToolExecOutcome":
+        """通过策略处理器表分发工具执行（替代 if-elif 链）。
+
+        遍历 self._handlers，第一个 can_handle 返回 True 的 handler 负责执行。
+        """
+        for handler in self._handlers:
+            if handler.can_handle(tool_name):
+                return await handler.handle(
+                    tool_name, tool_call_id, arguments,
+                    tool_scope=tool_scope, on_event=on_event,
+                    iteration=iteration, route_result=route_result,
+                )
+        # 不应到达此处（DefaultToolHandler 总是匹配）
+        raise RuntimeError(f"No handler found for tool: {tool_name}")
 
     async def _dispatch_tool_execution(
         self,
@@ -864,7 +1144,7 @@ class ToolDispatcher:
                     success = False
                     error = result_str
                 else:
-                    result_str = await e._handle_activate_skill(
+                    result_str = await e.handle_activate_skill(
                         selected_name.strip(),
                     )
                     success = result_str.startswith("OK")
@@ -881,7 +1161,7 @@ class ToolDispatcher:
                 task_brief = arguments.get("task_brief")
                 # task_brief 优先：渲染为结构化 Markdown
                 if isinstance(task_brief, dict) and task_brief.get("title"):
-                    task_value = e._render_task_brief(task_brief)
+                    task_value = e.render_task_brief(task_brief)
                 if not isinstance(task_value, str) or not task_value.strip():
                     result_str = "工具参数错误: task 或 task_brief 必须提供其一。"
                     success = False
@@ -899,7 +1179,7 @@ class ToolDispatcher:
                             success = False
                             error = result_str
                         else:
-                            delegate_outcome = await e._delegate_to_subagent(
+                            delegate_outcome = await e.delegate_to_subagent(
                                 task=task_value.strip(),
                                 agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
                                 file_paths=raw_file_paths,
@@ -916,7 +1196,7 @@ class ToolDispatcher:
                                 and sub_result is not None
                                 and sub_result.structured_changes
                             ):
-                                e._record_write_action()
+                                e.record_write_action()
                                 logger.info(
                                     "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
                                     len(sub_result.structured_changes),
@@ -927,14 +1207,14 @@ class ToolDispatcher:
                                 and sub_result is not None
                                 and sub_result.pending_approval_id is not None
                             ):
-                                pending = e._approval.pending
+                                pending = e.approval.pending
                                 approval_id_value = sub_result.pending_approval_id
                                 high_risk_tool = (
                                     pending.tool_name
                                     if pending is not None and pending.approval_id == approval_id_value
                                     else "高风险工具"
                                 )
-                                question = e._enqueue_subagent_approval_question(
+                                question = e.enqueue_subagent_approval_question(
                                     approval_id=approval_id_value,
                                     tool_name=high_risk_tool,
                                     picked_agent=delegate_outcome.picked_agent or "subagent",
@@ -958,7 +1238,7 @@ class ToolDispatcher:
                     error=error if not success else None,
                 )
             elif tool_name == "list_subagents":
-                result_str = e._handle_list_subagents()
+                result_str = e.handle_list_subagents()
                 success = True
                 error = None
                 log_tool_call(
@@ -975,7 +1255,7 @@ class ToolDispatcher:
                     error = result_str
                 else:
                     try:
-                        pd_outcome = await e._parallel_delegate_to_subagents(
+                        pd_outcome = await e.parallel_delegate_to_subagents(
                             tasks=raw_tasks,
                             on_event=on_event,
                         )
@@ -991,7 +1271,7 @@ class ToolDispatcher:
                                 and sub_result is not None
                                 and sub_result.structured_changes
                             ):
-                                e._record_workspace_write_action(
+                                e.record_workspace_write_action(
                                     tool_name="parallel_delegate",
                                     arguments={"task": pd_sub_outcome.task_text},
                                 )
@@ -1020,6 +1300,12 @@ class ToolDispatcher:
                 if _has_write:
                     result_str = (f"✅ 任务完成\n\n{rendered}" if rendered
                                   else "✓ 任务完成。")
+                    success = True
+                    error = None
+                    finish_accepted = True
+                elif _hint == "read_only":
+                    # read_only 任务本就不需要写入，直接接受，省掉一轮冗余确认
+                    result_str = f"✅ 任务完成（无写入）\n\n{rendered}" if rendered else "✓ 任务完成（无写入）。"
                     success = True
                     error = None
                     finish_accepted = True
@@ -1056,7 +1342,7 @@ class ToolDispatcher:
                     result=result_str,
                 )
             elif tool_name == "ask_user":
-                result_str, question_id = e._handle_ask_user(
+                result_str, question_id = e.handle_ask_user(
                     arguments=arguments,
                     tool_call_id=tool_call_id,
                     on_event=on_event,
@@ -1077,7 +1363,7 @@ class ToolDispatcher:
                 and e._plan_intercept_task_create
                 and not skip_plan_once_for_task_create
             ):
-                result_str, plan_id, plan_error = await e._intercept_task_create_with_plan(
+                result_str, plan_id, plan_error = await e.intercept_task_create_with_plan(
                     arguments=arguments,
                     route_result=route_result,
                     tool_call_id=tool_call_id,
@@ -1094,24 +1380,24 @@ class ToolDispatcher:
                     result=result_str if success else None,
                     error=error if not success else None,
                 )
-            elif tool_name == "run_code" and e._config.code_policy_enabled:
+            elif tool_name == "run_code" and e.config.code_policy_enabled:
                 # ── 动态代码策略引擎路由 ──
                 from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets, strip_exit_calls
                 _code_arg = arguments.get("code") or ""
                 _cp_engine = CodePolicyEngine(
-                    extra_safe_modules=e._config.code_policy_extra_safe_modules,
-                    extra_blocked_modules=e._config.code_policy_extra_blocked_modules,
+                    extra_safe_modules=e.config.code_policy_extra_safe_modules,
+                    extra_blocked_modules=e.config.code_policy_extra_blocked_modules,
                 )
                 _analysis = _cp_engine.analyze(_code_arg)
                 _auto_green = (
                     _analysis.tier == CodeRiskTier.GREEN
-                    and e._config.code_policy_green_auto_approve
+                    and e.config.code_policy_green_auto_approve
                 )
                 _auto_yellow = (
                     _analysis.tier == CodeRiskTier.YELLOW
-                    and e._config.code_policy_yellow_auto_approve
+                    and e.config.code_policy_yellow_auto_approve
                 )
-                if _auto_green or _auto_yellow or e._full_access_enabled:
+                if _auto_green or _auto_yellow or e.full_access_enabled:
                     _sandbox_tier = _analysis.tier.value
                     _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
                     # ── run_code 前: 对可能被修改的 Excel 文件做快照 ──
@@ -1120,18 +1406,18 @@ class ToolDispatcher:
                         if t.operation in ("write", "unknown")
                     ]
                     _rc_before_snap = self._snapshot_excel_for_diff(
-                        _rc_excel_targets, e._config.workspace_root,
+                        _rc_excel_targets, e.config.workspace_root,
                     ) if _rc_excel_targets else {}
-                    result_value, audit_record = await e._execute_tool_with_audit(
+                    result_value, audit_record = await e.execute_tool_with_audit(
                         tool_name=tool_name,
                         arguments=_augmented_args,
                         tool_scope=tool_scope,
-                        approval_id=e._approval.new_approval_id(),
-                        created_at_utc=e._approval.utc_now(),
+                        approval_id=e.approval.new_approval_id(),
+                        created_at_utc=e.approval.utc_now(),
                         undoable=False,
                     )
                     result_str = str(result_value)
-                    tool_def = getattr(e._registry, "get_tool", lambda _: None)(tool_name)
+                    tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
                     if tool_def is not None:
                         result_str = tool_def.truncate_result(result_str)
                     success = True
@@ -1154,13 +1440,13 @@ class ToolDispatcher:
                         or _has_cow
                         or _has_ast_write
                     ):
-                        e._record_write_action()
+                        e.record_write_action()
                     # ── run_code → window 感知桥接 ──
                     _stdout_tail = ""
                     if _rc_json is not None:
                         _stdout_tail = _rc_json.get("stdout_tail", "")
-                    if audit_record is not None and e._window_perception is not None:
-                        e._window_perception.observe_code_execution(
+                    if audit_record is not None and e.window_perception is not None:
+                        e.window_perception.observe_code_execution(
                             code=_code_arg,
                             audit_changes=audit_record.changes if audit_record else None,
                             stdout_tail=_stdout_tail,
@@ -1173,17 +1459,17 @@ class ToolDispatcher:
                         iteration,
                     )
                     # ── run_code 后: 对比快照生成 Excel diff ──
-                    if _rc_before_snap and on_event is not None:
+                    if _rc_excel_targets and on_event is not None:
                         try:
                             _rc_after_snap = self._snapshot_excel_for_diff(
-                                list(_rc_before_snap.keys()), e._config.workspace_root,
+                                _rc_excel_targets, e.config.workspace_root,
                             )
                             _rc_diffs = self._compute_snapshot_diffs(
                                 _rc_before_snap, _rc_after_snap,
                             )
                             from excelmanus.events import EventType, ToolCallEvent
                             for _rd in _rc_diffs:
-                                e._emit(
+                                e.emit(
                                     on_event,
                                     ToolCallEvent(
                                         event_type=EventType.EXCEL_DIFF,
@@ -1211,11 +1497,11 @@ class ToolDispatcher:
                         _re_analysis = _cp_engine.analyze(_sanitized_code)
                         _re_auto_green = (
                             _re_analysis.tier == CodeRiskTier.GREEN
-                            and e._config.code_policy_green_auto_approve
+                            and e.config.code_policy_green_auto_approve
                         )
                         _re_auto_yellow = (
                             _re_analysis.tier == CodeRiskTier.YELLOW
-                            and e._config.code_policy_yellow_auto_approve
+                            and e.config.code_policy_yellow_auto_approve
                         )
                         if _re_auto_green or _re_auto_yellow:
                             _downgraded = True
@@ -1230,18 +1516,18 @@ class ToolDispatcher:
                                 if t.operation in ("write", "unknown")
                             ]
                             _rc_before_snap_s = self._snapshot_excel_for_diff(
-                                _rc_targets_s, e._config.workspace_root,
+                                _rc_targets_s, e.config.workspace_root,
                             ) if _rc_targets_s else {}
-                            result_value, audit_record = await e._execute_tool_with_audit(
+                            result_value, audit_record = await e.execute_tool_with_audit(
                                 tool_name=tool_name,
                                 arguments=_sanitized_args,
                                 tool_scope=tool_scope,
-                                approval_id=e._approval.new_approval_id(),
-                                created_at_utc=e._approval.utc_now(),
+                                approval_id=e.approval.new_approval_id(),
+                                created_at_utc=e.approval.utc_now(),
                                 undoable=False,
                             )
                             result_str = str(result_value)
-                            tool_def = getattr(e._registry, "get_tool", lambda _: None)(tool_name)
+                            tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
                             if tool_def is not None:
                                 result_str = tool_def.truncate_result(result_str)
                             success = True
@@ -1264,12 +1550,12 @@ class ToolDispatcher:
                                 or _has_cow_s
                                 or _has_ast_write_s
                             ):
-                                e._record_write_action()
+                                e.record_write_action()
                             _stdout_tail_s = ""
                             if _rc_json_s is not None:
                                 _stdout_tail_s = _rc_json_s.get("stdout_tail", "")
-                            if audit_record is not None and e._window_perception is not None:
-                                e._window_perception.observe_code_execution(
+                            if audit_record is not None and e.window_perception is not None:
+                                e.window_perception.observe_code_execution(
                                     code=_sanitized_code,
                                     audit_changes=audit_record.changes if audit_record else None,
                                     stdout_tail=_stdout_tail_s,
@@ -1282,17 +1568,17 @@ class ToolDispatcher:
                                 iteration,
                             )
                             # ── run_code(清洗) 后: 对比快照生成 Excel diff ──
-                            if _rc_before_snap_s and on_event is not None:
+                            if _rc_targets_s and on_event is not None:
                                 try:
                                     _rc_after_snap_s = self._snapshot_excel_for_diff(
-                                        list(_rc_before_snap_s.keys()), e._config.workspace_root,
+                                        _rc_targets_s, e.config.workspace_root,
                                     )
                                     _rc_diffs_s = self._compute_snapshot_diffs(
                                         _rc_before_snap_s, _rc_after_snap_s,
                                     )
                                     from excelmanus.events import EventType, ToolCallEvent
                                     for _rd_s in _rc_diffs_s:
-                                        e._emit(
+                                        e.emit(
                                             on_event,
                                             ToolCallEvent(
                                                 event_type=EventType.EXCEL_DIFF,
@@ -1316,7 +1602,7 @@ class ToolDispatcher:
                         # 无法降级 → /accept 流程
                         _caps_detail = ", ".join(sorted(_analysis.capabilities))
                         _details_text = "; ".join(_analysis.details[:3])
-                        pending = e._approval.create_pending(
+                        pending = e.approval.create_pending(
                             tool_name=tool_name,
                             arguments=arguments,
                             tool_scope=tool_scope,
@@ -1328,11 +1614,11 @@ class ToolDispatcher:
                             f"- 风险等级: {_analysis.tier.value}\n"
                             f"- 检测到: {_caps_detail}\n"
                             f"- 详情: {_details_text}\n"
-                            f"{e._format_pending_prompt(pending)}"
+                            f"{e.format_pending_prompt(pending)}"
                         )
                         success = True
                         error = None
-                        e._emit_pending_approval_event(
+                        e.emit_pending_approval_event(
                             pending=pending, on_event=on_event, iteration=iteration,
                             tool_call_id=tool_call_id,
                         )
@@ -1342,40 +1628,40 @@ class ToolDispatcher:
                             pending.approval_id,
                         )
                         log_tool_call(logger, tool_name, arguments, result=result_str)
-            elif e._approval.is_audit_only_tool(tool_name):
-                result_value, audit_record = await e._execute_tool_with_audit(
+            elif e.approval.is_audit_only_tool(tool_name):
+                result_value, audit_record = await e.execute_tool_with_audit(
                     tool_name=tool_name,
                     arguments=arguments,
                     tool_scope=tool_scope,
-                    approval_id=e._approval.new_approval_id(),
-                    created_at_utc=e._approval.utc_now(),
+                    approval_id=e.approval.new_approval_id(),
+                    created_at_utc=e.approval.utc_now(),
                     undoable=tool_name not in {"run_code", "run_shell"},
                 )
                 result_str = str(result_value)
-                tool_def = getattr(e._registry, "get_tool", lambda _: None)(tool_name)
+                tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
                 if tool_def is not None:
                     result_str = tool_def.truncate_result(result_str)
                 success = True
                 error = None
                 log_tool_call(logger, tool_name, arguments, result=result_str)
-            elif e._approval.is_high_risk_tool(tool_name):
-                if not e._full_access_enabled and not skip_high_risk_approval_by_hook:
-                    pending = e._approval.create_pending(
+            elif e.approval.is_high_risk_tool(tool_name):
+                if not e.full_access_enabled and not skip_high_risk_approval_by_hook:
+                    pending = e.approval.create_pending(
                         tool_name=tool_name,
                         arguments=arguments,
                         tool_scope=tool_scope,
                     )
                     pending_approval = True
                     approval_id = pending.approval_id
-                    result_str = e._format_pending_prompt(pending)
+                    result_str = e.format_pending_prompt(pending)
                     success = True
                     error = None
-                    e._emit_pending_approval_event(
+                    e.emit_pending_approval_event(
                         pending=pending, on_event=on_event, iteration=iteration,
                         tool_call_id=tool_call_id,
                     )
                     log_tool_call(logger, tool_name, arguments, result=result_str)
-                elif e._approval.is_mcp_tool(tool_name):
+                elif e.approval.is_mcp_tool(tool_name):
                     # 非白名单 MCP 工具在 fullaccess 下可直接执行（不做文件审计）。
                     probe_before, probe_before_partial = self._capture_unknown_write_probe(tool_name)
                     result_value = await self.call_registry_tool(
@@ -1393,16 +1679,16 @@ class ToolDispatcher:
                     error = None
                     log_tool_call(logger, tool_name, arguments, result=result_str)
                 else:
-                    result_value, audit_record = await e._execute_tool_with_audit(
+                    result_value, audit_record = await e.execute_tool_with_audit(
                         tool_name=tool_name,
                         arguments=arguments,
                         tool_scope=tool_scope,
-                        approval_id=e._approval.new_approval_id(),
-                        created_at_utc=e._approval.utc_now(),
+                        approval_id=e.approval.new_approval_id(),
+                        created_at_utc=e.approval.utc_now(),
                         undoable=tool_name not in {"run_code", "run_shell"},
                     )
                     result_str = str(result_value)
-                    tool_def = getattr(e._registry, "get_tool", lambda _: None)(tool_name)
+                    tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
                     if tool_def is not None:
                         result_str = tool_def.truncate_result(result_str)
                     success = True
@@ -1493,9 +1779,9 @@ class ToolDispatcher:
         # 必须在 enrichment 之前保存原始结果供 _emit_excel_events 使用。
         _raw_result_for_excel_events = result_str
 
-        # ── 通用 CoW 映射提取：任何成功的工具调用都可能产生 cow_mapping ──
+        # ── 通用结构化字段提取（CoW 映射 + 图片注入，单次 JSON 解析） ──
         if success and result_str:
-            _cow_extracted = self._extract_and_register_cow_mapping(result_str)
+            result_str, _cow_extracted = self._extract_structured_result(result_str)
             if _cow_extracted:
                 logger.info(
                     "CoW 映射已注册: tool=%s mappings=%s", tool_name, _cow_extracted,
@@ -1506,20 +1792,21 @@ class ToolDispatcher:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
 
         # ── 备份沙盒提醒：首次写入成功后追加备份文件路径 ──
+        tx = e.transaction
         if (
             success
-            and e._backup_enabled
-            and e._backup_manager is not None
-            and not e._state.backup_write_notice_shown
+            and e.workspace.transaction_enabled
+            and tx is not None
+            and not e.state.backup_write_notice_shown
         ):
             from pathlib import Path as _Path
 
             from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS as _RO_TOOLS
 
             if tool_name not in _RO_TOOLS:
-                backups = e._backup_manager.list_backups()
+                backups = tx.list_staged()
                 if backups:
-                    backup_dir = str(e._backup_manager.backup_dir)
+                    backup_dir = str(tx.staging_dir)
                     file_names = [
                         _Path(b["backup"]).name
                         for b in backups
@@ -1536,14 +1823,10 @@ class ToolDispatcher:
                         "用户可通过 `/backup apply` 将修改应用到原文件。"
                     )
                     result_str = result_str + "".join(notice_parts)
-                    e._state.backup_write_notice_shown = True
-
-        # ── 图片注入：检测 _image_injection 并注入到 memory ──
-        if success and result_str:
-            result_str = self._try_inject_image(result_str)
+                    e.state.backup_write_notice_shown = True
 
         # ── B 通道：异步 VLM 描述追加 ──
-        if success and getattr(self, "_pending_vlm_image", None) is not None:
+        if success and self._pending_vlm_image is not None:
             vlm_desc = await self._run_vlm_describe()
             if vlm_desc:
                 result_str = (
@@ -1569,7 +1852,7 @@ class ToolDispatcher:
             error = e._apply_tool_result_hard_cap(str(error))
 
         # 发射 TOOL_CALL_END 事件
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.TOOL_CALL_END,
@@ -1589,10 +1872,10 @@ class ToolDispatcher:
                 _session_id = getattr(e, "_session_id", None)
                 self._tool_call_store.log(
                     session_id=_session_id,
-                    turn=e._state.session_turn,
+                    turn=e.state.session_turn,
                     iteration=iteration,
                     tool_name=tool_name,
-                    arguments_hash=e._state._args_fingerprint(arguments) if arguments else None,
+                    arguments_hash=e.state._args_fingerprint(arguments) if arguments else None,
                     success=success,
                     duration_ms=0.0,
                     result_chars=len(result_str) if result_str else 0,
@@ -1614,7 +1897,7 @@ class ToolDispatcher:
             _fp = arguments.get("file_path") or ""
             if _fp:
                 from excelmanus.events import EventType, ToolCallEvent
-                e._emit(
+                e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.FILES_CHANGED,
@@ -1628,7 +1911,7 @@ class ToolDispatcher:
         if success and tool_name == "task_create" and not pending_plan:
             task_list = e._task_store.current
             if task_list is not None:
-                e._emit(
+                e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.TASK_LIST_CREATED,
@@ -1638,7 +1921,7 @@ class ToolDispatcher:
         elif success and tool_name == "task_update":
             task_list = e._task_store.current
             if task_list is not None:
-                e._emit(
+                e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.TASK_ITEM_UPDATED,
@@ -1660,7 +1943,10 @@ class ToolDispatcher:
     def _snapshot_excel_for_diff(
         file_paths: list[str], workspace_root: str,
     ) -> dict[str, list[tuple[str, list[dict]]]]:
-        """对指定 Excel 文件做轻量快照，返回 {file_path: [(sheet, snapshot)]}。"""
+        """对指定 Excel 文件做轻量快照，返回 {file_path: [(sheet, snapshot)]}。
+
+        文件不存在时记录空列表（tombstone），以便 diff 能检测"从无到有"的新建场景。
+        """
         from pathlib import Path
         snapshots: dict[str, list[tuple[str, list[dict]]]] = {}
         for fp in file_paths:
@@ -1668,6 +1954,8 @@ class ToolDispatcher:
                 abs_path = Path(fp) if Path(fp).is_absolute() else Path(workspace_root) / fp
                 abs_path = abs_path.resolve()
                 if not abs_path.is_file():
+                    # 文件不存在 → 记录空快照（tombstone），支持新建文件 diff
+                    snapshots[fp] = []
                     continue
                 from openpyxl import load_workbook
                 wb = load_workbook(str(abs_path), data_only=True, read_only=True)
@@ -1759,7 +2047,7 @@ class ToolDispatcher:
                     elif isinstance(record, list):
                         rows_data.append(record)
                 total_rows = parsed.get("total_rows_in_sheet") or parsed.get("shape", {}).get("rows", 0)
-                e._emit(
+                e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.EXCEL_PREVIEW,
@@ -1778,7 +2066,7 @@ class ToolDispatcher:
         if isinstance(diff_data, dict):
             changes = diff_data.get("changes", [])
             if changes:
-                e._emit(
+                e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.EXCEL_DIFF,
@@ -1823,7 +2111,7 @@ class ToolDispatcher:
         if not affected or on_event is None:
             return
 
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.FILES_CHANGED,
@@ -1851,14 +2139,19 @@ class ToolDispatcher:
         if not affected_files or not isinstance(affected_files, list):
             return
 
+        _MAX_PATH_LEN = 260
         valid_paths = [
             f for f in affected_files
-            if isinstance(f, str) and f.strip()
+            if isinstance(f, str)
+            and f.strip()
+            and len(f) <= _MAX_PATH_LEN
+            and "\n" not in f
+            and "\r" not in f
         ]
         if not valid_paths:
             return
 
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.FILES_CHANGED,

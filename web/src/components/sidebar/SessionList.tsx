@@ -239,7 +239,7 @@ export function SessionList() {
                         className={`flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] ${
                           isActive
                             ? "opacity-100"
-                            : "opacity-0 group-hover:opacity-100"
+                            : "opacity-0 group-hover:opacity-100 touch-show"
                         }`}
                         onClick={(e) => e.stopPropagation()}
                       >

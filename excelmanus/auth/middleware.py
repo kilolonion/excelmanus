@@ -1,10 +1,10 @@
-"""Authentication middleware that protects API endpoints.
+"""认证中间件，保护 API 端点。
 
-Whitelisted paths (no auth required):
-- /api/v1/auth/*    — login, register, OAuth flows
-- /api/v1/health    — health check
-- /docs, /openapi.json, /redoc — API docs
-- Static file paths
+白名单路径（无需认证）：
+- /api/v1/auth/*    — 登录、注册、OAuth 流程
+- /api/v1/health    — 健康检查
+- /docs, /openapi.json, /redoc — API 文档
+- 静态文件路径
 """
 
 from __future__ import annotations
@@ -33,31 +33,35 @@ _PUBLIC_PREFIXES = (
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Inject ``request.state.user_id`` from Bearer token.
+    """将 Bearer token 中的 ``request.state.user_id`` 注入请求。
 
-    Public endpoints are allowed through without auth.
-    All other ``/api/`` endpoints require a valid access token.
+    公开端点无需认证直接放行。
+    所有其他 ``/api/`` 端点需要有效的访问令牌。
     """
 
     async def dispatch(
         self, request: Request, call_next: Callable[..., Response],
     ) -> Response:
+        # 放行 CORS 预检请求，避免 OPTIONS 被认证拦截
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         path = request.url.path
 
-        # Let public endpoints through
+        # 放行公开端点
         if any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # Non-API paths (frontend assets) pass through
+        # 非 API 路径（前端静态资源）直接放行
         if not path.startswith("/api/"):
             return await call_next(request)
 
-        # Check for auth_enabled flag (allows disabling auth for backward compat)
+        # 检查 auth_enabled 标志（允许禁用认证以保持向后兼容）
         auth_enabled = getattr(request.app.state, "auth_enabled", False)
         if not auth_enabled:
             return await call_next(request)
 
-        # Extract Bearer token
+        # 提取 Bearer token
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return JSONResponse(
@@ -82,7 +86,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"error": "无效的 token 载荷", "error_id": ""},
             )
 
-        # Inject user_id into request state for downstream handlers
+        # 将 user_id 注入 request state，供下游处理器使用
         request.state.user_id = user_id
         request.state.user_role = payload.get("role", "user")
 

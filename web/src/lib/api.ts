@@ -25,11 +25,17 @@ function resolveDirectBackendOrigin(): string {
 }
 
 function resolveApiBase(opts?: { direct?: boolean }): string {
-  // In browser context, always route through the Next.js rewrite proxy so
-  // that requests stay same-origin.  This avoids CORS failures when the
-  // page is accessed from other devices on the LAN (port 3000 → 8000 is
-  // cross-origin).  Server-side code may still use the direct backend URL.
+  // Most browser requests route through the Next.js rewrite proxy so that
+  // requests stay same-origin (avoids CORS when accessed from LAN devices).
+  //
+  // However, SSE (Server-Sent Events) streams MUST bypass the proxy because
+  // Next.js rewrites buffer the entire response before forwarding it to the
+  // client, which completely breaks real-time streaming.  Callers that need
+  // a live stream pass `direct: true` to connect straight to the backend.
   if (typeof window !== "undefined") {
+    if (opts?.direct) {
+      return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
+    }
     return API_BASE_PATH;
   }
   if (opts?.direct) {
@@ -133,7 +139,9 @@ export async function fetchSessions(opts?: {
 export async function fetchSessionDetail(
   sessionId: string
 ): Promise<SessionDetail | null> {
-  const res = await fetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`));
+  const res = await fetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`), {
+    headers: { ...getAuthHeaders() },
+  });
   if (res.status === 404) {
     return null;
   }
@@ -202,7 +210,10 @@ export async function clearAllSessions(): Promise<{
   sessions_deleted: number;
   messages_deleted: number;
 }> {
-  const res = await fetch(buildApiUrl("/sessions"), { method: "DELETE" });
+  const res = await fetch(buildApiUrl("/sessions"), {
+    method: "DELETE",
+    headers: { ...getAuthHeaders() },
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || data.error || `API error: ${res.status}`);
@@ -282,10 +293,13 @@ export interface ApprovalRecord {
 export async function fetchApprovals(opts?: {
   limit?: number;
   undoableOnly?: boolean;
+  sessionId?: string;
 }): Promise<ApprovalRecord[]> {
+  if (!opts?.sessionId) return [];
   const params = new URLSearchParams();
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.undoableOnly) params.set("undoable_only", "true");
+  params.set("session_id", opts.sessionId);
   const qs = params.toString();
   const res: { approvals?: ApprovalRecord[] } = await apiGet(
     `/approvals${qs ? `?${qs}` : ""}`
@@ -293,12 +307,13 @@ export async function fetchApprovals(opts?: {
   return res.approvals ?? [];
 }
 
-export async function undoApproval(approvalId: string): Promise<{
+export async function undoApproval(approvalId: string, sessionId: string): Promise<{
   status: string;
   message: string;
   approval_id: string;
 }> {
-  return apiPost(`/approvals/${approvalId}/undo`, {});
+  const qs = new URLSearchParams({ session_id: sessionId }).toString();
+  return apiPost(`/approvals/${approvalId}/undo?${qs}`, {});
 }
 
 export async function rollbackChat(opts: {
@@ -312,10 +327,9 @@ export async function rollbackChat(opts: {
   file_rollback_results: string[];
   turn_index: number;
 }> {
-  const url = buildApiUrl("/chat/rollback", { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(buildApiUrl("/chat/rollback"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       session_id: opts.sessionId,
       turn_index: opts.turnIndex,
@@ -323,10 +337,7 @@ export async function rollbackChat(opts: {
       new_message: opts.newMessage ?? null,
     }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Rollback error: ${res.status}`);
-  }
+  if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
@@ -344,6 +355,15 @@ export interface ExcelSnapshot {
   truncated: boolean;
 }
 
+/**
+ * Normalize a file path for API calls and comparisons.
+ *
+ * Handles:
+ * - Masked paths: ``<path>/foo.xlsx`` -> ``./foo.xlsx``
+ * - Absolute paths: keep as-is for backend workspace validation
+ * - Missing ``./`` prefix: ``uploads/foo.xlsx`` -> ``./uploads/foo.xlsx``
+ * - Double slashes: ``./uploads//foo.xlsx`` -> ``./uploads/foo.xlsx``
+ */
 export function normalizeExcelPath(path: string): string {
   const raw = String(path ?? "").trim();
   if (!raw) return "";
@@ -351,7 +371,11 @@ export function normalizeExcelPath(path: string): string {
     const basename = raw.slice("<path>/".length).trim();
     return basename ? `./${basename}` : "";
   }
-  return raw;
+  let p = raw.replace(/\/\/+/g, "/");
+  // Keep absolute paths intact so backend can validate them against workspace.
+  if (p.startsWith("/")) return p;
+  if (!p.startsWith("./")) p = `./${p}`;
+  return p;
 }
 
 function extractSanitizedPathBasename(path: string): string | null {
@@ -386,7 +410,7 @@ export interface ExcelFileListItem {
 
 export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
   const url = buildApiUrl("/files/excel/list", { direct: true });
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
@@ -394,7 +418,7 @@ export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
 
 export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   const url = buildApiUrl("/files/workspace/list", { direct: true });
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
@@ -404,7 +428,9 @@ export async function fetchExcelSnapshot(
   path: string,
   opts?: { sheet?: string; maxRows?: number; sessionId?: string }
 ): Promise<ExcelSnapshot> {
-  const res = await fetch(buildExcelSnapshotUrl(path, opts));
+  const res = await fetch(buildExcelSnapshotUrl(path, opts), {
+    headers: { ...getAuthHeaders() },
+  });
   if (!res.ok) {
     // 兼容历史脱敏路径 "<path>/foo.xlsx"：尝试按 basename 回查 workspace 文件并重试
     const maskedBasename = extractSanitizedPathBasename(path);
@@ -412,7 +438,9 @@ export async function fetchExcelSnapshot(
       const files = await fetchWorkspaceFiles().catch(() => []);
       const matches = files.filter((f) => f.filename === maskedBasename);
       if (matches.length === 1) {
-        const retryRes = await fetch(buildExcelSnapshotUrl(matches[0].path, opts));
+        const retryRes = await fetch(buildExcelSnapshotUrl(matches[0].path, opts), {
+          headers: { ...getAuthHeaders() },
+        });
         if (retryRes.ok) {
           return retryRes.json();
         }
@@ -433,7 +461,7 @@ export async function writeExcelCells(opts: {
   const url = buildApiUrl("/files/excel/write", { direct: true });
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       path: normalizeExcelPath(opts.path),
       sheet: opts.sheet ?? null,
@@ -446,6 +474,29 @@ export async function writeExcelCells(opts: {
     throw new Error(data.error || `Write error: ${res.status}`);
   }
   return res.json();
+}
+
+export async function downloadFile(path: string, filename?: string, sessionId?: string): Promise<void> {
+  const params = new URLSearchParams({ path: normalizeExcelPath(path) });
+  if (sessionId) params.set("session_id", sessionId);
+  const url = buildApiUrl(`/files/download?${params.toString()}`);
+  const res = await fetch(url, {
+    headers: { ...getAuthHeaders() },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Download error: ${res.status}`);
+  }
+  const blob = await res.blob();
+  const name = filename || path.split("/").pop() || "download";
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(objectUrl);
 }
 
 export async function uploadFile(file: File): Promise<{
@@ -467,7 +518,7 @@ export async function uploadFile(file: File): Promise<{
   return res.json();
 }
 
-// ── Backup Apply API ─────────────────────────────────────
+// ── Workspace Transaction API (formerly Backup Apply) ────
 
 export interface BackupFile {
   original_path: string;
@@ -485,10 +536,10 @@ export async function fetchBackupList(
   sessionId: string
 ): Promise<BackupListResponse> {
   const url = buildApiUrl(
-    `/backup/list?session_id=${encodeURIComponent(sessionId)}`,
+    `/workspace/staged?session_id=${encodeURIComponent(sessionId)}`,
     { direct: true }
   );
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) {
     return { files: [], backup_enabled: false };
   }
@@ -499,10 +550,10 @@ export async function applyBackup(opts: {
   sessionId: string;
   files?: string[];
 }): Promise<{ status: string; applied: { original: string; backup: string }[]; count: number }> {
-  const url = buildApiUrl("/backup/apply", { direct: true });
+  const url = buildApiUrl("/workspace/commit", { direct: true });
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       session_id: opts.sessionId,
       files: opts.files ?? null,
@@ -510,7 +561,7 @@ export async function applyBackup(opts: {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Apply error: ${res.status}`);
+    throw new Error(data.error || data.detail || `Commit error: ${res.status}`);
   }
   return res.json();
 }
@@ -519,10 +570,10 @@ export async function discardBackup(opts: {
   sessionId: string;
   files?: string[];
 }): Promise<{ status: string; discarded: number | string }> {
-  const url = buildApiUrl("/backup/discard", { direct: true });
+  const url = buildApiUrl("/workspace/rollback", { direct: true });
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       session_id: opts.sessionId,
       files: opts.files ?? null,
@@ -530,7 +581,7 @@ export async function discardBackup(opts: {
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Discard error: ${res.status}`);
+    throw new Error(data.error || data.detail || `Rollback error: ${res.status}`);
   }
   return res.json();
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   Wrench,
   CheckCircle2,
@@ -45,6 +45,23 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   const [open, setOpen] = useState(false);
   const [applyingInline, setApplyingInline] = useState(false);
   const [appliedInline, setAppliedInline] = useState(false);
+
+  // Elapsed timer for running tools
+  const startRef = useRef<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (status !== "running") {
+      startRef.current = null;
+      return;
+    }
+    if (startRef.current === null) startRef.current = Date.now();
+    const start = startRef.current;
+    setElapsed(0);
+    const timer = setInterval(() => {
+      setElapsed(Math.round((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [status]);
 
   const isExcelRead = EXCEL_READ_TOOLS.has(name);
   const isExcelWrite = EXCEL_WRITE_TOOLS.has(name);
@@ -95,6 +112,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
           <span className="font-mono text-xs flex-1 truncate">{name}</span>
           {status === "pending" && (
             <span className="text-[10px] text-amber-600 font-medium">待审批</span>
+          )}
+          {status === "running" && elapsed > 0 && (
+            <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
           )}
           {StatusIcon}
           {open ? (

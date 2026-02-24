@@ -95,10 +95,11 @@ def _parse_data_uri(url: str) -> tuple[str, str]:
 
 def _openai_messages_to_claude(
     messages: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]]]:
     """将 OpenAI messages 转换为 Claude 的 system + messages。
 
-    返回 (system_text, claude_messages)。
+    返回 (system, claude_messages)。
+    system 可能是 str（无 cache_control）或 list[dict]（带 cache_control breakpoint）。
     """
     system_parts: list[str] = []
     claude_messages: list[dict[str, Any]] = []
@@ -167,7 +168,7 @@ def _openai_messages_to_claude(
             continue
 
         if role == "tool":
-            # OpenAI tool result → Claude tool_result content block
+            # OpenAI 工具结果 → Claude tool_result 内容块
             tool_call_id = msg.get("tool_call_id", "")
             result_content = content or ""
             claude_messages.append({
@@ -187,11 +188,32 @@ def _openai_messages_to_claude(
             "content": str(content or ""),
         })
 
-    # Claude 要求 user/assistant 严格交替，合并连续同角色
+    # Claude 要求 user/assistant 严格交替，合并连续同角色消息
     claude_messages = _merge_consecutive_claude_messages(claude_messages)
 
-    system_text = "\n\n".join(system_parts)
-    return system_text, claude_messages
+    # Prompt Caching：将 system 构建为带 cache_control breakpoint 的结构化格式。
+    # 在最后一个 system block 上设置 cache_control，使整个 system 前缀可被缓存。
+    if len(system_parts) == 1:
+        system: str | list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": system_parts[0],
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    elif system_parts:
+        # 多个 system block：仅在最后一个上设置 cache_control breakpoint
+        system_blocks: list[dict[str, Any]] = []
+        for i, part in enumerate(system_parts):
+            block: dict[str, Any] = {"type": "text", "text": part}
+            if i == len(system_parts) - 1:
+                block["cache_control"] = {"type": "ephemeral"}
+            system_blocks.append(block)
+        system = system_blocks
+    else:
+        system = ""
+
+    return system, claude_messages
 
 
 def _merge_consecutive_claude_messages(
@@ -251,7 +273,7 @@ def _map_openai_tool_choice_to_claude(tool_choice: Any) -> dict[str, Any] | None
         if normalized == "required":
             return {"type": "any"}
         if normalized == "none":
-            # Claude 不提供 none，降级为 auto，后续由模型自行决定不调工具。
+            # Claude 不提供 none 选项，降级为 auto，由模型自行决定是否调用工具。
             return {"type": "auto"}
         return None
 
@@ -303,7 +325,7 @@ def _claude_response_to_openai(
                 ),
             ))
         elif block_type == "thinking":
-            # Claude extended thinking — 暂存但不影响主流程
+            # Claude 扩展思考 — 暂存但不影响主流程
             pass
 
     message = _Message(
@@ -311,7 +333,7 @@ def _claude_response_to_openai(
         tool_calls=tool_calls if tool_calls else None,
     )
 
-    # stop_reason 映射
+    # stop_reason 映射为 OpenAI finish_reason
     stop_reason = data.get("stop_reason", "end_turn")
     finish_reason_map = {
         "end_turn": "stop",
@@ -321,10 +343,21 @@ def _claude_response_to_openai(
     }
     finish_reason = finish_reason_map.get(stop_reason, "stop")
 
-    # usage
+    # usage 统计（含 prompt caching 字段）
     usage_data = data.get("usage", {})
     prompt_tokens = usage_data.get("input_tokens", 0)
     completion_tokens = usage_data.get("output_tokens", 0)
+    cache_creation_tokens = usage_data.get("cache_creation_input_tokens", 0)
+    cache_read_tokens = usage_data.get("cache_read_input_tokens", 0)
+
+    usage = _Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    # 附加 cache 统计到 usage 对象（供上层提取）
+    usage.cache_creation_input_tokens = cache_creation_tokens  # type: ignore[attr-defined]
+    usage.cache_read_input_tokens = cache_read_tokens  # type: ignore[attr-defined]
 
     return _ChatCompletion(
         id=msg_id,
@@ -333,11 +366,7 @@ def _claude_response_to_openai(
             message=message,
             finish_reason=finish_reason,
         )],
-        usage=_Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
+        usage=usage,
     )
 
 
@@ -413,7 +442,7 @@ class ClaudeClient:
         thinking_budget: int = 0,
     ) -> _ChatCompletion:
         """执行 Claude Messages API 请求。"""
-        system_text, claude_messages = _openai_messages_to_claude(messages)
+        system, claude_messages = _openai_messages_to_claude(messages)
 
         body: dict[str, Any] = {
             "model": model,
@@ -423,8 +452,8 @@ class ClaudeClient:
         if thinking_enabled and thinking_budget > 0:
             body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
             body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
-        if system_text:
-            body["system"] = system_text
+        if system:
+            body["system"] = system
 
         tools_list = tools if isinstance(tools, list) else None
         claude_tools = _openai_tools_to_claude(tools_list)
@@ -440,6 +469,7 @@ class ClaudeClient:
             "Content-Type": "application/json",
             "x-api-key": self._api_key,
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
         }
 
         logger.debug(
@@ -487,7 +517,7 @@ class ClaudeClient:
         thinking_budget: int = 0,
     ) -> Any:
         """流式执行 Claude Messages API 请求，返回异步生成器 yield StreamDelta。"""
-        system_text, claude_messages = _openai_messages_to_claude(messages)
+        system, claude_messages = _openai_messages_to_claude(messages)
         body: dict[str, Any] = {
             "model": model,
             "messages": claude_messages,
@@ -497,8 +527,8 @@ class ClaudeClient:
         if thinking_enabled and thinking_budget > 0:
             body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
             body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
-        if system_text:
-            body["system"] = system_text
+        if system:
+            body["system"] = system
         tools_list = tools if isinstance(tools, list) else None
         claude_tools = _openai_tools_to_claude(tools_list)
         if claude_tools:
@@ -512,6 +542,7 @@ class ClaudeClient:
             "Content-Type": "application/json",
             "x-api-key": self._api_key,
             "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31",
         }
 
         async def _stream_generator():
@@ -526,6 +557,9 @@ class ClaudeClient:
                 current_tool_name: str | None = None
                 current_tool_json: str = ""
                 tool_call_index: int = -1
+                # Prompt caching 统计（从 message_start 事件提取）
+                _cache_creation_tokens: int = 0
+                _cache_read_tokens: int = 0
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
@@ -539,6 +573,31 @@ class ClaudeClient:
                         continue
 
                     event_type = event_data.get("type", "")
+
+                    # message_start 携带初始 usage（含 prompt caching 统计）
+                    if event_type == "message_start":
+                        msg_obj = event_data.get("message", {})
+                        start_usage = msg_obj.get("usage", {})
+                        _cache_creation_tokens = start_usage.get(
+                            "cache_creation_input_tokens", 0
+                        ) or 0
+                        _cache_read_tokens = start_usage.get(
+                            "cache_read_input_tokens", 0
+                        ) or 0
+                        if _cache_read_tokens > 0:
+                            logger.info(
+                                "Anthropic prompt cache HIT: "
+                                "cache_read=%d, cache_creation=%d",
+                                _cache_read_tokens,
+                                _cache_creation_tokens,
+                            )
+                        elif _cache_creation_tokens > 0:
+                            logger.info(
+                                "Anthropic prompt cache MISS (creating): "
+                                "cache_creation=%d",
+                                _cache_creation_tokens,
+                            )
+                        continue
 
                     if event_type == "content_block_start":
                         block = event_data.get("content_block", {})
@@ -587,6 +646,9 @@ class ClaudeClient:
                                 total_tokens=usage_data.get("input_tokens", 0)
                                 + usage_data.get("output_tokens", 0),
                             )
+                            # 附加 prompt caching 统计
+                            u.cache_creation_input_tokens = _cache_creation_tokens  # type: ignore[attr-defined]
+                            u.cache_read_input_tokens = _cache_read_tokens  # type: ignore[attr-defined]
                         yield StreamDelta(finish_reason=finish, usage=u)
 
         return _stream_generator()

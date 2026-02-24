@@ -211,7 +211,7 @@ class CompactionManager:
             "threshold_ratio": threshold,
             "compaction_count": self._stats.compaction_count,
             "last_compaction_at": self._stats.last_compaction_at,
-            "message_count": len(memory._messages),
+            "message_count": len(memory.messages),
         }
 
     async def _do_compact(
@@ -225,7 +225,7 @@ class CompactionManager:
         source: str,
     ) -> CompactionResult:
         """执行压缩的核心逻辑。"""
-        messages_before = len(memory._messages)
+        messages_before = len(memory.messages)
         tokens_before = memory._total_tokens_with_system_messages(system_msgs)
 
         if messages_before == 0:
@@ -238,7 +238,7 @@ class CompactionManager:
 
         # 找到最近 keep_recent 个 user 消息的起始索引
         user_indices = [
-            i for i, m in enumerate(memory._messages)
+            i for i, m in enumerate(memory.messages)
             if m.get("role") == "user"
         ]
         if len(user_indices) <= keep_recent:
@@ -250,8 +250,8 @@ class CompactionManager:
             )
 
         split_idx = user_indices[-keep_recent]
-        old_messages = memory._messages[:split_idx]
-        recent_messages = memory._messages[split_idx:]
+        old_messages = memory.messages[:split_idx]
+        recent_messages = memory.messages[split_idx:]
 
         if not old_messages:
             return CompactionResult(
@@ -301,7 +301,7 @@ class CompactionManager:
                 * (self._config.compaction_threshold_ratio - 0.1)
             )
             memory._truncate_history_to_threshold(target_threshold, system_msgs)
-            messages_after = len(memory._messages)
+            messages_after = len(memory.messages)
             tokens_after = memory._total_tokens_with_system_messages(system_msgs)
             return CompactionResult(
                 success=False,
@@ -319,7 +319,7 @@ class CompactionManager:
                 * (self._config.compaction_threshold_ratio - 0.1)
             )
             memory._truncate_history_to_threshold(target_threshold, system_msgs)
-            messages_after = len(memory._messages)
+            messages_after = len(memory.messages)
             tokens_after = memory._total_tokens_with_system_messages(system_msgs)
             return CompactionResult(
                 success=False,
@@ -345,7 +345,7 @@ class CompactionManager:
         if memory._total_tokens_with_system_messages(system_msgs) > target_threshold:
             memory._truncate_history_to_threshold(target_threshold, system_msgs)
 
-        messages_after = len(memory._messages)
+        messages_after = len(memory.messages)
         tokens_after = memory._total_tokens_with_system_messages(system_msgs)
 
         # 更新统计

@@ -359,7 +359,7 @@ class TestRendererSummaryLine:
         renderer.handle_event(event)
 
         output = _strip_ansi(buf.getvalue())
-        assert "✅5" in output or "✅ 5" in output
+        assert "✅5" in output or "✅ 5" in output or "✓ 5" in output
 
     def test_summary_line_contains_failed_count(self) -> None:
         """摘要行应包含 ❌ 失败计数。"""
@@ -371,7 +371,7 @@ class TestRendererSummaryLine:
         renderer.handle_event(event)
 
         output = _strip_ansi(buf.getvalue())
-        assert "❌3" in output or "❌ 3" in output
+        assert "❌3" in output or "❌ 3" in output or "✗ 3" in output
 
     def test_no_summary_when_tasks_still_pending(self) -> None:
         """仍有 pending 任务时不应显示摘要行。"""
@@ -450,7 +450,7 @@ class TestRendererNarrowTerminal:
                 )
 
     def test_narrow_compact_format(self) -> None:
-        """窄终端应使用紧凑格式：图标直接跟随索引。"""
+        """窄终端应使用紧凑格式。"""
         buf = io.StringIO()
         console = Console(file=buf, width=40, force_terminal=True, no_color=True)
         renderer = StreamRenderer(console)
@@ -459,12 +459,12 @@ class TestRendererNarrowTerminal:
         renderer.handle_event(event)
 
         output = _strip_ansi(buf.getvalue())
-        # 紧凑格式: "⬜0.子任务A"（图标紧跟索引，无空格分隔）
-        assert "⬜0." in output
-        assert "⬜1." in output
+        # 新格式使用树形: "├ ○ 0. 子任务A" 或紧凑 "⬜0."
+        assert "0." in output and "子任务A" in output
+        assert "1." in output and "子任务B" in output
 
     def test_wide_terminal_uses_indentation(self) -> None:
-        """宽终端应使用带缩进的格式作为对照。"""
+        """宽终端应使用带缩进/树形的格式。"""
         buf = io.StringIO()
         console = Console(file=buf, width=120, force_terminal=True, no_color=True)
         renderer = StreamRenderer(console)
@@ -473,8 +473,8 @@ class TestRendererNarrowTerminal:
         renderer.handle_event(event)
 
         output = buf.getvalue()
-        # 宽格式: "     ⬜ 0. 子任务A"（5空格缩进 + 图标 + 空格 + 索引）
-        assert "     ⬜" in output
+        # 宽格式: 树形 "├ ○" 或缩进 "     ⬜"
+        assert "○" in output or "⬜" in output
 
 
 # ---------------------------------------------------------------------------

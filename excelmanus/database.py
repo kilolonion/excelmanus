@@ -208,6 +208,33 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE sessions ADD COLUMN user_id TEXT",
         "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
     ],
+    9: [
+        "ALTER TABLE memory_entries ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
+    ],
+    10: [
+        "ALTER TABLE approvals ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_user_id ON approvals(user_id)",
+        "ALTER TABLE tool_call_log ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
+        "ALTER TABLE llm_call_log ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_llm_user_id ON llm_call_log(user_id)",
+        "ALTER TABLE workspace_files ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_wf_user_id ON workspace_files(user_id)",
+        """CREATE TABLE IF NOT EXISTS user_config_kv (
+            key        TEXT NOT NULL,
+            user_id    TEXT,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(key, user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_uckv_user ON user_config_kv(user_id)",
+    ],
+    11: [
+        "ALTER TABLE llm_call_log ADD COLUMN ttft_ms REAL DEFAULT 0",
+        "ALTER TABLE llm_call_log ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
+        "ALTER TABLE llm_call_log ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -396,6 +423,33 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
     8: [
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT",
         "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    ],
+    9: [
+        "ALTER TABLE memory_entries ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
+    ],
+    10: [
+        "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_user_id ON approvals(user_id)",
+        "ALTER TABLE tool_call_log ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
+        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_llm_user_id ON llm_call_log(user_id)",
+        "ALTER TABLE workspace_files ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_wf_user_id ON workspace_files(user_id)",
+        """CREATE TABLE IF NOT EXISTS user_config_kv (
+            key        TEXT NOT NULL,
+            user_id    TEXT,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(key, user_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_uckv_user ON user_config_kv(user_id)",
+    ],
+    11: [
+        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS ttft_ms REAL DEFAULT 0",
+        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER DEFAULT 0",
+        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER DEFAULT 0",
     ],
 }
 

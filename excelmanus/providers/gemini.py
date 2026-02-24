@@ -158,7 +158,7 @@ def _openai_messages_to_gemini(
             continue
 
         if role == "tool":
-            # OpenAI tool result → Gemini functionResponse
+            # OpenAI 工具结果 → Gemini functionResponse
             tool_call_id = msg.get("tool_call_id", "")
             # 尝试从上下文中找到对应的函数名
             func_name = _find_function_name_by_call_id(messages, tool_call_id)

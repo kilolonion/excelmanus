@@ -48,7 +48,7 @@ def parse_arguments(raw: str) -> list[str]:
                 current.append(ch)
             continue
 
-        # state == "single_quote"
+        # state == "single_quote"（单引号状态）
         if ch == "'":
             state = "normal"
         else:

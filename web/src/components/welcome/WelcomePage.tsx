@@ -18,7 +18,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
         <img
           src="/logo.svg"
           alt="ExcelManus"
-          className="h-16 w-auto"
+          className="h-10 w-auto"
         />
       </div>
       <p className="text-muted-foreground mb-8">基于大语言模型的 Excel 智能代理</p>

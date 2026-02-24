@@ -1,5 +1,9 @@
 import { useAuthStore, type AuthUser } from "@/stores/auth-store";
 import { useRecentAccountsStore } from "@/stores/recent-accounts-store";
+import { useSessionStore } from "@/stores/session-store";
+import { useChatStore } from "@/stores/chat-store";
+import { useExcelStore } from "@/stores/excel-store";
+import { clearAllCachedMessages } from "@/lib/idb-cache";
 import { buildApiUrl } from "./api";
 
 // ── Types ─────────────────────────────────────────────────
@@ -16,6 +20,7 @@ interface TokenResponse {
     role: string;
     avatar_url: string | null;
     has_custom_llm_key: boolean;
+    allowed_models: string[];
     created_at: string;
   };
 }
@@ -28,21 +33,43 @@ function mapUser(raw: TokenResponse["user"]): AuthUser {
     role: raw.role,
     avatarUrl: raw.avatar_url,
     hasCustomLlmKey: raw.has_custom_llm_key,
+    allowedModels: raw.allowed_models ?? [],
     createdAt: raw.created_at,
   };
 }
 
 function handleTokenResponse(data: TokenResponse) {
+  const prevUser = useAuthStore.getState().user;
   const { setTokens, setUser } = useAuthStore.getState();
   setTokens(data.access_token, data.refresh_token);
   const user = mapUser(data.user);
   setUser(user);
+
+  // 切换到不同账号时，清理前一个用户的本地缓存数据，防止跨账号污染。
+  // refreshAccessToken 刷新同一用户的 token 时不触发清理。
+  if (prevUser && prevUser.id !== user.id) {
+    _clearUserSpecificStores();
+  }
 
   useRecentAccountsStore.getState().recordLogin({
     email: user.email,
     displayName: user.displayName,
     avatarUrl: user.avatarUrl ?? null,
   });
+}
+
+/**
+ * 清理所有用户特定的前端缓存，防止跨账号数据泄漏。
+ * 在 logout() 和账号切换时调用。
+ */
+function _clearUserSpecificStores() {
+  useSessionStore.getState().setSessions([]);
+  useSessionStore.getState().setActiveSession(null);
+  useChatStore.getState().switchSession(null);
+  clearAllCachedMessages().catch(() => {});
+  useExcelStore.getState().clearAllRecentFiles();
+  useExcelStore.getState().clearSession();
+  useExcelStore.setState({ dismissedPaths: new Set<string>() });
 }
 
 // ── Auth API ──────────────────────────────────────────────
@@ -238,6 +265,7 @@ export async function handleOAuthCallback(
 
 export function logout() {
   useAuthStore.getState().logout();
+  _clearUserSpecificStores();
 }
 
 // ── Admin API ─────────────────────────────────────────────
@@ -260,6 +288,7 @@ export interface AdminUser {
   role: string;
   avatar_url: string | null;
   has_custom_llm_key: boolean;
+  allowed_models: string[];
   created_at: string;
   is_active: boolean;
   daily_token_limit: number;

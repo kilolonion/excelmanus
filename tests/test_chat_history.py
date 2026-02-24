@@ -3,14 +3,14 @@
 import pytest
 
 from excelmanus.chat_history import ChatHistoryStore
+from excelmanus.database import Database
 
 
 @pytest.fixture
 def store(tmp_path):
-    db_path = str(tmp_path / "test_history.db")
-    s = ChatHistoryStore(db_path)
+    db = Database(str(tmp_path / "test_history.db"))
+    s = ChatHistoryStore(db)
     yield s
-    s.close()
 
 
 def test_create_and_list_session(store):

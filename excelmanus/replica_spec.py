@@ -19,7 +19,7 @@ class FontSpec(BaseModel):
     size: float | None = None
     bold: bool | None = None
     italic: bool | None = None
-    color: str | None = None  # hex like "#FF0000"
+    color: str | None = None  # 十六进制颜色值，如 "#FF0000"
 
 
 class FillSpec(BaseModel):
@@ -28,7 +28,7 @@ class FillSpec(BaseModel):
 
 
 class BorderSideSpec(BaseModel):
-    style: str | None = None  # thin, medium, thick, double, etc.
+    style: str | None = None  # thin, medium, thick, double 等
     color: str | None = None
 
 
@@ -98,7 +98,7 @@ class SheetSpec(BaseModel):
     merged_ranges: list[MergedRange] = Field(default_factory=list)
     styles: dict[str, StyleClass] = Field(default_factory=dict)
     column_widths: list[float] = Field(default_factory=list)
-    row_heights: dict[str, float] = Field(default_factory=dict)  # row_num_str → height
+    row_heights: dict[str, float] = Field(default_factory=dict)  # 行号字符串 → 行高
     objects: ObjectsSpec = Field(default_factory=ObjectsSpec)
     semantic_hints: SemanticHints = Field(default_factory=SemanticHints)
 

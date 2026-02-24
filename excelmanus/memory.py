@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import tiktoken
@@ -93,6 +94,31 @@ class ConversationMemory:
         # 图片降级追踪
         self._image_seq: int = 0  # 图片序号
         self._fresh_image_ids: set[int] = set()  # 尚未发送过的图片 ID
+
+    @property
+    def messages(self) -> list[dict]:
+        """内部消息列表引用（只读语义，调用方不应直接修改）。"""
+        return self._messages
+
+    def remove_last_assistant_if(self, predicate: Callable[[str], bool]) -> bool:
+        """移除最后一条 assistant 消息（如果其文本内容满足 predicate）。
+
+        Returns:
+            True 如果成功移除，False 如果不满足条件或列表为空。
+        """
+        if self._messages and self._messages[-1].get("role") == "assistant":
+            content = self._messages[-1].get("content", "")
+            if isinstance(content, str) and predicate(content):
+                self._messages.pop()
+                return True
+        return False
+
+    def replace_message_content(self, index: int, content: str) -> bool:
+        """替换指定位置的消息内容。越界时返回 False。"""
+        if 0 <= index < len(self._messages):
+            self._messages[index]["content"] = content
+            return True
+        return False
 
     @property
     def system_prompt(self) -> str:
@@ -193,7 +219,7 @@ class ConversationMemory:
                 return True
         return False
 
-    def _build_system_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
+    def build_system_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
         """构建 system 消息列表。"""
         prompts = system_prompts or [self._system_prompt]
         system_msgs = [
@@ -215,7 +241,7 @@ class ConversationMemory:
             system_prompts:
                 可选的 system 消息列表；为空时使用默认 system prompt。
         """
-        system_msgs = self._build_system_messages(system_prompts)
+        system_msgs = self.build_system_messages(system_prompts)
         output: list[dict] = []
         for msg in self._messages:
             if msg.get("_image_id") is not None:
@@ -240,7 +266,7 @@ class ConversationMemory:
         elif ratio >= 1:
             ratio = 0.99
         threshold = max(1, int(max_context_tokens * (1 - ratio)))
-        system_msgs = self._build_system_messages(system_prompts)
+        system_msgs = self.build_system_messages(system_prompts)
         self._truncate_history_to_threshold(threshold, system_msgs=system_msgs)
         # 过滤内部标记字段，与 get_messages 保持一致
         output: list[dict] = []

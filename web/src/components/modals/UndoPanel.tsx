@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Undo2, CheckCircle2, XCircle, Loader2, History, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchApprovals, undoApproval, type ApprovalRecord } from "@/lib/api";
+import { useSessionStore } from "@/stores/session-store";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface UndoPanelProps {
@@ -12,6 +13,7 @@ interface UndoPanelProps {
 }
 
 export function UndoPanel({ open, onClose }: UndoPanelProps) {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const [records, setRecords] = useState<ApprovalRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [undoing, setUndoing] = useState<string | null>(null);
@@ -20,7 +22,10 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
   const loadRecords = async () => {
     setLoading(true);
     try {
-      const data = await fetchApprovals({ limit: 20 });
+      const data = await fetchApprovals({
+        limit: 20,
+        sessionId: activeSessionId ?? undefined,
+      });
       setRecords(data);
     } catch {
       // silently ignore
@@ -33,12 +38,19 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
     if (open) {
       loadRecords();
     }
-  }, [open]);
+  }, [open, activeSessionId]);
 
   const handleUndo = async (id: string) => {
     setUndoing(id);
     try {
-      const res = await undoApproval(id);
+      if (!activeSessionId) {
+        setUndoResults((prev) => ({
+          ...prev,
+          [id]: { ok: false, msg: "缺少会话上下文，无法撤销。" },
+        }));
+        return;
+      }
+      const res = await undoApproval(id, activeSessionId);
       const ok = res.status === "ok";
       setUndoResults((prev) => ({ ...prev, [id]: { ok, msg: res.message } }));
       if (ok) {
@@ -63,9 +75,9 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
         initial={{ y: 100, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         exit={{ y: 100, opacity: 0 }}
-        className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 w-[560px] max-w-[90vw]"
+        className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 w-[560px] max-w-[calc(100vw-2rem)]"
       >
-        <div className="bg-card border border-border rounded-2xl shadow-lg">
+        <div className="bg-card border border-border rounded-2xl shadow-lg" style={{ paddingBottom: "max(0px, var(--sab, 0px))" }}>
           {/* Header */}
           <div className="flex items-center justify-between px-4 pt-4 pb-2">
             <div className="flex items-center gap-2">

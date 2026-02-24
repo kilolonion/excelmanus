@@ -1,83 +1,49 @@
-"""聊天记录持久化：支持 SQLite / PostgreSQL 存储后端。"""
+"""聊天记录持久化：支持 SQLite / PostgreSQL 存储后端。
+
+Schema 由 Database 迁移系统统一管理，ChatHistoryStore 仅负责查询与写入。
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, overload
 
-from excelmanus.db_adapter import ConnectionAdapter, create_sqlite_adapter
+from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id            TEXT PRIMARY KEY,
-    title         TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    message_count INTEGER DEFAULT 0,
-    status        TEXT DEFAULT 'active',
-    user_id       TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL,
-    content     TEXT,
-    turn_number INTEGER DEFAULT 0,
-    created_at  TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
-"""
-
 
 class ChatHistoryStore:
-    """聊天记录存储。兼容 SQLite / PostgreSQL 后端。"""
+    """聊天记录存储（纯查询 / 写入层）。
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
-        self._owns_conn = True
-        self._conn = create_sqlite_adapter(db_path)
-        self._conn.executescript(_SCHEMA_SQL)
-        self._conn.commit()
-        self._ensure_sessions_user_id()
+    必须通过 Database 实例或 ConnectionAdapter 创建——所有表结构由 Database 迁移管理。
+    """
+
+    @overload
+    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+
+    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+        if isinstance(conn, ConnectionAdapter):
+            self._conn = conn
+            self._db_path = ""
+        else:
+            # Database 实例
+            self._db_path = conn.db_path
+            self._conn = conn.conn
+        self._user_id = user_id
+        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @classmethod
     def from_database(cls, database: "Database") -> "ChatHistoryStore":
-        """从共享 Database 实例创建（表已由 Database 迁移创建）。"""
-        instance = object.__new__(cls)
-        instance._db_path = database.db_path
-        instance._owns_conn = False
-        instance._conn = database.conn
-        instance._ensure_sessions_user_id()
-        return instance
-
-    def _ensure_sessions_user_id(self) -> None:
-        """确保 sessions 表有 user_id 列（兼容旧 standalone SQLite）。"""
-        try:
-            if self._conn.is_pg:
-                return  # PostgreSQL 由 Database 迁移处理
-            info = self._conn.execute("PRAGMA table_info(sessions)").fetchall()
-            columns = [r[1] for r in info] if info else []
-            if "user_id" not in columns:
-                self._conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
-                self._conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)"
-                )
-                self._conn.commit()
-        except Exception:
-            pass
-
-    def close(self) -> None:
-        if self._owns_conn:
-            self._conn.close()
+        """向后兼容入口——等同于直接构造。"""
+        return cls(database)
 
     @staticmethod
     def _now_iso() -> str:
@@ -113,8 +79,12 @@ class ChatHistoryStore:
 
         user_id 为 None 时（如 CLI 单用户模式）：仅检查 id 存在。
         user_id 非空时：要求 DB 中 user_id 非空且一致，否则视为不存在（legacy 无主会话不可访问）。
+
+        注意：此方法接受显式 user_id 参数以支持跨用户校验场景（如 ConversationPersistence）。
+        若不传 user_id，则使用构造时绑定的 self._user_id。
         """
-        if user_id is None:
+        effective_uid = user_id if user_id is not None else self._user_id
+        if effective_uid is None:
             row = self._conn.execute(
                 "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
@@ -125,7 +95,7 @@ class ChatHistoryStore:
         if row is None:
             return False
         db_user_id = row["user_id"] if hasattr(row, "__getitem__") else row[0]
-        return db_user_id is not None and db_user_id == user_id
+        return db_user_id is not None and db_user_id == effective_uid
 
     def session_owned_by(self, session_id: str, user_id: str) -> bool:
         """检查会话是否属于指定用户。"""
@@ -155,7 +125,33 @@ class ChatHistoryStore:
         self._conn.commit()
         return cur.rowcount > 0
 
-    def delete_all_sessions(self) -> tuple[int, int]:
+    def delete_all_sessions(self, *, user_id: str | None = None) -> tuple[int, int]:
+        effective_uid = user_id if user_id is not None else self._user_id
+        if effective_uid is not None:
+            sess_ids = [
+                r[0] for r in self._conn.execute(
+                    "SELECT id FROM sessions WHERE user_id = ?", (effective_uid,)
+                ).fetchall()
+            ]
+            if not sess_ids:
+                return 0, 0
+            placeholders = ",".join("?" * len(sess_ids))
+            cur_msg = self._conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})",
+                sess_ids,
+            )
+            msg_count = (cur_msg.fetchone() or (0,))[0]  # type: ignore[index]
+            self._conn.execute(
+                f"DELETE FROM messages WHERE session_id IN ({placeholders})",
+                sess_ids,
+            )
+            self._conn.execute(
+                f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                sess_ids,
+            )
+            self._conn.commit()
+            return len(sess_ids), msg_count
+
         cur_msg = self._conn.execute("SELECT COUNT(*) FROM messages")
         msg_row = cur_msg.fetchone()
         msg_count = msg_row[0] if msg_row else 0  # type: ignore[index]
@@ -189,31 +185,24 @@ class ChatHistoryStore:
         *,
         user_id: str | None = None,
     ) -> list[dict]:
-        if user_id is not None:
-            if include_archived:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions WHERE user_id = ? "
-                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (user_id, limit, offset),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions WHERE user_id = ? AND status = 'active' "
-                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (user_id, limit, offset),
-                ).fetchall()
-        else:
-            if include_archived:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM sessions WHERE status = 'active' "
-                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                ).fetchall()
+        effective_uid = user_id if user_id is not None else self._user_id
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if effective_uid is not None:
+            uid_clause, uid_params = user_filter_clause("user_id", effective_uid)
+            conditions.append(uid_clause)
+            params.extend(uid_params)
+
+        if not include_archived:
+            conditions.append("status = 'active'")
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM sessions {where} "
+            "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Message CRUD ──────────────────────────────────

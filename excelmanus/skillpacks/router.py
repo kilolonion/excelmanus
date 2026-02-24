@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
@@ -37,9 +38,19 @@ _READ_ONLY_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 纯问候/闲聊检测：短消息且仅含问候词时跳过 LLM 分类
+# 纯问候/闲聊/身份问答检测：短消息且仅含问候词或元问题时跳过 LLM 分类
 _CHITCHAT_RE = re.compile(
-    r"^\s*(?:你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|good\s*(?:morning|afternoon|evening)|在吗|在不在|谢谢|thanks|thank\s*you|好的|ok|okay)[!！。.？?\s]*$",
+    r"^\s*(?:"
+    # 问候
+    r"你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|good\s*(?:morning|afternoon|evening)"
+    r"|在吗|在不在|谢谢|thanks|thank\s*you|好的|ok|okay"
+    # 身份/元问题（你是谁、介绍一下你自己、what are you 等）
+    r"|你是谁|你是什么|你叫什么|介绍一下你?自己|你能做什么|你会什么|你有什么功能"
+    r"|who\s*are\s*you|what\s*are\s*you|what\s*can\s*you\s*do|introduce\s*yourself"
+    r"|what\s*(?:is|are)\s*(?:your|ur)\s*(?:name|capabilities)"
+    # 通用短问答（怎么用、什么是、如何使用、帮助）
+    r"|怎么用|如何使用|help|帮助|使用说明|使用方法"
+    r")[?？!！。.\s]*$",
     re.IGNORECASE,
 )
 
@@ -117,7 +128,7 @@ class SkillRouter:
             skillpacks = self._loader.load_all()
 
         if not skillpacks:
-            return self._build_fallback_result(
+            return await self._build_fallback_result(
                 selected=[],
                 route_mode="no_skillpack",
                 all_skillpacks={},
@@ -155,7 +166,7 @@ class SkillRouter:
                 name=slash_command.strip(),
             )
             if direct_skill is None:
-                return self._build_fallback_result(
+                return await self._build_fallback_result(
                     selected=[],
                     route_mode="slash_not_found",
                     all_skillpacks=skillpacks,
@@ -165,7 +176,7 @@ class SkillRouter:
                     write_hint=slash_write_hint,
                 )
             if not direct_skill.user_invocable:
-                return self._build_fallback_result(
+                return await self._build_fallback_result(
                     selected=[],
                     route_mode="slash_not_user_invocable",
                     all_skillpacks=skillpacks,
@@ -174,7 +185,7 @@ class SkillRouter:
                     blocked_skillpacks=blocked_skillpacks,
                     write_hint=slash_write_hint,
                 )
-            return self._build_parameterized_result(
+            return await self._build_parameterized_result(
                 skill=direct_skill,
                 raw_args=raw_args or "",
                 user_message=user_message,
@@ -185,7 +196,7 @@ class SkillRouter:
         # ── 1. 纯问候/闲聊短路：跳过 LLM 分类，零延迟返回 ──
         if _CHITCHAT_RE.match(user_message.strip()) and not candidate_file_paths:
             logger.debug("chitchat 短路: %s", user_message[:30])
-            return self._build_all_tools_result(
+            return await self._build_all_tools_result(
                 user_message=user_message,
                 candidate_file_paths=candidate_file_paths,
                 write_hint="read_only",
@@ -197,7 +208,7 @@ class SkillRouter:
         classified_hint, classified_tags = await self._classify_task(
             user_message, write_hint=write_hint, on_event=on_event,
         )
-        return self._build_all_tools_result(
+        return await self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
             write_hint=classified_hint,
@@ -268,7 +279,7 @@ class SkillRouter:
             write_hint=write_hint,
         )
 
-    def _build_fallback_result(
+    async def _build_fallback_result(
         self,
         selected: list[Skillpack],
         route_mode: str,
@@ -297,7 +308,7 @@ class SkillRouter:
         if large_file_context:
             system_contexts.append(large_file_context)
 
-        file_structure_context, sheet_count, max_total_rows = self._build_file_structure_context(
+        file_structure_context, sheet_count, max_total_rows = await self._build_file_structure_context(
             candidate_file_paths=candidate_file_paths,
         )
         if file_structure_context:
@@ -313,7 +324,7 @@ class SkillRouter:
             max_total_rows=max_total_rows,
         )
 
-    def _build_all_tools_result(
+    async def _build_all_tools_result(
         self,
         *,
         user_message: str,
@@ -330,7 +341,7 @@ class SkillRouter:
         if large_file_context:
             system_contexts.append(large_file_context)
 
-        file_structure_context, sheet_count, max_total_rows = self._build_file_structure_context(
+        file_structure_context, sheet_count, max_total_rows = await self._build_file_structure_context(
             candidate_file_paths=candidate_file_paths,
         )
         if file_structure_context:
@@ -369,7 +380,11 @@ class SkillRouter:
     ) -> tuple[str, tuple[str, ...]]:
         """综合分类：write_hint + task_tags。
 
-        优先使用词法规则（零延迟），规则无法充分判断时调用小模型兜底。
+        三级策略：
+        1. 词法规则（零延迟）：关键词/正则能确定时直接返回
+        2. 同步 LLM 分类（带超时）：词法不确定时调用小模型，
+           阻塞等待结果（超时 ~2s），避免异步竞态导致下游误判
+        3. 保守默认 ``may_write``：LLM 超时/失败时的最终兜底
 
         Returns:
             (write_hint, task_tags)
@@ -377,22 +392,20 @@ class SkillRouter:
         lexical_hint = write_hint or self._classify_write_hint_lexical(user_message)
         lexical_tags = self._classify_task_tags_lexical(user_message)
 
-        # write_hint 一旦由词法确定，当前回合无需额外 LLM 分类。
-        # task_tags 主要用于策略增强，缺失不应阻塞首响应。
         if lexical_hint:
             return lexical_hint, tuple(lexical_tags)
 
-        # 无 aux_model 时直接返回词法结果
-        if not self._config.aux_model:
-            return lexical_hint or "unknown", tuple(lexical_tags)
+        # 词法无法判断：同步调用 LLM 分类（带超时），避免异步竞态
+        try:
+            llm_hint, llm_tags = await self._classify_task_llm(user_message)
+            if llm_hint:
+                merged_tags = list(set(lexical_tags + llm_tags))
+                return llm_hint, tuple(merged_tags)
+        except Exception:
+            logger.debug("同步 LLM 分类失败，回退到 may_write", exc_info=True)
 
-        # 调用 LLM 获取更精确的分类
-        self._emit_pipeline(on_event, "classifying", "正在理解任务类型...")
-        llm_hint, llm_tags = await self._classify_task_llm(user_message)
-        final_hint = llm_hint or lexical_hint or "unknown"
-        # 合并：LLM 标签优先，词法标签补充
-        merged_tags = list(dict.fromkeys(llm_tags + lexical_tags))
-        return final_hint, tuple(merged_tags)
+        # LLM 也无法判断：返回 may_write 作为保守默认值
+        return "may_write", tuple(lexical_tags)
 
     async def _classify_task_llm(
         self,
@@ -494,7 +507,10 @@ class SkillRouter:
 
     @staticmethod
     def _classify_write_hint_lexical(user_message: str) -> str | None:
-        """本地词法兜底：优先识别写入/格式化/图表等明确写意图。"""
+        """本地词法兜底：优先识别写入/格式化/图表等明确写意图。
+
+        返回 None 表示词法无法判断，交由 LLM 分类。
+        """
         text = str(user_message or "").strip()
         if not text:
             return None
@@ -502,6 +518,9 @@ class SkillRouter:
             return "may_write"
         if _READ_ONLY_HINT_RE.search(text):
             return "read_only"
+        # 消息中包含 Excel 文件路径引用 → 大概率要操作文件，保守归为 may_write
+        if _EXCEL_PATH_PATTERN.search(text):
+            return "may_write"
         return None
 
     @staticmethod
@@ -530,7 +549,7 @@ class SkillRouter:
         }
         return normalized_map.get(normalized)
 
-    def _build_parameterized_result(
+    async def _build_parameterized_result(
         self,
         *,
         skill: Skillpack,
@@ -555,7 +574,7 @@ class SkillRouter:
         )
         if large_file_context:
             system_contexts.append(large_file_context)
-        _, sheet_count, max_total_rows = self._build_file_structure_context(
+        _, sheet_count, max_total_rows = await self._build_file_structure_context(
             candidate_file_paths=candidate_file_paths,
         )
         return SkillMatchResult(
@@ -589,7 +608,7 @@ class SkillRouter:
             seen.add(normalized)
         return deduped
 
-    def _build_file_structure_context(
+    def _build_file_structure_context_sync(
         self,
         *,
         candidate_file_paths: list[str] | None,
@@ -731,6 +750,23 @@ class SkillRouter:
             "请基于以上预览直接调用工具执行用户请求，不要重复描述文件结构。"
         )
         return header + "\n" + "\n".join(file_sections), all_sheet_count, all_max_total_rows
+
+    async def _build_file_structure_context(
+        self,
+        *,
+        candidate_file_paths: list[str] | None,
+        max_files: int = 3,
+        max_sheets: int = 5,
+        scan_rows: int = 12,
+    ) -> tuple[str, int, int]:
+        """异步包装：将同步 openpyxl I/O 卸载到线程池，避免阻塞事件循环。"""
+        return await asyncio.to_thread(
+            self._build_file_structure_context_sync,
+            candidate_file_paths=candidate_file_paths,
+            max_files=max_files,
+            max_sheets=max_sheets,
+            scan_rows=scan_rows,
+        )
 
     def _set_file_structure_cache(
         self,

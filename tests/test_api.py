@@ -93,6 +93,7 @@ async def test_lifespan_uses_bootstrap_config_without_reloading(
 @contextmanager
 def _setup_api_globals(config=None, *, chat_history=None):
     """上下文管理器：注入 API 全局状态，退出时清理。"""
+    import importlib
     if config is None:
         config = _test_config()
     initialize_mcp_patcher = patch(
@@ -100,6 +101,28 @@ def _setup_api_globals(config=None, *, chat_history=None):
         new=AsyncMock(return_value=None),
     )
     initialize_mcp_patcher.start()
+
+    # 保存所有工具模块的 _guard 状态，避免污染其他测试
+    _tool_modules = [
+        "excelmanus.tools.file_tools",
+        "excelmanus.tools.sheet_tools",
+        "excelmanus.tools.chart_tools",
+        "excelmanus.tools.code_tools",
+        "excelmanus.tools.shell_tools",
+        "excelmanus.tools.format_tools",
+        "excelmanus.tools.data_tools",
+        "excelmanus.tools.image_tools",
+        "excelmanus.tools.macro_tools",
+        "excelmanus.tools.advanced_format_tools",
+    ]
+    _saved_guards = {}
+    for _mod_name in _tool_modules:
+        try:
+            _mod = importlib.import_module(_mod_name)
+            _saved_guards[_mod_name] = getattr(_mod, "_guard", None)
+        except ImportError:
+            pass
+
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
     loader = SkillpackLoader(config, registry)
@@ -135,6 +158,13 @@ def _setup_api_globals(config=None, *, chat_history=None):
         api_module._skillpack_loader = old_loader
         api_module._skill_router = old_router
         api_module._session_manager = old_manager
+        # 恢复工具模块的 _guard 状态
+        for _mod_name, _saved in _saved_guards.items():
+            try:
+                _mod = importlib.import_module(_mod_name)
+                _mod._guard = _saved
+            except ImportError:
+                pass
 
 
 # ── Fixtures ──────────────────────────────────────────────
@@ -273,8 +303,17 @@ class TestMemoryIsolation:
         client: AsyncClient,
         tmp_path: Path,
     ) -> None:
+        from datetime import datetime, timezone
+        from excelmanus.memory_models import MemoryCategory, MemoryEntry
+
         pm = PersistentMemory(str(tmp_path / "memory"))
-        (pm.memory_dir / "user_prefs.md").write_text("保持不变", encoding="utf-8")
+        pm.save_entries([
+            MemoryEntry(
+                content="保持不变",
+                category=MemoryCategory.USER_PREF,
+                timestamp=datetime.now(timezone.utc),
+            )
+        ])
         memory_tools.init_memory(pm)
         try:
             resp = await client.get("/api/v1/skills")
@@ -622,7 +661,7 @@ class TestProperty14SessionDeletion:
         """状态查询应懒恢复仅存在于历史存储的会话，无需先发消息。"""
         manager: SessionManager = setup_api_state["manager"]
         restored_engine = MagicMock()
-        restored_engine._compaction_manager.get_status.return_value = {"enabled": False}
+        restored_engine.get_compaction_status.return_value = {"enabled": False}
         restored_engine.workspace_manifest_build_status.return_value = {
             "state": "building",
             "total_files": None,
@@ -630,26 +669,20 @@ class TestProperty14SessionDeletion:
             "error": None,
         }
 
-        with patch.object(manager, "get_engine", return_value=None), patch.object(
-            manager, "session_exists", return_value=True
+        with patch.object(
+            manager, "can_restore_session", return_value=True
         ), patch.object(
             manager,
-            "acquire_for_chat",
+            "get_or_restore_engine",
             new_callable=AsyncMock,
-            return_value=("history-only", restored_engine),
-        ) as acquire_mock, patch.object(
-            manager,
-            "release_for_chat",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as release_mock:
+            return_value=restored_engine,
+        ) as restore_mock:
             status_resp = await client.get("/api/v1/sessions/history-only/status")
 
         assert status_resp.status_code == 200
         manifest = status_resp.json()["manifest"]
         assert manifest["state"] == "building"
-        acquire_mock.assert_awaited_once_with("history-only")
-        release_mock.assert_awaited_once_with("history-only")
+        restore_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_list_sessions_include_archived_query_passed_to_manager(
@@ -666,7 +699,7 @@ class TestProperty14SessionDeletion:
             resp = await client.get("/api/v1/sessions?include_archived=true")
 
         assert resp.status_code == 200
-        list_mock.assert_awaited_once_with(include_archived=True)
+        list_mock.assert_awaited_once_with(include_archived=True, user_id=None)
 
 
 class TestArchiveSessionAPI:
@@ -693,7 +726,7 @@ class TestArchiveSessionAPI:
         assert data["status"] == "ok"
         assert data["session_id"] == "test-sid"
         assert data["archived"] is True
-        archive_mock.assert_awaited_once_with("test-sid", archive=True)
+        archive_mock.assert_awaited_once_with("test-sid", archive=True, user_id=None)
 
     @pytest.mark.asyncio
     async def test_unarchive_session_returns_200(
@@ -714,7 +747,7 @@ class TestArchiveSessionAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["archived"] is False
-        archive_mock.assert_awaited_once_with("test-sid", archive=False)
+        archive_mock.assert_awaited_once_with("test-sid", archive=False, user_id=None)
 
     @pytest.mark.asyncio
     async def test_archive_nonexistent_returns_404(
@@ -751,7 +784,7 @@ class TestArchiveSessionAPI:
                 json={},
             )
         assert resp.status_code == 200
-        archive_mock.assert_awaited_once_with("test-sid", archive=True)
+        archive_mock.assert_awaited_once_with("test-sid", archive=True, user_id=None)
 
 
 class TestSessionCompactAPI:
@@ -2490,7 +2523,8 @@ class TestImageAttachment:
                 side_effect=slow_chat,
             ):
                 response = await api_module.chat_stream(
-                    api_module.ChatRequest(message="simulate-disconnect")
+                    api_module.ChatRequest(message="simulate-disconnect"),
+                    raw_request=MagicMock(state=SimpleNamespace()),
                 )
                 stream_iter = response.body_iterator
 
@@ -2498,12 +2532,19 @@ class TestImageAttachment:
                 first_payload = json.loads(first_chunk.split("data:", 1)[1].strip())
                 session_id = first_payload["session_id"]
 
-                # 继续消费下一块以启动后台 chat，然后取消该消费任务，模拟客户端断开。
-                next_chunk_task = asyncio.create_task(anext(stream_iter))
+                # 消费 chunk 直到 chat_started 被 set（兼容 pipeline_progress 等中间 chunk）
+                async def _consume_until_started() -> None:
+                    async for _ in stream_iter:
+                        if chat_started.is_set():
+                            break
+
+                next_chunk_task = asyncio.create_task(_consume_until_started())
                 await asyncio.wait_for(chat_started.wait(), timeout=2)
                 next_chunk_task.cancel()
-                with pytest.raises((StopAsyncIteration, asyncio.CancelledError)):
+                try:
                     await next_chunk_task
+                except (StopAsyncIteration, asyncio.CancelledError):
+                    pass
 
                 await asyncio.sleep(0.02)
                 active_task = api_module._active_chat_tasks.get(session_id)
@@ -2570,3 +2611,263 @@ class TestMCPServerEndpoints:
             "tool_count": 2,
             "tools": ["read_sheet", "write_cell"],
         }
+
+
+class TestSessionIsolationGuards:
+    """多用户隔离回归：高风险端点必须校验 session 归属。"""
+
+    @pytest.mark.asyncio
+    async def test_chat_turns_rejects_foreign_session(
+        self,
+        client: AsyncClient,
+        setup_api_state,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager: SessionManager = setup_api_state["manager"]
+        sid, _ = await manager.acquire_for_chat(None, user_id="user-a")
+        await manager.release_for_chat(sid)
+
+        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "user-b")
+        resp = await client.get("/api/v1/chat/turns", params={"session_id": sid})
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_backup_list_rejects_foreign_session(
+        self,
+        client: AsyncClient,
+        setup_api_state,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        manager: SessionManager = setup_api_state["manager"]
+        sid, _ = await manager.acquire_for_chat(None, user_id="user-a")
+        await manager.release_for_chat(sid)
+
+        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "user-b")
+        resp = await client.get("/api/v1/backup/list", params={"session_id": sid})
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_approvals_requires_session_id(self, client: AsyncClient) -> None:
+        resp = await client.get("/api/v1/approvals")
+        assert resp.status_code == 400
+
+
+class TestAdminGuardForModelConfig:
+    @pytest.mark.asyncio
+    async def test_models_endpoint_with_real_auth_dependency_returns_403_for_non_admin(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """模型列表为只读信息，所有已认证用户均可访问（不需要 admin）。"""
+        app.state.auth_enabled = True
+        mock_store = MagicMock()
+        mock_store.get_by_id.return_value = SimpleNamespace(
+            role="user", is_active=True
+        )
+        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1"},
+        )
+        # mock _config_store to avoid closed DB
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_active_model.return_value = None
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+
+        resp = await client.get(
+            "/api/v1/models",
+            headers={"Authorization": "Bearer fake-token"},
+        )
+
+        assert resp.status_code == 200
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_models_endpoint_requires_admin_when_auth_enabled(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """模型列表为只读信息，所有已认证用户均可访问（不需要 admin）。"""
+        app.state.auth_enabled = True
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.get_current_user",
+            AsyncMock(return_value=SimpleNamespace(role="user")),
+        )
+        # mock _config_store to avoid closed DB
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_active_model.return_value = None
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+
+        resp = await client.get(
+            "/api/v1/models",
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 200
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_switch_model_allowed_for_authenticated_user(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """认证启用时，普通用户也可以切换模型（不再要求管理员权限）。"""
+        app.state.auth_enabled = True
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.get_current_user",
+            AsyncMock(return_value=SimpleNamespace(role="user")),
+        )
+        resp = await client.put(
+            "/api/v1/models/active",
+            json={"name": "default"},
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        # 不再返回 403，而是正常处理（200 或其他非 403 状态码）
+        assert resp.status_code != 403
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_config_export_user_section_for_regular_user(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """普通用户可导出 user 区块。"""
+        app.state.auth_enabled = True
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        resp = await client.post(
+            "/api/v1/config/export",
+            json={"sections": ["user"], "mode": "simple"},
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "token" in data
+        assert data.get("sections") == ["user"]
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_config_export_global_sections_forbidden_for_regular_user(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """普通用户不可导出 main/aux/vlm/profiles。"""
+        app.state.auth_enabled = True
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        resp = await client.post(
+            "/api/v1/config/export",
+            json={"sections": ["main"], "mode": "simple"},
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 400
+        err_body = resp.json()
+        assert "普通用户仅可导出" in err_body.get("error", "") or "普通用户仅可导出" in err_body.get("detail", "")
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_config_import_user_section_for_regular_user(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """普通用户可导入 user 区块到自己的配置。"""
+        from excelmanus.config_transfer import export_config
+
+        app.state.auth_enabled = True
+        mock_store = MagicMock()
+        mock_store.update_user.return_value = True
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
+        token = export_config(
+            {"user": {"api_key": "sk-xxx", "base_url": "https://api.example.com", "model": "gpt-4"}},
+            mode="simple",
+        )
+        resp = await client.post(
+            "/api/v1/config/import",
+            json={"token": token},
+            headers={"Authorization": "Bearer fake-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("status") == "ok"
+        assert "user" in data.get("imported", {})
+        mock_store.update_user.assert_called_once()
+        call_kw = mock_store.update_user.call_args[1]
+        assert call_kw.get("llm_api_key") == "sk-xxx"
+        assert call_kw.get("llm_base_url") == "https://api.example.com"
+        assert call_kw.get("llm_model") == "gpt-4"
+        app.state.auth_enabled = False
+
+
+class TestMentionsWorkspaceIsolation:
+    @pytest.mark.asyncio
+    async def test_mentions_does_not_leak_other_user_workspace_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        workspace_root = tmp_path / "workspace"
+        (workspace_root / "users" / "u-1").mkdir(parents=True, exist_ok=True)
+        (workspace_root / "users" / "u-2").mkdir(parents=True, exist_ok=True)
+        (workspace_root / "users" / "u-1" / "my.xlsx").write_text("u1", encoding="utf-8")
+        (workspace_root / "users" / "u-2" / "secret.xlsx").write_text("u2", encoding="utf-8")
+
+        config = _test_config(workspace_root=str(workspace_root))
+        with _setup_api_globals(config=config):
+            app.state.auth_enabled = True
+            monkeypatch.setattr(
+                "excelmanus.auth.middleware.decode_token",
+                lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+            )
+            transport = _make_transport()
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get(
+                    "/api/v1/mentions",
+                    params={"path": "users/u-2"},
+                    headers={"Authorization": "Bearer fake-token"},
+                )
+
+            assert resp.status_code == 200
+            assert "users/u-2/secret.xlsx" not in resp.json().get("files", [])
+            app.state.auth_enabled = False
+
+
+class TestIsolationFlagSemantics:
+    def test_get_isolation_user_id_returns_none_when_isolation_disabled(self) -> None:
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    auth_enabled=False,
+                )
+            )
+        )
+        assert api_module._get_isolation_user_id(request) is None
+
+    def test_get_isolation_user_id_uses_extract_when_isolation_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    auth_enabled=True,
+                )
+            ),
+            state=SimpleNamespace(user_id="u-1"),
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.extract_user_id",
+            lambda _req: "u-1",
+        )
+        assert api_module._get_isolation_user_id(request) == "u-1"

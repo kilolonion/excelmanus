@@ -120,3 +120,177 @@ class TestInferVisionCapable:
 
     def test_force_false(self):
         assert self._infer("gpt-4o", "false") is False
+
+
+# ════════════════════════════════════════════════════════════════
+# 结构化提取 Prompt + 后处理
+# ════════════════════════════════════════════════════════════════
+
+_PROVENANCE = {
+    "source_image_hash": "sha256:abc123",
+    "model": "test-model",
+    "timestamp": "2026-01-01T00:00:00Z",
+}
+
+
+class TestExtractPromptBuilders:
+    def test_extract_data_prompt_non_empty(self):
+        from excelmanus.vision_extractor import build_extract_data_prompt
+        prompt = build_extract_data_prompt()
+        assert len(prompt) > 100
+        assert "tables" in prompt
+        assert "JSON" in prompt
+
+    def test_extract_style_prompt_includes_summary(self):
+        from excelmanus.vision_extractor import build_extract_style_prompt
+        summary = "- Sheet1: 5行×3列, 15个单元格"
+        prompt = build_extract_style_prompt(summary)
+        assert summary in prompt
+        assert "styles" in prompt
+
+    def test_build_table_summary(self):
+        from excelmanus.vision_extractor import build_table_summary
+        data = {
+            "tables": [
+                {"name": "Sheet1", "dimensions": {"rows": 5, "cols": 3},
+                 "cells": [{"addr": "A1"}] * 10, "merges": ["A1:C1"]},
+            ]
+        }
+        summary = build_table_summary(data)
+        assert "Sheet1" in summary
+        assert "10个单元格" in summary
+
+
+class TestPostprocessSingleTable:
+    def test_basic_conversion(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {
+            "tables": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 2, "cols": 2},
+                "header_rows": [1],
+                "cells": [
+                    {"addr": "A1", "val": "Name", "type": "string"},
+                    {"addr": "B1", "val": "Age", "type": "string"},
+                    {"addr": "A2", "val": "Alice", "type": "string"},
+                    {"addr": "B2", "val": 30, "type": "number"},
+                ],
+                "merges": [],
+                "col_widths": [15, 10],
+            }]
+        }
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        assert len(spec.sheets) == 1
+        assert len(spec.sheets[0].cells) == 4
+        assert spec.sheets[0].cells[3].value_type == "number"
+        assert spec.sheets[0].column_widths == [15, 10]
+        assert spec.sheets[0].semantic_hints.header_rows == [1]
+
+    def test_number_format_inferred(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {
+            "tables": [{
+                "name": "Sheet1",
+                "dimensions": {"rows": 1, "cols": 1},
+                "cells": [{"addr": "A1", "val": 1200.5, "type": "number", "display": "$1,200.50"}],
+                "merges": [],
+            }]
+        }
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        assert spec.sheets[0].cells[0].number_format is not None
+        assert "$" in spec.sheets[0].cells[0].number_format
+
+
+class TestPostprocessMultiTable:
+    def test_two_tables_two_sheets(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {
+            "tables": [
+                {"name": "Sales", "dimensions": {"rows": 1, "cols": 1},
+                 "cells": [{"addr": "A1", "val": "x", "type": "string"}], "merges": []},
+                {"name": "Summary", "dimensions": {"rows": 1, "cols": 1},
+                 "cells": [{"addr": "A1", "val": "y", "type": "string"}], "merges": []},
+            ]
+        }
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        assert len(spec.sheets) == 2
+        assert spec.sheets[0].name == "Sales"
+        assert spec.sheets[1].name == "Summary"
+
+    def test_auto_naming(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {
+            "tables": [
+                {"dimensions": {"rows": 1, "cols": 1},
+                 "cells": [{"addr": "A1", "val": "x", "type": "string"}], "merges": []},
+                {"dimensions": {"rows": 1, "cols": 1},
+                 "cells": [{"addr": "A1", "val": "y", "type": "string"}], "merges": []},
+            ]
+        }
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        assert spec.sheets[0].name == "Table1"
+        assert spec.sheets[1].name == "Table2"
+
+
+class TestPostprocessStyles:
+    def test_semantic_color_resolved(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {"tables": [{"name": "S1", "dimensions": {"rows": 1, "cols": 1},
+                            "cells": [{"addr": "A1", "val": "H", "type": "string"}], "merges": []}]}
+        style = {
+            "styles": {"header": {"font": {"bold": True, "color": "white"}, "fill": {"color": "dark_blue"}}},
+            "cell_styles": {"A1": "header"},
+        }
+        spec = postprocess_extraction_to_spec(data, style, _PROVENANCE)
+        h = spec.sheets[0].styles["header"]
+        assert h.font.color == "#FFFFFF"
+        assert h.fill.color == "#1F4E79"
+        assert spec.sheets[0].cells[0].style_id == "header"
+
+    def test_range_expansion(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {"tables": [{"name": "S1", "dimensions": {"rows": 2, "cols": 2},
+                            "cells": [
+                                {"addr": "A1", "val": "a", "type": "string"},
+                                {"addr": "B1", "val": "b", "type": "string"},
+                                {"addr": "A2", "val": "c", "type": "string"},
+                                {"addr": "B2", "val": "d", "type": "string"},
+                            ], "merges": []}]}
+        style = {"styles": {"d": {"border": {"style": "thin"}}}, "cell_styles": {"A1:B2": "d"}}
+        spec = postprocess_extraction_to_spec(data, style, _PROVENANCE)
+        for cell in spec.sheets[0].cells:
+            assert cell.style_id == "d"
+
+    def test_default_font(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {"tables": [{"name": "S1", "dimensions": {"rows": 1, "cols": 1},
+                            "cells": [{"addr": "A1", "val": "x", "type": "string"}], "merges": []}]}
+        style = {"default_font": {"name": "等线", "size": 11}, "styles": {}, "cell_styles": {}}
+        spec = postprocess_extraction_to_spec(data, style, _PROVENANCE)
+        assert spec.workbook.default_font.name == "等线"
+
+
+class TestPostprocessEdgeCases:
+    def test_invalid_address_becomes_uncertainty(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {"tables": [{"name": "S1", "dimensions": {"rows": 1, "cols": 1},
+                            "cells": [
+                                {"addr": "A1", "val": "ok", "type": "string"},
+                                {"addr": "INVALID", "val": "bad", "type": "string"},
+                            ], "merges": []}]}
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        assert len(spec.sheets[0].cells) == 1
+        assert len(spec.uncertainties) == 1
+
+    def test_empty_tables_raises(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        with pytest.raises(ValueError, match="没有 tables"):
+            postprocess_extraction_to_spec({"tables": []}, None, _PROVENANCE)
+
+    def test_spec_serializable(self):
+        from excelmanus.vision_extractor import postprocess_extraction_to_spec
+        data = {"tables": [{"name": "S1", "dimensions": {"rows": 1, "cols": 1},
+                            "cells": [{"addr": "A1", "val": "test", "type": "string"}], "merges": []}]}
+        spec = postprocess_extraction_to_spec(data, None, _PROVENANCE)
+        json_str = spec.model_dump_json()
+        assert '"S1"' in json_str

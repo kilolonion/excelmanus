@@ -2,24 +2,41 @@
   <img src="logo.svg" width="320" alt="ExcelManus" />
 </p>
 
-> **WIP** — 项目仍在积极开发中，API 尚未稳定。欢迎试用和反馈，但请勿用于生产环境。
-
-用自然语言操作 Excel —— 读数据、写公式、跑分析、画图表，说一句话就够了。
+<p align="center">
+  <strong>v1.5.6</strong> · 用自然语言操作 Excel —— 读数据、写公式、跑分析、画图表，说一句话就够了。
+</p>
 
 ExcelManus 是一个基于大语言模型的 Excel 智能代理。你不需要记住任何函数语法或者写 VBA，只需要告诉它你想做什么，它会自己完成剩下的事。支持 OpenAI、Claude、Gemini 等主流模型，从 URL 自动识别 Provider，无需手动切换。
+
+## 1.5.6 更新摘要
+
+- **用户隔离架构重构** — 引入 `IsolatedWorkspace` + `UserScope` + `ScopedDatabase`，Auth 即隔离，不再需要额外开关；每个用户拥有独立工作区目录和 SQLite 数据库
+- **文件版本管理** — 新增 `FileVersionManager`，统一 staging / audit / CoW 三套文件保护机制为单一版本链
+- **图片结构化提取** — VLM 两阶段提取（Phase 1 数据结构 + Phase 2 样式），截图还原 Excel 精度大幅提升
+- **工具调度策略化** — `ToolDispatcher` 重构为策略处理器链（SkillActivation → Delegation → CodePolicy → HighRiskApproval 等），可扩展性更强
+- **Pipeline 进度可视化** — Web UI 新增 Pipeline Stepper 组件，实时展示连接 → 路由 → 上下文构建 → 工具执行各阶段
+- **管理员模型权限** — 管理员可为每个用户分配可用模型白名单
+- **ConfigStore 拆分** — 全局配置（`GlobalConfigStore`）与用户级偏好（`UserConfigStore`）分离
+- **对话持久化重构** — 新增 `ConversationPersistence` 服务，消息同步逻辑从 SessionManager 中解耦
+- **记忆存储后端抽象** — 引入 `MemoryStorageBackend` 协议，支持文件和数据库双后端
+- **CORS 自动检测** — 后端自动添加本机 LAN IP 的前端端口来源，局域网访问无需手动配置
+- **`@` 提及增强** — 支持行范围引用（如 `@file.py:10-20`）
+- **移除旧模块** — 删除 `backup.py`、`auth/workspace.py`，功能已合并到新架构
 
 ## 能做什么
 
 - **读写 Excel** — 读取单元格、写入公式、VLOOKUP、批量填充，自动处理多 sheet
 - **数据分析** — 筛选、排序、分组聚合、透视表，复杂逻辑自动生成 Python 脚本执行
 - **图表生成** — 柱状图、折线图、饼图……描述你想要的样子，嵌入 Excel 或导出图片
-- **图片理解** — 贴一张表格截图，它能识别内容并提取为结构化数据（需 VLM 支持）
+- **图片理解** — 贴一张表格截图，它能识别内容并提取为结构化数据；支持两阶段结构化提取（数据 + 样式），还原度更高
 - **跨表操作** — 创建 / 复制 / 重命名工作表，跨表搬运数据
-- **自动备份** — 每次写操作自动保留副本，`/undo` 一键回滚
-- **持久记忆** — 记住你的偏好和常见操作模式，跨会话可用
+- **文件版本管理** — 统一版本链追踪（staging / audit / CoW），`/undo` 一键回滚
+- **持久记忆** — 记住你的偏好和常见操作模式，跨会话可用；支持文件 / 数据库双后端
 - **技能扩展** — 通过 Skillpack 机制添加领域知识，一个 Markdown 文件就是一个技能
 - **MCP 集成** — 接入外部 MCP Server 扩展工具能力
 - **Subagent** — 大文件或复杂任务自动委派给子代理处理
+- **多用户隔离** — 每个用户独立工作区、独立数据库、独立会话，Auth 即隔离
+- **管理员面板** — 用户管理、模型权限分配、用量追踪
 
 ## 快速开始
 
@@ -39,7 +56,7 @@ EXCELMANUS_MODEL=your-model-id
 
 支持任何 OpenAI 兼容 API。如果 URL 指向 Anthropic 或 Google，会自动切换到 Claude / Gemini 原生协议。
 
-> `.env` 仅用于首次启动的初始配置。第一次运行后，所有配置会自动迁移到本地数据库（`~/.excelmanus/excelmanus.db`），后续通过 CLI `/config` 命令或 Web UI 设置面板管理即可。
+> `.env` 仅用于首次启动的初始配置。第一次运行后，所有配置会自动迁移到本地数据库，后续通过 CLI `/config` 命令或 Web UI 设置面板管理即可。多用户模式下全局配置（模型 Profiles）由管理员管理，用户级偏好（如当前模型）存储在各自的隔离数据库中。
 
 **启动**
 
@@ -97,14 +114,16 @@ cd web && npm install && npm run dev
 Web UI 提供：
 
 - 实时聊天界面（SSE 流式响应，实时显示思考过程和工具调用）
+- Pipeline 进度条 — 连接 → 路由 → 上下文构建 → 工具执行，每步可视化
 - 内嵌 Excel 查看器 — 在侧边面板直接预览和编辑表格，支持选区引用
 - 变更追踪 — 每次操作后实时显示 diff 对比
 - 多会话管理 — 自动保存对话历史，随时切换
 - 设置面板 — 模型配置、技能管理、MCP Server、记忆、规则，全部可视化操作
+- 管理员面板 — 用户管理、角色分配、模型权限控制、用量统计
 - 配置分享 — 一键导出所有模型配置（含 API Key），加密后分享给他人导入
 - 审批流程 — 高风险操作弹窗确认，支持一键撤销
 - 文件拖拽 — 直接拖文件到输入框引用
-- `@` 提及 — 输入 `@` 引用文件、工具或技能
+- `@` 提及 — 输入 `@` 引用文件、工具或技能，支持行范围引用（如 `@file.py:10-20`）
 
 ### REST API
 
@@ -128,7 +147,7 @@ excelmanus-api
 | `POST /api/v1/config/import`       | 导入配置令牌         |
 | `GET /api/v1/health`               | 健康检查             |
 
-SSE 流推送 38 种事件类型，覆盖思考过程、工具调用、子代理执行、Excel 预览 / diff、审批请求等。
+SSE 流推送 26 种事件类型，覆盖思考过程、工具调用、子代理执行、Pipeline 进度、Excel 预览 / diff、审批请求、记忆提取等。
 
 ## 模型支持
 
@@ -172,9 +191,11 @@ ExcelManus 对文件操作和代码执行做了多层防护：
 
 - **路径沙盒** — 所有读写限制在工作目录内，路径穿越和符号链接越界会被拒绝
 - **代码策略引擎** — `run_code` 执行前做静态分析，按 Green / Yellow / Red 三级自动审批
+- **Docker 沙盒** — 可选启用 Docker 容器隔离执行用户代码（`EXCELMANUS_DOCKER_SANDBOX=1`）
 - **操作审批** — 高风险写入需要用户 `/accept` 确认，所有可审计操作记录变更 diff 和快照
-- **自动备份** — 默认开启，写操作在 `outputs/backups/` 保留副本，支持 `/undo` 回滚
+- **文件版本管理** — 统一版本链（staging / audit / CoW），支持 `/undo` 回滚到任意版本
 - **MCP 工具白名单** — 外部 MCP 工具默认需要确认，可配置自动批准
+- **用户隔离** — 多用户模式下工作区和数据库物理隔离，互不可见
 
 ## Skillpack 扩展
 
@@ -240,7 +261,7 @@ docker compose --profile production up -d     # 带 Nginx 反向代理
 
 ## 多用户与认证
 
-ExcelManus 支持多用户模式，启用后所有 API 请求需携带 JWT token。
+ExcelManus 支持多用户模式，启用认证后自动启用用户隔离（Auth 即隔离），每个用户拥有独立的工作区目录和数据库。
 
 ```dotenv
 EXCELMANUS_AUTH_ENABLED=true
@@ -270,7 +291,7 @@ EXCELMANUS_GOOGLE_REDIRECT_URI=https://your-domain/api/v1/auth/oauth/google/call
 # EXCELMANUS_OAUTH_PROXY=socks5://127.0.0.1:1080
 ```
 
-多用户模式下，每个用户拥有独立的工作区、对话历史和 token 用量追踪，首个注册用户自动成为管理员。
+多用户模式下，每个用户拥有独立的工作区、独立的 SQLite 数据库（`users/{user_id}/data.db`）、对话历史和 token 用量追踪，首个注册用户自动成为管理员。管理员可在 Web UI 管理面板中分配用户角色和模型使用权限。
 
 ## 配置参考
 

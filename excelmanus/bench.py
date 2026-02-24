@@ -595,7 +595,7 @@ class _StreamRecorder:
 
         # ── 从 chunk 中提取指标 ──
 
-        # openai ChatCompletionChunk 格式
+        # openai ChatCompletionChunk 格式解析
         choices = getattr(chunk, "choices", None)
         if choices:
             fr = getattr(choices[0], "finish_reason", None)
@@ -651,7 +651,7 @@ class _LLMCallInterceptor:
                 "engine may have been refactored"
             )
         self._original_create = engine._client.chat.completions.create
-        # monkey-patch
+        # 猴子补丁：拦截 LLM API 调用
         engine._client.chat.completions.create = self._intercepted_create
 
     async def _intercepted_create(self, **kwargs: Any) -> Any:
@@ -734,7 +734,7 @@ class _EngineTracer:
         self._orig_prepare = engine._prepare_system_prompts_for_request
         self._orig_enrich = engine._enrich_tool_result_with_window_perception
 
-        # monkey-patch
+        # 猴子补丁：拦截系统提示和窗口感知方法
         engine._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
         engine._enrich_tool_result_with_window_perception = self._traced_enrich  # type: ignore[assignment]
 
@@ -890,7 +890,7 @@ def _dump_conversation_messages(
             last_messages = interceptor.calls[-1]["request"].get("messages", [])
             if last_messages:
                 return list(last_messages)
-        messages = engine._memory.get_messages()
+        messages = engine.memory.get_messages()
         return [_serialize_message(m) for m in messages]
     except Exception:
         return []

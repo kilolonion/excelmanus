@@ -23,8 +23,21 @@ def _make_registry(tool_result: str = "ok") -> MagicMock:
 def _make_engine(tool_result: str = "ok") -> MagicMock:
     """构造一个最小化的 engine mock 供 ToolDispatcher 使用。"""
     engine = MagicMock()
-    engine._registry = _make_registry(tool_result)
+    reg = _make_registry(tool_result)
+    engine._registry = reg
+    engine.registry = reg
     engine._persistent_memory = None
+    engine._database = None
+    engine.config = MagicMock()
+    engine.config.code_policy_enabled = False
+    engine.state = MagicMock()
+    engine.approval = MagicMock()
+    engine.approval.is_audit_only_tool = MagicMock(return_value=False)
+    engine.approval.is_high_risk_tool = MagicMock(return_value=False)
+    engine.full_access_enabled = False
+    engine._plan_intercept_task_create = False
+    engine._finish_task_warned = False
+    engine._suspend_task_create_plan_once = False
     return engine
 
 
@@ -238,3 +251,36 @@ class TestCallVlmResponseFormat:
             vlm_base_delay=1.0,
         )
         assert "response_format" not in captured_kwargs
+
+
+# ════════════════════════════════════════════════════════════════
+# _parse_vlm_json
+# ════════════════════════════════════════════════════════════════
+
+
+class TestParseVlmJson:
+    def test_plain_json(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        result = _parse_vlm_json('{"tables": []}')
+        assert result == {"tables": []}
+
+    def test_fenced_json(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        text = '```json\n{"tables": [{"name": "S1"}]}\n```'
+        result = _parse_vlm_json(text)
+        assert result is not None
+        assert result["tables"][0]["name"] == "S1"
+
+    def test_prefix_suffix_pollution(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        text = 'Here is the result:\n{"tables": []}\nDone.'
+        result = _parse_vlm_json(text)
+        assert result == {"tables": []}
+
+    def test_invalid_returns_none(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        assert _parse_vlm_json("not json at all") is None
+
+    def test_empty_returns_none(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        assert _parse_vlm_json("") is None

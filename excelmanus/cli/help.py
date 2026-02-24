@@ -36,7 +36,7 @@ def render_help(
     console.print(f"  [{THEME.BOLD} {THEME.PRIMARY}]{title}[/{THEME.BOLD} {THEME.PRIMARY}] · 帮助")
     console.print()
 
-    # Shortcuts
+    # 快捷键
     console.print(f"  [{THEME.BOLD}]Shortcuts[/{THEME.BOLD}]")
     for left, right in HELP_SHORTCUT_ENTRIES:
         console.print(
@@ -45,7 +45,7 @@ def render_help(
         )
     console.print()
 
-    # Commands
+    # 命令列表
     console.print(f"  [{THEME.BOLD}]Commands[/{THEME.BOLD}]")
     commands = list(HELP_COMMAND_ENTRIES)
     if len(commands) % 2 != 0:

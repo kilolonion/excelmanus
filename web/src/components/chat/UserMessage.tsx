@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X } from "lucide-react";
+import { User, Check, X, Download } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
+import { useSessionStore } from "@/stores/session-store";
 import { MentionHighlighter } from "./MentionHighlighter";
+import { downloadFile } from "@/lib/api";
 import type { FileAttachment } from "@/lib/types";
 
 const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
@@ -23,6 +25,7 @@ interface UserMessageProps {
 export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming }: UserMessageProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -63,12 +66,12 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   );
 
   return (
-    <div className="group flex gap-3 py-4">
+    <div className="group flex gap-2.5 py-2.5">
       <div
-        className="flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center text-white text-xs"
+        className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px]"
         style={{ backgroundColor: "var(--em-primary)" }}
       >
-        <User className="h-4 w-4" />
+        <User className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0">
         {editing ? (
@@ -100,7 +103,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           </div>
         ) : (
           <div
-            className={`relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-3.5 py-2.5 shadow-sm transition-colors ${
+            className={`relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-3 py-2 shadow-sm transition-colors ${
               onEditAndResend && !isStreaming
                 ? "cursor-pointer hover:bg-[var(--em-primary-alpha-10)] hover:border-[var(--em-primary-alpha-20)]"
                 : ""
@@ -109,7 +112,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           >
             <MentionHighlighter
               text={content}
-              className="text-sm leading-6 whitespace-pre-wrap break-words"
+              className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
             />
           </div>
         )}
@@ -121,7 +124,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 <Badge
                   key={i}
                   variant="secondary"
-                  className={`text-xs ${excel ? "cursor-pointer hover:bg-secondary/70" : ""}`}
+                  className={`text-xs gap-1 pr-1 ${excel ? "cursor-pointer hover:bg-secondary/70" : ""}`}
                   onClick={
                     excel
                       ? () => {
@@ -135,6 +138,21 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                   }
                 >
                   {f.filename}
+                  <button
+                    type="button"
+                    className="rounded p-0.5 hover:bg-foreground/10 transition-colors"
+                    title="下载"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadFile(
+                        f.path,
+                        f.filename,
+                        activeSessionId ?? undefined
+                      ).catch(() => {});
+                    }}
+                  >
+                    <Download className="h-3 w-3" />
+                  </button>
                 </Badge>
               );
             })}

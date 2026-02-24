@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
+
+from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -14,8 +16,18 @@ logger = logging.getLogger(__name__)
 class LLMCallStore:
     """LLM 调用审计日志（支持 SQLite / PostgreSQL）。"""
 
-    def __init__(self, database: "Database") -> None:
-        self._conn = database.conn
+    @overload
+    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+
+    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+        if isinstance(conn, ConnectionAdapter):
+            self._conn = conn
+        else:
+            self._conn = conn.conn
+        self._user_id = user_id
+        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @staticmethod
     def _now_iso() -> str:
@@ -36,6 +48,9 @@ class LLMCallStore:
         thinking_chars: int = 0,
         stream: bool = False,
         latency_ms: float = 0.0,
+        ttft_ms: float = 0.0,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
         error: str | None = None,
     ) -> None:
         """写入一条 LLM 调用记录。"""
@@ -44,8 +59,10 @@ class LLMCallStore:
                 "INSERT INTO llm_call_log "
                 "(session_id, turn, iteration, model, "
                 " prompt_tokens, completion_tokens, cached_tokens, total_tokens, "
-                " has_tool_calls, thinking_chars, stream, latency_ms, error, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " has_tool_calls, thinking_chars, stream, latency_ms, "
+                " ttft_ms, cache_creation_tokens, cache_read_tokens, "
+                " error, created_at, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     turn,
@@ -59,8 +76,12 @@ class LLMCallStore:
                     thinking_chars,
                     1 if stream else 0,
                     round(latency_ms, 1),
+                    round(ttft_ms, 1),
+                    cache_creation_tokens,
+                    cache_read_tokens,
                     (error or "")[:500] if error else None,
                     self._now_iso(),
+                    self._user_id,
                 ),
             )
             self._conn.commit()
@@ -76,8 +97,8 @@ class LLMCallStore:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """查询 LLM 调用记录。"""
-        conditions: list[str] = []
-        params: list[Any] = []
+        conditions: list[str] = [self._uid_clause]
+        params: list[Any] = list(self._uid_params)
 
         if session_id is not None:
             conditions.append("session_id = ?")
@@ -86,7 +107,7 @@ class LLMCallStore:
             conditions.append("model = ?")
             params.append(model)
 
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        where = f"WHERE {' AND '.join(conditions)}"
         sql = (
             f"SELECT * FROM llm_call_log {where} "
             f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -97,8 +118,12 @@ class LLMCallStore:
 
     def stats(self, session_id: str | None = None) -> dict[str, Any]:
         """聚合统计：调用次数、总 token、平均延迟、按模型分组。"""
-        where = "WHERE session_id = ?" if session_id else ""
-        params: list[Any] = [session_id] if session_id else []
+        conditions: list[str] = [self._uid_clause]
+        params: list[Any] = list(self._uid_params)
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(conditions)}"
 
         row = self._conn.execute(
             f"SELECT "

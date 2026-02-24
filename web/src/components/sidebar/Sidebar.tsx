@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { uuid } from "@/lib/utils";
@@ -26,6 +26,32 @@ import { sidebarTransition, useMotionSafe } from "@/lib/sidebar-motion";
 import { SessionList } from "./SessionList";
 import { ExcelFilesBar } from "./ExcelFilesBar";
 import { StatusFooter } from "./StatusFooter";
+
+/** Hook: swipe-left to close sidebar on mobile */
+function useSwipeToClose(enabled: boolean, onClose: () => void) {
+  const touchRef = useRef<{ startX: number; startY: number; startTime: number } | null>(null);
+
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!enabled) return;
+    const t = e.touches[0];
+    touchRef.current = { startX: t.clientX, startY: t.clientY, startTime: Date.now() };
+  }, [enabled]);
+
+  const onTouchEnd = useCallback((e: React.TouchEvent) => {
+    if (!enabled || !touchRef.current) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchRef.current.startX;
+    const dy = Math.abs(t.clientY - touchRef.current.startY);
+    const dt = Date.now() - touchRef.current.startTime;
+    touchRef.current = null;
+    // Swipe left: dx < -60px, mostly horizontal, within 400ms
+    if (dx < -60 && dy < 80 && dt < 400) {
+      onClose();
+    }
+  }, [enabled, onClose]);
+
+  return { onTouchStart, onTouchEnd };
+}
 
 export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
@@ -58,6 +84,9 @@ export function Sidebar() {
 
   const hasExcelFiles = recentFiles.length > 0;
 
+  // Swipe-left to close sidebar on mobile
+  const swipe = useSwipeToClose(isMobile && sidebarOpen, toggleSidebar);
+
   // Auto-close sidebar on mobile (initial mount + session changes)
   useEffect(() => {
     if (isMobile && sidebarOpen) {
@@ -88,6 +117,8 @@ export function Sidebar() {
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
         style={{ backgroundColor: "var(--em-sidebar-bg)" }}
+        onTouchStart={swipe.onTouchStart}
+        onTouchEnd={swipe.onTouchEnd}
       >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3">
@@ -124,8 +155,8 @@ export function Sidebar() {
               ? "var(--em-primary-light)"
               : "var(--em-primary)",
           }}
-          onMouseEnter={() => setNewChatHover(true)}
-          onMouseLeave={() => setNewChatHover(false)}
+          onPointerEnter={() => setNewChatHover(true)}
+          onPointerLeave={() => setNewChatHover(false)}
           onClick={handleNewChat}
         >
           <MessageSquarePlus className="h-4 w-4" />

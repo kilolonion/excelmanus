@@ -375,6 +375,13 @@ class ToolRegistry:
 
         其中 task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册。
         """
+        from excelmanus.security import FileAccessGuard
+        from excelmanus.tools._guard_ctx import set_guard
+
+        # 设置 contextvar fallback，确保 CLI 模式下直接调用工具函数
+        # （不经过 tool_dispatcher.execute）也能拿到正确的 guard
+        set_guard(FileAccessGuard(workspace_root))
+
         for module_path in _BUILTIN_TOOL_MODULE_PATHS:
             module = import_module(module_path)
             init_guard = getattr(module, "init_guard", None)

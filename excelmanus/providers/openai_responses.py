@@ -95,7 +95,7 @@ def _chat_messages_to_responses_input(
         content = msg.get("content")
 
         if role == "system":
-            # system 消息 → instructions 参数
+            # system 消息 → instructions 参数传递
             if isinstance(content, str) and content.strip():
                 instructions_parts.append(content)
             continue
@@ -109,7 +109,7 @@ def _chat_messages_to_responses_input(
             continue
 
         if role == "assistant":
-            # assistant 消息中的文本和工具调用
+            # assistant 消息中的文本内容和工具调用
             # 文本部分
             if content:
                 input_items.append({
@@ -196,7 +196,7 @@ def _map_chat_tool_choice_to_responses(tool_choice: Any) -> Any:
     if not isinstance(tool_choice, dict):
         return None
 
-    # OpenAI Chat 强制工具格式：
+    # OpenAI Chat 强制指定工具格式：
     # {"type":"function","function":{"name":"ask_user"}}
     tc_type = str(tool_choice.get("type", "")).strip().lower()
     if tc_type == "function":
@@ -244,7 +244,7 @@ def _responses_output_to_openai(
         block_type = block.get("type", "")
 
         if block_type == "message":
-            # message block 包含 content 数组
+            # message 块包含 content 数组
             for content_item in block.get("content", []):
                 item_type = content_item.get("type", "")
                 if item_type in ("output_text", "text"):
@@ -274,7 +274,7 @@ def _responses_output_to_openai(
     else:
         finish_reason = "stop"
 
-    # usage 映射
+    # usage 统计映射
     usage_data = data.get("usage", {})
     prompt_tokens = usage_data.get("input_tokens", 0)
     completion_tokens = usage_data.get("output_tokens", 0)

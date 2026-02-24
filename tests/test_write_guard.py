@@ -825,7 +825,7 @@ class TestFinishTaskAcceptance:
 
     @pytest.mark.asyncio
     async def test_finish_task_double_call_accepted_when_not_may_write(self):
-        """write_hint != may_write 时，二次调用 finish_task 应被接受（只读任务）。"""
+        """write_hint != may_write 时，finish_task 直接接受（只读任务无需二次确认）。"""
         engine = _make_engine()
         engine._current_write_hint = "read_only"
 
@@ -835,17 +835,9 @@ class TestFinishTaskAcceptance:
             on_event=None,
             iteration=1,
         )
-        assert first.finish_accepted is False
-
-        second = await engine._execute_tool_call(
-            self._finish_task_call("second"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=2,
-        )
-        assert second.finish_accepted is True
-        assert "任务完成" in second.result
-        assert "无写入" in second.result
+        assert first.finish_accepted is True
+        assert "任务完成" in first.result
+        assert "无写入" in first.result
 
 
 class TestFinishTaskStructuredReport:

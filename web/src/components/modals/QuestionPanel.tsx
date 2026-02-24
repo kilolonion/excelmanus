@@ -71,10 +71,10 @@ export function QuestionPanel() {
               <button
                 key={opt.label}
                 onClick={() => toggleOption(opt.label)}
-                className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                className={`w-full text-left px-3 py-3 rounded-lg border text-sm transition-colors min-h-[44px] ${
                   selected.has(opt.label)
                     ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5"
-                    : "border-border hover:bg-muted/30"
+                    : "border-border hover:bg-muted/30 active:bg-muted/50"
                 }`}
               >
                 <span className="font-medium">{opt.label}</span>

@@ -19,6 +19,7 @@ from openpyxl import load_workbook
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools._helpers import get_worksheet, resolve_sheet_name
 from excelmanus.tools import data_tools
 from excelmanus.tools.registry import ToolDef
@@ -48,7 +49,10 @@ CJK_FONT_CANDIDATES = (
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard 单例。"""
+    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
+    ctx_guard = _get_ctx_guard()
+    if ctx_guard is not None:
+        return ctx_guard
     global _guard
     if _guard is None:
         _guard = FileAccessGuard(".")

@@ -9,8 +9,8 @@ import {
   CircleStop,
   FolderOpen,
   ChevronsUpDown,
-  Loader2,
   Brain,
+  Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -20,13 +20,14 @@ import { ToolCallCard } from "./ToolCallCard";
 import { SubagentBlock } from "./SubagentBlock";
 import { TaskList } from "./TaskList";
 import { UndoableCard } from "./UndoableCard";
+import { PipelineStepper } from "./PipelineStepper";
 import { useChatStore } from "@/stores/chat-store";
-import type { PipelineStatus } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl } from "@/lib/api";
+import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
 import type { AssistantBlock } from "@/lib/types";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 
 /**
  * Recursively process React children: replace plain string nodes
@@ -64,7 +65,7 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
   isStreamingText?: boolean;
 }) {
   return (
-    <div className={`prose prose-sm max-w-none text-foreground${isStreamingText ? " streaming-cursor" : ""}`}>
+    <div className={`prose prose-sm max-w-none text-foreground text-[13px] leading-relaxed${isStreamingText ? " streaming-cursor" : ""}`}>
       <ReactMarkdown
         remarkPlugins={remarkPluginsStable}
         components={markdownComponents}
@@ -165,7 +166,10 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
     [blocks],
   );
 
-  const showPipeline = blocks.length === 0 && isStreaming;
+  // Show pipeline progress whenever streaming — not just when blocks are empty.
+  // This ensures multi-iteration stages (preparing context, calling LLM, etc.)
+  // remain visible even after the first thinking/text block has arrived.
+  const showPipeline = isStreaming && (blocks.length === 0 || pipelineStatus !== null);
 
   const lastBlockIdx = blocks.length - 1;
   const lastBlock = lastBlockIdx >= 0 ? blocks[lastBlockIdx] : null;
@@ -176,14 +180,14 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
     && lastBlock.duration == null;
 
   return (
-    <div className="flex gap-2 sm:gap-3 py-4">
+    <div className="flex gap-2 sm:gap-2.5 py-2.5">
       <div
-        className="flex-shrink-0 h-7 w-7 rounded-full flex items-center justify-center text-white text-xs"
+        className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px]"
         style={{ backgroundColor: "var(--em-accent)" }}
       >
-        <FileSpreadsheet className="h-4 w-4" />
+        <FileSpreadsheet className="h-3.5 w-3.5" />
       </div>
-      <div className="flex-1 min-w-0 border-l-2 pl-4 relative" style={{ borderColor: "var(--em-primary)" }}>
+      <div className="flex-1 min-w-0 border-l-[1.5px] pl-3 relative" style={{ borderColor: "var(--em-primary)" }}>
         {hasChain && tailBlocks.length > 0 && !collapsed && (
           <button
             type="button"
@@ -230,7 +234,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
         ))}
 
         {showPipeline && (
-          <PipelineIndicator status={pipelineStatus} />
+          <PipelineStepper status={pipelineStatus} />
         )}
         {affectedFiles && affectedFiles.length > 0 && (
           <AffectedFilesBadges files={affectedFiles} />
@@ -240,18 +244,43 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
   );
 });
 
+const MAX_FILE_PATH_LENGTH = 260;
+
+function isPlausibleFilePath(p: string): boolean {
+  if (!p || p.length > MAX_FILE_PATH_LENGTH) return false;
+  if (/[\n\r\t]/.test(p)) return false;
+  if (/\s{2,}/.test(p)) return false;
+  return true;
+}
+
 function AffectedFilesBadges({ files }: { files: string[] }) {
   const openPanel = useExcelStore((s) => s.openPanel);
   const addRecentFile = useExcelStore((s) => s.addRecentFile);
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+
+  const validFiles = useMemo(
+    () => files.filter(isPlausibleFilePath),
+    [files],
+  );
 
   const handleClick = useCallback(
     (filePath: string) => {
-      const filename = filePath.split("/").pop() || filePath;
-      addRecentFile({ path: filePath, filename });
-      openPanel(filePath);
+      const normalized = normalizeExcelPath(filePath);
+      const filename = normalized.split("/").pop() || normalized;
+
+      const recentFiles = useExcelStore.getState().recentFiles;
+      const existing = recentFiles.find(
+        (f) => normalizeExcelPath(f.path) === normalized,
+      );
+      const resolvedPath = existing ? existing.path : normalized;
+
+      addRecentFile({ path: resolvedPath, filename });
+      openPanel(resolvedPath);
     },
     [openPanel, addRecentFile],
   );
+
+  if (validFiles.length === 0) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-border/30">
@@ -259,45 +288,51 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
         className="h-3 w-3 text-muted-foreground flex-shrink-0"
       />
       <span className="text-[10px] text-muted-foreground mr-0.5">涉及文件</span>
-      {files.map((filePath) => {
+      {validFiles.map((filePath) => {
         const filename = filePath.split("/").pop() || filePath;
         return (
-          <button
+          <span
             key={filePath}
-            type="button"
-            onClick={() => handleClick(filePath)}
-            className="inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-2.5 py-0.5 transition-colors cursor-pointer bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)]"
+            className="inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
           >
-            {filename}
-          </button>
+            <button
+              type="button"
+              onClick={() => handleClick(filePath)}
+              className="hover:underline cursor-pointer transition-colors"
+            >
+              {filename}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                downloadFile(
+                  filePath,
+                  filename,
+                  activeSessionId ?? undefined,
+                ).catch(() => {})
+              }
+              className="rounded p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
+              title="下载"
+            >
+              <Download className="h-3 w-3" />
+            </button>
+          </span>
         );
       })}
     </div>
   );
 }
 
-function PipelineIndicator({ status }: { status: PipelineStatus | null }) {
-  const [elapsed, setElapsed] = useState(0);
-
-  useEffect(() => {
-    if (!status) {
-      setElapsed(0);
-      return;
-    }
-    setElapsed(Math.round((Date.now() - status.startedAt) / 1000));
-    const timer = setInterval(() => {
-      setElapsed(Math.round((Date.now() - status.startedAt) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [status]);
-
+function IterationDivider({ iteration }: { iteration: number; isActive?: boolean }) {
   return (
-    <div className="flex items-center gap-2 h-7 text-sm text-muted-foreground">
-      <Loader2 className="h-3.5 w-3.5 animate-spin flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-      <span>{status?.message || "正在准备..."}</span>
-      {status && elapsed > 0 && (
-        <span className="text-xs opacity-50">{elapsed}s</span>
-      )}
+    <div className="flex items-center gap-2 my-3 text-xs">
+      <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--em-primary-alpha-06)] border border-[var(--em-primary-alpha-15)]">
+        <Repeat className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
+        <span className="font-medium" style={{ color: "var(--em-primary)" }}>
+          第 {iteration} 轮迭代
+        </span>
+      </div>
+      <div className="flex-1 border-t border-[var(--em-primary-alpha-15)]" />
     </div>
   );
 }
@@ -346,11 +381,10 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ bloc
       return <TaskList items={block.items} />;
     case "iteration":
       return (
-        <div className="flex items-center gap-2 my-2 text-xs text-muted-foreground">
-          <Repeat className="h-3 w-3" />
-          <span>迭代 {block.iteration}</span>
-          <div className="flex-1 border-t border-border/50" />
-        </div>
+        <IterationDivider
+          iteration={block.iteration}
+          isActive={isStreamingText !== undefined && blockIndex === (isStreamingText ? -1 : blockIndex)}
+        />
       );
     case "status": {
       const isStopped = block.label === "对话已停止";

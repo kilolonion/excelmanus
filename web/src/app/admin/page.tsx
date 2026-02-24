@@ -137,14 +137,18 @@ function UserRow({
   user,
   currentUserId,
   onAction,
+  allModelNames,
 }: {
   user: AdminUser;
   currentUserId: string;
   onAction: (userId: string, action: string, payload?: Record<string, unknown>) => Promise<void>;
+  allModelNames: string[];
 }) {
   const [loading, setLoading] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const isSelf = user.id === currentUserId;
+  const [editingModels, setEditingModels] = useState(false);
+  const [modelDraft, setModelDraft] = useState<string[]>(user.allowed_models ?? []);
 
   const handleAction = async (action: string, payload?: Record<string, unknown>) => {
     setLoading(action);
@@ -304,6 +308,96 @@ function UserRow({
                 </div>
               </div>
 
+              {/* Model permissions */}
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    模型权限
+                  </h4>
+                  {!editingModels ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-[11px] gap-1"
+                      onClick={() => {
+                        setModelDraft(user.allowed_models ?? []);
+                        setEditingModels(true);
+                      }}
+                    >
+                      编辑
+                    </Button>
+                  ) : (
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-[11px] gap-1"
+                        onClick={() => setEditingModels(false)}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-6 text-[11px] gap-1 text-white"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        disabled={loading !== null}
+                        onClick={async () => {
+                          await handleAction("set_allowed_models", {
+                            allowed_models: modelDraft.length > 0 ? modelDraft : [],
+                          });
+                          setEditingModels(false);
+                        }}
+                      >
+                        {loading === "set_allowed_models" && (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        )}
+                        保存
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {!editingModels ? (
+                  <p className="text-xs text-muted-foreground">
+                    {!user.allowed_models || user.allowed_models.length === 0
+                      ? "不限制（可使用所有模型）"
+                      : `允许: default, ${user.allowed_models.join(", ")}`}
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      勾选允许使用的模型（不勾选任何 = 不限制）。default 模型始终可用。
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {allModelNames
+                        .filter((n) => n !== "default")
+                        .map((name) => (
+                          <label
+                            key={name}
+                            className="inline-flex items-center gap-1.5 text-xs cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={modelDraft.includes(name)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setModelDraft((prev) => [...prev, name]);
+                                } else {
+                                  setModelDraft((prev) => prev.filter((m) => m !== name));
+                                }
+                              }}
+                              className="rounded border-border"
+                            />
+                            {name}
+                          </label>
+                        ))}
+                      {allModelNames.filter((n) => n !== "default").length === 0 && (
+                        <span className="text-[11px] text-muted-foreground">暂无多模型配置</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Action buttons */}
               <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-border">
                 {!isSelf && (
@@ -428,6 +522,7 @@ export default function AdminPage() {
   const [sortField, setSortField] = useState<SortField>("created_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [allModelNames, setAllModelNames] = useState<string[]>([]);
   let toastIdRef = 0;
 
   const addToast = useCallback((type: "success" | "error", message: string) => {
@@ -455,6 +550,12 @@ export default function AdminPage() {
       return;
     }
     loadUsers();
+    // Fetch available model names for the permissions editor
+    import("@/lib/api").then(({ apiGet }) => {
+      apiGet<{ models: { name: string }[] }>("/models")
+        .then((data) => setAllModelNames(data.models.map((m) => m.name)))
+        .catch(() => {});
+    });
   }, [currentUser, router, loadUsers]);
 
   const handleAction = useCallback(
@@ -484,6 +585,10 @@ export default function AdminPage() {
             addToast("success", `已清空 ${result.deleted_files} 个文件`);
             break;
           }
+          case "set_allowed_models":
+            await adminUpdateUser(userId, { allowed_models: payload?.allowed_models ?? [] });
+            addToast("success", "模型权限已更新");
+            break;
         }
         await loadUsers();
       } catch (err) {
@@ -680,6 +785,7 @@ export default function AdminPage() {
                 user={user}
                 currentUserId={currentUser?.id || ""}
                 onAction={handleAction}
+                allModelNames={allModelNames}
               />
             ))}
           </div>

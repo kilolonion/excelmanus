@@ -132,6 +132,8 @@ class ApprovalManager:
         self._applied: dict[str, AppliedApprovalRecord] = {}
         self._mcp_auto_approved: set[str] = set()
         self._db_store: "ApprovalStore | None" = None
+        # 统一文件版本管理器（由 engine 注入）
+        self._fvm: Any = None
         if database is not None:
             from excelmanus.stores.approval_store import ApprovalStore as _AS
             self._db_store = _AS(database)
@@ -448,6 +450,26 @@ class ApprovalManager:
             raise execute_error
         return result_text, record
 
+    def mark_non_undoable_for_paths(self, rel_paths: set[str]) -> int:
+        """将涉及指定路径的审批记录标记为不可回滚。
+
+        在备份应用后调用，防止 undo 操作在原始文件已被覆盖的情况下
+        使用过期的备份副本。
+
+        Returns the number of records affected.
+        """
+        count = 0
+        for record in self._applied.values():
+            if not record.undoable or not record.changes:
+                continue
+            if any(change.path in rel_paths for change in record.changes):
+                record.undoable = False
+                count += 1
+        # 同步失效 FileVersionManager 中的版本链
+        if self._fvm is not None:
+            self._fvm.invalidate_undo(rel_paths)
+        return count
+
     def undo(self, approval_id: str) -> str:
         record = self.get_applied(approval_id)
         if record is None:
@@ -457,6 +479,31 @@ class ApprovalManager:
         if not record.changes:
             return f"记录 `{approval_id}` 没有可回滚的文件变更。"
 
+        # ── 优先使用 FileVersionManager 恢复到真正的原始版本 ──
+        if self._fvm is not None:
+            restored = 0
+            failed: list[str] = []
+            for change in record.changes:
+                if change.before_exists:
+                    ok = self._fvm.restore_to_original(change.path)
+                    if ok:
+                        restored += 1
+                    else:
+                        # fallback 到旧的快照恢复
+                        if not self._legacy_restore_change(change):
+                            failed.append(change.path)
+                        else:
+                            restored += 1
+                else:
+                    path = self.workspace_root / change.path
+                    if path.exists():
+                        path.unlink()
+                        restored += 1
+            if failed:
+                return f"回滚 `{approval_id}` 部分失败：{', '.join(failed)}"
+            return f"已回滚 `{approval_id}`：恢复 {restored} 个文件。"
+
+        # ── 旧路径：从 approval snapshots 恢复 ──
         conflicts: list[str] = []
         for change in record.changes:
             path = self.workspace_root / change.path
@@ -489,6 +536,18 @@ class ApprovalManager:
                 path.unlink()
                 deleted += 1
         return f"已回滚 `{approval_id}`：恢复 {restored} 个文件，删除 {deleted} 个新增文件。"
+
+    def _legacy_restore_change(self, change: FileChangeRecord) -> bool:
+        """旧路径恢复：从 approval snapshots 目录读取 before 快照。"""
+        if not change.before_snapshot_file:
+            return False
+        snapshot = self.workspace_root / change.before_snapshot_file
+        if not snapshot.exists():
+            return False
+        path = self.workspace_root / change.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(snapshot.read_bytes())
+        return True
 
     def _new_approval_id(self) -> str:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

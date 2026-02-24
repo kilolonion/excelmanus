@@ -32,3 +32,35 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("EXCELMANUS_"):
             monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_tool_guards() -> None:
+    """每个测试结束后重置所有工具模块的模块级 _guard 单例及 contextvar。
+
+    防止 init_guard(tmp_path) 或 register_builtin_tools 设置的路径在测试结束后污染后续测试。
+    """
+    yield
+    _TOOL_MODULES_WITH_GUARD = [
+        "excelmanus.tools.worksheet_tools",
+        "excelmanus.tools.cell_tools",
+        "excelmanus.tools.data_tools",
+        "excelmanus.tools.format_tools",
+        "excelmanus.tools.advanced_format_tools",
+        "excelmanus.tools.chart_tools",
+        "excelmanus.tools.sheet_tools",
+        "excelmanus.tools.file_tools",
+        "excelmanus.tools.image_tools",
+        "excelmanus.tools.macro_tools",
+        "excelmanus.tools.code_tools",
+        "excelmanus.tools.shell_tools",
+    ]
+    import sys
+    for mod_name in _TOOL_MODULES_WITH_GUARD:
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "_guard"):
+            mod._guard = None
+    # 同时重置 contextvar，防止 register_builtin_tools 设置的 guard 跨测试污染
+    _guard_ctx = sys.modules.get("excelmanus.tools._guard_ctx")
+    if _guard_ctx is not None:
+        _guard_ctx._current_guard.set(None)

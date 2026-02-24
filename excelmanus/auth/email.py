@@ -1,9 +1,9 @@
-"""Email sending module — Resend API (primary) + SMTP (fallback).
+"""邮件发送模块 — Resend API（主）+ SMTP（备用）。
 
-Auto-selects backend based on environment variables:
-  - If EXCELMANUS_RESEND_API_KEY is set → use Resend
-  - Elif EXCELMANUS_SMTP_HOST is set    → use SMTP
-  - Else                                → log warning, skip (dev mode)
+根据环境变量自动选择后端：
+  - 如果设置了 EXCELMANUS_RESEND_API_KEY → 使用 Resend
+  - 否则如果设置了 EXCELMANUS_SMTP_HOST → 使用 SMTP
+  - 否则 → 记录警告，跳过（开发模式）
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ _PURPOSE_SUBJECTS = {
 
 
 def _make_html(code: str, purpose: PurposeType) -> str:
-    """Render the verification email body as HTML."""
+    """将验证邮件正文渲染为 HTML。"""
     if purpose == "register":
         title = "邮箱验证"
         intro = "感谢注册 <strong>ExcelManus</strong>！请使用以下验证码完成邮箱验证："
@@ -41,45 +41,73 @@ def _make_html(code: str, purpose: PurposeType) -> str:
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 0;">
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;background:#f4f4f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:48px 0;">
     <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0"
-             style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+      <table width="440" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.06);">
         <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#2563eb,#7c3aed);padding:32px 40px;text-align:center;">
-            <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;letter-spacing:.5px;">
-              ExcelManus
-            </h1>
-            <p style="margin:6px 0 0;color:rgba(255,255,255,.8);font-size:13px;">{title}</p>
+          <td style="padding:36px 40px 28px;text-align:center;">
+            <!--[if mso]>
+            <table cellpadding="0" cellspacing="0" align="center"><tr>
+            <td style="background:#217346;width:36px;height:36px;text-align:center;vertical-align:middle;border-radius:8px;">
+              <span style="color:#ffffff;font-size:18px;font-weight:700;font-family:Consolas,monospace;">X</span>
+            </td>
+            <td style="padding-left:10px;">
+              <span style="font-size:22px;font-weight:700;color:#1a1a1a;font-family:-apple-system,sans-serif;">ExcelManus</span>
+            </td>
+            </tr></table>
+            <![endif]-->
+            <!--[if !mso]><!-->
+            <table cellpadding="0" cellspacing="0" align="center" style="display:inline-table;"><tr>
+            <td style="background:#217346;width:36px;height:36px;text-align:center;vertical-align:middle;border-radius:8px;line-height:36px;">
+              <span style="color:#ffffff;font-size:18px;font-weight:700;font-family:Consolas,'Courier New',monospace;">X</span>
+            </td>
+            <td style="padding-left:10px;vertical-align:middle;">
+              <span style="font-size:22px;font-weight:700;color:#1a1a1a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">ExcelManus</span>
+            </td>
+            </tr></table>
+            <!--<![endif]-->
+          </td>
+        </tr>
+        <!-- Title bar -->
+        <tr>
+          <td style="padding:0 40px;">
+            <table width="100%" cellpadding="0" cellspacing="0">
+              <tr><td style="background:#217346;height:3px;border-radius:2px;font-size:0;line-height:0;">&nbsp;</td></tr>
+            </table>
           </td>
         </tr>
         <!-- Body -->
         <tr>
-          <td style="padding:40px 40px 32px;">
-            <p style="margin:0 0 20px;color:#374151;font-size:15px;line-height:1.6;">{intro}</p>
+          <td style="padding:32px 40px 28px;">
+            <p style="margin:0 0 6px;color:#6b7280;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:1px;">{title}</p>
+            <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.7;">{intro}</p>
             <!-- Code box -->
-            <div style="text-align:center;margin:28px 0;">
-              <span style="display:inline-block;background:#f0f4ff;border:2px dashed #2563eb;
-                           border-radius:10px;padding:14px 40px;
-                           font-size:36px;font-weight:700;letter-spacing:12px;color:#1d4ed8;
-                           font-family:'Courier New',monospace;">
-                {code}
-              </span>
+            <div style="text-align:center;margin:0 0 24px;">
+              <table cellpadding="0" cellspacing="0" align="center">
+                <tr><td style="background:#f0faf4;border:2px solid #217346;border-radius:12px;padding:16px 44px;">
+                  <span style="font-size:34px;font-weight:700;letter-spacing:10px;color:#217346;font-family:Consolas,'Courier New',monospace;">{code}</span>
+                </td></tr>
+              </table>
             </div>
-            <p style="margin:0;color:#6b7280;font-size:13px;text-align:center;">{note}</p>
+            <p style="margin:0;color:#9ca3af;font-size:13px;text-align:center;line-height:1.6;">{note}</p>
           </td>
         </tr>
         <!-- Footer -->
         <tr>
-          <td style="padding:20px 40px;border-top:1px solid #f3f4f6;text-align:center;">
-            <p style="margin:0;color:#9ca3af;font-size:12px;">
-              此邮件由 ExcelManus 自动发送，请勿直接回复。
+          <td style="padding:20px 40px 24px;border-top:1px solid #f0f0f1;text-align:center;">
+            <p style="margin:0;color:#b4b4b8;font-size:12px;line-height:1.6;">
+              此邮件由 ExcelManus 系统自动发送，请勿直接回复。
             </p>
           </td>
         </tr>
       </table>
+      <!-- Sub-footer branding -->
+      <p style="margin:24px 0 0;color:#b4b4b8;font-size:11px;text-align:center;">
+        &copy; ExcelManus &mdash; 基于大语言模型的 Excel 智能代理
+      </p>
     </td></tr>
   </table>
 </body>
@@ -87,7 +115,7 @@ def _make_html(code: str, purpose: PurposeType) -> str:
 
 
 def _make_text(code: str, purpose: PurposeType) -> str:
-    """Plain text fallback."""
+    """纯文本备用格式。"""
     action = "注册验证" if purpose == "register" else "密码重置"
     return (
         f"ExcelManus {action}\n\n"
@@ -96,7 +124,7 @@ def _make_text(code: str, purpose: PurposeType) -> str:
     )
 
 
-# ── Resend backend ─────────────────────────────────────────
+# ── Resend 后端 ─────────────────────────────────────────
 
 
 async def _send_via_resend(
@@ -125,7 +153,7 @@ async def _send_via_resend(
     logger.debug("邮件已通过 Resend 发送至 %s", to)
 
 
-# ── SMTP backend ───────────────────────────────────────────
+# ── SMTP 后端 ───────────────────────────────────────────
 
 
 def _send_via_smtp_sync(
@@ -167,13 +195,13 @@ async def _send_via_smtp(
     )
 
 
-# ── Public API ─────────────────────────────────────────────
+# ── 公开 API ─────────────────────────────────────────────
 
 
 async def send_verification_email(to: str, code: str, purpose: PurposeType) -> bool:
-    """Send a verification code email.
+    """发送验证码邮件。
 
-    Returns True on success, False on failure (so callers can decide whether to raise).
+    成功返回 True，失败返回 False（由调用方决定是否抛出异常）。
     """
     resend_key = os.environ.get("EXCELMANUS_RESEND_API_KEY", "").strip()
     smtp_host = os.environ.get("EXCELMANUS_SMTP_HOST", "").strip()
@@ -211,7 +239,7 @@ async def send_verification_email(to: str, code: str, purpose: PurposeType) -> b
             logger.exception("SMTP 发送失败")
             return False
 
-    # No email backend configured
+    # 未配置邮件后端
     logger.warning(
         "未配置邮件服务（EXCELMANUS_RESEND_API_KEY 或 EXCELMANUS_SMTP_HOST），"
         "验证码 %s 未发送给 %s。请在生产环境中配置邮件服务。",
@@ -221,7 +249,7 @@ async def send_verification_email(to: str, code: str, purpose: PurposeType) -> b
 
 
 def is_email_configured() -> bool:
-    """Return True if at least one email backend is configured."""
+    """如果至少配置了一个邮件后端，返回 True。"""
     return bool(
         os.environ.get("EXCELMANUS_RESEND_API_KEY", "").strip()
         or os.environ.get("EXCELMANUS_SMTP_HOST", "").strip()

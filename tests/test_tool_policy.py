@@ -98,7 +98,16 @@ def test_workspace_scan_budget_constants_contract() -> None:
     assert tuple(WORKSPACE_SCAN_EXCLUDE_PREFIXES) == (
         ".git",
         ".venv",
+        "venv",
         "__pycache__",
+        "node_modules",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".worktrees",
         "outputs/approvals",
     )
 

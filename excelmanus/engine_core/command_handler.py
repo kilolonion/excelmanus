@@ -15,10 +15,9 @@ from excelmanus.control_commands import (
 )
 from excelmanus.logger import get_logger
 
-# Lazy imports used at runtime to avoid circular dependencies:
+# 延迟导入，运行时使用以避免循环依赖：
 # - SkillMatchResult (from excelmanus.skillpacks.router)
 # - EventType, ToolCallEvent (from excelmanus.events)
-# - BackupManager (from excelmanus.backup)
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -88,7 +87,7 @@ class CommandHandler:
                 self._emit_mode_changed(on_event, "full_access", True)
                 msg = "已开启 fullaccess。当前代码技能权限：full_access。"
                 # 若当前有 pending approval，自动执行并续上对话
-                pending = e._approval.pending
+                pending = e.approval.pending
                 if pending is not None:
                     accept_result = await self._handle_accept_command(
                         ["/accept", pending.approval_id], on_event=on_event,
@@ -121,13 +120,13 @@ class CommandHandler:
                 e._subagent_enabled = False
                 return "已关闭 subagent。"
             if action == "list" and len(parts) == 2:
-                return e._handle_list_subagents()
+                return e.handle_list_subagents()
             if action == "run":
                 agent_name, task, parse_error = self._parse_subagent_run_command(text)
                 if parse_error is not None:
                     return parse_error
                 assert task is not None
-                outcome = await e._delegate_to_subagent(
+                outcome = await e.delegate_to_subagent(
                     task=task,
                     agent_name=agent_name,
                     on_event=on_event,
@@ -137,14 +136,14 @@ class CommandHandler:
                     and outcome.subagent_result is not None
                     and outcome.subagent_result.pending_approval_id is not None
                 ):
-                    pending = e._approval.pending
+                    pending = e.approval.pending
                     approval_id_value = outcome.subagent_result.pending_approval_id
                     high_risk_tool = (
                         pending.tool_name
                         if pending is not None and pending.approval_id == approval_id_value
                         else "高风险工具"
                     )
-                    question = e._enqueue_subagent_approval_question(
+                    question = e.enqueue_subagent_approval_question(
                         approval_id=approval_id_value,
                         tool_name=high_risk_tool,
                         picked_agent=outcome.picked_agent or "subagent",
@@ -170,8 +169,8 @@ class CommandHandler:
             # /model list → 列出所有可用模型
             # /model <name> → 切换模型
             if not action:
-                name_display = e._active_model_name or "default"
-                return f"当前模型：{name_display}（{e._active_model}）"
+                name_display = e.active_model_name or "default"
+                return f"当前模型：{name_display}（{e.active_model}）"
             if action == "list":
                 rows = e.list_models()
                 lines = ["可用模型："]
@@ -227,8 +226,8 @@ class CommandHandler:
 
         # /compact status
         if action == "status":
-            sys_msgs = e._memory._build_system_messages()
-            status = compaction_mgr.get_status(e._memory, sys_msgs)
+            sys_msgs = e.memory.build_system_messages()
+            status = compaction_mgr.get_status(e.memory, sys_msgs)
             pct = status["usage_ratio"] * 100
             threshold_pct = status["threshold_ratio"] * 100
             lines = [
@@ -264,11 +263,11 @@ class CommandHandler:
             custom_instruction = " ".join(parts[1:])
 
         # 确定摘要模型
-        summary_model = e._config.aux_model or e._active_model
-        sys_msgs = e._memory._build_system_messages()
+        summary_model = e.config.aux_model or e.active_model
+        sys_msgs = e.memory.build_system_messages()
 
         result = await compaction_mgr.manual_compact(
-            memory=e._memory,
+            memory=e.memory,
             system_msgs=sys_msgs,
             client=e._client,
             summary_model=summary_model,
@@ -279,13 +278,13 @@ class CommandHandler:
             return f"压缩未执行: {result.error}"
 
         pct_before = (
-            result.tokens_before / e._config.max_context_tokens * 100
-            if e._config.max_context_tokens > 0
+            result.tokens_before / e.config.max_context_tokens * 100
+            if e.config.max_context_tokens > 0
             else 0
         )
         pct_after = (
-            result.tokens_after / e._config.max_context_tokens * 100
-            if e._config.max_context_tokens > 0
+            result.tokens_after / e.config.max_context_tokens * 100
+            if e.config.max_context_tokens > 0
             else 0
         )
         return (
@@ -356,38 +355,38 @@ class CommandHandler:
         too_many_args = len(parts) > 3
 
         if action in {"status", ""} and not too_many_args:
-            if not e._backup_enabled:
+            if not e.workspace.transaction_enabled:
                 return "备份沙盒模式：已关闭。"
-            mgr = e._backup_manager
-            count = len(mgr.list_backups()) if mgr else 0
-            scope = mgr.scope if mgr else "all"
+            tx = e.transaction
+            count = len(tx.list_staged()) if tx else 0
+            scope = tx.scope if tx else "all"
             return (
                 f"备份沙盒模式：已启用（scope={scope}）。\n"
                 f"当前管理 {count} 个备份文件。\n"
-                f"备份目录：{mgr.backup_dir if mgr else 'N/A'}"
+                f"备份目录：{tx.staging_dir if tx else 'N/A'}"
             )
 
         if action == "on" and not too_many_args:
             scope = "all"
             if len(parts) == 3 and parts[2].strip().lower() == "--excel-only":
                 scope = "excel_only"
-            e._backup_enabled = True
-            from excelmanus.backup import BackupManager
-            e._backup_manager = BackupManager(
-                workspace_root=e._config.workspace_root,
-                scope=scope,
-            )
+            e.workspace.transaction_enabled = True
+            e.workspace.transaction_scope = scope
+            e.transaction = e.workspace.create_transaction(fvm=e._fvm)
+            e.sandbox_env = e.workspace.create_sandbox_env(transaction=e.transaction)
             return f"已开启备份沙盒模式（scope={scope}）。所有文件操作将重定向到副本。"
 
         if action == "off" and not too_many_args:
-            e._backup_enabled = False
-            e._backup_manager = None
+            e.workspace.transaction_enabled = False
+            e.transaction = None
+            e.sandbox_env = e.workspace.create_sandbox_env(transaction=None)
             return "已关闭备份沙盒模式。后续操作将直接修改原始文件。"
 
         if action == "apply" and not too_many_args:
-            if not e._backup_enabled or e._backup_manager is None:
+            tx = e.transaction
+            if not e.workspace.transaction_enabled or tx is None:
                 return "备份模式未启用，无需 apply。"
-            applied = e._backup_manager.apply_all()
+            applied = tx.commit_all()
             if not applied:
                 return "没有需要应用的备份。"
             lines = [f"已将 {len(applied)} 个备份文件应用到原始位置："]
@@ -396,9 +395,10 @@ class CommandHandler:
             return "\n".join(lines)
 
         if action == "list" and not too_many_args:
-            if not e._backup_enabled or e._backup_manager is None:
+            tx = e.transaction
+            if not e.workspace.transaction_enabled or tx is None:
                 return "备份模式未启用。"
-            backups = e._backup_manager.list_backups()
+            backups = tx.list_staged()
             if not backups:
                 return "当前没有备份文件。"
             lines = [f"当前 {len(backups)} 个备份文件："]
@@ -421,7 +421,7 @@ class CommandHandler:
             return "无效参数。用法：/accept <id>。"
 
         approval_id = parts[1].strip()
-        pending = e._approval.pending
+        pending = e.approval.pending
         if pending is None:
             return "当前没有待确认操作。"
         if pending.approval_id != approval_id:
@@ -442,7 +442,7 @@ class CommandHandler:
         # ── 发射 APPROVAL_RESOLVED 事件，携带 tool_call_id 供前端更新卡片 ──
         from excelmanus.events import EventType, ToolCallEvent
 
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.APPROVAL_RESOLVED,
@@ -457,13 +457,9 @@ class CommandHandler:
 
         # ── 始终更新 memory：用真实结果替换审批提示，使 LLM 知道操作已完成 ──
         if saved_tool_call_id and record.result_preview:
-            e._memory.replace_tool_result(saved_tool_call_id, record.result_preview)
+            e.memory.replace_tool_result(saved_tool_call_id, record.result_preview)
         # 移除审批提示对应的 assistant 尾部消息（避免 LLM 重复看到审批文本）
-        msgs = e._memory._messages
-        if msgs and msgs[-1].get("role") == "assistant":
-            last_content = msgs[-1].get("content", "")
-            if isinstance(last_content, str) and "待确认队列" in last_content:
-                msgs.pop()
+        e.memory.remove_last_assistant_if(lambda c: "待确认队列" in c)
 
         # 仅在仍有未完成任务时恢复主循环；普通单步高风险确认不应额外触发一次 LLM 调用。
         if route_to_resume is None or not e._has_incomplete_tasks():
@@ -492,17 +488,17 @@ class CommandHandler:
         if len(parts) != 2:
             return "无效参数。用法：/reject <id>。"
         approval_id = parts[1].strip()
-        pending = e._approval.pending
+        pending = e.approval.pending
         saved_tool_call_id = e._pending_approval_tool_call_id
         tool_name = pending.tool_name if pending else ""
-        result = e._approval.reject_pending(approval_id)
-        if e._approval.pending is None:
+        result = e.approval.reject_pending(approval_id)
+        if e.approval.pending is None:
             e._pending_approval_route_result = None
             e._pending_approval_tool_call_id = None
 
         from excelmanus.events import EventType, ToolCallEvent
 
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.APPROVAL_RESOLVED,
@@ -522,7 +518,7 @@ class CommandHandler:
 
         # /rollback 或 /rollback list → 列出用户轮次
         if action in {"", "list"}:
-            turns = e._memory.list_user_turns()
+            turns = e.memory.list_user_turns()
             if not turns:
                 return "当前没有用户对话记录。"
             lines = ["**用户对话轮次**（最早 → 最近）：\n"]
@@ -558,7 +554,7 @@ class CommandHandler:
 
         # /undo 或 /undo list → 列出可回滚操作
         if action in {"", "list"}:
-            records = e._approval.list_applied(limit=20)
+            records = e.approval.list_applied(limit=20)
             if not records:
                 return "没有已执行的操作记录。"
             lines = ["**操作历史**（最近 → 最早）：\n"]
@@ -579,7 +575,7 @@ class CommandHandler:
         # /undo <id> → 执行回滚
         if len(parts) == 2:
             approval_id = parts[1].strip()
-            return e._approval.undo(approval_id)
+            return e.approval.undo(approval_id)
 
         return "无效参数。用法：/undo [list] 或 /undo <id>。"
 
@@ -638,7 +634,7 @@ class CommandHandler:
         if len(parts) > 3:
             return "无效参数。用法：/plan approve [plan_id]。"
 
-        if e._approval.has_pending():
+        if e.approval.has_pending():
             return (
                 "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
                 "再处理计划审批。"
@@ -669,7 +665,7 @@ class CommandHandler:
         self._emit_mode_changed(on_event, "plan_mode", False)
 
         from excelmanus.events import EventType, ToolCallEvent
-        e._emit(
+        e.emit(
             on_event,
             ToolCallEvent(
                 event_type=EventType.TASK_LIST_CREATED,
@@ -683,7 +679,7 @@ class CommandHandler:
 
         if draft.source == "task_create_hook":
             if pending.tool_call_id:
-                e._memory.add_tool_result(
+                e.memory.add_tool_result(
                     pending.tool_call_id,
                     (
                         f"计划 `{draft.plan_id}` 已批准并创建任务清单「{draft.title}」，"
@@ -722,7 +718,7 @@ class CommandHandler:
         if len(parts) > 3:
             return "无效参数。用法：/plan reject [plan_id]。"
 
-        if e._approval.has_pending():
+        if e.approval.has_pending():
             return (
                 "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
                 "再处理计划审批。"
@@ -738,7 +734,7 @@ class CommandHandler:
             return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
 
         if pending.draft.source == "task_create_hook" and pending.tool_call_id:
-            e._memory.add_tool_result(
+            e.memory.add_tool_result(
                 pending.tool_call_id,
                 f"计划 `{expected_id}` 已拒绝，task_create 已取消执行。",
             )

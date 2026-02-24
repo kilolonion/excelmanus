@@ -321,7 +321,7 @@ def _parse_github_url(url: str) -> tuple[str, str, str, str, str]:
     # 尝试 raw.githubusercontent.com URL
     parsed = urlparse(url)
     if parsed.hostname == "raw.githubusercontent.com":
-        # path: /:owner/:repo/:ref/:file_path
+        # 路径格式: /:owner/:repo/:ref/:file_path
         segments = parsed.path.strip("/").split("/", 3)
         if len(segments) < 4:
             raise SkillImportError(f"无法解析 raw GitHub URL：{url}")

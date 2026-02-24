@@ -17,6 +17,7 @@ import {
   ChevronRight,
   ChevronDown,
   Upload,
+  Download,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -36,10 +37,36 @@ import { Button } from "@/components/ui/button";
 import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { uploadFile, fetchExcelFiles, fetchWorkspaceFiles } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
+import { uploadFile, fetchExcelFiles, fetchWorkspaceFiles, downloadFile, normalizeExcelPath } from "@/lib/api";
 import { fileItemVariants } from "@/lib/sidebar-motion";
 
 const EXCEL_EXTENSIONS = ".xlsx,.xls,.csv";
+
+/** Hook: long-press detection for touch devices (opens context menu) */
+function useLongPress(onLongPress: () => void, delay = 500) {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const triggeredRef = useRef(false);
+
+  const start = useCallback((e: React.TouchEvent) => {
+    triggeredRef.current = false;
+    timerRef.current = setTimeout(() => {
+      triggeredRef.current = true;
+      onLongPress();
+    }, delay);
+  }, [onLongPress, delay]);
+
+  const cancel = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const wasTriggered = useCallback(() => triggeredRef.current, []);
+
+  return { onTouchStart: start, onTouchEnd: cancel, onTouchMove: cancel, wasTriggered };
+}
 
 interface ExcelFilesBarProps {
   /** When true, renders as a flat list without section header (header is handled by parent). */
@@ -60,7 +87,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const pendingBackups = useExcelStore((s) => s.pendingBackups);
   const applyFile = useExcelStore((s) => s.applyFile);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const currentUserId = useAuthStore((s) => s.user?.id ?? "__anonymous__");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scannedUserIdRef = useRef<string | null>(null);
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -101,6 +130,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   }, [recentFiles]);
 
   useEffect(() => {
+    if (scannedUserIdRef.current === currentUserId) return;
+    scannedUserIdRef.current = currentUserId;
     fetchExcelFiles()
       .then((files) => {
         if (files.length > 0) {
@@ -114,7 +145,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         }
       })
       .catch(() => {});
-  }, [mergeRecentFiles]);
+  }, [mergeRecentFiles, currentUserId]);
 
   useEffect(() => {
     if (!treeView || wsFilesLoaded) return;
@@ -223,10 +254,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           <button
             onClick={() => fileInputRef.current?.click()}
             className="min-h-8 min-w-8 flex items-center justify-center rounded text-muted-foreground hover:text-white transition-all duration-150 ease-out"
-            onMouseEnter={(e) => {
+            onPointerEnter={(e) => {
               e.currentTarget.style.backgroundColor = "var(--em-primary)";
             }}
-            onMouseLeave={(e) => {
+            onPointerLeave={(e) => {
               e.currentTarget.style.backgroundColor = "";
             }}
             title="上传文件"
@@ -238,11 +269,11 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           onClick={() => fileInputRef.current?.click()}
           className="w-full flex items-center gap-2 px-2 py-1.5 min-h-8 rounded-md border border-dashed text-xs text-muted-foreground hover:text-foreground hover:border-solid transition-all duration-150 ease-out"
           style={{ borderColor: "var(--em-primary)" }}
-          onMouseEnter={(e) => {
+          onPointerEnter={(e) => {
             e.currentTarget.style.backgroundColor =
               "var(--em-primary-alpha-10)";
           }}
-          onMouseLeave={(e) => {
+          onPointerLeave={(e) => {
             e.currentTarget.style.backgroundColor = "";
           }}
         >
@@ -296,10 +327,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             <button
               onClick={() => fileInputRef.current?.click()}
               className="min-h-8 min-w-8 flex items-center justify-center rounded text-muted-foreground hover:text-white transition-all duration-150 ease-out"
-              onMouseEnter={(e) => {
+              onPointerEnter={(e) => {
                 e.currentTarget.style.backgroundColor = "var(--em-primary)";
               }}
-              onMouseLeave={(e) => {
+              onPointerLeave={(e) => {
                 e.currentTarget.style.backgroundColor = "";
               }}
               title="上传文件"
@@ -384,6 +415,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       {treeView ? (
         <FileTreeView
           files={workspaceFiles.length > 0 ? workspaceFiles : recentFiles}
+          sessionId={activeSessionId ?? undefined}
           panelOpen={panelOpen}
           activeFilePath={activeFilePath}
           draggingPath={draggingPath}
@@ -455,7 +487,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                   </span>
 
                   {/* Pending backup dot indicator */}
-                  {pendingBackups.some((b) => b.original_path === file.path) && (
+                  {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
                     <span
                       className="flex-shrink-0 h-2 w-2 rounded-full"
                       style={{ backgroundColor: "var(--em-primary)" }}
@@ -471,7 +503,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                           className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
                             isFileActive
                               ? "opacity-100"
-                              : "opacity-0 group-hover:opacity-100"
+                              : "opacity-0 group-hover:opacity-100 touch-show"
                           }`}
                           onClick={(e) => e.stopPropagation()}
                         >
@@ -483,7 +515,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                         align="start"
                         className="w-36"
                       >
-                        {pendingBackups.some((b) => b.original_path === file.path) && (
+                        {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
                           <DropdownMenuItem
                             onClick={async (e) => {
                               e.stopPropagation();
@@ -496,6 +528,19 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                             Apply 到原文件
                           </DropdownMenuItem>
                         )}
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadFile(
+                              file.path,
+                              file.filename,
+                              activeSessionId ?? undefined
+                            ).catch(() => {});
+                          }}
+                        >
+                          <Download className="h-4 w-4" />
+                          下载
+                        </DropdownMenuItem>
                         <DropdownMenuItem
                           variant="destructive"
                           onClick={(e) => {
@@ -519,6 +564,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       {dialogOpen && (
         <ExcelFilesDialog
           files={recentFiles}
+          sessionId={activeSessionId ?? undefined}
           onClose={() => setDialogOpen(false)}
           onClickFile={handleClick}
           onDoubleClickFile={handleDoubleClick}
@@ -560,10 +606,8 @@ interface TreeNode {
 }
 
 function normalizePath(p: string): string {
-  let s = p;
-  if (s.startsWith("./")) s = s.slice(2);
-  if (s.startsWith("/")) s = s.slice(1);
-  return s;
+  const n = normalizeExcelPath(p);
+  return n.startsWith("./") ? n.slice(2) : n;
 }
 
 function buildTree(files: { path: string; filename: string }[]): TreeNode {
@@ -629,6 +673,7 @@ function collapseTree(node: TreeNode): TreeNode {
 
 function FileTreeView({
   files,
+  sessionId,
   panelOpen,
   activeFilePath,
   draggingPath,
@@ -641,6 +686,7 @@ function FileTreeView({
   onRemove,
 }: {
   files: { path: string; filename: string }[];
+  sessionId?: string;
   panelOpen: boolean;
   activeFilePath: string | null;
   draggingPath: string | null;
@@ -660,6 +706,7 @@ function FileTreeView({
         <TreeNodeItem
           key={node.fullPath}
           node={node}
+          sessionId={sessionId}
           depth={0}
           panelOpen={panelOpen}
           activeFilePath={activeFilePath}
@@ -681,6 +728,7 @@ function FileTreeView({
 
 function TreeNodeItem({
   node,
+  sessionId,
   depth,
   panelOpen,
   activeFilePath,
@@ -694,6 +742,7 @@ function TreeNodeItem({
   onRemove,
 }: {
   node: TreeNode;
+  sessionId?: string;
   depth: number;
   panelOpen: boolean;
   activeFilePath: string | null;
@@ -736,6 +785,7 @@ function TreeNodeItem({
               <TreeNodeItem
                 key={child.fullPath}
                 node={child}
+                sessionId={sessionId}
                 depth={depth + 1}
                 panelOpen={panelOpen}
                 activeFilePath={activeFilePath}
@@ -826,7 +876,7 @@ function TreeNodeItem({
               className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
                 isFileActive
                   ? "opacity-100"
-                  : "opacity-0 group-hover:opacity-100"
+                  : "opacity-0 group-hover:opacity-100 touch-show"
               }`}
               onClick={(e) => e.stopPropagation()}
             >
@@ -834,6 +884,15 @@ function TreeNodeItem({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent side="right" align="start" className="w-32">
+            <DropdownMenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                downloadFile(file.path, file.filename, sessionId).catch(() => {});
+              }}
+            >
+              <Download className="h-4 w-4" />
+              下载
+            </DropdownMenuItem>
             <DropdownMenuItem
               variant="destructive"
               onClick={(e) => {
@@ -855,12 +914,14 @@ function TreeNodeItem({
 
 function ExcelFilesDialog({
   files,
+  sessionId,
   onClose,
   onClickFile,
   onDoubleClickFile,
   onRemoveFile,
 }: {
   files: { path: string; filename: string; lastUsedAt: number }[];
+  sessionId?: string;
   onClose: () => void;
   onClickFile: (path: string) => void;
   onDoubleClickFile: (path: string) => void;
@@ -953,6 +1014,16 @@ function ExcelFilesDialog({
                   <span className="text-[10px] text-muted-foreground whitespace-nowrap">
                     {time}
                   </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadFile(file.path, file.filename, sessionId).catch(() => {});
+                    }}
+                    className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
+                    title="下载"
+                  >
+                    <Download className="h-3 w-3" />
+                  </button>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

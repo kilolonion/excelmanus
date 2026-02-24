@@ -72,7 +72,10 @@ class TestMemoryReadTopic:
         """正确读取 file_patterns.md 内容。"""
         pm = PersistentMemory(str(tmp_path))
         topic_file = tmp_path / "file_patterns.md"
-        topic_file.write_text("### 文件结构\n\n列名: 日期, 产品, 数量", encoding="utf-8")
+        topic_file.write_text(
+            "### [2025-01-15 14:30] file_pattern\n\n文件结构: 列名: 日期, 产品, 数量\n\n---",
+            encoding="utf-8",
+        )
         init_memory(pm)
 
         result = memory_read_topic(topic="file_patterns")
@@ -83,7 +86,10 @@ class TestMemoryReadTopic:
         """正确读取 user_prefs.md 内容。"""
         pm = PersistentMemory(str(tmp_path))
         topic_file = tmp_path / "user_prefs.md"
-        topic_file.write_text("偏好柱状图，蓝色主题", encoding="utf-8")
+        topic_file.write_text(
+            "### [2025-01-15 14:30] user_pref\n\n偏好柱状图，蓝色主题\n\n---",
+            encoding="utf-8",
+        )
         init_memory(pm)
 
         result = memory_read_topic(topic="user_prefs")
@@ -93,7 +99,10 @@ class TestMemoryReadTopic:
         """正确读取 error_solutions.md 内容。"""
         pm = PersistentMemory(str(tmp_path))
         topic_file = tmp_path / "error_solutions.md"
-        topic_file.write_text("openpyxl 版本冲突时固定到 3.1.x", encoding="utf-8")
+        topic_file.write_text(
+            "### [2025-01-15 14:30] error_solution\n\nopenpyxl 版本冲突时固定到 3.1.x\n\n---",
+            encoding="utf-8",
+        )
         init_memory(pm)
 
         result = memory_read_topic(topic="error_solutions")
@@ -103,7 +112,10 @@ class TestMemoryReadTopic:
         """正确读取 general.md 内容。"""
         pm = PersistentMemory(str(tmp_path))
         topic_file = tmp_path / "general.md"
-        topic_file.write_text("项目默认使用中文回复", encoding="utf-8")
+        topic_file.write_text(
+            "### [2025-01-15 14:30] general\n\n项目默认使用中文回复\n\n---",
+            encoding="utf-8",
+        )
         init_memory(pm)
 
         result = memory_read_topic(topic="general")
@@ -113,7 +125,10 @@ class TestMemoryReadTopic:
         """旧别名 error_solution 仍可读取新主题文件。"""
         pm = PersistentMemory(str(tmp_path))
         topic_file = tmp_path / "error_solutions.md"
-        topic_file.write_text("别名兼容测试", encoding="utf-8")
+        topic_file.write_text(
+            "### [2025-01-15 14:30] error_solution\n\n别名兼容测试\n\n---",
+            encoding="utf-8",
+        )
         init_memory(pm)
 
         result = memory_read_topic(topic="error_solution")
@@ -122,9 +137,13 @@ class TestMemoryReadTopic:
     def test_bind_memory_context_overrides_global(self, tmp_path: Path) -> None:
         """上下文绑定应覆盖全局引用，退出后恢复。"""
         pm_global = PersistentMemory(str(tmp_path / "global"))
-        (pm_global.memory_dir / "user_prefs.md").write_text("全局", encoding="utf-8")
+        (pm_global.memory_dir / "user_prefs.md").write_text(
+            "### [2025-01-15 14:30] user_pref\n\n全局\n\n---", encoding="utf-8"
+        )
         pm_local = PersistentMemory(str(tmp_path / "local"))
-        (pm_local.memory_dir / "user_prefs.md").write_text("局部", encoding="utf-8")
+        (pm_local.memory_dir / "user_prefs.md").write_text(
+            "### [2025-01-15 14:30] user_pref\n\n局部\n\n---", encoding="utf-8"
+        )
         init_memory(pm_global)
 
         with bind_memory_context(pm_local):
@@ -135,7 +154,9 @@ class TestMemoryReadTopic:
     def test_bind_memory_context_none_blocks_global_fallback(self, tmp_path: Path) -> None:
         """上下文显式绑定 None 时应禁用全局回退。"""
         pm_global = PersistentMemory(str(tmp_path / "global"))
-        (pm_global.memory_dir / "user_prefs.md").write_text("全局", encoding="utf-8")
+        (pm_global.memory_dir / "user_prefs.md").write_text(
+            "### [2025-01-15 14:30] user_pref\n\n全局\n\n---", encoding="utf-8"
+        )
         init_memory(pm_global)
 
         with bind_memory_context(None):

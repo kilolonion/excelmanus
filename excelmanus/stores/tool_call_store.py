@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
+
+from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -14,8 +16,18 @@ logger = logging.getLogger(__name__)
 class ToolCallStore:
     """工具调用审计日志（支持 SQLite / PostgreSQL）。"""
 
-    def __init__(self, database: "Database") -> None:
-        self._conn = database.conn
+    @overload
+    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    @overload
+    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+
+    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+        if isinstance(conn, ConnectionAdapter):
+            self._conn = conn
+        else:
+            self._conn = conn.conn
+        self._user_id = user_id
+        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @staticmethod
     def _now_iso() -> str:
@@ -40,8 +52,8 @@ class ToolCallStore:
             self._conn.execute(
                 "INSERT INTO tool_call_log "
                 "(session_id, turn, iteration, tool_name, arguments_hash, "
-                " success, duration_ms, result_chars, error_type, error_preview, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " success, duration_ms, result_chars, error_type, error_preview, created_at, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     turn,
@@ -54,6 +66,7 @@ class ToolCallStore:
                     error_type,
                     (error_preview or "")[:200] if error_preview else None,
                     self._now_iso(),
+                    self._user_id,
                 ),
             )
             self._conn.commit()
@@ -70,8 +83,8 @@ class ToolCallStore:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """查询工具调用记录。"""
-        conditions: list[str] = []
-        params: list[Any] = []
+        conditions: list[str] = [self._uid_clause]
+        params: list[Any] = list(self._uid_params)
 
         if session_id is not None:
             conditions.append("session_id = ?")
@@ -83,7 +96,7 @@ class ToolCallStore:
             conditions.append("success = ?")
             params.append(1 if success else 0)
 
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        where = f"WHERE {' AND '.join(conditions)}"
         sql = (
             f"SELECT * FROM tool_call_log {where} "
             f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -94,8 +107,12 @@ class ToolCallStore:
 
     def stats(self, session_id: str | None = None) -> dict[str, Any]:
         """聚合统计：调用次数、成功率、平均耗时、top 失败工具。"""
-        where = "WHERE session_id = ?" if session_id else ""
-        params: list[Any] = [session_id] if session_id else []
+        conditions: list[str] = [self._uid_clause]
+        params: list[Any] = list(self._uid_params)
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(conditions)}"
 
         row = self._conn.execute(
             f"SELECT COUNT(*) as total, "
@@ -113,7 +130,7 @@ class ToolCallStore:
         fail_rows = self._conn.execute(
             f"SELECT tool_name, COUNT(*) as cnt "
             f"FROM tool_call_log {where} "
-            f"{'AND' if where else 'WHERE'} success = 0 "
+            f"AND success = 0 "
             f"GROUP BY tool_name ORDER BY cnt DESC LIMIT 5",
             params,
         ).fetchall()

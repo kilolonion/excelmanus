@@ -15,7 +15,36 @@ import re
 import sqlite3
 from typing import Any, Iterator, Sequence
 
-__all__ = ["ConnectionAdapter", "CursorAdapter", "DictRow", "Backend"]
+__all__ = [
+    "ConnectionAdapter",
+    "CursorAdapter",
+    "DictRow",
+    "Backend",
+    "user_filter_clause",
+]
+
+
+# ── 用户隔离辅助 ─────────────────────────────────────────────
+
+
+def user_filter_clause(
+    column: str = "user_id",
+    user_id: str | None = None,
+) -> tuple[str, tuple[str, ...] | tuple[()]]:
+    """生成 user_id 过滤条件，统一处理 NULL vs 值。
+
+    Returns:
+        (sql_fragment, params) — 可直接拼入 WHERE 子句。
+
+    Examples:
+        >>> user_filter_clause("user_id", None)
+        ('user_id IS NULL', ())
+        >>> user_filter_clause("user_id", "abc-123")
+        ('user_id = ?', ('abc-123',))
+    """
+    if user_id is None:
+        return f"{column} IS NULL", ()
+    return f"{column} = ?", (user_id,)
 
 
 class Backend:

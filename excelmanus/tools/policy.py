@@ -162,41 +162,42 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "code": ("write_text_file", "run_code", "run_shell"),
     "macro": ("vlookup_write", "computed_column"),
-    "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica"),
+    "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica", "extract_table_spec"),
 }
 
 
 # ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
-    # data_read
+    # 数据读取
     "read_excel": "读取 Excel 数据摘要与前10行预览，可按需附加样式/图表/公式等维度",
     "inspect_excel_files": "批量扫描目录下所有 Excel 文件概况，快速了解工作区全貌",
     # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
     "filter_data": "按条件筛选 Excel 数据行，支持多条件组合、排序和 Top-N",
-    # data_write
+    # 数据写入
     # write_excel, write_cells, transform_data, insert_rows, insert_columns: Batch 1 精简
     # Batch 2 精简（format 全部）
     # Batch 3 精简（advanced_format + chart + sheet写入）
-    # sheet (list_sheets 保留)
+    # sheet（list_sheets 保留）
     "list_sheets": "列出 Excel 文件中所有工作表的名称、行列数等概况信息",
-    # file
+    # 文件操作
     "list_directory": "列出指定目录下的文件和子目录，返回名称、类型和大小",
     # get_file_info, find_files, read_text_file: Batch 5 精简
     "copy_file": "复制文件到工作区内的新位置",
     "rename_file": "重命名或移动文件到工作区内的新位置",
     "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",
-    # code
+    # 代码执行
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
     "run_code": "执行 Python 代码或脚本，适用于批量数据处理、复杂变换、跨表操作等场景（已配备安全沙盒）",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
-    # macro
+    # 宏工具
     "vlookup_write": "跨表匹配写回：从源表查找/聚合数据写入目标表新列（类 VLOOKUP）",
     "computed_column": "新增计算列：用声明式表达式计算新列并写回",
-    # vision
+    # 视觉工具
     "read_image": "读取本地图片文件并加载到视觉上下文，支持 png/jpg/gif/bmp/webp",
     "rebuild_excel_from_spec": "从 ReplicaSpec JSON 确定性编译为 Excel 文件",
     "verify_excel_replica": "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
+    "extract_table_spec": "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON，支持多表格",
 }
 
 

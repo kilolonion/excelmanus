@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.engine import AgentEngine
 from excelmanus.session import (
     SessionBusyError,
     SessionLimitExceededError,
@@ -199,6 +200,17 @@ class TestAcquireForChat:
         sid, _ = await manager.acquire_for_chat("release-session")
         await manager.release_for_chat(sid)
         assert manager._sessions[sid].in_flight is False
+
+    @pytest.mark.asyncio
+    async def test_user_session_uses_user_workspace(
+        self, manager: SessionManager, config: ExcelManusConfig
+    ) -> None:
+        """认证场景下传入 user_id 时，engine 应绑定该用户工作区。"""
+        sid, engine = await manager.acquire_for_chat(None, user_id="user-abc")
+        await manager.release_for_chat(sid)
+
+        assert str(engine._config.workspace_root).endswith("/users/user-abc")
+        assert engine._config.workspace_root != config.workspace_root
 
 
 class TestSessionDetail:
@@ -568,69 +580,91 @@ class TestProperty18SessionTTLCleanup:
         idle_extra=st.integers(min_value=1, max_value=3600),
         n_sessions=st.integers(min_value=1, max_value=20),
     )
-    @pytest.mark.asyncio
-    async def test_expired_sessions_always_cleaned(
+    def test_expired_sessions_always_cleaned(
         self, ttl: int, idle_extra: int, n_sessions: int
     ) -> None:
         """任意 TTL 和空闲时间组合下，超时会话必须被全部清理。"""
-        config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
-        registry = ToolRegistry()
-        mgr = SessionManager(
-            max_sessions=1000,
-            ttl_seconds=ttl,
-            config=config,
-            registry=registry,
-        )
+        import asyncio
+        from unittest.mock import AsyncMock, patch
 
-        # 创建 n 个会话
-        for _ in range(n_sessions):
-            sid, _ = await mgr.acquire_for_chat(None)
-            await mgr.release_for_chat(sid)
+        loop = asyncio.new_event_loop()
+        try:
+            async def _inner() -> None:
+                config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
+                registry = ToolRegistry()
+                mgr = SessionManager(
+                    max_sessions=1000,
+                    ttl_seconds=ttl,
+                    config=config,
+                    registry=registry,
+                )
 
-        # 将所有会话标记为 base_time 访问
-        base_time = 10000.0
-        for entry in mgr._sessions.values():
-            entry.last_access = base_time
+                # 创建 n 个会话（mock 掉 MCP 初始化和 manifest 预热避免 hang）
+                with patch.object(AgentEngine, "initialize_mcp", new_callable=AsyncMock), \
+                     patch.object(AgentEngine, "start_workspace_manifest_prewarm", return_value=False):
+                    for _ in range(n_sessions):
+                        sid, _ = await mgr.acquire_for_chat(None)
+                        await mgr.release_for_chat(sid)
 
-        # 清理时间 = base_time + ttl + idle_extra（一定超时）
-        now = base_time + ttl + idle_extra
-        removed = await mgr.cleanup_expired(now=now)
+                # 将所有会话标记为 base_time 访问
+                base_time = 10000.0
+                for entry in mgr._sessions.values():
+                    entry.last_access = base_time
 
-        assert removed == n_sessions
-        assert await mgr.get_active_count() == 0
+                # 清理时间 = base_time + ttl + idle_extra（一定超时）
+                now = base_time + ttl + idle_extra
+                removed = await mgr.cleanup_expired(now=now)
+
+                assert removed == n_sessions
+                assert await mgr.get_active_count() == 0
+
+            loop.run_until_complete(_inner())
+        finally:
+            loop.close()
 
     @given(
         ttl=st.integers(min_value=2, max_value=7200),
         n_sessions=st.integers(min_value=1, max_value=20),
     )
-    @pytest.mark.asyncio
-    async def test_active_sessions_never_cleaned(
+    def test_active_sessions_never_cleaned(
         self, ttl: int, n_sessions: int
     ) -> None:
         """未超时的会话不应被清理。"""
-        config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
-        registry = ToolRegistry()
-        mgr = SessionManager(
-            max_sessions=1000,
-            ttl_seconds=ttl,
-            config=config,
-            registry=registry,
-        )
+        import asyncio
+        from unittest.mock import AsyncMock, patch
 
-        for _ in range(n_sessions):
-            sid, _ = await mgr.acquire_for_chat(None)
-            await mgr.release_for_chat(sid)
+        loop = asyncio.new_event_loop()
+        try:
+            async def _inner() -> None:
+                config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model", max_sessions=1000)
+                registry = ToolRegistry()
+                mgr = SessionManager(
+                    max_sessions=1000,
+                    ttl_seconds=ttl,
+                    config=config,
+                    registry=registry,
+                )
 
-        # 将所有会话标记为 base_time 访问
-        base_time = 10000.0
-        for entry in mgr._sessions.values():
-            entry.last_access = base_time
+                with patch.object(AgentEngine, "initialize_mcp", new_callable=AsyncMock), \
+                     patch.object(AgentEngine, "start_workspace_manifest_prewarm", return_value=False):
+                    for _ in range(n_sessions):
+                        sid, _ = await mgr.acquire_for_chat(None)
+                        await mgr.release_for_chat(sid)
 
-        # 清理时间 = base_time（刚访问，未超时）
-        removed = await mgr.cleanup_expired(now=base_time)
+                # 将所有会话标记为 base_time 访问
+                base_time = 10000.0
+                for entry in mgr._sessions.values():
+                    entry.last_access = base_time
 
-        assert removed == 0
-        assert await mgr.get_active_count() == n_sessions
+                # 清理时间 = base_time（刚访问，未超时）
+                removed = await mgr.cleanup_expired(now=base_time)
+
+                assert removed == 0
+                assert await mgr.get_active_count() == n_sessions
+
+            loop.run_until_complete(_inner())
+        finally:
+            loop.close()
 
 
 class TestArchiveSession:

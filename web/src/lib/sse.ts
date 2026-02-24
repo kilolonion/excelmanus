@@ -41,7 +41,13 @@ export async function consumeSSE(
     if (!currentEvent || currentDataLines.length === 0) return;
     try {
       const data = JSON.parse(currentDataLines.join("\n"));
-      handler({ event: currentEvent, data });
+      try {
+        handler({ event: currentEvent, data });
+      } catch (handlerErr) {
+        // Handler exceptions must NOT kill the SSE read loop — log and continue
+        // so that subsequent events (tool calls, text deltas, done) still arrive.
+        console.error("[SSE] handler error for event", currentEvent, handlerErr);
+      }
     } catch {
       // skip malformed JSON
     }

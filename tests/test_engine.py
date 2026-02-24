@@ -324,6 +324,7 @@ class TestControlCommandSubagent:
         engine._delegate_to_subagent.assert_awaited_once_with(
             task="分析这个文件",
             agent_name="explorer",
+            file_paths=None,
             on_event=None,
         )
 
@@ -348,6 +349,7 @@ class TestControlCommandSubagent:
         engine._delegate_to_subagent.assert_awaited_once_with(
             task="分析这个文件",
             agent_name=None,
+            file_paths=None,
             on_event=None,
         )
 
@@ -748,7 +750,7 @@ class TestSystemMessageMode:
     """system_message_mode 行为测试。"""
 
     def test_auto_mode_defaults_to_replace(self) -> None:
-        AgentEngine._system_mode_fallback_cache = None  # 确保干净状态
+        AgentEngine._system_mode_fallback_cache = {}  # 确保干净状态
         config = _make_config(system_message_mode="auto")
         engine = AgentEngine(config, _make_registry_with_tools())
         assert engine._effective_system_mode() == "replace"
@@ -769,7 +771,7 @@ class TestSystemMessageMode:
 
     @pytest.mark.asyncio
     async def test_auto_mode_fallback_merges_messages_after_provider_compat_error(self) -> None:
-        AgentEngine._system_mode_fallback_cache = None  # 确保干净状态
+        AgentEngine._system_mode_fallback_cache = {}  # 确保干净状态
         config = _make_config(system_message_mode="auto")
         engine = AgentEngine(config, _make_registry_with_tools())
         mocked_create = AsyncMock(
@@ -799,19 +801,21 @@ class TestSystemMessageMode:
         assert "S2" in retry_messages[0]["content"]
         assert sum(1 for msg in retry_messages if msg.get("role") == "system") == 1
         assert engine._system_mode_fallback == "merge"
-        assert AgentEngine._system_mode_fallback_cache == "merge"
+        _cache_key = (config.model, config.base_url)
+        assert AgentEngine._system_mode_fallback_cache.get(_cache_key) == "merge"
 
     @pytest.mark.asyncio
     async def test_auto_mode_fallback_persists_across_sessions(self) -> None:
         """类级缓存确保新会话不再重复试错。"""
-        # 先确保类缓存被设置为 merge（由上一个测试或手动设置）
-        AgentEngine._system_mode_fallback_cache = "merge"
         config = _make_config(system_message_mode="auto")
+        # 先确保类缓存被设置为 merge（由上一个测试或手动设置）
+        _cache_key = (config.model, config.base_url)
+        AgentEngine._system_mode_fallback_cache = {_cache_key: "merge"}
         engine = AgentEngine(config, _make_registry_with_tools())
         # 新实例应直接读取类缓存，无需试错
         assert engine._effective_system_mode() == "merge"
         # 清理类状态，避免污染其他测试
-        AgentEngine._system_mode_fallback_cache = None
+        AgentEngine._system_mode_fallback_cache = {}
 
 
 class TestContextBudgetAndHardCap:
@@ -2693,7 +2697,7 @@ class TestForkPathRemoved:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        engine._memory.add_user_message("请分析销售趋势")
+        engine.memory.add_user_message("请分析销售趋势")
         engine._delegate_to_subagent = AsyncMock()
 
         async def _fake_execute_tool_call(*args, **kwargs) -> ToolCallResult:

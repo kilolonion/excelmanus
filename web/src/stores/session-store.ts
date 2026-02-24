@@ -67,6 +67,17 @@ export const useSessionStore = create<SessionState>()(
               title: normalizedTitle || buildDefaultSessionTitle(rs.id),
             });
           }
+
+          // Remove local-only sessions not present in the backend response.
+          // Keep the active session to protect optimistic creates that haven't
+          // reached the server yet.
+          const remoteIds = new Set(remote.map((s) => s.id));
+          for (const [id] of localMap) {
+            if (!remoteIds.has(id) && id !== state.activeSessionId) {
+              localMap.delete(id);
+            }
+          }
+
           const merged = Array.from(localMap.values()).sort(
             (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")
           );
