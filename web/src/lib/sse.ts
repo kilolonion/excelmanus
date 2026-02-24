@@ -1,3 +1,5 @@
+import { useAuthStore } from "@/stores/auth-store";
+
 export interface SSEEvent {
   event: string;
   data: Record<string, unknown>;
@@ -11,9 +13,13 @@ export async function consumeSSE(
   handler: SSEHandler,
   signal?: AbortSignal
 ): Promise<void> {
+  const token = useAuthStore.getState().accessToken;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
     signal,
   });

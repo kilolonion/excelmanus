@@ -10,6 +10,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend } from "@/lib/chat-actions";
+import { uuid } from "@/lib/utils";
 
 export default function Home() {
   const messages = useChatStore((s) => s.messages);
@@ -23,7 +24,7 @@ export default function Home() {
 
   const handleSend = (text: string, files?: File[]) => {
     if (!activeSessionId) {
-      const id = crypto.randomUUID();
+      const id = uuid();
       addSession({
         id,
         title: text.slice(0, 60) || "新对话",
@@ -53,7 +54,7 @@ export default function Home() {
         <WelcomePage onSuggestionClick={handleSend} />
       )}
 
-      <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none">
+      <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">
           {pendingQuestion && <QuestionPanel />}
           <ChatInput

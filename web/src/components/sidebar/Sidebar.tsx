@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { uuid } from "@/lib/utils";
 import {
   MessageSquarePlus,
   PanelLeftClose,
@@ -28,6 +30,8 @@ import { StatusFooter } from "./StatusFooter";
 export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const isMobile = useIsMobile();
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
@@ -41,7 +45,7 @@ export function Sidebar() {
   const [clearing, setClearing] = useState(false);
 
   const handleNewChat = () => {
-    const id = crypto.randomUUID();
+    const id = uuid();
     addSession({
       id,
       title: "新对话",
@@ -54,13 +58,37 @@ export function Sidebar() {
 
   const hasExcelFiles = recentFiles.length > 0;
 
+  // Auto-close sidebar on mobile (initial mount + session changes)
+  useEffect(() => {
+    if (isMobile && sidebarOpen) {
+      toggleSidebar();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, isMobile]);
+
   return (
-    <motion.aside
-      animate={{ width: sidebarOpen ? 260 : 0 }}
-      transition={safeTransition ?? sidebarTransition}
-      className="flex flex-col border-r border-border overflow-hidden"
-      style={{ backgroundColor: "var(--em-sidebar-bg)" }}
-    >
+    <>
+      {/* Mobile backdrop */}
+      <AnimatePresence>
+        {isMobile && sidebarOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-40 bg-black/50"
+            onClick={toggleSidebar}
+          />
+        )}
+      </AnimatePresence>
+      <motion.aside
+        animate={{ width: isMobile ? (sidebarOpen ? 280 : 0) : (sidebarOpen ? 260 : 0) }}
+        transition={safeTransition ?? sidebarTransition}
+        className={`flex flex-col border-r border-border overflow-hidden ${
+          isMobile ? "fixed inset-y-0 left-0 z-50" : ""
+        }`}
+        style={{ backgroundColor: "var(--em-sidebar-bg)" }}
+      >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3">
         <img
@@ -116,7 +144,7 @@ export function Sidebar() {
                 {sessions.length > 0 && (
                   <button
                     type="button"
-                    className="p-0.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors opacity-0 group-hover/collapse:opacity-100 focus:opacity-100"
+                    className="p-0.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors md:opacity-0 md:group-hover/collapse:opacity-100 focus:opacity-100"
                     onClick={async (e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -186,6 +214,7 @@ export function Sidebar() {
       {/* Footer */}
       <StatusFooter />
     </motion.aside>
+    </>
   );
 }
 

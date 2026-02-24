@@ -163,6 +163,12 @@ class ConversationMemory:
         """
         normalized = dict(message)
         normalized["role"] = "assistant"
+        # 防御性校验：确保每个 tool_call 都包含 type 字段
+        tcs = normalized.get("tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                if isinstance(tc, dict) and "type" not in tc:
+                    tc["type"] = "function"
         self._messages.append(normalized)
         self._truncate_if_needed()
 

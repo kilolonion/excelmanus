@@ -524,15 +524,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     _database = None
     chat_history = None
-    if _config.chat_history_enabled:
-        from excelmanus.chat_history import ChatHistoryStore
-
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    need_database = _config.chat_history_enabled or auth_enabled
+    if need_database:
         resolved_db_path = os.path.expanduser(
             _config.chat_history_db_path or _config.db_path
         )
-        _database = Database(resolved_db_path)
-        chat_history = ChatHistoryStore.from_database(_database)
-        logger.info("统一数据库已启用: %s", resolved_db_path)
+        if _config.database_url:
+            _database = Database(database_url=_config.database_url)
+            logger.info("统一数据库已启用 (PostgreSQL)")
+        else:
+            _database = Database(resolved_db_path)
+            logger.info("统一数据库已启用: %s", resolved_db_path)
+        if _config.chat_history_enabled:
+            from excelmanus.chat_history import ChatHistoryStore
+            chat_history = ChatHistoryStore.from_database(_database)
 
     # 初始化 ConfigStore 并从 .env 迁移已有 profiles
     global _config_store
@@ -614,6 +620,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if _tool_registry is not None
         else []
     )
+    # 初始化认证模块（UserStore）+ 速率限制器
+    _user_store = None
+    if _database is not None:
+        try:
+            from excelmanus.auth.store import UserStore
+            _user_store = UserStore(_database)
+            app.state.user_store = _user_store
+            app.state.auth_enabled = auth_enabled
+            if auth_enabled:
+                logger.info("认证系统已启用")
+            else:
+                logger.info("认证系统已初始化（未强制启用，设置 EXCELMANUS_AUTH_ENABLED=true 启用）")
+        except Exception:
+            logger.warning("认证模块初始化失败", exc_info=True)
+
+    if auth_enabled:
+        try:
+            from excelmanus.auth.rate_limit import RateLimiter
+            app.state.rate_limiter = RateLimiter()
+            logger.info("速率限制器已启用")
+        except Exception:
+            logger.warning("速率限制器初始化失败", exc_info=True)
+
     logger.info(
         "API 服务启动完成，已加载 %d 个工具、%d 个 Skillpack",
         len(tool_names),
@@ -701,10 +730,21 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(bootstrap_config.cors_allow_origins),
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
     )
+
+    # Auth middleware (runs after CORS so preflight OPTIONS pass through)
+    from excelmanus.auth.middleware import AuthMiddleware
+    application.add_middleware(AuthMiddleware)
+
     _register_exception_handlers(application)
+
+    # Register auth router
+    from excelmanus.auth.router import router as auth_router
+    application.include_router(auth_router)
+
     application.include_router(_router)
     return application
 
@@ -804,12 +844,19 @@ async def _resolve_mentions(
 
 
 @_router.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     assert _session_manager is not None, "服务未初始化"
 
+    from excelmanus.auth.dependencies import extract_user_id
+    user_id = extract_user_id(raw_request)
+
+    rate_limiter = getattr(raw_request.app.state, "rate_limiter", None)
+    if rate_limiter is not None and user_id:
+        rate_limiter.check_chat(user_id)
+
     session_id, engine = await _session_manager.acquire_for_chat(
-        request.session_id
+        request.session_id, user_id=user_id,
     )
 
     if _is_save_command(request.message):
@@ -865,12 +912,19 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @_router.post("/api/v1/chat/stream", responses=_error_responses)
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
+async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingResponse:
     """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。"""
     assert _session_manager is not None, "服务未初始化"
 
+    from excelmanus.auth.dependencies import extract_user_id
+    user_id = extract_user_id(raw_request)
+
+    rate_limiter = getattr(raw_request.app.state, "rate_limiter", None)
+    if rate_limiter is not None and user_id:
+        rate_limiter.check_chat(user_id)
+
     session_id, engine = await _session_manager.acquire_for_chat(
-        request.session_id
+        request.session_id, user_id=user_id,
     )
 
     if _is_save_command(request.message):
@@ -1033,6 +1087,14 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 "completion_tokens": chat_result.completion_tokens,
                 "total_tokens": chat_result.total_tokens,
             })
+            # Record token usage for authenticated users
+            if user_id and chat_result.total_tokens > 0:
+                try:
+                    _user_store = getattr(raw_request.app.state, "user_store", None)
+                    if _user_store is not None:
+                        _user_store.record_token_usage(user_id, chat_result.total_tokens)
+                except Exception:
+                    logger.debug("记录用户 token 用量失败", exc_info=True)
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -2067,7 +2129,7 @@ _ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
 
 
 @_router.post("/api/v1/upload")
-async def upload_file(file: UploadFile = FastAPIFile(...)) -> JSONResponse:
+async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...)) -> JSONResponse:
     """上传文件到 workspace uploads 目录。"""
     assert _config is not None, "服务未初始化"
 
@@ -2076,7 +2138,13 @@ async def upload_file(file: UploadFile = FastAPIFile(...)) -> JSONResponse:
     if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
         return _error_json_response(400, f"不支持的文件格式: {ext}")
 
-    upload_dir = os.path.join(_config.workspace_root, "uploads")
+    from excelmanus.auth.dependencies import extract_user_id
+    from excelmanus.auth.workspace import resolve_workspace_for_request
+    user_id = extract_user_id(raw_request)
+    auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
+    ws_root = resolve_workspace_for_request(_config.workspace_root, user_id, auth_enabled)
+
+    upload_dir = os.path.join(ws_root, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
 
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
@@ -3449,6 +3517,7 @@ async def test_mcp_server(name: str) -> JSONResponse:
     if name not in data["mcpServers"]:
         return _error_json_response(404, f"Server '{name}' 不存在")
 
+    from excelmanus.mcp.client import MCPClientWrapper
     from excelmanus.mcp.config import MCPConfigLoader
 
     # 解析该 server 的配置
@@ -3837,6 +3906,8 @@ async def health() -> dict:
     if _session_manager is not None:
         active_sessions = await _session_manager.get_active_count()
 
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+
     return {
         "status": "ok",
         "version": excelmanus.__version__,
@@ -3844,6 +3915,7 @@ async def health() -> dict:
         "tools": tools,
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
+        "auth_enabled": auth_enabled,
     }
 
 

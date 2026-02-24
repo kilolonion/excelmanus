@@ -1,4 +1,4 @@
-"""MemoryStore：基于 SQLite 的持久记忆存储。"""
+"""MemoryStore：持久记忆存储（支持 SQLite / PostgreSQL）。"""
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +17,7 @@ _TIMESTAMP_FMT = "%Y-%m-%d %H:%M"
 
 
 class MemoryStore:
-    """SQLite 后端的持久记忆 CRUD。"""
+    """持久记忆 CRUD（支持 SQLite / PostgreSQL）。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn
@@ -41,7 +41,7 @@ class MemoryStore:
             content_hash = self._hash_content(entry.content)
             created_at = entry.timestamp.isoformat() if entry.timestamp else self._now_iso()
             try:
-                self._conn.execute(
+                cur = self._conn.execute(
                     "INSERT OR IGNORE INTO memory_entries "
                     "(category, content, content_hash, source, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -53,7 +53,7 @@ class MemoryStore:
                         created_at,
                     ),
                 )
-                if self._conn.total_changes:
+                if cur.rowcount > 0:
                     added += 1
             except Exception:
                 logger.warning("保存记忆条目失败", exc_info=True)
