@@ -8,21 +8,6 @@
 
 ExcelManus 是一个基于大语言模型的 Excel 智能代理。你不需要记住任何函数语法或者写 VBA，只需要告诉它你想做什么，它会自己完成剩下的事。支持 OpenAI、Claude、Gemini 等主流模型，从 URL 自动识别 Provider，无需手动切换。
 
-## 1.5.6 更新摘要
-
-- **用户隔离架构重构** — 引入 `IsolatedWorkspace` + `UserScope` + `ScopedDatabase`，Auth 即隔离，不再需要额外开关；每个用户拥有独立工作区目录和 SQLite 数据库
-- **文件版本管理** — 新增 `FileVersionManager`，统一 staging / audit / CoW 三套文件保护机制为单一版本链
-- **图片结构化提取** — VLM 两阶段提取（Phase 1 数据结构 + Phase 2 样式），截图还原 Excel 精度大幅提升
-- **工具调度策略化** — `ToolDispatcher` 重构为策略处理器链（SkillActivation → Delegation → CodePolicy → HighRiskApproval 等），可扩展性更强
-- **Pipeline 进度可视化** — Web UI 新增 Pipeline Stepper 组件，实时展示连接 → 路由 → 上下文构建 → 工具执行各阶段
-- **管理员模型权限** — 管理员可为每个用户分配可用模型白名单
-- **ConfigStore 拆分** — 全局配置（`GlobalConfigStore`）与用户级偏好（`UserConfigStore`）分离
-- **对话持久化重构** — 新增 `ConversationPersistence` 服务，消息同步逻辑从 SessionManager 中解耦
-- **记忆存储后端抽象** — 引入 `MemoryStorageBackend` 协议，支持文件和数据库双后端
-- **CORS 自动检测** — 后端自动添加本机 LAN IP 的前端端口来源，局域网访问无需手动配置
-- **`@` 提及增强** — 支持行范围引用（如 `@file.py:10-20`）
-- **移除旧模块** — 删除 `backup.py`、`auth/workspace.py`，功能已合并到新架构
-
 ## 能做什么
 
 - **读写 Excel** — 读取单元格、写入公式、VLOOKUP、批量填充，自动处理多 sheet
