@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     message_count INTEGER DEFAULT 0,
-    status        TEXT DEFAULT 'active'
+    status        TEXT DEFAULT 'active',
+    user_id       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -46,6 +47,7 @@ class ChatHistoryStore:
         self._conn = create_sqlite_adapter(db_path)
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
+        self._ensure_sessions_user_id()
 
     @classmethod
     def from_database(cls, database: "Database") -> "ChatHistoryStore":
@@ -54,7 +56,24 @@ class ChatHistoryStore:
         instance._db_path = database.db_path
         instance._owns_conn = False
         instance._conn = database.conn
+        instance._ensure_sessions_user_id()
         return instance
+
+    def _ensure_sessions_user_id(self) -> None:
+        """确保 sessions 表有 user_id 列（兼容旧 standalone SQLite）。"""
+        try:
+            if self._conn.is_pg:
+                return  # PostgreSQL 由 Database 迁移处理
+            info = self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+            columns = [r[1] for r in info] if info else []
+            if "user_id" not in columns:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT")
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)"
+                )
+                self._conn.commit()
+        except Exception:
+            pass
 
     def close(self) -> None:
         if self._owns_conn:
@@ -78,19 +97,39 @@ class ChatHistoryStore:
 
     # ── Session CRUD ──────────────────────────────────
 
-    def create_session(self, session_id: str, title: str = "") -> None:
+    def create_session(
+        self, session_id: str, title: str = "", *, user_id: str | None = None
+    ) -> None:
         now = self._now_iso()
         self._conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (session_id, title, now, now),
+            "INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at, user_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (session_id, title, now, now, user_id),
         )
         self._conn.commit()
 
-    def session_exists(self, session_id: str) -> bool:
+    def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
+        """检查会话是否存在。若提供 user_id，则同时校验归属（仅 user_id 一致时通过）。
+
+        user_id 为 None 时（如 CLI 单用户模式）：仅检查 id 存在。
+        user_id 非空时：要求 DB 中 user_id 非空且一致，否则视为不存在（legacy 无主会话不可访问）。
+        """
+        if user_id is None:
+            row = self._conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            return row is not None
         row = self._conn.execute(
-            "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
+            "SELECT user_id FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        db_user_id = row["user_id"] if hasattr(row, "__getitem__") else row[0]
+        return db_user_id is not None and db_user_id == user_id
+
+    def session_owned_by(self, session_id: str, user_id: str) -> bool:
+        """检查会话是否属于指定用户。"""
+        return self.session_exists(session_id, user_id=user_id)
 
     def update_session(self, session_id: str, **kwargs: str) -> None:
         sets: list[str] = []
@@ -147,18 +186,34 @@ class ChatHistoryStore:
         limit: int = 100,
         offset: int = 0,
         include_archived: bool = False,
+        *,
+        user_id: str | None = None,
     ) -> list[dict]:
-        if include_archived:
-            rows = self._conn.execute(
-                "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+        if user_id is not None:
+            if include_archived:
+                rows = self._conn.execute(
+                    "SELECT * FROM sessions WHERE user_id = ? "
+                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM sessions WHERE user_id = ? AND status = 'active' "
+                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                ).fetchall()
         else:
-            rows = self._conn.execute(
-                "SELECT * FROM sessions WHERE status = 'active' "
-                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+            if include_archived:
+                rows = self._conn.execute(
+                    "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM sessions WHERE status = 'active' "
+                    "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Message CRUD ──────────────────────────────────

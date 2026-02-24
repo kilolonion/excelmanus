@@ -38,6 +38,8 @@ services:
     volumes:
       - workspace_data:/workspace
       - db_data:/data
+      # Docker 沙盒需要挂载 Docker socket（启用 EXCELMANUS_DOCKER_SANDBOX=true 时取消注释）
+      # - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:

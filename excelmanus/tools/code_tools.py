@@ -35,6 +35,17 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
+# ── Docker 沙盒开关（模块级） ────────────────────────────
+
+_docker_sandbox_enabled: bool = False
+
+
+def init_docker_sandbox(enabled: bool) -> None:
+    """设置 Docker 沙盒模式开关（由 API 层在 lifespan 中调用）。"""
+    global _docker_sandbox_enabled
+    _docker_sandbox_enabled = enabled
+
+
 # ── 解释器探测 ───────────────────────────────────────────
 
 
@@ -424,6 +435,194 @@ def run_code(
     return result_json
 
 
+def _execute_script_docker(
+    *,
+    guard: FileAccessGuard,
+    script_safe: Path,
+    workdir_safe: Path,
+    args: list[str] | None,
+    timeout_seconds: int,
+    tail_lines: int,
+    stdout_file: str | None,
+    stderr_file: str | None,
+    inline_mode: bool,
+    sandbox_tier: str = "RED",
+) -> str:
+    """Docker 容器内执行脚本（OS 级隔离）。"""
+    from excelmanus.security.docker_sandbox import (
+        CONTAINER_WORKSPACE,
+        host_to_container_path,
+        run_in_container,
+    )
+
+    workspace_root = guard.workspace_root
+    safe_args = [str(item) for item in (args or [])]
+    sandbox_warnings: list[str] = []
+
+    sandbox_tmpdir = workspace_root / ".tmp"
+    sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
+    cow_log_name = f"_cow_{uuid.uuid4().hex[:12]}.log"
+    cow_log_path = sandbox_tmpdir / cow_log_name
+    container_tmpdir = f"{CONTAINER_WORKSPACE}/.tmp"
+
+    env_vars = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "TMPDIR": container_tmpdir,
+        "TMP": container_tmpdir,
+        "TEMP": container_tmpdir,
+        "HOME": "/tmp",
+        "MPLCONFIGDIR": "/tmp/mpl",
+        "EXCELMANUS_COW_LOG": host_to_container_path(cow_log_path, workspace_root),
+    }
+
+    container_script = host_to_container_path(script_safe, workspace_root)
+
+    temp_wrapper: Path | None = None
+    if sandbox_tier in ("GREEN", "YELLOW"):
+        from excelmanus.security.sandbox_hook import generate_wrapper_script
+
+        wrapper_src = generate_wrapper_script(sandbox_tier, CONTAINER_WORKSPACE)
+        temp_dir = workspace_root / "scripts" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
+        temp_wrapper.write_text(wrapper_src, encoding="utf-8")
+        container_wrapper = host_to_container_path(temp_wrapper, workspace_root)
+        command_parts = ["python", "-I", container_wrapper, container_script, *safe_args]
+    else:
+        command_parts = ["python", "-I", container_script, *safe_args]
+
+    try:
+        docker_result = run_in_container(
+            command_parts=command_parts,
+            workspace_root=workspace_root,
+            workdir=workdir_safe,
+            env_vars=env_vars,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:
+        sandbox_warnings.append(f"Docker 执行异常: {exc}")
+        docker_result = {
+            "return_code": 1,
+            "timed_out": False,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_seconds": 0.0,
+        }
+    finally:
+        if temp_wrapper is not None and temp_wrapper.exists():
+            try:
+                temp_wrapper.unlink()
+            except OSError:
+                pass
+
+    return_code = docker_result["return_code"]
+    timed_out = docker_result["timed_out"]
+    stdout = docker_result["stdout"]
+    stderr = docker_result["stderr"]
+
+    stdout_saved: str | None = None
+    stderr_saved: str | None = None
+    if stdout_file:
+        stdout_safe = guard.resolve_and_validate(stdout_file)
+        stdout_safe.parent.mkdir(parents=True, exist_ok=True)
+        stdout_safe.write_text(stdout, encoding="utf-8")
+        stdout_saved = str(stdout_safe.relative_to(workspace_root))
+    if stderr_file:
+        stderr_safe = guard.resolve_and_validate(stderr_file)
+        stderr_safe.parent.mkdir(parents=True, exist_ok=True)
+        stderr_safe.write_text(stderr, encoding="utf-8")
+        stderr_saved = str(stderr_safe.relative_to(workspace_root))
+
+    if timed_out:
+        status = "timed_out"
+    elif return_code == 0:
+        status = "success"
+    else:
+        status = "failed"
+
+    cow_mapping: dict[str, str] = {}
+    if cow_log_path.exists():
+        try:
+            for line in cow_log_path.read_text(encoding="utf-8").splitlines():
+                if "\t" in line:
+                    src, dst = line.split("\t", 1)
+                    try:
+                        src_rel = src.replace(CONTAINER_WORKSPACE + "/", "", 1)
+                        dst_rel = dst.replace(CONTAINER_WORKSPACE + "/", "", 1)
+                        cow_mapping[src_rel] = dst_rel
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                cow_log_path.unlink()
+            except OSError:
+                pass
+
+    result: dict[str, Any] = {
+        "status": status,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "duration_seconds": docker_result["duration_seconds"],
+        "mode": "inline" if inline_mode else "file",
+        "script": str(script_safe.relative_to(workspace_root)),
+        "workdir": str(workdir_safe.relative_to(workspace_root)),
+        "command": command_parts,
+        "python_command": ["python", "-I"],
+        "python_resolve_mode": "docker",
+        "python_probe_results": [],
+        "stdout_tail": _tail(stdout, tail_lines),
+        "stderr_tail": _tail(stderr, tail_lines),
+        "stdout_file": stdout_saved,
+        "stderr_file": stderr_saved,
+        "cow_mapping": cow_mapping,
+        "sandbox": {
+            "mode": "docker",
+            "tier": sandbox_tier,
+            "auto_approved": sandbox_tier in ("GREEN", "YELLOW"),
+            "isolated_python": True,
+            "limits_applied": True,
+            "warnings": sandbox_warnings,
+        },
+    }
+
+    if cow_mapping:
+        _cow_lines = [f"  {src} → {dst}" for src, dst in cow_mapping.items()]
+        result["cow_hint"] = (
+            "⚠️ 原始文件受保护，已自动复制到 outputs/ 目录。"
+            "后续对该文件的读取和写入请使用副本路径：\n"
+            + "\n".join(_cow_lines)
+        )
+
+    if status == "failed":
+        stderr_text = stderr or ""
+        hints: list[str] = []
+        if sandbox_tier in ("GREEN", "YELLOW") and "安全策略禁止" in stderr_text:
+            if "路径不在工作区内" in stderr_text:
+                hints.append(
+                    "库内部临时文件写入被拦截。"
+                    "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
+                )
+        if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
+            if any(
+                m in stderr_text
+                for m in [
+                    "requests", "urllib", "http", "socket",
+                    "os", "sys", "subprocess", "No module named",
+                ]
+            ):
+                hints.append(
+                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。"
+                    "请放弃尝试网络请求，或仅使用安全的数据处理库（pandas/numpy）。"
+                )
+        if hints:
+            result["recovery_hint"] = " ".join(hints)
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def _execute_script(
     *,
     guard: FileAccessGuard,
@@ -440,6 +639,20 @@ def _execute_script(
     sandbox_tier: str = "RED",
 ) -> str:
     """内部执行脚本核心逻辑（供 run_code 调用）。"""
+    if _docker_sandbox_enabled:
+        return _execute_script_docker(
+            guard=guard,
+            script_safe=script_safe,
+            workdir_safe=workdir_safe,
+            args=args,
+            timeout_seconds=timeout_seconds,
+            tail_lines=tail_lines,
+            stdout_file=stdout_file,
+            stderr_file=stderr_file,
+            inline_mode=inline_mode,
+            sandbox_tier=sandbox_tier,
+        )
+
     python_cmd, probes, mode = _resolve_python_command(
         python_command,
         require_excel_deps=require_excel_deps,

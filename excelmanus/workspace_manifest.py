@@ -40,11 +40,6 @@ _INJECT_COMPACT_THRESHOLD = 100  # 20-100 文件：紧凑注入
 # >100 文件：仅注入统计摘要
 
 
-def _excel_glob_patterns() -> tuple[str, ...]:
-    """将共享扩展名集合转换为稳定的 glob 列表。"""
-    return tuple(f"*{suffix}" for suffix in sorted(EXCEL_EXTENSIONS))
-
-
 @dataclass
 class SheetMeta:
     """单个 sheet 的元数据。"""
@@ -164,20 +159,31 @@ def _sheets_from_json(raw: str) -> list[SheetMeta]:
 
 
 def _collect_excel_paths(root: Path, max_files: int) -> list[Path]:
-    """递归收集工作区中的 Excel 文件路径。"""
+    """递归收集工作区中的 Excel 文件路径。
+
+    使用单次 os.walk 替代多次 rglob，避免对每个扩展名重复遍历目录树。
+    """
+    import os
+
+    excel_suffixes = EXCEL_EXTENSIONS  # frozenset: {".xlsx", ".xls", ...}
     excel_paths: list[Path] = []
-    for ext in _excel_glob_patterns():
-        for p in root.rglob(ext):
-            if p.name.startswith((".", "~$")):
+
+    for walk_root, dirs, files in os.walk(root):
+        # 原地裁剪：跳过噪音目录，避免递归进入
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+
+        for name in files:
+            if name.startswith((".", "~$")):
                 continue
-            rel_parts = p.relative_to(root).parts[:-1]
-            if any(part in _SKIP_DIRS for part in rel_parts):
+            # 快速后缀匹配（os.path.splitext 比 Path.suffix 快）
+            _, ext = os.path.splitext(name)
+            if ext.lower() not in excel_suffixes:
                 continue
-            excel_paths.append(p)
+            excel_paths.append(Path(walk_root, name))
             if len(excel_paths) >= max_files:
-                break
-        if len(excel_paths) >= max_files:
-            break
+                excel_paths.sort(key=lambda p: str(p.relative_to(root)).lower())
+                return excel_paths
+
     excel_paths.sort(key=lambda p: str(p.relative_to(root)).lower())
     return excel_paths
 

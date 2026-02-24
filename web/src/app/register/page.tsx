@@ -326,7 +326,7 @@ export default function RegisterPage() {
       >
         {/* Header */}
         <div className="text-center space-y-2">
-          <img src="/logo.svg" alt="ExcelManus" className="h-12 w-12 mx-auto rounded-xl shadow-md" />
+          <img src="/logo.svg" alt="ExcelManus" className="h-12 w-auto mx-auto" />
           <h1 className="text-2xl font-bold tracking-tight">注册 ExcelManus</h1>
           <p className="text-muted-foreground text-sm">创建账号，开始智能处理 Excel</p>
         </div>

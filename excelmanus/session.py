@@ -245,7 +245,9 @@ class SessionManager:
         engine.start_workspace_manifest_prewarm()
         return engine
 
-    def _persist_new_messages(self, session_id: str, engine: AgentEngine) -> None:
+    def _persist_new_messages(
+        self, session_id: str, engine: AgentEngine, *, user_id: str | None = None
+    ) -> None:
         """将 engine 中的消息增量持久化到 ChatHistoryStore。"""
         if self._chat_history is None:
             return
@@ -256,8 +258,13 @@ class SessionManager:
         if not new_msgs:
             return
         turn = engine.state.session_turn if hasattr(engine, "state") and engine.state else 0
-        # 确保会话记录存在
-        if not self._chat_history.session_exists(session_id):
+        # 确保会话记录存在（含 user_id 归属）
+        exists = (
+            self._chat_history.session_exists(session_id, user_id=user_id)
+            if user_id is not None
+            else self._chat_history.session_exists(session_id)
+        )
+        if not exists:
             title = ""
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "user":
@@ -265,7 +272,7 @@ class SessionManager:
                     if isinstance(content, str):
                         title = content[:80]
                     break
-            self._chat_history.create_session(session_id, title)
+            self._chat_history.create_session(session_id, title, user_id=user_id)
         self._chat_history.save_turn_messages(session_id, new_msgs, turn_number=turn)
         engine._history_snapshot_index = len(messages)  # type: ignore[attr-defined]
 
@@ -302,15 +309,22 @@ class SessionManager:
                     f"会话数量已达上限（{self._max_sessions}），请稍后重试。"
                 )
 
-            # 检查 SQLite 中是否有历史会话，按需恢复
+            # 检查 SQLite 中是否有历史会话，按需恢复（含 user_id 归属校验）
             history_messages: list[dict] | None = None
             if (
                 session_id is not None
                 and self._chat_history is not None
-                and self._chat_history.session_exists(session_id)
             ):
-                history_messages = self._chat_history.load_messages(session_id)
-                restored = True
+                if user_id is not None:
+                    if not self._chat_history.session_owned_by(session_id, user_id):
+                        # 会话存在但不属于当前用户，视为不存在（不泄露）
+                        pass
+                    else:
+                        history_messages = self._chat_history.load_messages(session_id)
+                        restored = True
+                elif self._chat_history.session_exists(session_id):
+                    history_messages = self._chat_history.load_messages(session_id)
+                    restored = True
 
             new_id = session_id if session_id is not None else str(uuid.uuid4())
             engine = self._create_engine_with_history(new_id, history_messages)
@@ -371,29 +385,36 @@ class SessionManager:
         # 在锁外持久化新增消息，避免阻塞并发
         if entry is not None and self._chat_history is not None:
             try:
-                self._persist_new_messages(session_id, entry.engine)
+                self._persist_new_messages(
+                    session_id, entry.engine, user_id=entry.user_id
+                )
             except Exception:
                 logger.warning("会话 %s 消息持久化失败", session_id, exc_info=True)
 
-    async def delete(self, session_id: str) -> bool:
+    async def delete(self, session_id: str, *, user_id: str | None = None) -> bool:
         """删除指定会话。
 
         删除前会提取会话记忆并持久化（在锁外执行，避免长时间持有锁）。
+        当 user_id 非空时，会校验会话归属，非归属用户视为不存在。
 
         Args:
             session_id: 要删除的会话 ID。
+            user_id: 当前用户 ID，用于归属校验（多租户场景）。
 
         Returns:
-            True 表示成功删除，False 表示会话不存在。
+            True 表示成功删除，False 表示会话不存在或无权访问。
         """
         engine: AgentEngine | None = None
         async with self._lock:
             if session_id in self._sessions:
-                if self._sessions[session_id].in_flight:
+                entry = self._sessions[session_id]
+                if user_id is not None and entry.user_id is not None and entry.user_id != user_id:
+                    return False  # 不属于当前用户，视为不存在
+                if entry.in_flight:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，暂无法删除。"
                     )
-                engine = self._sessions[session_id].engine
+                engine = entry.engine
                 del self._sessions[session_id]
                 logger.info("已删除会话 %s", session_id)
 
@@ -415,8 +436,13 @@ class SessionManager:
                     logger.warning("会话 %s SQLite 删除失败", session_id, exc_info=True)
             return True
 
-        # 仅存在于 SQLite 中的历史会话
-        if self._chat_history is not None and self._chat_history.session_exists(session_id):
+        # 仅存在于 SQLite 中的历史会话（需校验归属）
+        if self._chat_history is not None:
+            if user_id is not None:
+                if not self._chat_history.session_owned_by(session_id, user_id):
+                    return False
+            elif not self._chat_history.session_exists(session_id):
+                return False
             self._chat_history.delete_session(session_id)
             return True
         return False
@@ -498,37 +524,52 @@ class SessionManager:
                 logger.warning("清空 SQLite 会话失败", exc_info=True)
         return sess_count, msg_count
 
-    async def archive_session(self, session_id: str, archive: bool = True) -> bool:
+    async def archive_session(
+        self, session_id: str, archive: bool = True, *, user_id: str | None = None
+    ) -> bool:
         """归档或取消归档会话。
 
         对于内存中的活跃会话，仅更新 SQLite 状态（不影响运行中会话）。
         对于仅存在于 SQLite 中的历史会话，直接更新状态。
+        当 user_id 非空时，会校验会话归属。
 
         Args:
             session_id: 要归档/取消归档的会话 ID。
             archive: True 表示归档，False 表示取消归档。
+            user_id: 当前用户 ID，用于归属校验。
 
         Returns:
-            True 表示成功更新，False 表示会话不存在。
+            True 表示成功更新，False 表示会话不存在或无权访问。
         """
         new_status = "archived" if archive else "active"
 
         # 检查内存中是否存在
         async with self._lock:
             in_memory = session_id in self._sessions
+            if in_memory and user_id is not None:
+                entry = self._sessions.get(session_id)
+                if entry is not None and entry.user_id is not None and entry.user_id != user_id:
+                    return False  # 不属于当前用户
 
         if in_memory:
             # 活跃会话：先持久化到 SQLite（确保记录存在），再更新状态
             if self._chat_history is not None:
                 entry = self._sessions.get(session_id)
                 if entry is not None:
-                    self._persist_new_messages(session_id, entry.engine)
+                    self._persist_new_messages(
+                        session_id, entry.engine, user_id=entry.user_id
+                    )
                 self._chat_history.update_session(session_id, status=new_status)
                 return True
             return False
 
-        # 仅存在于 SQLite 中的历史会话
-        if self._chat_history is not None and self._chat_history.session_exists(session_id):
+        # 仅存在于 SQLite 中的历史会话（需校验归属）
+        if self._chat_history is not None:
+            if user_id is not None:
+                if not self._chat_history.session_owned_by(session_id, user_id):
+                    return False
+            elif not self._chat_history.session_exists(session_id):
+                return False
             self._chat_history.update_session(session_id, status=new_status)
             return True
 
@@ -639,13 +680,20 @@ class SessionManager:
         async with self._lock:
             return sum(1 for e in self._sessions.values() if e.user_id == user_id)
 
-    async def list_sessions(self, include_archived: bool = False) -> list[dict]:
-        """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。"""
+    async def list_sessions(
+        self, include_archived: bool = False, *, user_id: str | None = None
+    ) -> list[dict]:
+        """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。
+
+        当 user_id 非空时，仅返回该用户的会话（内存 + DB 均按 user_id 过滤）。
+        """
         in_memory_ids: set[str] = set()
         results: list[dict] = []
 
         async with self._lock:
             for sid, entry in self._sessions.items():
+                if user_id is not None and entry.user_id is not None and entry.user_id != user_id:
+                    continue
                 in_memory_ids.add(sid)
                 engine = entry.engine
                 msg_count = len(engine.state.messages) if hasattr(engine, "state") and engine.state else 0
@@ -670,6 +718,7 @@ class SessionManager:
             try:
                 db_sessions = self._chat_history.list_sessions(
                     include_archived=include_archived,
+                    user_id=user_id,
                 )
                 for ds in db_sessions:
                     if ds["id"] not in in_memory_ids:
@@ -686,11 +735,15 @@ class SessionManager:
 
         return results
 
-    async def get_session_detail(self, session_id: str) -> dict:
-        """获取会话详情含消息历史。"""
+    async def get_session_detail(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> dict:
+        """获取会话详情含消息历史。当 user_id 非空时，会校验会话归属。"""
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
+                if user_id is not None and entry.user_id is not None and entry.user_id != user_id:
+                    raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
                 engine = entry.engine
                 messages = []
                 if hasattr(engine, "state") and engine.state:
@@ -751,8 +804,13 @@ class SessionManager:
                     "last_route": last_route_data,
                 }
 
-        # 回退到 SQLite 历史
-        if self._chat_history is not None and self._chat_history.session_exists(session_id):
+        # 回退到 SQLite 历史（需校验归属）
+        if self._chat_history is not None:
+            if user_id is not None:
+                if not self._chat_history.session_owned_by(session_id, user_id):
+                    raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
+            elif not self._chat_history.session_exists(session_id):
+                raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
             messages = self._chat_history.load_messages(session_id)
             return {
                 "id": session_id,
@@ -776,12 +834,20 @@ class SessionManager:
         *,
         rollback_files: bool = False,
         new_message: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         """回退指定会话到目标用户轮次，并与持久化历史保持一致。"""
-        if not self.session_exists(session_id):
+        exists = (
+            self._chat_history.session_owned_by(session_id, user_id)
+            if user_id is not None and self._chat_history is not None
+            else self.session_exists(session_id)
+        )
+        if not exists:
             raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
 
-        acquired_session_id, engine = await self.acquire_for_chat(session_id)
+        acquired_session_id, engine = await self.acquire_for_chat(
+            session_id, user_id=user_id
+        )
         try:
             result = engine.rollback_conversation(
                 turn_index,
@@ -816,17 +882,29 @@ class SessionManager:
             await self.release_for_chat(acquired_session_id)
 
     async def get_session_messages(
-        self, session_id: str, limit: int = 50, offset: int = 0
+        self,
+        session_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        user_id: str | None = None,
     ) -> list[dict]:
-        """分页获取会话消息（优先内存，回退 SQLite）。"""
+        """分页获取会话消息（优先内存，回退 SQLite）。当 user_id 非空时，会校验会话归属。"""
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
+                if user_id is not None and entry.user_id is not None and entry.user_id != user_id:
+                    return []  # 不属于当前用户，返回空
                 engine = entry.engine
                 msgs = engine._memory._messages
                 return msgs[offset: offset + limit]
 
-        # 回退到 SQLite
+        # 回退到 SQLite（需校验归属）
         if self._chat_history is not None:
+            if user_id is not None:
+                if not self._chat_history.session_owned_by(session_id, user_id):
+                    return []
+            elif not self._chat_history.session_exists(session_id):
+                return []
             return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
         return []

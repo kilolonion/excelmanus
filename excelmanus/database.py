@@ -204,6 +204,10 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             updated_at TEXT NOT NULL
         )""",
     ],
+    8: [
+        "ALTER TABLE sessions ADD COLUMN user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -389,6 +393,10 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
             updated_at TEXT NOT NULL
         )""",
     ],
+    8: [
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())
@@ -544,8 +552,8 @@ def _migrate_chat_history(conn: ConnectionAdapter, old_db_path: str) -> None:
         for row in old_conn.execute("SELECT * FROM sessions").fetchall():
             conn.execute(
                 "INSERT OR IGNORE INTO sessions "
-                "(id, title, created_at, updated_at, message_count, status) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, title, created_at, updated_at, message_count, status, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["id"],
                     row["title"],
@@ -553,6 +561,7 @@ def _migrate_chat_history(conn: ConnectionAdapter, old_db_path: str) -> None:
                     row["updated_at"],
                     row["message_count"],
                     row["status"],
+                    None,  # 旧数据无 user_id，迁移后为 NULL
                 ),
             )
 

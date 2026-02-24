@@ -1317,6 +1317,30 @@ class AgentEngine:
         )
         return True
 
+    async def await_workspace_manifest(self, timeout: float = 3.0) -> bool:
+        """等待后台 manifest 预热完成，超时则放弃（不阻塞对话）。
+
+        在首轮对话构建 system prompt 前调用，给后台任务一个短暂的等待窗口，
+        使第一条消息就能拿到工作区概览。超时后静默返回，不影响对话流程。
+
+        Returns:
+            True 表示 manifest 已就绪，False 表示超时或无任务。
+        """
+        if self._workspace_manifest_built and self._workspace_manifest is not None:
+            return True
+        task = self._workspace_manifest_prewarm_task
+        if task is None or task.done():
+            return self._workspace_manifest is not None
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.debug("await_workspace_manifest 超时 (%.1fs)，继续对话", timeout)
+            return False
+        except Exception:  # noqa: BLE001
+            logger.debug("await_workspace_manifest 异常", exc_info=True)
+            return False
+        return self._workspace_manifest is not None
+
     def workspace_manifest_build_status(self) -> dict[str, Any]:
         """返回 workspace manifest 后台构建状态。"""
         if self._workspace_manifest_built and self._workspace_manifest is not None:
@@ -4072,6 +4096,8 @@ class AgentEngine:
             )
 
             if iteration == start_iteration:
+                # 首轮：短暂等待 manifest 预热完成，使第一条消息即可注入工作区概览
+                await self.await_workspace_manifest(timeout=3.0)
                 self._emit(
                     on_event,
                     ToolCallEvent(
