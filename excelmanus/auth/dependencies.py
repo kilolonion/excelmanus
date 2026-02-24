@@ -91,3 +91,11 @@ async def require_admin(
             detail="需要管理员权限",
         )
     return user
+
+
+def extract_user_id(request: Request) -> str | None:
+    """Extract user_id from request state (set by AuthMiddleware).
+
+    Returns None when auth is disabled — callers should handle gracefully.
+    """
+    return getattr(request.state, "user_id", None)

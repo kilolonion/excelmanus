@@ -166,6 +166,25 @@ async def update_me(
     return UserPublic.from_record(updated or user)
 
 
+@router.get("/me/usage")
+async def get_my_usage(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    store = _get_store(request)
+    daily = store.get_daily_usage(user.id)
+    monthly = store.get_monthly_usage(user.id)
+    return {
+        "user_id": user.id,
+        "daily_tokens": daily,
+        "monthly_tokens": monthly,
+        "daily_limit": user.daily_token_limit,
+        "monthly_limit": user.monthly_token_limit,
+        "daily_remaining": max(0, user.daily_token_limit - daily) if user.daily_token_limit > 0 else -1,
+        "monthly_remaining": max(0, user.monthly_token_limit - monthly) if user.monthly_token_limit > 0 else -1,
+    }
+
+
 # ── OAuth: GitHub ─────────────────────────────────────────
 
 
