@@ -47,6 +47,7 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
         "inspect_excel_files",
         "memory_read_topic",
         "read_image",
+        "introspect_capability",
     }
 )
 
