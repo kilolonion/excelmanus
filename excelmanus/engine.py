@@ -1319,17 +1319,20 @@ class AgentEngine:
         turn_index: int,
         *,
         rollback_files: bool = False,
+        keep_target: bool = True,
     ) -> dict:
         """回退对话到第 turn_index 个用户轮次。
 
         Args:
             turn_index: 目标用户轮次索引（0-indexed）。
             rollback_files: 是否同时回滚该轮之后产生的文件变更。
+            keep_target: 是否保留目标用户消息。为 False 时连同目标消息
+                一起移除（用于编辑重发场景，避免后续 chat() 重复添加）。
 
         Returns:
             {removed_messages, file_rollback_results, turn_index}
         """
-        removed = self._memory.rollback_to_user_turn(turn_index)
+        removed = self._memory.rollback_to_user_turn(turn_index, keep_target=keep_target)
 
         file_results: list[str] = []
         if rollback_files:
@@ -3119,6 +3122,32 @@ class AgentEngine:
                             },
                         },
                         "required": ["questions"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "suggest_mode_switch",
+                    "description": (
+                        "当前模式不适合用户任务时，向用户建议切换到更合适的模式。"
+                        "仅在明确检测到模式不匹配时调用（如 read 模式下需要写入、plan 模式下用户要求执行）。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "target_mode": {
+                                "type": "string",
+                                "enum": ["write", "read", "plan"],
+                                "description": "建议切换到的目标模式",
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "向用户解释为什么建议切换",
+                            },
+                        },
+                        "required": ["target_mode", "reason"],
                         "additionalProperties": False,
                     },
                 },

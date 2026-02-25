@@ -1296,6 +1296,42 @@ class ToolDispatcher:
                     arguments,
                     result=result_str,
                 )
+            elif tool_name == "suggest_mode_switch":
+                # 将模式切换建议转化为 USER_QUESTION 事件
+                target_mode = str(arguments.get("target_mode", "write")).strip()
+                reason = str(arguments.get("reason", "")).strip()
+                _mode_labels = {"write": "写入", "read": "读取", "plan": "计划"}
+                target_label = _mode_labels.get(target_mode, target_mode)
+                question_payload = {
+                    "header": "建议切换模式",
+                    "text": f"{reason}\n\n是否切换到「{target_label}」模式？",
+                    "options": [
+                        {"label": f"切换到{target_label}", "description": f"切换到{target_label}模式继续"},
+                        {"label": "保持当前模式", "description": "不切换，继续当前模式"},
+                    ],
+                    "multiSelect": False,
+                }
+                pending_q = e._question_flow.enqueue(
+                    question_payload=question_payload,
+                    tool_call_id=tool_call_id,
+                )
+                e._emit_user_question_event(
+                    question=pending_q,
+                    on_event=on_event,
+                    iteration=iteration,
+                )
+                result_str = f"已向用户发起模式切换建议（目标：{target_label}）。"
+                question_id = pending_q.question_id
+                success = True
+                error = None
+                pending_question = True
+                defer_tool_result = True
+                log_tool_call(
+                    logger,
+                    tool_name,
+                    arguments,
+                    result=result_str,
+                )
             elif tool_name == "run_code" and e.config.code_policy_enabled:
                 # ── 动态代码策略引擎路由 ──
                 from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets, strip_exit_calls
@@ -2016,6 +2052,20 @@ class ToolDispatcher:
                         excel_changes=changes[:200],
                     ),
                 )
+
+        # _file_download → FILE_DOWNLOAD (offer_download 工具在结果中附带)
+        dl_data = parsed.get("_file_download")
+        if isinstance(dl_data, dict) and dl_data.get("file_path"):
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.FILE_DOWNLOAD,
+                    tool_call_id=tool_call_id,
+                    download_file_path=dl_data.get("file_path", ""),
+                    download_filename=dl_data.get("filename", ""),
+                    download_description=dl_data.get("description", ""),
+                ),
+            )
 
     def _emit_files_changed_from_audit(
         self,

@@ -30,7 +30,7 @@ class PlanDraft:
     plan_id: str
     markdown: str
     title: str
-    subtasks: list[str]
+    subtasks: list[str | dict]
     file_path: str
     source: Literal["plan_mode", "task_create_hook"]
     objective: str
@@ -81,7 +81,7 @@ def save_plan_markdown(
     return str(path.relative_to(root))
 
 
-def parse_plan_markdown(markdown: str) -> tuple[str, list[str]]:
+def parse_plan_markdown(markdown: str) -> tuple[str, list[str | dict]]:
     """从 Markdown 中解析任务标题与子任务列表。"""
     text = (markdown or "").strip()
     if not text:
@@ -161,20 +161,29 @@ def _extract_checklist_subtasks(text: str) -> list[str]:
     return subtasks
 
 
-def _normalize_subtasks(raw_subtasks: object) -> list[str]:
+def _normalize_subtasks(raw_subtasks: object) -> list[str | dict]:
     if not isinstance(raw_subtasks, list):
         return []
 
-    normalized: list[str] = []
+    normalized: list[str | dict] = []
     seen: set[str] = set()
     for item in raw_subtasks:
-        text = _safe_str(item)
-        if not text:
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        normalized.append(text)
+        if isinstance(item, dict) and "title" in item:
+            title = _safe_str(item["title"])
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            verification = _safe_str(item.get("verification"))
+            if verification:
+                normalized.append({"title": title, "verification": verification})
+            else:
+                normalized.append(title)
+        else:
+            text = _safe_str(item)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
     return normalized
 
 

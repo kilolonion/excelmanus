@@ -863,6 +863,38 @@ def delete_file(file_path: str, confirm: bool = False) -> str:
     )
 
 
+def offer_download(file_path: str, description: str = "") -> str:
+    """向用户提供工作区内文件的可下载链接。
+
+    文件必须位于工作区内。工具返回包含 ``_file_download`` 标记的 JSON，
+    由 tool_dispatcher 检测后发射 FILE_DOWNLOAD SSE 事件，前端渲染为下载卡片。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve(file_path)
+    if not safe_path.is_file():
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    filename = safe_path.name
+    size = _format_size(safe_path.stat().st_size)
+
+    return json.dumps(
+        {
+            "status": "success",
+            "file_path": file_path,
+            "filename": filename,
+            "size": size,
+            "description": description or f"文件 {filename} 已准备好下载",
+            "_file_download": {
+                "file_path": file_path,
+                "filename": filename,
+                "description": description or f"文件 {filename} 已准备好下载",
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
 
 
@@ -1014,5 +1046,32 @@ def get_tools() -> list[ToolDef]:
             },
             func=delete_file,
             write_effect="workspace_write",
+        ),
+        ToolDef(
+            name="offer_download",
+            description=(
+                "向用户提供工作区内文件的可下载链接。"
+                "当你完成文件生成/处理后，使用此工具让用户能够直接下载结果文件。"
+                "前端会渲染为醒目的下载卡片。"
+                "适用场景：生成报告、导出数据、处理完成后提供结果文件。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "要提供下载的文件路径（相对于工作目录）",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "对文件的简短描述（显示在下载卡片上）",
+                        "default": "",
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=offer_download,
+            write_effect="none",
         ),
     ]

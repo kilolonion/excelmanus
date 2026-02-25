@@ -32,6 +32,7 @@ class TaskItem:
     title: str
     status: TaskStatus = TaskStatus.PENDING
     result: str | None = None
+    verification_criteria: str | None = None
 
     def transition(self, new_status: TaskStatus) -> None:
         """执行状态转换，非法转换抛出 ValueError。"""
@@ -46,6 +47,8 @@ class TaskItem:
         d = {"title": self.title, "status": self.status.value}
         if self.result is not None:
             d["result"] = self.result
+        if self.verification_criteria is not None:
+            d["verification"] = self.verification_criteria
         return d
 
     @classmethod
@@ -55,6 +58,7 @@ class TaskItem:
             title=data["title"],
             status=TaskStatus(data["status"]),
             result=data.get("result"),
+            verification_criteria=data.get("verification"),
         )
 
 
@@ -105,11 +109,15 @@ class TaskStore:
     def create(
         self,
         title: str,
-        subtask_titles: list[str],
+        subtask_titles: list[str | dict],
         *,
         replace_existing: bool = False,
     ) -> TaskList:
         """创建新任务清单。
+
+        subtask_titles 支持两种格式（可混合）：
+        - str: 纯标题
+        - dict: {"title": "...", "verification": "..."}
 
         当已存在活跃任务清单时，默认拒绝隐式覆盖；
         仅在 replace_existing=True 时允许替换。
@@ -119,7 +127,14 @@ class TaskStore:
                 f"已有任务清单「{self._task_list.title}」，"
                 "如需覆盖请显式传入 replace_existing=True。"
             )
-        items = [TaskItem(title=t) for t in subtask_titles]
+        items: list[TaskItem] = []
+        for entry in subtask_titles:
+            if isinstance(entry, dict):
+                t = str(entry.get("title", "")).strip()
+                v = (entry.get("verification") or "").strip() or None
+                items.append(TaskItem(title=t, verification_criteria=v))
+            else:
+                items.append(TaskItem(title=str(entry)))
         self._task_list = TaskList(title=title, items=items)
         return self._task_list
 
