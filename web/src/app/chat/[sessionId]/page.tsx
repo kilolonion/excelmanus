@@ -12,7 +12,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend } from "@/lib/chat-actions";
 
-export default function ChatPage() {
+function ChatPage() {
   const params = useParams();
   const sessionId = params.sessionId as string;
   const messages = useChatStore((s) => s.messages);
@@ -38,9 +38,11 @@ export default function ChatPage() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId, newContent, rollbackFiles) => {
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean) => {
             rollbackAndResend(messageId, newContent, rollbackFiles, sessionId);
           }}
+          // 传递sessionId作为key，确保会话切换时重新创建组件
+          key={sessionId}
         />
       )}
 
@@ -67,3 +69,5 @@ export default function ChatPage() {
     </div>
   );
 }
+
+export default ChatPage;

@@ -81,20 +81,20 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
               onKeyDown={handleKeyDown}
-              className="w-full text-sm border border-border rounded-md px-3 py-2 bg-background resize-none focus:outline-none focus:ring-1 focus:ring-ring min-h-[60px]"
+              className="w-full text-[13px] leading-relaxed rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
               rows={Math.min(editText.split("\n").length + 1, 8)}
             />
             <div className="flex gap-1.5">
               <button
                 onClick={confirmEdit}
-                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
+                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
               >
                 <Check className="h-3 w-3" />
                 重发
               </button>
               <button
                 onClick={cancelEdit}
-                className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-muted text-muted-foreground hover:bg-muted/80"
+                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
               >
                 <X className="h-3 w-3" />
                 取消
