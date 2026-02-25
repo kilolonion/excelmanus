@@ -2153,25 +2153,31 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_excel",
-            description="读取 Excel 数据摘要（形状、列名、类型、前10行预览），通过 include 按需附加样式/图表/公式等维度",
+            description=(
+                "读取 Excel 数据摘要（形状、列名、类型、前10行预览），通过 include 按需附加样式/图表/公式等维度。"
+                "适用场景：首次探查文件结构、确认列名与数据类型、查看样本数据。"
+                "不适用：批量数据处理或跨表操作（改用 run_code + pandas）。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径",
+                        "description": "Excel 文件路径（相对于工作目录）",
                     },
                     "sheet_name": {
                         "type": "string",
-                        "description": "工作表名称，默认读取第一个",
+                        "description": "工作表名称，默认读取第一个 sheet",
                     },
                     "max_rows": {
                         "type": "integer",
-                        "description": "最大读取行数，默认全部",
+                        "description": "最大读取行数，默认全部；小数据集（<=100行）建议不限制",
+                        "minimum": 1,
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头行号（从0开始），默认自动检测",
+                        "description": "列头行号（0-indexed，即第1行=0），默认自动检测",
+                        "minimum": 0,
                     },
                     "include": {
                         "type": "array",
@@ -2196,6 +2202,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "styles/formulas 维度扫描的最大行数，默认 200",
                         "default": 200,
+                        "minimum": 1,
                     },
                 },
                 "required": ["file_path"],
@@ -2209,17 +2216,22 @@ def get_tools() -> list[ToolDef]:
         # analyze_data: Batch 4 精简，由 run_code + pandas describe() 替代
         ToolDef(
             name="filter_data",
-            description="按条件筛选 Excel 数据行，支持单条件或多条件 AND/OR 组合、列投影、排序和 Top-N",
+            description=(
+                "按条件筛选 Excel 数据行，支持单条件或多条件 AND/OR 组合、列投影、排序和 Top-N。"
+                "适用场景：按条件查找特定数据行、排序取 Top-N、按列投影裁剪输出。"
+                "不适用：需要聚合统计（改用 run_code + pandas groupby）。"
+                "参数模式：单条件用 column/operator/value；多条件用 conditions 数组（二者互斥）。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径",
+                        "description": "Excel 文件路径（相对于工作目录）",
                     },
                     "column": {
                         "type": "string",
-                        "description": "筛选列名（单条件模式）",
+                        "description": "筛选列名（单条件模式，与 conditions 互斥）",
                     },
                     "operator": {
                         "type": "string",
@@ -2257,7 +2269,8 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头行号（从0开始），默认自动检测",
+                        "description": "列头行号（0-indexed，即第1行=0），默认自动检测",
+                        "minimum": 0,
                     },
                     "columns": {
                         "type": "array",
@@ -2267,6 +2280,7 @@ def get_tools() -> list[ToolDef]:
                     "max_rows": {
                         "type": "integer",
                         "description": "最多返回行数",
+                        "minimum": 1,
                     },
                     "sort_by": {
                         "type": "string",
@@ -2280,6 +2294,7 @@ def get_tools() -> list[ToolDef]:
                     "limit": {
                         "type": "integer",
                         "description": "排序后限制返回行数（Top-N）",
+                        "minimum": 1,
                     },
                 },
                 "required": ["file_path"],
@@ -2290,7 +2305,11 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="inspect_excel_files",
-            description="批量扫描目录下所有 Excel 文件概况（sheet/行列/列名/预览），支持按文件名或 sheet 名模糊搜索定位",
+            description=(
+                "批量扫描目录下所有 Excel 文件概况（sheet/行列/列名/预览），支持按文件名或 sheet 名模糊搜索定位。"
+                "适用场景：工作区有多个 Excel 文件时快速了解全貌、按关键词定位目标文件。"
+                "不适用：已知文件路径时直接用 read_excel。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2303,16 +2322,19 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "最多扫描文件数，默认 20",
                         "default": 20,
+                        "minimum": 1,
                     },
                     "preview_rows": {
                         "type": "integer",
                         "description": "每个 sheet 预览数据行数（不含标题行），默认 3",
                         "default": 3,
+                        "minimum": 0,
                     },
                     "max_columns": {
                         "type": "integer",
                         "description": "header/preview 最多展示列数，默认 15",
                         "default": 15,
+                        "minimum": 1,
                     },
                     "include": {
                         "type": "array",

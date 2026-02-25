@@ -3855,6 +3855,9 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "compaction_enabled": "EXCELMANUS_COMPACTION_ENABLED",
     "compaction_threshold_ratio": "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
     "code_policy_enabled": "EXCELMANUS_CODE_POLICY_ENABLED",
+    "tool_schema_validation_mode": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE",
+    "tool_schema_validation_canary_percent": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT",
+    "tool_schema_strict_path": "EXCELMANUS_TOOL_SCHEMA_STRICT_PATH",
 }
 
 
@@ -3870,6 +3873,9 @@ async def get_runtime_config() -> JSONResponse:
         "compaction_enabled": _config.compaction_enabled,
         "compaction_threshold_ratio": _config.compaction_threshold_ratio,
         "code_policy_enabled": _config.code_policy_enabled,
+        "tool_schema_validation_mode": _config.tool_schema_validation_mode,
+        "tool_schema_validation_canary_percent": _config.tool_schema_validation_canary_percent,
+        "tool_schema_strict_path": _config.tool_schema_strict_path,
     })
 
 
@@ -3882,6 +3888,9 @@ class RuntimeConfigUpdate(BaseModel):
     compaction_enabled: bool | None = None
     compaction_threshold_ratio: float | None = None
     code_policy_enabled: bool | None = None
+    tool_schema_validation_mode: Literal["off", "shadow", "enforce"] | None = None
+    tool_schema_validation_canary_percent: int | None = Field(default=None, ge=0, le=100)
+    tool_schema_strict_path: bool | None = None
 
 
 @_router.put("/api/v1/config/runtime")

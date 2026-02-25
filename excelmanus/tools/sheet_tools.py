@@ -573,24 +573,29 @@ def get_tools() -> list[ToolDef]:
             name="list_sheets",
             description=(
                 "列出 Excel 文件中所有工作表的名称、行列数和是否为活动表，"
-                "通过 include 按需附加 columns/preview/charts 等维度"
+                "通过 include 按需附加 columns/preview/charts 等维度。"
+                "适用场景：快速了解文件包含哪些 sheet、各 sheet 规模。"
+                "不适用：需要读取数据内容时改用 read_excel。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径",
+                        "description": "Excel 文件路径（相对于工作目录）",
                     },
                     "offset": {
                         "type": "integer",
                         "description": "分页起始偏移（从 0 开始），默认 0",
                         "default": 0,
+                        "minimum": 0,
                     },
                     "limit": {
                         "type": "integer",
                         "description": "分页大小，默认 100，最大 500",
                         "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                     "include": {
                         "type": "array",
@@ -612,6 +617,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "preview 维度的预览行数，默认 5",
                         "default": 5,
+                        "minimum": 1,
                     },
                 },
                 "required": ["file_path"],

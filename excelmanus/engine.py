@@ -628,6 +628,10 @@ class TurnDiagnostic:
     tool_names: list[str] = field(default_factory=list)
     # 门禁事件
     guard_events: list[str] = field(default_factory=list)
+    # Think-Act 推理检测
+    has_reasoning: bool = True
+    reasoning_chars: int = 0
+    silent_tool_call_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -649,6 +653,12 @@ class TurnDiagnostic:
             d["tool_names"] = self.tool_names
         if self.guard_events:
             d["guard_events"] = self.guard_events
+        if not self.has_reasoning:
+            d["has_reasoning"] = False
+        if self.reasoning_chars:
+            d["reasoning_chars"] = self.reasoning_chars
+        if self.silent_tool_call_count:
+            d["silent_tool_call_count"] = self.silent_tool_call_count
         return d
 
 
@@ -672,6 +682,8 @@ class ChatResult:
     route_mode: str = ""
     skills_used: list[str] = field(default_factory=list)
     task_tags: tuple[str, ...] = ()
+    # Think-Act 推理质量指标
+    reasoning_metrics: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:
         """兼容旧调用方将 chat 结果当作字符串直接使用。"""
@@ -817,6 +829,15 @@ class AgentEngine:
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
         self._registry = registry.fork() if hasattr(registry, "fork") else registry
+        if hasattr(self._registry, "configure_schema_validation"):
+            try:
+                self._registry.configure_schema_validation(
+                    mode=config.tool_schema_validation_mode,
+                    canary_percent=config.tool_schema_validation_canary_percent,
+                    strict_path=config.tool_schema_strict_path,
+                )
+            except Exception:
+                logger.warning("工具 schema 校验配置注入失败，已回退默认策略", exc_info=True)
         self._skill_router = skill_router
         self._skillpack_manager = (
             SkillpackManager(config, skill_router._loader)
@@ -2170,13 +2191,16 @@ class AgentEngine:
         )
 
         # 合并已激活 skill 的 system_contexts
+        # 使用 instructions_only 渲染：完整 resource_contents 已在
+        # activate_skill 的 tool result 中返回给 LLM，后续迭代仅需
+        # instructions 提醒，避免 resource_contents 在每轮重复注入。
         final_skills_used = list(route_result.skills_used)
         final_system_contexts = list(route_result.system_contexts)
         if self._active_skills:
             for skill in self._active_skills:
                 if skill.name not in final_skills_used:
                     final_skills_used.append(skill.name)
-                skill_context = skill.render_context()
+                skill_context = skill.render_context_instructions_only()
                 if skill_context.strip() and skill_context not in final_system_contexts:
                     final_system_contexts.append(skill_context)
 
@@ -2919,19 +2943,20 @@ class AgentEngine:
 
         activate_skill_description = (
             "激活技能获取专业操作指引。技能提供特定领域的最佳实践和步骤指导。\n"
-            "当你需要执行复杂任务、不确定最佳方案时，激活对应技能获取指引。\n"
+            "适用场景：执行复杂任务、不确定最佳方案时，激活对应技能获取指引。\n"
+            "不适用：简单读取/写入/回答问题——直接用对应工具即可。\n"
             "⚠️ 不要向用户提及技能名称或工具名称等内部概念。\n"
             "调用后立即执行任务，不要仅输出计划。\n\n"
             f"{skill_catalog}"
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
-            "委派子任务给子代理执行。单任务用 task 字符串；多个独立任务用 tasks 数组并行执行。\n"
-            "⚠️ 仅适用于需要 20+ 次工具调用的大规模后台任务（如：多文件批量变换、"
+            "委派子任务给子代理执行。\n"
+            "适用场景：需要 20+ 次工具调用的大规模后台任务（多文件批量变换、"
             "复杂多步骤修改、长链条数据管线）。\n"
-            "⚠️ 禁止委派：单文件读取/探查、简单写入/格式化、单步分析——直接用对应工具。\n"
-            "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物）。\n"
-            "并行模式（tasks 数组）要求彼此独立、不操作同一文件，最多 5 个。\n"
+            "不适用：单文件读取/探查、简单写入/格式化、单步分析——直接用对应工具。\n"
+            "参数模式（三选一）：task 字符串 / task_brief 结构化对象 / tasks 并行数组。\n"
+            "并行模式（tasks 数组）要求彼此独立、不操作同一文件，2~5 个。\n"
             "委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
             "Subagent_Catalog:\n"
             f"{subagent_catalog or '当前无可用子代理。'}"
@@ -2939,10 +2964,11 @@ class AgentEngine:
         list_subagents_description = "列出当前可用的全部 subagent 及职责。"
         ask_user_description = (
             "向用户提问并获取回答。这是与用户进行结构化交互的唯一方式。"
-            "当你需要用户做选择、确认意图或做决定时，必须调用本工具，"
-            "不要在文本回复中列出编号选项让用户回复。"
+            "适用场景：需要用户做选择、确认意图、做决定或补充缺失信息时。"
+            "不适用：信息已足够明确时——直接执行，不要多余询问。"
+            "必须调用本工具提问，不要在文本回复中列出编号选项让用户回复。"
             "选项应具体（列出实际文件名/方案名），不要泛泛而问。"
-            "需要收集多个维度信息时，在 questions 数组中传多个问题，系统逐个展示。"
+            "需要收集多个维度信息时，在 questions 数组中传多个问题（1~8个），系统逐个展示。"
             "调用后暂停执行，等待用户回答后继续。"
         )
         tools = [
@@ -3540,6 +3566,11 @@ class AgentEngine:
         recent_context = self._build_parent_context_summary()
         if recent_context:
             parts.append(f"会话上下文：{recent_context[:800]}")
+
+        # 注入任务清单状态（含每步验证结果），帮助 verifier 对照验证条件
+        task_list_notice = self._context_builder._build_task_list_status_notice()
+        if task_list_notice:
+            parts.append(f"任务清单验证记录：\n{task_list_notice}")
 
         prompt = "\n".join(parts)
 
@@ -4371,6 +4402,17 @@ class AgentEngine:
                         changed_files=list(self._state.affected_files),
                     ),
                 )
+            # 注入 Think-Act 推理指标
+            _s = self._state
+            _total_calls = _s.silent_call_count + _s.reasoned_call_count
+            kwargs.setdefault("reasoning_metrics", {
+                "silent_call_count": _s.silent_call_count,
+                "reasoned_call_count": _s.reasoned_call_count,
+                "reasoning_chars_total": _s.reasoning_chars_total,
+                "silent_call_rate": round(
+                    _s.silent_call_count / max(1, _total_calls), 3,
+                ),
+            })
             return ChatResult(**kwargs)
 
         max_iter = self._config.max_iterations

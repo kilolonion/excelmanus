@@ -497,28 +497,35 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="run_shell",
-            description="执行受限 shell 命令（仅白名单只读命令如 ls/cat/grep/find）",
+            description=(
+                "执行受限 shell 命令（仅白名单只读命令如 ls/cat/head/tail/grep/find/wc/file/du/stat）。"
+                "适用场景：文件探查、搜索、环境信息查询等只读操作。"
+                "不适用：写入操作和网络请求（严格禁止）。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "shell 命令（仅白名单命令）",
+                        "description": "shell 命令（仅白名单命令，支持管道）",
                     },
                     "workdir": {
                         "type": "string",
-                        "description": "执行工作目录",
+                        "description": "执行工作目录（相对于工作目录）",
                         "default": ".",
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "超时秒数（最大 120）",
+                        "description": "超时秒数（1~120）",
                         "default": 30,
+                        "minimum": 1,
+                        "maximum": 120,
                     },
                     "tail_lines": {
                         "type": "integer",
-                        "description": "返回日志尾部行数",
+                        "description": "返回 stdout/stderr 尾部行数",
                         "default": 80,
+                        "minimum": 0,
                     },
                 },
                 "required": ["command"],
