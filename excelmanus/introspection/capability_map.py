@@ -42,8 +42,16 @@ CATEGORY_DISPLAY_NAMES: dict[str, str] = {
 
 INTROSPECTION_GUIDANCE = """\
 ## 自省指引
-- 不确定某工具的参数或限制时，调用 introspect_capability 查询
-- 遇到复杂能力判断且 introspect_capability 无法明确回答时，尝试 run_code 通过 Python 实现
+
+不确定是否能做某事时，按以下决策树判断：
+1. 调用 `introspect_capability(query_type="can_i_do", query="你想做的事")` — 搜索内置工具 + 扩展能力 + 子代理 + MCP
+2. 内置工具不支持 → 考虑 `run_code`（openpyxl/pandas/matplotlib 覆盖绝大多数 Excel 操作）
+3. 需要独立只读探查 → 委派 `explorer` 子代理
+4. 以上均不行 → 用 `ask_user` 告知用户能力边界
+
+其他用法：
+- 查工具参数：`introspect_capability(query_type="tool_detail", query="工具名")`
+- 查运行时状态：`introspect_capability(query_type="system_status", query="")`
 - 禁止向用户暴露自省过程和内部实现细节"""
 
 

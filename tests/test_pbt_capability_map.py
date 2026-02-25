@@ -386,18 +386,33 @@ def test_pbt_property_7_no_side_effects(query_type: str, query: str) -> None:
 
 @given(query=_nonempty_text_strategy)
 def test_pbt_property_9_can_i_do_max_results(query: str) -> None:
-    """Property 9：对于任意 can_i_do 查询，返回的匹配工具数不超过 5 个。
+    """Property 9：对于任意 can_i_do 查询，每层匹配结果不超过 5 个。
+
+    can_i_do 返回多层结果（内置工具/扩展能力/子代理/MCP），
+    每层各自限制 _MAX_RESULTS (5) 条。
 
     **Validates: Requirement 6.2**
     """
     _ensure_registry()
     result = introspect_capability("can_i_do", query)
 
-    # 计算匹配工具行数（以 "  - " 开头的行）
-    tool_lines = [line for line in result.splitlines() if line.startswith("  - ")]
-    assert len(tool_lines) <= 5, (
-        f"can_i_do 返回了 {len(tool_lines)} 个工具，超过上限 5"
-    )
+    # 按层分组计数：遇到不以 "  - " 开头的非空行即进入新层
+    layer_counts: list[int] = []
+    current_count = 0
+    for line in result.splitlines():
+        if line.startswith("  - "):
+            current_count += 1
+        elif line.strip() and not line.startswith("  "):
+            if current_count > 0:
+                layer_counts.append(current_count)
+            current_count = 0
+    if current_count > 0:
+        layer_counts.append(current_count)
+
+    for i, count in enumerate(layer_counts):
+        assert count <= 5, (
+            f"can_i_do 第 {i+1} 层返回了 {count} 个结果，超过上限 5"
+        )
 
 
 # ---------------------------------------------------------------------------
