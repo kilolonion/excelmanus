@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useIsMobile } from "@/hooks/use-mobile";
+import { useIsMobile, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
 import { uuid } from "@/lib/utils";
 import {
   MessageSquarePlus,
@@ -22,7 +22,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { sidebarTransition, useMotionSafe } from "@/lib/sidebar-motion";
+import { sidebarTransition, sidebarContentVariants, useMotionSafe } from "@/lib/sidebar-motion";
 import { SessionList } from "./SessionList";
 import { ExcelFilesBar } from "./ExcelFilesBar";
 import { StatusFooter } from "./StatusFooter";
@@ -57,6 +57,9 @@ export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const isMobile = useIsMobile();
+  const isDesktop = useIsDesktop();
+  const isMediumScreen = useIsMediumScreen();
+  
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const addSession = useSessionStore((s) => s.addSession);
@@ -117,25 +120,42 @@ export function Sidebar() {
       <motion.aside
         animate={{ width: isMobile ? (sidebarOpen ? 280 : 0) : (sidebarOpen ? 260 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
-        className={`flex flex-col border-r border-border overflow-hidden ${
+        className={`flex flex-col border-r border-border ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
-        style={{ backgroundColor: "var(--em-sidebar-bg)" }}
+        style={{ 
+          backgroundColor: "var(--em-sidebar-bg)",
+          overflow: sidebarOpen ? "hidden" : "hidden"
+        }}
         onTouchStart={swipe.onTouchStart}
         onTouchEnd={swipe.onTouchEnd}
       >
+        {/* Inner content container with fixed width to prevent layout shifts */}
+        <motion.div 
+          className="flex flex-col h-full"
+          style={{ 
+            width: isMobile ? "280px" : "260px",
+            minWidth: isMobile ? "280px" : "260px"
+          }}
+          variants={sidebarContentVariants}
+          animate={sidebarOpen ? "open" : "closed"}
+          transition={isFirstRender.current ? { duration: 0 } : undefined}
+        >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3">
-        <img
-          src="/logo.svg"
-          alt="ExcelManus"
-          className="h-7 w-auto"
-        />
+      <div className="flex items-center justify-between px-3 py-3 flex-shrink-0">
+        <div className="flex items-center min-w-0">
+          <img
+            src="/logo.svg"
+            alt="ExcelManus"
+            className="h-7 flex-shrink-0"
+            style={{ width: "auto", minWidth: "120px" }}
+          />
+        </div>
         <Button
           variant="ghost"
           size="icon"
           onClick={toggleSidebar}
-          className="h-7 w-7 min-h-8 min-w-8"
+          className="h-7 w-7 min-h-8 min-w-8 flex-shrink-0"
         >
           <PanelLeftClose className="h-4 w-4" />
         </Button>
@@ -214,13 +234,11 @@ export function Sidebar() {
 
         {/* Divider between sections */}
         {hasExcelFiles && (
-          <div
-            className="h-px mx-3 flex-shrink-0"
-            style={{
-              background:
-                "linear-gradient(to right, transparent, var(--border), transparent)",
-            }}
-          />
+          <div className="mx-3 my-2 flex-shrink-0 flex items-center gap-2">
+            <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to right, transparent, var(--em-primary))" }} />
+            <div className="h-1 w-1 rounded-full opacity-40" style={{ backgroundColor: "var(--em-primary)" }} />
+            <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to left, transparent, var(--em-primary))" }} />
+          </div>
         )}
 
         {/* Section 2: Excel Files — collapsible, own scroll */}
@@ -246,9 +264,10 @@ export function Sidebar() {
         {!hasExcelFiles && <ExcelFilesBar />}
       </div>
 
-      {/* Footer */}
-      <StatusFooter />
-    </motion.aside>
+        {/* Footer */}
+        <StatusFooter />
+        </motion.div>
+      </motion.aside>
     </>
   );
 }

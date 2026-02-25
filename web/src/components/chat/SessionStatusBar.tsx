@@ -167,7 +167,7 @@ export function SessionStatusBar() {
   return (
     <>
       <TooltipProvider delayDuration={300}>
-        <div className="flex items-center gap-1.5 md:gap-3 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5 md:gap-3 text-[11px] text-muted-foreground min-w-0 overflow-hidden">
           {/* ── Compaction Ring ── */}
           {c.enabled && c.max_tokens > 0 && (() => {
             const pct = Math.min(c.usage_ratio, 1);
@@ -330,7 +330,7 @@ export function SessionStatusBar() {
             </TooltipContent>
           </Tooltip>
           {lastExtractResult && !extracting && (
-            <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-400 border-emerald-500/30">
+            <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-400 border-emerald-500/30 whitespace-nowrap max-w-[120px] sm:max-w-none truncate flex-shrink-0 sm:flex-shrink">
               {lastExtractResult}
             </Badge>
           )}
