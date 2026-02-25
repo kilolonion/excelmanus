@@ -27,10 +27,13 @@ from excelmanus.cli.utils import (
     SUBAGENT_SUMMARY_PREVIEW,
     THINKING_SUMMARY_LEN,
     THINKING_THRESHOLD,
+    detect_language,
     format_arguments,
     format_elapsed,
     format_subagent_tools,
     is_narrow_terminal,
+    looks_like_json,
+    render_syntax_block,
     separator_line,
     truncate,
 )
@@ -241,6 +244,16 @@ class StreamRenderer:
             f"({args_text})"
         )
 
+        # run_code: Python 代码高亮展示
+        if event.tool_name == "run_code":
+            code = (event.arguments or {}).get("code", "")
+            if isinstance(code, str) and code.strip():
+                render_syntax_block(self._console, code.strip(), "python")
+                return
+
+        # 复杂参数: JSON 高亮展示
+        self._maybe_render_args_highlighted(event.arguments)
+
     def _render_tool_end(self, event: ToolCallEvent) -> None:
         start = self._tool_start_times.pop(event.tool_name, None)
         elapsed_str = ""
@@ -251,13 +264,24 @@ class StreamRenderer:
         is_meta = event.tool_name in _META_TOOL_DISPLAY
 
         if event.success:
-            detail = ""
-            if not is_meta and event.result:
-                detail = f" [{THEME.DIM}]{rich_escape(truncate(event.result, RESULT_MAX_LEN))}[/{THEME.DIM}]"
-            self._console.print(
-                f"  {THEME.TREE_END}"
-                f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]{elapsed_str}{detail}"
-            )
+            result_text = (event.result or "").strip()
+            lang = detect_language(result_text, tool_name=event.tool_name) if result_text else None
+
+            if not is_meta and result_text and lang:
+                # 结构化结果：高亮展示
+                self._console.print(
+                    f"  {THEME.TREE_END}"
+                    f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]{elapsed_str}"
+                )
+                render_syntax_block(self._console, result_text, lang)
+            else:
+                detail = ""
+                if not is_meta and result_text:
+                    detail = f" [{THEME.DIM}]{rich_escape(truncate(result_text, RESULT_MAX_LEN))}[/{THEME.DIM}]"
+                self._console.print(
+                    f"  {THEME.TREE_END}"
+                    f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]{elapsed_str}{detail}"
+                )
         else:
             error_msg = rich_escape(event.error or "未知错误")
             self._console.print(
@@ -520,6 +544,24 @@ class StreamRenderer:
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _maybe_render_args_highlighted(self, arguments: Dict[str, Any]) -> None:
+        """当工具参数包含复杂嵌套结构时，用 JSON 高亮展示。"""
+        if not arguments:
+            return
+        # 仅当存在嵌套 dict/list 值时才高亮
+        has_complex = any(
+            isinstance(v, (dict, list)) for v in arguments.values()
+        )
+        if not has_complex:
+            return
+        import json as _json
+
+        try:
+            formatted = _json.dumps(arguments, indent=2, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return
+        render_syntax_block(self._console, formatted, "json")
 
     @staticmethod
     def _meta_tool_hint(tool_name: str, arguments: Dict[str, Any]) -> str:
