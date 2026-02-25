@@ -114,6 +114,45 @@ class QuestionFlowManager:
         self._queue.append(pending)
         return pending
 
+    def enqueue_batch(
+        self,
+        questions_payload: list[dict[str, Any]],
+        tool_call_id: str,
+    ) -> list[PendingQuestion]:
+        """批量入队多个问题（单次 ask_user 调用生成多问题表单）。
+
+        所有问题共享同一个 tool_call_id，前端逐个展示，
+        全部回答完毕后才将合并结果作为 tool_result 返回给 LLM。
+
+        Returns:
+            入队的 PendingQuestion 列表（第一个即为当前展示的问题）。
+
+        Raises:
+            ValueError: 参数校验失败或队列容量不足。
+        """
+        if not isinstance(questions_payload, list) or len(questions_payload) < 1:
+            raise ValueError("questions 必须是非空数组。")
+        if len(questions_payload) > self._max_queue_size:
+            raise ValueError(
+                f"单次提交的问题数量（{len(questions_payload)}）"
+                f"超过队列上限（{self._max_queue_size}）。"
+            )
+        remaining = self._max_queue_size - len(self._queue)
+        if len(questions_payload) > remaining:
+            raise ValueError(
+                f"队列剩余容量（{remaining}）不足以容纳 {len(questions_payload)} 个问题。"
+            )
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+            raise ValueError("tool_call_id 不能为空。")
+
+        tid = tool_call_id.strip()
+        results: list[PendingQuestion] = []
+        for qp in questions_payload:
+            pending = self._build_pending(qp, tid)
+            self._queue.append(pending)
+            results.append(pending)
+        return results
+
     def format_prompt(self, question: PendingQuestion | None = None) -> str:
         """将问题渲染为用户可读文本。"""
         q = question or self.current()

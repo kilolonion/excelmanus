@@ -475,6 +475,26 @@ export interface PipelineStatus {
   stage: string;
   message: string;
   startedAt: number;
+  phaseIndex?: number;
+  totalPhases?: number;
+  specPath?: string;
+  diff?: {
+    changes: Array<{
+      type: string;
+      sheet?: string;
+      cells_added?: number;
+      cells_modified?: number;
+      modified_details?: Array<{
+        cell: string;
+        old_value: unknown;
+        new_value: unknown;
+      }>;
+      merges_added?: number;
+      styles_added?: number;
+    }>;
+    summary: string;
+  };
+  checkpoint?: Record<string, unknown>;
 }
 
 interface ChatState {

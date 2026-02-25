@@ -222,11 +222,14 @@ class TestB4ThresholdParsing:
 class TestB1ManifestRefreshOnExit:
     """Property 1 & 2: 所有退出路径调用 _try_refresh_manifest。"""
 
-    def test_property1_finish_task_calls_refresh(self) -> None:
-        """finish_task 退出路径调用 _try_refresh_manifest。"""
+    def test_property1_text_reply_exit_calls_refresh(self) -> None:
+        """文本回复退出路径调用 _try_refresh_manifest。
+
+        LLM 返回纯文本（无 tool_calls）时经 _handle_text_reply 退出，
+        统一走 _finalize_result → _try_refresh_manifest。
+        """
         from excelmanus.engine import AgentEngine
 
-        # 验证修复后代码中 finish_task 路径包含 _try_refresh_manifest 调用
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
@@ -234,9 +237,9 @@ class TestB1ManifestRefreshOnExit:
         helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
         assert "_try_refresh_manifest()" in helper_block
 
-        # finish_task 接受退出块应走统一出口
-        finish_task_block = source[source.find("finish_task 接受，退出循环"):]
-        assert "return _finalize_result(" in finish_task_block
+        # 文本回复退出路径走统一出口
+        text_reply_source = inspect.getsource(AgentEngine._handle_text_reply)
+        assert "_finalize_result(" in text_reply_source
 
     def test_property1_pending_approval_calls_refresh(self) -> None:
         """pending_approval 退出路径调用 _try_refresh_manifest。"""

@@ -77,8 +77,9 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 _ALWAYS_AVAILABLE_TOOLS = (
-    "task_create", "task_update", "ask_user", "delegate_to_subagent",
-    "parallel_delegate", "memory_save", "memory_read_topic",
+    "task_create", "task_update", "ask_user", "delegate",
+    "delegate_to_subagent", "parallel_delegate",
+    "memory_save", "memory_read_topic",
 )
 _ALWAYS_AVAILABLE_TOOLS_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS)
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
@@ -93,6 +94,7 @@ _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
 _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
 _VALID_WRITE_HINTS = {"may_write", "read_only", "unknown"}
+_MID_DISCUSSION_MAX_LEN = 2000  # 中间讨论放行阈值（字符数）
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "subagent",
@@ -399,6 +401,53 @@ def _looks_like_html_document(text: str) -> bool:
     if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
         return True
     return "<html" in lowered and "</html>" in lowered and "<head" in lowered
+
+
+# ── 澄清检测：判断文本是否为向用户反问/澄清 ──────────────────
+
+_CLARIFICATION_PATTERNS = _re.compile(
+    r"(?:"
+    # 中文澄清信号
+    r"请(?:问|告诉|提供|确认|说明|指定|明确)"
+    r"|(?:哪个|哪些|哪一个|哪一些)(?:文件|表格|sheet|工作表|工作簿)"
+    r"|需要(?:你|您)(?:提供|确认|说明|指定|补充)"
+    r"|(?:你|您)(?:想|希望|需要|打算)(?:对|用|在|把)"
+    r"|(?:你|您)(?:指的是|说的是|想要的是)"
+    r"|(?:能否|可以|可否|是否能)(?:告诉|说明|提供|确认)"
+    r"|以下(?:信息|内容|参数|细节)(?:需要|还需)"
+    r"|为了(?:更好地|准确地|正确地)(?:完成|执行|处理)"
+    # 英文澄清信号
+    r"|(?:which|what|could you|can you|please (?:specify|provide|confirm|clarify))"
+    r"|(?:I need (?:to know|more info|clarification))"
+    r"|(?:before I (?:proceed|start|begin|continue))"
+    r")",
+    _re.IGNORECASE,
+)
+
+# 问号密度阈值：短文本中问号占比高说明是在提问
+_MIN_QUESTION_MARKS_FOR_CLARIFICATION = 1
+
+
+def _looks_like_clarification(text: str) -> bool:
+    """判断文本是否为 agent 向用户的澄清/反问。
+
+    用于在首轮无工具调用时放行澄清性文本回复，
+    避免被执行守卫或写入门禁误拦截。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    # 条件 1：包含问号（中文或英文）
+    question_marks = stripped.count("？") + stripped.count("?")
+    if question_marks < _MIN_QUESTION_MARKS_FOR_CLARIFICATION:
+        return False
+    # 条件 2：匹配澄清模式关键词
+    if _CLARIFICATION_PATTERNS.search(stripped):
+        return True
+    # 条件 3：短文本（< 500 字符）且问号密度高（>= 2 个问号）
+    if len(stripped) < 500 and question_marks >= 2:
+        return True
+    return False
 
 
 # ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
@@ -830,7 +879,7 @@ class AgentEngine:
         # _session_turn, _last_iteration_count, _last_tool_call_count,
         # _last_success_count, _last_failure_count, _current_write_hint,
         # _has_write_tool_call, _turn_diagnostics, _session_diagnostics,
-        # _execution_guard_fired, _vba_exempt, _finish_task_warned
+        # _execution_guard_fired, _vba_exempt
         self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root, database=database)
@@ -871,6 +920,7 @@ class AgentEngine:
         self._hook_agent_action_depth: int = 0
         self._question_flow = QuestionFlowManager(max_queue_size=8)
         self._system_question_actions: dict[str, dict[str, Any]] = {}
+        self._batch_answers: dict[str, list[dict[str, Any]]] = {}
         self._pending_question_route_result: SkillMatchResult | None = None
         self._pending_approval_route_result: SkillMatchResult | None = None
         self._pending_approval_tool_call_id: str | None = None
@@ -1230,14 +1280,6 @@ class AgentEngine:
     def _vba_exempt(self, value: bool) -> None:
         self._state.vba_exempt = value
 
-    @property
-    def _finish_task_warned(self) -> bool:
-        return self._state.finish_task_warned
-
-    @_finish_task_warned.setter
-    def _finish_task_warned(self, value: bool) -> None:
-        self._state.finish_task_warned = value
-
     def _get_tool_write_effect(self, tool_name: str) -> str:
         """读取工具声明的写入语义；缺失时回退 unknown。"""
         tool = self._registry.get_tool(tool_name)
@@ -1298,6 +1340,7 @@ class AgentEngine:
         # pending question/approval/plan 处理路径，导致孤立 tool_call_id 400 错误
         self._question_flow.clear()
         self._system_question_actions.clear()
+        self._batch_answers.clear()
         self._pending_question_route_result = None
         self._approval.clear_pending()
         self._pending_approval_route_result = None
@@ -2820,7 +2863,7 @@ class AgentEngine:
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """构建 LLM-Native 元工具定义。
 
-        构建 activate_skill + finish_task + delegate_to_subagent + list_subagents + ask_user。
+        构建 activate_skill + delegate + list_subagents + ask_user。
         """
         # ── 构建 skill catalog ──
         skill_catalog = "当前无可用技能。"
@@ -2883,16 +2926,13 @@ class AgentEngine:
         )
         subagent_catalog, subagent_names = self._subagent_registry.build_catalog()
         delegate_description = (
-            "把任务委派给独立上下文的 subagent 执行。\n"
+            "委派子任务给子代理执行。单任务用 task 字符串；多个独立任务用 tasks 数组并行执行。\n"
             "⚠️ 仅适用于需要 20+ 次工具调用的大规模后台任务（如：多文件批量变换、"
             "复杂多步骤修改、长链条数据管线）。\n"
-            "⚠️ 禁止将以下任务委派给 subagent：\n"
-            "- 单文件读取、探查（直接用 inspect_excel_files 或 read_excel）\n"
-            "- 简单写入/格式化（直接用 run_code 或对应写入工具）\n"
-            "- 单步分析（直接用 filter_data 或 run_code）\n"
-            "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物），"
-            "简单任务直接用 task 字符串。\n"
-            "注意：委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
+            "⚠️ 禁止委派：单文件读取/探查、简单写入/格式化、单步分析——直接用对应工具。\n"
+            "复杂任务建议使用 task_brief 结构化分派（含背景、目标、约束、交付物）。\n"
+            "并行模式（tasks 数组）要求彼此独立、不操作同一文件，最多 5 个。\n"
+            "委派即执行，不要先描述你将要委派什么，直接调用。\n\n"
             "Subagent_Catalog:\n"
             f"{subagent_catalog or '当前无可用子代理。'}"
         )
@@ -2901,69 +2941,10 @@ class AgentEngine:
             "向用户提问并获取回答。这是与用户进行结构化交互的唯一方式。"
             "当你需要用户做选择、确认意图或做决定时，必须调用本工具，"
             "不要在文本回复中列出编号选项让用户回复。"
-            "典型场景：多个候选目标需确认、指令有多种解读、"
-            "任务有多条可行路径（如大文件的输出方式）、不可逆操作需确认。"
-            "不需要问的情况：只有一条合理路径时直接执行；用户意图已明确时默认行动。"
             "选项应具体（列出实际文件名/方案名），不要泛泛而问。"
+            "需要收集多个维度信息时，在 questions 数组中传多个问题，系统逐个展示。"
             "调用后暂停执行，等待用户回答后继续。"
         )
-        # 写入门禁：仅当 write_hint == "may_write" 时注入 finish_task
-        finish_task_tool = None
-        if _normalize_write_hint(getattr(self, "_current_write_hint", "unknown")) == "may_write":
-            # bench 模式：精简汇报，减少最后一轮 token 消耗
-            if getattr(self, "_bench_mode", False):
-                finish_task_tool = {
-                    "type": "function",
-                    "function": {
-                        "name": "finish_task",
-                        "description": (
-                            "任务完成声明。写入操作执行完毕后调用。"
-                            "只需一句话概括即可，不要详细展开。"
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "summary": {
-                                    "type": "string",
-                                    "description": "一句话完成摘要",
-                                },
-                            },
-                            "required": ["summary"],
-                            "additionalProperties": False,
-                        },
-                    },
-                }
-            else:
-                finish_task_tool = {
-                    "type": "function",
-                    "function": {
-                        "name": "finish_task",
-                        "description": (
-                            "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
-                            "用自然语言在 summary 中向用户汇报：做了什么、关键结果、涉及的文件，"
-                            "有价值时可附带后续建议。语气自然，像同事间的简洁对话，不要套模板。"
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "summary": {
-                                    "type": "string",
-                                    "description": (
-                                        "用自然语言汇报任务结果。内容应涵盖：做了什么、关键数据/发现、涉及哪些文件。"
-                                        "如有必要可附带后续建议。不要逐条罗列，用流畅的段落表达即可。"
-                                    ),
-                                },
-                                "affected_files": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "涉及修改的文件路径列表（用于触发文件刷新事件）",
-                                },
-                            },
-                            "required": [],
-                            "additionalProperties": False,
-                        },
-                    },
-                }
         tools = [
             {
                 "type": "function",
@@ -2987,18 +2968,18 @@ class AgentEngine:
             {
                 "type": "function",
                 "function": {
-                    "name": "delegate_to_subagent",
+                    "name": "delegate",
                     "description": delegate_description,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "task": {
                                 "type": "string",
-                                "description": "简单任务描述（与 task_brief 二选一）",
+                                "description": "单任务描述（与 tasks 二选一；与 task_brief 二选一）",
                             },
                             "task_brief": {
                                 "type": "object",
-                                "description": "结构化任务描述，适用于复杂研究或多步骤修改任务（与 task 二选一）",
+                                "description": "结构化任务描述，适用于复杂任务（与 task 二选一）",
                                 "properties": {
                                     "title": {
                                         "type": "string",
@@ -3010,31 +2991,60 @@ class AgentEngine:
                                     },
                                     "objectives": {
                                         "type": "array",
-                                        "description": "研究或执行目标列表",
+                                        "description": "目标列表",
                                         "items": {"type": "string"},
                                     },
                                     "constraints": {
                                         "type": "array",
-                                        "description": "约束条件（如：只修改哪些文件、不要改动哪些模块）",
+                                        "description": "约束条件",
                                         "items": {"type": "string"},
                                     },
                                     "deliverables": {
                                         "type": "array",
-                                        "description": "期望的交付物列表",
+                                        "description": "期望交付物",
                                         "items": {"type": "string"},
                                     },
                                 },
                                 "required": ["title"],
                                 "additionalProperties": False,
                             },
+                            "tasks": {
+                                "type": "array",
+                                "description": "并行子任务列表（与 task/task_brief 二选一），2-5 个独立任务",
+                                "minItems": 2,
+                                "maxItems": 5,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "task": {
+                                            "type": "string",
+                                            "description": "子任务描述",
+                                        },
+                                        "agent_name": {
+                                            "type": "string",
+                                            "description": "可选，指定子代理名称",
+                                            **({
+                                                "enum": subagent_names,
+                                            } if subagent_names else {}),
+                                        },
+                                        "file_paths": {
+                                            "type": "array",
+                                            "description": "该子任务涉及的文件路径",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                    "required": ["task"],
+                                    "additionalProperties": False,
+                                },
+                            },
                             "agent_name": {
                                 "type": "string",
-                                "description": "可选，指定子代理名称；不传则自动选择",
+                                "description": "可选，指定子代理名称（仅单任务模式）",
                                 **({"enum": subagent_names} if subagent_names else {}),
                             },
                             "file_paths": {
                                 "type": "array",
-                                "description": "可选，相关文件路径列表",
+                                "description": "可选，相关文件路径列表（仅单任务模式）",
                                 "items": {"type": "string"},
                             },
                         },
@@ -3059,110 +3069,65 @@ class AgentEngine:
             {
                 "type": "function",
                 "function": {
-                    "name": "parallel_delegate",
-                    "description": (
-                        "并行委派多个独立子任务给不同子代理同时执行。\n"
-                        "⚠️ 仅适用于多个彼此独立、不操作同一文件的任务。\n"
-                        "典型场景：同时分析 A.xlsx 销售数据 + 格式化 B.xlsx 报表。\n"
-                        "⚠️ 禁止将有依赖关系的任务并行（如：先分析再基于结果修改）。\n"
-                        "每个子任务的 file_paths 不能有交集，否则会被拒绝。\n"
-                        "最多同时并行 5 个子任务。"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "tasks": {
-                                "type": "array",
-                                "description": "并行子任务列表",
-                                "minItems": 2,
-                                "maxItems": 5,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "task": {
-                                            "type": "string",
-                                            "description": "子任务描述",
-                                        },
-                                        "agent_name": {
-                                            "type": "string",
-                                            "description": "可选，指定子代理名称；不传则自动选择",
-                                            **({
-                                                "enum": subagent_names,
-                                            } if subagent_names else {}),
-                                        },
-                                        "file_paths": {
-                                            "type": "array",
-                                            "description": "该子任务涉及的文件路径",
-                                            "items": {"type": "string"},
-                                        },
-                                    },
-                                    "required": ["task"],
-                                    "additionalProperties": False,
-                                },
-                            },
-                        },
-                        "required": ["tasks"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "ask_user",
                     "description": ask_user_description,
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "question": {
-                                "type": "object",
-                                "properties": {
-                                    "text": {
-                                        "type": "string",
-                                        "description": "问题正文",
-                                    },
-                                    "header": {
-                                        "type": "string",
-                                        "description": "短标题（建议 <= 12 字符）",
-                                    },
-                                    "options": {
-                                        "type": "array",
-                                        "description": "候选项（1-4个），系统会自动追加 Other。",
-                                        "minItems": 1,
-                                        "maxItems": 4,
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "label": {
-                                                    "type": "string",
-                                                    "description": "选项名称",
+                            "questions": {
+                                "type": "array",
+                                "description": "问题列表，单问题传 1 个元素，多问题传多个（系统逐个展示）。",
+                                "minItems": 1,
+                                "maxItems": 8,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {
+                                            "type": "string",
+                                            "description": "问题正文",
+                                        },
+                                        "header": {
+                                            "type": "string",
+                                            "description": "短标题（建议 <= 12 字符）",
+                                        },
+                                        "options": {
+                                            "type": "array",
+                                            "description": "候选项（1-4个），系统会自动追加 Other。",
+                                            "minItems": 1,
+                                            "maxItems": 4,
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "label": {
+                                                        "type": "string",
+                                                        "description": "选项名称",
+                                                    },
+                                                    "description": {
+                                                        "type": "string",
+                                                        "description": "该选项的权衡说明",
+                                                    },
                                                 },
-                                                "description": {
-                                                    "type": "string",
-                                                    "description": "该选项的权衡说明",
-                                                },
+                                                "required": ["label"],
+                                                "additionalProperties": False,
                                             },
-                                            "required": ["label"],
-                                            "additionalProperties": False,
+                                        },
+                                        "multiSelect": {
+                                            "type": "boolean",
+                                            "description": "是否允许多选",
                                         },
                                     },
-                                    "multiSelect": {
-                                        "type": "boolean",
-                                        "description": "是否允许多选",
-                                    },
+                                    "required": ["text", "options"],
+                                    "additionalProperties": False,
                                 },
-                                "required": ["text", "options"],
-                                "additionalProperties": False,
                             },
                         },
-                        "required": ["question"],
+                        "required": ["questions"],
                         "additionalProperties": False,
                     },
                 },
             },
         ]
-        if finish_task_tool is not None:
-            tools.append(finish_task_tool)
+
         return tools
 
     def _build_v5_tools(self, *, write_hint: str = "unknown") -> list[dict[str, Any]]:
@@ -3542,7 +3507,7 @@ class AgentEngine:
         summary: str,
         on_event: EventCallback | None = None,
     ) -> str | None:
-        """Advisory 模式：finish_task 前运行 verifier 子代理。
+        """Advisory 模式：任务完成前运行 verifier 子代理。
 
         返回附加提示文本（拼接到 finish 响应），或 None 表示跳过/失败（fail-open）。
         不阻塞 finish_accepted，仅追加诊断信息。
@@ -4045,20 +4010,35 @@ class AgentEngine:
         on_event: EventCallback | None,
         iteration: int,
     ) -> tuple[str, str]:
-        question_value = arguments.get("question")
-        if not isinstance(question_value, dict):
-            raise ValueError("工具参数错误: question 必须为对象。")
+        # ── 统一 questions 数组模式 ──
+        questions_value = arguments.get("questions")
 
-        pending = self._question_flow.enqueue(
-            question_payload=question_value,
+        # 向后兼容：旧的 question（单数对象）自动转为 questions 数组
+        if not isinstance(questions_value, list) or len(questions_value) == 0:
+            question_value = arguments.get("question")
+            if isinstance(question_value, dict):
+                questions_value = [question_value]
+            else:
+                raise ValueError("工具参数错误: questions 必须为非空数组。")
+
+        pending_list = self._question_flow.enqueue_batch(
+            questions_payload=questions_value,
             tool_call_id=tool_call_id,
         )
+        # 只 emit 第一个问题，后续问题在回答后逐个 emit
+        first = pending_list[0]
         self._emit_user_question_event(
-            question=pending,
+            question=first,
             on_event=on_event,
             iteration=iteration,
         )
-        return f"已创建待回答问题 `{pending.question_id}`。", pending.question_id
+        ids = [p.question_id for p in pending_list]
+        if len(pending_list) == 1:
+            return f"已创建待回答问题 `{first.question_id}`。", first.question_id
+        return (
+            f"已创建 {len(pending_list)} 个待回答问题：{', '.join(ids)}。",
+            first.question_id,
+        )
 
     def _enqueue_subagent_approval_question(
         self,
@@ -4277,8 +4257,38 @@ class AgentEngine:
 
         # plan 审批是系统级问题，不对应真实 tool_call，避免写入孤立 tool result。
         if action_type != _SYSTEM_Q_PLAN_APPROVAL:
-            tool_result = json.dumps(parsed.to_tool_result(), ensure_ascii=False)
-            self._memory.add_tool_result(popped.tool_call_id, tool_result)
+            # ── 多问题批量模式：同一 tool_call_id 的问题需要累积回答 ──
+            # 检查队列中是否还有同一 tool_call_id 的后续问题
+            next_q = self._question_flow.current()
+            same_batch = (
+                next_q is not None
+                and next_q.tool_call_id == popped.tool_call_id
+            )
+            if same_batch:
+                # 累积到 _batch_answers，暂不写入 tool_result
+                if not hasattr(self, "_batch_answers"):
+                    self._batch_answers: dict[str, list[dict[str, Any]]] = {}
+                batch_key = popped.tool_call_id
+                if batch_key not in self._batch_answers:
+                    self._batch_answers[batch_key] = []
+                self._batch_answers[batch_key].append(parsed.to_tool_result())
+            else:
+                # 最后一个问题（或单问题模式）：合并所有累积回答 + 当前回答，一次性写入
+                batch_key = popped.tool_call_id
+                accumulated = []
+                if hasattr(self, "_batch_answers") and batch_key in self._batch_answers:
+                    accumulated = self._batch_answers.pop(batch_key)
+                accumulated.append(parsed.to_tool_result())
+                if len(accumulated) == 1:
+                    # 单问题：保持原格式
+                    tool_result = json.dumps(accumulated[0], ensure_ascii=False)
+                else:
+                    # 多问题：合并为数组
+                    tool_result = json.dumps(
+                        {"answers": accumulated, "total": len(accumulated)},
+                        ensure_ascii=False,
+                    )
+                self._memory.add_tool_result(popped.tool_call_id, tool_result)
 
         logger.info("已接收问题回答: %s", parsed.question_id)
         if system_action is not None:
@@ -4349,8 +4359,18 @@ class AgentEngine:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
 
         def _finalize_result(**kwargs: Any) -> ChatResult:
-            """统一出口：返回前尝试刷新 manifest，避免路径遗漏。"""
+            """统一出口：刷新 manifest + 自动发射 FILES_CHANGED 事件。"""
             self._try_refresh_manifest()
+            # 自动发射 FILES_CHANGED 事件（替代 finish_task 的 affected_files）
+            if self._state.affected_files and on_event is not None:
+                from excelmanus.events import EventType, ToolCallEvent
+                self.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.FILES_CHANGED,
+                        changed_files=list(self._state.affected_files),
+                    ),
+                )
             return ChatResult(**kwargs)
 
         max_iter = self._config.max_iterations
@@ -4866,30 +4886,6 @@ class AgentEngine:
                             _tc_args = {}
                         self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
 
-                        # finish_task 成功接受时退出循环
-                        if (
-                            tc_result.tool_name == "finish_task"
-                            and tc_result.success
-                            and tc_result.finish_accepted
-                        ):
-                            if tool_call_id:
-                                self._memory.add_tool_result(tool_call_id, tc_result.result)
-                            self._last_iteration_count = iteration
-                            self._last_tool_call_count += 1
-                            self._last_success_count += 1
-                            reply = tc_result.result
-                            self._memory.add_assistant_message(reply)
-                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
-                            return _finalize_result(
-                                reply=reply,
-                                tool_calls=list(all_tool_results),
-                                iterations=iteration,
-                                truncated=False,
-                                prompt_tokens=total_prompt_tokens,
-                                completion_tokens=total_completion_tokens,
-                                total_tokens=total_prompt_tokens + total_completion_tokens,
-                            )
-
                         if not tc_result.defer_tool_result and tool_call_id:
                             self._memory.add_tool_result(tool_call_id, tc_result.result)
 
@@ -5154,6 +5150,39 @@ class AgentEngine:
             )
 
         self._memory.add_assistant_message(reply_text)
+
+        # ── 澄清放行：agent 在首轮无工具调用时返回澄清性文本，直接放行 ──
+        # 当 agent 判断用户指令模糊而选择文本回复反问时，这是合理行为，
+        # 不应被执行守卫或写入门禁拦截强制继续。
+        if (
+            iteration == 0
+            and not all_tool_results
+            and _looks_like_clarification(reply_text)
+        ):
+            self._last_iteration_count = iteration
+            logger.info("澄清放行：首轮无工具调用，检测到澄清性文本回复")
+            return "return", _finalize_result(
+                reply=reply_text,
+                tool_calls=list(all_tool_results),
+                iterations=iteration,
+                truncated=False,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
+
+        # ── 中间讨论放行：agent 在工具调用间输出分析文本，不应被守卫拦截 ──
+        # 当 agent 已经执行过工具（说明正在工作中），且当前文本不是公式建议，
+        # 则视为中间过程讨论，允许继续下一轮迭代而不触发执行守卫或写入门禁。
+        if (
+            all_tool_results  # 已经执行过工具，说明 agent 在工作中
+            and iteration < max_iter - 1
+            and not _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
+            and len(reply_text) < _MID_DISCUSSION_MAX_LEN  # 中间讨论通常较短
+        ):
+            consecutive_text_only = 0  # 重置计数，不累积
+            logger.info("中间讨论放行：agent 在工具调用间输出分析文本 (iter=%d)", iteration)
+            return "continue", consecutive_text_only
 
         # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
         if (
@@ -5600,6 +5629,7 @@ class AgentEngine:
         self._tools_cache = None  # 技能清空 → 失效缓存
         self._question_flow.clear()
         self._system_question_actions.clear()
+        self._batch_answers.clear()
         self._pending_question_route_result = None
         self._pending_approval_route_result = None
         self._pending_approval_tool_call_id = None

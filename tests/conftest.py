@@ -1,6 +1,8 @@
 """pytest 全局配置与共享 fixtures。"""
 
 import os
+from unittest.mock import AsyncMock
+
 import pytest
 from hypothesis import settings as hyp_settings, HealthCheck
 
@@ -21,6 +23,22 @@ hyp_settings.register_profile(
     suppress_health_check=[HealthCheck.too_slow],
 )
 hyp_settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
+
+
+@pytest.fixture(autouse=True)
+def _disable_mid_discussion_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """禁用引擎的"中间讨论放行"机制，防止测试中 mock 响应列表被额外迭代耗尽。
+
+    引擎在工具调用后收到短文本回复时会触发"中间讨论放行"继续迭代，
+    导致测试中预设的有限 mock 响应被耗尽。此 fixture 通过 monkeypatch
+    将 excelmanus.engine 模块中的 _MID_DISCUSSION_MAX_LEN 阈值设为 0，
+    使该分支条件 `len(reply_text) < 0` 永远不成立。
+    """
+    try:
+        import excelmanus.engine as engine_mod
+        monkeypatch.setattr(engine_mod, "_MID_DISCUSSION_MAX_LEN", 0)
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)

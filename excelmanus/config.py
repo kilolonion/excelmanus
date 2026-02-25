@@ -417,6 +417,9 @@ class ExcelManusConfig:
     vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
     vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
     vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
+    # 渐进式管线配置
+    vlm_pipeline_uncertainty_threshold: int = 5  # uncertainty 数量超过此值时暂停
+    vlm_pipeline_uncertainty_confidence_floor: float = 0.3  # 任一项低于此置信度时暂停
     main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True

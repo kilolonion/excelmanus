@@ -8,6 +8,10 @@ import {
   FileSearch,
   Cpu,
   Wrench,
+  Grid3X3,
+  Database,
+  Palette,
+  ShieldCheck,
 } from "lucide-react";
 import type { PipelineStatus } from "@/stores/chat-store";
 
@@ -25,6 +29,11 @@ const STAGES = [
   { key: "calling_llm", label: "模型通信", icon: Cpu },
   { key: "generating_tool_call", label: "生成调用", icon: Wrench },
   { key: "executing_tools", label: "执行工具", icon: Wrench },
+  // VLM 渐进式提取阶段
+  { key: "vlm_extract_structure", label: "识别结构", icon: Grid3X3 },
+  { key: "vlm_extract_data", label: "提取数据", icon: Database },
+  { key: "vlm_extract_style", label: "提取样式", icon: Palette },
+  { key: "vlm_extract_verification", label: "自校验", icon: ShieldCheck },
 ] as const;
 
 type StageKey = (typeof STAGES)[number]["key"];

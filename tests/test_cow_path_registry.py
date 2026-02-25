@@ -220,12 +220,12 @@ class TestRedirectCowPaths:
         assert new_args["content"] == "hello"  # 非路径字段不变
 
     def test_no_path_fields_tool_skipped(self):
-        """没有路径字段映射的工具（如 finish_task）不做拦截。"""
+        """没有路径字段映射的工具（如 ask_user）不做拦截。"""
         dispatcher = self._make_dispatcher(
             registry={"bench/external/data.xlsx": "outputs/data.xlsx"},
         )
-        args = {"summary": "done"}
-        new_args, reminders = dispatcher._redirect_cow_paths("finish_task", args)
+        args = {"question": "which file?"}
+        new_args, reminders = dispatcher._redirect_cow_paths("ask_user", args)
         assert new_args == args
         assert reminders == []
 

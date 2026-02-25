@@ -206,3 +206,58 @@ class TestQueueAndPrompt:
         assert "1. 方案A" in prompt
         assert "Other" in prompt
         assert "还有 1 个问题" in prompt
+
+
+class TestBatchEnqueue:
+    """enqueue_batch 批量入队测试。"""
+
+    def test_batch_enqueue_basic(self) -> None:
+        manager = QuestionFlowManager(max_queue_size=8)
+        questions = [
+            _payload(header="Q1", text="问题1"),
+            _payload(header="Q2", text="问题2"),
+            _payload(header="Q3", text="问题3"),
+        ]
+        results = manager.enqueue_batch(questions, tool_call_id="call_batch")
+        assert len(results) == 3
+        assert manager.queue_size() == 3
+        # 所有问题共享同一个 tool_call_id
+        for r in results:
+            assert r.tool_call_id == "call_batch"
+        # FIFO 顺序
+        assert manager.current().text == "问题1"
+
+    def test_batch_enqueue_respects_capacity(self) -> None:
+        manager = QuestionFlowManager(max_queue_size=3)
+        manager.enqueue(_payload(header="Pre"), tool_call_id="call_pre")
+        with pytest.raises(ValueError, match="容量"):
+            manager.enqueue_batch(
+                [_payload(header="Q1"), _payload(header="Q2"), _payload(header="Q3")],
+                tool_call_id="call_batch",
+            )
+
+    def test_batch_enqueue_empty_list_rejected(self) -> None:
+        manager = QuestionFlowManager()
+        with pytest.raises(ValueError, match="非空"):
+            manager.enqueue_batch([], tool_call_id="call_batch")
+
+    def test_batch_enqueue_exceeds_max_queue_size(self) -> None:
+        manager = QuestionFlowManager(max_queue_size=2)
+        with pytest.raises(ValueError, match="上限"):
+            manager.enqueue_batch(
+                [_payload(header="Q1"), _payload(header="Q2"), _payload(header="Q3")],
+                tool_call_id="call_batch",
+            )
+
+    def test_batch_fifo_pop_all(self) -> None:
+        manager = QuestionFlowManager()
+        questions = [
+            _payload(header="Q1", text="第一个"),
+            _payload(header="Q2", text="第二个"),
+        ]
+        manager.enqueue_batch(questions, tool_call_id="call_batch")
+        q1 = manager.pop_current()
+        assert q1.text == "第一个"
+        q2 = manager.pop_current()
+        assert q2.text == "第二个"
+        assert not manager.has_pending()

@@ -118,6 +118,11 @@ class ToolCallEvent:
     # pipeline_progress 事件字段
     pipeline_stage: str = ""
     pipeline_message: str = ""
+    pipeline_phase_index: int = -1  # 当前阶段序号 (0-3)
+    pipeline_total_phases: int = 4
+    pipeline_spec_path: str = ""  # 当前阶段产出的 spec 文件路径
+    pipeline_diff: Optional[Dict[str, Any]] = None  # 阶段间 diff 数据
+    pipeline_checkpoint: Optional[Dict[str, Any]] = None  # 断点续跑信息
     # memory_extracted 事件字段
     memory_entries: List[Dict[str, Any]] = field(default_factory=list)
     memory_trigger: str = ""  # "periodic" | "pre_compaction" | "session_end"

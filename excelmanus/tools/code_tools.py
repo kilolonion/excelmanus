@@ -905,7 +905,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="run_code",
-            description="执行 Python 代码（支持内联代码片段或磁盘脚本文件，二选一）。适用于复杂数据变换（透视、转置、分组聚合、跨表匹配填充、条件行删除等）、批量计算、以及专用工具难以一步完成的多步逻辑。优先编写小步可验证脚本，执行后立即检查结果。",
+            description="执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -920,7 +920,7 @@ def get_tools() -> list[ToolDef]:
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "传递给脚本的位置参数（仅文件模式）",
+                        "description": "脚本位置参数（仅文件模式）",
                     },
                     "workdir": {
                         "type": "string",
@@ -934,26 +934,26 @@ def get_tools() -> list[ToolDef]:
                     },
                     "python_command": {
                         "type": "string",
-                        "description": "解释器命令，默认 auto 自动探测",
+                        "description": "解释器命令，默认 auto",
                         "default": "auto",
                     },
                     "tail_lines": {
                         "type": "integer",
-                        "description": "返回日志尾部行数",
+                        "description": "返回尾部行数",
                         "default": 80,
                     },
                     "require_excel_deps": {
                         "type": "boolean",
-                        "description": "是否要求解释器具备 pandas/openpyxl",
+                        "description": "是否要求 pandas/openpyxl",
                         "default": True,
                     },
                     "stdout_file": {
                         "type": "string",
-                        "description": "完整 stdout 日志输出路径（可选）",
+                        "description": "stdout 日志输出路径",
                     },
                     "stderr_file": {
                         "type": "string",
-                        "description": "完整 stderr 日志输出路径（可选）",
+                        "description": "stderr 日志输出路径",
                     },
                 },
                 "additionalProperties": False,

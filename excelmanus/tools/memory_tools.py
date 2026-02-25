@@ -178,19 +178,12 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "topic": {
                         "type": "string",
-                        "description": (
-                            "主题名称，支持 file_patterns、user_prefs、"
-                            "error_solutions、general；"
-                            "兼容别名 file_pattern、user_pref、error_solution"
-                        ),
+                        "description": "主题名称",
                         "enum": [
                             "file_patterns",
                             "user_prefs",
                             "error_solutions",
                             "general",
-                            "file_pattern",
-                            "user_pref",
-                            "error_solution",
                         ],
                     },
                 },
@@ -202,31 +195,17 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="memory_save",
-            description=(
-                "将有价值的信息保存到持久记忆，供未来会话复用。"
-                "适合保存：文件结构特征、用户偏好、错误解决方案、常用工作流模式。"
-                "不要保存：一次性数据值、临时文件路径、当前会话已知的上下文。"
-            ),
+            description="将有价值的信息保存到持久记忆，供未来会话复用",
             input_schema={
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": (
-                            "要保存的记忆内容，应简洁、结构化。"
-                            "例如：'销售数据.xlsx 包含 sheet「2024年」，"
-                            "列：日期(date)、产品(str)、数量(int)、单价(float)、金额(float)，"
-                            "header 在第1行，约5000行数据'"
-                        ),
+                        "description": "要保存的记忆内容，应简洁、结构化",
                     },
                     "category": {
                         "type": "string",
-                        "description": (
-                            "记忆类别：file_pattern（文件结构）、"
-                            "user_pref（用户偏好）、"
-                            "error_solution（错误解决方案）、"
-                            "general（其他有价值信息）"
-                        ),
+                        "description": "记忆类别",
                         "enum": [
                             "file_pattern",
                             "user_pref",

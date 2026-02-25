@@ -424,11 +424,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="vlookup_write",
-            description=(
-                "跨表匹配写回：从源表查找或聚合数据，写入目标表新列。"
-                "类似 VLOOKUP/INDEX-MATCH 但支持聚合（sum/mean/count 等）。"
-                "适用于：产品销售额写入产品目录、部门人数统计等跨表操作"
-            ),
+            description="跨表匹配写回：从源表查找/聚合数据写入目标表新列（类 VLOOKUP）",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -469,12 +465,12 @@ def get_tools() -> list[ToolDef]:
                     "agg_func": {
                         "type": "string",
                         "enum": ["first", "sum", "mean", "count", "max", "min"],
-                        "description": "聚合函数：first（取第一条）、sum、mean、count、max、min。默认 first",
+                        "description": "聚合函数，默认 first",
                         "default": "first",
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "表头行号（1-indexed），默认自动检测。建议不传，由 read_excel 自动检测后参考",
+                        "description": "表头行号（1-indexed），默认自动检测",
                     },
                 },
                 "required": ["file_path", "source_sheet", "source_key", "source_values", "target_sheet", "target_key"],
@@ -485,11 +481,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="computed_column",
-            description=(
-                "新增计算列：用声明式表达式计算新列并写回工作表。"
-                "表达式语法：col('列名') 引用列，today() 当前日期，where(条件,真值,假值) 条件判断。"
-                "示例：col('实付金额') * 0.3、(today() - col('入职日期')).dt.days / 365"
-            ),
+            description="新增计算列：用声明式表达式（col('列名')、today()、where()）计算新列并写回",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -507,11 +499,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "expression": {
                         "type": "string",
-                        "description": (
-                            "Python 表达式。用 col('列名') 引用列，today() 获取当前日期，"
-                            "where(条件, 真值, 假值) 做条件判断。"
-                            "示例：col('金额') * 0.3、(today() - col('入职日期')).dt.days / 365"
-                        ),
+                        "description": "Python 表达式，用 col('列名') 引用列、today() 获取日期、where(条件,真值,假值) 条件判断",
                     },
                     "output_type": {
                         "type": "string",

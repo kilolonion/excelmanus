@@ -377,6 +377,17 @@ def _gemini_response_to_openai(
     usage_meta = data.get("usageMetadata", {})
     prompt_tokens = usage_meta.get("promptTokenCount", 0)
     completion_tokens = usage_meta.get("candidatesTokenCount", 0)
+    cached_content_tokens = usage_meta.get("cachedContentTokenCount", 0)
+
+    usage = _Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    # 附加 Gemini 缓存统计到 usage 对象（供上层 _extract_cached_tokens 提取）
+    if cached_content_tokens:
+        # 兼容 OpenAI 格式：模拟 prompt_tokens_details.cached_tokens
+        usage.prompt_tokens_details = {"cached_tokens": cached_content_tokens}  # type: ignore[attr-defined]
 
     return _ChatCompletion(
         id=f"gemini-{uuid.uuid4().hex[:12]}",
@@ -385,11 +396,7 @@ def _gemini_response_to_openai(
             message=message,
             finish_reason=finish_reason,
         )],
-        usage=_Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
+        usage=usage,
     )
 
 
@@ -641,11 +648,15 @@ class GeminiClient:
                     if not candidates:
                         usage_meta = chunk_data.get("usageMetadata")
                         if usage_meta:
-                            yield StreamDelta(usage=_Usage(
+                            u = _Usage(
                                 prompt_tokens=usage_meta.get("promptTokenCount", 0),
                                 completion_tokens=usage_meta.get("candidatesTokenCount", 0),
                                 total_tokens=usage_meta.get("totalTokenCount", 0),
-                            ))
+                            )
+                            _cached = usage_meta.get("cachedContentTokenCount", 0)
+                            if _cached:
+                                u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
+                            yield StreamDelta(usage=u)
                         continue
 
                     candidate = candidates[0]
@@ -678,6 +689,9 @@ class GeminiClient:
                                 completion_tokens=usage_meta.get("candidatesTokenCount", 0),
                                 total_tokens=usage_meta.get("totalTokenCount", 0),
                             )
+                            _cached = usage_meta.get("cachedContentTokenCount", 0)
+                            if _cached:
+                                u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
                         yield StreamDelta(finish_reason=mapped_finish, usage=u)
 
         return _stream_generator()

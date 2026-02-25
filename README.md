@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>v1.5.6</strong> · 用自然语言操作 Excel —— 读数据、写公式、跑分析、画图表，说一句话就够了。
+  <strong>v1.5.7</strong> · 用自然语言操作 Excel —— 读数据、写公式、跑分析、画图表，说一句话就够了。
 </p>
 
 ExcelManus 是一个基于大语言模型的 Excel 智能代理。你不需要记住任何函数语法或者写 VBA，只需要告诉它你想做什么，它会自己完成剩下的事。支持 OpenAI、Claude、Gemini 等主流模型，从 URL 自动识别 Provider，无需手动切换。

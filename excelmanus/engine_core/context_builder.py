@@ -189,7 +189,7 @@ class ContextBuilder:
         if max_iter > 0 and iteration >= max_iter * 0.6:
             parts.append(
                 f"⚠️ 接近迭代上限（{iteration}/{max_iter}），"
-                "请尽快完成任务或调用 finish_task/ask_user。"
+                "请尽快完成任务或调用 ask_user。"
             )
 
         # 条件 2：连续失败 >= 3

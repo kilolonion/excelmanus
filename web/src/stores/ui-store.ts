@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getIsMobile } from "@/hooks/use-mobile";
 
 interface UIState {
   sidebarOpen: boolean;
@@ -17,7 +18,7 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  sidebarOpen: true,
+  sidebarOpen: !getIsMobile(),
   currentModel: "",
   fullAccessEnabled: false,
   planModeEnabled: false,

@@ -6,7 +6,7 @@
 - verifier 异常 → fail-open（不影响 finish）
 - verifier 未注册 → 跳过
 - subagent 关闭 → 跳过
-- finish_task 有写入时触发 verifier + 结果拼接
+- 任务自然退出（有写入）时触发 verifier + 结果拼接
 """
 
 from __future__ import annotations
@@ -178,61 +178,5 @@ class TestVerifierAdvisorySkip:
         assert suffix is None
 
 
-class TestFinishTaskWithVerifierAdvisory:
-    """finish_task 有写入时直接完成，不触发 verifier。"""
-
-    @staticmethod
-    def _finish_task_call(report: dict | None = None, summary: str = "done") -> types.SimpleNamespace:
-        args: dict = {}
-        if report is not None:
-            args["report"] = report
-        else:
-            args["summary"] = summary
-        return types.SimpleNamespace(
-            id="call_finish",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments=json.dumps(args, ensure_ascii=False),
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_finish_with_write_skips_verifier(self):
-        """有写入操作时直接完成，不调用 verifier。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-        engine._current_write_hint = "may_write"
-
-        run_subagent_mock = AsyncMock()
-        with patch.object(engine, "run_subagent", run_subagent_mock):
-            result = await engine._execute_tool_call(
-                self._finish_task_call(
-                    report={"operations": "写入数据", "key_findings": "100行"},
-                ),
-                tool_scope=None,
-                on_event=None,
-                iteration=1,
-            )
-
-        assert result.finish_accepted is True
-        assert "任务完成" in result.result
-        run_subagent_mock.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_finish_without_write_does_not_trigger_verifier(self):
-        """无写入时不触发 verifier。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = False
-        engine._current_write_hint = "may_write"
-
-        run_subagent_mock = AsyncMock()
-        with patch.object(engine, "run_subagent", run_subagent_mock):
-            result = await engine._execute_tool_call(
-                self._finish_task_call(summary="只是查询"),
-                tool_scope=None,
-                on_event=None,
-                iteration=1,
-            )
-
-        assert result.finish_accepted is False
-        run_subagent_mock.assert_not_awaited()
+# 注：verifier 在任务自然退出（LLM 返回纯文本）且有写入时由引擎层触发，
+# 不再依赖 finish_task。相关测试见 _handle_text_reply / _finalize_result 路径。

@@ -56,14 +56,16 @@ def test_create_app_uses_config_cors_for_middleware() -> None:
     config = _test_config(
         cors_allow_origins=("http://a.example", "http://b.example")
     )
-    local_app = api_module.create_app(config=config)
+    # mock socket.getaddrinfo 避免 LAN IP 自动发现注入额外 origin
+    with patch("socket.getaddrinfo", return_value=[]):
+        local_app = api_module.create_app(config=config)
 
     assert local_app.state.bootstrap_config is config
     cors_layers = [
         layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
     assert len(cors_layers) == 1
-    assert cors_layers[0].kwargs["allow_origins"] == [
+    assert sorted(cors_layers[0].kwargs["allow_origins"]) == [
         "http://a.example",
         "http://b.example",
     ]
@@ -2138,6 +2140,9 @@ class TestPBTProperty15ErrorNoLeak:
         self, error_msg: str
     ) -> None:
         """任意异常消息都不应在 500 响应中泄露。"""
+        # 固定的公开错误消息——如果 error_msg 恰好是其子串则不算泄露
+        _PUBLIC_ERROR = "服务内部错误，请联系管理员。"
+
         with _setup_api_globals():
             transport = _make_transport()
             async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -2157,9 +2162,10 @@ class TestPBTProperty15ErrorNoLeak:
             assert "error_id" in data
             assert isinstance(data["error_id"], str)
             assert len(data["error_id"]) > 0
-            # 不变量 3：响应体不包含原始错误消息
+            # 不变量 3：响应体不包含原始错误消息（排除与固定公开消息重叠的情况）
             body_str = resp.text
-            assert error_msg not in body_str
+            if error_msg not in _PUBLIC_ERROR:
+                assert error_msg not in body_str
             # 不变量 4：不包含 Traceback 关键字
             assert "Traceback" not in body_str
             assert "File \"" not in body_str

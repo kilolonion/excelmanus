@@ -2153,14 +2153,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_excel",
-            description=(
-                "读取 Excel 文件并返回数据摘要（形状、列名、类型、前10行预览）。"
-                "通过 include 参数可按需附加额外维度：styles（压缩样式类）、"
-                "charts（图表检测）、images（图片检测）、freeze_panes（冻结窗格）、"
-                "conditional_formatting（条件格式）、data_validation（数据验证）、"
-                "print_settings（打印设置）、column_widths（列宽）、formulas（公式）、"
-                "categorical_summary（分类列频次分布）"
-            ),
+            description="读取 Excel 数据摘要（形状、列名、类型、前10行预览），通过 include 按需附加样式/图表/公式等维度",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2176,14 +2169,9 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "最大读取行数，默认全部",
                     },
-                    "include_style_summary": {
-                        "type": "boolean",
-                        "description": "（已废弃，请用 include=[\"styles\"]）是否附带样式概览",
-                        "default": False,
-                    },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
+                        "description": "列头行号（从0开始），默认自动检测",
                     },
                     "include": {
                         "type": "array",
@@ -2202,18 +2190,7 @@ def get_tools() -> list[ToolDef]:
                                 "categorical_summary",
                             ],
                         },
-                        "description": (
-                            "按需请求的额外维度列表。"
-                            "styles: 压缩样式类（Style Classes + 单元格映射 + 合并范围）；"
-                            "charts: 嵌入图表元信息；images: 嵌入图片元信息；"
-                            "freeze_panes: 冻结窗格位置；"
-                            "conditional_formatting: 条件格式规则；"
-                            "data_validation: 数据验证规则；"
-                            "print_settings: 打印设置；"
-                            "column_widths: 非默认列宽；"
-                            "formulas: 含公式的单元格；"
-                            "categorical_summary: 分类列的 value_counts（unique 值 < 阈值的列自动统计频次分布）"
-                        ),
+                        "description": "按需附加的额外维度列表",
                     },
                     "max_style_scan_rows": {
                         "type": "integer",
@@ -2232,7 +2209,7 @@ def get_tools() -> list[ToolDef]:
         # analyze_data: Batch 4 精简，由 run_code + pandas describe() 替代
         ToolDef(
             name="filter_data",
-            description="根据条件过滤 Excel 数据行并可选排序。支持单条件（column/operator/value）和多条件 AND/OR 组合（conditions 数组）。可通过 columns 参数只返回指定列，通过 sort_by 排序结果，通过 max_rows 限制返回行数以减少数据量。适用于排序、筛选、Top-N 等场景",
+            description="按条件筛选 Excel 数据行，支持单条件或多条件 AND/OR 组合、列投影、排序和 Top-N",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2242,7 +2219,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "column": {
                         "type": "string",
-                        "description": "要过滤的列名（单条件模式，与 operator/value 配合使用）",
+                        "description": "筛选列名（单条件模式）",
                     },
                     "operator": {
                         "type": "string",
@@ -2250,29 +2227,28 @@ def get_tools() -> list[ToolDef]:
                         "description": "比较运算符（单条件模式）",
                     },
                     "value": {
-                        "description": "比较值（数字或字符串，单条件模式）",
+                        "description": "比较值（单条件模式）",
                     },
                     "conditions": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "column": {"type": "string", "description": "列名"},
+                                "column": {"type": "string"},
                                 "operator": {
                                     "type": "string",
                                     "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains"],
-                                    "description": "比较运算符",
                                 },
-                                "value": {"description": "比较值"},
+                                "value": {},
                             },
                             "required": ["column", "operator", "value"],
                         },
-                        "description": "多条件数组，每个元素包含 column/operator/value。与单条件参数二选一",
+                        "description": "多条件数组（与单条件互斥）",
                     },
                     "logic": {
                         "type": "string",
                         "enum": ["and", "or"],
-                        "description": "多条件组合逻辑，默认 and。仅在 conditions 有多个条件时生效",
+                        "description": "多条件组合逻辑，默认 and",
                         "default": "and",
                     },
                     "sheet_name": {
@@ -2281,29 +2257,29 @@ def get_tools() -> list[ToolDef]:
                     },
                     "header_row": {
                         "type": "integer",
-                        "description": "列头所在行号（从0开始），默认自动检测。如不确定表头位置，建议不传此参数让工具自动检测，或先用 read_excel 预览数据确认表头行号",
+                        "description": "列头行号（从0开始），默认自动检测",
                     },
                     "columns": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "只返回指定列名列表（投影），默认返回全部列",
+                        "description": "只返回指定列（投影）",
                     },
                     "max_rows": {
                         "type": "integer",
-                        "description": "最多返回的数据行数，默认返回全部匹配行。建议设置以控制返回数据量",
+                        "description": "最多返回行数",
                     },
                     "sort_by": {
                         "type": "string",
-                        "description": "排序列名。支持文本型数值列（如含千分位逗号、中文单位后缀）的正确排序",
+                        "description": "排序列名",
                     },
                     "ascending": {
                         "type": "boolean",
-                        "description": "排序方向，默认升序。设为 false 表示降序",
+                        "description": "排序方向，默认升序",
                         "default": True,
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "排序后限制返回行数（用于 Top-N 场景），默认返回全部",
+                        "description": "排序后限制返回行数（Top-N）",
                     },
                 },
                 "required": ["file_path"],
@@ -2314,12 +2290,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="inspect_excel_files",
-            description=(
-                "批量扫描目录下所有 Excel 文件（默认递归子目录），一次返回每个文件的 sheet 列表、行列数、列名和少量预览行。"
-                "支持按文件名、sheet 名模糊搜索，快速定位目标数据。"
-                "当用户提到特定数据名称但未给出文件路径时，优先使用 search 参数定位。"
-                "通过 include 可按需附加：freeze_panes、charts、images、conditional_formatting、column_widths"
-            ),
+            description="批量扫描目录下所有 Excel 文件概况（sheet/行列/列名/预览），支持按文件名或 sheet 名模糊搜索定位",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -2355,7 +2326,7 @@ def get_tools() -> list[ToolDef]:
                                 "column_widths",
                             ],
                         },
-                        "description": "按需请求的额外维度，每个文件的每个 sheet 均返回对应信息",
+                        "description": "按需附加的额外维度",
                     },
                     "recursive": {
                         "type": "boolean",

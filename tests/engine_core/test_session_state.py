@@ -99,23 +99,25 @@ class TestToolCallStats:
         assert state.last_failure_count == 1
 
 
-class TestFinishTaskWarned:
-    """finish_task_warned 状态追踪。"""
+class TestAffectedFiles:
+    """affected_files 自动追踪。"""
 
-    def test_default_false(self):
+    def test_default_empty(self):
         state = SessionState()
-        assert state.finish_task_warned is False
+        assert state.affected_files == []
 
-    def test_set_and_read(self):
+    def test_record_affected_file(self):
         state = SessionState()
-        state.finish_task_warned = True
-        assert state.finish_task_warned is True
+        state.record_affected_file("a.xlsx")
+        state.record_affected_file("b.xlsx")
+        state.record_affected_file("a.xlsx")
+        assert state.affected_files == ["a.xlsx", "b.xlsx"]
 
-    def test_reset_loop_stats_clears_finish_task_warned(self):
+    def test_reset_loop_stats_clears_affected_files(self):
         state = SessionState()
-        state.finish_task_warned = True
+        state.record_affected_file("x.xlsx")
         state.reset_loop_stats()
-        assert state.finish_task_warned is False
+        assert state.affected_files == []
 
 
 class TestResetSession:
@@ -132,7 +134,6 @@ class TestResetSession:
         state.has_write_tool_call = True
         state.execution_guard_fired = True
         state.vba_exempt = True
-        state.finish_task_warned = True
         state.turn_diagnostics = [{"iteration": 1}]
         state.session_diagnostics = [{"route": "test"}]
 
@@ -147,7 +148,6 @@ class TestResetSession:
         assert state.has_write_tool_call is False
         assert state.execution_guard_fired is False
         assert state.vba_exempt is False
-        assert state.finish_task_warned is False
         assert state.turn_diagnostics == []
         assert state.session_diagnostics == []
 

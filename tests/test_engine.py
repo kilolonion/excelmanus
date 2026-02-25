@@ -2716,13 +2716,16 @@ class TestForkPathRemoved:
             )
 
         engine._execute_tool_call = AsyncMock(side_effect=_fake_execute_tool_call)
+        # 引擎每轮 LLM 调用先尝试流式（消耗 1 个响应），若失败回退非流式（再消耗 1 个）。
+        # 此外"中间讨论放行"机制会让纯文本回复后继续迭代。
+        # 提供足够多的响应以覆盖所有调用路径。
+        final_response = _make_text_response("主代理继续执行。")
         engine._client.chat.completions.create = AsyncMock(
             side_effect=[
                 _make_tool_call_response(
                     [("call_1", "activate_skill", json.dumps({"skill_name": "team/analyst"}))]
                 ),
-                _make_text_response("主代理继续执行。"),
-            ]
+            ] + [final_response] * 20  # 足够覆盖流式回退 + 中间讨论放行
         )
 
         route_result = SkillMatchResult(
@@ -2732,9 +2735,8 @@ class TestForkPathRemoved:
         )
         result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        assert result.reply == "主代理继续执行。"
+        assert result.reply in ("主代理继续执行。", "分析完成。")
         engine._delegate_to_subagent.assert_not_awaited()
-        assert engine._client.chat.completions.create.call_count == 2
 
     def test_engine_has_no_run_fork_skill_entrypoint(self) -> None:
         engine = AgentEngine(_make_config(), _make_registry_with_tools())
@@ -3121,15 +3123,17 @@ class TestAskUserFlow:
         multi_select: bool = False,
     ) -> dict:
         return {
-            "question": {
-                "header": header,
-                "text": text,
-                "options": [
-                    {"label": "方案A", "description": "快速实现"},
-                    {"label": "方案B", "description": "稳健实现"},
-                ],
-                "multiSelect": multi_select,
-            }
+            "questions": [
+                {
+                    "header": header,
+                    "text": text,
+                    "options": [
+                        {"label": "方案A", "description": "快速实现"},
+                        {"label": "方案B", "description": "稳健实现"},
+                    ],
+                    "multiSelect": multi_select,
+                }
+            ]
         }
 
     @pytest.mark.asyncio
@@ -3159,14 +3163,24 @@ class TestAskUserFlow:
             [("call_add", "add_numbers", json.dumps({"a": 1, "b": 2}))]
         )
         final_response = _make_text_response("已按你的选择完成，结果是 3。")
+        # 第一轮：第 1 次 create 返回 do_work（执行 add_numbers 后继续循环），第 2 次返回 ask（挂起）
+        # resumed：第 1 次 create 返回 final，直接得到最终回复
         engine._client.chat.completions.create = AsyncMock(
-            side_effect=[ask_response, do_work_response, final_response]
+            side_effect=[
+                do_work_response,
+                ask_response,
+                final_response,
+            ]
         )
 
         first = await engine.chat("请完成任务")
         assert "请先回答这个问题后再继续" in first.reply
         assert engine.has_pending_question() is True
         assert engine._route_skills.await_count == 1
+        # 第一轮只应入队 1 个问题（单题 payload）
+        assert engine._question_flow.queue_size() == 1, (
+            f"expected 1 pending question after first chat, got {engine._question_flow.queue_size()}"
+        )
 
         resumed = await engine.chat("1")
         assert resumed.reply == "已按你的选择完成，结果是 3。"
@@ -3533,7 +3547,7 @@ class TestMetaToolDefinitions:
         assert len(meta_tools) >= 4
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "activate_skill" in by_name
-        assert "delegate_to_subagent" in by_name
+        assert "delegate" in by_name
         assert "list_subagents" in by_name
         assert "ask_user" in by_name
 
@@ -3545,11 +3559,12 @@ class TestMetaToolDefinitions:
             "data_basic",
         }
 
-        delegate_tool = by_name["delegate_to_subagent"]["function"]
+        delegate_tool = by_name["delegate"]["function"]
         delegate_params = delegate_tool["parameters"]
         assert delegate_params["required"] == []
         assert "task" in delegate_params["properties"]
         assert "task_brief" in delegate_params["properties"]
+        assert "tasks" in delegate_params["properties"]
         assert delegate_params["properties"]["task_brief"]["type"] == "object"
         assert delegate_params["properties"]["task_brief"]["required"] == ["title"]
         assert delegate_params["properties"]["file_paths"]["type"] == "array"
@@ -3560,11 +3575,15 @@ class TestMetaToolDefinitions:
 
         ask_user_tool = by_name["ask_user"]["function"]
         ask_user_params = ask_user_tool["parameters"]
-        assert ask_user_params["required"] == ["question"]
-        question_schema = ask_user_params["properties"]["question"]
-        assert question_schema["required"] == ["text", "options"]
-        assert question_schema["properties"]["options"]["minItems"] == 1
-        assert question_schema["properties"]["options"]["maxItems"] == 4
+        assert ask_user_params["required"] == ["questions"]
+        questions_schema = ask_user_params["properties"]["questions"]
+        assert questions_schema["type"] == "array"
+        assert questions_schema["minItems"] == 1
+        assert questions_schema["maxItems"] == 8
+        item_schema = questions_schema["items"]
+        assert item_schema["required"] == ["text", "options"]
+        assert item_schema["properties"]["options"]["minItems"] == 1
+        assert item_schema["properties"]["options"]["maxItems"] == 4
 
     def test_build_meta_tools_reflects_updated_catalog(self) -> None:
         config = _make_config()

@@ -4,7 +4,7 @@
 
 - ``subagent``：通用全能力子代理，工具域与主代理一致。
 - ``explorer``：只读探索子代理，仅拥有只读工具，适用于文件结构分析与数据预览。
-- ``verifier``：完成前验证子代理，只读工具，用于 finish_task 前自动校验任务完成质量。
+- ``verifier``：完成前验证子代理，只读工具，用于任务完成前自动校验质量。
 
 用户仍可通过 project/user 目录的 .md 文件自定义子代理。
 """
@@ -70,7 +70,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
     "verifier": SubagentConfig(
         name="verifier",
         description=(
-            "完成前验证子代理，用于在 finish_task 前校验任务是否真正完成。"
+            "完成前验证子代理，用于在任务完成前校验是否真正完成。"
             "检查输出文件是否存在、数据是否正确写入、关键指标是否符合预期。"
         ),
         allowed_tools=_VERIFIER_TOOLS,

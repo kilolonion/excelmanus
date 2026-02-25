@@ -871,43 +871,43 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_directory",
-            description="列出指定目录下的文件和子目录。支持扁平分页、递归树、overview 摘要模式；默认附带 agent 友好元数据（next_cursor/omitted/summary）。",
+            description="列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式",
             input_schema={
                 "type": "object",
                 "properties": {
                     "directory": {
                         "type": "string",
-                        "description": "目标目录路径（相对于工作目录），默认为当前目录",
+                        "description": "目标目录路径（相对于工作目录）",
                         "default": ".",
                     },
                     "show_hidden": {
                         "type": "boolean",
-                        "description": "是否显示隐藏文件（以 . 开头），默认不显示",
+                        "description": "是否显示隐藏文件",
                         "default": False,
                     },
                     "depth": {
                         "type": "integer",
-                        "description": "递归深度。0=仅当前层（扁平分页），1=含直接子目录，2=默认两层，-1=无限递归",
+                        "description": "递归深度（0=仅当前层，-1=无限递归）",
                         "default": 2,
                     },
                     "mode": {
                         "type": "string",
-                        "description": "扫描模式：auto|flat|tree|overview。auto 时 depth=0 使用 flat，否则使用 tree",
+                        "description": "扫描模式：auto|flat|tree|overview",
                         "default": "auto",
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "分页起始偏移（flat/overview 生效；tree 用于 entries 预览分页）",
+                        "description": "分页起始偏移",
                         "default": 0,
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "分页大小（默认 100，最大 500）",
+                        "description": "分页大小（默认100，最大500）",
                         "default": 100,
                     },
                     "cursor": {
                         "type": "string",
-                        "description": "游标分页（数字字符串）。提供后覆盖 offset，便于续扫。",
+                        "description": "游标分页（覆盖 offset）",
                     },
                     "exclude": {
                         "type": "array",
@@ -916,12 +916,12 @@ def get_tools() -> list[ToolDef]:
                     },
                     "use_default_excludes": {
                         "type": "boolean",
-                        "description": "是否启用默认噪音目录排除（.git/.venv/node_modules/outputs/.worktrees 等）",
+                        "description": "是否启用默认噪音目录排除",
                         "default": True,
                     },
                     "max_nodes": {
                         "type": "integer",
-                        "description": "tree 模式最多返回节点数，超过会截断并标记 truncated=true",
+                        "description": "tree 模式最多返回节点数",
                         "default": 2000,
                     },
                 },
@@ -977,7 +977,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="delete_file",
-            description="安全删除文件（仅限文件，不删目录）。首次调用返回文件信息，需 confirm=true 二次确认才执行删除",
+            description="安全删除文件（仅限文件），需 confirm=true 二次确认",
             input_schema={
                 "type": "object",
                 "properties": {

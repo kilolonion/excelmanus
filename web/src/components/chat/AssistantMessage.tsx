@@ -201,14 +201,30 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
         )}
 
         {collapsed && hasChain ? (
-          <button
-            type="button"
-            onClick={() => setCollapsed(false)}
-            className="flex items-center gap-2 my-1.5 px-2.5 py-1.5 rounded-md border border-border/60 bg-muted/20 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors cursor-pointer w-full text-left"
-          >
-            <ChevronsUpDown className="h-3 w-3 flex-shrink-0" />
-            <span>{chainSummary(chainBlocks)}</span>
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => setCollapsed(false)}
+              className="flex items-center gap-2 my-1.5 px-2.5 py-1.5 rounded-md border border-border/60 bg-muted/20 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors cursor-pointer w-full text-left"
+            >
+              <ChevronsUpDown className="h-3 w-3 flex-shrink-0" />
+              <span>{chainSummary(chainBlocks)}</span>
+            </button>
+            {/* Even when collapsed, show text and thinking blocks from the chain
+                so the user can still see the agent's analysis and reasoning. */}
+            {chainBlocks
+              .filter(({ block }) => block.type === "text" || block.type === "thinking")
+              .map(({ block, origIndex }) => (
+                <AssistantBlockRenderer
+                  key={origIndex}
+                  block={block}
+                  blockIndex={origIndex}
+                  messageId={messageId}
+                  isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
+                  isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
+                />
+              ))}
+          </>
         ) : (
           chainBlocks.map(({ block, origIndex }) => (
             <AssistantBlockRenderer
