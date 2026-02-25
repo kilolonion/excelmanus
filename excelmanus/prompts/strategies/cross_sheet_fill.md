@@ -1,30 +1,26 @@
 ---
 name: cross_sheet_fill
-version: "1.0.0"
+version: "1.1.0"
 priority: 50
 layer: strategy
-max_tokens: 300
+max_tokens: 450
 conditions:
+  chat_mode: "write"
   sheet_count_gte: 2
-  write_hint: "may_write"
 ---
 ## 跨 Sheet 数据填充策略
 
 当需要从一个 Sheet 查找数据填入另一个 Sheet 时：
 
-1. **确认完整数据范围**：用 list_sheets 确认源表和目标表的总行数，写入必须覆盖目标表的全部数据行，不能只处理前几十行。
-   - **Think-Act**：调用 list_sheets 前说明「需要源表与目标表行数以定写入范围」；返回后用「观察」总结两表行数、键列名，再决定 run_code 的读取范围与匹配逻辑。
+1. **确认完整数据范围**：用 list_sheets 确认源表和目标表的总行数，写入覆盖目标表的全部数据行。
 
 2. **使用 `run_code`**：跨表匹配填充是 `run_code` 的典型场景。用 pandas 读取源表和目标表，通过 merge/map 完成匹配计算，一次性写入结果。
-   - **Think-Act**：调用 run_code 前给出标准推理：观察（两表结构、键列、目标列）+ 分析（一对一/聚合/位置映射）+ 决策（merge 方式、重复键处理）。执行后总结匹配率或错误信息再决定是否验证。
 
 3. **优先写值而非公式**：openpyxl 写入的公式没有缓存计算值，外部读取会显示为空。应在 Python 层面完成匹配计算，写入具体值。
 
 4. **匹配逻辑验证**：写入前先对少量行（如前 5 行）做匹配验证，确认键列、结果列的对应关系正确后再批量写入。
-   - **Think-Act**：验证前说明「验证前 5 行键→结果对应关系」；验证后说明「样本是否正确，是否进行全量写入」。
 
 5. **写入后抽查**：批量写入完成后，用 read_excel 读取目标区域的前几行和末几行，确认值已正确写入。
-   - **Think-Act**：read_excel 前说明「抽查首尾以确认覆盖与正确性」；读完后总结「首尾行是否符合预期」，再汇报或继续修正。
 
 ### 常见匹配场景
 - **一对一查找**：目标表每行通过键列（如 ID、名称）在源表中查找对应行，提取结果列。类似 VLOOKUP。
@@ -35,3 +31,10 @@ conditions:
 - 源表和目标表的键列可能有前后空格差异，匹配前需 strip。
 - 源表可能有重复键，需明确取第一条还是聚合。
 - 目标表的待填充范围可能远大于 read_excel 的默认预览行数——必须从 list_sheets 获取总行数。
+
+### 示例流程
+用户：「把 Sheet2 的"部门名称"根据"部门ID"填到 Sheet1」
+1. `list_sheets` → Sheet1 200行(有部门ID列，部门名称列为空)、Sheet2 15行(有部门ID+部门名称)
+2. `run_code`：pandas read_excel 两表 → merge on 部门ID → 写回 Sheet1 → stdout: `"写入200行, 匹配率100%, 前3行: IT/HR/Finance"`
+3. `read_excel` Sheet1 首尾各3行 → 确认部门名称已正确填入
+4. `finish_task`：汇报"已将15个部门名称匹配填入Sheet1的200行，匹配率100%"

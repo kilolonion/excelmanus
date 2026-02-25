@@ -39,6 +39,7 @@ class PromptSegment:
 class PromptContext:
     """当前请求的上下文信号，用于策略匹配。"""
 
+    chat_mode: str = "write"  # "write" | "read" | "plan"
     write_hint: str = "unknown"
     sheet_count: int = 0
     total_rows: int = 0
@@ -291,6 +292,10 @@ class PromptComposer:
             elif key == "task_tags":
                 expected = set(value) if isinstance(value, list) else {value}
                 if not expected & set(ctx.task_tags):
+                    return False
+            elif key == "chat_mode":
+                expected_modes = {value} if isinstance(value, str) else set(value)
+                if ctx.chat_mode not in expected_modes:
                     return False
             elif key == "full_access":
                 expected_val = bool(value)

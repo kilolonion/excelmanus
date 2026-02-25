@@ -21,6 +21,7 @@ import pytest
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine, ToolCallResult
 from excelmanus.subagent.models import SubagentResult
+from excelmanus.task_list import TaskStatus
 from excelmanus.tools.registry import ToolRegistry
 
 
@@ -176,6 +177,65 @@ class TestVerifierAdvisorySkip:
             summary="",
         )
         assert suffix is None
+
+
+class TestVerifierAdvisoryTaskListContext:
+    """Phase 2b: verifier prompt 应包含任务清单上下文。"""
+
+    @pytest.mark.asyncio
+    async def test_verifier_prompt_includes_task_list_when_present(self):
+        """任务清单存在时，verifier 的 prompt 应包含任务清单验证记录。"""
+        engine = _make_engine()
+        engine._subagent_enabled = True
+
+        # 创建任务清单并标记部分完成
+        engine._task_store.create("测试计划", ["读取源表", "匹配填充", "写入目标表"])
+        engine._task_store.update_item(0, TaskStatus.IN_PROGRESS)
+        engine._task_store.update_item(0, TaskStatus.COMPLETED, result="500 行已读取")
+        engine._task_store.update_item(1, TaskStatus.IN_PROGRESS)
+        engine._task_store.update_item(1, TaskStatus.COMPLETED, result="匹配率 98%")
+
+        mock_result = _make_verifier_result(verdict="pass", checks=["数据完整"])
+        captured_prompt: list[str] = []
+
+        async def _capture_prompt(*, agent_name, prompt, on_event=None):
+            captured_prompt.append(prompt)
+            return mock_result
+
+        with patch.object(engine, "run_subagent", side_effect=_capture_prompt):
+            await engine._run_finish_verifier_advisory(
+                report={"operations": "跨表匹配填充", "key_findings": "500行"},
+                summary="",
+            )
+
+        assert len(captured_prompt) == 1
+        prompt_text = captured_prompt[0]
+        assert "任务清单验证记录" in prompt_text
+        assert "测试计划" in prompt_text
+        assert "读取源表" in prompt_text
+        assert "匹配填充" in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_verifier_prompt_omits_task_list_when_absent(self):
+        """无任务清单时，verifier 的 prompt 不应包含任务清单段。"""
+        engine = _make_engine()
+        engine._subagent_enabled = True
+
+        mock_result = _make_verifier_result(verdict="pass", checks=["基本检查"])
+        captured_prompt: list[str] = []
+
+        async def _capture_prompt(*, agent_name, prompt, on_event=None):
+            captured_prompt.append(prompt)
+            return mock_result
+
+        with patch.object(engine, "run_subagent", side_effect=_capture_prompt):
+            await engine._run_finish_verifier_advisory(
+                report={"operations": "写入数据", "key_findings": "100行"},
+                summary="",
+            )
+
+        assert len(captured_prompt) == 1
+        assert "任务清单验证记录" not in captured_prompt[0]
 
 
 # 注：verifier 在任务自然退出（LLM 返回纯文本）且有写入时由引擎层触发，

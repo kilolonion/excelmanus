@@ -5,8 +5,8 @@ priority: 55
 layer: strategy
 max_tokens: 200
 conditions:
+  chat_mode: "write"
   total_rows_gte: 100
-  write_hint: "may_write"
 ---
 ## 大量数据写入策略
 

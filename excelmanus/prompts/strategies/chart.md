@@ -4,9 +4,7 @@ version: "1.0.0"
 priority: 48
 layer: strategy
 max_tokens: 200
-conditions:
-  task_tags:
-    - chart
+conditions: {}
 ---
 ## 图表生成策略
 
