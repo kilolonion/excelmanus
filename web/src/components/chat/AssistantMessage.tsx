@@ -52,12 +52,58 @@ const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 
 const remarkPluginsStable = [remarkGfm];
 
+// File extensions recognized as downloadable workspace files
+const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
+
+function isWorkspaceFileLink(href: string): boolean {
+  if (!href) return false;
+  // Relative paths: ./foo.xlsx, foo.xlsx, subdir/foo.xlsx
+  if (href.startsWith("./") || href.startsWith("../") || !href.includes("://")) {
+    return DOWNLOADABLE_EXTENSIONS.test(href);
+  }
+  return false;
+}
+
+function FileDownloadLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const filename = href.split("/").pop() || href;
+  const handleDownload = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      downloadFile(href, filename, activeSessionId ?? undefined).catch(() => {});
+    },
+    [href, filename, activeSessionId],
+  );
+  return (
+    <button
+      type="button"
+      onClick={handleDownload}
+      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)] text-[var(--em-primary)]"
+      title={`下载 ${filename}`}
+    >
+      <Download className="h-3 w-3 flex-shrink-0" />
+      <span className="break-all">{children}</span>
+    </button>
+  );
+}
+
 const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components"] = {
   p({ children }) {
     return <p>{processChildren(children)}</p>;
   },
   li({ children }) {
     return <li>{processChildren(children)}</li>;
+  },
+  // Intercept links: workspace file links → download button, others → normal <a>
+  a({ href, children }) {
+    if (href && isWorkspaceFileLink(href)) {
+      return <FileDownloadLink href={href}>{children}</FileDownloadLink>;
+    }
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className="text-[var(--em-primary)] underline">
+        {children}
+      </a>
+    );
   },
   // Fenced code blocks → CodeBlock with syntax highlighting + copy button
   pre({ children }) {
@@ -215,17 +261,6 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
         <FileSpreadsheet className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0 border-l-[1.5px] pl-3 relative" style={{ borderColor: "var(--em-primary)" }}>
-        {hasChain && tailBlocks.length > 0 && !collapsed && (
-          <button
-            type="button"
-            onClick={() => setCollapsed(true)}
-            className="absolute -top-1 right-0 z-10 flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors cursor-pointer"
-            title="折叠工具链"
-          >
-            <ChevronsUpDown className="h-3 w-3" />
-            <span>折叠</span>
-          </button>
-        )}
 
         <AnimatePresence mode="wait" initial={false}>
           {collapsed && hasChain ? (
@@ -262,7 +297,6 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
           ) : (
             <motion.div
               key="expanded"
-              className={hasChain && tailBlocks.length > 0 ? "pt-5" : undefined}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -276,6 +310,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
                   messageId={messageId}
                   isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
                   isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
+                  showCollapseButton={origIndex === 0 && hasChain && tailBlocks.length > 0}
+                  onCollapse={() => setCollapsed(true)}
                 />
               ))}
             </motion.div>
@@ -290,6 +326,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
             messageId={messageId}
             isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
             isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
+            showCollapseButton={false}
+            onCollapse={undefined}
           />
         ))}
 
@@ -399,7 +437,23 @@ function IterationDivider({ iteration }: { iteration: number; isActive?: boolean
   );
 }
 
-const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ block, blockIndex, messageId, isThinkingActive, isStreamingText }: { block: AssistantBlock; blockIndex: number; messageId: string; isThinkingActive?: boolean; isStreamingText?: boolean }) {
+const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ 
+  block, 
+  blockIndex, 
+  messageId, 
+  isThinkingActive, 
+  isStreamingText,
+  showCollapseButton,
+  onCollapse
+}: { 
+  block: AssistantBlock; 
+  blockIndex: number; 
+  messageId: string; 
+  isThinkingActive?: boolean; 
+  isStreamingText?: boolean;
+  showCollapseButton?: boolean;
+  onCollapse?: () => void;
+}) {
   switch (block.type) {
     case "thinking":
       return (
@@ -471,11 +525,24 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ bloc
       }
       const Icon = block.variant === "route" ? Route : Info;
       return (
-        <div className="flex items-center gap-2 my-1.5 text-xs text-muted-foreground">
-          <Icon className="h-3 w-3 flex-shrink-0" />
-          <span>{block.label}</span>
-          {block.detail && (
-            <span className="text-muted-foreground/60">{block.detail}</span>
+        <div className="flex items-center justify-between gap-2 my-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <Icon className="h-3 w-3 flex-shrink-0" />
+            <span className="flex-shrink-0">{block.label}</span>
+            {block.detail && (
+              <span className="text-muted-foreground/60 flex-shrink-0">{block.detail}</span>
+            )}
+          </div>
+          {showCollapseButton && onCollapse && (
+            <button
+              type="button"
+              onClick={onCollapse}
+              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors cursor-pointer"
+              title="折叠工具链"
+            >
+              <ChevronsUpDown className="h-3 w-3" />
+              <span>折叠</span>
+            </button>
           )}
         </div>
       );
@@ -503,6 +570,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ bloc
       );
     case "memory_extracted":
       return <MemoryExtractedBlock block={block} />;
+    case "file_download":
+      return <FileDownloadCard block={block} />;
     default:
       return null;
   }
@@ -616,5 +685,38 @@ function MemoryExtractedBlock({
         ))}
       </div>
     </div>
+  );
+}
+
+function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { type: "file_download" }> }) {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const handleDownload = useCallback(() => {
+    downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
+  }, [block.filePath, block.filename, activeSessionId]);
+
+  return (
+    <button
+      type="button"
+      onClick={handleDownload}
+      className="group flex items-center gap-3 w-full my-2 rounded-lg px-3 py-2.5 text-left cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)]"
+      title={`下载 ${block.filename}`}
+    >
+      <div className="flex-shrink-0 h-8 w-8 rounded-md flex items-center justify-center bg-[var(--em-primary-alpha-15)] group-hover:bg-[var(--em-primary-alpha-20)] transition-colors">
+        <Download className="h-4 w-4 text-[var(--em-primary)]" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-[var(--em-primary)] break-all">
+          {block.filename}
+        </span>
+        {block.description && (
+          <span className="block text-xs text-muted-foreground mt-0.5 line-clamp-1">
+            {block.description}
+          </span>
+        )}
+      </div>
+      <span className="text-[10px] text-muted-foreground flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+        点击下载
+      </span>
+    </button>
   );
 }
