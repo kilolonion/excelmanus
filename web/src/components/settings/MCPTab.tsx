@@ -138,8 +138,19 @@ export function MCPTab() {
       if (res.status === "ok") {
         setTestResult((prev) => ({
           ...prev,
-          [name]: { ok: true, msg: `连接成功，发现 ${res.tool_count} 个工具` },
+          [name]: { ok: true, msg: `连接成功，发现 ${res.tool_count} 个工具，正在同步...` },
         }));
+        // 测试成功后自动热重载，使连接状态生效
+        try {
+          await apiPost("/mcp/reload", {});
+          await fetchServers();
+          setTestResult((prev) => ({
+            ...prev,
+            [name]: { ok: true, msg: `已连接，${res.tool_count} 个工具就绪` },
+          }));
+        } catch {
+          // 重载失败不影响测试结果展示
+        }
       } else {
         setTestResult((prev) => ({
           ...prev,
