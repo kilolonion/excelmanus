@@ -164,16 +164,31 @@ if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
 
   if [[ "$SKIP_BUILD" == true ]]; then
     echo "⏭️  跳过前端构建，仅重启..."
-    _remote_frontend "export PATH=${FRONTEND_NODE_BIN}:\$PATH && pm2 restart excelmanus-web"
+    # 确保 standalone 静态资源存在（可能被之前的操作清除）
+    _remote_frontend "
+      export PATH=${FRONTEND_NODE_BIN}:\$PATH && \
+      cd ${FRONTEND_REMOTE_DIR}/web && \
+      if [[ -d .next/standalone ]]; then
+        cp -r public .next/standalone/ 2>/dev/null || true
+        cp -r .next/static .next/standalone/.next/ 2>/dev/null || true
+      fi && \
+      pm2 restart excelmanus-web
+    "
   else
-    echo "🌐 更新前端（安装依赖 + 构建 + 重启）..."
+    echo "🌐 更新前端（安装依赖 + 构建 + 静态资源 + 重启）..."
     # 前端构建时的环境变量从 web/.env.production 自动加载（Next.js 内置行为）。
-    # 这里只需确保 BACKEND_INTERNAL_URL 在运行时也可用（pm2 env 或 .env.production）。
+    # Next.js standalone 模式构建后需要手动复制 public/ 和 .next/static/，
+    # 否则 logo、图片、CSS 等静态资源会 404。
+    # 启动方式必须用 node .next/standalone/server.js，不能用 npm start。
     _remote_frontend "
       export PATH=${FRONTEND_NODE_BIN}:\$PATH && \
       cd ${FRONTEND_REMOTE_DIR}/web && \
       npm install --production=false 2>&1 | tail -3 && \
       npm run build 2>&1 | tail -5 && \
+      echo '📋 复制 standalone 静态资源...' && \
+      cp -r public .next/standalone/ && \
+      cp -r .next/static .next/standalone/.next/ && \
+      echo '✅ 静态资源复制完成' && \
       pm2 restart excelmanus-web
     "
   fi

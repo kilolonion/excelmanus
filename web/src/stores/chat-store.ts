@@ -435,7 +435,7 @@ async function _loadMessagesAsyncWithOptions(
 
   // Fall back to backend API
   try {
-    const raw = await fetchSessionMessages(sessionId, 10000, 0);
+    const raw = await fetchSessionMessages(sessionId, 200, 0);
     if (raw.length === 0) return;
     const {
       messages,
@@ -689,10 +689,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   switchSession: (sessionId) => {
     const state = get();
 
-    // If we're already on this session and have messages (or an active
-    // stream), don't discard them — the caller is a redundant sync.
+    // Only skip if we're on this session AND actively streaming.
+    // Previously this also skipped when messages.length > 0, which
+    // caused clicks to be silently ignored after async message load.
     if (sessionId && sessionId === state.currentSessionId) {
-      if (state.messages.length > 0 || state.abortController) return;
+      if (state.abortController) return;
+      // Already loaded — no need to re-fetch
+      if (state.messages.length > 0) return;
     }
 
     // Save current session messages to both caches
