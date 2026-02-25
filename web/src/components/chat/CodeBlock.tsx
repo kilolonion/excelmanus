@@ -49,6 +49,110 @@ function ensureHljs(): Promise<void> {
   return _hljsLoading;
 }
 
+// ------------------------------------------------------------------
+// Rainbow Brackets: post-process hljs HTML to colorize brackets
+// Three color families by bracket type, cycling by nesting depth
+// ------------------------------------------------------------------
+
+const CURLY_COLORS = ["#e5a100", "#d7ba7d", "#c08b30", "#ffd700"];  // {} gold
+const ROUND_COLORS = ["#569cd6", "#4fc1ff", "#0078d4", "#9cdcfe"];  // () blue
+const SQUARE_COLORS = ["#c586c0", "#da70d6", "#d16969", "#ce9178"]; // [] pink
+
+const OPEN_COLORS: Record<string, string[]> = {
+  "{": CURLY_COLORS, "(": ROUND_COLORS, "[": SQUARE_COLORS,
+};
+const CLOSE_COLORS: Record<string, string[]> = {
+  "}": CURLY_COLORS, ")": ROUND_COLORS, "]": SQUARE_COLORS,
+};
+const CLOSE_TO_OPEN: Record<string, string> = { "}": "{", ")": "(", "]": "[" };
+
+function colorizeBracketsHtml(html: string): string {
+  const depths: Record<string, number> = { "{": 0, "(": 0, "[": 0 };
+  let inTag = false;
+  let stringSpanDepth = 0;
+  let spanStack: boolean[] = [];  // true = this span is a string span
+  let result = "";
+  let i = 0;
+
+  while (i < html.length) {
+    const ch = html[i];
+
+    // Track HTML tags to detect hljs-string spans
+    if (ch === "<") {
+      const closeTag = html.startsWith("</span", i);
+      if (closeTag) {
+        const end = html.indexOf(">", i);
+        result += html.slice(i, end + 1);
+        i = end + 1;
+        const wasString = spanStack.pop();
+        if (wasString) stringSpanDepth--;
+        continue;
+      }
+      const spanMatch = html.startsWith("<span", i);
+      if (spanMatch) {
+        const end = html.indexOf(">", i);
+        const tag = html.slice(i, end + 1);
+        const isString = tag.includes("hljs-string") || tag.includes("hljs-regexp");
+        spanStack.push(isString);
+        if (isString) stringSpanDepth++;
+        result += tag;
+        i = end + 1;
+        continue;
+      }
+      // Other tags: pass through
+      inTag = true;
+      result += ch;
+      i++;
+      continue;
+    }
+    if (inTag) {
+      if (ch === ">") inTag = false;
+      result += ch;
+      i++;
+      continue;
+    }
+
+    // Skip brackets inside string literals
+    if (stringSpanDepth > 0) {
+      result += ch;
+      i++;
+      continue;
+    }
+
+    // Handle HTML entities for brackets
+    let bracket: string | null = null;
+    let consumed = 1;
+    if (ch === "{" || ch === "}" || ch === "(" || ch === ")" || ch === "[" || ch === "]") {
+      bracket = ch;
+    } else if (html.startsWith("&lbrace;", i)) {
+      bracket = "{"; consumed = 8;
+    } else if (html.startsWith("&rbrace;", i)) {
+      bracket = "}"; consumed = 8;
+    }
+
+    if (bracket && bracket in OPEN_COLORS) {
+      const colors = OPEN_COLORS[bracket];
+      const depth = depths[bracket];
+      const color = colors[depth % colors.length];
+      result += `<span style="color:${color};font-weight:bold">${html.slice(i, i + consumed)}</span>`;
+      depths[bracket]++;
+      i += consumed;
+    } else if (bracket && bracket in CLOSE_COLORS) {
+      const openCh = CLOSE_TO_OPEN[bracket];
+      depths[openCh] = Math.max(0, depths[openCh] - 1);
+      const colors = CLOSE_COLORS[bracket];
+      const depth = depths[openCh];
+      const color = colors[depth % colors.length];
+      result += `<span style="color:${color};font-weight:bold">${html.slice(i, i + consumed)}</span>`;
+      i += consumed;
+    } else {
+      result += ch;
+      i++;
+    }
+  }
+  return result;
+}
+
 interface CodeBlockProps {
   language?: string;
   code: string;
@@ -71,7 +175,7 @@ export const CodeBlock = React.memo(function CodeBlock({
         const result = language && _hljs.getLanguage(language)
           ? _hljs.highlight(code, { language })
           : _hljs.highlightAuto(code);
-        if (!cancelled) setHighlightedHtml(result.value);
+        if (!cancelled) setHighlightedHtml(colorizeBracketsHtml(result.value));
       } catch {
         // Fallback: no highlighting
         if (!cancelled) setHighlightedHtml(null);

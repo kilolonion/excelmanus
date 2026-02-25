@@ -29,6 +29,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
+import { CodeBlock } from "./CodeBlock";
 
 // Tool category → icon mapping
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
@@ -48,6 +49,19 @@ function getToolIcon(name: string): LucideIcon {
   return TOOL_ICON_MAP[name] || Wrench;
 }
 
+/** Detect language for syntax highlighting of tool results. */
+function detectResultLanguage(toolName: string, text: string): string | undefined {
+  if (toolName === "run_code") return "python";
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      JSON.parse(trimmed);
+      return "json";
+    } catch { /* not json */ }
+  }
+  return undefined;
+}
+
 // Build a short summary of tool args for collapsed preview
 function argsSummary(name: string, args: Record<string, unknown>): string | null {
   const parts: string[] = [];
@@ -64,13 +78,88 @@ function argsSummary(name: string, args: Record<string, unknown>): string | null
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-// Status → left border color
-const STATUS_BAR_COLOR: Record<string, string> = {
-  running: "var(--em-cyan)",
-  success: "var(--em-primary)",
-  error: "var(--em-error)",
-  pending: "var(--em-gold)",
+// Tool category → green-family color theme
+type ToolCategoryTheme = {
+  bar: string;          // left accent bar
+  iconBg: string;       // circular icon background
+  iconColor: string;    // icon foreground
+  pillBg: string;       // tool-name pill background
+  pillText: string;     // tool-name pill text
+  cardBg: string;       // card background
+  cardHover: string;    // card hover background
+  border: string;       // card border
+  label: string;        // human-readable category label
 };
+
+const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
+  read: {
+    bar: "#0d9488",
+    iconBg: "bg-teal-500/10 dark:bg-teal-400/15",
+    iconColor: "text-teal-600 dark:text-teal-400",
+    pillBg: "bg-teal-500/8 dark:bg-teal-400/10",
+    pillText: "text-teal-700 dark:text-teal-300",
+    cardBg: "bg-teal-500/[0.02] dark:bg-teal-500/[0.03]",
+    cardHover: "hover:bg-teal-500/[0.05] dark:hover:bg-teal-400/[0.06]",
+    border: "border-teal-300/40 dark:border-teal-500/20",
+    label: "读取",
+  },
+  write: {
+    bar: "#217346",
+    iconBg: "bg-emerald-500/10 dark:bg-emerald-400/15",
+    iconColor: "text-emerald-600 dark:text-emerald-400",
+    pillBg: "bg-emerald-500/8 dark:bg-emerald-400/10",
+    pillText: "text-emerald-700 dark:text-emerald-300",
+    cardBg: "bg-emerald-500/[0.02] dark:bg-emerald-500/[0.03]",
+    cardHover: "hover:bg-emerald-500/[0.05] dark:hover:bg-emerald-400/[0.06]",
+    border: "border-emerald-300/40 dark:border-emerald-500/20",
+    label: "写入",
+  },
+  code: {
+    bar: "#4d7c0f",
+    iconBg: "bg-lime-500/10 dark:bg-lime-400/15",
+    iconColor: "text-lime-700 dark:text-lime-400",
+    pillBg: "bg-lime-500/8 dark:bg-lime-400/10",
+    pillText: "text-lime-700 dark:text-lime-300",
+    cardBg: "bg-lime-500/[0.02] dark:bg-lime-500/[0.03]",
+    cardHover: "hover:bg-lime-500/[0.05] dark:hover:bg-lime-400/[0.06]",
+    border: "border-lime-300/40 dark:border-lime-500/20",
+    label: "代码",
+  },
+  finish: {
+    bar: "#15803d",
+    iconBg: "bg-green-500/10 dark:bg-green-400/15",
+    iconColor: "text-green-600 dark:text-green-400",
+    pillBg: "bg-green-500/8 dark:bg-green-400/10",
+    pillText: "text-green-700 dark:text-green-300",
+    cardBg: "bg-green-500/[0.02] dark:bg-green-500/[0.03]",
+    cardHover: "hover:bg-green-500/[0.05] dark:hover:bg-green-400/[0.06]",
+    border: "border-green-300/40 dark:border-green-500/20",
+    label: "完成",
+  },
+  default: {
+    bar: "#6b7280",
+    iconBg: "bg-slate-500/8 dark:bg-slate-400/10",
+    iconColor: "text-slate-500 dark:text-slate-400",
+    pillBg: "bg-slate-500/6 dark:bg-slate-400/8",
+    pillText: "text-slate-600 dark:text-slate-400",
+    cardBg: "bg-slate-500/[0.015] dark:bg-slate-400/[0.02]",
+    cardHover: "hover:bg-slate-500/[0.04] dark:hover:bg-slate-400/[0.05]",
+    border: "border-border",
+    label: "工具",
+  },
+};
+
+function getToolCategory(name: string): string {
+  if (["read_excel", "list_sheets", "read_text_file"].includes(name)) return "read";
+  if (["write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"].includes(name)) return "write";
+  if (name === "run_code") return "code";
+  if (name === "finish_task") return "finish";
+  return "default";
+}
+
+function getTheme(name: string): ToolCategoryTheme {
+  return CATEGORY_THEMES[getToolCategory(name)] || CATEGORY_THEMES.default;
+}
 
 const EXCEL_READ_TOOLS = new Set(["read_excel"]);
 const EXCEL_WRITE_TOOLS = new Set([
@@ -95,6 +184,17 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   const [open, setOpen] = useState(false);
   const [applyingInline, setApplyingInline] = useState(false);
   const [appliedInline, setAppliedInline] = useState(false);
+  const [chevronClass, setChevronClass] = useState("");
+
+  // Handle chevron animation
+  const handleOpenChange = useCallback((newOpen: boolean) => {
+    setOpen(newOpen);
+    // Trigger animation class
+    const animationClass = newOpen ? "tool-chevron-expand" : "tool-chevron-collapse";
+    setChevronClass(animationClass);
+    // Clear animation class after animation completes (longer timeout for collapse)
+    setTimeout(() => setChevronClass(""), newOpen ? 250 : 350);
+  }, []);
 
   // Elapsed timer for running tools
   const startRef = useRef<number | null>(null);
@@ -151,79 +251,113 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   }, [activeSessionId, diffFilePaths, applyFile]);
 
   const StatusIcon = {
-    running: <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: "var(--em-cyan)" }} />,
-    success: <CheckCircle2 className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />,
-    error: <XCircle className="h-3.5 w-3.5" style={{ color: "var(--em-error)" }} />,
-    pending: <ShieldAlert className="h-3.5 w-3.5" style={{ color: "var(--em-gold)" }} />,
+    running: <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--em-cyan)" }} />,
+    success: <CheckCircle2 className="h-3 w-3" style={{ color: "var(--em-primary)" }} />,
+    error: <XCircle className="h-3 w-3" style={{ color: "var(--em-error)" }} />,
+    pending: <ShieldAlert className="h-3 w-3" style={{ color: "var(--em-gold)" }} />,
   }[status];
 
   const ToolIcon = getToolIcon(name);
   const summary = !open ? argsSummary(name, args) : null;
-  const barColor = STATUS_BAR_COLOR[status] || "var(--border)";
+  const theme = getTheme(name);
+
+  const isError = status === "error";
+  const isPending = status === "pending";
+  const isRunning = status === "running";
+  const isSuccess = status === "success";
+
+  const borderCls = isPending
+    ? "border-amber-400/50 dark:border-amber-500/30"
+    : isError
+      ? "border-red-300/50 dark:border-red-500/25"
+      : theme.border;
+
+  const bgCls = isPending
+    ? "bg-amber-500/[0.04] hover:bg-amber-500/[0.08]"
+    : isError
+      ? "bg-red-500/[0.03] hover:bg-red-500/[0.06]"
+      : `${theme.cardBg} ${theme.cardHover}`;
 
   return (
-    <div className="my-1">
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className={`flex items-center gap-2 rounded-lg border transition-colors w-full text-left text-sm overflow-hidden ${
-          status === "pending"
-            ? "border-amber-500/40 bg-amber-500/5 hover:bg-amber-500/10"
-            : status === "error"
-              ? "border-red-300/40 dark:border-red-500/30 hover:bg-red-500/5"
-              : "border-border hover:bg-muted/30"
-        }`}>
-          {/* Left status color bar */}
+    <div className={`my-1 rounded-lg ${isSuccess ? "animate-tool-success-flash" : ""}`}>
+      <Collapsible open={open} onOpenChange={handleOpenChange}>
+        <CollapsibleTrigger
+          className={`group/card flex items-center gap-0 rounded-lg border transition-all duration-200 w-full text-left text-sm overflow-hidden hover:shadow-sm ${borderCls} ${bgCls}`}
+        >
+          {/* Left accent bar */}
           <div
-            className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg transition-colors duration-500"
-            style={{ backgroundColor: barColor }}
+            className={`self-stretch w-[3px] flex-shrink-0 rounded-l-lg transition-colors duration-500 ${isRunning ? "animate-tool-running-bar" : ""}`}
+            style={{ backgroundColor: isError ? "var(--em-error)" : theme.bar, "--tool-cat-color": theme.bar } as React.CSSProperties}
           />
-          <div className="flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5">
-            <ToolIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-            <span className="font-mono text-xs flex-shrink-0">{name}</span>
+
+          <div className={`flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5 ${isRunning ? "animate-tool-running-pulse" : ""}`}>
+            {/* Circular icon badge */}
+            <span className={`flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 ${theme.iconBg}`}>
+              <ToolIcon className={`h-3 w-3 ${theme.iconColor}`} />
+            </span>
+
+            {/* Tool name pill */}
+            <span className={`inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium font-mono flex-shrink-0 ${theme.pillBg} ${theme.pillText}`}>
+              {name}
+            </span>
+
+            {/* Args preview */}
             {summary && (
-              <span className="text-[10px] text-muted-foreground truncate min-w-0">
+              <span className="text-[10px] text-muted-foreground/70 truncate min-w-0">
                 {summary}
               </span>
             )}
-            <span className="ml-auto flex items-center gap-1.5 flex-shrink-0">
-              {status === "pending" && (
-                <span className="text-[10px] font-medium" style={{ color: "var(--em-gold)" }}>待审批</span>
+
+            {/* Right side: status cluster */}
+            <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
+              {isPending && (
+                <span className="text-[10px] font-medium px-1.5 py-px rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">待审批</span>
               )}
-              {status === "running" && elapsed > 0 && (
+              {isRunning && elapsed > 0 && (
                 <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
               )}
-              <span className="transition-transform duration-300" style={{ transform: status === "success" ? "scale(1.15)" : "scale(1)" }}>
+              <span className="transition-transform duration-300" style={{ transform: isSuccess ? "scale(1.2)" : "scale(1)" }}>
                 {StatusIcon}
               </span>
-              {open ? (
-                <ChevronDown className="h-3 w-3 text-muted-foreground" />
-              ) : (
-                <ChevronRight className="h-3 w-3 text-muted-foreground" />
-              )}
+              <ChevronRight className={`h-3 w-3 text-muted-foreground/50 transition-all duration-300 ${chevronClass} ${
+                !chevronClass && open 
+                  ? "rotate-90" 
+                  : !chevronClass && "group-hover/card:translate-x-0.5 group-hover/card:text-muted-foreground/70"
+              }`} />
             </span>
           </div>
         </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="px-3 py-2 text-xs space-y-2 border border-t-0 border-border rounded-b-lg ml-[3px]">
+
+        <CollapsibleContent className="data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up overflow-hidden">
+          <div className={`px-3 py-2 text-xs space-y-2 border border-t-0 rounded-b-lg ml-[3px] ${borderCls} ${theme.cardBg}`}>
             {Object.keys(args).length > 0 && (
               <div>
                 <p className="font-semibold text-muted-foreground mb-1">参数</p>
-                <pre className="bg-muted/30 rounded p-2 overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(args, null, 2)}
-                </pre>
+                <CodeBlock language="json" code={JSON.stringify(args, null, 2)} />
               </div>
             )}
-            {result && (
-              <div>
-                <p className="font-semibold text-muted-foreground mb-1">结果</p>
-                <pre className="bg-muted/30 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-48">
-                  {result}
-                </pre>
-              </div>
-            )}
+            {result && (() => {
+              const lang = detectResultLanguage(name, result);
+              return (
+                <div>
+                  <p className="font-semibold text-muted-foreground mb-1">结果</p>
+                  {lang ? (
+                    <CodeBlock language={lang} code={result} />
+                  ) : (
+                    <pre className="bg-muted/30 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-48">
+                      {result}
+                    </pre>
+                  )}
+                </div>
+              );
+            })()}
             {error && (
               <div>
-                <p className="font-semibold mb-1" style={{ color: "var(--em-error)" }}>错误</p>
-                <pre className="bg-red-50 rounded p-2 overflow-x-auto whitespace-pre-wrap text-red-700">
+                <p className="flex items-center gap-1 font-semibold mb-1" style={{ color: "var(--em-error)" }}>
+                  <span className="inline-block h-1 w-1 rounded-full bg-red-500" />
+                  错误
+                </p>
+                <pre className="bg-red-50/80 dark:bg-red-950/20 rounded-md p-2 overflow-x-auto whitespace-pre-wrap text-red-700 dark:text-red-300 border border-red-200/40 dark:border-red-500/20">
                   {error}
                 </pre>
               </div>
