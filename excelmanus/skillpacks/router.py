@@ -7,7 +7,7 @@ from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, ClassVar
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
@@ -111,6 +111,12 @@ class SkillRouter:
             )
         return self._fallback_client
 
+    _MODE_TO_HINT: ClassVar[dict[str, str]] = {
+        "write": "may_write",
+        "read": "read_only",
+        "plan": "read_only",
+    }
+
     async def route(
         self,
         user_message: str,
@@ -120,6 +126,7 @@ class SkillRouter:
         file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
         write_hint: str | None = None,
+        chat_mode: str = "write",
         on_event: EventCallback | None = None,
     ) -> SkillMatchResult:
         """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
@@ -203,16 +210,13 @@ class SkillRouter:
                 task_tags=(),
             )
 
-        # ── 2. 非斜杠消息：默认全量工具（tool_scope 置空，由引擎补全）──
-        # 并行调用小模型判断 write_hint + task_tags
-        classified_hint, classified_tags = await self._classify_task(
-            user_message, write_hint=write_hint, on_event=on_event,
-        )
+        # ── 2. 非斜杠消息：chat_mode 直接映射 write_hint，无需 LLM 分类 ──
+        classified_hint = write_hint or self._MODE_TO_HINT.get(chat_mode, "may_write")
         return await self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
             write_hint=classified_hint,
-            task_tags=classified_tags,
+            task_tags=(),
         )
 
     def build_skill_catalog(

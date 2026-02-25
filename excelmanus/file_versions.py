@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from excelmanus.security.path_utils import resolve_in_workspace, to_workspace_relative
+
 logger = logging.getLogger(__name__)
 
 VersionReason = Literal["staging", "audit", "cow", "restore", "manual"]
@@ -93,18 +95,11 @@ class FileVersionManager:
 
     def _resolve(self, file_path: str) -> Path:
         """解析为绝对路径并校验在工作区内。"""
-        raw = Path(file_path).expanduser()
-        path = raw if raw.is_absolute() else self._workspace_root / raw
-        resolved = path.resolve(strict=False)
-        try:
-            resolved.relative_to(self._workspace_root)
-        except ValueError:
-            raise ValueError(f"文件路径在工作区外：{file_path}")
-        return resolved
+        return resolve_in_workspace(file_path, self._workspace_root)
 
     def _to_rel(self, abs_path: Path) -> str:
         """绝对路径 → 工作区相对路径字符串。"""
-        return str(abs_path.relative_to(self._workspace_root))
+        return to_workspace_relative(abs_path, self._workspace_root)
 
     def _version_store_dir(self, version_id: str) -> Path:
         """版本快照的物理存储目录。"""
