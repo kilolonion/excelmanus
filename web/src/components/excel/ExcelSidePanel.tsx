@@ -3,7 +3,7 @@
 import { useCallback, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download } from "lucide-react";
+import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download, Paintbrush } from "lucide-react";
 import { panelSlideVariants, panelSlideVariantsMobile } from "@/lib/sidebar-motion";
 import { useShallow } from "zustand/react/shallow";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -61,6 +61,7 @@ export function ExcelSidePanel() {
 
   // Pending range from Univer selection (not yet confirmed)
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
+  const [withStyles, setWithStyles] = useState(true);
 
   // Swipe-down to close on mobile
   const touchRef = useRef<{ startY: number; startTime: number } | null>(null);
@@ -178,6 +179,17 @@ export function ExcelSidePanel() {
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
           <button
+              onClick={() => setWithStyles((v) => !v)}
+              className={`flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md transition-colors duration-150 hover:bg-accent ${
+                withStyles
+                  ? "text-[var(--em-primary)]"
+                  : "text-muted-foreground"
+              }`}
+              title={withStyles ? "关闭样式渲染" : "开启样式渲染"}
+            >
+              <Paintbrush className="h-3.5 w-3.5" />
+            </button>
+            <button
             onClick={() => activeFilePath && downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => {})}
             className="p-2 md:p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
             title="下载文件"
@@ -208,6 +220,8 @@ export function ExcelSidePanel() {
           initialSheet={activeSheet || undefined}
           selectionMode={selectionMode}
           onRangeSelected={handleRangeSelected}
+          withStyles={withStyles}
+        
         />
       </div>
 

@@ -2307,13 +2307,23 @@ async def download_file(request: Request) -> StreamingResponse:
 
 @_router.get("/api/v1/files/excel/snapshot")
 async def get_excel_snapshot(request: Request) -> JSONResponse:
-    """返回 Excel 文件的轻量 JSON 快照（供聊天内嵌预览）。"""
+    """返回 Excel 文件的轻量 JSON 快照（供聊天内嵌预览）。
+
+    参数:
+      - path: 文件路径
+      - sheet: 指定工作表名（可选）
+      - max_rows: 最大行数（默认 50）
+      - session_id: 会话 ID（可选）
+      - all_sheets: 设为 1 时一次返回所有工作表快照（减少 HTTP 往返）
+    """
     assert _config is not None, "服务未初始化"
 
     path = request.query_params.get("path", "")
     sheet = request.query_params.get("sheet")
     max_rows = int(request.query_params.get("max_rows", "50"))
     session_id = request.query_params.get("session_id")
+    all_sheets = request.query_params.get("all_sheets", "").strip() in ("1", "true")
+    with_styles = request.query_params.get("with_styles", "1").strip() in ("1", "true")
 
     if not path:
         return _error_json_response(400, "缺少 path 参数")
@@ -2327,57 +2337,231 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
 
-        wb = load_workbook(resolved, data_only=True, read_only=True)
+        wb = load_workbook(resolved, data_only=True, read_only=not with_styles)
         sheet_names = wb.sheetnames
+
+        def _resolve_color(color_obj: Any) -> str | None:
+            """将 openpyxl Color 对象转为 #RRGGBB 字符串。"""
+            if color_obj is None:
+                return None
+            try:
+                if color_obj.type == "rgb" and color_obj.rgb and color_obj.rgb != "00000000":
+                    rgb = str(color_obj.rgb)
+                    # openpyxl rgb 可能是 AARRGGBB 格式
+                    if len(rgb) == 8:
+                        return f"#{rgb[2:]}"
+                    elif len(rgb) == 6:
+                        return f"#{rgb}"
+                if color_obj.type == "indexed" and color_obj.indexed is not None:
+                    # 常见索引色映射（简化版）
+                    _IDX_COLORS = {
+                        0: "#000000", 1: "#FFFFFF", 2: "#FF0000", 3: "#00FF00",
+                        4: "#0000FF", 5: "#FFFF00", 6: "#FF00FF", 7: "#00FFFF",
+                        8: "#000000", 9: "#FFFFFF", 10: "#FF0000", 11: "#00FF00",
+                        12: "#0000FF", 13: "#FFFF00", 14: "#FF00FF", 15: "#00FFFF",
+                        16: "#800000", 17: "#008000", 18: "#000080", 19: "#808000",
+                        20: "#800080", 21: "#008080", 22: "#C0C0C0", 23: "#808080",
+                    }
+                    return _IDX_COLORS.get(color_obj.indexed)
+                if color_obj.type == "theme" and color_obj.theme is not None:
+                    # 主题色简化映射
+                    _THEME_COLORS = {
+                        0: "#FFFFFF", 1: "#000000", 2: "#44546A", 3: "#E7E6E6",
+                        4: "#4472C4", 5: "#ED7D31", 6: "#A5A5A5", 7: "#FFC000",
+                        8: "#5B9BD5", 9: "#70AD47",
+                    }
+                    return _THEME_COLORS.get(color_obj.theme)
+            except Exception:
+                pass
+            return None
+
+        def _extract_cell_style(cell_obj: Any) -> dict | None:
+            """提取单元格样式，返回 Univer 兼容的样式 dict，无样式返回 None。"""
+            style: dict[str, Any] = {}
+            try:
+                font = cell_obj.font
+                if font:
+                    if font.bold:
+                        style["bl"] = 1
+                    if font.italic:
+                        style["it"] = 1
+                    if font.underline and font.underline != "none":
+                        style["ul"] = {"s": 1}
+                    if font.strike:
+                        style["st"] = {"s": 1}
+                    if font.size and font.size != 11:
+                        style["fs"] = font.size
+                    if font.name and font.name != "Calibri":
+                        style["ff"] = font.name
+                    fc = _resolve_color(font.color)
+                    if fc:
+                        style["cl"] = {"rgb": fc}
+            except Exception:
+                pass
+            try:
+                fill = cell_obj.fill
+                if fill and fill.patternType and fill.patternType != "none":
+                    bg = _resolve_color(fill.fgColor)
+                    if bg:
+                        style["bg"] = {"rgb": bg}
+            except Exception:
+                pass
+            try:
+                alignment = cell_obj.alignment
+                if alignment:
+                    h_map = {"left": 0, "center": 1, "right": 2, "justify": 3}
+                    v_map = {"top": 0, "center": 1, "bottom": 2}
+                    if alignment.horizontal and alignment.horizontal in h_map:
+                        style["ht"] = h_map[alignment.horizontal]
+                    if alignment.vertical and alignment.vertical in v_map:
+                        style["vt"] = v_map[alignment.vertical]
+                    if alignment.wrapText:
+                        style["tb"] = 1
+                    if alignment.textRotation:
+                        style["tr"] = {"a": alignment.textRotation}
+            except Exception:
+                pass
+            try:
+                border = cell_obj.border
+                if border:
+                    _BORDER_STYLE_MAP = {
+                        "thin": 1, "medium": 2, "thick": 3, "dashed": 4,
+                        "dotted": 5, "double": 6, "hair": 7,
+                        "mediumDashed": 8, "dashDot": 9, "mediumDashDot": 10,
+                        "dashDotDot": 11, "mediumDashDotDot": 12, "slantDashDot": 13,
+                    }
+                    for side_name, univer_key in [("left", "l"), ("right", "r"), ("top", "t"), ("bottom", "b")]:
+                        side = getattr(border, side_name, None)
+                        if side and side.style:
+                            bd_entry: dict[str, Any] = {"s": _BORDER_STYLE_MAP.get(side.style, 1)}
+                            bc = _resolve_color(side.color)
+                            if bc:
+                                bd_entry["cl"] = {"rgb": bc}
+                            style.setdefault("bd", {})[univer_key] = bd_entry
+            except Exception:
+                pass
+            try:
+                nf = cell_obj.number_format
+                if nf and nf != "General":
+                    style["n"] = {"pattern": nf}
+            except Exception:
+                pass
+            return style if style else None
+
+        def _read_sheet(ws_obj: Any) -> dict:
+            """读取单个工作表并返回快照 dict。"""
+            s_total_rows = ws_obj.max_row or 0
+            s_total_cols = ws_obj.max_column or 0
+            s_headers: list[str] = []
+            s_col_letters: list[str] = []
+            for c in range(1, min(s_total_cols + 1, 101)):
+                s_col_letters.append(get_column_letter(c))
+                cell_val = ws_obj.cell(row=1, column=c).value
+                s_headers.append(str(cell_val) if cell_val is not None else "")
+            s_rows: list[list[Any]] = []
+            s_row_limit = min(max_rows, s_total_rows, 200)
+            for r in range(2, s_row_limit + 2):
+                if r > s_total_rows:
+                    break
+                row_data: list[Any] = []
+                for c in range(1, min(s_total_cols + 1, 101)):
+                    val = ws_obj.cell(row=r, column=c).value
+                    if val is None:
+                        row_data.append(None)
+                    elif isinstance(val, (int, float, bool)):
+                        row_data.append(val)
+                    else:
+                        row_data.append(str(val))
+                s_rows.append(row_data)
+
+            result: dict[str, Any] = {
+                "sheet": ws_obj.title,
+                "shape": {"rows": s_total_rows, "columns": s_total_cols},
+                "column_letters": s_col_letters,
+                "headers": s_headers,
+                "rows": s_rows,
+                "total_rows": s_total_rows,
+                "truncated": s_total_rows > s_row_limit,
+            }
+
+            # 提取样式（仅 with_styles=True 时）
+            if with_styles:
+                cell_styles: dict[str, dict] = {}
+                merged: list[dict] = []
+                for r in range(1, s_row_limit + 2):
+                    if r > s_total_rows:
+                        break
+                    for c in range(1, min(s_total_cols + 1, 101)):
+                        cell_obj = ws_obj.cell(row=r, column=c)
+                        style = _extract_cell_style(cell_obj)
+                        if style:
+                            cell_styles[f"{r-1},{c-1}"] = style
+                # 合并单元格
+                try:
+                    for merge_range in ws_obj.merged_cells.ranges:
+                        merged.append({
+                            "startRow": merge_range.min_row - 1,
+                            "startColumn": merge_range.min_col - 1,
+                            "endRow": merge_range.max_row - 1,
+                            "endColumn": merge_range.max_col - 1,
+                        })
+                except Exception:
+                    pass
+                # 列宽
+                col_widths: dict[str, float] = {}
+                try:
+                    for col_letter, dim in ws_obj.column_dimensions.items():
+                        if dim.width and dim.width != 8.43:  # 默认宽度
+                            col_idx = 0
+                            for i, ch in enumerate(reversed(col_letter.upper())):
+                                col_idx += (ord(ch) - 64) * (26 ** i)
+                            col_widths[str(col_idx - 1)] = dim.width
+                except Exception:
+                    pass
+                # 行高
+                row_heights: dict[str, float] = {}
+                try:
+                    for row_idx, dim in ws_obj.row_dimensions.items():
+                        if dim.height and dim.height != 15:  # 默认行高
+                            row_heights[str(row_idx - 1)] = dim.height
+                except Exception:
+                    pass
+
+                if cell_styles:
+                    result["cell_styles"] = cell_styles
+                if merged:
+                    result["merged_cells"] = merged
+                if col_widths:
+                    result["column_widths"] = col_widths
+                if row_heights:
+                    result["row_heights"] = row_heights
+
+            return result
+
+        if all_sheets:
+            # 一次返回所有工作表快照
+            snapshots = []
+            for sn in sheet_names:
+                ws_obj = wb[sn]
+                snapshots.append(_read_sheet(ws_obj))
+            wb.close()
+            return JSONResponse(content={
+                "file": os.path.basename(resolved),
+                "sheets": sheet_names,
+                "all_snapshots": snapshots,
+            })
+
+        # 单 sheet 模式（向后兼容）
         ws = wb[sheet] if sheet and sheet in sheet_names else wb.active
         if ws is None:
             wb.close()
             return _error_json_response(404, "工作表不存在")
 
-        active_sheet = ws.title or sheet_names[0]
-        total_rows = ws.max_row or 0
-        total_cols = ws.max_column or 0
-
-        # 读取列头（第一行）
-        headers: list[str] = []
-        col_letters: list[str] = []
-        for c in range(1, min(total_cols + 1, 101)):  # 最多 100 列
-            col_letters.append(get_column_letter(c))
-            cell_val = ws.cell(row=1, column=c).value
-            headers.append(str(cell_val) if cell_val is not None else "")
-
-        # 读取数据行
-        rows: list[list[Any]] = []
-        row_limit = min(max_rows, total_rows, 200)
-        for r in range(2, row_limit + 2):  # 从第 2 行开始（跳过表头）
-            if r > total_rows:
-                break
-            row_data: list[Any] = []
-            for c in range(1, min(total_cols + 1, 101)):
-                val = ws.cell(row=r, column=c).value
-                if val is None:
-                    row_data.append(None)
-                elif isinstance(val, (int, float, bool)):
-                    row_data.append(val)
-                else:
-                    row_data.append(str(val))
-            rows.append(row_data)
-
+        snap = _read_sheet(ws)
+        snap["file"] = os.path.basename(resolved)
+        snap["sheets"] = sheet_names
         wb.close()
-
-        snapshot = {
-            "file": os.path.basename(resolved),
-            "sheet": active_sheet,
-            "sheets": sheet_names,
-            "shape": {"rows": total_rows, "columns": total_cols},
-            "column_letters": col_letters,
-            "headers": headers,
-            "rows": rows,
-            "total_rows": total_rows,
-            "truncated": total_rows > row_limit,
-        }
-
-        return JSONResponse(content=snapshot)
+        return JSONResponse(content=snap)
     except Exception as exc:
         logger.error("Excel snapshot 生成失败: %s", exc, exc_info=True)
         return _error_json_response(500, f"读取文件失败: {exc}")

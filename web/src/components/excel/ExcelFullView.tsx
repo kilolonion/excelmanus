@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { ArrowLeft, Maximize2, MousePointerSquareDashed, Check, XCircle, Download } from "lucide-react";
+import { ArrowLeft, Maximize2, MousePointerSquareDashed, Check, XCircle, Download, Paintbrush } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -32,6 +32,7 @@ export function ExcelFullView() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
+  const [withStyles, setWithStyles] = useState(true);
 
   const handleRangeSelected = useCallback((range: string, sheet: string) => {
     setPendingRange({ range, sheet });
@@ -112,6 +113,20 @@ export function ExcelFullView() {
         <Button
           variant="ghost"
           size="sm"
+          onClick={() => setWithStyles((v) => !v)}
+          className={`h-7 gap-1.5 text-xs ${
+            withStyles
+              ? "text-[var(--em-primary)] bg-[var(--em-primary)]/10"
+              : "text-muted-foreground"
+          }`}
+          title={withStyles ? "关闭样式渲染" : "开启样式渲染"}
+        >
+          <Paintbrush className="h-3.5 w-3.5" />
+          样式
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={() => fullViewPath && downloadFile(fullViewPath, fileName, activeSessionId ?? undefined).catch(() => {})}
           className="h-7 gap-1.5 text-xs text-muted-foreground"
           title="下载文件"
@@ -138,6 +153,7 @@ export function ExcelFullView() {
           initialSheet={fullViewSheet ?? undefined}
           selectionMode={selectionMode}
           onRangeSelected={handleRangeSelected}
+          withStyles={withStyles}
         />
       </div>
 

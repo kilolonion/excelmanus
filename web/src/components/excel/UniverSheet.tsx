@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useExcelStore } from "@/stores/excel-store";
-import { fetchExcelSnapshot, type ExcelSnapshot } from "@/lib/api";
+import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
 
 interface UniverSheetProps {
   fileUrl: string;
@@ -11,6 +11,7 @@ interface UniverSheetProps {
   initialSheet?: string;
   selectionMode?: boolean;
   onRangeSelected?: (range: string, sheet: string) => void;
+  withStyles?: boolean;
 }
 
 function createPreviewWorkbookId(): string {
@@ -49,20 +50,37 @@ function snapshotToWorkbookData(
     const sheetId = `sheet-${snap.sheet}`;
     sheetOrder.push(sheetId);
 
-    const cellData: Record<number, Record<number, { v: string | number | null }>> = {};
+    const cellData: Record<number, Record<number, any>> = {};
     // Header row (row 0)
-    const headerRow: Record<number, { v: string | number | null }> = {};
+    const headerRow: Record<number, any> = {};
     snap.headers.forEach((h, ci) => {
-      headerRow[ci] = { v: h };
+      const cell: any = { v: h };
+      // Apply style if available
+      const styleKey = `0,${ci}`;
+      if ((snap as any).cell_styles?.[styleKey]) {
+        cell.s = (snap as any).cell_styles[styleKey];
+      }
+      headerRow[ci] = cell;
     });
     cellData[0] = headerRow;
 
     // Data rows (row 1+)
     snap.rows.forEach((row, ri) => {
-      const rowData: Record<number, { v: string | number | null }> = {};
+      const rowData: Record<number, any> = {};
       row.forEach((val, ci) => {
         if (val !== null && val !== undefined) {
-          rowData[ci] = { v: val };
+          const cell: any = { v: val };
+          const styleKey = `${ri + 1},${ci}`;
+          if ((snap as any).cell_styles?.[styleKey]) {
+            cell.s = (snap as any).cell_styles[styleKey];
+          }
+          rowData[ci] = cell;
+        } else {
+          // Even null cells may have styles (e.g. background color)
+          const styleKey = `${ri + 1},${ci}`;
+          if ((snap as any).cell_styles?.[styleKey]) {
+            rowData[ci] = { v: null, s: (snap as any).cell_styles[styleKey] };
+          }
         }
       });
       cellData[ri + 1] = rowData;
@@ -71,13 +89,43 @@ function snapshotToWorkbookData(
     const colCount = Math.max(snap.headers.length, snap.column_letters.length, 26);
     const rowCount = snap.rows.length + 1 + 50; // extra rows for editing
 
-    sheetMap[sheetId] = {
+    const sheetData: any = {
       id: sheetId,
       name: snap.sheet,
       cellData,
       rowCount: Math.max(rowCount, 100),
       columnCount: Math.max(colCount, 26),
     };
+
+    // Apply merged cells
+    if ((snap as any).merged_cells?.length) {
+      sheetData.mergeData = (snap as any).merged_cells.map((m: any) => ({
+        startRow: m.startRow,
+        startColumn: m.startColumn,
+        endRow: m.endRow,
+        endColumn: m.endColumn,
+      }));
+    }
+
+    // Apply column widths
+    if ((snap as any).column_widths) {
+      const colInfo: Record<number, any> = {};
+      for (const [colIdx, width] of Object.entries((snap as any).column_widths)) {
+        colInfo[Number(colIdx)] = { w: (width as number) * 7.5 }; // Excel width units to pixels approx
+      }
+      sheetData.columnData = colInfo;
+    }
+
+    // Apply row heights
+    if ((snap as any).row_heights) {
+      const rowInfo: Record<number, any> = {};
+      for (const [rowIdx, height] of Object.entries((snap as any).row_heights)) {
+        rowInfo[Number(rowIdx)] = { h: height as number };
+      }
+      sheetData.rowData = rowInfo;
+    }
+
+    sheetMap[sheetId] = sheetData;
   }
 
   return {
@@ -100,7 +148,7 @@ function colIndexToLetter(index: number): string {
   return result;
 }
 
-export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected }: UniverSheetProps) {
+export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true }: UniverSheetProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<any>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
@@ -124,26 +172,16 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         setLoading(true);
         setError(null);
 
-        // Fetch first sheet to get the list of all sheets
-        const firstSnap = await fetchExcelSnapshot(filePath, { maxRows: 500 });
+        // Single request to fetch ALL sheets at once (eliminates N serial HTTP round-trips)
+        const resp = await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
         if (loadVersion !== loadVersionRef.current) return;
 
-        // Fetch all sheets
-        const allSnapshots: ExcelSnapshot[] = [firstSnap];
-        for (const sheetName of firstSnap.sheets) {
-          if (sheetName !== firstSnap.sheet) {
-            try {
-              const snap = await fetchExcelSnapshot(filePath, {
-                sheet: sheetName,
-                maxRows: 500,
-              });
-              allSnapshots.push(snap);
-            } catch {
-              // skip failed sheets
-            }
-          }
+        const allSnapshots: ExcelSnapshot[] = resp.all_snapshots;
+        if (!allSnapshots.length) {
+          setError("文件无工作表");
+          setLoading(false);
+          return;
         }
-        if (loadVersion !== loadVersionRef.current) return;
 
         const previousWorkbookId = workbookIdRef.current;
         try {
@@ -208,9 +246,17 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
     const init = async () => {
       try {
-        const { createUniver, LocaleType } = await import("@univerjs/presets");
-        const { UniverSheetsCorePreset } = await import("@univerjs/preset-sheets-core");
-        const sheetsCoreZhCN = (await import("@univerjs/preset-sheets-core/locales/zh-CN")).default;
+        // Prefetch data in parallel with Univer engine loading
+        const dataPromise = filePath
+          ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
+          : Promise.resolve(null);
+
+        const [{ createUniver, LocaleType }, { UniverSheetsCorePreset }, sheetsCoreZhCNMod] =
+          await Promise.all([
+            import("@univerjs/presets"),
+            import("@univerjs/preset-sheets-core"),
+            import("@univerjs/preset-sheets-core/locales/zh-CN"),
+          ]);
         await import("@univerjs/preset-sheets-core/lib/index.css");
 
         if (disposed) return;
@@ -218,7 +264,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         const { univerAPI } = createUniver({
           locale: LocaleType.ZH_CN,
           locales: {
-            [LocaleType.ZH_CN]: sheetsCoreZhCN,
+            [LocaleType.ZH_CN]: sheetsCoreZhCNMod.default,
           },
           presets: [
             UniverSheetsCorePreset({
@@ -235,7 +281,43 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         api = univerAPI;
         univerRef.current = univerAPI;
 
-        await loadData(univerAPI);
+        // Use prefetched data if available, otherwise loadData will fetch again
+        const prefetchedData = await dataPromise;
+        if (prefetchedData && prefetchedData.all_snapshots?.length) {
+          // Inject prefetched data directly
+          const loadVersion = ++loadVersionRef.current;
+          try {
+            const allSnapshots = prefetchedData.all_snapshots;
+            let workbookId = createPreviewWorkbookId();
+            workbookIdRef.current = workbookId;
+            let workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
+            try {
+              univerAPI.createWorkbook(workbookData);
+            } catch (createErr) {
+              if (!isDuplicateUnitIdError(createErr)) throw createErr;
+              workbookId = createPreviewWorkbookId();
+              workbookIdRef.current = workbookId;
+              workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
+              univerAPI.createWorkbook(workbookData);
+            }
+            if (initialSheet) {
+              try {
+                const wb = univerAPI.getActiveWorkbook();
+                if (wb) {
+                  const sheets = wb.getSheets();
+                  const target = sheets?.find((s: any) => s.getName?.() === initialSheet);
+                  if (target) target.activate();
+                }
+              } catch { /* ignore */ }
+            }
+            if (loadVersion === loadVersionRef.current) setLoading(false);
+          } catch {
+            // Prefetch path failed, fall back to normal loadData
+            await loadData(univerAPI);
+          }
+        } else {
+          await loadData(univerAPI);
+        }
       } catch (err) {
         console.error("Univer initialization error:", err);
         setError("Univer 引擎初始化失败");
