@@ -65,7 +65,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
 
     def task_create(
         title: str,
-        subtasks: list[str],
+        subtasks: list,
         replace_existing: bool = False,
     ) -> str:
         return globals()["task_create"](
@@ -107,8 +107,20 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                     },
                     "subtasks": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "子任务标题列表",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string", "description": "子任务标题"},
+                                        "verification": {"type": "string", "description": "该步骤的验证条件"},
+                                    },
+                                    "required": ["title"],
+                                },
+                            ],
+                        },
+                        "description": "子任务列表，每项可为字符串或含验证条件的对象",
                     },
                     "replace_existing": {
                         "type": "boolean",

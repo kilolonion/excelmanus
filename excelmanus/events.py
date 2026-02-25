@@ -35,6 +35,7 @@ class EventType(Enum):
     FILES_CHANGED = "files_changed"
     PIPELINE_PROGRESS = "pipeline_progress"
     MEMORY_EXTRACTED = "memory_extracted"
+    FILE_DOWNLOAD = "file_download"
 
 
 @dataclass
@@ -126,6 +127,10 @@ class ToolCallEvent:
     # memory_extracted 事件字段
     memory_entries: List[Dict[str, Any]] = field(default_factory=list)
     memory_trigger: str = ""  # "periodic" | "pre_compaction" | "session_end"
+    # file_download 事件字段
+    download_file_path: str = ""
+    download_filename: str = ""
+    download_description: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

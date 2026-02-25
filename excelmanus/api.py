@@ -1349,6 +1349,7 @@ class RollbackRequest(BaseModel):
     turn_index: int = Field(..., ge=0, description="目标用户轮次索引（0-indexed）")
     rollback_files: bool = Field(default=False, description="是否同时回滚文件变更")
     new_message: str | None = Field(default=None, description="替换该轮用户消息内容（可选）")
+    resend_mode: bool = Field(default=False, description="重发模式：移除目标用户消息，调用方随后通过 /chat/stream 重新发送")
 
 
 @_router.get("/api/v1/backup/list")
@@ -1468,6 +1469,7 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
             request.turn_index,
             rollback_files=request.rollback_files,
             new_message=request.new_message,
+            resend_mode=request.resend_mode,
             user_id=user_id,
         )
     except SessionNotFoundError as exc:
@@ -1568,6 +1570,7 @@ def _sse_event_to_sse(
         EventType.FILES_CHANGED: "files_changed",
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
+        EventType.FILE_DOWNLOAD: "file_download",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -1760,6 +1763,13 @@ def _sse_event_to_sse(
             "entries": (event.memory_entries or [])[:50],
             "trigger": event.memory_trigger or "session_end",
             "count": len(event.memory_entries or []),
+        }
+    elif event.event_type == EventType.FILE_DOWNLOAD:
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "file_path": _public_excel_path(event.download_file_path, safe_mode=safe_mode),
+            "filename": sanitize_external_text(event.download_filename, max_len=260),
+            "description": sanitize_external_text(event.download_description, max_len=500),
         }
     else:
         data = event.to_dict()
