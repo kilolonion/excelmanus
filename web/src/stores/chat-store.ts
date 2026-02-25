@@ -471,6 +471,17 @@ export async function refreshSessionMessagesFromBackend(
   });
 }
 
+export interface VlmPhaseEntry {
+  stage: string;
+  message: string;
+  startedAt: number;
+  duration?: number;
+  diff?: PipelineStatus["diff"];
+  specPath?: string;
+  phaseIndex: number;
+  totalPhases: number;
+}
+
 export interface PipelineStatus {
   stage: string;
   message: string;
@@ -505,6 +516,7 @@ interface ChatState {
   pendingQuestion: Question | null;
   abortController: AbortController | null;
   pipelineStatus: PipelineStatus | null;
+  vlmPhases: VlmPhaseEntry[];
 
   setMessages: (messages: Message[]) => void;
   addUserMessage: (id: string, content: string, files?: FileAttachment[]) => void;
@@ -523,6 +535,8 @@ interface ChatState {
   setPendingQuestion: (question: Question | null) => void;
   setAbortController: (controller: AbortController | null) => void;
   setPipelineStatus: (status: PipelineStatus | null) => void;
+  pushVlmPhase: (entry: VlmPhaseEntry) => void;
+  clearVlmPhases: () => void;
   clearMessages: () => void;
   removeSessionCache: (sessionId: string) => void;
   switchSession: (sessionId: string | null) => void;
@@ -538,15 +552,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingQuestion: null,
   abortController: null,
   pipelineStatus: null,
+  vlmPhases: [],
 
   setMessages: (messages) => set({ messages }),
   addUserMessage: (id, content, files) =>
     set((state) => ({
-      messages: [...state.messages, { id, role: "user" as const, content, files }],
+      messages: [...state.messages, { id, role: "user" as const, content, files, timestamp: Date.now() }],
     })),
   addAssistantMessage: (id) =>
     set((state) => ({
-      messages: [...state.messages, { id, role: "assistant" as const, blocks: [] }],
+      messages: [...state.messages, { id, role: "assistant" as const, blocks: [], timestamp: Date.now() }],
     })),
   appendBlock: (messageId, block) =>
     set((state) => ({
@@ -632,6 +647,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPendingQuestion: (question) => set({ pendingQuestion: question }),
   setAbortController: (controller) => set({ abortController: controller }),
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
+  pushVlmPhase: (entry) =>
+    set((state) => ({
+      vlmPhases: [...state.vlmPhases.filter((p) => p.stage !== entry.stage), entry],
+    })),
+  clearVlmPhases: () => set({ vlmPhases: [] }),
   clearMessages: () => {
     const { currentSessionId } = get();
     // 清除内存缓存

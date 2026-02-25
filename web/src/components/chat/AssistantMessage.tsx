@@ -21,6 +21,9 @@ import { SubagentBlock } from "./SubagentBlock";
 import { TaskList } from "./TaskList";
 import { UndoableCard } from "./UndoableCard";
 import { PipelineStepper } from "./PipelineStepper";
+import { CodeBlock } from "./CodeBlock";
+import { MessageActions } from "./MessageActions";
+import { VlmPipelineCard } from "./VlmPipelineCard";
 import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -28,6 +31,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
 import type { AssistantBlock } from "@/lib/types";
 import React, { useCallback, useMemo, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 /**
  * Recursively process React children: replace plain string nodes
@@ -54,6 +58,29 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   },
   li({ children }) {
     return <li>{processChildren(children)}</li>;
+  },
+  // Fenced code blocks → CodeBlock with syntax highlighting + copy button
+  pre({ children }) {
+    // react-markdown wraps fenced code in <pre><code>…</code></pre>
+    // We pass through so the code component handles rendering via CodeBlock
+    return <>{children}</>;
+  },
+  code({ className, children, node, ...rest }) {
+    const match = /language-(\w+)/.exec(className || "");
+    const codeString = String(children).replace(/\n$/, "");
+    // Fenced code block (has language class or is multi-line)
+    if (match || (node?.position && codeString.includes("\n"))) {
+      return <CodeBlock language={match?.[1]} code={codeString} />;
+    }
+    // Inline code
+    return (
+      <code
+        className="rounded px-1 py-0.5 text-[12.5px] font-mono bg-[var(--em-primary-alpha-06)] text-[var(--em-primary-dark)]"
+        {...rest}
+      >
+        {children}
+      </code>
+    );
   },
 };
 
@@ -180,7 +207,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
     && lastBlock.duration == null;
 
   return (
-    <div className="flex gap-2 sm:gap-2.5 py-2.5">
+    <div className="group/msg flex gap-2 sm:gap-2.5 py-2.5">
       <div
         className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px]"
         style={{ backgroundColor: "var(--em-accent)" }}
@@ -200,21 +227,48 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
           </button>
         )}
 
-        {collapsed && hasChain ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setCollapsed(false)}
-              className="flex items-center gap-2 my-1.5 px-2.5 py-1.5 rounded-md border border-border/60 bg-muted/20 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors cursor-pointer w-full text-left"
+        <AnimatePresence mode="wait" initial={false}>
+          {collapsed && hasChain ? (
+            <motion.div
+              key="collapsed"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
             >
-              <ChevronsUpDown className="h-3 w-3 flex-shrink-0" />
-              <span>{chainSummary(chainBlocks)}</span>
-            </button>
-            {/* Even when collapsed, show text and thinking blocks from the chain
-                so the user can still see the agent's analysis and reasoning. */}
-            {chainBlocks
-              .filter(({ block }) => block.type === "text" || block.type === "thinking")
-              .map(({ block, origIndex }) => (
+              <button
+                type="button"
+                onClick={() => setCollapsed(false)}
+                className="flex items-center gap-2 my-1.5 px-2.5 py-1.5 rounded-md border border-border/60 bg-muted/20 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors cursor-pointer w-full text-left"
+              >
+                <ChevronsUpDown className="h-3 w-3 flex-shrink-0" />
+                <span>{chainSummary(chainBlocks)}</span>
+              </button>
+              {/* Even when collapsed, show text and thinking blocks from the chain
+                  so the user can still see the agent's analysis and reasoning. */}
+              {chainBlocks
+                .filter(({ block }) => block.type === "text" || block.type === "thinking")
+                .map(({ block, origIndex }) => (
+                  <AssistantBlockRenderer
+                    key={origIndex}
+                    block={block}
+                    blockIndex={origIndex}
+                    messageId={messageId}
+                    isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
+                    isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
+                  />
+                ))}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="expanded"
+              className={hasChain && tailBlocks.length > 0 ? "pt-5" : undefined}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+            >
+              {chainBlocks.map(({ block, origIndex }) => (
                 <AssistantBlockRenderer
                   key={origIndex}
                   block={block}
@@ -224,19 +278,9 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
                   isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
                 />
               ))}
-          </>
-        ) : (
-          chainBlocks.map(({ block, origIndex }) => (
-            <AssistantBlockRenderer
-              key={origIndex}
-              block={block}
-              blockIndex={origIndex}
-              messageId={messageId}
-              isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
-              isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
-            />
-          ))
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {tailBlocks.map(({ block, origIndex }) => (
           <AssistantBlockRenderer
@@ -255,6 +299,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
         {affectedFiles && affectedFiles.length > 0 && (
           <AffectedFilesBadges files={affectedFiles} />
         )}
+
+        <MessageActions blocks={blocks} />
       </div>
     </div>
   );
@@ -371,17 +417,25 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({ bloc
       }
       return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} />;
     }
-    case "tool_call":
+    case "tool_call": {
+      const isVlmExtract = block.name === "extract_table_spec";
+      const imagePath = isVlmExtract
+        ? (block.args?.file_path as string | undefined)
+        : undefined;
       return (
-        <ToolCallCard
-          toolCallId={block.toolCallId}
-          name={block.name}
-          args={block.args}
-          status={block.status}
-          result={block.result}
-          error={block.error}
-        />
+        <>
+          <ToolCallCard
+            toolCallId={block.toolCallId}
+            name={block.name}
+            args={block.args}
+            status={block.status}
+            result={block.result}
+            error={block.error}
+          />
+          {isVlmExtract && <VlmPipelineCard imagePath={imagePath} />}
+        </>
       );
+    }
     case "subagent":
       return (
         <SubagentBlock

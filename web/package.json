@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
+    "build:webpack": "next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
@@ -16,6 +17,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.34.3",
+    "highlight.js": "^11.11.1",
     "idb-keyval": "^6.2.2",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",

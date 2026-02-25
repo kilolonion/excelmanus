@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion } from "framer-motion";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -9,6 +9,48 @@ import { AssistantMessage } from "./AssistantMessage";
 import { RollbackConfirmDialog, getRollbackFilePreference } from "./RollbackConfirmDialog";
 import { messageEnterVariants } from "@/lib/sidebar-motion";
 import type { Message } from "@/lib/types";
+
+const TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 minutes
+
+function formatTimestamp(ts: number): string {
+  const now = Date.now();
+  const diff = now - ts;
+  const date = new Date(ts);
+  const today = new Date();
+  const isToday =
+    date.getDate() === today.getDate() &&
+    date.getMonth() === today.getMonth() &&
+    date.getFullYear() === today.getFullYear();
+  const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+
+  if (diff < 60_000) return "\u521a\u521a";
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} \u5206\u949f\u524d`;
+  if (isToday) return time;
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday =
+    date.getDate() === yesterday.getDate() &&
+    date.getMonth() === yesterday.getMonth() &&
+    date.getFullYear() === yesterday.getFullYear();
+  if (isYesterday) return `\u6628\u5929 ${time}`;
+  return `${date.getMonth() + 1}/${date.getDate()} ${time}`;
+}
+
+/** Indices of messages that should show a timestamp separator above them. */
+function computeTimestampIndices(messages: Message[]): Set<number> {
+  const indices = new Set<number>();
+  if (messages.length === 0) return indices;
+  // Always show timestamp on the first message if it has one
+  if (messages[0].timestamp) indices.add(0);
+  for (let i = 1; i < messages.length; i++) {
+    const prev = messages[i - 1].timestamp;
+    const curr = messages[i].timestamp;
+    if (prev && curr && curr - prev >= TIMESTAMP_GAP_MS) {
+      indices.add(i);
+    }
+  }
+  return indices;
+}
 
 interface MessageStreamProps {
   messages: Message[];
@@ -133,6 +175,11 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
     setRollbackDialog({ open: false, messageId: "", newContent: "" });
   }, []);
 
+  const timestampIndices = useMemo(
+    () => computeTimestampIndices(messages),
+    [messages],
+  );
+
   const virtualItems = virtualizer.getVirtualItems();
   const lastMsgIndex = messages.length - 1;
 
@@ -169,6 +216,15 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
+                {/* Smart timestamp separator */}
+                {message.timestamp && timestampIndices.has(virtualRow.index) && (
+                  <div className="flex items-center justify-center py-1 max-w-3xl mx-auto px-3 sm:px-4">
+                    <span className="text-[10px] text-muted-foreground/60 select-none">
+                      {formatTimestamp(message.timestamp)}
+                    </span>
+                  </div>
+                )}
+
                 <motion.div
                   className="max-w-3xl mx-auto px-3 sm:px-4"
                   variants={messageEnterVariants}

@@ -201,6 +201,7 @@ export async function sendMessage(
           || `任务 ${i + 1}`,
         status: (item.status as string) || "pending",
         index: typeof item.index === "number" ? item.index : i,
+        verification: (item.verification as string) || undefined,
       };
     });
   };
@@ -287,16 +288,31 @@ export async function sendMessage(
 
           // ── Pipeline Progress ─────────────────────
           case "pipeline_progress": {
+            const stage = (data.stage as string) || "";
+            const pipelineMsg = (data.message as string) || "";
+            const phaseIndex = typeof data.phase_index === "number" ? data.phase_index : undefined;
+            const totalPhases = typeof data.total_phases === "number" ? data.total_phases : undefined;
+            const specPath = (data.spec_path as string) || undefined;
+            const diff = (data.diff as PipelineStatus["diff"]) ?? undefined;
+            const checkpoint = (data.checkpoint as Record<string, unknown>) ?? undefined;
+
             S().setPipelineStatus({
-              stage: (data.stage as string) || "",
-              message: (data.message as string) || "",
-              startedAt: Date.now(),
-              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-              specPath: (data.spec_path as string) || undefined,
-              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
-              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
+              stage, message: pipelineMsg, startedAt: Date.now(),
+              phaseIndex, totalPhases, specPath, diff, checkpoint,
             });
+
+            // Accumulate VLM extract phases for the timeline card
+            if (stage.startsWith("vlm_extract_") && phaseIndex != null && totalPhases != null) {
+              S().pushVlmPhase({
+                stage,
+                message: pipelineMsg,
+                startedAt: Date.now(),
+                diff,
+                specPath,
+                phaseIndex,
+                totalPhases,
+              });
+            }
             break;
           }
 
@@ -862,6 +878,7 @@ export async function sendContinuation(
           || `任务 ${i + 1}`,
         status: (item.status as string) || "pending",
         index: typeof item.index === "number" ? item.index : i,
+        verification: (item.verification as string) || undefined,
       };
     });
   };

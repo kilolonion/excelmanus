@@ -32,6 +32,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useDropzone } from "react-dropzone";
 import { useChatStore } from "@/stores/chat-store";
 import { useUIStore } from "@/stores/ui-store";
@@ -853,6 +859,17 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     >
       <input {...getInputProps()} />
 
+      {/* Drag overlay */}
+      {isDragActive && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center rounded-[20px] bg-[var(--em-primary-alpha-06)] border-2 border-dashed border-[var(--em-primary-light)] backdrop-blur-[2px]">
+          <div className="flex flex-col items-center gap-1.5 text-[var(--em-primary)]">
+            <Plus className="h-6 w-6" />
+            <span className="text-sm font-medium">拖放文件到这里</span>
+            <span className="text-[10px] text-muted-foreground">支持 xlsx、xls、csv、图片</span>
+          </div>
+        </div>
+      )}
+
       {/* Slash / @ Popover */}
       {popover && popoverItems.length > 0 && (
         <div
@@ -972,14 +989,23 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       {/* Main input row: [+] textarea [send] */}
       <div className="flex items-end gap-1 px-1.5 py-1.5">
         {/* Attach button (left) */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <Plus className="h-4 w-4" />
-        </Button>
+        <TooltipProvider delayDuration={400}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              添加文件
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         <input
           ref={fileInputRef}
           type="file"
