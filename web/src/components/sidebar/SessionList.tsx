@@ -141,12 +141,13 @@ export function SessionList() {
   return (
     <div className="space-y-1.5 py-1">
       {/* Filter tabs */}
-      <div className="px-1 flex gap-1">
+      <div className="px-1 flex gap-1 flex-shrink-0">
         {filterViews.map(({ key, label }) => (
           <button
             key={key}
-            className="relative h-6 min-h-8 min-w-[2rem] px-2 text-xs rounded-md z-10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1"
+            className="relative h-6 min-h-8 px-2 text-xs rounded-md z-10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 flex-shrink-0 whitespace-nowrap"
             style={{
+              minWidth: key === "all" ? "3rem" : key === "active" ? "3rem" : "3rem",
               ...(sessionView === key ? { color: "white" } : {}),
               // @ts-expect-error CSS custom property
               "--tw-ring-color": "var(--em-primary)",
@@ -161,7 +162,7 @@ export function SessionList() {
                 transition={{ duration: 0.15, ease: "easeOut" }}
               />
             )}
-            <span className="relative z-10">
+            <span className="relative z-10 flex items-center justify-center w-full">
               {label} {getCount(key)}
             </span>
           </button>

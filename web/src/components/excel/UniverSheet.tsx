@@ -311,6 +311,15 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         }
 
         if (loadVersion !== loadVersionRef.current) return;
+
+        // 移动端：数据 workbook 创建后立即禁用选区，确保触摸 = 滚动
+        if (isMobile && !selectionMode) {
+          try {
+            const wb = api.getActiveWorkbook();
+            wb?.disableSelection();
+          } catch { /* ignore */ }
+        }
+
         setLoading(false);
       } catch (err: any) {
         if (loadVersion !== loadVersionRef.current) return;
@@ -365,13 +374,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         api = univerAPI;
         univerRef.current = univerAPI;
 
-        // On mobile: disable selection by default so touch = scroll only
-        if (isMobile && !selectionMode) {
-          try {
-            const wb = univerAPI.getActiveWorkbook();
-            wb?.disableSelection();
-          } catch { /* ignore */ }
-        }
+        // 注意：此处不调用 disableSelection()，因为数据 workbook 尚未创建。
+        // 会在 createWorkbook() 成功后、以及 loadData() 结束后统一处理。
 
         // Use prefetched data if available, otherwise loadData will fetch again
         const prefetchedData = await dataPromise;
@@ -402,6 +406,14 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
                 }
               } catch { /* ignore */ }
             }
+            // 移动端：prefetch 路径创建的 workbook 也需禁用选区
+            if (isMobile && !selectionMode) {
+              try {
+                const wb = univerAPI.getActiveWorkbook();
+                wb?.disableSelection();
+              } catch { /* ignore */ }
+            }
+
             if (loadVersion === loadVersionRef.current) setLoading(false);
           } catch {
             // Prefetch path failed, fall back to normal loadData
@@ -464,7 +476,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         wb.enableSelection();
       }
     } catch { /* ignore */ }
-  }, [selectionMode, isMobile, mobileSelectActive]);
+  }, [selectionMode, isMobile, mobileSelectActive, loading]);
 
   // Selection mode: listen for selection changes in Univer and report back
   useEffect(() => {

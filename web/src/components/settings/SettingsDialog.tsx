@@ -158,7 +158,7 @@ export function SettingsDialog() {
               onPointerMove={tabs.onPointerMove}
               onPointerUp={tabs.onPointerUp}
               onPointerCancel={tabs.onPointerUp}
-              className="w-full justify-start flex-shrink-0 overflow-x-auto scrollbar-none touch-pan-x cursor-grab flex-nowrap"
+              className="w-full justify-evenly flex-shrink-0 overflow-x-auto scrollbar-none touch-pan-x cursor-grab flex-nowrap"
             >
               {TAB_META.map((tab) => (
                 <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5 text-xs select-none flex-none">

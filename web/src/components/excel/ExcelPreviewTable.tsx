@@ -32,9 +32,9 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
         </div>
         <button
           onClick={handleOpenPanel}
-          className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+          className="flex items-center gap-1 p-1.5 md:p-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
         >
-          <ExternalLink className="h-3 w-3" />
+          <ExternalLink className="h-2.5 w-2.5 md:h-3 md:w-3" />
           在面板中打开
         </button>
       </div>
