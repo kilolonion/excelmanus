@@ -36,6 +36,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { apiGet, apiPut, apiPost, apiDelete } from "@/lib/api";
+import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 
@@ -386,7 +387,7 @@ export function ModelTab() {
                     />
                     {field === "api_key" && (
                       <button
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
                         onClick={() =>
                           setShowKeys((prev) => ({
                             ...prev,
@@ -502,13 +503,26 @@ export function ModelTab() {
               </div>
               <div>
                 <label className="text-xs text-muted-foreground">API Key（空则继承主配置）</label>
-                <Input
-                  value={profileDraft.api_key}
-                  onChange={(e) => setProfileDraft((d) => ({ ...d, api_key: e.target.value }))}
-                  className="h-7 text-xs font-mono"
-                  type="password"
-                  placeholder="sk-..."
-                />
+                <div className="relative">
+                  <Input
+                    value={profileDraft.api_key}
+                    onChange={(e) => setProfileDraft((d) => ({ ...d, api_key: e.target.value }))}
+                    className="h-7 text-xs font-mono pr-8"
+                    type={showKeys["profile_api_key"] ? "text" : "password"}
+                    placeholder="sk-..."
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
+                    onClick={() => setShowKeys((prev) => ({ ...prev, profile_api_key: !prev.profile_api_key }))}
+                  >
+                    {showKeys["profile_api_key"] ? (
+                      <EyeOff className="h-3 w-3" />
+                    ) : (
+                      <Eye className="h-3 w-3" />
+                    )}
+                  </button>
+                </div>
               </div>
               <div>
                 <label className="text-xs text-muted-foreground">描述</label>
@@ -556,75 +570,80 @@ export function ModelTab() {
               return (
               <div
                 key={p.name}
-                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                className={`rounded-lg border px-3 py-2.5 text-sm transition-colors overflow-hidden ${
                   isModelUnhealthy(pCaps)
                     ? "border-destructive/40 bg-destructive/5 opacity-70"
                     : "border-border"
                 }`}
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-medium">{p.name}</span>
-                    <Badge variant="secondary" className="text-[10px] font-mono">
-                      {p.model}
-                    </Badge>
-                    {isModelUnhealthy(pCaps) ? (
-                      <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
-                        <AlertTriangle className="h-2.5 w-2.5" />
-                        不可用
-                      </span>
-                    ) : (
-                      <CapabilityBadges caps={pCaps ?? null} />
-                    )}
+                {/* Row 1: name + action buttons */}
+                <div className="flex items-center gap-2">
+                  <span className="font-medium truncate flex-1 min-w-0">{p.name}</span>
+                  <div className="flex gap-0.5 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      title="探测能力"
+                      onClick={() => handleProbeOne(p.name)}
+                      disabled={probingKey === p.name}
+                    >
+                      {probingKey === p.name ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Zap className="h-3 w-3" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => {
+                        setEditingProfile(p.name);
+                        setNewProfile(false);
+                        setProfileDraft({
+                          name: p.name,
+                          model: p.model,
+                          api_key: "",
+                          base_url: p.base_url,
+                          description: p.description,
+                        });
+                      }}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-destructive"
+                      onClick={() => handleDeleteProfile(p.name)}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
-                  {isModelUnhealthy(pCaps) ? (
-                    <p className="text-[10px] text-destructive truncate" title={getHealthError(pCaps)}>
-                      {getHealthError(pCaps) || "连接失败"}
-                    </p>
-                  ) : p.description ? (
-                    <p className="text-xs text-muted-foreground truncate">{p.description}</p>
-                  ) : null}
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  title="探测能力"
-                  onClick={() => handleProbeOne(p.name)}
-                  disabled={probingKey === p.name}
-                >
-                  {probingKey === p.name ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
+                {/* Row 2: model badge + capabilities / error */}
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                  <Badge variant="secondary" className="text-[10px] font-mono">
+                    {p.model}
+                  </Badge>
+                  {isModelUnhealthy(pCaps) ? (
+                    <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
+                      <AlertTriangle className="h-2.5 w-2.5" />
+                      不可用
+                    </span>
                   ) : (
-                    <Zap className="h-3 w-3" />
+                    <CapabilityBadges caps={pCaps ?? null} />
                   )}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={() => {
-                    setEditingProfile(p.name);
-                    setNewProfile(false);
-                    setProfileDraft({
-                      name: p.name,
-                      model: p.model,
-                      api_key: "",
-                      base_url: p.base_url,
-                      description: p.description,
-                    });
-                  }}
-                >
-                  <Pencil className="h-3 w-3" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6 text-destructive"
-                  onClick={() => handleDeleteProfile(p.name)}
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
+                </div>
+                {/* Row 3: description or error detail */}
+                {isModelUnhealthy(pCaps) ? (
+                  <p className="text-[10px] text-destructive truncate mt-0.5" title={getHealthError(pCaps)}>
+                    {getHealthError(pCaps) || "连接失败"}
+                  </p>
+                ) : p.description ? (
+                  <p className="text-[11px] text-muted-foreground truncate mt-0.5">{p.description}</p>
+                ) : null}
               </div>
               );
             })}
@@ -876,17 +895,14 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
           <div>
             <p className="text-xs font-medium mb-2">选择导出区块</p>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-x-3 gap-y-1.5">
               {Object.entries(sectionLabels).map(([key, label]) => (
-                <label key={key} className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={exportSections[key]}
-                    onChange={(e) => setExportSections((prev) => ({ ...prev, [key]: e.target.checked }))}
-                    className="rounded border-border"
-                  />
-                  {label}
-                </label>
+                <MiniCheckbox
+                  key={key}
+                  checked={exportSections[key]}
+                  onChange={(v) => setExportSections((prev) => ({ ...prev, [key]: v }))}
+                  label={label}
+                />
               ))}
             </div>
           </div>
