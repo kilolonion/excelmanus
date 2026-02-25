@@ -823,7 +823,7 @@ class TestContextBudgetAndHardCap:
 
     @pytest.mark.asyncio
     async def test_tool_loop_messages_fit_max_context_budget(self) -> None:
-        config = _make_config(max_context_tokens=8000)
+        config = _make_config(max_context_tokens=20000)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine.memory.add_user_message("测试上下文预算")
@@ -2093,260 +2093,38 @@ class TestTaskUpdateFailureSemantics:
         assert engine._task_store.current.items[0].status == TaskStatus.PENDING
 
 
-class TestPlanModeControl:
-    """plan mode 控制命令与执行流测试。"""
+class TestChatModeDeprecatedPlanCommand:
+    """旧 /plan 命令已废弃，应返回提示信息。"""
 
     @pytest.mark.asyncio
-    async def test_plan_status_on_off(self) -> None:
+    async def test_plan_command_returns_deprecation_notice(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
-        status = await engine.chat("/plan status")
-        assert "disabled" in status.reply
-
-        turn_on = await engine.chat("/plan on")
-        assert "已开启" in turn_on.reply
-        assert engine.plan_mode_enabled is True
-
-        turn_off = await engine.chat("/plan off")
-        assert "已关闭" in turn_off.reply
-        assert engine.plan_mode_enabled is False
+        for cmd in ("/plan status", "/plan on", "/plan off", "/plan approve"):
+            result = await engine.chat(cmd)
+            assert "废弃" in result.reply or "Tab" in result.reply
 
     @pytest.mark.asyncio
-    async def test_planmode_alias_returns_tombstone_message(self) -> None:
+    async def test_chat_mode_passed_to_route(self) -> None:
+        """chat_mode 参数应传递到 _route_skills。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-
-        result = await engine.chat("/planmode on")
-        assert "命令已移除，请使用 /plan ..." in result.reply
-        assert engine.plan_mode_enabled is False
-
-    @pytest.mark.asyncio
-    async def test_plan_mode_alias_returns_tombstone_message(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        result = await engine.chat("/plan_mode status")
-        assert "命令已移除，请使用 /plan ..." in result.reply
-        assert engine.plan_mode_enabled is False
-
-    @pytest.mark.asyncio
-    async def test_plan_mode_message_generates_pending_plan_only(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._plan_mode_enabled = True
-        engine._route_skills = AsyncMock()
-
-        draft = PlanDraft(
-            plan_id="pln_test_001",
-            markdown="# 计划\n\n## 任务清单\n- [ ] A",
-            title="测试计划",
-            subtasks=["A"],
-            file_path=".excelmanus/plans/plan_test.md",
-            source="plan_mode",
-            objective="请规划测试任务",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-
-        async def _fake_create_pending(**kwargs):
-            engine._pending_plan = PendingPlanState(draft=draft)
-            return draft, None
-
-        engine._create_pending_plan_draft = AsyncMock(side_effect=_fake_create_pending)
-        result = await engine.chat("请规划测试任务")
-        assert "待你审批" in result.reply
-        assert engine._route_skills.await_count == 0
-        assert engine._pending_plan is not None
-
-    @pytest.mark.asyncio
-    async def test_plan_approve_from_plan_mode_creates_tasklist_and_executes(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._plan_mode_enabled = True
-
-        draft = PlanDraft(
-            plan_id="pln_test_approve_1",
-            markdown="# 自动化计划\n\n## 任务清单\n- [ ] 第一步\n- [ ] 第二步",
-            title="自动化计划",
-            subtasks=["第一步", "第二步"],
-            file_path=".excelmanus/plans/plan_test.md",
-            source="plan_mode",
-            objective="执行自动化任务",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-        engine._pending_plan = PendingPlanState(draft=draft)
-        engine._route_skills = AsyncMock(
-            return_value=SkillMatchResult(
-                skills_used=[],
-                tool_scope=["add_numbers"],
-                route_mode="fallback",
-                system_contexts=[],
-            )
-        )
         engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response("执行完成")
+            return_value=_make_text_response("ok")
         )
+        mock_router = MagicMock()
+        mock_router.route = AsyncMock(return_value=SkillMatchResult(
+            skills_used=[], route_mode="all_tools", system_contexts=[],
+        ))
+        engine._skill_router = mock_router
 
-        result = await engine.chat("/plan approve pln_test_approve_1")
-        assert "执行完成" in result.reply
-        assert engine.plan_mode_enabled is False
-        assert engine._task_store.current is not None
-        assert engine._task_store.current.title == "自动化计划"
-        assert "来源: .excelmanus/plans/plan_test.md" in (engine._approved_plan_context or "")
-
-    @pytest.mark.asyncio
-    async def test_plan_mode_question_answer_does_not_write_virtual_tool_result(self) -> None:
-        """plan_mode 审批问答不应写入孤立的 plan_approval_* tool result。"""
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._plan_mode_enabled = True
-
-        draft = PlanDraft(
-            plan_id="pln_virtual_tool_result_guard",
-            markdown="# 计划\n\n## 任务清单\n- [ ] A",
-            title="计划审批",
-            subtasks=["A"],
-            file_path=".excelmanus/plans/plan_virtual.md",
-            source="plan_mode",
-            objective="执行计划任务",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-        engine._pending_plan = PendingPlanState(draft=draft)
-        engine._enqueue_plan_approval_question(draft=draft, on_event=None)
-        engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_text_response("执行完成")
-        )
-
-        result = await engine.chat("1")
-        assert "执行完成" in result.reply
-
-        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
-        assert all(
-            not str(msg.get("tool_call_id", "")).startswith("plan_approval_")
-            for msg in tool_msgs
-        )
-
-    @pytest.mark.asyncio
-    async def test_task_create_hook_enters_pending_plan(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._plan_intercept_task_create = True  # 显式开启拦截（默认关闭）
-
-        draft = PlanDraft(
-            plan_id="pln_task_create_hook",
-            markdown="# 计划\n\n## 任务清单\n- [ ] A",
-            title="任务清单",
-            subtasks=["A"],
-            file_path=".excelmanus/plans/plan_hook.md",
-            source="task_create_hook",
-            objective="草稿任务",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-
-        async def _fake_create_pending(**kwargs):
-            engine._pending_plan = PendingPlanState(
-                draft=draft,
-                tool_call_id="call_tc",
-                route_to_resume=kwargs.get("route_to_resume"),
-            )
-            return draft, None
-
-        engine._create_pending_plan_draft = AsyncMock(side_effect=_fake_create_pending)
-        tc = SimpleNamespace(
-            id="call_tc",
-            function=SimpleNamespace(
-                name="task_create",
-                arguments=json.dumps({"title": "任务清单", "subtasks": ["A"]}),
-            ),
-        )
-        route_result = SkillMatchResult(
-            skills_used=[],
-            tool_scope=["task_create"],
-            route_mode="fallback",
-            system_contexts=[],
-        )
-        result = await engine._execute_tool_call(
-            tc=tc,
-            tool_scope=["task_create"],
-            on_event=None,
-            iteration=1,
-            route_result=route_result,
-        )
-        assert result.success is True
-        assert result.pending_plan is True
-        assert result.defer_tool_result is True
-        assert engine._task_store.current is None
-
-    def test_task_create_hook_plan_reject_writes_tool_result(self) -> None:
-        """task_create_hook 拒绝计划时应回填原 task_create 调用结果。"""
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-
-        draft = PlanDraft(
-            plan_id="pln_task_create_reject",
-            markdown="# 计划\n\n## 任务清单\n- [ ] A",
-            title="任务清单",
-            subtasks=["A"],
-            file_path=".excelmanus/plans/plan_reject.md",
-            source="task_create_hook",
-            objective="草稿任务",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-        engine._pending_plan = PendingPlanState(
-            draft=draft,
-            tool_call_id="call_task_create_1",
-            route_to_resume=None,
-        )
-
-        reply = engine._handle_plan_reject(parts=["/plan", "reject"])
-        assert "已拒绝计划" in reply
-        tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
-        reject_msg = next(
-            m for m in tool_msgs if m.get("tool_call_id") == "call_task_create_1"
-        )
-        assert "已拒绝" in str(reject_msg.get("content", ""))
-
-    @pytest.mark.asyncio
-    async def test_pending_plan_blocks_and_reject_unblocks(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        draft = PlanDraft(
-            plan_id="pln_block_1",
-            markdown="# 计划\n\n## 任务清单\n- [ ] A",
-            title="阻塞计划",
-            subtasks=["A"],
-            file_path=".excelmanus/plans/plan_block.md",
-            source="plan_mode",
-            objective="阻塞目标",
-            created_at_utc="2026-02-13T00:00:00Z",
-        )
-        engine._pending_plan = PendingPlanState(draft=draft)
-
-        blocked = await engine.chat("继续执行")
-        assert "待你审批" in blocked.reply
-
-        rejected = await engine.chat("/plan reject pln_block_1")
-        assert "已拒绝计划" in rejected.reply
-        assert engine._pending_plan is None
-
-    def test_prepare_system_prompts_includes_approved_plan_context(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._approved_plan_context = "来源: .excelmanus/plans/plan_x.md\n# 计划"
-
-        prompts, _ = engine._prepare_system_prompts_for_request([])
-        assert any("## 已批准计划上下文" in p for p in prompts)
-        assert any("plan_x.md" in p for p in prompts)
+        await engine.chat("分析数据", chat_mode="read")
+        assert mock_router.route.call_count == 1
+        call_kwargs = mock_router.route.call_args[1]
+        assert call_kwargs.get("chat_mode") == "read"
 
 
 class TestManualSkillSlashCommand:

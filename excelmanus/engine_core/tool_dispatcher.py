@@ -38,8 +38,6 @@ class _ToolExecOutcome:
     audit_record: Any = None
     pending_question: bool = False
     question_id: str | None = None
-    pending_plan: bool = False
-    plan_id: str | None = None
     defer_tool_result: bool = False
     finish_accepted: bool = False
 
@@ -870,8 +868,6 @@ class ToolDispatcher:
         audit_record = None
         pending_question = False
         question_id: str | None = None
-        pending_plan = False
-        plan_id: str | None = None
         defer_tool_result = False
         finish_accepted = False
         _cow_reminders: list[str] = []
@@ -969,8 +965,6 @@ class ToolDispatcher:
                 audit_record = outcome.audit_record
                 pending_question = outcome.pending_question
                 question_id = outcome.question_id
-                pending_plan = outcome.pending_plan
-                plan_id = outcome.plan_id
                 defer_tool_result = outcome.defer_tool_result
                 finish_accepted = outcome.finish_accepted
 
@@ -1021,7 +1015,6 @@ class ToolDispatcher:
             error=error,
             iteration=iteration,
             on_event=on_event,
-            pending_plan=pending_plan,
             cow_reminders=_cow_reminders,
         )
 
@@ -1036,8 +1029,6 @@ class ToolDispatcher:
             audit_record=audit_record,
             pending_question=pending_question,
             question_id=question_id,
-            pending_plan=pending_plan,
-            plan_id=plan_id,
             defer_tool_result=defer_tool_result,
             finish_accepted=finish_accepted,
         )
@@ -1095,17 +1086,10 @@ class ToolDispatcher:
         audit_record = None
         pending_question = False
         question_id: str | None = None
-        pending_plan = False
-        plan_id: str | None = None
         defer_tool_result = False
         finish_accepted = False
 
         try:
-            skip_plan_once_for_task_create = False
-            if tool_name == "task_create" and e._suspend_task_create_plan_once:
-                skip_plan_once_for_task_create = True
-                e._suspend_task_create_plan_once = False
-
             if tool_name == "activate_skill":
                 selected_name = arguments.get("skill_name")
                 if not isinstance(selected_name, str) or not selected_name.strip():
@@ -1311,28 +1295,6 @@ class ToolDispatcher:
                     tool_name,
                     arguments,
                     result=result_str,
-                )
-            elif (
-                tool_name == "task_create"
-                and e._plan_intercept_task_create
-                and not skip_plan_once_for_task_create
-            ):
-                result_str, plan_id, plan_error = await e.intercept_task_create_with_plan(
-                    arguments=arguments,
-                    route_result=route_result,
-                    tool_call_id=tool_call_id,
-                    on_event=on_event,
-                )
-                success = plan_error is None
-                error = plan_error
-                pending_plan = success
-                defer_tool_result = success
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str if success else None,
-                    error=error if not success else None,
                 )
             elif tool_name == "run_code" and e.config.code_policy_enabled:
                 # ── 动态代码策略引擎路由 ──
@@ -1698,8 +1660,6 @@ class ToolDispatcher:
             audit_record=audit_record,
             pending_question=pending_question,
             question_id=question_id,
-            pending_plan=pending_plan,
-            plan_id=plan_id,
             defer_tool_result=defer_tool_result,
             finish_accepted=finish_accepted,
         )
@@ -1715,7 +1675,6 @@ class ToolDispatcher:
         error: str | None,
         iteration: int,
         on_event: "EventCallback | None",
-        pending_plan: bool,
         cow_reminders: list[str],
     ) -> tuple[str, bool, str | None]:
         """后处理流水线：CoW/备份/图片/VLM/窗口感知/硬截断/事件/审计/任务清单。
@@ -1888,7 +1847,7 @@ class ToolDispatcher:
                             _state.record_affected_file(_pv)
 
         # 任务清单事件：成功执行 task_create/task_update 后发射对应事件
-        if success and tool_name == "task_create" and not pending_plan:
+        if success and tool_name == "task_create":
             task_list = e._task_store.current
             if task_list is not None:
                 e.emit(
@@ -1938,7 +1897,7 @@ class ToolDispatcher:
                     snapshots[fp] = []
                     continue
                 from openpyxl import load_workbook
-                wb = load_workbook(str(abs_path), data_only=True, read_only=True)
+                wb = load_workbook(str(abs_path), data_only=False, read_only=True)
                 file_snaps: list[tuple[str, list[dict]]] = []
                 for sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]

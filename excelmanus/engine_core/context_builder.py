@@ -34,8 +34,12 @@ logger = get_logger("context_builder")
 class ContextBuilder:
     """系统提示词组装器，从 AgentEngine 搬迁所有 _build_*_notice 和 _prepare_system_prompts。"""
 
+    _TOKEN_COUNT_CACHE_MAX = 16  # fingerprint → token_count LRU 上限
+
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
+        # O3+O4: 基于内容指纹的 token 计数缓存，避免重复 tiktoken 编码
+        self._token_count_cache: dict[str, int] = {}
 
     def _all_tool_names(self) -> list[str]:
         e = self._engine
@@ -253,7 +257,7 @@ class ContextBuilder:
             f"mcp={e.mcp_connected_count}",
             f"subagent={'on' if e._subagent_enabled else 'off'}",
             f"vision={'on' if e._is_vision_capable else 'off'}",
-            f"plan_mode={'on' if e._plan_mode_enabled else 'off'}",
+            f"chat_mode={getattr(e, '_current_chat_mode', 'write')}",
             f"skills={len(e._active_skills)}",
         ]
         if e.workspace_manifest is not None:
@@ -308,23 +312,15 @@ class ContextBuilder:
         if prefetch_context:
             base_prompt = base_prompt + "\n\n" + prefetch_context
 
-        # ── 动态内容（放在末尾，不破坏前缀稳定性） ──
+        # ── 半静态内容（轮次级稳定，最大化 Provider prompt cache 前缀） ──
 
-        # 注入运行时元数据（每轮变化的 turn/write_hint 等）
-        runtime_line = self._build_runtime_metadata_line()
-        base_prompt = base_prompt + "\n\n" + runtime_line
-
-        # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
-        meta_cognition = self._build_meta_cognition_notice()
-        if meta_cognition:
-            base_prompt = base_prompt + "\n\n" + meta_cognition
-
-        # 注入任务策略（PromptComposer strategies）
+        # 注入任务策略（PromptComposer strategies，同一轮次内不变）
         _strategy_text_captured = ""
         if e._prompt_composer is not None and route_result is not None:
             try:
                 from excelmanus.prompt_composer import PromptContext as _PCtx
                 _p_ctx = _PCtx(
+                    chat_mode=getattr(e, "_current_chat_mode", "write"),
                     write_hint=route_result.write_hint or "unknown",
                     sheet_count=route_result.sheet_count,
                     total_rows=route_result.max_total_rows,
@@ -338,6 +334,8 @@ class ContextBuilder:
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
 
+        # ── 动态内容（放在最末尾，Provider cache 前缀到此为止） ──
+
         _hook_context_captured = ""
         if e._transient_hook_contexts:
             hook_context = "\n".join(e._transient_hook_contexts).strip()
@@ -346,7 +344,15 @@ class ContextBuilder:
                 base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
                 _hook_context_captured = hook_context
 
-        approved_plan_context = self._build_approved_plan_context_notice()
+        # 注入运行时元数据（每轮/每迭代变化，放在所有静态内容之后）
+        runtime_line = self._build_runtime_metadata_line()
+        base_prompt = base_prompt + "\n\n" + runtime_line
+
+        # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
+        meta_cognition = self._build_meta_cognition_notice()
+        if meta_cognition:
+            base_prompt = base_prompt + "\n\n" + meta_cognition
+
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
         current_skill_contexts = [
@@ -375,8 +381,6 @@ class ContextBuilder:
             _snapshot_components["prompt_strategies"] = _strategy_text_captured
         if _hook_context_captured:
             _snapshot_components["hook_context"] = _hook_context_captured
-        if approved_plan_context:
-            _snapshot_components["approved_plan_context"] = approved_plan_context
         if window_perception_context:
             _snapshot_components["window_perception_context"] = window_perception_context
         for idx, ctx in enumerate(current_skill_contexts):
@@ -413,19 +417,15 @@ class ContextBuilder:
             mode = e._effective_system_mode()
             if mode == "merge":
                 merged_parts = [base_prompt]
-                if approved_plan_context:
-                    merged_parts.append(approved_plan_context)
                 merged_parts.extend(current_skill_contexts)
                 if window_perception_context:
                     if window_at_tail:
                         merged_parts.append(window_perception_context)
                     else:
-                        merged_parts.insert(2 if approved_plan_context else 1, window_perception_context)
+                        merged_parts.insert(1, window_perception_context)
                 return ["\n\n".join(merged_parts)]
 
             prompts = [base_prompt]
-            if approved_plan_context:
-                prompts.append(approved_plan_context)
             if window_at_tail:
                 prompts.extend(current_skill_contexts)
                 if window_perception_context:
@@ -438,17 +438,20 @@ class ContextBuilder:
 
         threshold = max(1, int(e.config.max_context_tokens * 0.9))
         prompts = _compose_prompts()
-        total_tokens = self._system_prompts_token_count(prompts)
+
+        # O3+O4: 基于内容指纹的 token 计数缓存
+        _cached_count = self._token_count_cache.get(_content_fingerprint)
+        if _cached_count is not None:
+            total_tokens = _cached_count
+        else:
+            total_tokens = self._system_prompts_token_count(prompts)
+            # LRU 淘汰
+            if len(self._token_count_cache) >= self._TOKEN_COUNT_CACHE_MAX:
+                self._token_count_cache.pop(next(iter(self._token_count_cache)))
+            self._token_count_cache[_content_fingerprint] = total_tokens
+
         if total_tokens <= threshold:
             return prompts, None
-
-        if approved_plan_context:
-            approved_plan_context = self._shrink_context_text(approved_plan_context)
-            prompts = _compose_prompts()
-            total_tokens = self._system_prompts_token_count(prompts)
-            if total_tokens <= threshold:
-                return prompts, None
-            approved_plan_context = ""
 
         if window_perception_context:
             window_perception_context = self._shrink_context_text(window_perception_context)
@@ -481,35 +484,6 @@ class ContextBuilder:
             )
         return prompts, None
 
-
-    def _build_approved_plan_context_notice(self) -> str:
-        """注入已批准计划上下文 + 任务清单状态 + 自主执行指令。"""
-        e = self._engine
-        context = (e._approved_plan_context or "").strip()
-        if not context:
-            return ""
-        if len(context) > _PLAN_CONTEXT_MAX_CHARS:
-            truncated = context[:_PLAN_CONTEXT_MAX_CHARS]
-            context = (
-                f"{truncated}\n"
-                f"[计划上下文已截断，原始长度: {len(e._approved_plan_context or '')} 字符]"
-            )
-
-        parts = [f"## 已批准计划上下文\n{context}"]
-
-        # 注入任务清单当前状态
-        task_status = self._build_task_list_status_notice()
-        if task_status:
-            parts.append(task_status)
-
-        # 自主执行指令
-        parts.append(
-            "【自主执行指令】计划已获用户批准，你必须自主连续执行所有子任务直到全部完成。"
-            "严禁在中间步骤停下来等待用户发送「继续」或确认。"
-            "每完成一个子任务后，立即用 task_update 标记完成，然后继续执行下一个。"
-            "仅在遇到需要用户决策的歧义或 accept 门禁时才暂停。"
-        )
-        return "\n\n".join(parts)
 
     def _build_task_list_status_notice(self) -> str:
         """构建当前任务清单状态摘要，用于注入 system prompt。"""
