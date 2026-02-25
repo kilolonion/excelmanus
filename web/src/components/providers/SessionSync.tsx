@@ -71,7 +71,7 @@ export function SessionSync() {
   const switchSession = useChatStore((s) => s.switchSession);
   const setStreaming = useChatStore((s) => s.setStreaming);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
-  const setPlanModeEnabled = useUIStore((s) => s.setPlanModeEnabled);
+  const setChatMode = useUIStore((s) => s.setChatMode);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
@@ -141,7 +141,9 @@ export function SessionSync() {
   useEffect(() => {
     if (!activeSessionId) {
       setFullAccessEnabled(false);
-      setPlanModeEnabled(false);
+      // Don't reset chatMode here — it's user-driven state (ChatModeTabs).
+      // Resetting it causes the mode to snap back to "write" a few seconds
+      // after the user switches to "read" or "plan" while idle.
       // Don't reset currentModel here — TopModelSelector independently
       // manages the global active model name via /models API.  Clearing
       // it causes a visual flash where the toolbar briefly shows "模型"
@@ -185,7 +187,11 @@ export function SessionSync() {
         notFoundCount = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
-        setPlanModeEnabled(detail.planModeEnabled);
+        // NOTE: 不要在轮询中用后端 chatMode 覆盖前端状态。
+        // chatMode 的权威来源是前端用户操作（ChatModeTabs 点击），
+        // 后端 _current_chat_mode 只在 engine.chat() 调用时更新，
+        // 轮询覆盖会导致用户切换模式后几秒被重置回旧值。
+        // 后端主动推送的模式变更（SSE mode_changed 事件）仍然生效。
         const modelName = detail.currentModelName || detail.currentModel;
         setCurrentModel(modelName ?? "");
 
@@ -204,21 +210,21 @@ export function SessionSync() {
 
           // 仅在以下情况刷新消息（避免轮询期间替换消息数组导致编辑状态丢失）：
           // 1) 首次加载且本地消息为空（页面刷新恢复）
-          // 2) 后端正在处理中（inFlight），持续同步
-          // 3) inFlight 刚从 true -> false（后端处理完毕），做最终同步
+          // 2) inFlight 刚从 true -> false（后端处理完毕），做最终同步
+          // 移除了 detail.inFlight 条件，避免在流式处理期间持续替换消息
           const wasInFlight = prevInFlightRef.current;
           const shouldRefresh =
             (!initialLoadDone && chat.messages.length === 0)
-            || detail.inFlight
             || (wasInFlight && !detail.inFlight);
           prevInFlightRef.current = detail.inFlight;
           initialLoadDone = true;
 
           if (shouldRefresh) {
             const latestChat = useChatStore.getState();
-            // If local streaming starts while this poll is in-flight, skip
-            // backend replacement to preserve optimistic local messages.
-            if (latestChat.abortController === null && !latestChat.isStreaming) {
+            // 增强保护：确保没有活跃的 SSE 连接且不在流式处理中
+            if (latestChat.abortController === null &&
+              !latestChat.isStreaming &&
+              latestChat.messages.length === 0) {
               await refreshSessionMessagesFromBackend(activeSessionId);
             }
           }
@@ -254,8 +260,8 @@ export function SessionSync() {
         // Network error or non-404 server error — reset UI toggles but
         // keep the session entry intact.  Don't reset currentModel —
         // it is managed independently by TopModelSelector.
+        // Don't reset chatMode either — it's user-driven state.
         setFullAccessEnabled(false);
-        setPlanModeEnabled(false);
       }
     };
 
@@ -285,7 +291,7 @@ export function SessionSync() {
     setStreaming,
     setCurrentModel,
     setFullAccessEnabled,
-    setPlanModeEnabled,
+    setChatMode,
   ]);
 
   return null;

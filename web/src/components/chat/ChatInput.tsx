@@ -38,6 +38,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Pencil, Search as SearchIcon, ClipboardList as ClipboardListIcon } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { useChatStore } from "@/stores/chat-store";
 import { useUIStore } from "@/stores/ui-store";
@@ -131,6 +132,46 @@ interface MentionData {
   tools: string[];
   skills: { name: string; description: string }[];
   files: string[];
+}
+
+const CHAT_MODE_COLORS: Record<string, { text: string; bg: string }> = {
+  write: { text: "var(--em-primary)", bg: "var(--em-primary-alpha-10)" },
+  read:  { text: "var(--em-cyan)",    bg: "color-mix(in srgb, var(--em-cyan) 10%, transparent)" },
+  plan:  { text: "var(--em-gold)",    bg: "color-mix(in srgb, var(--em-gold) 12%, transparent)" },
+};
+
+const CHAT_MODES = [
+  { key: "write" as const, label: "写入", icon: Pencil },
+  { key: "read" as const, label: "读取", icon: SearchIcon },
+  { key: "plan" as const, label: "计划", icon: ClipboardListIcon },
+];
+
+function ChatModeTabs() {
+  const chatMode = useUIStore((s) => s.chatMode);
+  const setChatMode = useUIStore((s) => s.setChatMode);
+  return (
+    <div className="flex items-center gap-0.5 px-3 pt-1.5 pb-0">
+      {CHAT_MODES.map(({ key, label, icon: Icon }) => (
+        <button
+          key={key}
+          onClick={() => setChatMode(key)}
+          className={`inline-flex items-center gap-1 px-2.5 sm:py-1 py-0.5 rounded-lg text-xs font-medium transition-colors ${
+            chatMode === key
+              ? ""
+              : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
+          }`}
+          style={
+            chatMode === key
+              ? { color: CHAT_MODE_COLORS[key].text, backgroundColor: CHAT_MODE_COLORS[key].bg }
+              : undefined
+          }
+        >
+          <Icon className="sm:h-3 sm:w-3 h-2.5 w-2.5" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onStop }: ChatInputProps) {
@@ -964,6 +1005,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         </div>
       )}
 
+
+      {/* Chat Mode Tabs */}
+      <ChatModeTabs />
 
       {/* File attachment chips */}
       {files.length > 0 && (

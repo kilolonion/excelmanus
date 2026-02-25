@@ -18,7 +18,7 @@ export interface SessionDetail {
   messageCount: number;
   inFlight: boolean;
   fullAccessEnabled: boolean;
-  planModeEnabled: boolean;
+  chatMode: "write" | "read" | "plan";
   currentModel: string | null;
   currentModelName: string | null;
   messages: unknown[];
@@ -78,6 +78,13 @@ export type AssistantBlock =
       entries: { id: string; content: string; category: string }[];
       trigger: string;
       count: number;
+    }
+  | {
+      type: "file_download";
+      toolCallId?: string;
+      filePath: string;
+      filename: string;
+      description: string;
     };
 
 export interface TaskItem {

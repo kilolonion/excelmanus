@@ -11,25 +11,30 @@ import type { AssistantBlock, TaskItem } from "@/lib/types";
 // ---------------------------------------------------------------------------
 // RAF-based delta batcher: buffers high-frequency text_delta / thinking_delta
 // events and flushes them once per animation frame to avoid excessive re-renders.
+// 改进：增加立即刷新机制，确保非增量事件不会与缓冲的增量事件产生时序问题
 // ---------------------------------------------------------------------------
 class DeltaBatcher {
   private _textBuf = "";
   private _thinkingBuf = "";
   private _rafId: number | null = null;
+  private _disposed = false;
 
   constructor(private _onFlush: (text: string, thinking: string) => void) {}
 
   pushText(delta: string) {
+    if (this._disposed) return;
     this._textBuf += delta;
     this._schedule();
   }
 
   pushThinking(delta: string) {
+    if (this._disposed) return;
     this._thinkingBuf += delta;
     this._schedule();
   }
 
   flush() {
+    if (this._disposed) return;
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
@@ -38,6 +43,7 @@ class DeltaBatcher {
   }
 
   dispose() {
+    this._disposed = true;
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
@@ -46,21 +52,32 @@ class DeltaBatcher {
     this._thinkingBuf = "";
   }
 
+  // 检查是否有待处理的内容
+  hasPendingContent(): boolean {
+    return this._textBuf.length > 0 || this._thinkingBuf.length > 0;
+  }
+
   private _schedule() {
-    if (this._rafId !== null) return;
+    if (this._disposed || this._rafId !== null) return;
     this._rafId = requestAnimationFrame(() => {
+      if (this._disposed) return;
       this._rafId = null;
       this._doFlush();
     });
   }
 
   private _doFlush() {
+    if (this._disposed) return;
     const text = this._textBuf;
     const thinking = this._thinkingBuf;
     this._textBuf = "";
     this._thinkingBuf = "";
     if (text || thinking) {
-      this._onFlush(text, thinking);
+      try {
+        this._onFlush(text, thinking);
+      } catch (error) {
+        console.error("[DeltaBatcher] flush error:", error);
+      }
     }
   }
 }
@@ -241,6 +258,7 @@ export async function sendMessage(
       {
         message: messageContent,
         session_id: effectiveSessionId,
+        chat_mode: useUIStore.getState().chatMode,
       },
       (event) => {
         const data = event.data;
@@ -280,8 +298,8 @@ export async function sendMessage(
             if (typeof data.full_access_enabled === "boolean") {
               ui.setFullAccessEnabled(data.full_access_enabled);
             }
-            if (typeof data.plan_mode_enabled === "boolean") {
-              ui.setPlanModeEnabled(data.plan_mode_enabled);
+            if (typeof data.chat_mode === "string") {
+              ui.setChatMode(data.chat_mode as "write" | "read" | "plan");
             }
             break;
           }
@@ -649,6 +667,22 @@ export async function sendMessage(
             break;
           }
 
+          case "file_download": {
+            const dlFilePath = (data.file_path as string) || "";
+            const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
+            const dlDescription = (data.description as string) || "";
+            if (dlFilePath) {
+              S().appendBlock(assistantMsgId, {
+                type: "file_download",
+                toolCallId: (data.tool_call_id as string) || undefined,
+                filePath: dlFilePath,
+                filename: dlFilename,
+                description: dlDescription,
+              });
+            }
+            break;
+          }
+
           // ── Reply & Done ───────────────────────────
           case "reply": {
             const content = (data.content as string) || "";
@@ -669,8 +703,8 @@ export async function sendMessage(
             if (typeof data.full_access_enabled === "boolean") {
               uiReply.setFullAccessEnabled(data.full_access_enabled);
             }
-            if (typeof data.plan_mode_enabled === "boolean") {
-              uiReply.setPlanModeEnabled(data.plan_mode_enabled);
+            if (typeof data.chat_mode === "string") {
+              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
             }
             // Token stats handling
             const totalTokens = (data.total_tokens as number) || 0;
@@ -702,11 +736,12 @@ export async function sendMessage(
             const enabled = Boolean(data.enabled);
             if (modeName === "full_access") {
               uiMode.setFullAccessEnabled(enabled);
-            } else if (modeName === "plan_mode") {
-              uiMode.setPlanModeEnabled(enabled);
+            } else if (modeName === "chat_mode") {
+              uiMode.setChatMode(data.value as "write" | "read" | "plan");
             }
             // Show mode change as a status block in chat
-            const modeLabel = modeName === "full_access" ? "Full Access" : "Plan Mode";
+            const _modeLabelMap: Record<string, string> = { full_access: "Full Access", chat_mode: "Chat Mode" };
+            const modeLabel = _modeLabelMap[modeName] || modeName;
             const modeAction = enabled ? "已开启" : "已关闭";
             S().appendBlock(assistantMsgId, {
               type: "status",
@@ -1247,15 +1282,31 @@ export async function sendContinuation(
             break;
           }
 
+          case "file_download": {
+            const dlFilePath2 = (data.file_path as string) || "";
+            const dlFilename2 = (data.filename as string) || dlFilePath2.split("/").pop() || "download";
+            const dlDescription2 = (data.description as string) || "";
+            if (dlFilePath2) {
+              S().appendBlock(msgId, {
+                type: "file_download",
+                toolCallId: (data.tool_call_id as string) || undefined,
+                filePath: dlFilePath2,
+                filename: dlFilename2,
+                description: dlDescription2,
+              });
+            }
+            break;
+          }
+
           case "mode_changed": {
             const uiMode = useUIStore.getState();
             const modeName = data.mode_name as string;
             const enabled = Boolean(data.enabled);
             if (modeName === "full_access") uiMode.setFullAccessEnabled(enabled);
-            else if (modeName === "plan_mode") uiMode.setPlanModeEnabled(enabled);
+            else if (modeName === "chat_mode") uiMode.setChatMode(data.value as "write" | "read" | "plan");
             S().appendBlock(msgId, {
               type: "status",
-              label: `${enabled ? "已开启" : "已关闭"} ${modeName === "full_access" ? "Full Access" : "Plan Mode"}`,
+              label: `${enabled ? "已开启" : "已关闭"} ${modeName === "full_access" ? "Full Access" : modeName}`,
               variant: "info",
             });
             break;
@@ -1276,8 +1327,8 @@ export async function sendContinuation(
             if (typeof data.full_access_enabled === "boolean") {
               uiReply.setFullAccessEnabled(data.full_access_enabled);
             }
-            if (typeof data.plan_mode_enabled === "boolean") {
-              uiReply.setPlanModeEnabled(data.plan_mode_enabled);
+            if (typeof data.chat_mode === "string") {
+              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
             }
             const totalTokens = (data.total_tokens as number) || 0;
             if (totalTokens > 0) {
@@ -1391,9 +1442,9 @@ export async function sendContinuation(
 
 /**
  * 回退对话到指定用户消息并重新发送（编辑后的内容）。
- * 1. 调用后端 rollback API 截断对话
- * 2. 截断前端消息列表
- * 3. 用新内容发送消息
+ * 1. 调用后端 rollback API（resend_mode=true 移除目标用户消息）
+ * 2. 截断前端消息列表到目标消息之前
+ * 3. 用 sendMessage 重新发送（在前后端各添加一条用户消息）
  */
 export async function rollbackAndResend(
   messageId: string,
@@ -1418,25 +1469,25 @@ export async function rollbackAndResend(
   const effectiveSessionId = sessionId || store.currentSessionId;
   if (!effectiveSessionId) return;
 
-  // 调用后端 rollback API
+  // 调用后端 rollback API（resend_mode 会移除目标用户消息）
   try {
     const { rollbackChat } = await import("./api");
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
       rollbackFiles,
-      newMessage: newContent,
+      resendMode: true,
     });
   } catch (err) {
     console.error("Rollback failed:", err);
     return;
   }
 
-  // 截断前端消息列表：保留 msgIndex 之前的消息（不包含该用户消息本身，因为要重发）
+  // 前端截断到目标用户消息之前（与后端 resend_mode 一致）
   const truncated = messages.slice(0, msgIndex);
   store.setMessages(truncated);
 
-  // 用新内容发送消息
+  // sendMessage 会在前后端各添加用户消息 + 触发流式回复
   await sendMessage(newContent, undefined, effectiveSessionId);
 }
 

@@ -201,7 +201,7 @@ export async function fetchSessionDetail(
     messageCount: (data.message_count as number) ?? 0,
     inFlight: (data.in_flight as boolean) ?? false,
     fullAccessEnabled: (data.full_access_enabled as boolean) ?? false,
-    planModeEnabled: (data.plan_mode_enabled as boolean) ?? false,
+    chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
     currentModel: (data.current_model as string | null) ?? null,
     currentModelName: (data.current_model_name as string | null) ?? null,
     messages: Array.isArray(data.messages) ? (data.messages as unknown[]) : [],
@@ -338,6 +338,7 @@ export async function rollbackChat(opts: {
   turnIndex: number;
   rollbackFiles?: boolean;
   newMessage?: string;
+  resendMode?: boolean;
 }): Promise<{
   status: string;
   removed_messages: number;
@@ -352,6 +353,7 @@ export async function rollbackChat(opts: {
       turn_index: opts.turnIndex,
       rollback_files: opts.rollbackFiles ?? false,
       new_message: opts.newMessage ?? null,
+      resend_mode: opts.resendMode ?? false,
     }),
   });
   if (!res.ok) return handleAuthError(res);
