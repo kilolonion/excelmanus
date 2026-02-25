@@ -244,6 +244,7 @@ _config: ExcelManusConfig | None = None
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
 _rules_manager: Any = None  # RulesManager | None
 _api_persistent_memory: Any = None  # PersistentMemory | None (shared for API)
+_database: Any = None  # Database | None
 _config_store: Any = None  # ConfigStore | None
 _router = APIRouter()
 
@@ -617,7 +618,7 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config, _database
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
@@ -4276,10 +4277,12 @@ async def delete_session_rule(session_id: str, rule_id: str) -> dict:
 
 
 @_router.get("/api/v1/memory")
-async def list_memory_entries(category: str | None = None) -> list[dict]:
-    """列出持久记忆条目，可按类别筛选。"""
-    if _api_persistent_memory is None:
-        return []
+async def list_memory_entries(request: Request, category: str | None = None) -> list[dict]:
+    """列出持久记忆条目，可按类别筛选。
+
+    优先从用户隔离的 SQLite 数据库读取（多租户模式），
+    回退到全局 FileMemoryBackend（单用户/未认证模式）。
+    """
     from excelmanus.memory_models import MemoryCategory
     cat = None
     if category:
@@ -4290,6 +4293,34 @@ async def list_memory_entries(category: str | None = None) -> list[dict]:
                 status_code=400,
                 content={"detail": f"不支持的类别: {category}"},
             )
+
+    # 优先走用户隔离的数据库
+    user_id = _get_isolation_user_id(request)
+    if user_id is not None and _database is not None and _config is not None:
+        try:
+            from excelmanus.user_scope import UserScope
+            scope = UserScope.create(user_id, _database, _config.workspace_root)
+            mem_store = scope.memory_store()
+            if cat is not None:
+                entries = mem_store.load_by_category(cat)
+            else:
+                entries = mem_store.load_all()
+            return [
+                {
+                    "id": e.id,
+                    "content": e.content,
+                    "category": e.category.value,
+                    "timestamp": e.timestamp.isoformat(),
+                    "source": e.source,
+                }
+                for e in entries
+            ]
+        except Exception:
+            logger.debug("从用户隔离数据库读取记忆失败，回退到全局", exc_info=True)
+
+    # 回退到全局 FileMemoryBackend
+    if _api_persistent_memory is None:
+        return []
     entries = _api_persistent_memory.list_entries(cat)
     return [
         {
@@ -4304,7 +4335,22 @@ async def list_memory_entries(category: str | None = None) -> list[dict]:
 
 
 @_router.delete("/api/v1/memory/{entry_id}")
-async def delete_memory_entry(entry_id: str) -> dict:
+async def delete_memory_entry(entry_id: str, request: Request) -> dict:
+    # 优先走用户隔离的数据库
+    user_id = _get_isolation_user_id(request)
+    if user_id is not None and _database is not None and _config is not None:
+        try:
+            from excelmanus.user_scope import UserScope
+            scope = UserScope.create(user_id, _database, _config.workspace_root)
+            mem_store = scope.memory_store()
+            ok = mem_store.delete_entry(entry_id)
+            if not ok:
+                return JSONResponse(status_code=404, content={"detail": "记忆条目不存在"})  # type: ignore[return-value]
+            return {"status": "deleted"}
+        except Exception:
+            logger.debug("从用户隔离数据库删除记忆失败，回退到全局", exc_info=True)
+
+    # 回退到全局
     if _api_persistent_memory is None:
         return JSONResponse(status_code=503, content={"detail": "记忆功能未启用"})  # type: ignore[return-value]
     ok = _api_persistent_memory.delete_entry(entry_id)
