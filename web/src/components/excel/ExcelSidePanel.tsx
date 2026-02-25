@@ -167,7 +167,7 @@ export function ExcelSidePanel() {
                 ? "bg-[var(--em-primary)]/20 text-[var(--em-primary)]"
                 : "hover:bg-muted text-muted-foreground hover:text-foreground"
             }`}
-            title={selectionMode ? "退出选区模式" : "选区引用"}
+            title={selectionMode ? "退出选区模式" : (isMobile ? "选区引用（也可长按表格）" : "选区引用")}
           >
             <MousePointerSquareDashed className="h-3.5 w-3.5" />
           </button>
