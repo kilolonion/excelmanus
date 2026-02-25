@@ -427,7 +427,7 @@ async function _loadMessagesAsyncWithOptions(
       ) {
         useChatStore.setState({ messages: cached });
       }
-      // 消息已加载到 store，从后端恢复 Excel 事件并回填 affectedFiles
+      // 消息已加载到 store，立即恢复 Excel 事件并回填 affectedFiles
       _loadPersistedExcelEvents(sessionId).catch(() => {});
       return;
     }
@@ -455,7 +455,7 @@ async function _loadMessagesAsyncWithOptions(
     ) {
       useChatStore.setState({ messages });
     }
-    // 消息已加载，从后端恢复 Excel 事件并回填 affectedFiles
+    // 消息已加载，立即恢复 Excel 事件并回填 affectedFiles
     _loadPersistedExcelEvents(sessionId).catch(() => {});
   } catch {
     // silently ignore
@@ -723,6 +723,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       _sessionMessages.set(state.currentSessionId, [...state.messages]);
       saveCachedMessages(state.currentSessionId, state.messages).catch(() => {});
     }
+    
     // Load target session messages from memory cache first
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
@@ -735,16 +736,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return;
     }
-    // Set empty immediately, then try IDB → backend async
+
+    // 改进：不立即清空消息，而是先尝试从 IndexedDB 加载
+    // 只有在确实没有缓存时才清空，减少消息闪烁
+    const loadAndSwitch = async () => {
+      if (!sessionId) {
+        set({
+          currentSessionId: null,
+          messages: [],
+          pendingApproval: null,
+          pendingQuestion: null,
+          pipelineStatus: null,
+        });
+        return;
+      }
+
+      // 先尝试从 IndexedDB 快速加载
+      try {
+        const cached = await loadCachedMessages(sessionId);
+        if (cached && cached.length > 0) {
+          // 检查是否仍然是目标会话（用户可能已经切换到其他会话）
+          const currentState = get();
+          if (currentState.currentSessionId === sessionId) {
+            _sessionMessages.set(sessionId, cached);
+            set({
+              currentSessionId: sessionId,
+              messages: cached,
+              pendingApproval: null,
+              pendingQuestion: null,
+              pipelineStatus: null,
+            });
+            // 立即恢复 Excel 事件，确保 diff 数据及时显示
+            _loadPersistedExcelEvents(sessionId).catch(() => {});
+            return;
+          }
+        }
+      } catch {
+        // IndexedDB 失败，继续后续流程
+      }
+
+      // IndexedDB 没有缓存，现在才清空并异步加载
+      const currentState = get();
+      if (currentState.currentSessionId === sessionId) {
+        set({
+          currentSessionId: sessionId,
+          messages: [],
+          pendingApproval: null,
+          pendingQuestion: null,
+          pipelineStatus: null,
+        });
+        _loadMessagesAsync(sessionId).catch(() => {});
+      }
+    };
+
+    // 立即更新 currentSessionId，但保持当前消息直到新消息加载完成
     set({
       currentSessionId: sessionId,
-      messages: [],
       pendingApproval: null,
       pendingQuestion: null,
       pipelineStatus: null,
     });
-    if (sessionId) {
-      _loadMessagesAsync(sessionId).catch(() => {});
-    }
+    
+    loadAndSwitch();
   },
 }));
