@@ -366,6 +366,7 @@ def _public_excel_path(path: str, *, safe_mode: bool) -> str:
     - 优先返回 workspace 相对路径（`./subdir/file.xlsx`），避免泄露绝对路径且保持可用。
     - 已被脱敏为 `<path>/name.xlsx` 的历史值，降级为 `./name.xlsx` 以兼容旧数据。
     - 对工作区外绝对路径，safe_mode 下仍保留脱敏行为。
+    - 处理用户隔离架构的路径（`./users/{user_id}/xxx` → `./xxx`）。
     """
     raw = str(path or "").strip()
     if not raw:
@@ -377,13 +378,27 @@ def _public_excel_path(path: str, *, safe_mode: bool) -> str:
 
     from pathlib import Path
 
+    # 处理 ./users/{user_id}/ 格式的路径（用户隔离架构）
+    if raw.startswith("./users/"):
+        parts = raw.split("/", 3)  # ['.', 'users', '{user_id}', 'rest']
+        if len(parts) >= 4:
+            # 提取用户相对路径部分
+            user_relative = parts[3]
+            return f"./{user_relative}" if user_relative else ""
+
     if _config is not None:
         workspace = Path(_config.workspace_root).resolve()
         candidate = Path(raw)
         if candidate.is_absolute():
             try:
                 rel = candidate.resolve().relative_to(workspace)
-                return f"./{rel.as_posix()}"
+                rel_str = rel.as_posix()
+                # 如果是 users/{user_id}/xxx 格式，提取用户相对路径
+                if rel_str.startswith("users/"):
+                    parts = rel_str.split("/", 2)
+                    if len(parts) >= 3:
+                        return f"./{parts[2]}"
+                return f"./{rel_str}"
             except Exception:
                 return sanitize_external_text(raw, max_len=500) if safe_mode else raw
 
@@ -393,6 +408,8 @@ def _public_excel_path(path: str, *, safe_mode: bool) -> str:
     if normalized.startswith("/"):
         return sanitize_external_text(normalized, max_len=500) if safe_mode else normalized
     return f"./{normalized}"
+
+
 
 
 def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
