@@ -1002,9 +1002,16 @@ class SessionManager:
         *,
         rollback_files: bool = False,
         new_message: str | None = None,
+        resend_mode: bool = False,
         user_id: str | None = None,
     ) -> dict:
-        """回退指定会话到目标用户轮次，并与持久化历史保持一致。"""
+        """回退指定会话到目标用户轮次，并与持久化历史保持一致。
+
+        Args:
+            resend_mode: 若为 True，目标用户消息将被一并移除（而非保留），
+                调用方应随后通过 /chat/stream 发送新消息。此时 new_message
+                参数被忽略。
+        """
         exists = (
             self._chat_history.session_owned_by(session_id, user_id)
             if user_id is not None and self._chat_history is not None
@@ -1020,9 +1027,10 @@ class SessionManager:
             result = engine.rollback_conversation(
                 turn_index,
                 rollback_files=rollback_files,
+                keep_target=not resend_mode,
             )
 
-            if new_message is not None and new_message.strip():
+            if not resend_mode and new_message is not None and new_message.strip():
                 turns = engine.list_user_turns()
                 for turn in turns:
                     if turn["index"] == turn_index:
