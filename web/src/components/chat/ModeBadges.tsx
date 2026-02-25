@@ -15,8 +15,8 @@ export function ModeBadges() {
         <span
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
           style={{
-            backgroundColor: "hsl(38 92% 50% / 0.15)",
-            color: "hsl(38 92% 50%)",
+            backgroundColor: "color-mix(in srgb, var(--em-gold) 15%, transparent)",
+            color: "var(--em-gold)",
           }}
         >
           <Shield className="h-3 w-3" />
@@ -27,8 +27,8 @@ export function ModeBadges() {
         <span
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
           style={{
-            backgroundColor: "hsl(199 89% 48% / 0.15)",
-            color: "hsl(199 89% 48%)",
+            backgroundColor: "color-mix(in srgb, var(--em-cyan) 15%, transparent)",
+            color: "var(--em-cyan)",
           }}
         >
           <ClipboardList className="h-3 w-3" />

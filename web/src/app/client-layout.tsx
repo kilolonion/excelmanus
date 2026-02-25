@@ -24,15 +24,17 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Top bar — model selector (ChatGPT style) */}
-        <div className="flex items-center h-12 px-3 flex-shrink-0 border-b border-border">
+        <div className="flex items-center h-12 px-3 flex-shrink-0 border-b border-border/60">
+          {/* Left group: navigation + model */}
           <SidebarToggle />
           <TopModelSelector />
-          <div className="flex">
-            <ModeBadges />
-          </div>
+          <ModeBadges />
+
           <div className="flex-1" />
-          <BackupApplyBadge />
-          <div className="flex">
+
+          {/* Right group: status indicators */}
+          <div className="flex items-center gap-2">
+            <BackupApplyBadge />
             <SessionStatusBar />
           </div>
         </div>

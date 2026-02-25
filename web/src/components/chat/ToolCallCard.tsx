@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import {
   Wrench,
   CheckCircle2,
@@ -11,6 +11,14 @@ import {
   ChevronRight,
   Upload,
   Check,
+  BookOpen,
+  PenLine,
+  Code,
+  Table2,
+  ListChecks,
+  Search,
+  FileText,
+  type LucideIcon,
 } from "lucide-react";
 import {
   Collapsible,
@@ -21,6 +29,48 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
+
+// Tool category → icon mapping
+const TOOL_ICON_MAP: Record<string, LucideIcon> = {
+  read_excel: BookOpen,
+  list_sheets: Search,
+  write_cells: PenLine,
+  insert_rows: Table2,
+  insert_columns: Table2,
+  create_sheet: Table2,
+  delete_sheet: Table2,
+  run_code: Code,
+  finish_task: ListChecks,
+  read_text_file: FileText,
+};
+
+function getToolIcon(name: string): LucideIcon {
+  return TOOL_ICON_MAP[name] || Wrench;
+}
+
+// Build a short summary of tool args for collapsed preview
+function argsSummary(name: string, args: Record<string, unknown>): string | null {
+  const parts: string[] = [];
+  if (args.sheet) parts.push(`sheet: ${args.sheet}`);
+  if (args.range) parts.push(`range: ${args.range}`);
+  if (args.path) {
+    const p = String(args.path);
+    parts.push(p.split("/").pop() || p);
+  }
+  if (name === "run_code" && typeof args.code === "string") {
+    const firstLine = args.code.split("\n")[0].slice(0, 50);
+    parts.push(firstLine + (args.code.length > 50 ? "…" : ""));
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+// Status → left border color
+const STATUS_BAR_COLOR: Record<string, string> = {
+  running: "var(--em-cyan)",
+  success: "var(--em-primary)",
+  error: "var(--em-error)",
+  pending: "var(--em-gold)",
+};
 
 const EXCEL_READ_TOOLS = new Set(["read_excel"]);
 const EXCEL_WRITE_TOOLS = new Set([
@@ -74,57 +124,86 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     toolCallId && isExcelRead ? s.previews[toolCallId] : undefined
   );
   const canHaveDiff = EXCEL_DIFF_TOOLS.has(name);
-  const diff = useExcelStore((s) =>
-    toolCallId && canHaveDiff
-      ? s.diffs.find((d) => d.toolCallId === toolCallId)
-      : undefined
+  
+  // 使用 useMemo 缓存 diffs 计算结果，避免无限循环
+  const allDiffs = useExcelStore((s) => s.diffs);
+  const diffs = useMemo(() => {
+    if (!toolCallId || !canHaveDiff) return [];
+    return allDiffs.filter((d) => d.toolCallId === toolCallId);
+  }, [toolCallId, canHaveDiff, allDiffs]);
+
+  // 按文件去重获取涉及的文件路径
+  const diffFilePaths = Array.from(new Set(diffs.map((d) => d.filePath).filter(Boolean)));
+  const hasPendingBackup = diffFilePaths.some((fp) =>
+    pendingBackups.some((b) => b.original_path === fp)
   );
 
-  const diffFilePath = diff?.filePath ?? null;
-  const hasPendingBackup = diffFilePath
-    ? pendingBackups.some((b) => b.original_path === diffFilePath)
-    : false;
-
   const handleInlineApply = useCallback(async () => {
-    if (!activeSessionId || !diffFilePath) return;
+    if (!activeSessionId || diffFilePaths.length === 0) return;
     setApplyingInline(true);
-    const ok = await applyFile(activeSessionId, diffFilePath);
+    let anyOk = false;
+    for (const fp of diffFilePaths) {
+      const ok = await applyFile(activeSessionId, fp);
+      if (ok) anyOk = true;
+    }
     setApplyingInline(false);
-    if (ok) setAppliedInline(true);
-  }, [activeSessionId, diffFilePath, applyFile]);
+    if (anyOk) setAppliedInline(true);
+  }, [activeSessionId, diffFilePaths, applyFile]);
 
   const StatusIcon = {
-    running: <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />,
-    success: <CheckCircle2 className="h-4 w-4" style={{ color: "var(--em-primary)" }} />,
-    error: <XCircle className="h-4 w-4" style={{ color: "var(--em-error)" }} />,
-    pending: <ShieldAlert className="h-4 w-4 text-amber-500" />,
+    running: <Loader2 className="h-3.5 w-3.5 animate-spin" style={{ color: "var(--em-cyan)" }} />,
+    success: <CheckCircle2 className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />,
+    error: <XCircle className="h-3.5 w-3.5" style={{ color: "var(--em-error)" }} />,
+    pending: <ShieldAlert className="h-3.5 w-3.5" style={{ color: "var(--em-gold)" }} />,
   }[status];
 
+  const ToolIcon = getToolIcon(name);
+  const summary = !open ? argsSummary(name, args) : null;
+  const barColor = STATUS_BAR_COLOR[status] || "var(--border)";
+
   return (
-    <div className="my-2">
+    <div className="my-1">
       <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-colors w-full text-left text-sm ${
+        <CollapsibleTrigger className={`flex items-center gap-2 rounded-lg border transition-colors w-full text-left text-sm overflow-hidden ${
           status === "pending"
             ? "border-amber-500/40 bg-amber-500/5 hover:bg-amber-500/10"
-            : "border-border hover:bg-muted/30"
+            : status === "error"
+              ? "border-red-300/40 dark:border-red-500/30 hover:bg-red-500/5"
+              : "border-border hover:bg-muted/30"
         }`}>
-          <Wrench className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-          <span className="font-mono text-xs flex-1 truncate">{name}</span>
-          {status === "pending" && (
-            <span className="text-[10px] text-amber-600 font-medium">待审批</span>
-          )}
-          {status === "running" && elapsed > 0 && (
-            <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
-          )}
-          {StatusIcon}
-          {open ? (
-            <ChevronDown className="h-3 w-3 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-3 w-3 text-muted-foreground" />
-          )}
+          {/* Left status color bar */}
+          <div
+            className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg transition-colors duration-500"
+            style={{ backgroundColor: barColor }}
+          />
+          <div className="flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5">
+            <ToolIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+            <span className="font-mono text-xs flex-shrink-0">{name}</span>
+            {summary && (
+              <span className="text-[10px] text-muted-foreground truncate min-w-0">
+                {summary}
+              </span>
+            )}
+            <span className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+              {status === "pending" && (
+                <span className="text-[10px] font-medium" style={{ color: "var(--em-gold)" }}>待审批</span>
+              )}
+              {status === "running" && elapsed > 0 && (
+                <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
+              )}
+              <span className="transition-transform duration-300" style={{ transform: status === "success" ? "scale(1.15)" : "scale(1)" }}>
+                {StatusIcon}
+              </span>
+              {open ? (
+                <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="h-3 w-3 text-muted-foreground" />
+              )}
+            </span>
+          </div>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <div className="px-3 py-2 text-xs space-y-2 border border-t-0 border-border rounded-b-lg">
+          <div className="px-3 py-2 text-xs space-y-2 border border-t-0 border-border rounded-b-lg ml-[3px]">
             {Object.keys(args).length > 0 && (
               <div>
                 <p className="font-semibold text-muted-foreground mb-1">参数</p>
@@ -155,9 +234,11 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
 
       {/* Excel inline preview / diff — always visible when data available */}
       {preview && <ExcelPreviewTable data={preview} />}
-      {diff && (
+      {diffs.length > 0 && (
         <div className="relative">
-          <ExcelDiffTable data={diff} />
+          {diffs.map((d, i) => (
+            <ExcelDiffTable key={`${d.toolCallId}-${d.sheet}-${i}`} data={d} />
+          ))}
           {/* Inline apply button for this diff's file */}
           {(hasPendingBackup || appliedInline) && (
             <div className="flex justify-end px-3 -mt-1 mb-2">

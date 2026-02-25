@@ -72,6 +72,36 @@ function _clearUserSpecificStores() {
   useExcelStore.setState({ dismissedPaths: new Set<string>() });
 }
 
+// ── JWT local helpers ─────────────────────────────────────
+
+/**
+ * Decode JWT payload without verification (client-side only).
+ * Returns null if the token is malformed.
+ */
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether a JWT access token is expired locally.
+ * Uses a 60-second safety margin so we refresh slightly before actual expiry.
+ * Returns `true` (= treat as expired) when the token is null / malformed / expired.
+ */
+export function isTokenExpired(token: string | null): boolean {
+  if (!token) return true;
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number") return true;
+  const nowSec = Math.floor(Date.now() / 1000);
+  return nowSec >= payload.exp - 60;
+}
+
 // ── Auth API ──────────────────────────────────────────────
 
 export interface RegisterResult {

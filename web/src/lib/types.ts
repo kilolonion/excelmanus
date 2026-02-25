@@ -84,11 +84,12 @@ export interface TaskItem {
   content: string;
   status: string;
   index: number;
+  verification?: string;
 }
 
 export type Message =
-  | { id: string; role: "user"; content: string; files?: FileAttachment[] }
-  | { id: string; role: "assistant"; blocks: AssistantBlock[]; affectedFiles?: string[] };
+  | { id: string; role: "user"; content: string; files?: FileAttachment[]; timestamp?: number }
+  | { id: string; role: "assistant"; blocks: AssistantBlock[]; affectedFiles?: string[]; timestamp?: number };
 
 export interface Approval {
   id: string;

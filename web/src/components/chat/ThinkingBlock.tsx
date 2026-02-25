@@ -70,10 +70,10 @@ export function ThinkingBlock({
         )}
       >
         <span>
-          {isActive ? "Thinking" : "Thought"}
+          {isActive ? "思考中" : "思考完成"}
           {durationStr && (
             <span className="ml-1 font-normal opacity-60">
-              for {durationStr}
+              {durationStr}
             </span>
           )}
         </span>
@@ -98,7 +98,8 @@ export function ThinkingBlock({
         <div
           ref={contentRef}
           className={cn(
-            "mt-1.5 text-xs text-muted-foreground/70 whitespace-pre-wrap leading-relaxed",
+            "mt-1.5 text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed",
+            "rounded-lg bg-muted/20 dark:bg-muted/10 px-3 py-2",
             "scrollbar-none",
             isActive && "overflow-y-auto",
           )}

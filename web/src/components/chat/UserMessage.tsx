@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X, Download } from "lucide-react";
+import { User, Check, X, Download, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -103,9 +103,9 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           </div>
         ) : (
           <div
-            className={`relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-3 py-2 shadow-sm transition-colors ${
+            className={`group/bubble relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 shadow-sm transition-colors ${
               onEditAndResend && !isStreaming
-                ? "cursor-pointer hover:bg-[var(--em-primary-alpha-10)] hover:border-[var(--em-primary-alpha-20)]"
+                ? "cursor-pointer hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-25)]"
                 : ""
             }`}
             onClick={onEditAndResend && !isStreaming ? startEdit : undefined}
@@ -114,6 +114,14 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               text={content}
               className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
             />
+            {onEditAndResend && !isStreaming && (
+              <span
+                className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show transition-opacity"
+                aria-label="编辑消息"
+              >
+                <Pencil className="h-3 w-3 text-muted-foreground" />
+              </span>
+            )}
           </div>
         )}
         {files && files.length > 0 && (
