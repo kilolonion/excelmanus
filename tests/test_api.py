@@ -532,7 +532,7 @@ class TestProperty14SessionDeletion:
         assert detail_resp.status_code == 200
         detail = detail_resp.json()
         assert "full_access_enabled" in detail
-        assert "plan_mode_enabled" in detail
+        assert "chat_mode" in detail
         assert "current_model" in detail
         assert "current_model_name" in detail
 
@@ -990,13 +990,13 @@ class TestExternalSafeMode:
     async def test_plan_command_keep_safe_mode_hidden(
         self, client: AsyncClient
     ) -> None:
-        """默认安全模式下，/plan 命令可执行且路由元信息仍隐藏。"""
+        """默认安全模式下，/plan 命令返回废弃提示且路由元信息仍隐藏。"""
         resp = await client.post(
             "/api/v1/chat", json={"message": "/plan status"},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "plan mode" in data["reply"]
+        assert "废弃" in data["reply"] or "Tab" in data["reply"]
         assert data["route_mode"] == "hidden"
         assert data["skills_used"] == []
         assert data["tool_scope"] == []

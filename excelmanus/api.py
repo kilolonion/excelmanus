@@ -98,6 +98,7 @@ class ChatRequest(BaseModel):
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
+    chat_mode: Literal["write", "read", "plan"] = "write"
     images: list[ImageAttachment] = Field(default_factory=list)
 
 
@@ -606,8 +607,8 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
             "approval_id": item.approval_id,
             "pending_question": bool(item.pending_question),
             "question_id": item.question_id,
-            "pending_plan": bool(item.pending_plan),
-            "plan_id": item.plan_id,
+
+
         })
     return rows
 
@@ -1057,6 +1058,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 on_event=_on_event_sync,
                 mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
+                chat_mode=request.chat_mode,
             )
         )
     finally:
@@ -1161,6 +1163,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 on_event=_on_event,
                 mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
+                chat_mode=request.chat_mode,
             )
             return _normalize_chat_result(result)
         except Exception:
@@ -2269,6 +2272,71 @@ async def get_excel_file(request: Request) -> StreamingResponse:
         _iter_file(),
         media_type=content_type,
         headers={"Content-Disposition": _make_content_disposition(file_path.name)},
+    )
+
+
+@_router.get("/api/v1/files/spec")
+async def get_spec_file(request: Request) -> JSONResponse:
+    """返回 ReplicaSpec JSON 文件内容（供 VLM pipeline 迷你表格预览）。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+
+    ws_root = _resolve_workspace_root(request)
+    file_path = _Path(path)
+    if not file_path.is_absolute():
+        file_path = _Path(ws_root) / file_path
+
+    if not file_path.is_file() or file_path.suffix.lower() != ".json":
+        return _error_json_response(404, f"Spec 文件不存在: {path}")  # type: ignore[return-value]
+
+    import json as _json
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        data = _json.loads(content)
+    except Exception as exc:
+        return _error_json_response(500, f"读取 spec 失败: {exc}")  # type: ignore[return-value]
+
+    return JSONResponse(content=data)
+
+
+@_router.get("/api/v1/files/image")
+async def get_image_file(request: Request) -> StreamingResponse:
+    """返回 workspace 内图片文件的二进制流（供 VLM pipeline 原图预览）。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+    import mimetypes
+
+    ws_root = _resolve_workspace_root(request)
+    file_path = _Path(path)
+    if not file_path.is_absolute():
+        file_path = _Path(ws_root) / file_path
+
+    _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
+    if not file_path.is_file() or file_path.suffix.lower() not in _IMAGE_EXTENSIONS:
+        return _error_json_response(404, f"图片文件不存在: {path}")  # type: ignore[return-value]
+
+    content_type = mimetypes.guess_type(file_path.name)[0] or "image/png"
+
+    def _iter_image():
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter_image(),
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 

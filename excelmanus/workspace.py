@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from excelmanus.security.path_utils import resolve_in_workspace
+
 if TYPE_CHECKING:
     from excelmanus.file_versions import FileVersionManager
 
@@ -137,7 +139,6 @@ class SandboxConfig:
     """Per-workspace sandbox settings."""
 
     docker_enabled: bool = False
-    default_tier: str = "GREEN"
 
 
 # ── WorkspaceTransaction ───────────────────────────────────
@@ -205,16 +206,7 @@ class WorkspaceTransaction:
     # -- Path helpers --------------------------------------------------------
 
     def _resolve_and_validate(self, file_path: str) -> Path:
-        raw = Path(file_path).expanduser()
-        path = raw if raw.is_absolute() else self._workspace_root / raw
-        resolved = path.resolve(strict=False)
-        try:
-            resolved.relative_to(self._workspace_root)
-        except ValueError:
-            raise ValueError(
-                f"文件路径在工作区外，无法操作：{file_path}"
-            )
-        return resolved
+        return resolve_in_workspace(file_path, self._workspace_root)
 
     # -- Core operations -----------------------------------------------------
 
@@ -312,6 +304,20 @@ class SandboxEnv:
         tmpdir.mkdir(parents=True, exist_ok=True)
         return tmpdir / f"_cow_{secrets.token_hex(6)}.log"
 
+    def get_staging_map_json(self) -> str:
+        """导出 staging 映射为 JSON（注入子进程环境变量用）。
+
+        格式: {"<abs_original>": "<abs_staged>", ...}
+        无 transaction 或无 staging 条目时返回 "{}"。
+        """
+        import json
+        if self.transaction is None:
+            return "{}"
+        file_map = self.transaction.fvm.staged_file_map()
+        if not file_map:
+            return "{}"
+        return json.dumps(file_map, ensure_ascii=False)
+
     def get_tmp_dir(self) -> Path:
         tmpdir = self.workspace.root_dir / ".tmp"
         tmpdir.mkdir(parents=True, exist_ok=True)
@@ -361,6 +367,10 @@ class IsolatedWorkspace:
     @property
     def sandbox_config(self) -> SandboxConfig:
         return self._sandbox_config
+
+    @sandbox_config.setter
+    def sandbox_config(self, value: SandboxConfig) -> None:
+        self._sandbox_config = value
 
     @property
     def quota(self) -> QuotaPolicy:
