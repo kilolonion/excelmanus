@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { ArrowLeft, Maximize2, MousePointerSquareDashed, Check, XCircle, Download, Paintbrush } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl, downloadFile } from "@/lib/api";
@@ -21,6 +22,7 @@ const UniverSheet = dynamic(
 );
 
 export function ExcelFullView() {
+  const isMobile = useIsMobile();
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const fullViewSheet = useExcelStore((s) => s.fullViewSheet);
   const closeFullView = useExcelStore((s) => s.closeFullView);
@@ -105,7 +107,7 @@ export function ExcelFullView() {
               ? "text-[var(--em-primary)] bg-[var(--em-primary)]/10"
               : "text-muted-foreground"
           }`}
-          title={selectionMode ? "退出选区模式" : "选区引用"}
+          title={selectionMode ? "退出选区模式" : (isMobile ? "选区引用（也可长按表格）" : "选区引用")}
         >
           <MousePointerSquareDashed className="h-3.5 w-3.5" />
           选区引用
