@@ -4752,6 +4752,20 @@ class AgentEngine:
                 assistant_msg["tool_calls"] = [_to_plain(tc) for tc in tool_calls]
             self._memory.add_assistant_tool_message(assistant_msg)
 
+            # ── Think-Act 推理检测（纯记录，不阻断执行） ──
+            _text_content = (getattr(message, "content", None) or "").strip()
+            _has_reasoning = bool(_text_content or thinking_content)
+            _reasoning_chars = len(_text_content) + len(thinking_content)
+            _tc_count = len(tool_calls)
+            if _has_reasoning:
+                self._state.reasoned_call_count += _tc_count
+                self._state.reasoning_chars_total += _reasoning_chars
+            else:
+                self._state.silent_call_count += _tc_count
+            diag.has_reasoning = _has_reasoning
+            diag.reasoning_chars = _reasoning_chars
+            diag.silent_tool_call_count = 0 if _has_reasoning else _tc_count
+
             # 遍历工具调用
             _tool_names_in_batch = [
                 getattr(getattr(tc, "function", None), "name", "")

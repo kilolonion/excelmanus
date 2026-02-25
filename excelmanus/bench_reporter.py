@@ -142,6 +142,22 @@ def _render_quality_checks(cases: list[dict[str, Any]]) -> str:
     )
     lines.append(f"- **用例执行失败**: {case_errors} 例")
 
+    # 推理质量统计
+    total_silent = 0
+    total_reasoned = 0
+    total_reasoning_chars = 0
+    for c in cases:
+        rm = c.get("stats", {}).get("reasoning_metrics", {})
+        total_silent += rm.get("silent_call_count", 0)
+        total_reasoned += rm.get("reasoned_call_count", 0)
+        total_reasoning_chars += rm.get("reasoning_chars_total", 0)
+    total_calls = total_silent + total_reasoned
+    if total_calls > 0:
+        silent_rate = total_silent / total_calls * 100
+        avg_chars = total_reasoning_chars / max(1, total_reasoned)
+        lines.append(f"- **沉默调用率**: {silent_rate:.1f}% ({total_silent}/{total_calls})")
+        lines.append(f"- **平均推理字符/调用**: {avg_chars:.0f} chars")
+
     return "\n".join(lines)
 
 

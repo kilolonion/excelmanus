@@ -184,8 +184,9 @@ class ContextBuilder:
         successes = state.last_success_count
 
         parts: list[str] = []
+        _MAX_WARNINGS = 2
 
-        # 条件 1：接近迭代上限（已用 >= 60%）
+        # 条件 1（优先级最高）：接近迭代上限（已用 >= 60%）
         if max_iter > 0 and iteration >= max_iter * 0.6:
             parts.append(
                 f"⚠️ 接近迭代上限（{iteration}/{max_iter}），"
@@ -193,7 +194,7 @@ class ContextBuilder:
             )
 
         # 条件 2：连续失败 >= 3
-        if failures >= 3 and successes == 0:
+        if len(parts) < _MAX_WARNINGS and failures >= 3 and successes == 0:
             parts.append(
                 f"⚠️ 已连续失败 {failures} 次且无成功调用。建议："
                 "1) 检查文件路径和 sheet 名是否正确 "
@@ -202,15 +203,40 @@ class ContextBuilder:
             )
 
         # 条件 3：执行守卫曾触发（agent 曾给出建议而不执行）
-        if state.execution_guard_fired and not state.has_write_tool_call:
+        if len(parts) < _MAX_WARNINGS and state.execution_guard_fired and not state.has_write_tool_call:
             parts.append(
                 "⚠️ 此前已触发执行守卫。请通过工具执行操作，不要仅给出文本建议。"
+            )
+
+        # 条件 4（优先级最低）：沉默调用
+        silent = state.silent_call_count
+        reasoned = state.reasoned_call_count
+        if len(parts) < _MAX_WARNINGS and silent > 0 and silent >= reasoned:
+            parts.append(
+                f"⚠️ 本轮已有 {silent} 次工具调用未附带推理文本。"
+                "请遵循 Think-Act 协议：工具调用前至少用 1 句话说明意图。"
+                "（thinking 模型：推理可在 thinking 块中完成。）"
             )
 
         if not parts:
             return ""
 
         return "## 进展反思\n" + "\n".join(parts)
+
+    @staticmethod
+    def _compute_reasoning_level_static(route_result: Any) -> str:
+        """根据任务上下文计算推荐推理级别。"""
+        if route_result is None:
+            return "standard"
+        wh = getattr(route_result, "write_hint", "unknown") or "unknown"
+        tags = set(getattr(route_result, "task_tags", []) or [])
+        if wh == "read_only":
+            return "lightweight"
+        if tags & {"cross_sheet", "large_data"}:
+            return "complete"
+        if wh == "may_write":
+            return "standard"
+        return "lightweight"
 
     def _build_runtime_metadata_line(self) -> str:
         """生成紧凑的运行时元数据行，让 agent 感知自身状态。
@@ -225,9 +251,15 @@ class ContextBuilder:
             f"fullaccess={'on' if e.full_access_enabled else 'off'}",
             f"backup={'on' if e.workspace.transaction_enabled else 'off'}",
             f"mcp={e.mcp_connected_count}",
+            f"subagent={'on' if e._subagent_enabled else 'off'}",
+            f"vision={'on' if e._is_vision_capable else 'off'}",
+            f"plan_mode={'on' if e._plan_mode_enabled else 'off'}",
+            f"skills={len(e._active_skills)}",
         ]
         if e.workspace_manifest is not None:
             parts.append(f"files={e.workspace_manifest.total_files}")
+        _route = getattr(e, '_last_route_result', None)
+        parts.append(f"reasoning={self._compute_reasoning_level_static(_route)}")
         return "Runtime: " + " | ".join(parts)
 
     def _prepare_system_prompts_for_request(
@@ -507,6 +539,23 @@ class ContextBuilder:
             for item in task_list.items
         )
 
+    def _has_verification_failed_blocking_task(self) -> bool:
+        """检查任务序列中是否有带验证条件的失败任务阻断后续步骤。
+
+        仅当失败任务具有 verification_criteria 时视为验证失败阻断；
+        无验证条件的操作失败不阻断（保持现有容错行为）。
+        """
+        e = self._engine
+        task_list = e._task_store.current
+        if task_list is None:
+            return False
+        for item in task_list.items:
+            if item.status == TaskStatus.FAILED and item.verification_criteria:
+                return True
+            if item.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                break
+        return False
+
     async def _auto_continue_task_loop(
         self,
         route_result: "SkillMatchResult",
@@ -519,6 +568,10 @@ class ContextBuilder:
         result = initial_result
         for attempt in range(_MAX_PLAN_AUTO_CONTINUE):
             if not self._has_incomplete_tasks():
+                break
+            # 验证失败阻断：带验证条件的任务失败时停止续跑
+            if self._has_verification_failed_blocking_task():
+                logger.info("自动续跑停止：检测到带验证条件的任务失败")
                 break
             # 遇到待确认/待回答/待审批时不续跑，交还用户控制
             if e.approval.has_pending():
