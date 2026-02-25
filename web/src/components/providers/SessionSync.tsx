@@ -114,7 +114,7 @@ export function SessionSync() {
     void syncSessions();
     const timer = window.setInterval(() => {
       void syncSessions();
-    }, 5000);
+    }, 15000);
 
     return () => {
       cancelled = true;

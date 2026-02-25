@@ -204,13 +204,11 @@ export function SessionList() {
                   role="button"
                   onClick={() => {
                     setActiveSession(session.id);
-                    switchSession(session.id);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
                       setActiveSession(session.id);
-                      switchSession(session.id);
                     }
                   }}
                 >
