@@ -32,12 +32,7 @@ from excelmanus.hooks import (
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.memory import ConversationMemory, TokenCounter
 from excelmanus.plan_mode import (
-    PendingPlanState,
-    PlanDraft,
-    new_plan_id,
     parse_plan_markdown,
-    plan_filename,
-    save_plan_markdown,
     utc_now_iso,
 )
 from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
@@ -86,9 +81,8 @@ _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
-_SYSTEM_Q_PLAN_APPROVAL = "plan_approval"
-_PLAN_APPROVAL_OPTION_APPROVE = "批准执行"
-_PLAN_APPROVAL_OPTION_REJECT = "拒绝计划"
+
+
 _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
@@ -559,8 +553,7 @@ class ToolCallResult:
     audit_record: AppliedApprovalRecord | None = None
     pending_question: bool = False
     question_id: str | None = None
-    pending_plan: bool = False
-    plan_id: str | None = None
+    # pending_plan 和 plan_id 已废弃（Chat Mode Tabs 重构）
     defer_tool_result: bool = False
     finish_accepted: bool = False
 
@@ -945,13 +938,9 @@ class AgentEngine:
         self._pending_question_route_result: SkillMatchResult | None = None
         self._pending_approval_route_result: SkillMatchResult | None = None
         self._pending_approval_tool_call_id: str | None = None
-        self._plan_mode_enabled: bool = False
-        self._plan_intercept_task_create: bool = False
         self._bench_mode: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
-        self._pending_plan: PendingPlanState | None = None
-        self._approved_plan_context: str | None = None
-        self._suspend_task_create_plan_once: bool = False
+        self._current_chat_mode: str = "write"
         self._window_perception = WindowPerceptionManager(
             enabled=config.window_perception_enabled,
             budget=PerceptionBudget(
@@ -1366,8 +1355,6 @@ class AgentEngine:
         self._approval.clear_pending()
         self._pending_approval_route_result = None
         self._pending_approval_tool_call_id = None
-        self._pending_plan = None
-        self._approved_plan_context = None
 
         return {
             "removed_messages": removed,
@@ -1681,11 +1668,6 @@ class AgentEngine:
         return self._subagent_enabled
 
     @property
-    def plan_mode_enabled(self) -> bool:
-        """当前会话是否启用 plan mode。"""
-        return self._plan_mode_enabled
-
-    @property
     def backup_enabled(self) -> bool:
         """当前会话是否启用备份沙盒模式（事务模式）。"""
         return self._workspace.transaction_enabled
@@ -1862,8 +1844,6 @@ class AgentEngine:
         - bench 模式标志：用于 activate_skill 短路非 Excel 类 skill
         """
         self._full_access_enabled = True
-        self._plan_intercept_task_create = False
-        self._plan_mode_enabled = False
         self._subagent_enabled = True
         self._bench_mode = True
 
@@ -2045,6 +2025,7 @@ class AgentEngine:
         mention_contexts: list[ResolvedMention] | None = None,
         images: list[dict[str, Any]] | None = None,
         approval_resolver: ApprovalResolver | None = None,
+        chat_mode: str = "write",
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
         normalized_images: list[dict[str, str]] = []
@@ -2122,23 +2103,12 @@ class AgentEngine:
             logger.info("存在待确认项，已阻塞普通请求")
             return ChatResult(reply=block_msg)
 
-        if self._pending_plan is not None:
-            block_msg = self._format_pending_plan_prompt()
-            logger.info("存在待审批计划，已阻塞普通请求")
-            return ChatResult(reply=block_msg)
-
-        if self._plan_mode_enabled and not user_message.strip().startswith("/"):
-            logger.info("plan mode 命中，进入仅规划路径")
-            return await self._run_plan_mode_only(
-                user_message=user_message,
-                on_event=on_event,
-            )
-
         chat_start = time.monotonic()
         # 每次真正的 chat 调用递增轮次计数器
         self._state.increment_turn()
         # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
         self._current_write_hint = "unknown"
+        self._current_chat_mode = chat_mode
         self._tools_cache = None  # 新 turn → 失效工具 schema 缓存
 
         # 发出路由开始事件
@@ -2175,11 +2145,12 @@ class AgentEngine:
                     effective_raw_args = parse_result.clean_text
                     break
 
-        # ── 路由（斜杠命令 + write_hint 分类） ──
+        # ── 路由（斜杠命令 + chat_mode 映射） ──
         route_result = await self._route_skills(
             user_message,
             slash_command=effective_slash_command,
             raw_args=effective_raw_args if effective_slash_command else None,
+            chat_mode=chat_mode,
             on_event=on_event,
         )
 
@@ -3773,211 +3744,6 @@ class AgentEngine:
         return "\n".join(lines)
 
     @staticmethod
-    def _task_create_objective(arguments: dict[str, Any]) -> str:
-        """将 task_create 参数转为规划目标文本。"""
-        title = str(arguments.get("title", "") or "").strip()
-        raw_subtasks = arguments.get("subtasks")
-        subtasks: list[str] = []
-        if isinstance(raw_subtasks, list):
-            for item in raw_subtasks:
-                text = str(item).strip()
-                if text:
-                    subtasks.append(text)
-
-        lines = ["请基于以下任务草稿生成可审批执行计划："]
-        if title:
-            lines.append(f"任务标题：{title}")
-        if subtasks:
-            lines.append("候选子任务：")
-            lines.extend(f"- {item}" for item in subtasks)
-        else:
-            lines.append("候选子任务：暂无，需你根据目标拆解。")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _build_planner_prompt(*, objective: str, source: str) -> str:
-        """构造 planner 子代理提示。"""
-        source_label = "plan mode" if source == "plan_mode" else "task_create_hook"
-        return (
-            f"任务来源：{source_label}\n"
-            "你需要产出一份可审批的执行计划文档。\n\n"
-            "用户目标如下：\n"
-            f"{objective.strip()}\n\n"
-            "请严格按系统约束输出 Markdown（含 `## 任务清单` 与 `tasklist-json` 代码块）。"
-        )
-
-    async def _create_pending_plan_draft(
-        self,
-        *,
-        objective: str,
-        source: Literal["plan_mode", "task_create_hook"],
-        route_to_resume: SkillMatchResult | None,
-        tool_call_id: str | None,
-        on_event: EventCallback | None,
-    ) -> tuple[PlanDraft | None, str | None]:
-        """调用 planner 生成待审批计划草案。"""
-        if self._pending_plan is not None:
-            return None, "当前已有待审批计划，请先批准或拒绝。"
-
-        plan_result = await self.run_subagent(
-            agent_name="subagent",
-            prompt=self._build_planner_prompt(objective=objective, source=source),
-            on_event=on_event,
-        )
-        if not plan_result.success:
-            detail = (plan_result.error or plan_result.summary or "未知错误").strip()
-            return None, f"planner 执行失败：{detail}"
-
-        markdown = str(plan_result.summary or "").strip()
-        if not markdown:
-            return None, "planner 未返回计划文档。"
-
-        try:
-            title, subtasks = parse_plan_markdown(markdown)
-        except ValueError as exc:
-            return None, str(exc)
-
-        plan_id = new_plan_id()
-        file_name = plan_filename(plan_id)
-        try:
-            file_path = save_plan_markdown(
-                markdown=markdown,
-                workspace_root=self._config.workspace_root,
-                filename=file_name,
-            )
-        except Exception as exc:  # noqa: BLE001
-            return None, f"计划文档落盘失败：{exc}"
-
-        draft = PlanDraft(
-            plan_id=plan_id,
-            markdown=markdown,
-            title=title,
-            subtasks=subtasks,
-            file_path=file_path,
-            source=source,
-            objective=objective.strip(),
-            created_at_utc=utc_now_iso(),
-        )
-        self._pending_plan = PendingPlanState(
-            draft=draft,
-            tool_call_id=tool_call_id,
-            route_to_resume=route_to_resume,
-        )
-        return draft, None
-
-    def _format_pending_plan_prompt(self) -> str:
-        """构造待审批计划提示。"""
-        pending = self._pending_plan
-        if pending is None:
-            return "当前没有待审批计划。"
-        draft = pending.draft
-        return (
-            "已生成计划草案，待你审批后继续执行。\n"
-            f"- ID: `{draft.plan_id}`\n"
-            f"- 文件: `{draft.file_path}`\n"
-            f"- 标题: {draft.title}\n"
-            f"- 子任务数: {len(draft.subtasks)}\n"
-            "请选择「批准执行」或「拒绝计划」。"
-        )
-
-    def _enqueue_plan_approval_question(
-        self,
-        *,
-        draft: PlanDraft,
-        on_event: EventCallback | None,
-        iteration: int = 0,
-    ) -> PendingQuestion:
-        """创建 plan 审批系统问题并入队。"""
-        # 使用虚拟 tool_call_id（plan mode 无真实工具调用）
-        virtual_tool_call_id = f"plan_approval_{draft.plan_id}"
-        question_payload = {
-            "header": "计划审批",
-            "text": (
-                f"已生成计划草案「{draft.title}」"
-                f"（ID: {draft.plan_id}，子任务: {len(draft.subtasks)}）。"
-                "请选择是否批准执行。"
-            ),
-            "options": [
-                {
-                    "label": _PLAN_APPROVAL_OPTION_APPROVE,
-                    "description": "批准计划并开始执行任务。",
-                },
-                {
-                    "label": _PLAN_APPROVAL_OPTION_REJECT,
-                    "description": "拒绝该计划，不执行。",
-                },
-            ],
-            "multiSelect": False,
-        }
-        pending = self._question_flow.enqueue(
-            question_payload=question_payload,
-            tool_call_id=virtual_tool_call_id,
-        )
-        self._system_question_actions[pending.question_id] = {
-            "type": _SYSTEM_Q_PLAN_APPROVAL,
-            "plan_id": draft.plan_id,
-        }
-        self._emit_user_question_event(
-            question=pending,
-            on_event=on_event,
-            iteration=iteration,
-        )
-        return pending
-
-    async def _intercept_task_create_with_plan(
-        self,
-        *,
-        arguments: dict[str, Any],
-        route_result: SkillMatchResult | None,
-        tool_call_id: str,
-        on_event: EventCallback | None,
-    ) -> tuple[str, str | None, str | None]:
-        """拦截 task_create，改为 planner 生成待审批计划。"""
-        objective = self._task_create_objective(arguments)
-        draft, error = await self._create_pending_plan_draft(
-            objective=objective,
-            source="task_create_hook",
-            route_to_resume=route_result,
-            tool_call_id=tool_call_id,
-            on_event=on_event,
-        )
-        if error is not None:
-            return f"计划生成失败：{error}", None, f"计划生成失败：{error}"
-        assert draft is not None
-        self._enqueue_plan_approval_question(
-            draft=draft,
-            on_event=on_event,
-        )
-        return self._format_pending_plan_prompt(), draft.plan_id, None
-
-    async def _run_plan_mode_only(
-        self,
-        *,
-        user_message: str,
-        on_event: EventCallback | None,
-    ) -> ChatResult:
-        """plan mode 下仅生成计划，不进入常规执行循环。"""
-        objective = user_message.strip()
-        if not objective:
-            return ChatResult(reply="plan mode 需要非空目标描述。")
-
-        draft, error = await self._create_pending_plan_draft(
-            objective=objective,
-            source="plan_mode",
-            route_to_resume=None,
-            tool_call_id=None,
-            on_event=on_event,
-        )
-        if error is not None:
-            return ChatResult(reply=f"计划生成失败：{error}")
-        assert draft is not None
-        self._enqueue_plan_approval_question(
-            draft=draft,
-            on_event=on_event,
-        )
-        return ChatResult(reply=self._format_pending_plan_prompt())
-
-    @staticmethod
     def _question_options_payload(question: PendingQuestion) -> list[dict[str, str]]:
         return [
             {
@@ -4197,54 +3963,6 @@ class AgentEngine:
         )
         return ChatResult(reply=manual)
 
-    async def _handle_plan_approval_answer(
-        self,
-        *,
-        action: dict[str, Any],
-        parsed: Any,
-        on_event: EventCallback | None,
-    ) -> ChatResult:
-        """处理 plan 审批系统问题的回答。"""
-        selected_options = (
-            parsed.selected_options if hasattr(parsed, "selected_options") else []
-        )
-        selected_label = (
-            str(selected_options[0].get("label", "")).strip()
-            if selected_options
-            else ""
-        )
-        plan_id = str(action.get("plan_id", "")).strip()
-
-        pending = self._pending_plan
-        if pending is None:
-            return ChatResult(reply="当前没有待审批计划。")
-
-        expected_id = pending.draft.plan_id
-        if plan_id and plan_id != expected_id:
-            return ChatResult(
-                reply=f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
-            )
-
-        if selected_label == _PLAN_APPROVAL_OPTION_APPROVE:
-            reply = await self._handle_plan_approve(
-                parts=["/plan", "approve"],
-                on_event=on_event,
-            )
-            return ChatResult(reply=reply)
-
-        if selected_label == _PLAN_APPROVAL_OPTION_REJECT:
-            reply = self._handle_plan_reject(parts=["/plan", "reject"])
-            return ChatResult(reply=reply)
-
-        # 用户选了"其他"或无法识别的选项
-        return ChatResult(
-            reply=(
-                "已记录你的回答。你可以手动执行以下命令：\n"
-                f"- `/plan approve {expected_id}` 批准并继续执行\n"
-                f"- `/plan reject {expected_id}` 拒绝该计划"
-            )
-        )
-
     async def _handle_pending_question_answer(
         self,
         *,
@@ -4286,52 +4004,44 @@ class AgentEngine:
         system_action = self._system_question_actions.pop(parsed.question_id, None)
         action_type = str(system_action.get("type", "")).strip() if system_action else ""
 
-        # plan 审批是系统级问题，不对应真实 tool_call，避免写入孤立 tool result。
-        if action_type != _SYSTEM_Q_PLAN_APPROVAL:
-            # ── 多问题批量模式：同一 tool_call_id 的问题需要累积回答 ──
-            # 检查队列中是否还有同一 tool_call_id 的后续问题
-            next_q = self._question_flow.current()
-            same_batch = (
-                next_q is not None
-                and next_q.tool_call_id == popped.tool_call_id
-            )
-            if same_batch:
-                # 累积到 _batch_answers，暂不写入 tool_result
-                if not hasattr(self, "_batch_answers"):
-                    self._batch_answers: dict[str, list[dict[str, Any]]] = {}
-                batch_key = popped.tool_call_id
-                if batch_key not in self._batch_answers:
-                    self._batch_answers[batch_key] = []
-                self._batch_answers[batch_key].append(parsed.to_tool_result())
+        # ── 多问题批量模式：同一 tool_call_id 的问题需要累积回答 ──
+        # 检查队列中是否还有同一 tool_call_id 的后续问题
+        next_q = self._question_flow.current()
+        same_batch = (
+            next_q is not None
+            and next_q.tool_call_id == popped.tool_call_id
+        )
+        if same_batch:
+            # 累积到 _batch_answers，暂不写入 tool_result
+            if not hasattr(self, "_batch_answers"):
+                self._batch_answers: dict[str, list[dict[str, Any]]] = {}
+            batch_key = popped.tool_call_id
+            if batch_key not in self._batch_answers:
+                self._batch_answers[batch_key] = []
+            self._batch_answers[batch_key].append(parsed.to_tool_result())
+        else:
+            # 最后一个问题（或单问题模式）：合并所有累积回答 + 当前回答，一次性写入
+            batch_key = popped.tool_call_id
+            accumulated = []
+            if hasattr(self, "_batch_answers") and batch_key in self._batch_answers:
+                accumulated = self._batch_answers.pop(batch_key)
+            accumulated.append(parsed.to_tool_result())
+            if len(accumulated) == 1:
+                # 单问题：保持原格式
+                tool_result = json.dumps(accumulated[0], ensure_ascii=False)
             else:
-                # 最后一个问题（或单问题模式）：合并所有累积回答 + 当前回答，一次性写入
-                batch_key = popped.tool_call_id
-                accumulated = []
-                if hasattr(self, "_batch_answers") and batch_key in self._batch_answers:
-                    accumulated = self._batch_answers.pop(batch_key)
-                accumulated.append(parsed.to_tool_result())
-                if len(accumulated) == 1:
-                    # 单问题：保持原格式
-                    tool_result = json.dumps(accumulated[0], ensure_ascii=False)
-                else:
-                    # 多问题：合并为数组
-                    tool_result = json.dumps(
-                        {"answers": accumulated, "total": len(accumulated)},
-                        ensure_ascii=False,
-                    )
-                self._memory.add_tool_result(popped.tool_call_id, tool_result)
+                # 多问题：合并为数组
+                tool_result = json.dumps(
+                    {"answers": accumulated, "total": len(accumulated)},
+                    ensure_ascii=False,
+                )
+            self._memory.add_tool_result(popped.tool_call_id, tool_result)
 
         logger.info("已接收问题回答: %s", parsed.question_id)
         if system_action is not None:
             self._pending_question_route_result = None
             if action_type == _SYSTEM_Q_SUBAGENT_APPROVAL:
                 action_result = await self._handle_subagent_approval_answer(
-                    action=system_action,
-                    parsed=parsed,
-                    on_event=on_event,
-                )
-            elif action_type == _SYSTEM_Q_PLAN_APPROVAL:
-                action_result = await self._handle_plan_approval_answer(
                     action=system_action,
                     parsed=parsed,
                     on_event=on_event,
@@ -5049,22 +4759,6 @@ class AgentEngine:
                                     total_tokens=total_prompt_tokens + total_completion_tokens,
                                 )
 
-                        if tc_result.pending_plan:
-                            reply = tc_result.result
-                            self._memory.add_assistant_message(reply)
-                            self._last_iteration_count = iteration
-                            logger.info("工具调用进入待审批计划队列: %s", tc_result.plan_id)
-                            logger.info("最终结果摘要: %s", _summarize_text(reply))
-                            return _finalize_result(
-                                reply=reply,
-                                tool_calls=list(all_tool_results),
-                                iterations=iteration,
-                                truncated=False,
-                                prompt_tokens=total_prompt_tokens,
-                                completion_tokens=total_completion_tokens,
-                                total_tokens=total_prompt_tokens + total_completion_tokens,
-                            )
-
                         if tc_result.pending_question:
                             question_started = True
                             if self._pending_question_route_result is None:
@@ -5676,8 +5370,6 @@ class AgentEngine:
         self._pending_question_route_result = None
         self._pending_approval_route_result = None
         self._pending_approval_tool_call_id = None
-        self._pending_plan = None
-        self._approved_plan_context = None
         self._task_store.clear()
         self._approval.clear_pending()
         self._window_perception.reset()
@@ -5932,6 +5624,7 @@ class AgentEngine:
         slash_command: str | None = None,
         raw_args: str | None = None,
         write_hint: str | None = None,
+        chat_mode: str = "write",
         on_event: EventCallback | None = None,
     ) -> SkillMatchResult:
         if self._skill_router is None:
@@ -5952,6 +5645,7 @@ class AgentEngine:
             raw_args=raw_args,
             blocked_skillpacks=blocked_skillpacks,
             write_hint=write_hint,
+            chat_mode=chat_mode,
             on_event=on_event,
         )
 

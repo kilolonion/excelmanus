@@ -63,9 +63,6 @@ class CommandHandler:
 
         parts = text.split()
         raw_command = parts[0].strip().lower()
-        if raw_command in {"/planmode", "/plan_mode"}:
-            return "命令已移除，请使用 /plan ..."
-
         normalized_command = normalize_control_command(raw_command)
         command = NORMALIZED_ALIAS_TO_CANONICAL_CONTROL_COMMAND.get(normalized_command)
         if command is None:
@@ -162,7 +159,7 @@ class CommandHandler:
             )
 
         if command == "/plan":
-            return await self._handle_plan_command(parts, on_event=on_event)
+            return "该命令已废弃。请使用输入框上方的「写入 / 读取 / 计划」模式 Tab 切换。"
 
         if command == "/model":
             # /model → 显示当前模型
@@ -578,169 +575,6 @@ class CommandHandler:
             return e.approval.undo(approval_id)
 
         return "无效参数。用法：/undo [list] 或 /undo <id>。"
-
-    async def _handle_plan_command(
-        self,
-        parts: list[str],
-        *,
-        on_event: EventCallback | None,
-    ) -> str:
-        """处理 /plan 命令。"""
-        e = self._engine
-        action = parts[1].strip().lower() if len(parts) >= 2 else "status"
-
-        if action in {"status", ""} and len(parts) <= 2:
-            mode = "enabled" if e._plan_mode_enabled else "disabled"
-            lines = [f"当前 plan mode 状态：{mode}。"]
-            if e._pending_plan is not None:
-                draft = e._pending_plan.draft
-                lines.append(f"- 待审批计划 ID: `{draft.plan_id}`")
-                lines.append(f"- 计划文件: `{draft.file_path}`")
-                lines.append(f"- 子任务数: {len(draft.subtasks)}")
-            return "\n".join(lines)
-
-        if action == "on" and len(parts) == 2:
-            e._plan_mode_enabled = True
-            e._plan_intercept_task_create = True
-            self._emit_mode_changed(on_event, "plan_mode", True)
-            return "已开启 plan mode。后续普通对话将仅生成计划草案。"
-
-        if action == "off" and len(parts) == 2:
-            e._plan_mode_enabled = False
-            e._plan_intercept_task_create = False
-            self._emit_mode_changed(on_event, "plan_mode", False)
-            return "已关闭 plan mode。"
-
-        if action == "approve":
-            return await self._handle_plan_approve(parts=parts, on_event=on_event)
-
-        if action == "reject":
-            return self._handle_plan_reject(parts=parts)
-
-        return (
-            "无效参数。用法：/plan [on|off|status]，"
-            "或 /plan approve [plan_id]，"
-            "或 /plan reject [plan_id]。"
-        )
-
-    async def _handle_plan_approve(
-        self,
-        *,
-        parts: list[str],
-        on_event: EventCallback | None,
-    ) -> str:
-        """批准待审批计划并自动继续执行。"""
-        e = self._engine
-        if len(parts) > 3:
-            return "无效参数。用法：/plan approve [plan_id]。"
-
-        if e.approval.has_pending():
-            return (
-                "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
-                "再处理计划审批。"
-            )
-
-        pending = e._pending_plan
-        if pending is None:
-            return "当前没有待审批计划。"
-
-        expected_id = pending.draft.plan_id
-        provided_id = parts[2].strip() if len(parts) == 3 else ""
-        if provided_id and provided_id != expected_id:
-            return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
-
-        draft = pending.draft
-        task_list = e._task_store.create(
-            draft.title,
-            draft.subtasks,
-            replace_existing=True,
-        )
-        e._approved_plan_context = (
-            f"来源: {draft.file_path}\n"
-            f"{draft.markdown.strip()}"
-        )
-        e._pending_plan = None
-        e._plan_mode_enabled = False
-        e._plan_intercept_task_create = False
-        self._emit_mode_changed(on_event, "plan_mode", False)
-
-        from excelmanus.events import EventType, ToolCallEvent
-        e.emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.TASK_LIST_CREATED,
-                task_list_data=task_list.to_dict(),
-            ),
-        )
-
-        resume_prefix = (
-            f"已批准计划 `{draft.plan_id}` 并创建任务清单「{draft.title}」，已切回执行模式。"
-        )
-
-        if draft.source == "task_create_hook":
-            if pending.tool_call_id:
-                e.memory.add_tool_result(
-                    pending.tool_call_id,
-                    (
-                        f"计划 `{draft.plan_id}` 已批准并创建任务清单「{draft.title}」，"
-                        f"共 {len(draft.subtasks)} 个子任务。"
-                    ),
-                )
-            route_to_resume = pending.route_to_resume
-            if route_to_resume is None:
-                return resume_prefix
-
-            e._suspend_task_create_plan_once = True
-            try:
-                e._set_window_perception_turn_hints(
-                    user_message=draft.objective,
-                    is_new_task=False,
-                )
-                resumed = await e._tool_calling_loop(route_to_resume, on_event)
-                # 自动续跑：若任务清单仍有未完成子任务，自动继续
-                resumed = await e._auto_continue_task_loop(
-                    route_to_resume, on_event, resumed
-                )
-            finally:
-                e._suspend_task_create_plan_once = False
-            return f"{resume_prefix}\n\n{resumed.reply}"
-
-        e._suspend_task_create_plan_once = True
-        try:
-            resumed = await e.chat(draft.objective, on_event=on_event)
-        finally:
-            e._suspend_task_create_plan_once = False
-        return f"{resume_prefix}\n\n{resumed.reply}"
-
-    def _handle_plan_reject(self, *, parts: list[str]) -> str:
-        """拒绝待审批计划。"""
-        e = self._engine
-        if len(parts) > 3:
-            return "无效参数。用法：/plan reject [plan_id]。"
-
-        if e.approval.has_pending():
-            return (
-                "当前存在高风险待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`，"
-                "再处理计划审批。"
-            )
-
-        pending = e._pending_plan
-        if pending is None:
-            return "当前没有待审批计划。"
-
-        expected_id = pending.draft.plan_id
-        provided_id = parts[2].strip() if len(parts) == 3 else ""
-        if provided_id and provided_id != expected_id:
-            return f"计划 ID 不匹配。当前待审批计划 ID 为 `{expected_id}`。"
-
-        if pending.draft.source == "task_create_hook" and pending.tool_call_id:
-            e.memory.add_tool_result(
-                pending.tool_call_id,
-                f"计划 `{expected_id}` 已拒绝，task_create 已取消执行。",
-            )
-
-        e._pending_plan = None
-        return f"已拒绝计划 `{expected_id}`。"
 
     @staticmethod
     def _parse_subagent_run_command(
