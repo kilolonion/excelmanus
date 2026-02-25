@@ -689,9 +689,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("ConfigStore 已初始化")
 
     # 初始化会话管理器
-    shared_mcp_manager: MCPManager | None = None
-    if _config.mcp_shared_manager:
-        shared_mcp_manager = MCPManager(_config.workspace_root)
+    # 始终创建共享 MCP 管理器并在启动时自动连接
+    shared_mcp_manager = MCPManager(_config.workspace_root)
+    try:
+        await shared_mcp_manager.initialize(_tool_registry)
+        mcp_info = shared_mcp_manager.get_server_info()
+        mcp_ready = sum(1 for s in mcp_info if s["status"] == "ready")
+        if mcp_info:
+            logger.info(
+                "MCP 启动自动连接完成: %d/%d 个 Server 就绪",
+                mcp_ready, len(mcp_info),
+            )
+    except Exception:
+        logger.warning("MCP 启动自动连接失败", exc_info=True)
 
     _session_manager = SessionManager(
         max_sessions=_config.max_sessions,
