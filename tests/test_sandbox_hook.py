@@ -220,7 +220,7 @@ class TestAutoCoW:
         assert target.read_text(encoding="utf-8") == "original_data"
         
         # 副本已生成并被修改
-        cow_file = outputs_dir / "protected.txt"
+        cow_file = outputs_dir / "backups" / "protected.txt"
         assert cow_file.exists()
         assert cow_file.read_text(encoding="utf-8") == "new_data"
         
@@ -255,7 +255,7 @@ class TestAutoCoW:
         assert wb_orig.active["A1"].value == "original"
         
         # 副本已生成并被修改
-        cow_file = outputs_dir / "protected.xlsx"
+        cow_file = outputs_dir / "backups" / "protected.xlsx"
         assert cow_file.exists()
         wb_cow = openpyxl.load_workbook(cow_file)
         assert wb_cow.active["A1"].value == "new_data"

@@ -40,10 +40,23 @@ _YELLOW_BLOCKED: tuple[str, ...] = (
 )
 
 
-def generate_wrapper_script(tier: str, workspace_root: str) -> str:
-    """生成对应风险等级的沙盒 wrapper Python 脚本源码。"""
-    if tier == "RED":
+def generate_wrapper_script(
+    tier: str, workspace_root: str, *, docker_mode: bool = False,
+) -> str:
+    """生成对应风险等级的沙盒 wrapper Python 脚本源码。
+
+    Args:
+        tier: 代码风险等级 (GREEN/YELLOW/RED)
+        workspace_root: 工作区根目录绝对路径
+        docker_mode: 是否在 Docker 容器内运行。Docker RED tier
+            也注入最小 filesystem guard（bench 保护 + staging 重定向）。
+    """
+    if tier == "RED" and not docker_mode:
         return _RED_WRAPPER_TEMPLATE
+    if tier == "RED" and docker_mode:
+        return _RED_FS_GUARD_TEMPLATE.format(
+            workspace_root=repr(workspace_root),
+        )
 
     blocked = _GREEN_BLOCKED if tier == "GREEN" else _YELLOW_BLOCKED
     blocked_repr = repr(blocked)
@@ -73,6 +86,156 @@ exec(compile(open(_script, encoding="utf-8").read(), _script, "exec"),
      {"__name__": "__main__", "__file__": _script, "__builtins__": __builtins__})
 '''
 
+_RED_FS_GUARD_TEMPLATE = '''\
+"""ExcelManus RED filesystem guard wrapper (Docker mode, auto-generated).
+
+RED tier 无 import/exec/socket 限制，仅保留：
+- Filesystem Guard（工作区范围 + bench CoW + staging 重定向）
+- openpyxl atomic save 保护
+"""
+import sys
+import os
+import tempfile as _tmpmod
+import builtins
+
+_WORKSPACE_ROOT = os.path.realpath({workspace_root})
+_TIER = "RED"
+_SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
+
+# ── staging map (transaction-aware redirect) ──
+import json as _json_mod
+_STAGING_MAP_RAW = os.environ.get("EXCELMANUS_STAGING_MAP", "{{}}")
+try:
+    _STAGING_MAP = _json_mod.loads(_STAGING_MAP_RAW)
+    if not isinstance(_STAGING_MAP, dict):
+        _STAGING_MAP = {{}}
+except (ValueError, TypeError):
+    _STAGING_MAP = {{}}
+_STAGING_LOOKUP = {{os.path.realpath(k): os.path.realpath(v) for k, v in _STAGING_MAP.items()}}
+
+_original_open = builtins.open
+
+# ── Filesystem Guard ──
+_BENCH_PROTECTED_DIRS_RAW = os.environ.get("EXCELMANUS_BENCH_PROTECTED_DIRS", "bench/external")
+_BENCH_PROTECTED_DIRS = [
+    os.path.realpath(os.path.join(_WORKSPACE_ROOT, d.strip()))
+    for d in _BENCH_PROTECTED_DIRS_RAW.split(",")
+    if d.strip()
+]
+
+_COW_MAPPING = {{}}
+
+def _apply_cow(resolved):
+    if resolved in _COW_MAPPING:
+        return _COW_MAPPING[resolved]
+    redirect_dir = os.path.join(_WORKSPACE_ROOT, "outputs", "backups")
+    os.makedirs(redirect_dir, exist_ok=True)
+    redirect_path = os.path.join(redirect_dir, os.path.basename(resolved))
+    if os.path.exists(resolved):
+        try:
+            with _original_open(resolved, "rb") as src, _original_open(redirect_path, "wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+        except Exception:
+            pass
+    _COW_MAPPING[resolved] = redirect_path
+    cow_log = os.environ.get("EXCELMANUS_COW_LOG")
+    if cow_log:
+        try:
+            with _original_open(cow_log, "a", encoding="utf-8") as f:
+                f.write(resolved + "\\t" + redirect_path + "\\n")
+        except Exception:
+            pass
+    return redirect_path
+
+def _guarded_open(file, mode="r", *args, **kwargs):
+    resolved = os.path.realpath(str(file))
+    if resolved in _COW_MAPPING:
+        resolved = _COW_MAPPING[resolved]
+        file = resolved
+    if resolved in _STAGING_LOOKUP:
+        resolved = _STAGING_LOOKUP[resolved]
+        file = resolved
+    if any(c in str(mode) for c in "wax+"):
+        ws = _WORKSPACE_ROOT + os.sep
+        _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT
+        if not _in_workspace:
+            _tmp_prefix = _SYSTEM_TMPDIR + os.sep
+            if resolved.startswith(_tmp_prefix) or resolved == _SYSTEM_TMPDIR:
+                return _original_open(file, mode, *args, **kwargs)
+            raise PermissionError(
+                f"文件写入被安全策略禁止：路径不在工作区内 [等级: {{_TIER}}]"
+            )
+        for protected in _BENCH_PROTECTED_DIRS:
+            protected_prefix = protected + os.sep
+            if resolved.startswith(protected_prefix) or resolved == protected:
+                resolved = _apply_cow(resolved)
+                file = resolved
+                break
+    return _original_open(file, mode, *args, **kwargs)
+
+builtins.open = _guarded_open
+
+# ── openpyxl save 原子写入保护 ──
+def _patch_openpyxl_save():
+    try:
+        from openpyxl.workbook import Workbook as _Wb
+    except ImportError:
+        return
+    _original_save = _Wb.save
+    def _atomic_save(self, filename):
+        import tempfile
+        resolved = os.path.realpath(str(filename))
+        if resolved in _STAGING_LOOKUP:
+            resolved = _STAGING_LOOKUP[resolved]
+            filename = resolved
+        if resolved in _COW_MAPPING:
+            resolved = _COW_MAPPING[resolved]
+            filename = resolved
+        for _p in _BENCH_PROTECTED_DIRS:
+            _pp = _p + os.sep
+            if resolved.startswith(_pp) or resolved == _p:
+                resolved = _apply_cow(resolved)
+                filename = resolved
+                break
+        if not os.path.exists(resolved):
+            return _original_save(self, filename)
+        dir_name = os.path.dirname(resolved)
+        fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=dir_name)
+        os.close(fd)
+        try:
+            _original_save(self, tmp_path)
+            os.replace(tmp_path, resolved)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    _Wb.save = _atomic_save
+_patch_openpyxl_save()
+
+# ── execute user script ──
+if len(sys.argv) < 2:
+    print("Usage: wrapper.py <script.py> [args...]", file=sys.stderr)
+    sys.exit(1)
+
+_script = sys.argv[1]
+sys.argv = sys.argv[1:]
+
+with _original_open(_script, encoding="utf-8") as _f:
+    _code = _f.read()
+
+exec(compile(_code, _script, "exec"), {{
+    "__name__": "__main__",
+    "__file__": _script,
+    "__builtins__": __builtins__,
+}})
+'''
+
 _SANDBOX_WRAPPER_TEMPLATE = '''\
 """ExcelManus sandbox wrapper (auto-generated)."""
 import sys
@@ -87,6 +250,17 @@ _BLOCKED_MODULES = {blocked_modules}
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = {tier}
 _SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
+
+# ── staging map (transaction-aware redirect) ──
+import json as _json_mod
+_STAGING_MAP_RAW = os.environ.get("EXCELMANUS_STAGING_MAP", "{{}}")
+try:
+    _STAGING_MAP = _json_mod.loads(_STAGING_MAP_RAW)
+    if not isinstance(_STAGING_MAP, dict):
+        _STAGING_MAP = {{}}
+except (ValueError, TypeError):
+    _STAGING_MAP = {{}}
+_STAGING_LOOKUP = {{os.path.realpath(k): os.path.realpath(v) for k, v in _STAGING_MAP.items()}}
 
 # ── save original refs before monkey-patch ──
 _original_open = builtins.open
@@ -129,7 +303,7 @@ def _apply_cow(resolved):
     if resolved in _COW_MAPPING:
         return _COW_MAPPING[resolved]
         
-    redirect_dir = os.path.join(_WORKSPACE_ROOT, "outputs")
+    redirect_dir = os.path.join(_WORKSPACE_ROOT, "outputs", "backups")
     os.makedirs(redirect_dir, exist_ok=True)
     redirect_path = os.path.join(redirect_dir, os.path.basename(resolved))
     
@@ -163,6 +337,11 @@ def _guarded_open(file, mode="r", *args, **kwargs):
     # 同一脚本内已触发 CoW 的文件，读写都重定向到副本
     if resolved in _COW_MAPPING:
         resolved = _COW_MAPPING[resolved]
+        file = resolved
+        
+    # staging 映射重定向（读模式也重定向，确保读到最新 staged 副本）
+    if resolved in _STAGING_LOOKUP:
+        resolved = _STAGING_LOOKUP[resolved]
         file = resolved
         
     if any(c in str(mode) for c in "wax+"):
@@ -230,6 +409,11 @@ def _patch_openpyxl_save():
     def _atomic_save(self, filename):
         import tempfile
         resolved = os.path.realpath(str(filename))
+        
+        # staging 映射重定向（transaction 感知）
+        if resolved in _STAGING_LOOKUP:
+            resolved = _STAGING_LOOKUP[resolved]
+            filename = resolved
         
         # 处理同一次运行中已被 CoW 的文件
         if resolved in _COW_MAPPING:
