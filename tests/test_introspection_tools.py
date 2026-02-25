@@ -1,6 +1,6 @@
 """单元测试：introspect_capability 工具。
 
-测试四种查询类型的正确性、错误处理和注册逻辑。
+测试五种查询类型的正确性、错误处理和注册逻辑。
 
 **Validates: Requirements 3.1–3.3, 4.1–4.3, 5.1–5.3, 6.1–6.4, 7.1–7.2, 8.1–8.3, 12.1**
 """
@@ -11,9 +11,13 @@ import pytest
 
 from excelmanus.tools.introspection_tools import (
     INTROSPECT_CAPABILITY_SCHEMA,
+    _ALL_QUERY_TYPES,
+    _EXTENDED_CAPABILITIES,
+    _SUBAGENT_CAPABILITIES,
     _handle_can_i_do,
     _handle_category_tools,
     _handle_related_tools,
+    _handle_system_status,
     _handle_tool_detail,
     introspect_capability,
     register_introspection_tools,
@@ -70,6 +74,38 @@ def empty_registry() -> ToolRegistry:
     mod._registry = old
 
 
+class TestBatchQuery:
+    """测试批量查询功能。"""
+
+    def test_batch_query_mode(self, registry: ToolRegistry) -> None:
+        """批量查询应返回多个结果。"""
+        queries = [
+            {"query_type": "tool_detail", "query": "read_excel"},
+            {"query_type": "can_i_do", "query": "读取数据"},
+        ]
+        result = introspect_capability(queries=queries)
+        
+        # 应包含两个查询的结果
+        assert "[1]" in result
+        assert "[2]" in result
+        assert "read_excel" in result
+        assert "tool_detail(read_excel)" in result
+
+    def test_batch_query_empty(self, registry: ToolRegistry) -> None:
+        """空的批量查询应返回提示信息。"""
+        result = introspect_capability(queries=[])
+        assert "未提供有效查询" in result
+
+    def test_batch_query_invalid_type(self, registry: ToolRegistry) -> None:
+        """批量查询中的无效查询类型应返回错误信息。"""
+        queries = [
+            {"query_type": "invalid_type", "query": "test"},
+        ]
+        result = introspect_capability(queries=queries)
+        assert "不支持的查询类型" in result
+        assert "invalid_type" in result
+
+
 # ── 注册测试 ──────────────────────────────────────────────
 
 
@@ -83,18 +119,26 @@ class TestRegistration:
         assert tool.name == "introspect_capability"
 
     def test_schema_has_required_fields(self, registry: ToolRegistry) -> None:
-        """Schema 应包含 query_type 和 query 两个必填参数。"""
+        """Schema 应包含 query_type、query 和 queries 三个属性。"""
         tool = registry.get_tool("introspect_capability")
         assert tool is not None
         schema = tool.input_schema
-        assert "query_type" in schema["properties"]
-        assert "query" in schema["properties"]
-        assert set(schema["required"]) == {"query_type", "query"}
+
+        # 扁平 properties 结构
+        assert "properties" in schema
+        props = schema["properties"]
+        assert "query_type" in props
+        assert "query" in props
+        assert "queries" in props
 
     def test_query_type_enum(self) -> None:
-        """query_type 应包含四种枚举值。"""
-        enum_values = INTROSPECT_CAPABILITY_SCHEMA["properties"]["query_type"]["enum"]
-        assert set(enum_values) == {"tool_detail", "category_tools", "can_i_do", "related_tools"}
+        """query_type 应包含五种枚举值。"""
+        props = INTROSPECT_CAPABILITY_SCHEMA["properties"]
+        enum_values = props["query_type"]["enum"]
+        assert set(enum_values) == {
+            "tool_detail", "category_tools", "can_i_do",
+            "related_tools", "system_status",
+        }
 
     def test_in_read_only_safe_tools(self) -> None:
         """introspect_capability 应在 READ_ONLY_SAFE_TOOLS 中。"""
@@ -201,15 +245,33 @@ class TestCanIDo:
         """无匹配时应返回"无直接工具支持"。"""
         result = introspect_capability("can_i_do", "量子计算模拟")
         assert "无直接工具支持" in result
-        assert "introspector" in result
 
-    def test_max_results(self, registry: ToolRegistry) -> None:
-        """匹配结果不应超过 5 个。"""
-        # 使用一个广泛的查询词
+    def test_max_results_per_layer(self, registry: ToolRegistry) -> None:
+        """每层匹配结果不应超过 5 个。"""
         result = introspect_capability("can_i_do", "Excel 数据 文件 格式")
-        # 计算匹配工具数（以 "  - " 开头的行）
-        tool_lines = [l for l in result.splitlines() if l.startswith("  - ")]
-        assert len(tool_lines) <= 5
+        # 内置工具匹配行
+        builtin_lines = []
+        in_builtin = False
+        for line in result.splitlines():
+            if line.startswith("内置工具匹配"):
+                in_builtin = True
+                continue
+            if in_builtin and line.startswith("  - "):
+                builtin_lines.append(line)
+            elif in_builtin and not line.startswith("  "):
+                in_builtin = False
+        assert len(builtin_lines) <= 5
+
+    def test_extended_capabilities_match(self, registry: ToolRegistry) -> None:
+        """can_i_do 应能匹配扩展能力（run_code + Python 库）。"""
+        result = introspect_capability("can_i_do", "数据透视表 pivot")
+        assert "支持" in result
+        assert "扩展能力" in result or "pivot" in result.lower()
+
+    def test_subagent_match(self, registry: ToolRegistry) -> None:
+        """can_i_do 应能匹配子代理能力。"""
+        result = introspect_capability("can_i_do", "只读探索 文件结构分析")
+        assert "支持" in result
 
 
 # ── related_tools 测试 ────────────────────────────────────
@@ -235,6 +297,53 @@ class TestRelatedTools:
         assert "无相关工具推荐" in result
 
 
+# ── system_status 测试 ───────────────────────────────────
+
+
+class TestSystemStatus:
+    """测试 system_status 查询类型。"""
+
+    def test_basic_status(self, registry: ToolRegistry) -> None:
+        """system_status 应返回工具数量和分类信息。"""
+        result = introspect_capability("system_status", "")
+        assert "系统状态概览" in result
+        assert "内置工具" in result
+        assert "工具分类" in result
+        assert "扩展能力" in result
+        assert "内置子代理" in result
+
+    def test_shows_subagent_names(self, registry: ToolRegistry) -> None:
+        """system_status 应列出所有内置子代理名称。"""
+        result = introspect_capability("system_status", "")
+        for name in _SUBAGENT_CAPABILITIES:
+            assert name in result
+
+    def test_extended_capabilities_count(self, registry: ToolRegistry) -> None:
+        """system_status 应显示正确的扩展能力数量。"""
+        result = introspect_capability("system_status", "")
+        assert f"{len(_EXTENDED_CAPABILITIES)} 项" in result
+
+
+# ── 扩展能力常量测试 ─────────────────────────────────────
+
+
+class TestExtendedCapabilitiesConstants:
+    """测试扩展能力和子代理常量的完整性。"""
+
+    def test_extended_capabilities_non_empty(self) -> None:
+        """扩展能力描述不应为空。"""
+        assert len(_EXTENDED_CAPABILITIES) > 0
+        for key, desc in _EXTENDED_CAPABILITIES.items():
+            assert isinstance(key, str) and key
+            assert isinstance(desc, str) and desc
+            assert "run_code" in desc, f"扩展能力 {key} 应提及 run_code"
+
+    def test_subagent_capabilities_match_builtin(self) -> None:
+        """子代理能力描述应与 builtin.py 中定义的子代理一致。"""
+        expected = {"explorer", "verifier", "subagent"}
+        assert set(_SUBAGENT_CAPABILITIES.keys()) == expected
+
+
 # ── 纯查询无副作用测试 ────────────────────────────────────
 
 
@@ -253,7 +362,7 @@ class TestNoSideEffects:
 
     def test_always_returns_nonempty(self, registry: ToolRegistry) -> None:
         """任何有效查询都应返回非空字符串。"""
-        for qt in ("tool_detail", "category_tools", "can_i_do", "related_tools"):
+        for qt in _ALL_QUERY_TYPES:
             result = introspect_capability(qt, "test_query")
             assert isinstance(result, str)
             assert len(result) > 0
