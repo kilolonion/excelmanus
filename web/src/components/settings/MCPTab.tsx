@@ -69,7 +69,7 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
   ready: <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />,
   connect_failed: <XCircle className="h-3.5 w-3.5 text-red-500" />,
   discover_failed: <XCircle className="h-3.5 w-3.5 text-orange-500" />,
-  not_connected: <Circle className="h-3.5 w-3.5 text-muted-foreground" />,
+  not_connected: <Circle className="h-3.5 w-3.5 text-red-400" />,
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -77,6 +77,13 @@ const STATUS_LABELS: Record<string, string> = {
   connect_failed: "连接失败",
   discover_failed: "发现失败",
   not_connected: "未连接",
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  ready: "text-green-600 dark:text-green-400",
+  connect_failed: "text-red-600 dark:text-red-400",
+  discover_failed: "text-orange-600 dark:text-orange-400",
+  not_connected: "text-red-500 dark:text-red-400",
 };
 
 export function MCPTab() {
@@ -530,64 +537,65 @@ export function MCPTab() {
             </p>
           )}
           {servers.map((server) => (
-            <div key={server.name} className="rounded-lg border border-border">
+            <div key={server.name} className="rounded-lg border border-border overflow-hidden">
               {/* Card header */}
               <div
-                className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
+                className="px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
                 onClick={() =>
                   setExpandedServer(expandedServer === server.name ? null : server.name)
                 }
               >
-                {expandedServer === server.name ? (
-                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                )}
-                {STATUS_ICONS[server.status] || STATUS_ICONS.not_connected}
-                <span className="text-sm font-medium truncate">{server.name}</span>
-                <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-mono">
-                  {TRANSPORT_ICONS[server.transport]}
-                  <span className="ml-1">{server.transport}</span>
-                </Badge>
-                {server.tool_count > 0 && (
-                  <Badge variant="outline" className="text-[10px] px-1 py-0">
-                    {server.tool_count} 工具
+                {/* Row 1: status dot + name + action buttons */}
+                <div className="flex items-center gap-2">
+                  {STATUS_ICONS[server.status] || STATUS_ICONS.not_connected}
+                  <span className="text-sm font-medium truncate flex-1 min-w-0">{server.name}</span>
+                  <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={testing === server.name}
+                      onClick={() => handleTest(server.name)}
+                      title="测试连接"
+                    >
+                      {testing === server.name ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Zap className="h-3 w-3" />
+                      )}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => startEdit(server)}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-destructive"
+                      onClick={() => handleDelete(server.name)}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+                {/* Row 2: transport + tool count + status */}
+                <div className="flex items-center gap-1.5 mt-1 ml-[22px]">
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-mono">
+                    {TRANSPORT_ICONS[server.transport]}
+                    <span className="ml-1">{server.transport}</span>
                   </Badge>
-                )}
-                <span className="text-xs text-muted-foreground ml-auto">
-                  {STATUS_LABELS[server.status] || server.status}
-                </span>
-                <div className="flex gap-0.5 ml-1" onClick={(e) => e.stopPropagation()}>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
-                    disabled={testing === server.name}
-                    onClick={() => handleTest(server.name)}
-                    title="测试连接"
-                  >
-                    {testing === server.name ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : (
-                      <Zap className="h-3 w-3" />
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => startEdit(server)}
-                  >
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 text-destructive"
-                    onClick={() => handleDelete(server.name)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
+                  {server.tool_count > 0 && (
+                    <Badge variant="outline" className="text-[10px] px-1 py-0">
+                      {server.tool_count} 工具
+                    </Badge>
+                  )}
+                  <span className={`text-[11px] ${STATUS_COLORS[server.status] || "text-muted-foreground"}`}>
+                    {STATUS_LABELS[server.status] || server.status}
+                  </span>
                 </div>
               </div>
 

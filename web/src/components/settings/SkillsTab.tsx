@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
+import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
 
 interface SkillSummary {
   name: string;
@@ -277,11 +278,12 @@ export function SkillsTab() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs text-muted-foreground">
-            管理 system / user / project 三层技能包
-          </p>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.system}`} variant="secondary">system</Badge>
+          <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.user}`} variant="secondary">user</Badge>
+          <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.project}`} variant="secondary">project</Badge>
+          <span className="text-xs text-muted-foreground">{skills.length} 个技能</span>
         </div>
         <Button
           size="sm"
@@ -351,15 +353,7 @@ export function SkillsTab() {
               <p className="text-[10px] text-muted-foreground">
                 将自动扫描同目录下的附属文件（scripts/、references/ 等）一并导入
               </p>
-              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={fileOverwrite}
-                  onChange={(e) => setFileOverwrite(e.target.checked)}
-                  className="rounded"
-                />
-                覆盖已存在的同名技能
-              </label>
+              <MiniCheckbox checked={fileOverwrite} onChange={setFileOverwrite} label="覆盖已存在的同名技能" />
             </div>
           )}
 
@@ -381,15 +375,7 @@ export function SkillsTab() {
                 支持 github.com/.../blob/... 和 raw.githubusercontent.com 格式。
                 自动通过 GitHub API 拉取同目录附属文件。
               </p>
-              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={githubOverwrite}
-                  onChange={(e) => setGithubOverwrite(e.target.checked)}
-                  className="rounded"
-                />
-                覆盖已存在的同名技能
-              </label>
+              <MiniCheckbox checked={githubOverwrite} onChange={setGithubOverwrite} label="覆盖已存在的同名技能" />
             </div>
           )}
 
@@ -617,56 +603,57 @@ export function SkillsTab() {
             </p>
           )}
           {skills.map((skill) => (
-            <div key={skill.name} className="rounded-lg border border-border">
+            <div key={skill.name} className="rounded-lg border border-border overflow-hidden">
               {/* Card header */}
               <div
-                className="flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
+                className="px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
                 onClick={() => toggleExpand(skill.name)}
               >
-                {expandedSkill === skill.name ? (
-                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                ) : (
-                  <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                )}
-                <Package className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-                <span className="text-sm font-medium truncate">{skill.name}</span>
-                <Badge
-                  className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS[skill.source] || ""}`}
-                  variant="secondary"
-                >
-                  {skill.source}
-                </Badge>
-                {skill.writable && (
-                  <Badge variant="outline" className="text-[10px] px-1 py-0">
-                    可写
+                {/* Row 1: icon + name + action buttons */}
+                <div className="flex items-center gap-2">
+                  <Package className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+                  <span className="text-sm font-medium truncate flex-1 min-w-0">{skill.name}</span>
+                  {skill.writable && (
+                    <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => {
+                          if (!skillDetails[skill.name]) fetchDetail(skill.name);
+                          startEdit(skill);
+                        }}
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-destructive"
+                        onClick={() => handleDelete(skill.name)}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {/* Row 2: source badge + writable + description */}
+                <div className="flex items-center gap-1.5 mt-1 ml-[22px]">
+                  <Badge
+                    className={`text-[10px] px-1.5 py-0 shrink-0 ${SOURCE_COLORS[skill.source] || ""}`}
+                    variant="secondary"
+                  >
+                    {skill.source}
                   </Badge>
-                )}
-                <span className="text-xs text-muted-foreground ml-auto truncate max-w-[200px]">
-                  {skill.description}
-                </span>
-                {skill.writable && (
-                  <div className="flex gap-0.5 ml-1" onClick={(e) => e.stopPropagation()}>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => {
-                        if (!skillDetails[skill.name]) fetchDetail(skill.name);
-                        startEdit(skill);
-                      }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-destructive"
-                      onClick={() => handleDelete(skill.name)}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                )}
+                  {skill.writable && (
+                    <Badge variant="outline" className="text-[10px] px-1 py-0 shrink-0">
+                      可写
+                    </Badge>
+                  )}
+                  <span className="text-[11px] text-muted-foreground truncate">
+                    {skill.description}
+                  </span>
+                </div>
               </div>
 
               {/* Expanded detail */}
