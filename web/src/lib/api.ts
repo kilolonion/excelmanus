@@ -441,6 +441,29 @@ export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   return data.files ?? [];
 }
 
+export interface AllSheetsSnapshotResponse {
+  file: string;
+  sheets: string[];
+  all_snapshots: ExcelSnapshot[];
+}
+
+export async function fetchAllSheetsSnapshot(
+  path: string,
+  opts?: { maxRows?: number; sessionId?: string; withStyles?: boolean }
+): Promise<AllSheetsSnapshotResponse> {
+  const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
+  if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
+  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
+  const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Snapshot error: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchExcelSnapshot(
   path: string,
   opts?: { sheet?: string; maxRows?: number; sessionId?: string }
