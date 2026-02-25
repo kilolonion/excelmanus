@@ -45,6 +45,7 @@ class SessionState:
 
         # 执行守卫状态
         self.execution_guard_fired: bool = False
+        self.last_text_reply: str | None = None  # 上一次文本回复（用于重复检测）
         self.vba_exempt: bool = False
         self.finish_task_warned: bool = False
 

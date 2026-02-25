@@ -5173,6 +5173,23 @@ class AgentEngine:
 
         # ── 中间讨论放行：agent 在工具调用间输出分析文本，不应被守卫拦截 ──
         # 当 agent 已经执行过工具（说明正在工作中），且当前文本不是公式建议，
+
+        # 重复文本检测：如果连续返回相同文本，终止而不是继续
+        last_reply = self._state.last_text_reply
+        if last_reply and reply_text.strip() == last_reply.strip():
+            self._last_iteration_count = iteration
+            logger.warning("检测到重复文本回复，终止迭代 (iter=%d)", iteration)
+            return "return", _finalize_result(
+                reply=reply_text,
+                tool_calls=list(all_tool_results),
+                iterations=iteration,
+                truncated=False,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
+        self._state.last_text_reply = reply_text
+
         # 则视为中间过程讨论，允许继续下一轮迭代而不触发执行守卫或写入门禁。
         if (
             all_tool_results  # 已经执行过工具，说明 agent 在工作中
