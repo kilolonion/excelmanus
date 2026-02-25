@@ -880,11 +880,15 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="write_text_file",
-            description="写入文本文件（常用于生成 Python 脚本）",
+            description=(
+                "写入文本文件（常用于生成 Python 脚本后交给 run_code 执行）。"
+                "适用场景：创建或覆盖 .py/.txt/.csv 等文本文件。"
+                "不适用：直接写入 Excel 数据（改用 run_code + openpyxl/pandas）。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "目标文件路径"},
+                    "file_path": {"type": "string", "description": "目标文件路径（相对于工作目录）"},
                     "content": {"type": "string", "description": "文件内容"},
                     "overwrite": {
                         "type": "boolean",
@@ -905,17 +909,23 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="run_code",
-            description="执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑",
+            description=(
+                "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
+                "适用场景：所有数据写入、格式修改、跨表操作、批量计算。"
+                "必须：包含顶层 try/except（错误 print 到 stderr）；禁止 sys.exit()/exec()/eval()；"
+                "写入后在 stdout 打印关键验证数据（行数、列名、抽样值）。"
+                "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "内联 Python 代码（与 script_path 互斥）",
+                        "description": "内联 Python 代码（与 script_path 互斥，同时传时忽略 code）",
                     },
                     "script_path": {
                         "type": "string",
-                        "description": "磁盘脚本路径 .py（与 code 互斥）",
+                        "description": "磁盘 .py 脚本路径（与 code 互斥，相对于工作目录）",
                     },
                     "args": {
                         "type": "array",
@@ -924,23 +934,26 @@ def get_tools() -> list[ToolDef]:
                     },
                     "workdir": {
                         "type": "string",
-                        "description": "执行工作目录",
+                        "description": "执行工作目录（相对于工作目录）",
                         "default": ".",
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "超时秒数",
+                        "description": "超时秒数（1~300）",
                         "default": 120,
+                        "minimum": 1,
+                        "maximum": 300,
                     },
                     "python_command": {
                         "type": "string",
-                        "description": "解释器命令，默认 auto",
+                        "description": "解释器命令，默认 auto（自动探测）",
                         "default": "auto",
                     },
                     "tail_lines": {
                         "type": "integer",
-                        "description": "返回尾部行数",
+                        "description": "返回 stdout/stderr 尾部行数",
                         "default": 80,
+                        "minimum": 0,
                     },
                     "require_excel_deps": {
                         "type": "boolean",

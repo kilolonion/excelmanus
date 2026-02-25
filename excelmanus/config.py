@@ -429,6 +429,10 @@ class ExcelManusConfig:
     code_policy_yellow_auto_approve: bool = True
     code_policy_extra_safe_modules: tuple[str, ...] = ()
     code_policy_extra_blocked_modules: tuple[str, ...] = ()
+    # 工具参数 schema 校验（off/shadow/enforce）
+    tool_schema_validation_mode: str = "off"
+    tool_schema_validation_canary_percent: int = 100
+    tool_schema_strict_path: bool = False
     # Embedding 语义检索配置（需独立配置 embedding API，未配置时功能关闭）
     embedding_enabled: bool = False
     embedding_api_key: str | None = None
@@ -615,6 +619,20 @@ def _parse_window_rule_engine_version(value: str | None) -> str:
         value,
     )
     return "v1"
+
+
+def _parse_tool_schema_validation_mode(value: str | None) -> str:
+    """解析工具参数 schema 校验模式。"""
+    if value is None:
+        return "off"
+    normalized = value.strip().lower()
+    if normalized in {"off", "shadow", "enforce"}:
+        return normalized
+    raise ConfigError(
+        "配置项 EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE 必须是 "
+        "['off', 'shadow', 'enforce'] 之一，"
+        f"当前值: {value!r}"
+    )
 
 
 _ALLOWED_CLI_LAYOUT_MODES = {"dashboard", "classic"}
@@ -1201,6 +1219,24 @@ def load_config() -> ExcelManusConfig:
     code_policy_extra_blocked_modules = _parse_csv_tuple(
         os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
     )
+    tool_schema_validation_mode = _parse_tool_schema_validation_mode(
+        os.environ.get("EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE")
+    )
+    tool_schema_validation_canary_percent = _parse_int_allow_zero(
+        os.environ.get("EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT"),
+        "EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT",
+        100,
+    )
+    if tool_schema_validation_canary_percent > 100:
+        raise ConfigError(
+            "配置项 EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT 必须在 0..100，"
+            f"当前值: {tool_schema_validation_canary_percent}"
+        )
+    tool_schema_strict_path = _parse_bool(
+        os.environ.get("EXCELMANUS_TOOL_SCHEMA_STRICT_PATH"),
+        "EXCELMANUS_TOOL_SCHEMA_STRICT_PATH",
+        False,
+    )
 
     # Embedding 语义检索配置（需独立配置 API，未配置时功能关闭）
     embedding_api_key = os.environ.get("EXCELMANUS_EMBEDDING_API_KEY") or None
@@ -1363,6 +1399,9 @@ def load_config() -> ExcelManusConfig:
         code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
         code_policy_extra_safe_modules=code_policy_extra_safe_modules,
         code_policy_extra_blocked_modules=code_policy_extra_blocked_modules,
+        tool_schema_validation_mode=tool_schema_validation_mode,
+        tool_schema_validation_canary_percent=tool_schema_validation_canary_percent,
+        tool_schema_strict_path=tool_schema_strict_path,
         embedding_enabled=embedding_enabled,
         embedding_api_key=embedding_api_key,
         embedding_base_url=embedding_base_url,

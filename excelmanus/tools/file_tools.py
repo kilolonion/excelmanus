@@ -871,7 +871,11 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="list_directory",
-            description="列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式",
+            description=(
+                "列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式。"
+                "适用场景：浏览工作区文件结构、确认文件是否存在。"
+                "不适用：已知确切文件路径时直接操作，无需先浏览目录。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -892,18 +896,22 @@ def get_tools() -> list[ToolDef]:
                     },
                     "mode": {
                         "type": "string",
-                        "description": "扫描模式：auto|flat|tree|overview",
+                        "enum": ["auto", "flat", "tree", "overview"],
+                        "description": "扫描模式：auto=根据 depth 推断，flat=扁平分页，tree=递归树，overview=摘要",
                         "default": "auto",
                     },
                     "offset": {
                         "type": "integer",
                         "description": "分页起始偏移",
                         "default": 0,
+                        "minimum": 0,
                     },
                     "limit": {
                         "type": "integer",
                         "description": "分页大小（默认100，最大500）",
                         "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
                     },
                     "cursor": {
                         "type": "string",
@@ -923,6 +931,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "tree 模式最多返回节点数",
                         "default": 2000,
+                        "minimum": 1,
                     },
                 },
                 "required": [],
@@ -935,7 +944,10 @@ def get_tools() -> list[ToolDef]:
         # get_file_info, find_files, read_text_file: Batch 5 精简，由 run_code/run_shell 替代
         ToolDef(
             name="copy_file",
-            description="复制文件到工作区内的新位置（不覆盖已有文件）",
+            description=(
+                "复制文件到工作区内的新位置（不覆盖已有文件）。"
+                "目标路径已存在时会报错，需先删除或使用不同名称。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -956,7 +968,10 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="rename_file",
-            description="重命名或移动文件到工作区内的新位置（不覆盖已有文件）",
+            description=(
+                "重命名或移动文件到工作区内的新位置（不覆盖已有文件）。"
+                "目标路径已存在时会报错。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -977,7 +992,10 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="delete_file",
-            description="安全删除文件（仅限文件），需 confirm=true 二次确认",
+            description=(
+                "安全删除文件（仅限文件，不删目录），需 confirm=true 二次确认。"
+                "首次调用不传 confirm 时返回文件信息供确认，第二次调用传 confirm=true 才执行删除。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {

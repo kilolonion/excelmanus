@@ -2,17 +2,41 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from importlib import import_module
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence
 
 from excelmanus.logger import get_logger
 
 logger = get_logger("tools")
 
+_PATH_LIKE_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "file_path",
+        "path",
+        "source",
+        "destination",
+        "directory",
+        "workdir",
+        "script_path",
+        "stdout_file",
+        "stderr_file",
+        "spec_path",
+        "excel_path",
+        "output_path",
+        "target_path",
+        "source_file",
+        "target_file",
+        "resume_from_spec",
+    }
+)
+
 OpenAISchemaMode = Literal["responses", "chat_completions"]
+SchemaValidationMode = Literal["off", "shadow", "enforce"]
 WriteEffect = Literal[
     "none",
     "workspace_write",
@@ -194,6 +218,9 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDef] = {}
+        self._schema_validation_mode: SchemaValidationMode = "off"
+        self._schema_validation_canary_percent: int = 100
+        self._schema_strict_path: bool = False
 
     def fork(self) -> "ToolRegistry":
         """创建一个 per-session 的 overlay registry。
@@ -204,7 +231,280 @@ class ToolRegistry:
         """
         child = ToolRegistry()
         child._tools = dict(self._tools)  # 浅拷贝：ToolDef 不可变，安全
+        child._schema_validation_mode = self._schema_validation_mode
+        child._schema_validation_canary_percent = self._schema_validation_canary_percent
+        child._schema_strict_path = self._schema_strict_path
         return child
+
+    def configure_schema_validation(
+        self,
+        *,
+        mode: SchemaValidationMode,
+        canary_percent: int,
+        strict_path: bool,
+    ) -> None:
+        """配置工具参数 schema 校验策略。"""
+        normalized_mode = str(mode or "off").strip().lower()
+        if normalized_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError(
+                "schema validation mode 仅支持 off/shadow/enforce，"
+                f"当前值: {mode!r}"
+            )
+        canary = int(canary_percent)
+        if canary < 0 or canary > 100:
+            raise ValueError(
+                "schema validation canary_percent 必须在 0..100，"
+                f"当前值: {canary_percent!r}"
+            )
+        self._schema_validation_mode = normalized_mode  # type: ignore[assignment]
+        self._schema_validation_canary_percent = canary
+        self._schema_strict_path = bool(strict_path)
+
+    @staticmethod
+    def _schema_type_matches(value: Any, schema_type: Any) -> bool:
+        """检查值是否匹配 JSON Schema type（支持 type 字符串/数组）。"""
+        if schema_type is None:
+            return True
+
+        expected_types: list[str] = []
+        if isinstance(schema_type, str):
+            expected_types = [schema_type]
+        elif isinstance(schema_type, list):
+            expected_types = [item for item in schema_type if isinstance(item, str)]
+        if not expected_types:
+            return True
+
+        def _single_match(tp: str) -> bool:
+            if tp == "object":
+                return isinstance(value, dict)
+            if tp == "array":
+                return isinstance(value, list)
+            if tp == "string":
+                return isinstance(value, str)
+            if tp == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            if tp == "number":
+                return (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                )
+            if tp == "boolean":
+                return isinstance(value, bool)
+            if tp == "null":
+                return value is None
+            return True
+
+        return any(_single_match(tp) for tp in expected_types)
+
+    @staticmethod
+    def _contains_parent_traversal(path_value: str) -> bool:
+        """检查路径文本是否包含父目录穿越片段。"""
+        normalized = path_value.replace("\\", "/")
+        return ".." in Path(normalized).parts
+
+    @staticmethod
+    def _is_path_like_field(field_name: str) -> bool:
+        """判断字段名是否属于路径类参数。"""
+        return field_name in _PATH_LIKE_FIELD_NAMES
+
+    def _collect_schema_violations(
+        self,
+        *,
+        value: Any,
+        schema: dict[str, Any],
+        path: str,
+        violations: list[str],
+    ) -> None:
+        """递归收集 schema 违规项（轻量子集校验）。"""
+        one_of = schema.get("oneOf")
+        if isinstance(one_of, list) and one_of:
+            matched_count = 0
+            for option in one_of:
+                if not isinstance(option, dict):
+                    continue
+                option_violations: list[str] = []
+                self._collect_schema_violations(
+                    value=value,
+                    schema=option,
+                    path=path,
+                    violations=option_violations,
+                )
+                if not option_violations:
+                    matched_count += 1
+            if matched_count != 1:
+                violations.append(
+                    f"{path}: 必须匹配 oneOf 的 1 个分支，当前匹配 {matched_count} 个"
+                )
+                return
+
+        schema_type = schema.get("type")
+        if not self._schema_type_matches(value, schema_type):
+            violations.append(
+                f"{path}: 类型不匹配，期望 {schema_type!r}，实际 {type(value).__name__}"
+            )
+            return
+
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and enum_values and value not in enum_values:
+            violations.append(f"{path}: 不在允许枚举中，当前值 {value!r}")
+
+        if isinstance(value, str):
+            min_length = schema.get("minLength")
+            if isinstance(min_length, int) and len(value) < min_length:
+                violations.append(f"{path}: 长度不能小于 {min_length}")
+            max_length = schema.get("maxLength")
+            if isinstance(max_length, int) and len(value) > max_length:
+                violations.append(f"{path}: 长度不能超过 {max_length}")
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            if isinstance(minimum, (int, float)) and value < minimum:
+                violations.append(f"{path}: 不能小于 {minimum}")
+            maximum = schema.get("maximum")
+            if isinstance(maximum, (int, float)) and value > maximum:
+                violations.append(f"{path}: 不能超过 {maximum}")
+
+        if isinstance(value, list):
+            min_items = schema.get("minItems")
+            if isinstance(min_items, int) and len(value) < min_items:
+                violations.append(f"{path}: 列表长度不能小于 {min_items}")
+            max_items = schema.get("maxItems")
+            if isinstance(max_items, int) and len(value) > max_items:
+                violations.append(f"{path}: 列表长度不能超过 {max_items}")
+            items_schema = schema.get("items")
+            if isinstance(items_schema, dict):
+                for index, item in enumerate(value):
+                    self._collect_schema_violations(
+                        value=item,
+                        schema=items_schema,
+                        path=f"{path}[{index}]",
+                        violations=violations,
+                    )
+            return
+
+        if not isinstance(value, dict):
+            return
+
+        properties = schema.get("properties")
+        properties_map = properties if isinstance(properties, dict) else {}
+
+        required = schema.get("required")
+        if isinstance(required, list):
+            for field_name in required:
+                if isinstance(field_name, str) and field_name not in value:
+                    violations.append(f"{path}.{field_name}: 缺少必填字段")
+
+        if schema.get("additionalProperties") is False and properties_map:
+            for field_name in sorted(value.keys()):
+                if field_name not in properties_map:
+                    violations.append(f"{path}.{field_name}: 非法字段（schema 未声明）")
+
+        for field_name, field_value in value.items():
+            field_path = f"{path}.{field_name}"
+            if (
+                self._schema_strict_path
+                and self._is_path_like_field(field_name)
+                and isinstance(field_value, str)
+                and field_value.strip()
+            ):
+                if Path(field_value).is_absolute():
+                    violations.append(f"{field_path}: 必须使用相对路径，不允许绝对路径")
+                if self._contains_parent_traversal(field_value):
+                    violations.append(f"{field_path}: 不允许包含 '..' 路径穿越片段")
+
+            field_schema = properties_map.get(field_name)
+            if isinstance(field_schema, dict):
+                self._collect_schema_violations(
+                    value=field_value,
+                    schema=field_schema,
+                    path=field_path,
+                    violations=violations,
+                )
+
+    def _is_canary_hit(self, *, tool_name: str, arguments: dict[str, Any]) -> bool:
+        """判断当前请求是否命中 enforce 灰度桶（稳定哈希）。"""
+        percent = self._schema_validation_canary_percent
+        if percent >= 100:
+            return True
+        if percent <= 0:
+            return False
+        payload = {
+            "tool": tool_name,
+            "arguments": arguments,
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        bucket = int(hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:8], 16) % 100
+        return bucket < percent
+
+    def _resolve_schema_validation_decision(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> SchemaValidationMode:
+        """解析本次调用的 schema 校验决策（off/shadow/enforce）。"""
+        mode = self._schema_validation_mode
+        if mode == "off":
+            return "off"
+        if mode == "shadow":
+            return "shadow"
+        # mode == "enforce"
+        return "enforce" if self._is_canary_hit(tool_name=tool_name, arguments=arguments) else "shadow"
+
+    def validate_arguments_by_schema(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        schema: dict[str, Any] | None,
+    ) -> str | None:
+        """按当前策略校验参数 schema。
+
+        Returns:
+            str | None: 当命中 enforce 且校验失败时返回结构化错误 JSON；
+            其余情况返回 None（包括 shadow 仅打日志）。
+        """
+        if not isinstance(schema, dict):
+            return None
+
+        decision = self._resolve_schema_validation_decision(
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        if decision == "off":
+            return None
+
+        violations: list[str] = []
+        self._collect_schema_violations(
+            value=arguments,
+            schema=schema,
+            path="$",
+            violations=violations,
+        )
+        if not violations:
+            return None
+
+        if decision == "shadow":
+            logger.warning(
+                "工具 '%s' schema 校验失败（shadow）：%s; arguments=%s",
+                tool_name,
+                violations,
+                arguments,
+            )
+            return None
+
+        logger.warning(
+            "工具 '%s' schema 校验失败（enforce）：%s; arguments=%s",
+            tool_name,
+            violations,
+            arguments,
+        )
+        return self._format_argument_schema_validation_error(
+            tool_name=tool_name,
+            arguments=arguments,
+            schema=schema,
+            violations=violations,
+        )
 
     def register_tool(self, tool: ToolDef) -> None:
         """注册单个工具。"""
@@ -274,6 +574,14 @@ class ToolRegistry:
         if tool is None:
             raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
 
+        schema_error = self.validate_arguments_by_schema(
+            tool_name=tool_name,
+            arguments=arguments,
+            schema=tool.input_schema,
+        )
+        if schema_error is not None:
+            return schema_error
+
         # 先做函数签名绑定校验，拦截缺参/多参等调用层错误，
         # 以结构化错误返回给模型，便于其在下一轮自动修正参数。
         signature: inspect.Signature | None = None
@@ -335,6 +643,33 @@ class ToolRegistry:
             "provided_fields": sorted(arguments.keys()),
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _format_argument_schema_validation_error(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        schema: dict[str, Any],
+        violations: list[str],
+    ) -> str:
+        """构造 schema 级参数校验错误（JSON 字符串）。"""
+        required_raw = schema.get("required")
+        required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
+        properties_raw = schema.get("properties")
+        accepted_fields = sorted(str(item) for item in properties_raw.keys()) if isinstance(properties_raw, dict) else []
+        payload = {
+            "status": "error",
+            "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
+            "tool": tool_name,
+            "message": "工具参数与 schema 不匹配，请修正后重试。",
+            "detail": "; ".join(violations[:5]),
+            "violations": violations[:20],
+            "required_fields": required,
+            "accepted_fields": accepted_fields,
+            "provided_fields": sorted(arguments.keys()),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     @staticmethod
     def _format_execution_error(
         *,
