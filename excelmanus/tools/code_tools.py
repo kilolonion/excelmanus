@@ -29,7 +29,7 @@ def _get_guard() -> FileAccessGuard:
         return ctx_guard
     global _guard
     if _guard is None:
-        _guard = FileAccessGuard(".")
+        _guard = FileAccessGuard(os.environ.get("EXCELMANUS_WORKSPACE_ROOT", "."))
     return _guard
 
 
@@ -508,21 +508,42 @@ def _execute_script_docker(
         "EXCELMANUS_COW_LOG": host_to_container_path(cow_log_path, workspace_root),
     }
 
+    # ── staging 映射注入（Docker 路径转换） ──
+    _sandbox_env_obj = _get_active_sandbox_env()
+    if _sandbox_env_obj is not None:
+        _staging_json = getattr(_sandbox_env_obj, "get_staging_map_json", lambda: "{}")()
+        if _staging_json and _staging_json != "{}":
+            try:
+                _host_map = json.loads(_staging_json)
+                _container_map = {}
+                for _hk, _hv in _host_map.items():
+                    try:
+                        _ck = host_to_container_path(Path(_hk), workspace_root)
+                        _cv = host_to_container_path(Path(_hv), workspace_root)
+                        _container_map[_ck] = _cv
+                    except ValueError:
+                        pass
+                if _container_map:
+                    env_vars["EXCELMANUS_STAGING_MAP"] = json.dumps(
+                        _container_map, ensure_ascii=False,
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
     container_script = host_to_container_path(script_safe, workspace_root)
 
-    temp_wrapper: Path | None = None
-    if sandbox_tier in ("GREEN", "YELLOW"):
-        from excelmanus.security.sandbox_hook import generate_wrapper_script
+    # Docker 模式下所有 tier 都注入 wrapper（RED 使用最小 filesystem guard）
+    from excelmanus.security.sandbox_hook import generate_wrapper_script
 
-        wrapper_src = generate_wrapper_script(sandbox_tier, CONTAINER_WORKSPACE)
-        temp_dir = workspace_root / "scripts" / "temp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
-        temp_wrapper.write_text(wrapper_src, encoding="utf-8")
-        container_wrapper = host_to_container_path(temp_wrapper, workspace_root)
-        command_parts = ["python", "-I", container_wrapper, container_script, *safe_args]
-    else:
-        command_parts = ["python", "-I", container_script, *safe_args]
+    wrapper_src = generate_wrapper_script(
+        sandbox_tier, CONTAINER_WORKSPACE, docker_mode=True,
+    )
+    temp_dir = workspace_root / "scripts" / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_wrapper: Path | None = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
+    temp_wrapper.write_text(wrapper_src, encoding="utf-8")
+    container_wrapper = host_to_container_path(temp_wrapper, workspace_root)
+    command_parts = ["python", "-I", container_wrapper, container_script, *safe_args]
 
     try:
         docker_result = run_in_container(
@@ -708,6 +729,13 @@ def _execute_script(
     # ── CoW 日志 ──
     cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     sandbox_env["EXCELMANUS_COW_LOG"] = str(cow_log_path)
+
+    # ── staging 映射注入（transaction 感知） ──
+    _sandbox_env_obj = _get_active_sandbox_env()
+    if _sandbox_env_obj is not None:
+        _staging_json = getattr(_sandbox_env_obj, "get_staging_map_json", lambda: "{}")()
+        if _staging_json and _staging_json != "{}":
+            sandbox_env["EXCELMANUS_STAGING_MAP"] = _staging_json
 
     # ── 沙盒 wrapper 注入（GREEN/YELLOW 模式） ──
     temp_wrapper: Path | None = None

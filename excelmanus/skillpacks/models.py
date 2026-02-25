@@ -55,6 +55,29 @@ class Skillpack:
                 lines.append(content.strip())
         return "\n".join(lines).strip()
 
+    def render_context_instructions_only(self) -> str:
+        """仅返回 name + description + instructions（不含 resource_contents）。
+
+        用于后续迭代的 system prompt 注入：首次激活时完整内容已通过
+        tool result 返回给 LLM，后续迭代只需 instructions 提醒即可，
+        避免 resource_contents 在每轮迭代中重复注入导致 token 放大。
+        """
+        lines = [
+            f"[Skillpack] {self.name}",
+            f"描述：{self.description}",
+            "执行指引：",
+            self.instructions.strip() or "(无)",
+        ]
+        if self.required_mcp_servers or self.required_mcp_tools:
+            lines.append("MCP 依赖：")
+            if self.required_mcp_servers:
+                lines.append(f"- servers: {', '.join(self.required_mcp_servers)}")
+            if self.required_mcp_tools:
+                lines.append(f"- tools: {', '.join(self.required_mcp_tools)}")
+        if self.resource_contents:
+            lines.append(f"[补充资源已在激活时返回，共 {len(self.resource_contents)} 个文件]")
+        return "\n".join(lines).strip()
+
     def render_context_minimal(self) -> str:
         """仅返回 name + description，用于预算耗尽时的降级。"""
         return f"[Skillpack] {self.name}\n描述：{self.description}"
