@@ -282,13 +282,15 @@ class ConversationMemory:
         """注入历史消息（用于会话恢复）。不触发截断。"""
         self._messages.extend(messages)
 
-    def rollback_to_user_turn(self, turn_index: int) -> int:
+    def rollback_to_user_turn(self, turn_index: int, *, keep_target: bool = True) -> int:
         """回退对话到第 turn_index 个用户消息（0-indexed）。
 
-        截断该用户消息之后的所有消息（保留该 user 消息本身）。
+        截断该用户消息之后的所有消息。
 
         Args:
             turn_index: 目标用户轮次索引（0 = 第一条用户消息）。
+            keep_target: 若为 True（默认），保留目标 user 消息本身；
+                若为 False，连同目标 user 消息一起移除（用于重发场景）。
 
         Returns:
             被截断的消息数量。
@@ -303,9 +305,13 @@ class ConversationMemory:
             raise IndexError(
                 f"用户轮次索引 {turn_index} 超出范围（共 {len(user_indices)} 轮）"
             )
-        cut_after = user_indices[turn_index]  # 保留该 user 消息
-        removed_count = len(self._messages) - cut_after - 1
-        self._messages = self._messages[: cut_after + 1]
+        cut_after = user_indices[turn_index]
+        if keep_target:
+            removed_count = len(self._messages) - cut_after - 1
+            self._messages = self._messages[: cut_after + 1]
+        else:
+            removed_count = len(self._messages) - cut_after
+            self._messages = self._messages[:cut_after]
         return removed_count
 
     def list_user_turns(self) -> list[dict]:
