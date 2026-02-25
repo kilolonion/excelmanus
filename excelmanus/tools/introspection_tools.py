@@ -35,14 +35,28 @@ INTROSPECT_CAPABILITY_SCHEMA: dict = {
         "query_type": {
             "type": "string",
             "enum": ["tool_detail", "category_tools", "can_i_do", "related_tools"],
-            "description": "查询类型",
+            "description": "查询类型（单条查询时使用）",
         },
         "query": {
             "type": "string",
-            "description": "查询内容：工具名/分类名/能力描述",
+            "description": "查询内容：工具名/分类名/能力描述（单条查询时使用）",
+        },
+        "queries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": ["tool_detail", "category_tools", "can_i_do", "related_tools"],
+                    },
+                    "query": {"type": "string"},
+                },
+                "required": ["query_type", "query"],
+            },
+            "description": "批量查询（一次传入多个查询，减少迭代次数）",
         },
     },
-    "required": ["query_type", "query"],
     "additionalProperties": False,
 }
 
@@ -201,12 +215,16 @@ def _handle_related_tools(tool_name: str) -> str:
 # ── 主函数 ────────────────────────────────────────────────
 
 
-def introspect_capability(query_type: str, query: str) -> str:
+def introspect_capability(query_type: str = "", query: str = "", queries: list | None = None) -> str:
     """查询自身工具能力详情，用于决策时确认能力边界。
 
+    支持单条查询（query_type + query）或批量查询（queries 数组）。
+    批量查询时一次返回所有结果，减少迭代次数。
+
     Args:
-        query_type: 查询类型（tool_detail/category_tools/can_i_do/related_tools）
-        query: 查询内容（工具名/分类名/能力描述）
+        query_type: 查询类型（单条模式）
+        query: 查询内容（单条模式）
+        queries: 批量查询列表，每项含 query_type 和 query
 
     Returns:
         结构化的查询结果文本（始终非空）
@@ -221,6 +239,23 @@ def introspect_capability(query_type: str, query: str) -> str:
         "related_tools": _handle_related_tools,
     }
 
+    # 批量查询模式
+    if queries and isinstance(queries, list):
+        results = []
+        for i, q in enumerate(queries[:10], 1):  # 最多 10 条
+            qt = q.get("query_type", "")
+            qv = q.get("query", "")
+            handler = handlers.get(qt)
+            if handler is None:
+                valid = ", ".join(sorted(handlers.keys()))
+                results.append(f"[{i}] 不支持的查询类型: {qt}，可用类型: {valid}")
+            else:
+                result_text = handler(qv)
+                results.append(f"[{i}] {qt}({qv}): {result_text}")
+        sep = "\n\n"
+        return sep.join(results) if results else "未提供有效查询"
+
+    # 单条查询模式
     handler = handlers.get(query_type)
     if handler is None:
         valid = ", ".join(sorted(handlers.keys()))
