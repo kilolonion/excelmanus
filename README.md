@@ -244,6 +244,53 @@ docker compose --profile production up -d     # 带 Nginx 反向代理
 
 > 脚本自动排除 `.env`、`data/`、`workspace/` 等数据目录，不会覆盖服务器上的配置和用户数据。
 
+
+### 部署注意事项
+
+#### Next.js Standalone 静态资源
+
+前端使用 Next.js standalone 模式构建时，`public/` 和 `.next/static/` 目录不会自动复制到 `.next/standalone/` 输出目录，需要手动复制：
+
+```bash
+cd web
+npm run build
+cp -r public .next/standalone/
+cp -r .next/static .next/standalone/.next/
+```
+
+否则会导致 logo、图片、CSS 等静态资源 404 或 500 错误。建议在 `deploy.sh` 中自动化这一步骤。
+
+#### Nginx SSE 流式响应配置
+
+如果前端通过 Nginx 代理访问后端，需要为 SSE 端点单独配置，避免流式响应被缓冲：
+
+```nginx
+# SSE 流式接口专用配置
+location /api/v1/chat/stream {
+    proxy_pass http://backend-server:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Connection '';  # 关键：清空 Connection 头部（SSE 不需要 upgrade）
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 600s;
+    chunked_transfer_encoding on;
+}
+
+# 其他 API 请求
+location /api/ {
+    proxy_pass http://backend-server:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection 'upgrade';  # WebSocket 用
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;
+}
+```
+
+**关键点**：SSE（Server-Sent Events）不是 WebSocket，不需要 `Connection: upgrade` 头部。如果对所有 `/api/` 请求都设置 `Connection: upgrade`，会导致 SSE 连接失败，表现为发送消息时显示 fail to fetch。
+
+## 多用户与认证
 ## 多用户与认证
 
 ExcelManus 支持多用户模式，启用认证后自动启用用户隔离（Auth 即隔离），每个用户拥有独立的工作区目录和数据库。
