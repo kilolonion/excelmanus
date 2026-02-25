@@ -143,14 +143,22 @@
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
   }
 }
 
 @keyframes pulse-green {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
 }
 
 .animate-pulse-green {
@@ -165,8 +173,15 @@
 
 /* Session / file card selected indicator shimmer */
 @keyframes indicator-enter {
-  from { transform: scaleY(0); opacity: 0; }
-  to   { transform: scaleY(1); opacity: 1; }
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
 }
 
 .card-indicator-enter {
@@ -177,12 +192,12 @@
 /* Subtle selected card glow */
 .card-selected-glow {
   box-shadow: inset 0 0 0 1px var(--em-primary-alpha-15),
-              0 0 8px var(--em-primary-alpha-10);
+    0 0 8px var(--em-primary-alpha-10);
 }
 
 .dark .card-selected-glow {
   box-shadow: inset 0 0 0 1px var(--em-primary-alpha-20),
-              0 0 12px var(--em-primary-alpha-15);
+    0 0 12px var(--em-primary-alpha-15);
 }
 
 /* Ensure Univer Excel preview area is never transparent.
@@ -193,7 +208,117 @@
 }
 
 .dark [data-u-comp="workbench-layout"] {
-  background-color: #1f2937 !important; /* gray-800 */
+  background-color: #1f2937 !important;
+  /* gray-800 */
+}
+
+/* Hide Univer row header resize handle (narrow vertical strip in sheet header) */
+header .univer-box-border .univer-w-5.univer-cursor-pointer {
+  display: none !important;
+}
+
+/* Fix Univer.js button sizes on mobile devices */
+@media (pointer: coarse) {
+
+  /* Target the specific "开始" button with simplified selector */
+  a.univer-h-7.univer-rounded-full {
+    height: 20px !important;
+    min-height: 20px !important;
+    padding-left: 6px !important;
+    padding-right: 4px !important;
+    font-size: 10px !important;
+    min-width: auto !important;
+    line-height: 1.2 !important;
+  }
+
+  /* Also target the parent container to ensure it has enough space */
+  .univer-h-10 {
+    height: 32px !important;
+    min-height: 32px !important;
+  }
+
+  /* General Univer.js buttons and toolbar elements */
+  [data-u-comp] button,
+  [class*="univer"] button,
+  [class*="univerjs"] button,
+  .univer-toolbar button,
+  .univer-menu button {
+    min-height: 32px !important;
+    min-width: auto !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+  }
+}
+
+/* ── Univer Footer Status Bar: Mobile / Tablet Optimization ── */
+/* 在非桌面端（\u003c1280px，与 JS DESKTOP_BREAKPOINT 一致）精简 footer 布局：
+   保留工作表切换（< > 翻页箭头）和缩放控件（− + 百分比），
+   隐藏"添加工作表"和"工作表列表"按钮，压缩整体尺寸 */
+@media (max-width: 1279px) {
+
+  /* Footer 整体：降低高度、缩小内边距和字号 */
+  footer section[data-range-selector="true"] {
+    height: 28px !important;
+    min-height: 28px !important;
+    max-height: 28px !important;
+    padding: 0 6px !important;
+    font-size: 11px !important;
+    gap: 2px !important;
+  }
+
+  /* Footer 内所有按钮：覆盖全局 44px 触摸目标规则 */
+  footer section[data-range-selector="true"] button,
+  footer section[data-range-selector="true"] [role="button"] {
+    min-height: 22px !important;
+    min-width: 22px !important;
+    height: 22px !important;
+    width: auto !important;
+    padding: 2px 4px !important;
+    font-size: 11px !important;
+  }
+
+  /* Footer 内 SVG 图标缩小 */
+  footer section[data-range-selector="true"] svg {
+    width: 12px !important;
+    height: 12px !important;
+  }
+
+  /* 隐藏"添加工作表" + 按钮（左侧区域第1个按钮） */
+  footer section[data-range-selector="true"]> :first-child>button:first-of-type {
+    display: none !important;
+  }
+
+  /* 隐藏工作表管理图标（左侧区域第2个按钮） */
+  footer section[data-range-selector="true"]> :first-child>button:nth-of-type(2) {
+    display: none !important;
+  }
+
+  /* 缩放百分比文字缩小 */
+  footer section[data-range-selector="true"]> :last-child {
+    font-size: 10px !important;
+    padding: 0 2px !important;
+  }
+}
+
+/* 在更小的手机屏幕上进一步压缩 */
+@media (max-width: 767px) {
+  footer section[data-range-selector="true"] {
+    padding: 0 4px !important;
+    font-size: 10px !important;
+  }
+
+  footer section[data-range-selector="true"] button,
+  footer section[data-range-selector="true"] [role="button"] {
+    min-height: 20px !important;
+    min-width: 20px !important;
+    height: 20px !important;
+    padding: 1px 3px !important;
+  }
+
+  footer section[data-range-selector="true"] svg {
+    width: 10px !important;
+    height: 10px !important;
+  }
 }
 
 /* Inline code inside prose should wrap to avoid horizontal overflow */
@@ -248,6 +373,7 @@
 .scrollbar-none {
   scrollbar-width: none;
 }
+
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
@@ -256,7 +382,7 @@
    content width, breaking text truncation and pushing right-side elements
    beyond the overflow-x:hidden clip boundary. Force block layout so the
    wrapper respects the viewport width constraint. */
-[data-radix-scroll-area-viewport] > div {
+[data-radix-scroll-area-viewport]>div {
   display: block !important;
 }
 
@@ -272,6 +398,7 @@
 
 /* On touch devices, always show elements that rely on hover for visibility */
 @media (hover: none) {
+
   .md\:opacity-0,
   .touch-show {
     opacity: 1 !important;
@@ -294,7 +421,9 @@ body {
 
 /* Prevent horizontal swipe from triggering browser back/forward on iOS */
 @supports (-webkit-touch-callout: none) {
-  html, body {
+
+  html,
+  body {
     overflow-x: hidden;
   }
 }
@@ -318,6 +447,7 @@ button:active:not(:disabled),
 
 /* Ensure minimum 44×44px touch targets on coarse-pointer devices (WCAG 2.5.8) */
 @media (pointer: coarse) {
+
   button,
   [role="button"],
   a,
@@ -330,10 +460,32 @@ button:active:not(:disabled),
   }
 
   /* Exceptions: icon-only buttons that already have explicit sizing */
-  button.h-5, button.h-6, button.h-7, button.h-8,
-  [role="button"].h-5, [role="button"].h-6, [role="button"].h-7, [role="button"].h-8 {
+  button.h-5,
+  button.h-6,
+  button.h-7,
+  button.h-8,
+  [role="button"].h-5,
+  [role="button"].h-6,
+  [role="button"].h-7,
+  [role="button"].h-8 {
     min-height: 36px;
     min-width: 36px;
+  }
+
+  /* Exceptions: small compact buttons (chat mode tabs, regenerate buttons, etc.) */
+  button.text-xs,
+  [role="button"].text-xs,
+  button[class*="compact"],
+  [role="button"][class*="compact"] {
+    min-height: 32px;
+    min-width: auto;
+  }
+
+  /* Exceptions: Univer toolbar "开始" and similar compact links - keep desktop size on mobile */
+  a.univer-h-7.univer-rounded-full,
+  a[class*="univer-h-7"][class*="univer-rounded-full"] {
+    min-height: 0;
+    min-width: auto;
   }
 
   /* Dropdown menu items need adequate touch height */
@@ -345,6 +497,7 @@ button:active:not(:disabled),
 
 /* Smooth momentum scrolling for all scrollable containers on touch */
 @media (pointer: coarse) {
+
   .overflow-y-auto,
   .overflow-x-auto,
   .overflow-auto,
@@ -356,6 +509,7 @@ button:active:not(:disabled),
 
 /* Prevent text selection on interactive elements during touch */
 @media (pointer: coarse) {
+
   button,
   [role="button"],
   [role="menuitem"],
@@ -368,6 +522,7 @@ button:active:not(:disabled),
 
 /* Long-press context menu prevention on interactive elements */
 @media (pointer: coarse) {
+
   button,
   [role="button"],
   img {
@@ -375,11 +530,173 @@ button:active:not(:disabled),
   }
 }
 
+/* ── Tool Card Status Animations ── */
+@keyframes tool-running-pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes tool-running-bar {
+  0% {
+    background-position: 0% 0%;
+  }
+
+  100% {
+    background-position: 0% 200%;
+  }
+}
+
+@keyframes tool-success-flash {
+  0% {
+    background-color: rgba(33, 115, 70, 0.12);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.dark .animate-tool-success-flash {
+  animation: tool-success-flash-dark 0.6s ease-out forwards;
+}
+
+@keyframes tool-success-flash-dark {
+  0% {
+    background-color: rgba(33, 115, 70, 0.18);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-tool-running-pulse {
+  animation: tool-running-pulse 1.8s ease-in-out infinite;
+}
+
+.animate-tool-running-bar {
+  background: linear-gradient(180deg, var(--tool-cat-color) 0%, rgba(255, 255, 255, 0.3) 50%, var(--tool-cat-color) 100%);
+  background-size: 100% 200%;
+  animation: tool-running-bar 1.5s ease-in-out infinite;
+}
+
+.animate-tool-success-flash {
+  animation: tool-success-flash 0.6s ease-out forwards;
+}
+
+/* ── Tool Card Collapse Animations ── */
+@keyframes tool-expand-smooth {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+
+  60% {
+    transform: rotate(90deg) scale(1.05);
+  }
+
+  100% {
+    transform: rotate(90deg) scale(1);
+  }
+}
+
+@keyframes tool-collapse-smooth {
+  0% {
+    transform: rotate(90deg) scale(1);
+  }
+
+  70% {
+    transform: rotate(20deg) scale(1.01);
+  }
+
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+@keyframes collapsible-down {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.tool-chevron-expand {
+  animation: tool-expand-smooth 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards !important;
+}
+
+.tool-chevron-collapse {
+  animation: tool-collapse-smooth 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+}
+
+.animate-collapsible-down {
+  animation: collapsible-down 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.animate-collapsible-up {
+  animation: collapsible-up 0.2s cubic-bezier(0.55, 0.06, 0.68, 0.19);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .animate-tool-running-pulse,
+  .animate-tool-running-bar,
+  .animate-tool-success-flash,
+  .tool-chevron-expand,
+  .tool-chevron-collapse,
+  .animate-collapsible-down,
+  .animate-collapsible-up {
+    animation: none;
+  }
+
+  .tool-chevron-expand {
+    transform: rotate(90deg);
+  }
+
+  .tool-chevron-collapse {
+    transform: rotate(0deg);
+  }
+}
+
 /* ── Pipeline Stepper chip enter ── */
 @keyframes chipEnter {
-  0%   { opacity: 0; transform: translateX(8px) scale(0.92); }
-  60%  { opacity: 1; transform: translateX(-2px) scale(1.02); }
-  100% { opacity: 1; transform: translateX(0) scale(1); }
+  0% {
+    opacity: 0;
+    transform: translateX(8px) scale(0.92);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translateX(-2px) scale(1.02);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
 }
 
 .animate-chip-enter {
@@ -391,14 +708,22 @@ button:active:not(:disabled),
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
 
 /* ── Streaming Typing Cursor ── */
 @keyframes blink-caret {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
 }
 
 .streaming-cursor::after {
@@ -425,66 +750,162 @@ button:active:not(:disabled),
   color: #383a42;
   background: transparent;
 }
+
 .hljs-comment,
-.hljs-quote { color: #a0a1a7; font-style: italic; }
+.hljs-quote {
+  color: #a0a1a7;
+  font-style: italic;
+}
+
 .hljs-keyword,
 .hljs-selector-tag,
-.hljs-meta { color: #a626a4; }
+.hljs-meta {
+  color: #a626a4;
+}
+
 .hljs-string,
 .hljs-attr,
-.hljs-template-tag { color: #50a14f; }
+.hljs-template-tag {
+  color: #50a14f;
+}
+
 .hljs-number,
-.hljs-literal { color: #986801; }
+.hljs-literal {
+  color: #986801;
+}
+
 .hljs-built_in,
 .hljs-type,
-.hljs-params { color: #c18401; }
+.hljs-params {
+  color: #c18401;
+}
+
 .hljs-title,
 .hljs-title.function_,
-.hljs-section { color: #4078f2; }
+.hljs-section {
+  color: #4078f2;
+}
+
 .hljs-name,
-.hljs-selector-class { color: #e45649; }
+.hljs-selector-class {
+  color: #e45649;
+}
+
 .hljs-variable,
-.hljs-template-variable { color: #e45649; }
-.hljs-attribute { color: #986801; }
+.hljs-template-variable {
+  color: #e45649;
+}
+
+.hljs-attribute {
+  color: #986801;
+}
+
 .hljs-regexp,
-.hljs-link { color: #50a14f; }
+.hljs-link {
+  color: #50a14f;
+}
+
 .hljs-symbol,
-.hljs-bullet { color: #4078f2; }
-.hljs-addition { color: #50a14f; background: rgba(80, 161, 79, 0.1); }
-.hljs-deletion { color: #e45649; background: rgba(228, 86, 73, 0.1); }
-.hljs-emphasis { font-style: italic; }
-.hljs-strong { font-weight: bold; }
+.hljs-bullet {
+  color: #4078f2;
+}
+
+.hljs-addition {
+  color: #50a14f;
+  background: rgba(80, 161, 79, 0.1);
+}
+
+.hljs-deletion {
+  color: #e45649;
+  background: rgba(228, 86, 73, 0.1);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
 
 /* ── Highlight.js Syntax Theme (Dark) ── */
 .dark .hljs {
   color: #abb2bf;
 }
+
 .dark .hljs-comment,
-.dark .hljs-quote { color: #5c6370; font-style: italic; }
+.dark .hljs-quote {
+  color: #5c6370;
+  font-style: italic;
+}
+
 .dark .hljs-keyword,
 .dark .hljs-selector-tag,
-.dark .hljs-meta { color: #c678dd; }
+.dark .hljs-meta {
+  color: #c678dd;
+}
+
 .dark .hljs-string,
 .dark .hljs-attr,
-.dark .hljs-template-tag { color: #98c379; }
+.dark .hljs-template-tag {
+  color: #98c379;
+}
+
 .dark .hljs-number,
-.dark .hljs-literal { color: #d19a66; }
+.dark .hljs-literal {
+  color: #d19a66;
+}
+
 .dark .hljs-built_in,
 .dark .hljs-type,
-.dark .hljs-params { color: #e5c07b; }
+.dark .hljs-params {
+  color: #e5c07b;
+}
+
 .dark .hljs-title,
 .dark .hljs-title.function_,
-.dark .hljs-section { color: #61afef; }
+.dark .hljs-section {
+  color: #61afef;
+}
+
 .dark .hljs-name,
-.dark .hljs-selector-class { color: #e06c75; }
+.dark .hljs-selector-class {
+  color: #e06c75;
+}
+
 .dark .hljs-variable,
-.dark .hljs-template-variable { color: #e06c75; }
-.dark .hljs-attribute { color: #d19a66; }
+.dark .hljs-template-variable {
+  color: #e06c75;
+}
+
+.dark .hljs-attribute {
+  color: #d19a66;
+}
+
 .dark .hljs-regexp,
-.dark .hljs-link { color: #98c379; }
+.dark .hljs-link {
+  color: #98c379;
+}
+
 .dark .hljs-symbol,
-.dark .hljs-bullet { color: #61afef; }
-.dark .hljs-addition { color: #98c379; background: rgba(152, 195, 121, 0.1); }
-.dark .hljs-deletion { color: #e06c75; background: rgba(224, 108, 117, 0.1); }
-.dark .hljs-emphasis { font-style: italic; }
-.dark .hljs-strong { font-weight: bold; }
+.dark .hljs-bullet {
+  color: #61afef;
+}
+
+.dark .hljs-addition {
+  color: #98c379;
+  background: rgba(152, 195, 121, 0.1);
+}
+
+.dark .hljs-deletion {
+  color: #e06c75;
+  background: rgba(224, 108, 117, 0.1);
+}
+
+.dark .hljs-emphasis {
+  font-style: italic;
+}
+
+.dark .hljs-strong {
+  font-weight: bold;
+}
