@@ -66,7 +66,7 @@ class TestConversationMemory:
 
     def test_default_system_prompt_contains_verification_principle(self) -> None:
         assert "验证闭环" in _DEFAULT_SYSTEM_PROMPT
-        assert "finish_task" in _DEFAULT_SYSTEM_PROMPT
+        assert "善始善终" in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
         """初始状态只有 system 消息。"""

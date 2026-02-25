@@ -2,12 +2,10 @@
 
 import { useEffect, useState, useCallback } from "react";
 import {
-  Shrink,
   FolderSearch,
   Loader2,
   CheckCircle2,
   AlertCircle,
-  Zap,
   Brain,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -51,12 +49,6 @@ interface SessionStatus {
   session_id: string;
   compaction: CompactionStatus;
   manifest: ManifestStatus;
-}
-
-function usageColor(ratio: number, threshold: number): string {
-  if (ratio >= threshold) return "bg-red-500";
-  if (ratio >= threshold * 0.8) return "bg-amber-500";
-  return "bg-emerald-500";
 }
 
 function formatTokens(n: number): string {
@@ -176,79 +168,91 @@ export function SessionStatusBar() {
     <>
       <TooltipProvider delayDuration={300}>
         <div className="flex items-center gap-1.5 md:gap-3 text-[11px] text-muted-foreground">
-          {/* ── Compaction Bar ── */}
-          {c.enabled && c.max_tokens > 0 && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div className="flex items-center gap-1.5 cursor-default">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-4 w-4 p-0"
-                    disabled={compacting || !activeSessionId}
+          {/* ── Compaction Ring ── */}
+          {c.enabled && c.max_tokens > 0 && (() => {
+            const pct = Math.min(c.usage_ratio, 1);
+            const r = 6;
+            const circumference = 2 * Math.PI * r;
+            const strokeDash = pct * circumference;
+            const colorClass = pct >= c.threshold_ratio
+              ? "stroke-red-500"
+              : pct >= c.threshold_ratio * 0.8
+                ? "stroke-amber-500"
+                : "stroke-emerald-500";
+            return (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className="flex items-center gap-1 cursor-pointer"
+                    role="button"
+                    tabIndex={0}
                     onClick={(event) => {
                       event.stopPropagation();
                       setConfirmOpen(true);
                     }}
-                    aria-label={compacting ? "上下文压缩中" : "压缩上下文"}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setConfirmOpen(true);
+                      }
+                    }}
                   >
                     {compacting ? (
-                      <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
                     ) : (
-                      <Shrink className="h-3 w-3 flex-shrink-0" />
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 16 16"
+                        className="flex-shrink-0"
+                      >
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r={r}
+                          fill="none"
+                          className="stroke-muted"
+                          strokeWidth="2.5"
+                        />
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r={r}
+                          fill="none"
+                          className={`${colorClass} transition-all`}
+                          strokeWidth="2.5"
+                          strokeDasharray={`${strokeDash} ${circumference}`}
+                          strokeLinecap="round"
+                          transform="rotate(-90 8 8)"
+                        />
+                      </svg>
                     )}
-                  </Button>
-                  <div className="w-14 md:w-20 h-1.5 rounded-full bg-muted overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all ${usageColor(c.usage_ratio, c.threshold_ratio)}`}
-                      style={{ width: `${Math.min(c.usage_ratio * 100, 100)}%` }}
-                    />
+                    <span className="tabular-nums text-[10px]">
+                      {Math.round(c.usage_ratio * 100)}%
+                    </span>
+                    {compacting && (
+                      <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+                        压缩中
+                      </Badge>
+                    )}
                   </div>
-                  <span className="tabular-nums">
-                    {Math.round(c.usage_ratio * 100)}%
-                  </span>
-                  {compacting && (
-                    <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                      <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
-                      压缩中
-                    </Badge>
-                  )}
-                  {lastCompactResult && !compacting && (
-                    <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-                      {lastCompactResult.startsWith("✅") ? "已压缩" : "未压缩"}
-                    </Badge>
-                  )}
-                  {c.usage_ratio >= c.threshold_ratio && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-4 w-4 p-0"
-                      disabled={compacting}
-                      onClick={handleManualCompact}
-                    >
-                      {compacting ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Zap className="h-3 w-3 text-amber-500" />
-                      )}
-                    </Button>
-                  )}
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs max-w-52">
-                <div className="space-y-0.5">
-                  <div>Token: {formatTokens(c.current_tokens)} / {formatTokens(c.max_tokens)}</div>
-                  <div>阈值: {Math.round(c.threshold_ratio * 100)}%</div>
-                  <div>消息数: {c.message_count}</div>
-                  {compacting && <div>状态: 正在压缩…</div>}
-                  {lastCompactResult && <div>最近结果: {lastCompactResult.split("\n")[0]}</div>}
-                  {c.compaction_count > 0 && (
-                    <div>已压缩: {c.compaction_count} 次</div>
-                  )}
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          )}
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs max-w-52">
+                  <div className="space-y-0.5">
+                    <div>Token: {formatTokens(c.current_tokens)} / {formatTokens(c.max_tokens)}</div>
+                    <div>阈值: {Math.round(c.threshold_ratio * 100)}%</div>
+                    <div>消息数: {c.message_count}</div>
+                    {compacting && <div>状态: 正在压缩…</div>}
+                    {lastCompactResult && <div>最近结果: {lastCompactResult.split("\n")[0]}</div>}
+                    {c.compaction_count > 0 && (
+                      <div>已压缩: {c.compaction_count} 次</div>
+                    )}
+                    <div className="text-muted-foreground/70 mt-1">点击压缩上下文</div>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            );
+          })()}
 
           {/* ── Manifest Badge ── */}
           <Tooltip>
@@ -269,33 +273,22 @@ export function SessionStatusBar() {
                 }}
               >
                 {m.state === "building" || rebuilding ? (
-                  <>
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                      构建中
-                    </Badge>
-                  </>
+                  <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+                    <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
+                    构建
+                  </Badge>
                 ) : isManifestReady ? (
-                  <>
-                    <FolderSearch className="h-3 w-3" />
-                    <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-                      <CheckCircle2 className="h-2.5 w-2.5 text-green-500 mr-0.5" />
-                      清单
-                      {m.sheet_count != null && ` (${m.sheet_count})`}
-                    </Badge>
-                  </>
+                  <Badge variant="outline" className="h-4 px-1 text-[10px]">
+                    <CheckCircle2 className="h-2.5 w-2.5 text-green-500 mr-0.5" />
+                    {m.sheet_count != null ? `${m.sheet_count}` : "✓"}
+                  </Badge>
                 ) : m.state === "error" ? (
-                  <>
-                    <FolderSearch className="h-3 w-3" />
-                    <Badge variant="destructive" className="h-4 px-1.5 text-[10px]">
-                      <AlertCircle className="h-2.5 w-2.5 mr-0.5" />
-                      异常
-                    </Badge>
-                  </>
+                  <Badge variant="destructive" className="h-4 px-1 text-[10px]">
+                    <AlertCircle className="h-2.5 w-2.5 mr-0.5" />
+                    !
+                  </Badge>
                 ) : (
-                  <>
-                    <FolderSearch className="h-3 w-3 opacity-50" />
-                  </>
+                  <FolderSearch className="h-3 w-3 opacity-50" />
                 )}
               </span>
             </TooltipTrigger>

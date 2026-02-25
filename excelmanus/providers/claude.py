@@ -93,6 +93,48 @@ def _parse_data_uri(url: str) -> tuple[str, str]:
     return "image/png", url
 
 
+def _inject_messages_cache_breakpoints(
+    claude_messages: list[dict[str, Any]],
+) -> None:
+    """在 Claude messages 中注入 cache_control breakpoint，最大化对话历史缓存命中。
+
+    策略：在倒数第二条 user 消息上设置 breakpoint（即当前轮 user 消息之前的那条）。
+    这样整个对话历史前缀（包括之前所有轮次）都可以被缓存。
+    仅当对话历史 >= 3 条消息时才注入（至少有一轮完整的 user→assistant 交互）。
+
+    Anthropic 限制最多 4 个 breakpoint（system 已占 1 个），这里最多再加 1 个。
+    """
+    if len(claude_messages) < 3:
+        return
+
+    # 找到倒数第二条 user 消息的索引（跳过最后一条 user 消息）
+    user_indices = [
+        i for i, msg in enumerate(claude_messages) if msg.get("role") == "user"
+    ]
+    if len(user_indices) < 2:
+        return
+
+    # 在倒数第二条 user 消息上设置 cache breakpoint
+    target_idx = user_indices[-2]
+    target_msg = claude_messages[target_idx]
+    content = target_msg.get("content")
+
+    if isinstance(content, list) and content:
+        # 结构化 content：在最后一个 block 上设置 cache_control
+        last_block = content[-1]
+        if isinstance(last_block, dict) and "cache_control" not in last_block:
+            last_block["cache_control"] = {"type": "ephemeral"}
+    elif isinstance(content, str):
+        # 纯文本 content：转换为结构化格式以支持 cache_control
+        claude_messages[target_idx]["content"] = [
+            {
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+
 def _openai_messages_to_claude(
     messages: list[dict[str, Any]],
 ) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]]]:
@@ -190,6 +232,12 @@ def _openai_messages_to_claude(
 
     # Claude 要求 user/assistant 严格交替，合并连续同角色消息
     claude_messages = _merge_consecutive_claude_messages(claude_messages)
+
+    # Prompt Caching：在对话历史中设置 cache_control breakpoint。
+    # Anthropic 建议最多 4 个 breakpoint：system + 对话历史中的关键位置。
+    # 策略：在最后一条 user 消息（即当前轮之前的最后一条）上设置 breakpoint，
+    # 使整个对话历史前缀可被缓存，大幅降低多轮对话的 token 成本。
+    _inject_messages_cache_breakpoints(claude_messages)
 
     # Prompt Caching：将 system 构建为带 cache_control breakpoint 的结构化格式。
     # 在最后一个 system block 上设置 cache_control，使整个 system 前缀可被缓存。

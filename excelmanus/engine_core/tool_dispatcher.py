@@ -78,37 +78,6 @@ def _parse_vlm_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _render_finish_task_report(
-    report: dict[str, Any] | None,
-    summary: str,
-) -> str:
-    """将 finish_task 的参数渲染为用户可读文本。
-
-    新格式只有 summary + affected_files；兼容旧格式的 report dict。
-    """
-    # 新格式：直接使用 summary 自然语言
-    if not report or not isinstance(report, dict):
-        return summary.strip() if summary else ""
-
-    # 旧格式兼容：将 report dict 的各字段拼接为自然段落
-    parts: list[str] = []
-    for key in ("operations", "key_findings", "explanation", "suggestions"):
-        text = (report.get(key) or "").strip()
-        if text:
-            parts.append(text)
-
-    affected_files = report.get("affected_files")
-    if affected_files and isinstance(affected_files, list):
-        file_lines = [f"- {f}" for f in affected_files if isinstance(f, str) and f.strip()]
-        if file_lines:
-            parts.append("涉及文件：\n" + "\n".join(file_lines))
-
-    if not parts:
-        return summary.strip() if summary else ""
-
-    return "\n\n".join(parts)
-
-
 class ToolDispatcher:
     """工具调度器：参数解析、分支路由、执行、审计。"""
 
@@ -1156,80 +1125,114 @@ class ToolDispatcher:
                     result=result_str if success else None,
                     error=error if not success else None,
                 )
-            elif tool_name == "delegate_to_subagent":
-                task_value = arguments.get("task")
-                task_brief = arguments.get("task_brief")
-                # task_brief 优先：渲染为结构化 Markdown
-                if isinstance(task_brief, dict) and task_brief.get("title"):
-                    task_value = e.render_task_brief(task_brief)
-                if not isinstance(task_value, str) or not task_value.strip():
-                    result_str = "工具参数错误: task 或 task_brief 必须提供其一。"
-                    success = False
-                    error = result_str
+            elif tool_name in ("delegate", "delegate_to_subagent"):
+                # ── 并行模式：tasks 数组 ──
+                tasks_value = arguments.get("tasks")
+                if isinstance(tasks_value, list) and len(tasks_value) >= 2:
+                    try:
+                        pd_outcome = await e.parallel_delegate_to_subagents(
+                            tasks=tasks_value,
+                            on_event=on_event,
+                        )
+                        result_str = pd_outcome.reply if hasattr(pd_outcome, "reply") else str(pd_outcome)
+                        success = getattr(pd_outcome, "success", True)
+                        error = None if success else result_str
+                        # 写入传播
+                        if hasattr(pd_outcome, "outcomes"):
+                            for pd_sub_outcome in pd_outcome.outcomes:
+                                sub_result = getattr(pd_sub_outcome, "subagent_result", None)
+                                if (
+                                    sub_result is not None
+                                    and sub_result.structured_changes
+                                ):
+                                    e.record_workspace_write_action(
+                                        tool_name="delegate",
+                                        arguments={"task": pd_sub_outcome.task_text},
+                                    )
+                                    logger.info(
+                                        "delegate(parallel) 写入传播: agent=%s, changes=%d",
+                                        pd_sub_outcome.picked_agent,
+                                        len(sub_result.structured_changes),
+                                    )
+                    except Exception as exc:  # noqa: BLE001
+                        result_str = f"delegate(parallel) 执行异常: {exc}"
+                        success = False
+                        error = str(exc)
                 else:
-                    agent_name_value = arguments.get("agent_name")
-                    if agent_name_value is not None and not isinstance(agent_name_value, str):
-                        result_str = "工具参数错误: agent_name 必须为字符串。"
+                    # ── 单任务模式 ──
+                    task_value = arguments.get("task")
+                    task_brief = arguments.get("task_brief")
+                    # task_brief 优先：渲染为结构化 Markdown
+                    if isinstance(task_brief, dict) and task_brief.get("title"):
+                        task_value = e.render_task_brief(task_brief)
+                    if not isinstance(task_value, str) or not task_value.strip():
+                        result_str = "工具参数错误: task、task_brief 或 tasks 必须提供其一。"
                         success = False
                         error = result_str
                     else:
-                        raw_file_paths = arguments.get("file_paths")
-                        if raw_file_paths is not None and not isinstance(raw_file_paths, list):
-                            result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                        agent_name_value = arguments.get("agent_name")
+                        if agent_name_value is not None and not isinstance(agent_name_value, str):
+                            result_str = "工具参数错误: agent_name 必须为字符串。"
                             success = False
                             error = result_str
                         else:
-                            delegate_outcome = await e.delegate_to_subagent(
-                                task=task_value.strip(),
-                                agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
-                                file_paths=raw_file_paths,
-                                on_event=on_event,
-                            )
-                            result_str = delegate_outcome.reply
-                            success = delegate_outcome.success
-                            error = None if success else result_str
-
-                            # ── 写入传播：subagent 有文件变更时视为主 agent 写入 ──
-                            sub_result = delegate_outcome.subagent_result
-                            if (
-                                success
-                                and sub_result is not None
-                                and sub_result.structured_changes
-                            ):
-                                e.record_write_action()
-                                logger.info(
-                                    "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
-                                    len(sub_result.structured_changes),
-                                    sub_result.file_changes,
-                                )
-                            if (
-                                not success
-                                and sub_result is not None
-                                and sub_result.pending_approval_id is not None
-                            ):
-                                pending = e.approval.pending
-                                approval_id_value = sub_result.pending_approval_id
-                                high_risk_tool = (
-                                    pending.tool_name
-                                    if pending is not None and pending.approval_id == approval_id_value
-                                    else "高风险工具"
-                                )
-                                question = e.enqueue_subagent_approval_question(
-                                    approval_id=approval_id_value,
-                                    tool_name=high_risk_tool,
-                                    picked_agent=delegate_outcome.picked_agent or "subagent",
-                                    task_text=delegate_outcome.task_text,
-                                    normalized_paths=delegate_outcome.normalized_paths,
-                                    tool_call_id=tool_call_id,
+                            raw_file_paths = arguments.get("file_paths")
+                            if raw_file_paths is not None and not isinstance(raw_file_paths, list):
+                                result_str = "工具参数错误: file_paths 必须为字符串数组。"
+                                success = False
+                                error = result_str
+                            else:
+                                delegate_outcome = await e.delegate_to_subagent(
+                                    task=task_value.strip(),
+                                    agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
+                                    file_paths=raw_file_paths,
                                     on_event=on_event,
-                                    iteration=iteration,
                                 )
-                                result_str = f"已创建待回答问题 `{question.question_id}`。"
-                                question_id = question.question_id
-                                pending_question = True
-                                defer_tool_result = True
-                                success = True
-                                error = None
+                                result_str = delegate_outcome.reply
+                                success = delegate_outcome.success
+                                error = None if success else result_str
+
+                                # ── 写入传播：subagent 有文件变更时视为主 agent 写入 ──
+                                sub_result = delegate_outcome.subagent_result
+                                if (
+                                    success
+                                    and sub_result is not None
+                                    and sub_result.structured_changes
+                                ):
+                                    e.record_write_action()
+                                    logger.info(
+                                        "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
+                                        len(sub_result.structured_changes),
+                                        sub_result.file_changes,
+                                    )
+                                if (
+                                    not success
+                                    and sub_result is not None
+                                    and sub_result.pending_approval_id is not None
+                                ):
+                                    pending = e.approval.pending
+                                    approval_id_value = sub_result.pending_approval_id
+                                    high_risk_tool = (
+                                        pending.tool_name
+                                        if pending is not None and pending.approval_id == approval_id_value
+                                        else "高风险工具"
+                                    )
+                                    question = e.enqueue_subagent_approval_question(
+                                        approval_id=approval_id_value,
+                                        tool_name=high_risk_tool,
+                                        picked_agent=delegate_outcome.picked_agent or "subagent",
+                                        task_text=delegate_outcome.task_text,
+                                        normalized_paths=delegate_outcome.normalized_paths,
+                                        tool_call_id=tool_call_id,
+                                        on_event=on_event,
+                                        iteration=iteration,
+                                    )
+                                    result_str = f"已创建待回答问题 `{question.question_id}`。"
+                                    question_id = question.question_id
+                                    pending_question = True
+                                    defer_tool_result = True
+                                    success = True
+                                    error = None
                 log_tool_call(
                     logger,
                     tool_name,
@@ -1248,6 +1251,7 @@ class ToolDispatcher:
                     result=result_str,
                 )
             elif tool_name == "parallel_delegate":
+                # ── 兼容旧名称：转发到 delegate 的并行模式 ──
                 raw_tasks = arguments.get("tasks")
                 if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
                     result_str = "工具参数错误: tasks 必须为包含至少 2 个子任务的数组。"
@@ -1263,7 +1267,7 @@ class ToolDispatcher:
                         success = pd_outcome.success
                         error = None if success else result_str
 
-                        # ── 写入传播：并行子代理有文件变更时视为主 agent 写入 ──
+                        # ── 写入传播 ──
                         for pd_sub_outcome in pd_outcome.outcomes:
                             sub_result = pd_sub_outcome.subagent_result
                             if (
@@ -1272,16 +1276,16 @@ class ToolDispatcher:
                                 and sub_result.structured_changes
                             ):
                                 e.record_workspace_write_action(
-                                    tool_name="parallel_delegate",
+                                    tool_name="delegate",
                                     arguments={"task": pd_sub_outcome.task_text},
                                 )
                                 logger.info(
-                                    "parallel_delegate 写入传播: agent=%s, changes=%d",
+                                    "delegate(parallel-compat) 写入传播: agent=%s, changes=%d",
                                     pd_sub_outcome.picked_agent,
                                     len(sub_result.structured_changes),
                                 )
                     except Exception as exc:  # noqa: BLE001
-                        result_str = f"parallel_delegate 执行异常: {exc}"
+                        result_str = f"delegate(parallel) 执行异常: {exc}"
                         success = False
                         error = str(exc)
                 log_tool_call(
@@ -1290,56 +1294,6 @@ class ToolDispatcher:
                     arguments,
                     result=result_str if success else None,
                     error=error if not success else None,
-                )
-            elif tool_name == "finish_task":
-                report = arguments.get("report")
-                summary = arguments.get("summary", "")
-                rendered = _render_finish_task_report(report, summary)
-                _has_write = getattr(e, "_has_write_tool_call", False)
-                _hint = getattr(e, "_current_write_hint", "unknown")
-                if _has_write:
-                    result_str = (f"✅ 任务完成\n\n{rendered}" if rendered
-                                  else "✓ 任务完成。")
-                    success = True
-                    error = None
-                    finish_accepted = True
-                elif _hint == "read_only":
-                    # read_only 任务本就不需要写入，直接接受，省掉一轮冗余确认
-                    result_str = f"✅ 任务完成（无写入）\n\n{rendered}" if rendered else "✓ 任务完成（无写入）。"
-                    success = True
-                    error = None
-                    finish_accepted = True
-                elif getattr(e, "_finish_task_warned", False):
-                    _no_write_suffix = "（无写入）" if _hint == "read_only" else ""
-                    result_str = f"✅ 任务完成{_no_write_suffix}\n\n{rendered}" if rendered else f"✓ 任务完成{_no_write_suffix}。"
-                    success = True
-                    error = None
-                    finish_accepted = True
-                else:
-                    result_str = (
-                        "⚠️ 未检测到写入类工具的成功调用。"
-                        "如果确实不需要写入，请再次调用 finish_task 并在 summary 中说明原因。"
-                        "否则请先执行写入操作。"
-                    )
-                    e._finish_task_warned = True
-                    success = True
-                    error = None
-                    finish_accepted = False
-                # ── finish_task → files_changed 事件 ──
-                # 新格式: affected_files 在顶层；旧格式: 在 report 内
-                _report_for_event = report if isinstance(report, dict) else None
-                if not _report_for_event:
-                    top_files = arguments.get("affected_files")
-                    if top_files and isinstance(top_files, list):
-                        _report_for_event = {"affected_files": top_files}
-                self._emit_files_changed_from_report(
-                    e, on_event, tool_call_id, _report_for_event, iteration,
-                )
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str,
                 )
             elif tool_name == "ask_user":
                 result_str, question_id = e.handle_ask_user(
@@ -1907,6 +1861,32 @@ class ToolDispatcher:
                     ),
                 )
 
+        # ── 自动追踪 affected_files（供 _finalize_result 统一发射 FILES_CHANGED）──
+        if success:
+            _state = getattr(e, "_state", None)
+            if _state is not None:
+                if tool_name in self._EXCEL_WRITE_TOOLS:
+                    _afp = (arguments.get("file_path") or "").strip()
+                    if _afp:
+                        _state.record_affected_file(_afp)
+                elif tool_name == "run_code" and _raw_result_for_excel_events:
+                    try:
+                        import json as _json
+                        _parsed = _json.loads(_raw_result_for_excel_events.strip())
+                        if isinstance(_parsed, dict):
+                            _cow = _parsed.get("cow_mapping")
+                            if isinstance(_cow, dict):
+                                for _v in _cow.values():
+                                    if isinstance(_v, str) and _v.strip():
+                                        _state.record_affected_file(_v)
+                    except Exception:
+                        pass
+                elif e.get_tool_write_effect(tool_name) == "workspace_write":
+                    for _pk in ("file_path", "output_path", "path", "target_path"):
+                        _pv = (arguments.get(_pk) or "").strip()
+                        if _pv:
+                            _state.record_affected_file(_pv)
+
         # 任务清单事件：成功执行 task_create/task_update 后发射对应事件
         if success and tool_name == "task_create" and not pending_plan:
             task_list = e._task_store.current
@@ -2118,45 +2098,5 @@ class ToolDispatcher:
                 tool_call_id=tool_call_id,
                 iteration=iteration,
                 changed_files=sorted(affected),
-            ),
-        )
-
-    def _emit_files_changed_from_report(
-        self,
-        e: Any,
-        on_event: Any,
-        tool_call_id: str,
-        report: dict[str, Any] | None,
-        iteration: int,
-    ) -> None:
-        """从 finish_task 的 report.affected_files 中提取文件并发射 FILES_CHANGED 事件。"""
-        if not report or not isinstance(report, dict) or on_event is None:
-            return
-
-        from excelmanus.events import EventType, ToolCallEvent
-
-        affected_files = report.get("affected_files")
-        if not affected_files or not isinstance(affected_files, list):
-            return
-
-        _MAX_PATH_LEN = 260
-        valid_paths = [
-            f for f in affected_files
-            if isinstance(f, str)
-            and f.strip()
-            and len(f) <= _MAX_PATH_LEN
-            and "\n" not in f
-            and "\r" not in f
-        ]
-        if not valid_paths:
-            return
-
-        e.emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.FILES_CHANGED,
-                tool_call_id=tool_call_id,
-                iteration=iteration,
-                changed_files=valid_paths,
             ),
         )

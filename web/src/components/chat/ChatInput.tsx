@@ -200,6 +200,17 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
   }, []);
 
+  // Auto-resize textarea height based on content
+  const autoResize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(el.scrollHeight, 180);
+    el.style.height = `${next}px`;
+    el.style.overflow = next >= 180 ? "auto" : "hidden";
+    syncScroll();
+  }, [syncScroll]);
+
   // Fetch mention data from backend, supports path param for subfolder
   const fetchMentionData = useCallback(async (subpath?: string) => {
     try {
@@ -466,6 +477,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
   const handleTextChange = (value: string) => {
     setText(value);
+    requestAnimationFrame(autoResize);
 
     // Detect / at start of input
     if (value === "/") {
@@ -952,7 +964,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       )}
 
       {/* Main input row: [+] textarea [send] */}
-      <div className="flex items-end gap-1 px-1.5 py-1">
+      <div className="flex items-end gap-1 px-1.5 py-1.5">
         {/* Attach button (left) */}
         <Button
           variant="ghost"
@@ -982,9 +994,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           <div
             ref={backdropRef}
             aria-hidden="true"
-            className="absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words
-              px-2 py-[8px] text-[13px] leading-normal"
-            style={{ color: "var(--foreground)" }}
+            className="absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words font-sans"
+            style={{ color: "var(--foreground)", padding: "8px 8px", fontSize: "13px", lineHeight: "20px" }}
           >
             {renderHighlightedText(text)}
           </div>
@@ -1000,8 +1011,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             placeholder="有问题，尽管问"
             disabled={disabled}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
-              focus-visible:ring-0 focus-visible:ring-offset-0 px-2 py-[8px] text-[13px]
+              focus-visible:ring-0 focus-visible:ring-offset-0
               text-transparent caret-foreground selection:bg-[var(--em-primary)]/20 relative z-10"
+            style={{ padding: "8px 8px", fontSize: "13px", lineHeight: "20px", fontFamily: "inherit" }}
             rows={1}
           />
         </div>

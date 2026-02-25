@@ -300,5 +300,10 @@ class TestToolCallEventFields:
             "memory_trigger",
             "pipeline_message",
             "pipeline_stage",
+            "pipeline_spec_path",
+            "pipeline_total_phases",
+            "pipeline_phase_index",
+            "pipeline_checkpoint",
+            "pipeline_diff",
         }
         assert set(annotations.keys()) == expected_fields

@@ -280,6 +280,18 @@ def _responses_output_to_openai(
     completion_tokens = usage_data.get("output_tokens", 0)
     total_tokens = usage_data.get("total_tokens", prompt_tokens + completion_tokens)
 
+    usage = _Usage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+    # 提取 Responses API 的缓存统计（input_tokens_details.cached_tokens）
+    input_details = usage_data.get("input_tokens_details", {})
+    if isinstance(input_details, dict):
+        cached = input_details.get("cached_tokens", 0)
+        if cached:
+            usage.prompt_tokens_details = {"cached_tokens": cached}  # type: ignore[attr-defined]
+
     return _ChatCompletion(
         id=resp_id,
         model=data.get("model", model),
@@ -287,11 +299,7 @@ def _responses_output_to_openai(
             message=message,
             finish_reason=finish_reason,
         )],
-        usage=_Usage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-        ),
+        usage=usage,
     )
 
 
@@ -522,6 +530,12 @@ class OpenAIResponsesClient:
                                 total_tokens=usage_data.get("input_tokens", 0)
                                 + usage_data.get("output_tokens", 0),
                             )
+                            # 提取缓存统计
+                            _input_details = usage_data.get("input_tokens_details", {})
+                            if isinstance(_input_details, dict):
+                                _cached = _input_details.get("cached_tokens", 0)
+                                if _cached:
+                                    u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
                         output = response_obj.get("output", [])
                         has_tool = any(
                             item.get("type") == "function_call"

@@ -567,7 +567,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_image",
-            description="读取本地图片文件并加载到视觉上下文。支持 png/jpg/gif/bmp/webp。",
+            description="读取本地图片文件并加载到视觉上下文（png/jpg/gif/bmp/webp）",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -579,7 +579,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "enum": ["auto", "low", "high"],
                         "default": "auto",
-                        "description": "图片分析精度：auto（自动）、low（快速概览）、high（高保真分析）",
+                        "description": "图片分析精度",
                     },
                 },
                 "required": ["file_path"],
@@ -591,7 +591,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="rebuild_excel_from_spec",
-            description="从 ReplicaSpec JSON 确定性编译为 Excel 文件。这是图片→Excel 复刻流水线的第二步。",
+            description="从 ReplicaSpec JSON 编译为 Excel 文件",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -613,7 +613,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="verify_excel_replica",
-            description="验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告。这是图片→Excel 复刻流水线的第三步。",
+            description="验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
             input_schema={
                 "type": "object",
                 "properties": {
@@ -640,9 +640,8 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="extract_table_spec",
             description=(
-                "从图片中自动提取表格结构和样式，生成 ReplicaSpec JSON 文件。"
-                "支持多表格检测（每个表格生成独立 Sheet）。"
-                "这是图片→Excel 复刻流水线的自动化第一步。"
+                "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON。"
+                "支持多表格检测，采用渐进式 4 阶段提取。"
             ),
             input_schema={
                 "type": "object",
@@ -660,6 +659,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "跳过样式提取（仅提取数据结构，速度更快）",
                         "default": False,
+                    },
+                    "resume_from_spec": {
+                        "type": "string",
+                        "description": "断点续跑：传入中间 spec 文件路径，从该阶段之后继续",
                     },
                 },
                 "required": ["file_path"],

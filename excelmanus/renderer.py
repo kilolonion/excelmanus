@@ -17,9 +17,7 @@ import time
 from typing import Any, Dict
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
-from rich.padding import Padding
 from rich.text import Text
 
 from excelmanus.cli.theme import THEME
@@ -43,6 +41,7 @@ logger = logging.getLogger(__name__)
 # 元工具：对用户隐藏内部细节，使用友好名称
 _META_TOOL_DISPLAY: dict[str, str] = {
     "activate_skill": "激活技能指引",
+    "delegate": "委派子任务",
     "delegate_to_subagent": "委派子任务",
     "list_subagents": "查询可用助手",
 }
@@ -107,12 +106,10 @@ class StreamRenderer:
                 self._fallback_render(event)
 
     def finish_streaming(self) -> None:
-        """流式输出结束时调用，将缓冲文本以 Markdown 渲染输出。"""
-        if self._streaming_text and self._text_buffer:
-            full_text = "".join(self._text_buffer)
+        """流式输出结束时调用，换行收尾。"""
+        if self._streaming_text:
+            # 文本已实时输出，只需换行收尾
             self._console.print()
-            # 回复文本用左缩进 Markdown 块，无 ● 前缀
-            self._console.print(Padding(Markdown(full_text), (0, 2, 0, 2)))
         elif self._streaming_thinking:
             self._console.print()
         self._streaming_text = False
@@ -209,7 +206,14 @@ class StreamRenderer:
             self._streaming_thinking = False
         if not self._streaming_text:
             self._streaming_text = True
+            # 首次文本 delta：输出 agent 前缀，后续内容紧跟其后
+            self._console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}] ",
+                end="",
+            )
         self._text_buffer.append(event.text_delta)
+        # 实时输出文本 delta，不再等 finish_streaming
+        self._console.print(event.text_delta, end="", highlight=False)
 
     # ------------------------------------------------------------------
     # 工具调用
@@ -522,7 +526,7 @@ class StreamRenderer:
         if tool_name == "activate_skill":
             reason = arguments.get("reason", "")
             return reason.strip() if isinstance(reason, str) and reason.strip() else ""
-        if tool_name == "delegate_to_subagent":
+        if tool_name in ("delegate", "delegate_to_subagent"):
             task = arguments.get("task", "")
             return truncate(task.strip(), 60) if isinstance(task, str) and task.strip() else ""
         return ""

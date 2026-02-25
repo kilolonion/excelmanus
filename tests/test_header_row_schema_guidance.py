@@ -27,5 +27,3 @@ def test_header_row_schema_guidance_is_consistent() -> None:
     for tool_defs, tool_name, prop_name in checks:
         desc = _get_prop_desc(tool_defs, tool_name, prop_name)
         assert "自动检测" in desc
-        assert "建议不传" in desc
-        assert "read_excel" in desc

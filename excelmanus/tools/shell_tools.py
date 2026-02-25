@@ -497,16 +497,13 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="run_shell",
-            description=(
-                "执行受限 shell 命令（仅允许白名单内的只读命令，"
-                "如 ls/cat/head/tail/grep/find/wc 等）"
-            ),
+            description="执行受限 shell 命令（仅白名单只读命令如 ls/cat/grep/find）",
             input_schema={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "要执行的 shell 命令（仅允许白名单命令）",
+                        "description": "shell 命令（仅白名单命令）",
                     },
                     "workdir": {
                         "type": "string",

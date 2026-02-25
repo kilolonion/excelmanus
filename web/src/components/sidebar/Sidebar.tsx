@@ -70,6 +70,10 @@ export function Sidebar() {
   const [excelOpen, setExcelOpen] = useState(true);
   const [clearing, setClearing] = useState(false);
 
+  // Skip animation on first render to prevent sidebar flash
+  const isFirstRender = useRef(true);
+  useEffect(() => { isFirstRender.current = false; }, []);
+
   const handleNewChat = () => {
     const id = uuid();
     addSession({
@@ -112,7 +116,7 @@ export function Sidebar() {
       </AnimatePresence>
       <motion.aside
         animate={{ width: isMobile ? (sidebarOpen ? 280 : 0) : (sidebarOpen ? 260 : 0) }}
-        transition={safeTransition ?? sidebarTransition}
+        transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
         className={`flex flex-col border-r border-border overflow-hidden ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}

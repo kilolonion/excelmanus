@@ -80,20 +80,24 @@ class SkillActivationHandler(BaseToolHandler):
 # ---------------------------------------------------------------------------
 
 class DelegationHandler(BaseToolHandler):
-    """处理 delegate_to_subagent / list_subagents / parallel_delegate。"""
+    """处理 delegate / delegate_to_subagent（兼容） / list_subagents / parallel_delegate（兼容）。"""
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        return tool_name in ("delegate_to_subagent", "list_subagents", "parallel_delegate")
+        return tool_name in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate")
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
-        if tool_name == "delegate_to_subagent":
-            return await self._handle_delegate(tool_call_id, arguments, on_event=on_event, iteration=iteration)
-        elif tool_name == "list_subagents":
+        if tool_name == "list_subagents":
             return self._handle_list(arguments)
-        else:
+
+        # delegate / delegate_to_subagent / parallel_delegate 统一处理
+        # 判断是并行还是单任务模式
+        tasks_value = arguments.get("tasks")
+        if tool_name == "parallel_delegate" or (isinstance(tasks_value, list) and len(tasks_value) >= 2):
             return await self._handle_parallel(arguments, on_event=on_event)
+        else:
+            return await self._handle_delegate(tool_call_id, arguments, on_event=on_event, iteration=iteration)
 
     async def _handle_delegate(self, tool_call_id, arguments, *, on_event, iteration):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
@@ -104,20 +108,20 @@ class DelegationHandler(BaseToolHandler):
         if isinstance(task_brief, dict) and task_brief.get("title"):
             task_value = e.render_task_brief(task_brief)
         if not isinstance(task_value, str) or not task_value.strip():
-            result_str = "工具参数错误: task 或 task_brief 必须提供其一。"
-            log_tool_call(logger, "delegate_to_subagent", arguments, error=result_str)
+            result_str = "工具参数错误: task、task_brief 或 tasks 必须提供其一。"
+            log_tool_call(logger, "delegate", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         agent_name_value = arguments.get("agent_name")
         if agent_name_value is not None and not isinstance(agent_name_value, str):
             result_str = "工具参数错误: agent_name 必须为字符串。"
-            log_tool_call(logger, "delegate_to_subagent", arguments, error=result_str)
+            log_tool_call(logger, "delegate", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         raw_file_paths = arguments.get("file_paths")
         if raw_file_paths is not None and not isinstance(raw_file_paths, list):
             result_str = "工具参数错误: file_paths 必须为字符串数组。"
-            log_tool_call(logger, "delegate_to_subagent", arguments, error=result_str)
+            log_tool_call(logger, "delegate", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         delegate_outcome = await e.delegate_to_subagent(
@@ -168,7 +172,7 @@ class DelegationHandler(BaseToolHandler):
             success = True
             error = None
 
-        log_tool_call(logger, "delegate_to_subagent", arguments, result=result_str if success else None, error=error if not success else None)
+        log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
         return _ToolExecOutcome(
             result_str=result_str, success=success, error=error,
             pending_question=pending_question, question_id=question_id,
@@ -189,7 +193,7 @@ class DelegationHandler(BaseToolHandler):
         raw_tasks = arguments.get("tasks")
         if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
             result_str = "工具参数错误: tasks 必须为包含至少 2 个子任务的数组。"
-            log_tool_call(logger, "parallel_delegate", arguments, error=result_str)
+            log_tool_call(logger, "delegate", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         try:
@@ -207,7 +211,7 @@ class DelegationHandler(BaseToolHandler):
             success = False
             error = str(exc)
 
-        log_tool_call(logger, "parallel_delegate", arguments, result=result_str if success else None, error=error if not success else None)
+        log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
         return _ToolExecOutcome(result_str=result_str, success=success, error=error)
 
 
@@ -429,6 +433,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
         file_path = arguments.get("file_path", "")
         output_path = arguments.get("output_path", "outputs/replica_spec.json")
         skip_style = arguments.get("skip_style", False)
+        resume_from_spec = arguments.get("resume_from_spec")  # 断点续跑参数
 
         # ── 校验文件 ──
         path = Path(file_path)
@@ -468,14 +473,35 @@ class ExtractTableSpecHandler(BaseToolHandler):
         mime = mime_map.get(ext, "image/png")
 
         # ── 调用 VLM 提取 ──
+        # 解析断点续跑参数
+        resume_from_phase = None
+        resume_spec_path = None
+        if resume_from_spec:
+            try:
+                from pathlib import Path as _P
+                rp = _P(resume_from_spec)
+                if rp.is_file():
+                    # 从文件名推断已完成的阶段号 (e.g. replica_spec_p2.json → phase 2)
+                    stem = rp.stem
+                    if "_p" in stem:
+                        phase_str = stem.rsplit("_p", 1)[-1]
+                        if phase_str.isdigit():
+                            resume_from_phase = int(phase_str)
+                            resume_spec_path = str(rp)
+            except Exception:
+                pass  # 解析失败则从头开始
+
         result_str = await self._dispatcher._run_vlm_extract_spec(
             image_b64=b64,
             mime=mime,
             file_path=str(path),
             output_path=output_path,
             skip_style=skip_style,
+            resume_from_phase=resume_from_phase,
+            resume_spec_path=resume_spec_path,
+            on_event=on_event,
         )
-        success = '"status": "ok"' in result_str
+        success = '"status": "ok"' in result_str or '"status": "paused"' in result_str
         error = None if success else result_str
         log_tool_call(logger, tool_name, arguments, result=result_str if success else None, error=error)
         if success:

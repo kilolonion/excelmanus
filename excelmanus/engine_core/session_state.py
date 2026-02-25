@@ -48,6 +48,9 @@ class SessionState:
         self.vba_exempt: bool = False
         self.finish_task_warned: bool = False
 
+        # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
+        self.affected_files: list[str] = []
+
         # CoW 路径映射注册表（会话级累积）
         # key: 原始相对路径, value: outputs/ 下的副本相对路径
         # 注意：当 _fvm 可用时，cow_path_registry 从 _fvm 的 staging 索引派生
@@ -81,10 +84,11 @@ class SessionState:
         self.last_success_count = 0
         self.last_failure_count = 0
         self.has_write_tool_call = False
-        self.finish_task_warned = False
         self.turn_diagnostics = []
+        self.finish_task_warned = False
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
+        self.affected_files = []
 
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
@@ -92,8 +96,8 @@ class SessionState:
         self.current_write_hint = "unknown"
         self.execution_guard_fired = False
         self.vba_exempt = False
-        self.finish_task_warned = False
         self.has_write_tool_call = False
+        self.finish_task_warned = False
         self.last_iteration_count = 0
         self.last_tool_call_count = 0
         self.last_success_count = 0
@@ -105,11 +109,18 @@ class SessionState:
         self.prompt_injection_snapshots = []
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
+        self.affected_files = []
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
         self.has_write_tool_call = True
         self.current_write_hint = "may_write"
+
+    def record_affected_file(self, path: str) -> None:
+        """记录被写入工具修改的文件路径。"""
+        normalized = path.strip()
+        if normalized and normalized not in self.affected_files:
+            self.affected_files.append(normalized)
 
     def record_tool_success(self) -> None:
         """记录一次工具调用成功。"""

@@ -56,10 +56,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="focus_window",
-            description=(
-                "聚焦指定数据窗口并切换视口，支持 scroll/clear_filter/expand/restore。"
-                "当目标范围不在缓存中时会自动补读并更新窗口。"
-            ),
+            description="聚焦指定数据窗口并切换视口（scroll/clear_filter/expand/restore）",
             input_schema={
                 "type": "object",
                 "properties": {

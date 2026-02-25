@@ -572,10 +572,8 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="list_sheets",
             description=(
-                "列出 Excel 文件中所有工作表的名称、行列数和是否为活动表。"
-                "通过 include 参数可按需附加：columns（列名）、preview（前N行）、"
-                "freeze_panes（冻结窗格）、charts（图表）、images（图片）、"
-                "conditional_formatting（条件格式）、column_widths（列宽）"
+                "列出 Excel 文件中所有工作表的名称、行列数和是否为活动表，"
+                "通过 include 按需附加 columns/preview/charts 等维度"
             ),
             input_schema={
                 "type": "object",
@@ -608,7 +606,7 @@ def get_tools() -> list[ToolDef]:
                                 "column_widths",
                             ],
                         },
-                        "description": "按需请求的额外维度列表，每个 sheet 均返回对应信息",
+                        "description": "按需附加的额外维度",
                     },
                     "max_preview_rows": {
                         "type": "integer",

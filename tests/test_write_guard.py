@@ -1,4 +1,4 @@
-"""写入完成门禁（finish_task）单元测试。"""
+"""写入状态传播与执行守卫单元测试（finish_task 已移除，自然退出）。"""
 
 from __future__ import annotations
 
@@ -144,32 +144,6 @@ class TestDelegateSubagentWritePropagation:
         assert result.success is True
         assert engine._has_write_tool_call is True
         assert engine._current_write_hint == "may_write"
-
-    @pytest.mark.asyncio
-    async def test_subagent_with_file_changes_then_finish_task_accepted(self):
-        """subagent 写入传播后，finish_task 应被接受。"""
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-        engine._has_write_tool_call = False
-
-        outcome = self._make_outcome(success=True, file_changes=["outputs/backups/test.xlsx"])
-        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
-            await engine._execute_tool_call(
-                self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
-            )
-
-        ft = types.SimpleNamespace(
-            id="call_finish",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments='{"summary":"done via subagent"}',
-            ),
-        )
-        finish_result = await engine._execute_tool_call(
-            ft, tool_scope=None, on_event=None, iteration=2,
-        )
-        assert finish_result.finish_accepted is True
-        assert "任务完成" in finish_result.result
 
     @pytest.mark.asyncio
     async def test_subagent_without_file_changes_does_not_propagate(self):
@@ -330,36 +304,6 @@ class TestRunCodeWritePropagation:
         assert result.success is True
         assert engine._has_write_tool_call is False
 
-    @pytest.mark.asyncio
-    async def test_run_code_write_then_finish_task_accepted(self):
-        """run_code 写入后 finish_task 应被接受。"""
-        engine = _make_engine(code_policy_enabled=True)
-        engine._current_write_hint = "may_write"
-        engine._has_write_tool_call = False
-        engine._window_perception = None
-
-        audit_record = self._make_audit_record(has_changes=True)
-        result_json = '{"status":"success","stdout_tail":"ok","cow_mapping":{}}'
-
-        with patch.object(engine, "_execute_tool_with_audit", new_callable=AsyncMock,
-                          return_value=(result_json, audit_record)):
-            await engine._execute_tool_call(
-                self._run_code_tc(), tool_scope=None, on_event=None, iteration=1,
-            )
-
-        ft = types.SimpleNamespace(
-            id="call_finish",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments='{"summary":"done via run_code"}',
-            ),
-        )
-        finish_result = await engine._execute_tool_call(
-            ft, tool_scope=None, on_event=None, iteration=2,
-        )
-        assert finish_result.finish_accepted is True
-        assert "任务完成" in finish_result.result
-
 
     @pytest.mark.asyncio
     async def test_run_code_ast_write_triggers_record_write_action(self):
@@ -394,88 +338,24 @@ class TestRunCodeWritePropagation:
         assert engine._has_write_tool_call is True
 
 
-# ── _build_meta_tools finish_task 注入测试 ──
+class TestFinishTaskRemoved:
+    """finish_task 已移除，任何 write_hint 下都不应出现在工具列表中。"""
 
-class TestFinishTaskInjection:
-    def test_current_write_hint_initialized_as_unknown(self):
-        engine = _make_engine()
-        assert engine._current_write_hint == "unknown"
+    def test_no_finish_task_in_any_write_hint(self):
+        for hint in ("unknown", "read_only", "may_write"):
+            engine = _make_engine()
+            engine._current_write_hint = hint
+            engine._skill_router = None
+            tools = engine._build_meta_tools()
+            names = [t["function"]["name"] for t in tools]
+            assert "finish_task" not in names, f"finish_task should not exist when write_hint={hint}"
 
-    def test_no_finish_task_when_unknown(self):
-        engine = _make_engine()
-        engine._current_write_hint = "unknown"
-        engine._skill_router = None
-        tools = engine._build_meta_tools()
-        names = [t["function"]["name"] for t in tools]
-        assert "finish_task" not in names
-
-    def test_no_finish_task_when_read_only(self):
-        engine = _make_engine()
-        engine._current_write_hint = "read_only"
-        engine._skill_router = None
-        tools = engine._build_meta_tools()
-        names = [t["function"]["name"] for t in tools]
-        assert "finish_task" not in names
-
-    def test_finish_task_injected_when_may_write(self):
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-        engine._skill_router = None
-        tools = engine._build_meta_tools()
-        names = [t["function"]["name"] for t in tools]
-        assert "finish_task" in names
-
-    def test_finish_task_schema(self):
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-        engine._skill_router = None
-        tools = engine._build_meta_tools()
-        ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
-        params = ft["function"]["parameters"]
-        assert "summary" in params["properties"]
-        assert "affected_files" in params["properties"]
-        assert params["required"] == []
-
-    def test_finish_task_reaches_model_tools_when_may_write(self):
+    def test_no_finish_task_in_v5_tools(self):
         engine = _make_engine()
         engine._current_write_hint = "may_write"
         tools = engine._build_v5_tools()
         names = [t["function"]["name"] for t in tools]
-        assert "finish_task" in names
-
-    def test_route_write_hint_blank_falls_back_to_current_state(self):
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-        tools = engine._build_v5_tools()
-        names = [t["function"]["name"] for t in tools]
-        assert "finish_task" in names
-
-
-class TestWriteGuardPrompt:
-    @pytest.mark.asyncio
-    async def test_write_guard_prompt_requires_activate_skill_then_execute(self):
-        engine = _make_engine(max_iterations=2)
-        route_result = _make_route_result(write_hint="may_write")
-        engine._route_skills = AsyncMock(return_value=route_result)
-        engine._client.chat.completions.create = AsyncMock(
-            side_effect=[
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="先确认一下", tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="仍然不执行", tool_calls=None))]
-                ),
-            ]
-        )
-
-        _ = await engine.chat("先画图再美化")
-
-        user_messages = [
-            str(m.get("content", ""))
-            for m in engine.memory.get_messages()
-            if m.get("role") == "user"
-        ]
-        assert any("请立即调用" in msg for msg in user_messages)
+        assert "finish_task" not in names
 
 
 class TestExecutionGuardState:
@@ -683,284 +563,11 @@ class TestWriteTrackingApis:
         assert engine._manifest_refresh_needed is False
 
 
-class TestFinishTaskAcceptance:
-    @pytest.mark.asyncio
-    async def test_finish_task_warning_should_not_exit_when_result_contains_checkmark(self):
-        engine = _make_engine(max_iterations=2)
-        route_result = _make_route_result(
-            write_hint="unknown",
-            tool_scope=["finish_task"],
-        )
-
-        first = types.SimpleNamespace(
-            choices=[
-                types.SimpleNamespace(
-                    message=types.SimpleNamespace(
-                        content="",
-                        tool_calls=[
-                            {
-                                "id": "call_1",
-                                "function": {
-                                    "name": "finish_task",
-                                    "arguments": '{"summary":"首轮只是解释原因 ✓"}',
-                                },
-                            }
-                        ],
-                    )
-                )
-            ]
-        )
-        second = types.SimpleNamespace(
-            choices=[
-                types.SimpleNamespace(
-                    message=types.SimpleNamespace(content="继续执行", tool_calls=None)
-                )
-            ]
-        )
-        engine._client.chat.completions.create = AsyncMock(side_effect=[first, second])
-
-        with patch.object(
-            engine,
-            "_enrich_tool_result_with_window_perception",
-            side_effect=lambda **kwargs: f"{kwargs['result_text']}\n外部附加符号 ✓",
-        ):
-            result = await engine._tool_calling_loop(route_result, on_event=None)
-
-        assert result.reply == "继续执行"
-
-    @staticmethod
-    def _finish_task_call(summary: str = "done") -> types.SimpleNamespace:
-        return types.SimpleNamespace(
-            id="call_finish",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments=f'{{"summary":"{summary}"}}',
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_finish_accepted_flag_tracks_real_acceptance(self):
-        engine = _make_engine()
-
-        first = await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert first.success is True
-        assert first.finish_accepted is False
-        assert first.result.startswith("⚠️ 未检测到写入类工具")
-
-        second = await engine._execute_tool_call(
-            self._finish_task_call("second"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=2,
-        )
-        assert second.success is True
-        assert second.finish_accepted is True
-        assert "任务完成" in second.result
-        # write_hint 默认为 unknown，P1 修复后不再显示"无写入"
-        assert "无写入" not in second.result
-
-        engine._has_write_tool_call = True
-        with_write = await engine._execute_tool_call(
-            self._finish_task_call("third"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=3,
-        )
-        assert with_write.success is True
-        assert with_write.finish_accepted is True
-        assert "任务完成" in with_write.result
-
-    @pytest.mark.asyncio
-    async def test_finish_task_may_write_warn_then_accept(self):
-        """write_hint=may_write 无实际写入时，首次警告、二次放行。"""
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-
-        # 第一次调用：警告，设 _finish_task_warned
-        first = await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert first.success is True
-        assert first.finish_accepted is False
-        assert "未检测到写入类工具" in first.result
-        assert engine._finish_task_warned is True
-
-        # 第二次调用：LLM 确认后放行
-        second = await engine._execute_tool_call(
-            self._finish_task_call("确认无需写入"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=2,
-        )
-        assert second.success is True
-        assert second.finish_accepted is True
-        assert "任务完成" in second.result
-        # write_hint=may_write，P1 修复后不再显示"无写入"
-        assert "无写入" not in second.result
-
-    @pytest.mark.asyncio
-    async def test_finish_task_accepted_when_may_write_with_actual_write(self):
-        """write_hint=may_write 且有实际写入时，finish_task 应被接受。"""
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-        engine._has_write_tool_call = True
-
-        result = await engine._execute_tool_call(
-            self._finish_task_call("done"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert result.success is True
-        assert result.finish_accepted is True
-        assert "任务完成" in result.result
-
-    @pytest.mark.asyncio
-    async def test_finish_task_double_call_accepted_when_not_may_write(self):
-        """write_hint != may_write 时，finish_task 直接接受（只读任务无需二次确认）。"""
-        engine = _make_engine()
-        engine._current_write_hint = "read_only"
-
-        first = await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert first.finish_accepted is True
-        assert "任务完成" in first.result
-        assert "无写入" in first.result
-
-
-class TestFinishTaskStructuredReport:
-    """finish_task report 兼容 & summary 渲染测试。"""
-
-    @staticmethod
-    def _finish_task_call_with_report(report: dict) -> types.SimpleNamespace:
-        import json as _json
-        return types.SimpleNamespace(
-            id="call_finish_report",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments=_json.dumps({"report": report}, ensure_ascii=False),
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_report_renders_all_fields(self):
-        """旧格式 report dict 兼容：各字段内容以自然段落拼接。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-
-        report = {
-            "operations": "步骤1: 读取数据\n步骤2: 写入结果",
-            "key_findings": "共处理 100 行，匹配率 95%",
-            "explanation": "使用 ID 列作为匹配键",
-            "suggestions": "建议检查未匹配的 5 行",
-            "affected_files": ["output.xlsx"],
-        }
-        result = await engine._execute_tool_call(
-            self._finish_task_call_with_report(report),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert result.success is True
-        assert result.finish_accepted is True
-        assert "步骤1: 读取数据" in result.result
-        assert "匹配率 95%" in result.result
-        assert "ID 列" in result.result
-        assert "未匹配的 5 行" in result.result
-        assert "output.xlsx" in result.result
-
-    @pytest.mark.asyncio
-    async def test_report_renders_required_fields_only(self):
-        """旧格式 report 仅包含部分字段时，缺失字段不渲染。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-
-        report = {
-            "operations": "写入了 A 列公式",
-            "key_findings": "共 50 行",
-        }
-        result = await engine._execute_tool_call(
-            self._finish_task_call_with_report(report),
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert result.finish_accepted is True
-        assert "写入了 A 列公式" in result.result
-        assert "共 50 行" in result.result
-
-    @pytest.mark.asyncio
-    async def test_summary_fallback_when_no_report(self):
-        """无 report 时回退到 summary。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-
-        tc = types.SimpleNamespace(
-            id="call_finish_fallback",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments='{"summary":"旧格式摘要"}',
-            ),
-        )
-        result = await engine._execute_tool_call(
-            tc,
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert result.finish_accepted is True
-        assert "旧格式摘要" in result.result
-        assert "任务完成" in result.result
-
-    @pytest.mark.asyncio
-    async def test_report_takes_priority_over_summary(self):
-        """report 和 summary 同时存在时，report 优先。"""
-        engine = _make_engine()
-        engine._has_write_tool_call = True
-
-        import json as _json
-        tc = types.SimpleNamespace(
-            id="call_finish_both",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments=_json.dumps({
-                    "report": {
-                        "operations": "执行了操作X",
-                        "key_findings": "发现Y",
-                    },
-                    "summary": "这个不应该出现",
-                }, ensure_ascii=False),
-            ),
-        )
-        result = await engine._execute_tool_call(
-            tc,
-            tool_scope=["finish_task"],
-            on_event=None,
-            iteration=1,
-        )
-        assert result.finish_accepted is True
-        assert "执行了操作X" in result.result
-        assert "发现Y" in result.result
-        assert "这个不应该出现" not in result.result
-
-
 class TestRunCodeASTVariableWriteRegression:
     """回归测试：wb.save(file_path) 使用变量参数时 AST 检测应触发写入。
 
     conversation_20260221T135637 中 run_code 通过 openpyxl wb.save(file_path)
-    实际写入了文件，但 AST 检测因仅识别字面量而漏检，导致 finish_task 被拒。
+    实际写入了文件，但 AST 检测因仅识别字面量而漏检。
     """
 
     @staticmethod
@@ -1017,8 +624,8 @@ class TestRunCodeASTVariableWriteRegression:
         assert engine._has_write_tool_call is True
 
     @pytest.mark.asyncio
-    async def test_wb_save_variable_then_finish_task_accepted(self):
-        """wb.save(var) 写入后 finish_task 应直接通过，不再被拒。"""
+    async def test_wb_save_variable_propagates_write(self):
+        """wb.save(var) 写入后 has_write_tool_call 应被正确传播。"""
         engine = _make_engine(code_policy_enabled=True)
         engine._current_write_hint = "may_write"
         engine._has_write_tool_call = False
@@ -1048,80 +655,4 @@ class TestRunCodeASTVariableWriteRegression:
                 tool_scope=None, on_event=None, iteration=1,
             )
 
-        ft = types.SimpleNamespace(
-            id="call_finish_var",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments='{"summary":"done via wb.save(var)"}',
-            ),
-        )
-        finish_result = await engine._execute_tool_call(
-            ft, tool_scope=None, on_event=None, iteration=2,
-        )
-        assert finish_result.finish_accepted is True
-        assert "任务完成" in finish_result.result
-
-
-class TestFinishTaskNoWriteLabelByHint:
-    """P1 回归：finish_task warned 分支根据 write_hint 决定"无写入"标签。"""
-
-    @staticmethod
-    def _finish_task_call(summary: str = "done") -> types.SimpleNamespace:
-        return types.SimpleNamespace(
-            id="call_finish_label",
-            function=types.SimpleNamespace(
-                name="finish_task",
-                arguments=f'{{"summary":"{summary}"}}',
-            ),
-        )
-
-    @pytest.mark.asyncio
-    async def test_read_only_hint_shows_no_write_label(self):
-        """write_hint=read_only 时 warned 分支应显示"无写入"。"""
-        engine = _make_engine()
-        engine._current_write_hint = "read_only"
-
-        await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=None, on_event=None, iteration=1,
-        )
-        second = await engine._execute_tool_call(
-            self._finish_task_call("second"),
-            tool_scope=None, on_event=None, iteration=2,
-        )
-        assert second.finish_accepted is True
-        assert "无写入" in second.result
-
-    @pytest.mark.asyncio
-    async def test_may_write_hint_hides_no_write_label(self):
-        """write_hint=may_write 时 warned 分支不应显示"无写入"。"""
-        engine = _make_engine()
-        engine._current_write_hint = "may_write"
-
-        await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=None, on_event=None, iteration=1,
-        )
-        second = await engine._execute_tool_call(
-            self._finish_task_call("second"),
-            tool_scope=None, on_event=None, iteration=2,
-        )
-        assert second.finish_accepted is True
-        assert "无写入" not in second.result
-
-    @pytest.mark.asyncio
-    async def test_unknown_hint_hides_no_write_label(self):
-        """write_hint=unknown 时 warned 分支不应显示"无写入"。"""
-        engine = _make_engine()
-        engine._current_write_hint = "unknown"
-
-        await engine._execute_tool_call(
-            self._finish_task_call("first"),
-            tool_scope=None, on_event=None, iteration=1,
-        )
-        second = await engine._execute_tool_call(
-            self._finish_task_call("second"),
-            tool_scope=None, on_event=None, iteration=2,
-        )
-        assert second.finish_accepted is True
-        assert "无写入" not in second.result
+        assert engine._has_write_tool_call is True

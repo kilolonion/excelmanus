@@ -1,7 +1,7 @@
 import { consumeSSE } from "./sse";
 import { buildApiUrl, uploadFile } from "./api";
 import { uuid } from "@/lib/utils";
-import { useChatStore } from "@/stores/chat-store";
+import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
@@ -291,6 +291,11 @@ export async function sendMessage(
               stage: (data.stage as string) || "",
               message: (data.message as string) || "",
               startedAt: Date.now(),
+              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
+              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
+              specPath: (data.spec_path as string) || undefined,
+              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
+              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
             });
             break;
           }
@@ -916,6 +921,11 @@ export async function sendContinuation(
               stage: (data.stage as string) || "",
               message: (data.message as string) || "",
               startedAt: Date.now(),
+              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
+              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
+              specPath: (data.spec_path as string) || undefined,
+              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
+              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
             });
             break;
           }

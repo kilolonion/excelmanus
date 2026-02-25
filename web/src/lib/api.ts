@@ -2,7 +2,6 @@ import type { SessionDetail } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
 
 const API_BASE_PATH = "/api/v1";
-const DEFAULT_BACKEND_PORT = "8000";
 
 function getAuthHeaders(): Record<string, string> {
   const token = useAuthStore.getState().accessToken;
@@ -17,22 +16,21 @@ function trimTrailingSlash(value: string): string {
  * 解析后端直连地址（用于 SSE 流等必须绕过 Next.js 代理的场景）。
  *
  * 优先级：
- * 1. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联，生产环境必须设置）
- * 2. 回退：window.location.hostname:8000（仅适用于前后端同机开发）
+ * 1. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联）
+ * 2. 空字符串 — 走同源 Nginx 代理（生产环境推荐，/api/ 已配置 proxy_buffering off）
+ * 3. 回退：window.location.hostname:8000（仅适用于前后端同机开发）
  *
- * 前后端分离部署时，必须在 web/.env.production 中设置
- * NEXT_PUBLIC_BACKEND_ORIGIN=http://<后端IP>:8000
+ * 生产环境如果 Nginx 已配置 /api/ 反向代理且关闭了 buffering，
+ * 留空 NEXT_PUBLIC_BACKEND_ORIGIN 即可，所有请求走同源，无 CORS 问题。
  */
 function resolveDirectBackendOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
   if (configured) {
     return trimTrailingSlash(configured);
   }
-  // 回退：假设后端与前端同机，端口 8000（仅开发环境适用）
-  if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:${DEFAULT_BACKEND_PORT}`;
-  }
-  return `http://localhost:${DEFAULT_BACKEND_PORT}`;
+  // 未配置时走同源（Nginx 反向代理 /api/ → 后端，buffering 已关闭）
+  // 返回空字符串，让请求路径保持 /api/v1/... 同源访问
+  return "";
 }
 
 /**
