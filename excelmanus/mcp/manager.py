@@ -409,17 +409,21 @@ class MCPManager:
         self._initialized = False
         # 初始化后填充：白名单中的 MCP 工具（prefixed_name 列表）
         self._auto_approved_tools: list[str] = []
+        # 后台安装任务
+        self._background_tasks: list[asyncio.Task] = []
+        self._registry: "ToolRegistry | None" = None
 
     async def initialize(self, registry: "ToolRegistry") -> None:
         """加载配置 → 连接所有 Server → 注册远程工具到 ToolRegistry。
 
         流程：
         1. 调用 MCPConfigLoader.load() 加载配置
-        2. 无配置时直接返回
-        3. 逐个创建 MCPClientWrapper 并连接（连接失败记录 ERROR 并跳过）
-        4. 连接成功后发现工具，转换为 ToolDef
-        5. 检查工具名冲突，冲突则跳过并记录 WARNING
-        6. 批量注册所有不冲突的工具到 registry
+        2. 对 npx 命令检查本地缓存：
+           - 缓存命中 → 立即连接
+           - 缓存未命中 → 后台安装，不阻塞主启动
+        3. 连接成功后发现工具，转换为 ToolDef
+        4. 检查工具名冲突，冲突则跳过并记录 WARNING
+        5. 批量注册所有不冲突的工具到 registry
 
         任何单个 Server 的失败不影响其余 Server。
         """
@@ -436,6 +440,7 @@ class MCPManager:
             self._managed_workspace_pids_by_state_dir.clear()
             self._auto_approved_tools = []
             self._server_states.clear()
+            self._registry = registry
 
             configs = MCPConfigLoader.load(workspace_root=self._workspace_root)
             if not configs:
@@ -443,142 +448,38 @@ class MCPManager:
                 logger.debug("无 MCP Server 配置，跳过初始化")
                 return
 
-            # ── 连接 Server 并注册工具 ──────────
-            all_tool_defs: list[ToolDef] = []
-            auto_approved_names: list[str] = []
+            # ── 将 npx 命令解析为缓存的二进制，避免每次启动重复安装 ──
+            # 缓存命中：立即可用；缓存未命中：推入后台安装队列
+            from excelmanus.mcp.npx_cache import try_resolve_from_cache
+
+            ready_configs: list[type(configs[0])] = []
+            deferred_configs: list[type(configs[0])] = []
 
             for cfg in configs:
-                started = time.monotonic()
-                state = _ServerRuntimeState(
-                    name=cfg.name,
-                    transport=cfg.transport,
-                    status="connect_failed",
+                resolved = try_resolve_from_cache(cfg)
+                if resolved is not None:
+                    ready_configs.append(resolved)
+                else:
+                    # 缓存未命中 → 标记为 installing，推迟到后台
+                    self._server_states[cfg.name] = _ServerRuntimeState(
+                        name=cfg.name,
+                        transport=cfg.transport,
+                        status="installing",
+                    )
+                    deferred_configs.append(cfg)
+
+            # ── 连接缓存命中的 Server 并注册工具 ──────────
+            all_tool_defs: list[ToolDef] = []
+            auto_approved_names: list[str] = []
+            batch_pending_names: set[str] = set()
+
+            for cfg in ready_configs:
+                tool_defs, approved = await self._connect_and_register_server(
+                    cfg, registry, batch_pending_names=batch_pending_names,
                 )
-                self._server_states[cfg.name] = state
-
-                client = MCPClientWrapper(cfg)
-                known_workspace_pids: set[int] = set()
-                if cfg.transport == "stdio":
-                    known_workspace_pids = snapshot_workspace_mcp_pids(
-                        self._workspace_root,
-                        state_dir=cfg.state_dir,
-                    )
-                try:
-                    await client.connect()
-                except Exception as exc:
-                    state.status = "connect_failed"
-                    state.last_error = _short_error(exc)
-                    state.init_ms = int((time.monotonic() - started) * 1000)
-                    logger.error(
-                        "连接 MCP Server '%s' 失败: %s",
-                        cfg.name,
-                        state.last_error,
-                    )
-                    continue
-
-                if cfg.transport == "stdio":
-                    current_workspace_pids = snapshot_workspace_mcp_pids(
-                        self._workspace_root,
-                        state_dir=cfg.state_dir,
-                    )
-                    spawned_pids = current_workspace_pids - known_workspace_pids
-                    if spawned_pids:
-                        if hasattr(client, "bind_managed_pids"):
-                            client.bind_managed_pids(spawned_pids)
-                        self._track_managed_pids(
-                            spawned_pids,
-                            state_dir=cfg.state_dir,
-                        )
-                    known_workspace_pids = current_workspace_pids
-
-                # 发现远程工具
-                try:
-                    mcp_tools = await client.discover_tools()
-                except Exception as exc:
-                    state.status = "discover_failed"
-                    state.last_error = _short_error(exc)
-                    state.init_ms = int((time.monotonic() - started) * 1000)
-                    logger.error(
-                        "发现 MCP Server '%s' 的工具失败: %s",
-                        cfg.name,
-                        state.last_error,
-                    )
-                    try:
-                        await client.close()
-                    except BaseException:
-                        logger.debug(
-                            "discover 失败后关闭 MCP Server '%s' 时异常，加入待清理列表",
-                            cfg.name,
-                            exc_info=True,
-                        )
-                        self._leaked_clients.append(client)
-                    continue
-
-                if cfg.transport == "stdio":
-                    current_workspace_pids = snapshot_workspace_mcp_pids(
-                        self._workspace_root,
-                        state_dir=cfg.state_dir,
-                    )
-                    spawned_pids = current_workspace_pids - known_workspace_pids
-                    if spawned_pids:
-                        existing = getattr(client, "managed_pids", set())
-                        bound_pids = set(existing) | spawned_pids
-                        if hasattr(client, "bind_managed_pids"):
-                            client.bind_managed_pids(bound_pids)
-                        self._track_managed_pids(
-                            spawned_pids,
-                            state_dir=cfg.state_dir,
-                        )
-
-                # 转换为 ToolDef，检查冲突
-                existing_names = set(registry.get_tool_names())
-                pending_names = {td.name for td in all_tool_defs}
-                tool_names: list[str] = []
-
-                for tool in mcp_tools:
-                    tool_def = make_tool_def(
-                        cfg.name,
-                        client,
-                        tool,
-                        workspace_root=self._workspace_root,
-                    )
-                    if tool_def.name in existing_names:
-                        logger.warning(
-                            "MCP 工具 '%s' (server=%s) 与已注册工具冲突，跳过",
-                            tool_def.name,
-                            cfg.name,
-                        )
-                        continue
-                    if tool_def.name in pending_names:
-                        logger.warning(
-                            "MCP 工具 '%s' (server=%s) 与其他 MCP 工具冲突，跳过",
-                            tool_def.name,
-                            cfg.name,
-                        )
-                        continue
-                    all_tool_defs.append(tool_def)
-                    pending_names.add(tool_def.name)
-                    original_name: str = getattr(tool, "name", "")
-                    if original_name:
-                        tool_names.append(original_name)
-
-                    # 收集白名单：autoApprove 含 "*" 或匹配原始工具名
-                    if "*" in cfg.auto_approve or original_name in cfg.auto_approve:
-                        auto_approved_names.append(tool_def.name)
-
-                self._clients[cfg.name] = client
-                state.status = "ready"
-                state.last_error = None
-                state.tool_names = tool_names
-                state.init_ms = int((time.monotonic() - started) * 1000)
-                logger.info(
-                    "MCP Server 就绪: server=%s status=%s transport=%s init_ms=%d pid_count=%d",
-                    cfg.name,
-                    state.status,
-                    cfg.transport,
-                    state.init_ms,
-                    len(getattr(client, "managed_pids", set())),
-                )
+                all_tool_defs.extend(tool_defs)
+                auto_approved_names.extend(approved)
+                batch_pending_names.update(td.name for td in tool_defs)
 
             # 批量注册
             if all_tool_defs:
@@ -592,12 +493,241 @@ class MCPManager:
                 for item in self._server_states.values()
                 if item.status == "ready"
             )
-            logger.info(
-                "MCP 初始化完成：%d/%d 个 Server 就绪，%d 个远程工具已注册",
-                ready_count,
-                len(self._server_states),
-                len(all_tool_defs),
+            total_count = len(self._server_states)
+            deferred_count = len(deferred_configs)
+
+            if deferred_count:
+                logger.info(
+                    "MCP 初始化完成：%d/%d 个 Server 就绪，%d 个远程工具已注册"
+                    "｜%d 个 Server 后台安装中",
+                    ready_count,
+                    total_count,
+                    len(all_tool_defs),
+                    deferred_count,
+                )
+            else:
+                logger.info(
+                    "MCP 初始化完成：%d/%d 个 Server 就绪，%d 个远程工具已注册",
+                    ready_count,
+                    total_count,
+                    len(all_tool_defs),
+                )
+
+            # ── 后台安装 npx 包并延迟连接 ──────────
+            if deferred_configs:
+                task = asyncio.create_task(
+                    self._deferred_install_and_connect(deferred_configs, registry),
+                    name="mcp-npx-deferred-install",
+                )
+                self._background_tasks.append(task)
+
+    async def _connect_and_register_server(
+        self,
+        cfg: "MCPServerConfig",
+        registry: "ToolRegistry",
+        *,
+        batch_pending_names: set[str] | None = None,
+    ) -> tuple[list[ToolDef], list[str]]:
+        """连接单个 Server、发现工具并收集 ToolDef。
+
+        Args:
+            batch_pending_names: 同一批次中已收集但尚未注册的工具名集合，
+                用于跨 Server 去重。
+
+        Returns:
+            (tool_defs, auto_approved_names) — 尚未注册到 registry，由调用方批量注册。
+        """
+        from excelmanus.mcp.config import MCPServerConfig as _Cfg  # noqa: F811
+
+        started = time.monotonic()
+        state = self._server_states.get(cfg.name)
+        if state is None:
+            state = _ServerRuntimeState(
+                name=cfg.name,
+                transport=cfg.transport,
+                status="connect_failed",
             )
+            self._server_states[cfg.name] = state
+        else:
+            state.transport = cfg.transport
+            state.status = "connect_failed"
+
+        client = MCPClientWrapper(cfg)
+        known_workspace_pids: set[int] = set()
+        if cfg.transport == "stdio":
+            known_workspace_pids = snapshot_workspace_mcp_pids(
+                self._workspace_root,
+                state_dir=cfg.state_dir,
+            )
+        try:
+            await client.connect()
+        except Exception as exc:
+            state.status = "connect_failed"
+            state.last_error = _short_error(exc)
+            state.init_ms = int((time.monotonic() - started) * 1000)
+            logger.error(
+                "连接 MCP Server '%s' 失败: %s",
+                cfg.name,
+                state.last_error,
+            )
+            return [], []
+
+        if cfg.transport == "stdio":
+            current_workspace_pids = snapshot_workspace_mcp_pids(
+                self._workspace_root,
+                state_dir=cfg.state_dir,
+            )
+            spawned_pids = current_workspace_pids - known_workspace_pids
+            if spawned_pids:
+                if hasattr(client, "bind_managed_pids"):
+                    client.bind_managed_pids(spawned_pids)
+                self._track_managed_pids(
+                    spawned_pids,
+                    state_dir=cfg.state_dir,
+                )
+            known_workspace_pids = current_workspace_pids
+
+        # 发现远程工具
+        try:
+            mcp_tools = await client.discover_tools()
+        except Exception as exc:
+            state.status = "discover_failed"
+            state.last_error = _short_error(exc)
+            state.init_ms = int((time.monotonic() - started) * 1000)
+            logger.error(
+                "发现 MCP Server '%s' 的工具失败: %s",
+                cfg.name,
+                state.last_error,
+            )
+            try:
+                await client.close()
+            except BaseException:
+                logger.debug(
+                    "discover 失败后关闭 MCP Server '%s' 时异常，加入待清理列表",
+                    cfg.name,
+                    exc_info=True,
+                )
+                self._leaked_clients.append(client)
+            return [], []
+
+        if cfg.transport == "stdio":
+            current_workspace_pids = snapshot_workspace_mcp_pids(
+                self._workspace_root,
+                state_dir=cfg.state_dir,
+            )
+            spawned_pids = current_workspace_pids - known_workspace_pids
+            if spawned_pids:
+                existing = getattr(client, "managed_pids", set())
+                bound_pids = set(existing) | spawned_pids
+                if hasattr(client, "bind_managed_pids"):
+                    client.bind_managed_pids(bound_pids)
+                self._track_managed_pids(
+                    spawned_pids,
+                    state_dir=cfg.state_dir,
+                )
+
+        # 转换为 ToolDef，检查冲突
+        existing_names = set(registry.get_tool_names())
+        if batch_pending_names:
+            existing_names |= batch_pending_names
+        tool_defs: list[ToolDef] = []
+        auto_approved: list[str] = []
+        local_pending: set[str] = set()
+        tool_names: list[str] = []
+
+        for tool in mcp_tools:
+            tool_def = make_tool_def(
+                cfg.name,
+                client,
+                tool,
+                workspace_root=self._workspace_root,
+            )
+            if tool_def.name in existing_names:
+                logger.warning(
+                    "MCP 工具 '%s' (server=%s) 与已注册工具冲突，跳过",
+                    tool_def.name,
+                    cfg.name,
+                )
+                continue
+            if tool_def.name in local_pending:
+                logger.warning(
+                    "MCP 工具 '%s' (server=%s) 与其他 MCP 工具冲突，跳过",
+                    tool_def.name,
+                    cfg.name,
+                )
+                continue
+            tool_defs.append(tool_def)
+            local_pending.add(tool_def.name)
+            original_name: str = getattr(tool, "name", "")
+            if original_name:
+                tool_names.append(original_name)
+
+            # 收集白名单：autoApprove 含 "*" 或匹配原始工具名
+            if "*" in cfg.auto_approve or original_name in cfg.auto_approve:
+                auto_approved.append(tool_def.name)
+
+        self._clients[cfg.name] = client
+        state.status = "ready"
+        state.last_error = None
+        state.tool_names = tool_names
+        state.init_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "MCP Server 就绪: server=%s status=%s transport=%s init_ms=%d pid_count=%d",
+            cfg.name,
+            state.status,
+            cfg.transport,
+            state.init_ms,
+            len(getattr(client, "managed_pids", set())),
+        )
+        return tool_defs, auto_approved
+
+    async def _deferred_install_and_connect(
+        self,
+        deferred_configs: list,
+        registry: "ToolRegistry",
+    ) -> None:
+        """后台安装 npx 包并连接 Server（不阻塞主启动）。"""
+        from excelmanus.mcp.npx_cache import resolve_npx_config
+
+        # 并发安装所有待安装的包
+        resolved = await asyncio.gather(
+            *(resolve_npx_config(cfg) for cfg in deferred_configs),
+            return_exceptions=True,
+        )
+
+        for cfg_or_exc, original_cfg in zip(resolved, deferred_configs):
+            if isinstance(cfg_or_exc, BaseException):
+                state = self._server_states.get(original_cfg.name)
+                if state:
+                    state.status = "install_failed"
+                    state.last_error = _short_error(cfg_or_exc)
+                logger.error(
+                    "MCP Server '%s' 后台安装失败: %s",
+                    original_cfg.name,
+                    cfg_or_exc,
+                )
+                continue
+
+            cfg = cfg_or_exc
+            tool_defs, approved = await self._connect_and_register_server(
+                cfg, registry,
+            )
+            if tool_defs:
+                registry.register_tools(tool_defs)
+            if approved:
+                self._auto_approved_tools.extend(approved)
+
+        # 输出延迟连接汇总
+        ready_count = sum(
+            1
+            for item in self._server_states.values()
+            if item.status == "ready"
+        )
+        logger.info(
+            "MCP 后台安装完成：%d/%d 个 Server 就绪",
+            ready_count,
+            len(self._server_states),
+        )
 
     def _track_managed_pids(
         self,
@@ -625,6 +755,13 @@ class MCPManager:
         逐个调用 client.close()，关闭失败时记录 WARNING 但不抛异常。
         """
         async with self._initialize_lock:
+            # 取消未完成的后台安装任务
+            for task in self._background_tasks:
+                if not task.done():
+                    task.cancel()
+            if self._background_tasks:
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                self._background_tasks.clear()
             grouped_managed_pids: dict[str | None, set[int]] = {
                 key: set(value)
                 for key, value in self._managed_workspace_pids_by_state_dir.items()

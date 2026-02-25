@@ -64,36 +64,51 @@ def is_sandbox_image_ready() -> bool:
 
 
 def build_sandbox_image(force: bool = False) -> tuple[bool, str]:
-    """构建沙盒 Docker 镜像。返回 (成功, 消息)。"""
+    """构建沙盒 Docker 镜像。返回 (成功, 消息)。
+
+    优先使用仓库根目录的 ``Dockerfile.sandbox``，不存在时回退到内联内容。
+    """
     if not force and is_sandbox_image_ready():
         return True, "镜像已存在"
 
-    import tempfile
+    # 优先使用仓库根目录的 Dockerfile.sandbox
+    repo_dockerfile = Path(__file__).resolve().parent.parent.parent / "Dockerfile.sandbox"
+    if repo_dockerfile.exists():
+        build_context = str(repo_dockerfile.parent)
+        build_cmd = [
+            "docker", "build",
+            "-t", SANDBOX_IMAGE,
+            "-f", str(repo_dockerfile),
+            build_context,
+        ]
+    else:
+        import tempfile
+        _tmp_dir = tempfile.mkdtemp()
+        tmp_dockerfile = Path(_tmp_dir) / "Dockerfile"
+        tmp_dockerfile.write_text(_SANDBOX_DOCKERFILE_CONTENT)
+        build_cmd = [
+            "docker", "build",
+            "-t", SANDBOX_IMAGE,
+            "-f", str(tmp_dockerfile),
+            _tmp_dir,
+        ]
 
-    with tempfile.TemporaryDirectory() as build_dir:
-        dockerfile = Path(build_dir) / "Dockerfile"
-        dockerfile.write_text(_SANDBOX_DOCKERFILE_CONTENT)
-        try:
-            result = subprocess.run(
-                [
-                    "docker", "build",
-                    "-t", SANDBOX_IMAGE,
-                    "-f", str(dockerfile),
-                    build_dir,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "构建超时（>10 分钟）"
-        except FileNotFoundError:
-            return False, "docker 命令不可用"
+    try:
+        result = subprocess.run(
+            build_cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "构建超时（>10 分钟）"
+    except FileNotFoundError:
+        return False, "docker 命令不可用"
 
-        if result.returncode == 0:
-            return True, "构建成功"
-        return False, f"构建失败: {result.stderr[:500]}"
+    if result.returncode == 0:
+        return True, "构建成功"
+    return False, f"构建失败: {result.stderr[:500]}"
 
 
 def host_to_container_path(host_path: Path, workspace_root: Path) -> str:
