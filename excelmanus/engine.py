@@ -5171,49 +5171,6 @@ class AgentEngine:
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-        # ── 中间讨论放行：agent 在工具调用间输出分析文本，不应被守卫拦截 ──
-        # 当 agent 已经执行过工具（说明正在工作中），且当前文本不是公式建议，
-
-        # 重复/冗余文本检测：连续纯文本放行或相似文本，终止迭代
-        last_reply = self._state.last_text_reply
-        # 精确匹配检测
-        is_exact_repeat = last_reply and reply_text.strip() == last_reply.strip()
-        # 相似度检测（前200字符相同视为重复）
-        is_similar = (
-            last_reply
-            and len(reply_text) > 50
-            and reply_text.strip()[:200] == last_reply.strip()[:200]
-        )
-        # 连续中间讨论放行计数
-        mid_discussion_count = getattr(self._state, "_mid_discussion_count", 0)
-        if is_exact_repeat or is_similar or mid_discussion_count >= 2:
-            self._last_iteration_count = iteration
-            reason = "精确重复" if is_exact_repeat else ("相似文本" if is_similar else f"连续放行{mid_discussion_count}次")
-            logger.warning("检测到冗余文本回复（%s），终止迭代 (iter=%d)", reason, iteration)
-            self._state._mid_discussion_count = 0
-            return "return", _finalize_result(
-                reply=reply_text,
-                tool_calls=list(all_tool_results),
-                iterations=iteration,
-                truncated=False,
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-            )
-        self._state.last_text_reply = reply_text
-
-        # 则视为中间过程讨论，允许继续下一轮迭代而不触发执行守卫或写入门禁。
-        if (
-            all_tool_results  # 已经执行过工具，说明 agent 在工作中
-            and iteration < max_iter - 1
-            and not _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
-            and len(reply_text) < _MID_DISCUSSION_MAX_LEN  # 中间讨论通常较短
-        ):
-            consecutive_text_only = 0  # 重置计数，不累积
-            self._state._mid_discussion_count = getattr(self._state, "_mid_discussion_count", 0) + 1
-            logger.info("中间讨论放行：agent 在工具调用间输出分析文本 (iter=%d, mid_count=%d)", iteration, self._state._mid_discussion_count)
-            return "continue", consecutive_text_only
-
         # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
         if (
             write_hint != "may_write"
@@ -5243,7 +5200,7 @@ class AgentEngine:
                 guard_msg = (
                     "你尚未调用任何写入工具完成实际操作。"
                     "如果当前任务确实仅涉及筛选/统计/分析/查找且无需写回文件，"
-                    "请直接调用 finish_task 并在 summary 中说明分析结果。"
+                    "请直接用文本回复分析结果。"
                     "如果任务需要写入，请立即调用对应写入/格式化/图表工具执行。"
                     "注意：你拥有完整的 Excel 工具集可直接操作数据，"
                     "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
