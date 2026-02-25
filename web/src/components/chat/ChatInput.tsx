@@ -704,6 +704,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       // 0) /undo (bare) → open UndoPanel
       if (trimmed === "/undo") {
         setText("");
+        requestAnimationFrame(autoResize);
         setUndoPanelOpen(true);
         return;
       }
@@ -713,12 +714,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (action === "stop") {
         onStop?.();
         setText("");
+        requestAnimationFrame(autoResize);
         return;
       }
       if (action === "clear") {
         const { currentSessionId } = useChatStore.getState();
         useChatStore.getState().clearMessages();
         setText("");
+        requestAnimationFrame(autoResize);
         if (currentSessionId) {
           fetch(buildApiUrl(`/sessions/${currentSessionId}/clear`), { method: "POST" }).catch(() => {});
         }
@@ -736,6 +739,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           const cmd = `/${action} ${pending.id}`;
           onSend(cmd);
           setText("");
+          requestAnimationFrame(autoResize);
         } else {
           if (onCommandResult) {
             onCommandResult(`/${action}`, "当前没有待审批的操作", "text");
@@ -780,6 +784,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     setText("");
     setFiles([]);
     setConfirmedTokens(new Set());
+    // Reset textarea height after clearing text
+    requestAnimationFrame(autoResize);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
