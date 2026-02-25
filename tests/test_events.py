@@ -123,6 +123,7 @@ class TestEventTypeEnum:
             "FILES_CHANGED",
             "MEMORY_EXTRACTED",
             "PIPELINE_PROGRESS",
+            "FILE_DOWNLOAD",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -164,6 +165,7 @@ class TestEventTypeEnum:
             ("FILES_CHANGED", "files_changed"),
             ("PIPELINE_PROGRESS", "pipeline_progress"),
             ("MEMORY_EXTRACTED", "memory_extracted"),
+            ("FILE_DOWNLOAD", "file_download"),
         ]
 
 
@@ -305,5 +307,8 @@ class TestToolCallEventFields:
             "pipeline_phase_index",
             "pipeline_checkpoint",
             "pipeline_diff",
+            "download_file_path",
+            "download_filename",
+            "download_description",
         }
         assert set(annotations.keys()) == expected_fields

@@ -358,7 +358,7 @@ class TestDeleteFile:
 class TestGetTools:
     def test_tool_count(self) -> None:
         tools = file_tools.get_tools()
-        assert len(tools) == 4  # Batch 5 精简: get_file_info/find_files/read_text_file 已删除
+        assert len(tools) == 5  # Batch 5 精简后 + offer_download
 
     def test_tool_names(self) -> None:
         names = {t.name for t in file_tools.get_tools()}
@@ -368,6 +368,7 @@ class TestGetTools:
             "copy_file",
             "rename_file",
             "delete_file",
+            "offer_download",
         }
         assert names == expected
 

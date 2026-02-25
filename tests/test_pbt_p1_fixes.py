@@ -250,15 +250,6 @@ class TestB1ManifestRefreshOnExit:
         block = source[source.find("工具调用进入待确认队列"):]
         assert "return _finalize_result(" in block
 
-    def test_property1_pending_plan_calls_refresh(self) -> None:
-        """pending_plan 退出路径调用 _try_refresh_manifest。"""
-        from excelmanus.engine import AgentEngine
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
-
-        block = source[source.find("工具调用进入待审批计划队列"):]
-        assert "return _finalize_result(" in block
-
     def test_property1_ask_user_calls_refresh(self) -> None:
         """ask_user 退出路径调用 _try_refresh_manifest。"""
         from excelmanus.engine import AgentEngine

@@ -226,7 +226,7 @@ class TestSessionDetail:
         detail = await manager.get_session_detail(sid)
 
         assert detail["full_access_enabled"] is False
-        assert detail["plan_mode_enabled"] is False
+        assert detail["chat_mode"] == "write"
         assert detail["current_model"] == manager._sessions[sid].engine.current_model
         assert (
             detail["current_model_name"]
@@ -253,7 +253,7 @@ class TestSessionDetail:
         detail = await manager.get_session_detail("history-only")
 
         assert detail["full_access_enabled"] is False
-        assert detail["plan_mode_enabled"] is False
+        assert detail["chat_mode"] == "write"
         assert detail["current_model"] is None
         assert detail["current_model_name"] is None
 
