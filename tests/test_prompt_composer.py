@@ -273,7 +273,7 @@ class TestSandboxAwarenessStrategy:
         strats.mkdir()
         (strats / "20_sandbox_awareness.md").write_text(
             '---\nname: sandbox_awareness\nversion: "1.0.0"\npriority: 20\nlayer: strategy\n'
-            'conditions:\n  full_access: false\n---\n沙箱安全机制内容。',
+            'conditions: {}\n---\n沙箱安全机制内容。',
             encoding="utf-8",
         )
         return tmp_path
@@ -286,13 +286,14 @@ class TestSandboxAwarenessStrategy:
         text = composer.compose_strategies_text(ctx)
         assert "沙箱安全机制内容。" in text
 
-    def test_sandbox_excluded_when_full_access_on(self, tmp_path: Path) -> None:
+    def test_sandbox_included_when_full_access_on(self, tmp_path: Path) -> None:
+        """sandbox_awareness 现为无条件注入，full_access=True 时也应包含。"""
         d = self._make_dir_with_sandbox(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         ctx = PromptContext(full_access=True)
         text = composer.compose_strategies_text(ctx)
-        assert "沙箱安全机制内容。" not in text
+        assert "沙箱安全机制内容。" in text
 
     def test_real_sandbox_awareness_file(self) -> None:
         """验证实际 prompts/strategies/20_sandbox_awareness.md 文件可正确加载。"""
@@ -302,7 +303,7 @@ class TestSandboxAwarenessStrategy:
             pytest.skip("20_sandbox_awareness.md 不存在")
         seg = parse_prompt_file(strat_file)
         assert seg.name == "sandbox_awareness"
-        assert seg.conditions.get("full_access") is False
+        assert seg.conditions == {}
         assert "GREEN" in seg.content
         assert "RED" in seg.content
 
@@ -363,7 +364,7 @@ class TestComposeForSubagent:
             assert result is not None, f"{name} 子代理提示词加载失败"
             assert len(result) > 50, f"{name} 子代理提示词过短"
             # 应包含 _base.md 的共享约束
-            assert "禁止空承诺" in result, f"{name} 缺少共享约束"
+            assert "直接行动" in result, f"{name} 缺少共享约束"
 
 
 class TestTaskTagsLexical:
@@ -408,6 +409,45 @@ class TestTaskTagsLexical:
         from excelmanus.skillpacks.router import SkillRouter
         tags = SkillRouter._classify_task_tags_lexical("读取A1单元格的值")
         assert tags == []
+
+
+class TestErrorRecoveryStrategy:
+    """error_recovery 策略文件加载与无条件注入测试。"""
+
+    def test_real_error_recovery_file(self) -> None:
+        """验证实际 prompts/strategies/error_recovery.md 文件可正确加载。"""
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        strat_file = prompts_dir / "strategies" / "error_recovery.md"
+        if not strat_file.exists():
+            pytest.skip("error_recovery.md 不存在")
+        seg = parse_prompt_file(strat_file)
+        assert seg.name == "error_recovery"
+        assert seg.priority == 25
+        assert seg.conditions == {}
+        assert "分级处理" in seg.content
+        assert "重试上限" in seg.content
+
+    def test_error_recovery_included_unconditionally(self, tmp_path: Path) -> None:
+        """error_recovery 无条件注入，read_only 和 may_write 均应包含。"""
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "00_id.md").write_text(
+            '---\nname: id\nversion: "1.0"\npriority: 0\nlayer: core\n---\n身份。',
+            encoding="utf-8",
+        )
+        strats = tmp_path / "strategies"
+        strats.mkdir()
+        (strats / "error_recovery.md").write_text(
+            '---\nname: error_recovery\nversion: "1.0.0"\npriority: 25\nlayer: strategy\n'
+            'conditions: {}\n---\n错误恢复策略内容。',
+            encoding="utf-8",
+        )
+        composer = PromptComposer(tmp_path)
+        composer.load_all(auto_repair=False)
+        for hint in ("read_only", "may_write", "unknown"):
+            ctx = PromptContext(write_hint=hint)
+            text = composer.compose_strategies_text(ctx)
+            assert "错误恢复策略内容。" in text, f"write_hint={hint} 时未注入 error_recovery"
 
 
 class TestCoreSegmentsMatchLegacy:

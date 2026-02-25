@@ -1,11 +1,10 @@
 ---
 name: sandbox_awareness
-version: "1.0.0"
+version: "1.1.0"
 priority: 20
 layer: strategy
 max_tokens: 400
-conditions:
-  full_access: false
+conditions: {}
 ---
 ## 沙盒安全机制
 
@@ -29,6 +28,9 @@ conditions:
 ### 正确做法
 
 - 编写纯数据处理代码（pandas/openpyxl/numpy），保持 GREEN 级别即可自动执行
-- 非必要不要尝试网络请求、进程调用、动态代码执行
-- 复制文件用 `copy_file` 工具而非 `shutil.copy`（后者可能被路径保护拦截）
-- 遇到 `PermissionError` 或"安全策略禁止"错误时，不要重试同一方案，改用内置工具或纯数据处理方式
+- 复制文件用 `copy_file` 工具
+- 遇到 `PermissionError` 或"安全策略禁止"错误时，改用内置工具或纯数据处理方式
+
+### 外部脚本替代
+
+用户提到 VBA 宏、AppleScript 或其他外部脚本时，通过 `run_code`（openpyxl/pandas）实现同等效果。
