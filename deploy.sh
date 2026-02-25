@@ -4,9 +4,9 @@ set -euo pipefail
 # ═══════════════════════════════════════════════════════════
 #  ExcelManus 一键部署脚本（前后端分离）
 #
-#  架构:
-#    后端 API  → BACKEND_SERVER  (47.253.182.146)
-#    前端 Web  → FRONTEND_SERVER (8.138.89.144)
+#  所有服务器地址、端口、路径等配置从 deploy/.env.deploy 读取，
+#  前端环境变量从 web/.env.production 读取。
+#  本脚本不硬编码任何部署信息。
 #
 #  用法:  ./deploy.sh [选项]
 #
@@ -18,22 +18,20 @@ set -euo pipefail
 #    --from-local     从本地 rsync 同步（默认从 GitHub 拉取）
 # ═══════════════════════════════════════════════════════════
 
-# ── 服务器配置 ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SSH_KEY="${SCRIPT_DIR}/id_excelmanus.pem"
 
-BACKEND_SERVER="47.253.182.146"
-FRONTEND_SERVER="8.138.89.144"
-SERVER_USER="root"
+# ── 加载部署配置 ──
+DEPLOY_ENV="${SCRIPT_DIR}/deploy/.env.deploy"
+if [[ ! -f "${DEPLOY_ENV}" ]]; then
+  echo "❌ 未找到部署配置: ${DEPLOY_ENV}"
+  echo "   请复制 deploy/.env.deploy.example 并填入真实值"
+  exit 1
+fi
+# shellcheck source=deploy/.env.deploy
+source "${DEPLOY_ENV}"
 
-BACKEND_REMOTE_DIR="/www/wwwroot/excelmanus"
-FRONTEND_REMOTE_DIR="/www/wwwroot/excelmanus"
-BACKEND_NODE_BIN="/usr/local/bin"
-FRONTEND_NODE_BIN="/www/server/nodejs/v22.22.0/bin"
-BACKEND_PORT=8000
-
-REPO_URL="https://github.com/kilolonion/excelmanus"
-REPO_BRANCH="main"
+# ── 派生变量 ──
+SSH_KEY="${SCRIPT_DIR}/${SSH_KEY_NAME}"
 
 MODE="full"
 SKIP_BUILD=false
@@ -49,6 +47,7 @@ for arg in "$@"; do
     -h|--help)
       echo "用法: ./deploy.sh [--backend-only|--frontend-only|--full] [--skip-build] [--from-local]"
       echo ""
+      echo "  配置文件: ${DEPLOY_ENV}"
       echo "  后端: ${BACKEND_SERVER}  前端: ${FRONTEND_SERVER}"
       echo "  默认从 GitHub 拉取，--from-local 则从本地 rsync 同步"
       exit 0 ;;
@@ -74,6 +73,7 @@ _rsync_excludes=(
   --exclude='__pycache__'
   --exclude='*.pyc'
   --exclude='.env'
+  --exclude='.env.local'
   --exclude='data/'
   --exclude='workspace/'
   --exclude='*.pem'
@@ -98,6 +98,7 @@ echo "════════════════════════�
 echo "  ExcelManus 部署 (模式: ${MODE})"
 echo "  后端: ${BACKEND_SERVER}"
 echo "  前端: ${FRONTEND_SERVER}"
+echo "  域名: ${SITE_URL:-未配置}"
 echo "══════════════════════════════════════"
 echo ""
 
@@ -108,7 +109,7 @@ if [[ ! -f "${SSH_KEY}" ]]; then
 fi
 chmod 600 "${SSH_KEY}" 2>/dev/null || true
 
-# ── 同步代码到后端服务器 ──
+# ── 同步代码 ──
 _sync_code() {
   local target_server="$1"
   local remote_dir="$2"
@@ -166,11 +167,13 @@ if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
     _remote_frontend "export PATH=${FRONTEND_NODE_BIN}:\$PATH && pm2 restart excelmanus-web"
   else
     echo "🌐 更新前端（安装依赖 + 构建 + 重启）..."
+    # 前端构建时的环境变量从 web/.env.production 自动加载（Next.js 内置行为）。
+    # 这里只需确保 BACKEND_INTERNAL_URL 在运行时也可用（pm2 env 或 .env.production）。
     _remote_frontend "
       export PATH=${FRONTEND_NODE_BIN}:\$PATH && \
       cd ${FRONTEND_REMOTE_DIR}/web && \
       npm install --production=false 2>&1 | tail -3 && \
-      NEXT_PUBLIC_BACKEND_ORIGIN= BACKEND_INTERNAL_URL=http://${BACKEND_SERVER}:${BACKEND_PORT} npm run build 2>&1 | tail -5 && \
+      npm run build 2>&1 | tail -5 && \
       pm2 restart excelmanus-web
     "
   fi
@@ -182,13 +185,14 @@ fi
 echo "🔍 验证服务（等待启动）..."
 sleep 8
 
-HEALTH=$(curl -s --max-time 10 "https://kilon.top/api/v1/health" 2>/dev/null || echo '{"status":"failed"}')
+HEALTH_URL="${SITE_URL:-https://kilon.top}/api/v1/health"
+HEALTH=$(curl -s --max-time 10 "${HEALTH_URL}" 2>/dev/null || echo '{"status":"failed"}')
 STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
 
 if [[ "$STATUS" == "ok" ]]; then
   echo "✅ 部署成功！服务正常运行"
   echo ""
-  echo "   🌐 https://kilon.top"
+  echo "   🌐 ${SITE_URL:-https://kilon.top}"
   echo ""
 else
   echo "⚠️  健康检查未通过，请检查日志:"
