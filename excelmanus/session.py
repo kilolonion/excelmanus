@@ -141,8 +141,19 @@ class SessionManager:
                     entry.engine.set_model_capabilities(caps)
 
     def set_sandbox_docker_enabled(self, enabled: bool) -> None:
-        """Update the Docker sandbox flag (called by API lifespan)."""
+        """Update the Docker sandbox flag (called by API lifespan).
+
+        Also propagates to all active sessions so that existing sessions
+        pick up the change without requiring recreation.
+        """
         self._sandbox_config = SandboxConfig(docker_enabled=enabled)
+        for entry in self._sessions.values():
+            engine = entry.engine
+            ws = engine.workspace
+            ws.sandbox_config = self._sandbox_config
+            engine.sandbox_env = ws.create_sandbox_env(
+                transaction=engine.transaction,
+            )
 
     def _resolve_user_config_store(self, user_id: str | None) -> Any:
         """返回用户级 ConfigStore（用于 active_model 等偏好）。"""
@@ -953,7 +964,7 @@ class SessionManager:
                     "in_flight": entry.in_flight,
                     "messages": messages,
                     "full_access_enabled": engine.full_access_enabled,
-                    "plan_mode_enabled": engine.plan_mode_enabled,
+                    "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
                     "current_model": engine.current_model,
                     "current_model_name": engine.current_model_name,
                     "pending_approval": pending_approval_data,
@@ -975,7 +986,7 @@ class SessionManager:
                 "in_flight": False,
                 "messages": messages,
                 "full_access_enabled": False,
-                "plan_mode_enabled": False,
+                "chat_mode": "write",
                 "current_model": None,
                 "current_model_name": None,
                 "pending_approval": None,
