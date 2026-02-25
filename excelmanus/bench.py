@@ -130,6 +130,8 @@ class TurnResult:
     task_events: list[dict[str, Any]] = field(default_factory=list)
     question_events: list[dict[str, Any]] = field(default_factory=list)
     approval_events: list[dict[str, Any]] = field(default_factory=list)
+    # Think-Act 推理质量指标
+    reasoning_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
@@ -160,6 +162,7 @@ class TurnResult:
                 "tool_successes": tool_successes,
                 "tool_failures": tool_failures,
                 "llm_call_count": len(self.llm_calls),
+                "reasoning_metrics": self.reasoning_metrics,
             },
         }
         if self.engine_trace:
@@ -216,6 +219,8 @@ class BenchResult:
     task_events: list[dict[str, Any]] = field(default_factory=list)
     question_events: list[dict[str, Any]] = field(default_factory=list)
     approval_events: list[dict[str, Any]] = field(default_factory=list)
+    # Think-Act 推理质量指标（聚合）
+    reasoning_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
@@ -260,6 +265,7 @@ class BenchResult:
                 "tool_successes": tool_successes,
                 "tool_failures": tool_failures,
                 "llm_call_count": len(self.llm_calls),
+                "reasoning_metrics": self.reasoning_metrics,
             },
         }
         # 多轮对话时输出各轮次详情
@@ -1040,6 +1046,7 @@ async def run_case(
     _MAX_AUTO_REPLY_ROUNDS = 10
     auto_reply_queue = list(case.auto_replies)
     auto_reply_count = 0
+    chat_result: ChatResult | None = None  # 安全默认值，避免异常路径 UnboundLocalError
 
     try:
         for turn_idx, msg in enumerate(messages):
@@ -1176,6 +1183,7 @@ async def run_case(
                 task_events=snap["task_events"],
                 question_events=snap["question_events"],
                 approval_events=snap["approval_events"],
+                reasoning_metrics=getattr(chat_result, "reasoning_metrics", {}),
             )
             all_turns.append(turn_result)
 
@@ -1253,6 +1261,7 @@ async def run_case(
         active_model=engine.current_model,
         write_hint=_write_hint,
         config_snapshot=_config_snapshot,
+        reasoning_metrics=getattr(chat_result, "reasoning_metrics", {}) if chat_result is not None else {},
     )
 
     # 单轮时打印最终回复（多轮已在循环中逐轮打印）

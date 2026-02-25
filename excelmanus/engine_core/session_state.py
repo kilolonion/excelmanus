@@ -74,6 +74,11 @@ class SessionState:
         # 当前轮次内是否已触发过 stuck 警告（避免重复注入）
         self.stuck_warning_fired: bool = False
 
+        # ── Think-Act 推理检测 ─────────────────────────────────
+        self.silent_call_count: int = 0
+        self.reasoned_call_count: int = 0
+        self.reasoning_chars_total: int = 0
+
     def increment_turn(self) -> None:
         """递增会话轮次。"""
         self.session_turn += 1
@@ -90,6 +95,9 @@ class SessionState:
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
+        self.silent_call_count = 0
+        self.reasoned_call_count = 0
+        self.reasoning_chars_total = 0
 
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
@@ -111,6 +119,9 @@ class SessionState:
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
+        self.silent_call_count = 0
+        self.reasoned_call_count = 0
+        self.reasoning_chars_total = 0
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
