@@ -240,6 +240,8 @@ docker compose --profile production up -d     # 带 Nginx 反向代理
 ./deploy.sh --backend-only   # 只更新后端（最快）
 ./deploy.sh --frontend-only  # 只更新前端
 ./deploy.sh --skip-build     # 跳过前端构建，仅重启
+./deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz  # 使用本地/CI 前端制品（推荐低内存机器）
+./deploy.sh --frontend-only --cold-build  # 远端冷构建（仅排障）
 ```
 
 > 脚本自动排除 `.env`、`data/`、`workspace/` 等数据目录，不会覆盖服务器上的配置和用户数据。
@@ -259,6 +261,22 @@ cp -r .next/static .next/standalone/.next/
 ```
 
 否则会导致 logo、图片、CSS 等静态资源 404 或 500 错误。建议在 `deploy.sh` 中自动化这一步骤。
+
+#### 低内存服务器发布建议（强烈推荐）
+
+当服务器内存较小（如 1~2G）时，不建议在服务器上直接 `npm run build`。推荐流程：
+
+1. 在本地或 CI 先构建：`cd web && npm run build`（必要时可用 `npm run build:webpack` 兜底）。
+2. 打包运行时最小集合（`.next/standalone`、`.next/static`、`public`）：
+
+   ```bash
+   cd web
+   tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
+   ```
+
+3. 使用 `./deploy.sh --frontend-only --frontend-artifact <tar.gz>` 上传并原子切换。
+
+如果必须远端构建，请优先保留 `.next/cache`，仅在明确排障时使用 `--cold-build`。
 
 #### Nginx SSE 流式响应配置
 

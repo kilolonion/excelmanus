@@ -19,7 +19,10 @@ set -euo pipefail
 #    --frontend-only      只更新前端
 #    --full               完整部署（默认）
 #    --skip-build         跳过前端构建（仅同步+重启）
+#    --frontend-artifact FILE
+#                         使用本地/CI 构建的前端制品（tar.gz），上传后原子切换
 #    --skip-deps          跳过依赖安装
+#    --cold-build         远端构建前清理 web/.next/cache（高风险，默认关闭）
 #    --from-local         从本地 rsync 同步（默认从 GitHub 拉取）
 #    --dry-run            仅打印将执行的操作，不实际执行
 #
@@ -50,6 +53,8 @@ set -euo pipefail
 #    --pm2-frontend NAME  前端 PM2 进程名（默认 excelmanus-web）
 #    --backend-port PORT  后端 API 端口（默认 8000）
 #    --frontend-port PORT 前端端口（默认 3000）
+#    --keep-frontend-releases N
+#                         前端制品部署后保留的回滚备份数量（默认 3）
 #
 #  Git 选项:
 #    --repo URL           Git 仓库地址
@@ -87,7 +92,11 @@ log()     { [[ "$QUIET" == true ]] && return; echo -e "${GREEN}✅${NC} $*"; }
 info()    { [[ "$QUIET" == true ]] && return; echo -e "${BLUE}ℹ️${NC}  $*"; }
 warn()    { echo -e "${YELLOW}⚠️${NC}  $*" >&2; }
 error()   { echo -e "${RED}❌${NC} $*" >&2; }
-debug()   { [[ "$VERBOSE" == true ]] && echo -e "${CYAN}🔍${NC} $*"; }
+debug() {
+  if [[ "$VERBOSE" == true ]]; then
+    echo -e "${CYAN}🔍${NC} $*"
+  fi
+}
 step()    { [[ "$QUIET" == true ]] && return; echo -e "\n${BOLD}$*${NC}"; }
 
 run() {
@@ -106,6 +115,10 @@ SKIP_BUILD=false
 SKIP_DEPS=false
 FROM_LOCAL=false
 NO_VERIFY=false
+COLD_BUILD=false
+FRONTEND_ARTIFACT=""
+FRONTEND_RELEASE_KEEP=3
+FRONTEND_ARTIFACT_REMOTE_PATH=""
 
 # 服务器
 BACKEND_HOST=""
@@ -216,7 +229,9 @@ _parse_args() {
       --frontend-only)   MODE="frontend" ;;
       --full)            MODE="full" ;;
       --skip-build)      SKIP_BUILD=true ;;
+      --frontend-artifact) FRONTEND_ARTIFACT="$2"; shift ;;
       --skip-deps)       SKIP_DEPS=true ;;
+      --cold-build)      COLD_BUILD=true ;;
       --from-local)      FROM_LOCAL=true ;;
       --dry-run)         DRY_RUN=true ;;
 
@@ -247,6 +262,7 @@ _parse_args() {
       --pm2-frontend)    PM2_FRONTEND="$2"; shift ;;
       --backend-port)    BACKEND_PORT="$2"; shift ;;
       --frontend-port)   FRONTEND_PORT="$2"; shift ;;
+      --keep-frontend-releases) FRONTEND_RELEASE_KEEP="$2"; shift ;;
 
       # Git
       --repo)            REPO_URL="$2"; shift ;;
@@ -270,7 +286,7 @@ _parse_args() {
 
 _show_help() {
   # 提取脚本头部注释作为帮助
-  sed -n '/^#  用法/,/^# ═/p' "${BASH_SOURCE[0]}" | sed 's/^#  \?//' | head -n -1
+  sed -n '/^#  用法/,/^# ═/p' "${BASH_SOURCE[0]}" | sed 's/^# *//' | sed '$d'
   echo ""
   echo "示例:"
   echo "  # 单机部署（前后端同一台服务器）"
@@ -290,11 +306,17 @@ _show_help() {
   echo ""
   echo "  # 自定义 Node.js 路径和 PM2 进程名"
   echo "  ./deploy.sh --host myserver --node-bin /usr/local/node/bin --pm2-backend my-api"
+  echo ""
+  echo "  # 使用本地构建的前端制品（推荐低内存服务器）"
+  echo "  ./deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz"
+  echo ""
+  echo "  # 远端冷构建（仅排障使用）"
+  echo "  ./deploy.sh --frontend-only --cold-build"
 }
 
 # ── SSH 执行封装 ──
 _ssh_opts() {
-  local opts="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30"
+  local opts="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
   [[ -n "$SSH_KEY_PATH" ]] && opts="$opts -i $SSH_KEY_PATH"
   [[ "$SSH_PORT" != "22" ]] && opts="$opts -p $SSH_PORT"
   echo "$opts"
@@ -312,6 +334,144 @@ _remote() {
 
 _remote_backend()  { _remote "$BACKEND_HOST" "$@"; }
 _remote_frontend() { _remote "$FRONTEND_HOST" "$@"; }
+
+_ensure_frontend_standalone_assets() {
+  info "复制 standalone 静态资源..."
+  _remote_frontend "
+    cd '${FRONTEND_DIR}/web' && \
+    if [[ -d .next/standalone ]]; then
+      cp -r public .next/standalone/ 2>/dev/null || true
+      cp -r .next/static .next/standalone/.next/ 2>/dev/null || true
+      echo 'standalone 静态资源复制完成'
+    else
+      echo '未检测到 standalone 输出，跳过静态资源复制'
+    fi
+  "
+}
+
+_restart_frontend_service() {
+  _remote_frontend "
+    export PATH=${NODE_BIN}:\$PATH && \
+    cd '${FRONTEND_DIR}/web' && \
+    pm2 restart '${PM2_FRONTEND}' 2>/dev/null || \
+    pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web' 2>/dev/null
+  "
+}
+
+_build_frontend_remote() {
+  local cold_cmd=""
+  if [[ "$COLD_BUILD" == true ]]; then
+    warn "已启用 --cold-build：将清理远端 web/.next/cache 后再构建（低内存机器风险更高）"
+    cold_cmd="rm -rf .next/cache && "
+  else
+    info "保留远端 .next/cache 以降低冷启动构建内存峰值。需要冷构建时请显式传 --cold-build。"
+  fi
+
+  info "构建前端（默认命令：npm run build）..."
+  if _remote_frontend "
+    export PATH=${NODE_BIN}:\$PATH && \
+    cd '${FRONTEND_DIR}/web' && \
+    ${cold_cmd}npm run build 2>&1 | tail -10
+  "; then
+    return 0
+  fi
+
+  warn "默认构建失败，尝试 webpack 兜底（npm run build:webpack）..."
+  _remote_frontend "
+    export PATH=${NODE_BIN}:\$PATH && \
+    cd '${FRONTEND_DIR}/web' && \
+    ${cold_cmd}npm run build:webpack 2>&1 | tail -10
+  "
+}
+
+_upload_frontend_artifact() {
+  local artifact_path="$1"
+  local artifact_name
+  artifact_name="$(basename "$artifact_path")"
+  local remote_dir="${FRONTEND_DIR}/web/.deploy/artifacts"
+  local remote_path="${remote_dir}/${artifact_name}"
+
+  info "上传前端制品（支持断点续传）..."
+  _remote_frontend "mkdir -p '${remote_dir}'"
+
+  if [[ "$TOPOLOGY" == "local" ]]; then
+    run "cp '${artifact_path}' '${remote_path}'"
+  else
+    local rsync_ssh="ssh $(_ssh_opts)"
+    run "rsync -az --partial --append-verify --timeout=120 --progress -e \"$rsync_ssh\" \
+      '${artifact_path}' '${SSH_USER}@${FRONTEND_HOST}:${remote_path}'"
+  fi
+
+  FRONTEND_ARTIFACT_REMOTE_PATH="$remote_path"
+}
+
+_activate_frontend_artifact() {
+  local remote_artifact="$1"
+  local release_id="$2"
+  local prune_offset=$((FRONTEND_RELEASE_KEEP + 1))
+
+  _remote_frontend "
+    set -e
+    WEB_DIR='${FRONTEND_DIR}/web'
+    DEPLOY_DIR=\"\$WEB_DIR/.deploy\"
+    STAGE_DIR=\"\$DEPLOY_DIR/stage-${release_id}\"
+    BACKUP_DIR=\"\$DEPLOY_DIR/backups/${release_id}\"
+
+    mkdir -p \"\$DEPLOY_DIR/backups\" \"\$STAGE_DIR\"
+    tar -xzf '${remote_artifact}' -C \"\$STAGE_DIR\"
+
+    [[ -f \"\$STAGE_DIR/.next/standalone/server.js\" ]] || { echo '制品缺少 .next/standalone/server.js'; exit 1; }
+    [[ -d \"\$STAGE_DIR/.next/static\" ]] || { echo '制品缺少 .next/static'; exit 1; }
+    [[ -d \"\$STAGE_DIR/public\" ]] || mkdir -p \"\$STAGE_DIR/public\"
+
+    mkdir -p \"\$BACKUP_DIR/.next\"
+    [[ -d \"\$WEB_DIR/.next/standalone\" ]] && mv \"\$WEB_DIR/.next/standalone\" \"\$BACKUP_DIR/.next/standalone\"
+    [[ -d \"\$WEB_DIR/.next/static\" ]] && mv \"\$WEB_DIR/.next/static\" \"\$BACKUP_DIR/.next/static\"
+    [[ -d \"\$WEB_DIR/public\" ]] && mv \"\$WEB_DIR/public\" \"\$BACKUP_DIR/public\"
+
+    mkdir -p \"\$WEB_DIR/.next\"
+    mv \"\$STAGE_DIR/.next/standalone\" \"\$WEB_DIR/.next/standalone\"
+    mv \"\$STAGE_DIR/.next/static\" \"\$WEB_DIR/.next/static\"
+    rm -rf \"\$WEB_DIR/public\"
+    mv \"\$STAGE_DIR/public\" \"\$WEB_DIR/public\"
+
+    rm -rf \"\$STAGE_DIR\" '${remote_artifact}'
+    printf '%s' \"\$BACKUP_DIR\" > \"\$DEPLOY_DIR/last_backup_path\"
+
+    if [[ -d \"\$DEPLOY_DIR/backups\" ]]; then
+      old_backups=\$(ls -1dt \"\$DEPLOY_DIR\"/backups/* 2>/dev/null | tail -n +${prune_offset} || true)
+      if [[ -n "\$old_backups" ]]; then
+        while IFS= read -r one_backup; do
+          [[ -n "\$one_backup" ]] && rm -rf "\$one_backup"
+        done <<< "\$old_backups"
+      fi
+    fi
+  "
+}
+
+_rollback_frontend_from_last_backup() {
+  _remote_frontend "
+    set -e
+    WEB_DIR='${FRONTEND_DIR}/web'
+    DEPLOY_DIR=\"\$WEB_DIR/.deploy\"
+    [[ -f \"\$DEPLOY_DIR/last_backup_path\" ]] || { echo '未找到可回滚备份'; exit 1; }
+
+    BACKUP_DIR=\$(cat "\$DEPLOY_DIR/last_backup_path")
+    [[ -d "\$BACKUP_DIR" ]] || { echo '回滚失败：备份目录不存在'; exit 1; }
+
+    if [[ ! -d \"\$BACKUP_DIR/.next/standalone\" || ! -d \"\$BACKUP_DIR/.next/static\" ]]; then
+      echo '回滚失败：备份不完整，已保留当前版本'
+      exit 1
+    fi
+
+    mkdir -p \"\$WEB_DIR/.next\"
+    rm -rf \"\$WEB_DIR/.next/standalone\" \"\$WEB_DIR/.next/static\" \"\$WEB_DIR/public\"
+
+    [[ -d \"\$BACKUP_DIR/.next/standalone\" ]] && mv \"\$BACKUP_DIR/.next/standalone\" \"\$WEB_DIR/.next/standalone\"
+    [[ -d \"\$BACKUP_DIR/.next/static\" ]] && mv \"\$BACKUP_DIR/.next/static\" \"\$WEB_DIR/.next/static\"
+    [[ -d \"\$BACKUP_DIR/public\" ]] && mv \"\$BACKUP_DIR/public\" \"\$WEB_DIR/public\"
+  "
+}
 
 # ── rsync 排除列表 ──
 _rsync_excludes=(
@@ -358,7 +518,7 @@ _sync_code() {
       return
     fi
     local rsync_ssh="ssh $(_ssh_opts)"
-    run "rsync -az ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
+    run "rsync -az --partial --append-verify --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
       '${SCRIPT_DIR}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
     info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
@@ -419,21 +579,47 @@ _deploy_frontend() {
 
   # 同步代码（分离模式下前端有独立的代码目录）
   if [[ "$TOPOLOGY" == "split" ]]; then
-    _sync_code "$FRONTEND_HOST" "$FRONTEND_DIR" "前端"
+    if [[ -n "$FRONTEND_ARTIFACT" ]]; then
+      info "已启用前端制品模式，跳过仓库同步。"
+      _remote_frontend "mkdir -p '${FRONTEND_DIR}/web/.deploy/artifacts'"
+    else
+      _sync_code "$FRONTEND_HOST" "$FRONTEND_DIR" "前端"
+    fi
+  fi
+
+  if [[ -n "$FRONTEND_ARTIFACT" ]]; then
+    local release_id
+    release_id="$(date +%Y%m%dT%H%M%S)"
+    local remote_artifact
+    _upload_frontend_artifact "$FRONTEND_ARTIFACT"
+    remote_artifact="$FRONTEND_ARTIFACT_REMOTE_PATH"
+
+    info "解包前端制品并切换到新版本..."
+    if ! _activate_frontend_artifact "$remote_artifact" "$release_id"; then
+      warn "前端制品激活失败，尝试回滚到上一版本..."
+      _rollback_frontend_from_last_backup || warn "自动回滚失败，请手动检查 ${FRONTEND_DIR}/web/.deploy/backups"
+      _restart_frontend_service || true
+      error "前端制品部署失败（激活阶段）"
+      return 1
+    fi
+
+    info "重启前端服务..."
+    if ! _restart_frontend_service; then
+      warn "前端重启失败，尝试回滚到上一版本..."
+      _rollback_frontend_from_last_backup || warn "自动回滚失败，请手动检查 ${FRONTEND_DIR}/web/.deploy/backups"
+      _restart_frontend_service || true
+      error "前端制品部署失败（已执行回滚尝试）"
+      return 1
+    fi
+
+    log "前端制品部署完成"
+    return 0
   fi
 
   if [[ "$SKIP_BUILD" == true ]]; then
     info "跳过构建，仅重启..."
-    # 确保 standalone 静态资源存在
-    _remote_frontend "
-      export PATH=${NODE_BIN}:\$PATH && \
-      cd '${FRONTEND_DIR}/web' && \
-      if [[ -d .next/standalone ]]; then
-        cp -r public .next/standalone/ 2>/dev/null || true
-        cp -r .next/static .next/standalone/.next/ 2>/dev/null || true
-      fi && \
-      pm2 restart '${PM2_FRONTEND}' 2>/dev/null || true
-    "
+    _ensure_frontend_standalone_assets
+    _restart_frontend_service
   else
     # 安装依赖
     if [[ "$SKIP_DEPS" != true ]]; then
@@ -445,37 +631,13 @@ _deploy_frontend() {
       "
     fi
 
-    # 构建
-    info "构建前端..."
-    _remote_frontend "
-      export PATH=${NODE_BIN}:\$PATH && \
-      cd '${FRONTEND_DIR}/web' && \
-      npm run build 2>&1 | tail -10
-    "
-
-    # Next.js standalone 模式：复制静态资源
-    # standalone 构建不会自动包含 public/ 和 .next/static/，
-    # 缺少这些会导致 logo、图片、CSS 等静态资源 404。
-    info "复制 standalone 静态资源..."
-    _remote_frontend "
-      cd '${FRONTEND_DIR}/web' && \
-      if [[ -d .next/standalone ]]; then
-        cp -r public .next/standalone/ && \
-        cp -r .next/static .next/standalone/.next/ && \
-        echo 'standalone 静态资源复制完成'
-      else
-        echo '未检测到 standalone 输出，跳过静态资源复制'
-      fi
-    "
+    warn "当前为远端现场构建路径。低内存服务器建议使用 --frontend-artifact。"
+    _build_frontend_remote
+    _ensure_frontend_standalone_assets
 
     # 重启前端
     info "重启前端服务..."
-    _remote_frontend "
-      export PATH=${NODE_BIN}:\$PATH && \
-      cd '${FRONTEND_DIR}/web' && \
-      pm2 restart '${PM2_FRONTEND}' 2>/dev/null || \
-      pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' 2>/dev/null || true
-    "
+    _restart_frontend_service
   fi
   log "前端部署完成"
 }
@@ -573,6 +735,9 @@ _print_summary() {
   esac
 
   echo -e "  代码来源: ${CYAN}$([ "$FROM_LOCAL" == true ] && echo "本地 rsync" || echo "GitHub (${REPO_BRANCH})")${NC}"
+  [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  前端制品: ${CYAN}${FRONTEND_ARTIFACT}${NC}"
+  [[ "$COLD_BUILD" == true ]] && echo -e "  构建缓存: ${YELLOW}冷构建 (--cold-build)${NC}"
+  [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  回滚备份: ${CYAN}保留最近 ${FRONTEND_RELEASE_KEEP} 个${NC}"
   [[ "$SKIP_BUILD" == true ]] && echo -e "  构建:     ${YELLOW}跳过${NC}"
   [[ "$SKIP_DEPS" == true ]]  && echo -e "  依赖:     ${YELLOW}跳过${NC}"
   [[ "$DRY_RUN" == true ]]    && echo -e "  ${YELLOW}⚠️  DRY RUN 模式${NC}"
@@ -581,6 +746,25 @@ _print_summary() {
 
 # ── 前置检查 ──
 _preflight() {
+  if [[ ! "$FRONTEND_RELEASE_KEEP" =~ ^[0-9]+$ ]] || [[ "$FRONTEND_RELEASE_KEEP" -lt 1 ]]; then
+    error "--keep-frontend-releases 必须是 >= 1 的整数"
+    exit 1
+  fi
+
+  if [[ -n "$FRONTEND_ARTIFACT" ]]; then
+    if [[ ! -f "$FRONTEND_ARTIFACT" ]]; then
+      error "前端制品不存在: $FRONTEND_ARTIFACT"
+      exit 1
+    fi
+    if [[ "$MODE" == "backend" ]]; then
+      warn "当前是 backend-only 模式，--frontend-artifact 不会生效"
+    fi
+  fi
+
+  if [[ "$COLD_BUILD" == true && "$SKIP_BUILD" == true ]]; then
+    warn "--cold-build 与 --skip-build 同时使用时，--cold-build 不生效"
+  fi
+
   # SSH 密钥检查（非本地/Docker 模式）
   if [[ "$TOPOLOGY" != "local" && "$TOPOLOGY" != "docker" ]]; then
     if [[ -n "$SSH_KEY_PATH" && ! -f "$SSH_KEY_PATH" ]]; then
