@@ -13,17 +13,36 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+/**
+ * 解析后端直连地址（用于 SSE 流等必须绕过 Next.js 代理的场景）。
+ *
+ * 优先级：
+ * 1. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联，生产环境必须设置）
+ * 2. 回退：window.location.hostname:8000（仅适用于前后端同机开发）
+ *
+ * 前后端分离部署时，必须在 web/.env.production 中设置
+ * NEXT_PUBLIC_BACKEND_ORIGIN=http://<后端IP>:8000
+ */
 function resolveDirectBackendOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
   if (configured) {
     return trimTrailingSlash(configured);
   }
+  // 回退：假设后端与前端同机，端口 8000（仅开发环境适用）
   if (typeof window !== "undefined") {
     return `${window.location.protocol}//${window.location.hostname}:${DEFAULT_BACKEND_PORT}`;
   }
   return `http://localhost:${DEFAULT_BACKEND_PORT}`;
 }
 
+/**
+ * 解析 API 基础路径。
+ *
+ * - 默认：走 Next.js rewrite 代理（同源，避免 CORS）
+ * - direct: true：直连后端（用于 SSE 流，因为 Next.js rewrite 会缓冲整个响应）
+ *
+ * 普通 REST 请求一律走代理，只有 SSE/abort 等实时性要求高的请求才用 direct。
+ */
 function resolveApiBase(opts?: { direct?: boolean }): string {
   // Most browser requests route through the Next.js rewrite proxy so that
   // requests stay same-origin (avoids CORS when accessed from LAN devices).
@@ -393,13 +412,13 @@ function buildExcelSnapshotUrl(
   if (opts?.sheet) params.set("sheet", opts.sheet);
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
   if (opts?.sessionId) params.set("session_id", opts.sessionId);
-  return buildApiUrl(`/files/excel/snapshot?${params.toString()}`, { direct: true });
+  return buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
 }
 
 export function buildExcelFileUrl(path: string, sessionId?: string): string {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (sessionId) params.set("session_id", sessionId);
-  return buildApiUrl(`/files/excel?${params.toString()}`, { direct: true });
+  return buildApiUrl(`/files/excel?${params.toString()}`);
 }
 
 export interface ExcelFileListItem {
@@ -409,7 +428,7 @@ export interface ExcelFileListItem {
 }
 
 export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
-  const url = buildApiUrl("/files/excel/list", { direct: true });
+  const url = buildApiUrl("/files/excel/list");
   const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return [];
   const data = await res.json();
@@ -417,7 +436,7 @@ export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
 }
 
 export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
-  const url = buildApiUrl("/files/workspace/list", { direct: true });
+  const url = buildApiUrl("/files/workspace/list");
   const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) return [];
   const data = await res.json();
@@ -458,7 +477,7 @@ export async function writeExcelCells(opts: {
   changes: { cell: string; value: unknown }[];
   sessionId?: string;
 }): Promise<{ status: string; cells_written: number }> {
-  const url = buildApiUrl("/files/excel/write", { direct: true });
+  const url = buildApiUrl("/files/excel/write");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -536,8 +555,7 @@ export async function fetchBackupList(
   sessionId: string
 ): Promise<BackupListResponse> {
   const url = buildApiUrl(
-    `/workspace/staged?session_id=${encodeURIComponent(sessionId)}`,
-    { direct: true }
+    `/workspace/staged?session_id=${encodeURIComponent(sessionId)}`
   );
   const res = await fetch(url, { headers: { ...getAuthHeaders() } });
   if (!res.ok) {
@@ -550,7 +568,7 @@ export async function applyBackup(opts: {
   sessionId: string;
   files?: string[];
 }): Promise<{ status: string; applied: { original: string; backup: string }[]; count: number }> {
-  const url = buildApiUrl("/workspace/commit", { direct: true });
+  const url = buildApiUrl("/workspace/commit");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -570,7 +588,7 @@ export async function discardBackup(opts: {
   sessionId: string;
   files?: string[];
 }): Promise<{ status: string; discarded: number | string }> {
-  const url = buildApiUrl("/workspace/rollback", { direct: true });
+  const url = buildApiUrl("/workspace/rollback");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
