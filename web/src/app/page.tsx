@@ -46,7 +46,7 @@ export default function Home() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId, newContent, rollbackFiles) => {
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean) => {
             rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId);
           }}
         />
