@@ -302,19 +302,19 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
         <CollapsibleTrigger
           className={`group/card flex items-center gap-0 rounded-lg border transition-all duration-200 w-full text-left text-sm overflow-hidden hover:shadow-sm ${borderCls} ${bgCls}`}
         >
-          {/* Left accent bar */}
+          {/* 左侧强调条 */}
           <div
             className={`self-stretch w-[3px] flex-shrink-0 rounded-l-lg transition-colors duration-500 ${isRunning ? "animate-tool-running-bar" : ""}`}
             style={{ backgroundColor: isError ? "var(--em-error)" : theme.bar, "--tool-cat-color": theme.bar } as React.CSSProperties}
           />
 
           <div className={`flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5 ${isRunning ? "animate-tool-running-pulse" : ""}`}>
-            {/* Circular icon badge */}
+            {/* 圆形图标徽章 */}
             <span className={`flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 ${theme.iconBg}`}>
               <ToolIcon className={`h-3 w-3 ${theme.iconColor}`} />
             </span>
 
-            {/* Tool name pill */}
+            {/* 工具名胶囊 */}
             <span className={`inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium font-mono flex-shrink-0 ${theme.pillBg} ${theme.pillText}`}>
               {name}
             </span>

@@ -76,11 +76,11 @@ export function ExcelSidePanel() {
     if (ok) setAppliedSidePanel(true);
   }, [activeSessionId, activeFilePath, applyFile]);
 
-  // Pending range from Univer selection (not yet confirmed)
+  // 来自 Univer 选区的待确认范围（尚未确认）
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
   const [withStyles, setWithStyles] = useState(true);
 
-  // Swipe-down to close on mobile
+  // 移动端下滑关闭
   const touchRef = useRef<{ startY: number; startTime: number } | null>(null);
   const handlePanelTouchStart = useCallback((e: React.TouchEvent) => {
     if (!isMobile) return;
@@ -138,7 +138,7 @@ export function ExcelSidePanel() {
   );
 
   const handleRefresh = useCallback(() => {
-    // Force refresh by incrementing counter
+    // 通过递增计数器强制刷新
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
   }, []);
 
@@ -171,13 +171,13 @@ export function ExcelSidePanel() {
           onTouchStart={handlePanelTouchStart}
           onTouchEnd={handlePanelTouchEnd}
         >
-          {/* Swipe indicator for mobile and medium screens */}
+          {/* 移动端与中等屏幕的滑动指示条 */}
           {useFloatingMode && (
             <div className="flex justify-center py-1.5 flex-shrink-0">
               <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
             </div>
           )}
-          {/* Header */}
+          {/* 头部 */}
           <div className={`flex items-center justify-between px-3 border-b border-border bg-muted/30 ${isMobile ? "py-1" : "py-2"}`}>
             <div className="flex items-center gap-2 min-w-0 flex-1">
               <span className="text-sm font-medium truncate">{fileName}</span>
@@ -290,7 +290,7 @@ export function ExcelSidePanel() {
             </div>
           </div>
 
-          {/* Univer Sheet */}
+          {/* Univer 表格 */}
           <div className="flex-1 overflow-hidden">
             <UniverSheet
               fileUrl={fileUrl}
@@ -302,7 +302,7 @@ export function ExcelSidePanel() {
             />
           </div>
 
-          {/* Selection confirmation bar */}
+          {/* 选区确认栏 */}
           {selectionMode && pendingRange && (
             <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2">
               <span className="text-xs font-mono flex-1 truncate" style={{ color: "var(--em-primary)" }}>
@@ -326,7 +326,7 @@ export function ExcelSidePanel() {
             </div>
           )}
 
-          {/* Apply to original file bar */}
+          {/* 应用到原文件栏 */}
           {(hasBackupForFile || appliedSidePanel) && (
             <div className="border-t border-border bg-muted/30 px-3 py-2 flex items-center justify-between">
               <span className="text-[11px] text-muted-foreground">沙盒文件</span>
@@ -355,7 +355,7 @@ export function ExcelSidePanel() {
             </div>
           )}
 
-          {/* Diff History (bottom bar) */}
+          {/* 变更历史（底栏） */}
           {fileDiffs.length > 0 && (
             <div className="border-t border-border bg-muted/20 max-h-[120px] overflow-y-auto">
               <div className="px-3 py-1.5 text-[10px] text-muted-foreground font-medium flex items-center gap-1">
