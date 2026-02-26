@@ -148,8 +148,7 @@ class WorkspaceTransaction:
     """统一的事务化文件层。
 
     所有暂存变更均位于 staging_dir 下，直至显式提交或回滚。
-    内部委托 FileRegistry 做版本跟踪与物理文件操作，
-    同时保留原有公开接口以保持向后兼容。
+    内部统一委托 FileRegistry 做版本跟踪与物理文件操作。
     """
 
     def __init__(
@@ -158,8 +157,8 @@ class WorkspaceTransaction:
         staging_dir: Path,
         tx_id: str,
         *,
+        registry: "FileRegistry",
         scope: str = "all",
-        registry: "FileRegistry | None" = None,
     ) -> None:
         self._workspace_root = workspace_root
         self._staging_dir = staging_dir
@@ -167,13 +166,7 @@ class WorkspaceTransaction:
         self._tx_id = tx_id
         self._scope = scope
 
-        # 统一使用 FileRegistry；未提供时回退到独立 FVM
-        self._registry: "FileRegistry | None" = registry
-        if registry is not None:
-            self._fvm = registry.fvm
-        else:
-            from excelmanus.file_versions import FileVersionManager as _FVM
-            self._fvm = _FVM(workspace_root)
+        self._registry = registry
 
     # -- 属性 ----------------------------------------------------------
 
@@ -194,15 +187,13 @@ class WorkspaceTransaction:
         return self._workspace_root
 
     @property
-    def registry(self) -> "FileRegistry | None":
+    def registry(self) -> "FileRegistry":
         """关联的 FileRegistry 实例（供 ApprovalManager 等共享）。"""
         return self._registry
 
     @property
     def tracked_originals(self) -> set[str]:
-        if self._registry is not None:
-            return set(self._registry.staged_file_map().keys())
-        return set(self._fvm.staged_file_map().keys())
+        return set(self._registry.staged_file_map().keys())
 
     # -- 路径辅助 --------------------------------------------------------
 
@@ -213,55 +204,36 @@ class WorkspaceTransaction:
 
     def stage_for_write(self, file_path: str) -> str:
         """确保 file_path 存在对应的暂存副本。"""
-        if self._registry is not None:
-            return self._registry.stage_for_write(
-                file_path, ref_id=self._tx_id, scope=self._scope,
-            )
-        return self._fvm.stage_for_write(
+        return self._registry.stage_for_write(
             file_path, ref_id=self._tx_id, scope=self._scope,
         )
 
     def resolve_read(self, file_path: str) -> str:
         """若存在暂存路径则返回暂存路径，否则返回原路径。"""
         resolved = self._resolve_and_validate(file_path)
-        if self._registry is not None:
-            rel = self._registry._to_rel(resolved)
-            staged = self._registry.get_staged_path(rel)
-        else:
-            rel = self._fvm._to_rel(resolved)
-            staged = self._fvm.get_staged_path(rel)
+        rel = self._registry._to_rel(resolved)
+        staged = self._registry.get_staged_path(rel)
         return staged if staged is not None else str(resolved)
 
     def commit_all(self) -> list[dict[str, str]]:
         """将所有暂存文件复制回原位置。"""
-        if self._registry is not None:
-            return self._registry.commit_all_staged()
-        return self._fvm.commit_all_staged()
+        return self._registry.commit_all_staged()
 
     def commit_one(self, file_path: str) -> dict[str, str] | None:
         """将单个暂存文件提交回原位置。"""
-        if self._registry is not None:
-            return self._registry.commit_staged(file_path)
-        return self._fvm.commit_staged(file_path)
+        return self._registry.commit_staged(file_path)
 
     def rollback_one(self, file_path: str) -> bool:
         """丢弃单个暂存文件。"""
-        if self._registry is not None:
-            return self._registry.discard_staged(file_path)
-        return self._fvm.discard_staged(file_path)
+        return self._registry.discard_staged(file_path)
 
     def rollback_all(self) -> None:
         """丢弃所有暂存文件。"""
-        if self._registry is not None:
-            self._registry.discard_all_staged()
-        else:
-            self._fvm.discard_all_staged()
+        self._registry.discard_all_staged()
 
     def cleanup_stale(self) -> int:
         """移除暂存文件已不存在的条目。"""
-        if self._registry is not None:
-            return self._registry.prune_stale_staging()
-        return self._fvm.prune_stale_staging()
+        return self._registry.prune_stale_staging()
 
     def to_relative(self, abs_path: str) -> str:
         """将绝对路径转换为相对工作区的 ./ 路径。"""
@@ -273,25 +245,18 @@ class WorkspaceTransaction:
 
     def list_staged(self) -> list[dict[str, str]]:
         """列出当前所有暂存文件。"""
-        if self._registry is not None:
-            return self._registry.list_staged()
-        return self._fvm.list_staged()
+        return self._registry.list_staged()
 
     def staged_file_map(self) -> dict[str, str]:
         """返回 original_abs → staged_abs 的映射。"""
-        if self._registry is not None:
-            return self._registry.staged_file_map()
-        return self._fvm.staged_file_map()
+        return self._registry.staged_file_map()
 
     def register_cow_mappings(self, mapping: dict[str, str]) -> None:
         """将子进程级 CoW 映射合并进本事务。"""
         if not mapping:
             return
         for src_rel, dst_rel in mapping.items():
-            if self._registry is not None:
-                self._registry.register_cow_mapping(src_rel, dst_rel)
-            else:
-                self._fvm.register_cow_mapping(src_rel, dst_rel)
+            self._registry.register_cow_mapping(src_rel, dst_rel)
 
 
 # ── 沙盒环境 ─────────────────────────────────────────────
@@ -413,8 +378,8 @@ class IsolatedWorkspace:
 
     def create_transaction(
         self,
+        registry: "FileRegistry",
         tx_id: str | None = None,
-        registry: "FileRegistry | None" = None,
     ) -> WorkspaceTransaction:
         """创建绑定到本工作区的新 WorkspaceTransaction。"""
         if tx_id is None:

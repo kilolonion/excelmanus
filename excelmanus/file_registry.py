@@ -1,7 +1,6 @@
 """FileRegistry：统一文件注册表 — 元数据 + provenance + 物理操作 + 路径解析。
 
-方案 B（重型替换）：完全替代 WorkspaceManifest + FileVersionManager + CoW registry，
-成为文件管理的唯一外部接口。
+方案 B（重型替换）：统一收敛为文件管理的唯一外部接口。
 
 Phase 1: 核心数据模型 + 注册/查询/事件记录 + 路径解析 + panorama 构建。
 Phase 2: 全文件类型扫描 + uploads 接入 + engine/api 集成。
@@ -677,7 +676,7 @@ class FileRegistry:
     def build_panorama(self, max_tokens: int = 1500) -> str:
         """构建文件全景图文本，用于 system prompt 注入。
 
-        替代 _build_workspace_manifest_notice() + _build_uploads_notice() + _build_cow_path_notice()。
+        统一覆盖文件全景、上传文件提示与 CoW 路径提示。
 
         TODO: 使用 max_tokens 参数截断超长输出。
         """
