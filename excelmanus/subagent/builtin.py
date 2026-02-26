@@ -41,7 +41,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         allowed_tools=[],
         permission_mode="acceptEdits",
         max_iterations=120,
-        max_consecutive_failures=2,
+        max_consecutive_failures=3,
         capability_mode="full",
         source="builtin",
     ),
@@ -54,7 +54,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         allowed_tools=_EXPLORER_TOOLS,
         permission_mode="readOnly",
         max_iterations=30,
-        max_consecutive_failures=2,
+        max_consecutive_failures=3,
         capability_mode="restricted",
         source="builtin",
         system_prompt=(
@@ -64,7 +64,11 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
             "- 仅使用只读工具，不做任何写入操作。\n"
             "- 优先给出结构化、可引用的结果摘要。\n"
             "- 包含关键数字（行数、列数、数据范围、匹配数等）。\n"
-            "- 完成后输出简洁的发现摘要，供主代理决策使用。"
+            "- 完成后输出简洁的发现摘要，供主代理决策使用。\n\n"
+            "## 效率优先\n"
+            "- 简单任务不要强制拆解多步，一次工具调用能完成就直接输出结论。\n"
+            "- 如果上下文已提供足够信息，无需额外探索即可直接汇报。\n"
+            "- 避免重复读取已知信息。"
         ),
     ),
     "verifier": SubagentConfig(
@@ -76,7 +80,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         allowed_tools=_VERIFIER_TOOLS,
         permission_mode="readOnly",
         max_iterations=15,
-        max_consecutive_failures=2,
+        max_consecutive_failures=3,
         capability_mode="restricted",
         source="builtin",
         system_prompt=(
