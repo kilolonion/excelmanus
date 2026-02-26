@@ -166,16 +166,30 @@ class SubagentOrchestrator:
                     normalized_paths=normalized_paths,
                 )
 
-        # ── 执行子代理 ──
+        # ── 执行子代理（带超时保护） ──
         prompt = task_text
         if normalized_paths:
             prompt += f"\n\n相关文件：{', '.join(normalized_paths)}"
 
-        result = await engine.run_subagent(
-            agent_name=picked_agent,
-            prompt=prompt,
-            on_event=on_event,
-        )
+        timeout = engine._config.subagent_timeout_seconds
+        try:
+            result = await asyncio.wait_for(
+                engine.run_subagent(
+                    agent_name=picked_agent,
+                    prompt=prompt,
+                    on_event=on_event,
+                ),
+                timeout=timeout if timeout > 0 else None,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("子代理 %s 执行超时 (%ds)", picked_agent, timeout)
+            return DelegateSubagentOutcome(
+                reply=f"子代理 {picked_agent} 执行超时（{timeout}s），已终止。",
+                success=False,
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+            )
 
         # ── Post-subagent Hook（A1: 无激活技能时跳过） ──
         if hook_skill is not None:
@@ -305,9 +319,10 @@ class SubagentOrchestrator:
                 success=False,
             )
 
-        if len(tasks) > 5:
+        max_parallel = engine._config.parallel_subagent_max
+        if len(tasks) > max_parallel:
             return ParallelDelegateOutcome(
-                reply="工具参数错误: 最多同时并行 5 个子任务。",
+                reply=f"工具参数错误: 最多同时并行 {max_parallel} 个子任务。",
                 success=False,
             )
 
@@ -320,14 +335,17 @@ class SubagentOrchestrator:
                 conflict_error=conflict,
             )
 
-        # ── 并发执行 ──
+        # ── 并发执行（Semaphore 限流） ──
+        sem = asyncio.Semaphore(max_parallel)
+
         async def _run_one(t: ParallelDelegateTask) -> DelegateSubagentOutcome:
-            return await self.delegate(
-                task=t.task,
-                agent_name=t.agent_name,
-                file_paths=t.file_paths,
-                on_event=on_event,
-            )
+            async with sem:
+                return await self.delegate(
+                    task=t.task,
+                    agent_name=t.agent_name,
+                    file_paths=t.file_paths,
+                    on_event=on_event,
+                )
 
         raw_results = await asyncio.gather(
             *[_run_one(t) for t in tasks],

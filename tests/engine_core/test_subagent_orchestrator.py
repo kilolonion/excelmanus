@@ -34,6 +34,9 @@ def _make_orchestrator(
     # E4: orchestrator 现在直接访问 _subagent_registry
     engine_mock._subagent_registry = MagicMock()
     engine_mock._subagent_registry.build_catalog = MagicMock(return_value=("", ["subagent"]))
+    engine_mock._config = MagicMock()
+    engine_mock._config.subagent_timeout_seconds = 600
+    engine_mock._config.parallel_subagent_max = 3
     return SubagentOrchestrator(engine_mock)
 
 

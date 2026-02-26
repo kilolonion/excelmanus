@@ -2144,6 +2144,37 @@ class ToolDispatcher:
     _EXCEL_WRITE_TOOLS = {"write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"}
 
     @staticmethod
+    def _extract_preview_styles(
+        file_path: str, sheet_name: str | None, num_rows: int, num_cols: int,
+        workspace_root: str,
+    ) -> list[list]:
+        """Best-effort: 提取 preview 区域的单元格样式（header + data rows）。"""
+        from pathlib import Path
+        from excelmanus.tools._style_extract import extract_cell_style
+        import openpyxl
+
+        abs_path = Path(file_path) if Path(file_path).is_absolute() else Path(workspace_root) / file_path
+        abs_path = abs_path.resolve()
+        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm"):
+            return []
+
+        wb = openpyxl.load_workbook(str(abs_path), read_only=False, data_only=True)
+        try:
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+            if ws is None:
+                return []
+            styles: list[list] = []
+            for r in range(1, num_rows + 2):  # +1 header row, +1 for 1-based
+                row_styles: list = []
+                for c in range(1, num_cols + 1):
+                    cell = ws.cell(row=r, column=c)
+                    row_styles.append(extract_cell_style(cell))
+                styles.append(row_styles)
+            return styles
+        finally:
+            wb.close()
+
+    @staticmethod
     def _snapshot_excel_for_diff(
         file_paths: list[str], workspace_root: str,
     ) -> dict[str, list[tuple[str, list[dict]]]]:
@@ -2162,7 +2193,9 @@ class ToolDispatcher:
                     snapshots[fp] = []
                     continue
                 from openpyxl import load_workbook
-                wb = load_workbook(str(abs_path), data_only=False, read_only=True)
+                from openpyxl.utils import get_column_letter
+                from excelmanus.tools._style_extract import extract_cell_style
+                wb = load_workbook(str(abs_path), data_only=False, read_only=False)
                 file_snaps: list[tuple[str, list[dict]]] = []
                 for sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
@@ -2171,13 +2204,16 @@ class ToolDispatcher:
                                             max_col=min(ws.max_column or 0, 50)):
                         for cell in row:
                             if cell.value is not None:
-                                from openpyxl.utils import get_column_letter
                                 ref = f"{get_column_letter(cell.column)}{cell.row}"
                                 val = cell.value
                                 if isinstance(val, (int, float, bool, str)):
-                                    cells.append({"cell": ref, "value": val})
+                                    entry: dict = {"cell": ref, "value": val}
                                 else:
-                                    cells.append({"cell": ref, "value": str(val)})
+                                    entry = {"cell": ref, "value": str(val)}
+                                style = extract_cell_style(cell)
+                                if style:
+                                    entry["style"] = style
+                                cells.append(entry)
                     file_snaps.append((sheet_name, cells))
                 wb.close()
                 snapshots[fp] = file_snaps
@@ -2200,13 +2236,22 @@ class ToolDispatcher:
             for sheet in sorted(all_sheets):
                 b_cells = {c["cell"]: c["value"] for c in before_sheets.get(sheet, [])}
                 a_cells = {c["cell"]: c["value"] for c in after_sheets.get(sheet, [])}
+                b_styles = {c["cell"]: c.get("style") for c in before_sheets.get(sheet, [])}
+                a_styles = {c["cell"]: c.get("style") for c in after_sheets.get(sheet, [])}
                 changes: list[dict] = []
                 for ref in sorted(set(b_cells) | set(a_cells)):
                     old_val = b_cells.get(ref)
                     new_val = a_cells.get(ref)
                     if old_val != new_val:
                         _ser = lambda v: None if v is None else (v if isinstance(v, (int, float, bool)) else str(v))
-                        changes.append({"cell": ref, "old": _ser(old_val), "new": _ser(new_val)})
+                        ch: dict = {"cell": ref, "old": _ser(old_val), "new": _ser(new_val)}
+                        old_s = b_styles.get(ref)
+                        new_s = a_styles.get(ref)
+                        if old_s is not None:
+                            ch["old_style"] = old_s
+                        if new_s is not None:
+                            ch["new_style"] = new_s
+                        changes.append(ch)
                 if changes:
                     first = changes[0]["cell"]
                     last = changes[-1]["cell"]
@@ -2251,6 +2296,18 @@ class ToolDispatcher:
                     elif isinstance(record, list):
                         rows_data.append(record)
                 total_rows = parsed.get("total_rows_in_sheet") or parsed.get("shape", {}).get("rows", 0)
+                # Best-effort: 提取预览单元格样式
+                cell_styles: list[list] = []
+                try:
+                    cell_styles = self._extract_preview_styles(
+                        arguments.get("file_path", ""),
+                        arguments.get("sheet_name") or None,
+                        len(rows_data),
+                        len(columns),
+                        e.config.workspace_root,
+                    )
+                except Exception:
+                    logger.debug("提取预览单元格样式失败", exc_info=True)
                 e.emit(
                     on_event,
                     ToolCallEvent(
@@ -2262,6 +2319,7 @@ class ToolDispatcher:
                         excel_rows=rows_data[:50],
                         excel_total_rows=int(total_rows) if total_rows else 0,
                         excel_truncated=bool(parsed.get("is_truncated", False)),
+                        excel_cell_styles=cell_styles,
                     ),
                 )
 
