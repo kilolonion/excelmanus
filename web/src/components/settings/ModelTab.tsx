@@ -42,6 +42,7 @@ interface ModelSection {
   api_key?: string;
   base_url?: string;
   model?: string;
+  enabled?: boolean;
 }
 
 interface ProfileEntry {
@@ -68,8 +69,8 @@ interface ModelCapabilities {
 
 interface ModelConfig {
   main: ModelSection;
-  aux: ModelSection;
-  vlm: ModelSection;
+  aux: ModelSection & { enabled?: boolean };
+  vlm: ModelSection & { enabled?: boolean };
   profiles: ProfileEntry[];
 }
 
@@ -329,6 +330,7 @@ export function ModelTab() {
   const [saved, setSaved] = useState<string | null>(null);
   const [editDrafts, setEditDrafts] = useState<Record<string, Record<string, string>>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+  const [enabledDrafts, setEnabledDrafts] = useState<Record<string, boolean>>({});
   const [newProfile, setNewProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
   const [profileDraft, setProfileDraft] = useState<ProfileEntry>({
@@ -474,6 +476,11 @@ export function ModelTab() {
         }
       }
       setEditDrafts(drafts);
+      // 初始化 enabled 开关状态
+      setEnabledDrafts({
+        aux: data.aux?.enabled !== false,
+        vlm: data.vlm?.enabled !== false,
+      });
     } catch {
       // 后端未就绪
     } finally {
@@ -493,10 +500,14 @@ export function ModelTab() {
     setSaving(sectionKey);
     try {
       const draft = editDrafts[sectionKey];
-      const body: Record<string, string> = {};
+      const body: Record<string, unknown> = {};
       for (const [field, value] of Object.entries(draft)) {
         if (field === "api_key" && isMaskedApiKey(value)) continue;
         body[field] = value;
+      }
+      // aux/vlm 保存时一并提交 enabled 开关
+      if ((sectionKey === "aux" || sectionKey === "vlm") && enabledDrafts[sectionKey] !== undefined) {
+        body.enabled = enabledDrafts[sectionKey];
       }
       await apiPut(`/config/models/${sectionKey}`, body);
       setSaved(sectionKey);
@@ -506,6 +517,18 @@ export function ModelTab() {
       // 忽略
     } finally {
       setSaving(null);
+    }
+  };
+
+  const handleToggleEnabled = async (sectionKey: string, checked: boolean) => {
+    setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: checked }));
+    // 立即保存开关状态
+    try {
+      await apiPut(`/config/models/${sectionKey}`, { enabled: checked });
+      fetchConfig();
+    } catch {
+      // 回滚
+      setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: !checked }));
     }
   };
 
@@ -573,6 +596,13 @@ export function ModelTab() {
             <div className="flex items-center gap-2 flex-wrap">
               <span style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
               <h3 className="font-semibold text-sm">{section.label}</h3>
+              {(section.key === "aux" || section.key === "vlm") && (
+                <Switch
+                  checked={enabledDrafts[section.key] !== false}
+                  onCheckedChange={(checked) => handleToggleEnabled(section.key, checked)}
+                  className="ml-1 scale-75 origin-left"
+                />
+              )}
               <span className="text-xs text-muted-foreground ml-auto hidden sm:inline">{section.desc}</span>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5 ml-6 sm:hidden">{section.desc}</p>
@@ -588,7 +618,10 @@ export function ModelTab() {
                 <CapabilityBadges caps={sectionCaps ?? null} />
               </div>
             )}
-            <div className="space-y-2 mt-3">
+            {(section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 ml-6">已禁用，将回退到主模型</p>
+            )}
+            <div className={`space-y-2 mt-3 transition-opacity ${(section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false ? "opacity-40 pointer-events-none" : ""}`}>
               {section.fields.map((field) => (
                 <div key={field} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
                   <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">
