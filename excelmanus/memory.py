@@ -379,7 +379,7 @@ class ConversationMemory:
         for i, msg in enumerate(self._messages):
             image_id = msg.get("_image_id")
             if image_id is not None and image_id in self._fresh_image_ids:
-                # Extract text parts from multimodal content before degrading
+                # 在多模态内容降级前提取文本部分
                 original_text = ""
                 content = msg.get("content")
                 if isinstance(content, list):

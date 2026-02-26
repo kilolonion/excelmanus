@@ -204,6 +204,17 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
             dims_parts.append(f"...(+{len(sheet_dimensions) - 20})")
         lines.append(f"sheets: {' | '.join(dims_parts)}")
 
+    # 行溢出提示：当 total_rows 远大于 visible_rows 时提示 focus_window
+    _visible_rows = viewport.get("visible_rows", 0)
+    _total_rows = viewport.get("total_rows", 0)
+    _identity = payload.get("identity") or ""
+    if _total_rows > _visible_rows > 0 and _total_rows > _visible_rows * 1.5:
+        _win_id = _identity.split("#")[0] if "#" in _identity else _identity
+        lines.append(
+            f"💡 显示 {_visible_rows}/{_total_rows} 行，"
+            f"需查看更多数据可用 focus_window(window_id=\"{_win_id}\", action=\"scroll\"/\"expand\")"
+        )
+
     # 列截断警告：当实际列数超过视口可见列数时提醒
     _visible_cols = viewport.get("visible_cols", 0)
     _total_cols = viewport.get("total_cols", 0)
@@ -452,9 +463,17 @@ def _render_sheet(window: SheetWindow) -> str:
             f"（总列数: {viewport.total_cols}）"
         )
 
-    # 数据充分性警告：聚合意图下样本不足时提醒
+    # 视口溢出提示：当 total_rows 超过预览行数时，提示使用 focus_window
     preview_len = len(preview) if isinstance(preview, list) else 0
     sheet_total_rows = viewport.total_rows if viewport is not None else 0
+    if sheet_total_rows > preview_len > 0:
+        lines.append(
+            f"💡 当前显示 {preview_len}/{sheet_total_rows} 行，"
+            f"可用 focus_window(window_id=\"{window.id}\", action=\"scroll\", range=\"...\") "
+            f"跳转到其他区域，或 action=\"expand\" 向下加载更多行"
+        )
+
+    # 数据充分性警告：聚合意图下样本不足时提醒
     if (
         window.intent_tag == IntentTag.AGGREGATE
         and sheet_total_rows > preview_len * 2
@@ -623,6 +642,15 @@ def render_window_wurm_full(
     visible_cols = len(column_names)
     if total_cols > visible_cols > 0:
         lines.append(f"⚠️ 还有 {total_cols - visible_cols} 列未在视口中显示（总列数: {total_cols}）")
+
+    # 视口溢出提示：当 total_rows 超过当前展示行数时，提示使用 focus_window 浏览更多数据
+    _displayed_rows = min(render_max_rows, len(window.data_buffer))
+    if total_rows > _displayed_rows > 0 and total_rows > render_max_rows:
+        lines.append(
+            f"💡 当前显示 {_displayed_rows}/{total_rows} 行，"
+            f"可用 focus_window(window_id=\"{window.id}\", action=\"scroll\", range=\"...\") "
+            f"跳转到其他区域，或 action=\"expand\" 向下加载更多行"
+        )
 
     # 数据充分性警告：当 total_rows 远大于预览行数且意图为聚合时，提醒 LLM 样本不足
     if profile["intent"] == IntentTag.AGGREGATE.value and total_rows > render_max_rows * 2:

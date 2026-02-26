@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from rich.console import Console
 from rich.markup import escape as rich_escape
+from rich.table import Table
 from rich.text import Text
 
 from excelmanus.cli.theme import THEME
@@ -99,6 +100,12 @@ class StreamRenderer:
             EventType.THINKING_DELTA: self._render_thinking_delta,
             EventType.TEXT_DELTA: self._render_text_delta,
             EventType.MODE_CHANGED: self._render_mode_changed,
+            EventType.EXCEL_PREVIEW: self._render_excel_preview,
+            EventType.EXCEL_DIFF: self._render_excel_diff,
+            EventType.FILES_CHANGED: self._render_files_changed,
+            EventType.PIPELINE_PROGRESS: self._render_pipeline_progress,
+            EventType.MEMORY_EXTRACTED: self._render_memory_extracted,
+            EventType.FILE_DOWNLOAD: self._render_file_download,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -300,13 +307,20 @@ class StreamRenderer:
             return
         title = data.get("title", "")
         items = data.get("items", [])
+
+        # 计算进度百分比（借鉴前端 TaskList 进度条）
+        progress_str = self._format_task_progress(items)
+
         self._console.print(
             f"\n  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.BOLD}]{rich_escape(title)}[/{THEME.BOLD}]"
+            f" [{THEME.BOLD}]{rich_escape(title)}[/{THEME.BOLD}]{progress_str}"
         )
         for i, item in enumerate(items):
             sym = _STATUS_SYMBOLS.get(item.get("status", "pending"), "○")
-            self._console.print(f"  {THEME.TREE_MID} {sym} {i}. {rich_escape(item.get('title', ''))}")
+            title_text = rich_escape(item.get("title", ""))
+            verification = item.get("verification", "")
+            veri_str = f" [{THEME.DIM}]({rich_escape(truncate(verification, 40))})[/{THEME.DIM}]" if verification else ""
+            self._console.print(f"  {THEME.TREE_MID} {sym} {i}. {title_text}{veri_str}")
 
     def _render_task_update(self, event: ToolCallEvent) -> None:
         idx = event.task_index
@@ -317,17 +331,47 @@ class StreamRenderer:
         title = items[idx]["title"] if idx is not None and 0 <= idx < len(items) else f"#{idx}"
         self._console.print(f"  {THEME.TREE_MID} {sym} {idx}. {rich_escape(title)}")
 
+        # 进度条（借鉴前端 TaskList 百分比进度条）
         progress = data.get("progress", {})
         total = sum(progress.values())
         done = progress.get("completed", 0) + progress.get("failed", 0)
-        if total > 0 and done == total:
+        if total > 0:
+            pct = int(done / total * 100)
+            bar = self._render_progress_bar(pct, width=20)
             c = progress.get("completed", 0)
             f = progress.get("failed", 0)
-            self._console.print(
-                f"  {THEME.TREE_END} 全部完成:"
-                f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} {c}[/{THEME.PRIMARY_LIGHT}]"
-                f" [{THEME.RED}]{THEME.FAILURE} {f}[/{THEME.RED}]"
-            )
+            if done == total:
+                self._console.print(
+                    f"  {THEME.TREE_END} {bar} 全部完成:"
+                    f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} {c}[/{THEME.PRIMARY_LIGHT}]"
+                    f" [{THEME.RED}]{THEME.FAILURE} {f}[/{THEME.RED}]"
+                )
+            else:
+                self._console.print(
+                    f"  {THEME.TREE_END} [{THEME.DIM}]{bar} {pct}%[/{THEME.DIM}]"
+                )
+
+    @staticmethod
+    def _render_progress_bar(pct: int, width: int = 20) -> str:
+        """生成文本进度条：█░ 风格。"""
+        filled = int(width * pct / 100)
+        empty = width - filled
+        return "█" * filled + "░" * empty
+
+    @staticmethod
+    def _format_task_progress(items: list) -> str:
+        """从任务项列表计算进度，返回 ' (3/5 60%)' 格式字符串。"""
+        if not items:
+            return ""
+        total = len(items)
+        done = sum(
+            1 for item in items
+            if item.get("status") in ("completed", "failed")
+        )
+        if done == 0:
+            return f" [{THEME.DIM}]({total} 项)[/{THEME.DIM}]"
+        pct = int(done / total * 100)
+        return f" [{THEME.DIM}]({done}/{total} {pct}%)[/{THEME.DIM}]"
 
     # ------------------------------------------------------------------
     # 问题与审批
@@ -540,6 +584,233 @@ class StreamRenderer:
         if event.total_tokens <= 0:
             return ""
         return f"{event.prompt_tokens:,} + {event.completion_tokens:,} = {event.total_tokens:,} tokens"
+
+    # ------------------------------------------------------------------
+    # Excel 预览与 Diff
+    # ------------------------------------------------------------------
+
+    def _render_excel_preview(self, event: ToolCallEvent) -> None:
+        """渲染 Excel 预览数据为终端表格。"""
+        columns = event.excel_columns or []
+        rows = event.excel_rows or []
+        if not columns and not rows:
+            return
+
+        filename = (event.excel_file_path or "").split("/")[-1] or event.excel_file_path
+        sheet = event.excel_sheet or ""
+        header = f"{filename}"
+        if sheet:
+            header += f" / {sheet}"
+
+        table = Table(
+            title=None,
+            show_header=True,
+            header_style=f"bold {THEME.PRIMARY_LIGHT}",
+            border_style=THEME.DIM,
+            padding=(0, 1),
+            show_lines=False,
+        )
+        table.add_column("#", style=THEME.DIM, justify="right", width=4)
+        for col in columns:
+            table.add_column(str(col), max_width=20)
+
+        # 限制最多显示 15 行
+        display_rows = rows[:15]
+        for i, row in enumerate(display_rows, 1):
+            cells = [str(i)]
+            for val in row:
+                cells.append(str(val) if val is not None else "")
+            # 补齐缺少的列
+            while len(cells) < len(columns) + 1:
+                cells.append("")
+            table.add_row(*cells)
+
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]{rich_escape(header)}[/{THEME.BOLD}]"
+        )
+        self._console.print(table)
+
+        total = event.excel_total_rows or len(rows)
+        footer = f"  [{THEME.DIM}]共 {total} 行 × {len(columns)} 列"
+        if event.excel_truncated:
+            footer += f"，显示前 {len(display_rows)} 行"
+        footer += f"[/{THEME.DIM}]"
+        self._console.print(footer)
+
+    def _render_excel_diff(self, event: ToolCallEvent) -> None:
+        """渲染 Excel 变更对比（借鉴前端 InlineDiff 风格）。"""
+        changes = event.excel_changes or []
+        if not changes:
+            return
+
+        filename = (event.excel_file_path or "").split("/")[-1] or event.excel_file_path
+        sheet = event.excel_sheet or ""
+        affected = event.excel_affected_range or ""
+
+        header_parts = [filename]
+        if sheet:
+            header_parts.append(sheet)
+        if affected:
+            header_parts.append(f"({affected})")
+
+        # 分类统计
+        added = modified = deleted = 0
+        for c in changes:
+            old_val = c.get("old")
+            new_val = c.get("new")
+            old_empty = old_val is None or old_val == ""
+            new_empty = new_val is None or new_val == ""
+            if old_empty and not new_empty:
+                added += 1
+            elif not old_empty and new_empty:
+                deleted += 1
+            else:
+                modified += 1
+
+        stats_parts = []
+        if modified > 0:
+            stats_parts.append(f"[yellow]{modified} 修改[/yellow]")
+        if added > 0:
+            stats_parts.append(f"[green]{added} 新增[/green]")
+        if deleted > 0:
+            stats_parts.append(f"[{THEME.RED}]{deleted} 删除[/{THEME.RED}]")
+        stats = " · ".join(stats_parts)
+
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]Diff[/{THEME.BOLD}]"
+            f" [{THEME.DIM}]{rich_escape(' / '.join(header_parts))}[/{THEME.DIM}]"
+        )
+
+        # 逐条渲染变更（最多 20 条）
+        display_changes = changes[:20]
+        for c in display_changes:
+            cell = c.get("cell", "?")
+            old_val = c.get("old")
+            new_val = c.get("new")
+            old_empty = old_val is None or old_val == ""
+            new_empty = new_val is None or new_val == ""
+            old_str = str(old_val) if old_val is not None else "(空)"
+            new_str = str(new_val) if new_val is not None else "(空)"
+
+            if old_empty and not new_empty:
+                # 新增
+                self._console.print(
+                    f"  {THEME.TREE_MID} [green]+[/green]"
+                    f" [{THEME.BOLD}]{cell}[/{THEME.BOLD}]"
+                    f" [green]{rich_escape(truncate(new_str, 60))}[/green]"
+                )
+            elif not old_empty and new_empty:
+                # 删除
+                self._console.print(
+                    f"  {THEME.TREE_MID} [{THEME.RED}]-[/{THEME.RED}]"
+                    f" [{THEME.BOLD}]{cell}[/{THEME.BOLD}]"
+                    f" [{THEME.RED}]{rich_escape(truncate(old_str, 60))}[/{THEME.RED}]"
+                )
+            else:
+                # 修改
+                self._console.print(
+                    f"  {THEME.TREE_MID} [yellow]~[/yellow]"
+                    f" [{THEME.BOLD}]{cell}[/{THEME.BOLD}]"
+                    f" [{THEME.RED}]{rich_escape(truncate(old_str, 30))}[/{THEME.RED}]"
+                    f" [{THEME.DIM}]→[/{THEME.DIM}]"
+                    f" [green]{rich_escape(truncate(new_str, 30))}[/green]"
+                )
+
+        if len(changes) > 20:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]…及另外 {len(changes) - 20} 处变更[/{THEME.DIM}]"
+            )
+        else:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]共 {len(changes)} 处变更[/{THEME.DIM}] {stats}"
+            )
+
+    # ------------------------------------------------------------------
+    # 文件变更、流水线进度、记忆提取、文件下载
+    # ------------------------------------------------------------------
+
+    def _render_files_changed(self, event: ToolCallEvent) -> None:
+        """渲染文件变更通知。"""
+        files = event.changed_files or []
+        if not files:
+            return
+        filenames = [f.split("/")[-1] or f for f in files]
+        listing = ", ".join(filenames[:5])
+        extra = len(files) - 5
+        if extra > 0:
+            listing += f" (+{extra})"
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.DIM}]文件变更:[/{THEME.DIM}] {rich_escape(listing)}"
+        )
+
+    def _render_pipeline_progress(self, event: ToolCallEvent) -> None:
+        """渲染流水线阶段进度。"""
+        stage = event.pipeline_stage or ""
+        message = event.pipeline_message or stage
+        phase = event.pipeline_phase_index
+        total = event.pipeline_total_phases or 0
+
+        progress = ""
+        if phase >= 0 and total > 0:
+            progress = f" [{THEME.DIM}]({phase + 1}/{total})[/{THEME.DIM}]"
+
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.CYAN}]{rich_escape(message)}[/{THEME.CYAN}]{progress}"
+        )
+
+    def _render_memory_extracted(self, event: ToolCallEvent) -> None:
+        """渲染记忆提取事件。"""
+        entries = event.memory_entries or []
+        trigger = event.memory_trigger or "session_end"
+        if not entries:
+            return
+
+        trigger_labels = {
+            "periodic": "周期提取",
+            "pre_compaction": "压缩前提取",
+            "session_end": "会话结束提取",
+        }
+        label = trigger_labels.get(trigger, trigger)
+
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]已提取 {len(entries)} 条记忆[/{THEME.BOLD}]"
+            f" [{THEME.DIM}]({label})[/{THEME.DIM}]"
+        )
+        for entry in entries[:5]:
+            content = entry.get("content", "") if isinstance(entry, dict) else str(entry)
+            category = entry.get("category", "") if isinstance(entry, dict) else ""
+            cat_str = f"[{THEME.CYAN}]{category}[/{THEME.CYAN}] " if category else ""
+            self._console.print(
+                f"  {THEME.TREE_MID} {cat_str}[{THEME.DIM}]{rich_escape(truncate(content, 80))}[/{THEME.DIM}]"
+            )
+        if len(entries) > 5:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]…及另外 {len(entries) - 5} 条[/{THEME.DIM}]"
+            )
+
+    def _render_file_download(self, event: ToolCallEvent) -> None:
+        """渲染文件下载/生成提示。"""
+        filepath = event.download_file_path or ""
+        filename = event.download_filename or filepath.split("/")[-1] or "download"
+        desc = event.download_description or ""
+
+        desc_str = f" [{THEME.DIM}]{rich_escape(truncate(desc, 60))}[/{THEME.DIM}]" if desc else ""
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.CYAN}]📄 {rich_escape(filename)}[/{THEME.CYAN}]{desc_str}"
+        )
+        if filepath and filepath != filename:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]{rich_escape(filepath)}[/{THEME.DIM}]"
+            )
 
     # ------------------------------------------------------------------
     # 辅助方法

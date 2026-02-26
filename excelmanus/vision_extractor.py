@@ -212,16 +212,28 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
     "header": {{
       "font": {{"bold": true, "size": 12, "color": "white", "name": "字体名"}},
       "fill": {{"color": "dark_blue"}},
-      "alignment": {{"horizontal": "center"}},
+      "alignment": {{"horizontal": "center", "vertical": "center"}},
       "border": {{"style": "thin", "color": "black"}}
     }},
-    "data": {{
+    "data_text": {{
+      "alignment": {{"horizontal": "left", "vertical": "center"}},
       "border": {{"style": "thin", "color": "light_gray"}}
+    }},
+    "data_number": {{
+      "alignment": {{"horizontal": "right", "vertical": "center"}},
+      "border": {{"style": "thin", "color": "light_gray"}}
+    }},
+    "total_row": {{
+      "font": {{"bold": true}},
+      "alignment": {{"horizontal": "right"}},
+      "border": {{"style": "thin", "color": "black"}}
     }}
   }},
   "cell_styles": {{
     "A1:E1": "header",
-    "A2:E9": "data"
+    "A2:B9": "data_text",
+    "C2:E9": "data_number",
+    "A10:E10": "total_row"
   }},
   "row_heights": {{"1": 28}}
 }}
@@ -233,6 +245,13 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
 - cell_styles: 单元格范围 → 样式 ID 的映射（用 Excel 范围表示，如 "A1:E1"）
 - row_heights: 行号 → 行高的映射（仅非默认行高的行）
 - 颜色可以用语义名（dark_blue, light_gray, white 等）或 hex 值（#1F4E79）
+
+**对齐方式（alignment）是复刻精度的关键，请仔细观察：**
+- horizontal: "left" | "center" | "right" — 每个区域必须单独判断
+- vertical: "top" | "center" | "bottom" — 合并单元格和多行文本通常垂直居中
+- wrap_text: true | false — 当单元格内容换行显示时设为 true
+- 典型规律：标题行居中、文本列左对齐、数字/金额列右对齐、合计行右对齐或居中
+- **不同列的对齐方式往往不同**，请按列或区域分别定义样式，不要将整个数据区归为同一个样式
 
 **注意：**
 - 只描述你能看到的样式，不要猜测

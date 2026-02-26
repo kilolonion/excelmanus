@@ -99,6 +99,7 @@ class ToolCallEvent:
     approval_risk_level: str = ""
     approval_args_summary: Dict[str, str] = field(default_factory=dict)
     approval_undoable: bool = False
+    approval_has_changes: bool = False
     # 流式 delta 字段
     text_delta: str = ""
     thinking_delta: str = ""

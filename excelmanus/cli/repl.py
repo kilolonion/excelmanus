@@ -125,6 +125,25 @@ class LiveStatusTicker:
         if event.event_type in (EventType.TEXT_DELTA, EventType.THINKING_DELTA):
             self._status_label = ""
             return
+        if event.event_type == EventType.PIPELINE_PROGRESS:
+            msg = (event.pipeline_message or event.pipeline_stage or "").strip()
+            self._status_label = msg if msg else "流水线处理中"
+            return
+        if event.event_type == EventType.FILES_CHANGED:
+            self._status_label = "文件写入中"
+            return
+        if event.event_type == EventType.MEMORY_EXTRACTED:
+            self._status_label = "记忆提取中"
+            return
+        if event.event_type == EventType.EXCEL_PREVIEW:
+            self._status_label = "预览生成中"
+            return
+        if event.event_type == EventType.EXCEL_DIFF:
+            self._status_label = "变更对比中"
+            return
+        if event.event_type == EventType.FILE_DOWNLOAD:
+            self._status_label = "文件生成中"
+            return
         self._status_label = "思考中"
 
     def _clear_line(self) -> None:
@@ -148,6 +167,7 @@ async def chat_with_feedback(
     raw_args: str | None = None,
     mention_contexts: list | None = None,
     approval_resolver: "Callable[[PendingApproval], Any] | None" = None,
+    images: list[dict] | None = None,
 ) -> tuple[str, bool]:
     """统一封装 chat 调用，增加等待期动态状态反馈。返回 (reply_text, streamed)。"""
     from excelmanus.cli.prompt import is_interactive_terminal
@@ -166,6 +186,8 @@ async def chat_with_feedback(
             chat_kwargs["mention_contexts"] = mention_contexts
         if approval_resolver is not None:
             chat_kwargs["approval_resolver"] = approval_resolver
+        if images:
+            chat_kwargs["images"] = images
         reply = _reply_text(await engine.chat(user_input, **chat_kwargs))
         streamed = renderer._streaming_text or renderer._streaming_thinking
         renderer.finish_streaming()
@@ -184,6 +206,7 @@ async def run_chat_turn(
     mention_contexts: list | None = None,
     error_label: str = "处理请求",
     approval_resolver: "Callable[[PendingApproval], Any] | None" = None,
+    images: list[dict] | None = None,
 ) -> tuple[str, bool] | None:
     """统一回合执行入口：使用 StreamRenderer 渲染，调用引擎。"""
     renderer = StreamRenderer(console)
@@ -197,6 +220,7 @@ async def run_chat_turn(
             slash_command=slash_command,
             raw_args=raw_args,
             mention_contexts=mention_contexts,
+            images=images,
             approval_resolver=approval_resolver,
         )
 
@@ -712,11 +736,37 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
         except Exception as exc:
             logger.debug("@ 提及解析失败，跳过上下文注入：%s", exc)
 
+        # ── @img 图片附件解析 ──
+        cli_images: list[dict] | None = None
+        try:
+            from excelmanus.cli.commands import parse_image_attachments
+            clean_text, img_paths = parse_image_attachments(user_input)
+            if img_paths:
+                import base64 as _b64
+                import mimetypes as _mt
+                from pathlib import Path as _P
+                ws = _P(engine._config.workspace_root)
+                loaded: list[dict] = []
+                for p in img_paths:
+                    fp = _P(p) if _P(p).is_absolute() else ws / p
+                    if not fp.is_file():
+                        console.print(f"  [{THEME.GOLD}]⚠ 图片文件不存在: {p}[/{THEME.GOLD}]")
+                        continue
+                    mime = _mt.guess_type(fp.name)[0] or "image/png"
+                    data = _b64.b64encode(fp.read_bytes()).decode()
+                    loaded.append({"data": data, "media_type": mime})
+                if loaded:
+                    cli_images = loaded
+                    user_input = clean_text
+        except Exception as exc:
+            logger.debug("@img 解析失败：%s", exc)
+
         try:
             await run_chat_turn(
                 console, engine,
                 user_input=user_input,
                 mention_contexts=mention_contexts,
+                images=cli_images,
                 error_label="处理请求",
                 approval_resolver=_approval_resolver,
             )

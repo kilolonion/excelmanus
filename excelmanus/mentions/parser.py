@@ -80,7 +80,7 @@ class MentionParser:
         for m in _MENTION_PATTERN.finditer(text):
             kind = m.group(1).lower()
             value = m.group(2)
-            range_spec = m.group(3)  # None if no [range] suffix
+            range_spec = m.group(3)  # 无 [range] 后缀时为 None
             mentions.append(
                 Mention(
                     kind=kind,

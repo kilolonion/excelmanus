@@ -47,7 +47,7 @@ _PHASE_INDEX = {
     PipelinePhase.VERIFICATION: 3,
 }
 
-# JSON fence 提取正则
+# JSON 代码块提取用正则
 _JSON_FENCE_RE = _re.compile(r"```(?:json)?\s*(.*?)```", _re.DOTALL | _re.IGNORECASE)
 
 
@@ -103,7 +103,7 @@ def compute_phase_diff(
             diff["changes"].append({"type": "add_sheet", "sheet": sheet.name})
             continue
 
-        # cells diff
+        # 单元格差异
         prev_cells = {c.address.upper(): c for c in prev_sheet.cells}
         curr_cells = {c.address.upper(): c for c in sheet.cells}
         added_cells = set(curr_cells) - set(prev_cells)
@@ -119,13 +119,13 @@ def compute_phase_diff(
                     "new_style": cc.style_id,
                 })
 
-        # merges diff
+        # 合并区域差异
         prev_merges = {m.range for m in prev_sheet.merged_ranges}
         curr_merges = {m.range for m in sheet.merged_ranges}
         added_merges = curr_merges - prev_merges
         removed_merges = prev_merges - curr_merges
 
-        # styles diff
+        # 样式差异
         prev_style_ids = set(prev_sheet.styles.keys())
         curr_style_ids = set(sheet.styles.keys())
         added_styles = curr_style_ids - prev_style_ids
