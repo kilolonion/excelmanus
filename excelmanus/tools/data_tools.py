@@ -15,7 +15,7 @@ _builtin_range = range  # 保存内置 range，避免被同名函数参数遮蔽
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
-from excelmanus.tools._helpers import get_worksheet, resolve_sheet_name
+from excelmanus.tools._helpers import check_file_exists, get_worksheet, resolve_sheet_name
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.data")
@@ -641,6 +641,10 @@ def read_excel(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    not_found = check_file_exists(safe_path, file_path, guard)
+    if not_found is not None:
+        return not_found
 
     # ── range 模式：精确读取指定坐标范围 ──
     if range is not None:
