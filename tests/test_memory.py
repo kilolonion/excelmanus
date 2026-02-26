@@ -334,7 +334,7 @@ class TestMultimodalMemory:
 
 # ---------------------------------------------------------------------------
 # Property 7：对话截断属性测试
-# **Validates: Requirements 1.8**
+# **验证：需求 1.8**
 # ---------------------------------------------------------------------------
 
 # 生成随机消息内容的策略
@@ -359,7 +359,7 @@ def test_property_truncation_preserves_system_and_recent(
 ) -> None:
     """Property 7：截断后 system prompt 始终在首位，且最近消息被保留。
 
-    **Validates: Requirements 1.8**
+    **验证：需求 1.8**
     """
     system_tokens = TokenCounter.count_message(
         {"role": "system", "content": _DEFAULT_SYSTEM_PROMPT}
@@ -426,7 +426,7 @@ def test_property_truncation_no_orphan_tool_results(
 ) -> None:
     """Property 7 补充：截断后不存在孤立的 tool result 消息。
 
-    **Validates: Requirements 1.8**
+    **验证：需求 1.8**
     """
     config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
     mem = ConversationMemory(config)

@@ -7,7 +7,7 @@
 注意：Property 6/7/8（算法打分相关）已随 LLM-Native 路由重构删除，
 对应的 _score_description、_tokenize、_score_triggers 方法已不存在。
 
-**Validates: Requirements 7.2**
+**验证：需求 7.2**
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _cors_origin_list = st.lists(_cors_origin, min_size=1, max_size=5)
 # ---------------------------------------------------------------------------
 # Property 9：CORS 环境变量逗号分隔解析
 # Feature: v3-post-refactor-cleanup, Property 9: CORS 环境变量逗号分隔解析
-# **Validates: Requirements 7.2**
+# **验证：需求 7.2**
 # ---------------------------------------------------------------------------
 
 
@@ -41,7 +41,7 @@ def test_property_9_cors_comma_separated_parsing(origins: list[str]) -> None:
     将其用逗号连接后通过 CORS 解析逻辑处理，结果应等于原始列表
     （去除首尾空白后）。
 
-    **Validates: Requirements 7.2**
+    **验证：需求 7.2**
     """
     # 用逗号连接
     raw_value = ",".join(origins)

@@ -119,7 +119,7 @@ def serialize_confirmation(record: ConfirmationRecord | ConfirmationProjection, 
 
 
 def parse_confirmation(text: str) -> ConfirmationRecord | None:
-    """解析确认文本，便于 round-trip 校验。"""
+    """解析确认文本，便于往返校验。"""
     normalized = str(text or "").strip()
     if not normalized:
         return None

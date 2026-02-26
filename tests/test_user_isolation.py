@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 
-# ── UserContext tests ─────────────────────────────────────
+# ── UserContext 测试 ─────────────────────────────────────
 
 
 class TestUserContext:
@@ -41,11 +41,11 @@ class TestUserContext:
             ctx.user_id = "u2"  # type: ignore[misc]
 
 
-# ── UserConfigStore isolation tests ──────────────────────
+# ── UserConfigStore 隔离测试 ─────────────────────────────
 
 
 class TestUserConfigStoreIsolation:
-    """Verify that UserConfigStore isolates active_model per user."""
+    """验证 UserConfigStore 按用户隔离 active_model。"""
 
     def _make_db(self, db_path: str) -> "ConnectionAdapter":
         from excelmanus.db_adapter import create_sqlite_adapter
@@ -88,11 +88,11 @@ class TestUserConfigStoreIsolation:
         assert store_anon.get_active_model() == "gpt4"
 
 
-# ── Store user_id filtering tests ────────────────────────
+# ── 各 Store 按 user_id 过滤测试 ──────────────────────────
 
 
 class TestApprovalStoreIsolation:
-    """Verify ApprovalStore filters by user_id."""
+    """验证 ApprovalStore 按 user_id 过滤。"""
 
     def test_approvals_filtered_by_user(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -133,7 +133,7 @@ class TestApprovalStoreIsolation:
 
 
 class TestToolCallStoreIsolation:
-    """Verify ToolCallStore logs with user_id."""
+    """验证 ToolCallStore 记录日志时包含 user_id。"""
 
     def test_log_includes_user_id(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -159,7 +159,7 @@ class TestToolCallStoreIsolation:
 
 
 class TestLLMCallStoreIsolation:
-    """Verify LLMCallStore logs with user_id."""
+    """验证 LLMCallStore 记录日志时包含 user_id。"""
 
     def test_log_includes_user_id(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -186,11 +186,11 @@ class TestLLMCallStoreIsolation:
         db.close()
 
 
-# ── ScopedDatabase tests ─────────────────────────────────
+# ── ScopedDatabase 测试 ───────────────────────────────────
 
 
 class TestScopedDatabase:
-    """Verify ScopedDatabase creates per-user DB files for SQLite."""
+    """验证 ScopedDatabase 为 SQLite 创建按用户隔离的数据库文件。"""
 
     def test_sqlite_creates_per_user_db(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -225,11 +225,11 @@ class TestScopedDatabase:
         shared_db.close()
 
 
-# ── Guard contextvar isolation ────────────────────────────
+# ── Guard contextvar 隔离测试 ─────────────────────────────
 
 
 class TestGuardContextVar:
-    """Verify FileAccessGuard contextvar isolation."""
+    """验证 FileAccessGuard 的 contextvar 隔离。"""
 
     def test_contextvar_takes_priority(self, tmp_path: Path) -> None:
         from excelmanus.security import FileAccessGuard
@@ -247,11 +247,11 @@ class TestGuardContextVar:
         assert get_guard() is None
 
 
-# ── Database migration v10 tests ──────────────────────────
+# ── 数据库迁移 v10 测试 ───────────────────────────────────
 
 
 class TestMigrationV10:
-    """Verify that migration v10 adds user_id columns to all required tables."""
+    """验证迁移 v10 为所有必需表添加 user_id 列。"""
 
     def test_migration_adds_user_id_columns(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -270,11 +270,11 @@ class TestMigrationV10:
         db.close()
 
 
-# ── System mode fallback cache isolation ──────────────────
+# ── 系统模式回退缓存隔离测试 ──────────────────────────────
 
 
 class TestSystemModeFallbackCache:
-    """Verify class-level cache is keyed by (model, base_url)."""
+    """验证类级别缓存以 (model, base_url) 为键。"""
 
     def test_cache_keyed_by_model(self) -> None:
         from excelmanus.engine import AgentEngine

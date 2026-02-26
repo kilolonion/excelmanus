@@ -2,7 +2,7 @@
 
 覆盖 Parser 基础解析、边界情况、@img 兼容语法等场景。
 
-**Validates: Requirements 1.1–1.8, 8.1**
+**验证：需求 1.1–1.8, 8.1**
 """
 
 from __future__ import annotations
@@ -254,7 +254,7 @@ class TestRangeSpecParsing:
 
 # ══════════════════════════════════════════════════════════
 # 单元测试：MentionResolver
-# **Validates: Requirements 2.1–2.6, 3.1–3.5, 4.1, 4.5, 5.1, 5.2, 9.1–9.4**
+# **验证：需求 2.1–2.6, 3.1–3.5, 4.1, 4.5, 5.1, 5.2, 9.1–9.4**
 # ══════════════════════════════════════════════════════════
 
 import asyncio
@@ -1009,7 +1009,7 @@ class TestSkillMentionRouting:
 
 # ══════════════════════════════════════════════════════════
 # 单元测试：MentionCompleter
-# **Validates: Requirements 7.1–7.8, 8.1–8.3**
+# **验证：需求 7.1–7.8, 8.1–8.3**
 # ══════════════════════════════════════════════════════════
 
 from prompt_toolkit.completion import CompleteEvent

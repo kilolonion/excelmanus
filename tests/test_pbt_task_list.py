@@ -5,7 +5,7 @@
 使用 hypothesis 验证 TaskList 序列化往返、初始状态、状态转换合法性、
 进度摘要不变量、task_create 有效性、越界索引错误。
 
-**Validates: Requirements 1.1, 1.2, 1.4, 1.5, 1.6, 2.3, 2.4, 6.1, 6.2, 6.3, 6.4**
+**验证：需求 1.1, 1.2, 1.4, 1.5, 1.6, 2.3, 2.4, 6.1, 6.2, 6.3, 6.4**
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ _task_list_strategy = st.builds(
 # ---------------------------------------------------------------------------
 # Property 1: TaskList 序列化往返一致性
 # Feature: agent-task-list, Property 1: TaskList 序列化往返一致性
-# **Validates: Requirements 6.3, 6.1, 6.2, 6.4, 1.1, 1.2**
+# **验证：需求 6.3, 6.1, 6.2, 6.4, 1.1, 1.2**
 # ---------------------------------------------------------------------------
 
 
@@ -70,7 +70,7 @@ def test_pbt_property_1_task_list_round_trip(task_list: TaskList) -> None:
     """Property 1：对于任意合法的 TaskList 实例，
     TaskList.from_dict(task_list.to_dict()) 应产生等价的 TaskList。
 
-    **Validates: Requirements 6.3, 6.1, 6.2, 6.4, 1.1, 1.2**
+    **验证：需求 6.3, 6.1, 6.2, 6.4, 1.1, 1.2**
     """
     serialized = task_list.to_dict()
     restored = TaskList.from_dict(serialized)
@@ -95,7 +95,7 @@ def test_pbt_property_1_task_list_round_trip(task_list: TaskList) -> None:
 # ---------------------------------------------------------------------------
 # Property 2: 新建 TaskList 所有项初始为 pending
 # Feature: agent-task-list, Property 2: 新建 TaskList 所有项初始为 pending
-# **Validates: Requirements 1.4**
+# **验证：需求 1.4**
 # ---------------------------------------------------------------------------
 
 # 非空子任务标题列表
@@ -109,7 +109,7 @@ def test_pbt_property_2_new_task_list_all_pending(
     """Property 2：对于任意非空的子任务标题列表，
     通过 TaskStore.create() 创建的 TaskList 中，所有 TaskItem 的 status 均为 PENDING。
 
-    **Validates: Requirements 1.4**
+    **验证：需求 1.4**
     """
     store = TaskStore()
     task_list = store.create(title, subtask_titles)
@@ -124,7 +124,7 @@ def test_pbt_property_2_new_task_list_all_pending(
 # ---------------------------------------------------------------------------
 # Property 3: 状态转换合法性
 # Feature: agent-task-list, Property 3: 状态转换合法性
-# **Validates: Requirements 1.5**
+# **验证：需求 1.5**
 # ---------------------------------------------------------------------------
 
 # 合法转换集合
@@ -146,7 +146,7 @@ def test_pbt_property_3_state_transition_validity(
     当且仅当 (当前状态, 目标状态) 属于合法转换集合时，transition() 调用成功；
     否则抛出 ValueError。
 
-    **Validates: Requirements 1.5**
+    **验证：需求 1.5**
     """
     item = TaskItem(title="测试任务", status=current_status)
     is_legal = (current_status, target_status) in _LEGAL_TRANSITIONS
@@ -164,7 +164,7 @@ def test_pbt_property_3_state_transition_validity(
 # ---------------------------------------------------------------------------
 # Property 4: 进度摘要不变量
 # Feature: agent-task-list, Property 4: 进度摘要不变量
-# **Validates: Requirements 1.6**
+# **验证：需求 1.6**
 # ---------------------------------------------------------------------------
 
 
@@ -173,7 +173,7 @@ def test_pbt_property_4_progress_summary_invariant(task_list: TaskList) -> None:
     """Property 4：对于任意 TaskList，progress_summary() 返回的各状态计数之和
     等于 len(items)，且每个状态的计数等于 items 中处于该状态的实际数量。
 
-    **Validates: Requirements 1.6**
+    **验证：需求 1.6**
     """
     summary = task_list.progress_summary()
 
@@ -194,7 +194,7 @@ def test_pbt_property_4_progress_summary_invariant(task_list: TaskList) -> None:
 # ---------------------------------------------------------------------------
 # Property 5: task_create 工具产生有效 TaskList
 # Feature: agent-task-list, Property 5: task_create 工具产生有效 TaskList
-# **Validates: Requirements 2.3**
+# **验证：需求 2.3**
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +206,7 @@ def test_pbt_property_5_task_create_produces_valid_task_list(
     调用 task_create() 后，TaskStore.current 不为 None，
     且其 title 与传入标题一致，items 数量与子任务列表长度一致。
 
-    **Validates: Requirements 2.3**
+    **验证：需求 2.3**
     """
     # 每次测试使用独立的 TaskStore
     store = TaskStore()
@@ -229,7 +229,7 @@ def test_pbt_property_5_task_create_produces_valid_task_list(
 # ---------------------------------------------------------------------------
 # Property 6: 越界索引抛异常
 # Feature: agent-task-list, Property 6: 越界索引抛异常
-# **Validates: Requirements 2.4**
+# **验证：需求 2.4**
 # ---------------------------------------------------------------------------
 
 # 生成越界索引：负数或 >= N
@@ -253,7 +253,7 @@ def test_pbt_property_6_out_of_bounds_index_raises(
     调用 task_update() 时传入 index < 0 或 index ≥ N，
     应抛出 IndexError。
 
-    **Validates: Requirements 2.4**
+    **验证：需求 2.4**
     """
     store = TaskStore()
     task_tools.init_store(store)
@@ -274,7 +274,7 @@ def test_pbt_property_6_out_of_bounds_index_raises(
 # ---------------------------------------------------------------------------
 # Property 8: ToolCallEvent 任务字段序列化完整性
 # Feature: agent-task-list, Property 8: ToolCallEvent 任务字段序列化完整性
-# **Validates: Requirements 5.3, 3.4**
+# **验证：需求 5.3, 3.4**
 # ---------------------------------------------------------------------------
 
 from excelmanus.events import ToolCallEvent, EventType
@@ -319,7 +319,7 @@ def test_pbt_property_8_tool_call_event_task_fields_serialization(
     """Property 8：对于任意设置了 task_list_data 的 ToolCallEvent 实例，
     to_dict() 的返回字典应包含 task_list_data、task_index、task_status、task_result 字段。
 
-    **Validates: Requirements 5.3, 3.4**
+    **验证：需求 5.3, 3.4**
     """
     event = ToolCallEvent(
         event_type=EventType.TASK_LIST_CREATED,
@@ -347,7 +347,7 @@ def test_pbt_property_8_tool_call_event_task_fields_serialization(
 # ---------------------------------------------------------------------------
 # Property 7: 渲染输出包含正确状态图标
 # Feature: agent-task-list, Property 7: 渲染输出包含正确状态图标
-# **Validates: Requirements 4.1, 4.2, 4.3**
+# **验证：需求 4.1, 4.2, 4.3**
 # ---------------------------------------------------------------------------
 
 import io
@@ -383,7 +383,7 @@ def test_pbt_property_7_render_output_contains_correct_status_icons(
     StreamRenderer 渲染 TASK_LIST_CREATED 事件时，输出中每个 TaskItem
     对应的行应包含与其状态匹配的图标（pending→⬜, in_progress→🔄, completed→✅, failed→❌）。
 
-    **Validates: Requirements 4.1, 4.2, 4.3**
+    **验证：需求 4.1, 4.2, 4.3**
     """
     # 使用 StringIO 捕获渲染输出（宽终端，避免窄终端紧凑格式干扰）
     buf = io.StringIO()

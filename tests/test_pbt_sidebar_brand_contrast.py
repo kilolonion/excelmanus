@@ -7,7 +7,7 @@ Property 1: 品牌色对比度符合 WCAG AA 标准
 验证品牌色（--em-primary 及其变体）作为背景色时，
 与白色前景文字的对比度比值 >= 4.5:1（WCAG AA 标准）。
 
-**Validates: Requirements 6.2**
+**验证：需求 6.2**
 """
 
 from hypothesis import given, settings

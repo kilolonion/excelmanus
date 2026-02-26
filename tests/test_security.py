@@ -185,7 +185,7 @@ path_traversal_st = st.one_of(
 class TestProperty19FileAccessBoundary:
     """Property 19：路径越界或路径穿越必须被拒绝，并抛出 SecurityViolationError。
 
-    **Validates: Requirements 8.1, 8.2, 6.8**
+    **验证：需求 8.1, 8.2, 6.8**
     """
 
     @given(path=path_traversal_st)

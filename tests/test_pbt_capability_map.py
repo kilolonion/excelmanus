@@ -5,7 +5,7 @@
 使用 hypothesis 验证能力图谱的完整性（P1）、权限一致性（P2）、
 MCP 检测双向正确性（P3）。
 
-**Validates: Requirements 1.1–1.6, 11.1, 11.2**
+**验证：需求 1.1–1.6, 11.1, 11.2**
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ _mcp_name_strategy = st.text(
 # ---------------------------------------------------------------------------
 # Property 1: 能力图谱完整性
 # Feature: capability-introspection, Property 1
-# **Validates: Requirements 1.1, 1.5**
+# **验证：需求 1.1, 1.5**
 # ---------------------------------------------------------------------------
 
 
@@ -96,7 +96,7 @@ def test_pbt_property_1_capability_map_completeness(pair: tuple[str, str]) -> No
     """Property 1：对于 TOOL_CATEGORIES 中的任意 (category, tool)，
     该工具必须出现在 generate() 输出中，且附带其描述。
 
-    **Validates: Requirements 1.1, 1.5**
+    **验证：需求 1.1, 1.5**
     """
     category, tool_name = pair
     reg = _make_registry(_all_categorized_tools())
@@ -115,7 +115,7 @@ def test_pbt_property_1_capability_map_completeness(pair: tuple[str, str]) -> No
 # ---------------------------------------------------------------------------
 # Property 2: 权限标注一致性
 # Feature: capability-introspection, Property 2
-# **Validates: Requirements 1.2, 1.3**
+# **验证：需求 1.2, 1.3**
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ def test_pbt_property_1_capability_map_completeness(pair: tuple[str, str]) -> No
 def test_pbt_property_2_permission_consistency(tool_name: str) -> None:
     """Property 2：对于任意分类内工具，其权限图标必须与 policy 分层一致。
 
-    **Validates: Requirements 1.2, 1.3**
+    **验证：需求 1.2, 1.3**
     """
     reg = _make_registry(_all_categorized_tools())
     gen = CapabilityMapGenerator(reg)
@@ -150,7 +150,7 @@ def test_pbt_property_2_permission_consistency(tool_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 3: MCP 检测双向正确性
 # Feature: capability-introspection, Property 3
-# **Validates: Requirements 1.4, 11.1, 11.2**
+# **验证：需求 1.4, 11.1, 11.2**
 # ---------------------------------------------------------------------------
 
 
@@ -161,7 +161,7 @@ def test_pbt_property_3_mcp_detection_bidirectional(mcp_name: str) -> None:
     正向：注册一个不在分类中的工具 → 应被检测为 MCP
     反向：分类内工具 → 不应被检测为 MCP
 
-    **Validates: Requirements 1.4, 11.1, 11.2**
+    **验证：需求 1.4, 11.1, 11.2**
     """
     categorized = _all_categorized_tools()
     all_tools = categorized + [mcp_name]
@@ -182,7 +182,7 @@ def test_pbt_property_3_mcp_detection_bidirectional(mcp_name: str) -> None:
 def test_pbt_property_3_categorized_not_mcp(tool_name: str) -> None:
     """Property 3 反向：分类内工具不应被检测为 MCP。
 
-    **Validates: Requirements 11.2**
+    **验证：需求 11.2**
     """
     reg = _make_registry(_all_categorized_tools())
     gen = CapabilityMapGenerator(reg)
@@ -193,7 +193,7 @@ def test_pbt_property_3_categorized_not_mcp(tool_name: str) -> None:
 # ══════════════════════════════════════════════════════════
 # Property 4–10: introspect_capability 工具属性测试
 # Feature: capability-introspection, Property 4-10
-# **Validates: Requirements 3.1–3.3, 4.1–4.3, 5.1–5.3, 6.1–6.4, 7.1–7.2, 8.1–8.3, 12.1**
+# **验证：需求 3.1–3.3, 4.1–4.3, 5.1–5.3, 6.1–6.4, 7.1–7.2, 8.1–8.3, 12.1**
 # ══════════════════════════════════════════════════════════
 
 import json
@@ -272,7 +272,7 @@ _nonexistent_category_strategy = st.text(
 # ---------------------------------------------------------------------------
 # Property 4: tool_detail 查询正确性
 # Feature: capability-introspection, Property 4
-# **Validates: Requirements 4.1, 4.2**
+# **验证：需求 4.1, 4.2**
 # ---------------------------------------------------------------------------
 
 
@@ -281,7 +281,7 @@ def test_pbt_property_4_tool_detail_correctness(tool_name: str) -> None:
     """Property 4：对于任意已注册工具，tool_detail 返回的结果应包含
     与 ToolDef.input_schema 一致的参数 schema。
 
-    **Validates: Requirements 4.1, 4.2**
+    **验证：需求 4.1, 4.2**
     """
     reg = _ensure_registry()
     result = introspect_capability("tool_detail", tool_name)
@@ -304,7 +304,7 @@ def test_pbt_property_4_tool_detail_correctness(tool_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 5: category_tools 查询完整性
 # Feature: capability-introspection, Property 5
-# **Validates: Requirements 5.1, 5.2**
+# **验证：需求 5.1, 5.2**
 # ---------------------------------------------------------------------------
 
 
@@ -313,7 +313,7 @@ def test_pbt_property_5_category_tools_completeness(category: str) -> None:
     """Property 5：对于任意有效分类，category_tools 返回的工具集合
     应与 TOOL_CATEGORIES[category] 一致。
 
-    **Validates: Requirements 5.1, 5.2**
+    **验证：需求 5.1, 5.2**
     """
     _ensure_registry()
     result = introspect_capability("category_tools", category)
@@ -328,7 +328,7 @@ def test_pbt_property_5_category_tools_completeness(category: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 6: can_i_do 自匹配性
 # Feature: capability-introspection, Property 6
-# **Validates: Requirement 6.4**
+# **验证：需求 6.4**
 # ---------------------------------------------------------------------------
 
 
@@ -337,7 +337,7 @@ def test_pbt_property_6_can_i_do_self_match(tool_name: str) -> None:
     """Property 6：对于任意有描述的工具，使用其完整描述作为 can_i_do 查询
     必须在匹配结果中包含该工具。
 
-    **Validates: Requirement 6.4**
+    **验证：需求 6.4**
     """
     _ensure_registry()
     desc = TOOL_SHORT_DESCRIPTIONS[tool_name]
@@ -352,7 +352,7 @@ def test_pbt_property_6_can_i_do_self_match(tool_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 7: introspect_capability 纯查询无副作用
 # Feature: capability-introspection, Property 7
-# **Validates: Requirements 8.1, 8.2, 8.3**
+# **验证：需求 8.1, 8.2, 8.3**
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +361,7 @@ def test_pbt_property_7_no_side_effects(query_type: str, query: str) -> None:
     """Property 7：对于任意有效 (query_type, query) 对，调用 introspect_capability
     不应修改 ToolRegistry 状态，且必须返回非空字符串。
 
-    **Validates: Requirements 8.1, 8.2, 8.3**
+    **验证：需求 8.1, 8.2, 8.3**
     """
     reg = _ensure_registry()
     tools_before = set(reg.get_tool_names())
@@ -380,7 +380,7 @@ def test_pbt_property_7_no_side_effects(query_type: str, query: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 9: can_i_do 结果上限
 # Feature: capability-introspection, Property 9
-# **Validates: Requirement 6.2**
+# **验证：需求 6.2**
 # ---------------------------------------------------------------------------
 
 
@@ -391,7 +391,7 @@ def test_pbt_property_9_can_i_do_max_results(query: str) -> None:
     can_i_do 返回多层结果（内置工具/扩展能力/子代理/MCP），
     每层各自限制 _MAX_RESULTS (5) 条。
 
-    **Validates: Requirement 6.2**
+    **验证：需求 6.2**
     """
     _ensure_registry()
     result = introspect_capability("can_i_do", query)
@@ -418,7 +418,7 @@ def test_pbt_property_9_can_i_do_max_results(query: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 10: 不存在工具/分类的错误处理
 # Feature: capability-introspection, Property 10
-# **Validates: Requirements 4.3, 5.3**
+# **验证：需求 4.3, 5.3**
 # ---------------------------------------------------------------------------
 
 
@@ -426,7 +426,7 @@ def test_pbt_property_9_can_i_do_max_results(query: str) -> None:
 def test_pbt_property_10_nonexistent_tool_detail(name: str) -> None:
     """Property 10a：对于任意不存在的工具名，tool_detail 应返回"工具不存在"提示。
 
-    **Validates: Requirement 4.3**
+    **验证：需求 4.3**
     """
     _ensure_registry()
     result = introspect_capability("tool_detail", name)
@@ -439,7 +439,7 @@ def test_pbt_property_10_nonexistent_tool_detail(name: str) -> None:
 def test_pbt_property_10_nonexistent_category(name: str) -> None:
     """Property 10b：对于任意不存在的分类名，category_tools 应返回所有可用分类名。
 
-    **Validates: Requirement 5.3**
+    **验证：需求 5.3**
     """
     _ensure_registry()
     result = introspect_capability("category_tools", name)

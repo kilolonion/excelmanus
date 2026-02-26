@@ -1,6 +1,6 @@
 """工具注册中心测试：ToolRegistry 属性测试 + 废弃模块清理测试。
 
-**Validates: Requirements 2.1, 2.2, 2.5, 4.1, 4.2, 4.3**
+**验证：需求 2.1, 2.2, 2.5, 4.1, 4.2, 4.3**
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class TestProperty8ToolRegistration:
     """Property 8：重复工具名注册必须报错；schema 数量等于工具总数；
     schema 必须含 name/description/parameters。
 
-    **Validates: Requirements 2.1, 2.2, 2.5**
+    **验证：需求 2.1, 2.2, 2.5**
     """
 
     @given(
@@ -106,7 +106,7 @@ class TestDeprecatedSkillsModuleRemoved:
 class TestToolRegistryUnit:
     """ToolRegistry 核心方法单元测试。
 
-    **Validates: Requirements 2.1, 2.2, 2.5**
+    **验证：需求 2.1, 2.2, 2.5**
     """
 
     def test_register_and_get_tools(self) -> None:

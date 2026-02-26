@@ -199,6 +199,17 @@ class SubagentExecutor:
                         continue
 
                     observed_files.update(self._extract_excel_paths_from_arguments(args))
+                    self._emit_safe(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.SUBAGENT_TOOL_START,
+                            subagent_name=config.name,
+                            subagent_conversation_id=conversation_id,
+                            tool_name=tool_name,
+                            arguments=self._summarize_args(tool_name, args),
+                            subagent_tool_index=tool_calls,
+                        ),
+                    )
                     result = await self._execute_tool(
                         config=config,
                         registry=filtered_registry,
@@ -216,6 +227,19 @@ class SubagentExecutor:
                     )
                     content = result.result[:max_chars]
                     memory.add_tool_result(call_id, content)
+                    self._emit_safe(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.SUBAGENT_TOOL_END,
+                            subagent_name=config.name,
+                            subagent_conversation_id=conversation_id,
+                            tool_name=tool_name,
+                            success=result.success,
+                            result=result.result[:300] if result.result else "",
+                            error=result.error[:200] if result.error else None,
+                            subagent_tool_index=tool_calls,
+                        ),
+                    )
                     observed_source = result.raw_result if result.raw_result is not None else result.result
                     observed_files.update(
                         self._extract_excel_paths_from_tool_result(
@@ -343,6 +367,111 @@ class SubagentExecutor:
             observed_files=sorted(observed_files),
         )
 
+    async def _execute_with_probe(
+        self,
+        *,
+        registry: FilteredToolRegistry,
+        persistent_memory: "PersistentMemory | None",
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: list[str],
+        tool_result_enricher: ToolResultEnricher | None,
+        log_prefix: str = "subagent unknown",
+    ) -> _ExecResult:
+        """探针→执行→错误检测→探针对比→截断→增强 的通用流水线。
+
+        MCP-audit 路径和无审计路径共用此方法，仅 log_prefix 不同。
+        """
+        # ── 前置探针（write_effect 未知时收集工作区快照） ──
+        probe_before: dict[str, tuple[int, int]] | None = None
+        probe_before_partial = False
+        tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
+        write_effect = (
+            getattr(tool_def, "write_effect", "unknown")
+            if tool_def is not None
+            else "unknown"
+        )
+        if isinstance(write_effect, str) and write_effect.strip().lower() == "unknown":
+            try:
+                probe_before, probe_before_partial = collect_workspace_mtime_index(
+                    self._parent_config.workspace_root
+                )
+            except Exception:
+                logger.debug("%s 探针前置快照失败", log_prefix, exc_info=True)
+
+        # ── 执行工具 ──
+        try:
+            raw_result = await self._call_tool_with_memory_context(
+                registry=registry,
+                persistent_memory=persistent_memory,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_scope=tool_scope,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = f"工具执行错误: {exc}"
+            return _ExecResult(success=False, result=error, error=str(exc))
+
+        raw_text = str(raw_result)
+        struct_err = self._check_structured_error(raw_text)
+        if struct_err is not None:
+            return struct_err
+
+        # ── 后置探针对比 ──
+        probed_changes: list[str] = []
+        if probe_before is not None:
+            try:
+                probe_after, probe_after_partial = collect_workspace_mtime_index(
+                    self._parent_config.workspace_root
+                )
+                if has_workspace_mtime_changes(probe_before, probe_after):
+                    probed_changes = diff_workspace_mtime_paths(
+                        probe_before, probe_after,
+                    )
+                    logger.info(
+                        "%s 写入探针命中: tool=%s partial_before=%s partial_after=%s changed_paths=%d",
+                        log_prefix,
+                        tool_name,
+                        probe_before_partial,
+                        probe_after_partial,
+                        len(probed_changes),
+                    )
+            except Exception:
+                logger.debug("%s 探针后置快照失败", log_prefix, exc_info=True)
+
+        # ── 截断 + 增强 ──
+        enriched = self._apply_tool_result_enricher(
+            tool_name=tool_name,
+            arguments=arguments,
+            text=self._truncate_tool_result(
+                registry=registry,
+                tool_name=tool_name,
+                text=raw_text,
+            ),
+            success=True,
+            tool_result_enricher=tool_result_enricher,
+        )
+        return _ExecResult(
+            success=True,
+            result=enriched,
+            file_changes=probed_changes or None,
+            raw_result=raw_text,
+        )
+
+    @staticmethod
+    def _check_structured_error(raw_text: str) -> _ExecResult | None:
+        """检测 registry 层返回的结构化错误 JSON，命中时返回失败结果。"""
+        if not raw_text.startswith('{"status": "error"'):
+            return None
+        try:
+            err = json.loads(raw_text)
+            if isinstance(err, dict) and err.get("status") == "error":
+                msg = err.get("message") or raw_text
+                return _ExecResult(success=False, result=raw_text, error=msg)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return None
+
     @staticmethod
     def _emit_safe(on_event: EventCallback | None, event: ToolCallEvent) -> None:
         if on_event is None:
@@ -351,6 +480,21 @@ class SubagentExecutor:
             on_event(event)
         except Exception:  # noqa: BLE001
             logger.warning("子代理事件回调异常，已忽略。", exc_info=True)
+
+    @staticmethod
+    def _summarize_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """为前端展示构建紧凑的参数摘要字典。"""
+        summary: dict[str, Any] = {}
+        for key in ("sheet", "range", "file_path", "path"):
+            if key in args:
+                val = args[key]
+                if isinstance(val, str) and len(val) > 80:
+                    val = val[:77] + "..."
+                summary[key] = val
+        if tool_name == "run_code" and isinstance(args.get("code"), str):
+            first_line = args["code"].split("\n", 1)[0][:60]
+            summary["code_preview"] = first_line + ("…" if len(args["code"]) > 60 else "")
+        return summary
 
     def _build_system_prompt(
         self,
@@ -456,80 +600,17 @@ class SubagentExecutor:
             approval_id = self._approval.new_approval_id()
             created_at_utc = self._approval.utc_now()
 
-            # MCP 工具不做本地文件快照审计（由远端系统自行审计）。
+            # MCP 工具不做本地文件快照审计（由远端系统自行审计），
+            # 使用通用 probe→execute→enrich 流水线。
             if self._approval.is_mcp_tool(tool_name):
-                mcp_probe_before: dict[str, tuple[int, int]] | None = None
-                mcp_probe_before_partial = False
-                mcp_tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
-                mcp_effect = (
-                    getattr(mcp_tool_def, "write_effect", "unknown")
-                    if mcp_tool_def is not None
-                    else "unknown"
-                )
-                if isinstance(mcp_effect, str) and mcp_effect.strip().lower() == "unknown":
-                    try:
-                        mcp_probe_before, mcp_probe_before_partial = collect_workspace_mtime_index(
-                            self._parent_config.workspace_root
-                        )
-                    except Exception:
-                        logger.debug("subagent mcp unknown 探针前置快照失败", exc_info=True)
-                try:
-                    raw_result = await self._call_tool_with_memory_context(
-                        registry=registry,
-                        persistent_memory=persistent_memory,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        tool_scope=tool_scope,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    error = f"工具执行错误: {exc}"
-                    return _ExecResult(success=False, result=error, error=str(exc))
-                raw_text = str(raw_result)
-                # ── 检测 registry 层返回的结构化错误 JSON ──
-                if raw_text.startswith('{"status": "error"'):
-                    try:
-                        _err = json.loads(raw_text)
-                        if isinstance(_err, dict) and _err.get("status") == "error":
-                            _msg = _err.get("message") or raw_text
-                            return _ExecResult(success=False, result=raw_text, error=_msg)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-                probed_changes: list[str] = []
-                if mcp_probe_before is not None:
-                    try:
-                        mcp_probe_after, mcp_probe_after_partial = collect_workspace_mtime_index(
-                            self._parent_config.workspace_root
-                        )
-                        if has_workspace_mtime_changes(mcp_probe_before, mcp_probe_after):
-                            probed_changes = diff_workspace_mtime_paths(
-                                mcp_probe_before,
-                                mcp_probe_after,
-                            )
-                            logger.info(
-                                "subagent mcp unknown 写入探针命中: tool=%s partial_before=%s partial_after=%s changed_paths=%d",
-                                tool_name,
-                                mcp_probe_before_partial,
-                                mcp_probe_after_partial,
-                                len(probed_changes),
-                            )
-                    except Exception:
-                        logger.debug("subagent mcp unknown 探针后置快照失败", exc_info=True)
-                enriched = self._apply_tool_result_enricher(
+                return await self._execute_with_probe(
+                    registry=registry,
+                    persistent_memory=persistent_memory,
                     tool_name=tool_name,
                     arguments=arguments,
-                    text=self._truncate_tool_result(
-                        registry=registry,
-                        tool_name=tool_name,
-                        text=raw_text,
-                    ),
-                    success=True,
+                    tool_scope=tool_scope,
                     tool_result_enricher=tool_result_enricher,
-                )
-                return _ExecResult(
-                    success=True,
-                    result=enriched,
-                    file_changes=probed_changes or None,
-                    raw_result=raw_text,
+                    log_prefix="subagent mcp unknown",
                 )
 
             def _execute(name: str, args: dict[str, Any], scope: list[str]) -> Any:
@@ -572,81 +653,15 @@ class SubagentExecutor:
                 raw_result=result_text,
             )
 
-        probe_before: dict[str, tuple[int, int]] | None = None
-        probe_before_partial = False
-        tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
-        write_effect = (
-            getattr(tool_def, "write_effect", "unknown")
-            if tool_def is not None
-            else "unknown"
+        # 无审计路径：使用通用 probe→execute→enrich 流水线
+        return await self._execute_with_probe(
+            registry=registry,
+            persistent_memory=persistent_memory,
+            tool_name=tool_name,
+            arguments=arguments,
+            tool_scope=tool_scope,
+            tool_result_enricher=tool_result_enricher,
         )
-        if isinstance(write_effect, str) and write_effect.strip().lower() == "unknown":
-            try:
-                probe_before, probe_before_partial = collect_workspace_mtime_index(
-                    self._parent_config.workspace_root
-                )
-            except Exception:
-                logger.debug("subagent unknown 探针前置快照失败", exc_info=True)
-
-        try:
-            raw_result = await self._call_tool_with_memory_context(
-                registry=registry,
-                persistent_memory=persistent_memory,
-                tool_name=tool_name,
-                arguments=arguments,
-                tool_scope=tool_scope,
-            )
-            raw_text = str(raw_result)
-            # ── 检测 registry 层返回的结构化错误 JSON ──
-            if raw_text.startswith('{"status": "error"'):
-                try:
-                    _err = json.loads(raw_text)
-                    if isinstance(_err, dict) and _err.get("status") == "error":
-                        _msg = _err.get("message") or raw_text
-                        return _ExecResult(success=False, result=raw_text, error=_msg)
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-            probed_changes: list[str] = []
-            if probe_before is not None:
-                try:
-                    probe_after, probe_after_partial = collect_workspace_mtime_index(
-                        self._parent_config.workspace_root
-                    )
-                    if has_workspace_mtime_changes(probe_before, probe_after):
-                        probed_changes = diff_workspace_mtime_paths(
-                            probe_before,
-                            probe_after,
-                        )
-                        logger.info(
-                            "subagent unknown 写入探针命中: tool=%s partial_before=%s partial_after=%s changed_paths=%d",
-                            tool_name,
-                            probe_before_partial,
-                            probe_after_partial,
-                            len(probed_changes),
-                        )
-                except Exception:
-                    logger.debug("subagent unknown 探针后置快照失败", exc_info=True)
-            text = self._truncate_tool_result(
-                registry=registry,
-                tool_name=tool_name,
-                text=raw_text,
-            )
-            enriched = self._apply_tool_result_enricher(
-                tool_name=tool_name,
-                arguments=arguments,
-                text=text,
-                success=True,
-                tool_result_enricher=tool_result_enricher,
-            )
-            return _ExecResult(
-                success=True,
-                result=enriched,
-                file_changes=probed_changes or None,
-                raw_result=raw_text,
-            )
-        except Exception as exc:  # noqa: BLE001
-            error = f"工具执行错误: {exc}"
-            return _ExecResult(success=False, result=error, error=str(exc))
 
     async def _call_tool_with_memory_context(
         self,

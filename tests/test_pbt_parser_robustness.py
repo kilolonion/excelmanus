@@ -6,7 +6,7 @@
 
 使用 hypothesis 验证引号解析、非法语法拒绝、format→parse 往返一致性。
 
-**Validates: Requirements 5.1, 5.3, 5.5**
+**验证：需求 5.1, 5.3, 5.5**
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ _fm_dict = st.dictionaries(
 # ---------------------------------------------------------------------------
 # Property 3：引号字符串解析正确
 # Feature: v3-post-refactor-cleanup, Property 3: 引号字符串解析正确
-# **Validates: Requirements 5.1**
+# **验证：需求 5.1**
 # ---------------------------------------------------------------------------
 
 
@@ -86,7 +86,7 @@ def test_property_3_double_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（双引号）：对于任意不含引号字符的字符串 s，
     parse_scalar('"' + s + '"') 应返回 s。
 
-    **Validates: Requirements 5.1**
+    **验证：需求 5.1**
     """
     result = SkillpackLoader.parse_scalar(f'"{s}"')
     assert result == s, (
@@ -99,7 +99,7 @@ def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
     """Property 3（单引号）：对于任意不含引号字符的字符串 s，
     parse_scalar("'" + s + "'") 应返回 s。
 
-    **Validates: Requirements 5.1**
+    **验证：需求 5.1**
     """
     result = SkillpackLoader.parse_scalar(f"'{s}'")
     assert result == s, (
@@ -110,7 +110,7 @@ def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 4：非法 YAML frontmatter 抛出异常
 # Feature: v3-post-refactor-cleanup, Property 4: 非法 YAML frontmatter 抛出异常
-# **Validates: Requirements 5.3**
+# **验证：需求 5.3**
 # ---------------------------------------------------------------------------
 
 _invalid_yaml_kind = st.sampled_from(
@@ -137,7 +137,7 @@ def test_property_4_invalid_yaml_raises_validation_error(
     """Property 4：对于非法 YAML frontmatter 文本，
     parse_frontmatter() 应抛出 SkillpackValidationError。
 
-    **Validates: Requirements 5.3**
+    **验证：需求 5.3**
     """
     if kind == "unclosed_list":
         frontmatter_text = f"{key}: [{suffix}"
@@ -157,12 +157,12 @@ def test_property_4_invalid_yaml_raises_validation_error(
 # ---------------------------------------------------------------------------
 # Property 5：Frontmatter round-trip
 # Feature: v3-post-refactor-cleanup, Property 5: Frontmatter round-trip
-# **Validates: Requirements 5.5**
+# **验证：需求 5.5**
 # ---------------------------------------------------------------------------
 
 
 def _normalize_value(v):
-    """将值规范化以便比较 round-trip 结果。
+    """将值规范化以便比较往返结果。
 
     format_frontmatter 输出的字符串经 parse_scalar 解析后，
     某些类型会发生预期的转换（如 float → str，因为解析器不支持 float）。
@@ -177,7 +177,7 @@ def test_property_5_frontmatter_round_trip(data: dict) -> None:
     """Property 5：对于任意合法的 frontmatter 字典，
     parse_frontmatter(format_frontmatter(d)) 应产生与 d 等价的字典。
 
-    **Validates: Requirements 5.5**
+    **验证：需求 5.5**
     """
     # 格式化为 frontmatter 文本
     formatted = SkillpackLoader.format_frontmatter(data)

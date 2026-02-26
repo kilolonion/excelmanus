@@ -4,7 +4,7 @@
 - 测试 FAILS on unfixed code → 证明 bug 存在（这是预期结果）
 - 测试 PASSES after fix → 验证修复正确
 
-**Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6**
+**验证：需求 1.1, 1.2, 1.3, 1.4, 1.5, 1.6**
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class TestFaultCondition:
     失败即证明 bug 存在，是预期的正确结果。
     修复后这些测试应全部通过。
 
-    **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6**
+    **验证：需求 1.1, 1.2, 1.3, 1.4, 1.5, 1.6**
     """
 
     def test_r10_fallback_core_files_is_empty(self):
@@ -81,7 +81,7 @@ class TestFaultCondition:
         未修复时：字典非空，包含硬编码的 v4.0.0 内容 → 测试 FAILS（证明 bug 存在）
         修复后：字典为空 {} → 测试 PASSES（bug 已消除）
 
-        **Validates: Requirements 1.1, 1.2**
+        **验证：需求 1.1, 1.2**
         """
         from excelmanus.prompt_composer import _FALLBACK_CORE_FILES
 
@@ -97,7 +97,7 @@ class TestFaultCondition:
         未修复时：内容包含 version: "4.0.0" 标注 → 测试 FAILS（证明版本漂移 bug 存在）
         修复后：字典为空，不含任何版本字符串 → 测试 PASSES
 
-        **Validates: Requirements 1.1, 1.2**
+        **验证：需求 1.1, 1.2**
         """
         from excelmanus.prompt_composer import _FALLBACK_CORE_FILES
 
@@ -113,7 +113,7 @@ class TestFaultCondition:
         未修复时：semantic_search 是 async 函数 → 测试 FAILS（证明冗余包装 bug 存在）
         修复后：函数被删除，导入时抛出 ImportError → 测试 PASSES
 
-        **Validates: Requirements 1.3**
+        **验证：需求 1.3**
         """
         import importlib
         import excelmanus.embedding.search as search_module
@@ -131,7 +131,7 @@ class TestFaultCondition:
         未修复时：_finalize 写入 delta_chars 和 tool_call_deltas → 测试 FAILS（证明死代码 bug 存在）
         修复后：这两个字段被移除 → 测试 PASSES
 
-        **Validates: Requirements 1.4**
+        **验证：需求 1.4**
         """
         from excelmanus.bench import _StreamRecorder
 
@@ -170,7 +170,7 @@ class TestFaultCondition:
         未修复时：抛出的 AttributeError 不包含 'bench requires' 字样 → 测试 FAILS（证明脆弱耦合 bug 存在）
         修复后：抛出包含 'bench requires engine._client' 的明确错误 → 测试 PASSES
 
-        **Validates: Requirements 1.5**
+        **验证：需求 1.5**
         """
         from excelmanus.bench import _LLMCallInterceptor
 
@@ -281,7 +281,7 @@ class TestPreservation:
     这些测试在未修复代码上 MUST PASS，建立基线。
     修复后这些测试仍应全部通过（无回归）。
 
-    **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6**
+    **验证：需求 3.1, 3.2, 3.3, 3.4, 3.5, 3.6**
     """
 
     # ── P5a: cosine_top_k 结果正确性属性 ────
@@ -298,7 +298,7 @@ class TestPreservation:
         使用 Hypothesis 生成随机维度、语料库大小和 k 值，
         验证：结果数量 <= k、按 score 降序、index 在有效范围内。
 
-        **Validates: Requirements 3.2**
+        **验证：需求 3.2**
         """
         from excelmanus.embedding.search import cosine_top_k
 
@@ -338,7 +338,7 @@ class TestPreservation:
         2. finish_reason 正确记录
         3. usage 正确累计
 
-        **Validates: Requirements 3.3, 3.4**
+        **验证：需求 3.3, 3.4**
         """
         from excelmanus.bench import _StreamRecorder
 
@@ -392,7 +392,7 @@ class TestPreservation:
     def test_llm_call_interceptor_init_and_restore_with_valid_engine(self):
         """engine 属性均存在时，_LLMCallInterceptor 初始化正常，restore() 正确恢复。
 
-        **Validates: Requirements 3.5, 3.6**
+        **验证：需求 3.5, 3.6**
         """
         from excelmanus.bench import _LLMCallInterceptor
 
@@ -413,7 +413,7 @@ class TestPreservation:
     def test_engine_tracer_init_and_restore_with_valid_engine(self):
         """engine 属性均存在时，_EngineTracer 初始化正常，restore() 正确恢复。
 
-        **Validates: Requirements 3.5, 3.6**
+        **验证：需求 3.5, 3.6**
         """
         from excelmanus.bench import _EngineTracer
 

@@ -5,7 +5,7 @@ P0 Bug 条件探索测试 — B2 Task 泄漏 & U2 PENDING_APPROVAL 敏感信息�
 1. 探索性测试（exploration）：在未修复代码上运行，预期 FAIL，证明 Bug 存在
 2. 保留性测试（preservation）：在未修复代码上运行，预期 PASS，建立基线
 
-**Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5**
+**验证：需求 1.1, 1.2, 1.3, 1.4, 1.5**
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ async def test_b2_exploration_bug_condition_exists():
     2. 对 pending 集合中的每个 task 调用 cancel() 并 await
 
     **修复后此测试应 PASS（确认 Bug 已修复）**
-    **Validates: Requirements 2.1**
+    **验证：需求 2.1**
     """
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -111,7 +111,7 @@ async def test_b2_exploration_linear_task_accumulation():
     10 次迭代后应有 0 个悬挂 task。
 
     **修复后此测试应 PASS（确认 Bug 已修复）**
-    **Validates: Requirements 2.2**
+    **验证：需求 2.2**
     """
     queue: asyncio.Queue = asyncio.Queue()
     leaked_tasks: list[asyncio.Task] = []
@@ -163,7 +163,7 @@ def test_u2_exploration_pending_approval_not_filtered_in_safe_mode():
     会进入 else 分支调用 event.to_dict()，返回非 None 值。
 
     **预期在未修复代码上 FAIL（这是正确的 —— 证明 Bug 存在）**
-    **Validates: Requirements 1.4**
+    **验证：需求 1.4**
     """
     event = _make_pending_approval_event()
 
@@ -188,7 +188,7 @@ def test_u2_exploration_approval_arguments_exposed():
     返回值中包含 approval_arguments 字段（含用户文件路径等敏感信息）。
 
     **预期在未修复代码上 FAIL（这是正确的 —— 证明 Bug 存在）**
-    **Validates: Requirements 1.5**
+    **验证：需求 1.5**
     """
     sensitive_path = "/Users/secret/sensitive_data.xlsx"
     event = _make_pending_approval_event(
@@ -292,7 +292,7 @@ def test_u2_preservation_existing_filtered_events_still_filtered(event_type):
     在 safe_mode=True 时应返回 None，此行为不应被修复破坏。
 
     **预期在未修复代码上 PASS（建立基线）**
-    **Validates: Requirements 3.4**
+    **验证：需求 3.4**
     """
     event = _make_event_for_type(event_type)
     result = _sse_event_to_sse(event, safe_mode=True)
@@ -316,7 +316,7 @@ def test_u2_preservation_safe_mode_false_non_approval_events_pass_through(event_
     应正常输出，此行为不应被修复破坏。
 
     **预期在未修复代码上 PASS（建立基线）**
-    **Validates: Requirements 3.5**
+    **验证：需求 3.5**
     """
     event = _make_event_for_type(event_type)
     result = _sse_event_to_sse(event, safe_mode=False)
@@ -346,7 +346,7 @@ def test_u2_preservation_safe_mode_true_non_sensitive_events_pass_through(event_
     safe_mode=True 时应正常输出，此行为不应被修复破坏。
 
     **预期在未修复代码上 PASS（建立基线）**
-    **Validates: Requirements 3.6**
+    **验证：需求 3.6**
     """
     event = _make_event_for_type(event_type)
     result = _sse_event_to_sse(event, safe_mode=True)
@@ -373,7 +373,7 @@ async def test_b2_preservation_get_task_completes_first_event_forwarded():
     事件应被正确读取，此行为不应被修复破坏。
 
     **预期在未修复代码上 PASS（建立基线）**
-    **Validates: Requirements 3.1**
+    **验证：需求 3.1**
     """
     queue: asyncio.Queue = asyncio.Queue()
     test_event = ToolCallEvent(event_type=EventType.TEXT_DELTA, text_delta="hello")
@@ -427,7 +427,7 @@ async def test_b2_preservation_multiple_events_in_queue_all_readable():
     B2 保留性：队列中有多个事件时，每次 get_task 先完成，事件依次被正确读取。
 
     **预期在未修复代码上 PASS（建立基线）**
-    **Validates: Requirements 3.1, 3.2**
+    **验证：需求 3.1, 3.2**
     """
     queue: asyncio.Queue = asyncio.Queue()
     events = [

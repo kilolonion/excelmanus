@@ -7,7 +7,7 @@
 - ToolRegistry.call_tool() 在工具不在 scope 中时抛出 ToolNotAllowedError
 - AgentEngine._execute_tool_call() 返回 success=False 且 error 包含正确 JSON 结构
 
-**Validates: Requirements 2.2, 2.3, 2.4**
+**验证：需求 2.2, 2.3, 2.4**
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def _make_tool_call_object(tool_name: str, arguments: str = "{}") -> SimpleNames
 # ---------------------------------------------------------------------------
 # Property 1：未授权工具调用抛出 ToolNotAllowedError
 # Feature: v3-post-refactor-cleanup, Property 1: 未授权工具调用抛出 ToolNotAllowedError
-# **Validates: Requirements 2.2**
+# **验证：需求 2.2**
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ def test_property_1_unauthorized_tool_raises_not_allowed_error(
     如果 tool_name 不在 tool_scope 中，
     调用 ToolRegistry.call_tool(tool_name, {}, tool_scope=tool_scope) 应抛出 ToolNotAllowedError。
 
-    **Validates: Requirements 2.2**
+    **验证：需求 2.2**
     """
     # 确保 tool_name 不在 tool_scope 中
     assume(tool_name not in tool_scope)
@@ -119,7 +119,7 @@ def test_property_1_unauthorized_tool_raises_not_allowed_error(
 # ---------------------------------------------------------------------------
 # Property 2：未授权工具错误响应格式正确
 # Feature: v3-post-refactor-cleanup, Property 2: 未授权工具错误响应格式正确
-# **Validates: Requirements 2.3, 2.4**
+# **验证：需求 2.3, 2.4**
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +139,7 @@ async def test_property_2_unauthorized_tool_error_response_format(
     - error 字段包含 JSON 字符串
     - JSON 中包含 error_code、tool、message 三个键
 
-    **Validates: Requirements 2.3, 2.4**
+    **验证：需求 2.3, 2.4**
     """
     # 确保 tool_name 不在 tool_scope 中
     assume(tool_name not in tool_scope)

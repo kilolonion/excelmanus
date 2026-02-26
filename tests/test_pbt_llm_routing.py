@@ -153,7 +153,7 @@ class TestSlashDirectRouting:
     SkillRouter 应返回 slash_direct 路由模式且 skills_used 包含该技能；
     当技能名称不存在时，应返回 slash_not_found 路由模式。
 
-    **Validates: Requirements 1.1, 1.2**
+    **验证：需求 1.1, 1.2**
     """
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -166,7 +166,7 @@ class TestSlashDirectRouting:
     ) -> None:
         """已注册技能通过斜杠命令路由应返回 slash_direct。
 
-        **Validates: Requirements 1.1**
+        **验证：需求 1.1**
         """
         with tempfile.TemporaryDirectory() as tmp:
             router = _setup_router_in(Path(tmp), [skill_name])
@@ -187,7 +187,7 @@ class TestSlashDirectRouting:
     ) -> None:
         """未注册技能通过斜杠命令路由应返回 slash_not_found。
 
-        **Validates: Requirements 1.2**
+        **验证：需求 1.2**
         """
         # 确保 nonexistent_name 与已注册技能不同（归一化后也不同）
         normalize = SkillRouter._normalize_skill_name
@@ -227,7 +227,7 @@ class TestSlashNameNormalization:
     对于任意技能名称，将其转换为带有随机大小写、连字符或下划线变体的形式后，
     通过斜杠命令路由应仍能正确匹配到原始技能。
 
-    **Validates: Requirements 1.3**
+    **验证：需求 1.3**
     """
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -240,7 +240,7 @@ class TestSlashNameNormalization:
     ) -> None:
         """名称变体（大小写、连字符、下划线）经归一化后应匹配原始技能。
 
-        **Validates: Requirements 1.3**
+        **验证：需求 1.3**
         """
         mutated = _mutate_name(skill_name, data.draw)
 
@@ -267,7 +267,7 @@ class TestSkillCatalogIntegrity:
     描述文本应包含每个技能的 name 和 description，且 skill_name 参数的 enum 值
     应等于所有技能名称的集合。
 
-    **Validates: Requirements 2.2, 6.2, 8.2**
+    **验证：需求 2.2, 6.2, 8.2**
     """
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -285,7 +285,7 @@ class TestSkillCatalogIntegrity:
     ) -> None:
         """_build_meta_tools 生成的 catalog 与 enum 应完整覆盖所有技能。
 
-        **Validates: Requirements 2.2, 6.2, 8.2**
+        **验证：需求 2.2, 6.2, 8.2**
         """
         with tempfile.TemporaryDirectory() as tmp:
             skills = [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import shutil
@@ -59,9 +60,9 @@ def init_docker_sandbox(enabled: bool) -> None:
 
 
 def set_sandbox_env(env: Any) -> _contextvars.Token:
-    """Set the per-session SandboxEnv for the current async context.
+    """为当前异步上下文设置每会话的 SandboxEnv。
 
-    Returns a token that can be used to reset the contextvar.
+    返回可用于恢复 contextvar 的 token。
     """
     return _current_sandbox_env.set(env)
 
@@ -349,6 +350,48 @@ def _build_unix_limits_preexec(
 # ── 工具函数 ──────────────────────────────────────────────
 
 
+def _generate_text_diff(
+    old_text: str,
+    new_text: str,
+    file_path: str,
+    *,
+    max_lines: int = 300,
+) -> dict | None:
+    """生成统一 diff（unified diff），返回用于 _text_diff 事件的字典。
+
+    Returns:
+        ``None`` if no changes, otherwise dict with keys:
+        ``file_path``, ``hunks`` (list of diff line strings),
+        ``additions``, ``deletions``.
+    """
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+        lineterm="",
+    ))
+    if not diff_lines:
+        return None
+
+    additions = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+    deletions = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+
+    # 截断过长 diff
+    truncated = len(diff_lines) > max_lines
+    if truncated:
+        diff_lines = diff_lines[:max_lines]
+
+    return {
+        "file_path": file_path,
+        "hunks": [l.rstrip("\n\r") for l in diff_lines],
+        "additions": additions,
+        "deletions": deletions,
+        "truncated": truncated,
+    }
+
+
 def write_text_file(
     file_path: str,
     content: str,
@@ -369,18 +412,108 @@ def write_text_file(
             ensure_ascii=False,
         )
 
+    # 读取旧内容用于生成 diff
+    old_text = ""
+    if existed_before:
+        try:
+            old_text = safe_path.read_text(encoding=encoding)
+        except Exception:
+            pass
+
     safe_path.parent.mkdir(parents=True, exist_ok=True)
     safe_path.write_text(content, encoding=encoding)
-    return json.dumps(
-        {
-            "status": "success",
-            "file": str(safe_path.relative_to(guard.workspace_root)),
-            "bytes": len(content.encode(encoding, errors="ignore")),
-            "encoding": encoding,
-            "overwritten": existed_before,
-        },
-        ensure_ascii=False,
-    )
+
+    rel_path = str(safe_path.relative_to(guard.workspace_root))
+    result: dict[str, Any] = {
+        "status": "success",
+        "file": rel_path,
+        "bytes": len(content.encode(encoding, errors="ignore")),
+        "encoding": encoding,
+        "overwritten": existed_before,
+    }
+
+    # 生成 text diff
+    diff_data = _generate_text_diff(old_text, content, rel_path)
+    if diff_data is not None:
+        result["_text_diff"] = diff_data
+
+    return json.dumps(result, ensure_ascii=False)
+
+
+def edit_text_file(
+    file_path: str,
+    old_string: str,
+    new_string: str,
+    encoding: str = "utf-8",
+    replace_all: bool = False,
+) -> str:
+    """精准编辑文本文件：查找 old_string 并替换为 new_string。
+
+    类似于 IDE 的查找替换功能。支持单次替换或全部替换。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    if not safe_path.is_file():
+        return json.dumps(
+            {"status": "error", "error": f"文件不存在: {file_path}"},
+            ensure_ascii=False,
+        )
+
+    try:
+        old_text = safe_path.read_text(encoding=encoding)
+    except UnicodeDecodeError:
+        return json.dumps(
+            {"status": "error", "error": f"无法以 {encoding} 编码读取文件"},
+            ensure_ascii=False,
+        )
+
+    if old_string not in old_text:
+        return json.dumps(
+            {"status": "error", "error": "old_string 未在文件中找到，请检查内容是否精确匹配"},
+            ensure_ascii=False,
+        )
+
+    if old_string == new_string:
+        return json.dumps(
+            {"status": "error", "error": "old_string 与 new_string 相同，无需修改"},
+            ensure_ascii=False,
+        )
+
+    # 非 replace_all 时检查唯一性
+    if not replace_all and old_text.count(old_string) > 1:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"old_string 在文件中出现 {old_text.count(old_string)} 次，"
+                         "请提供更多上下文使其唯一，或设置 replace_all=true",
+            },
+            ensure_ascii=False,
+        )
+
+    if replace_all:
+        new_text = old_text.replace(old_string, new_string)
+        match_count = old_text.count(old_string)
+    else:
+        new_text = old_text.replace(old_string, new_string, 1)
+        match_count = 1
+
+    safe_path.write_text(new_text, encoding=encoding)
+
+    rel_path = str(safe_path.relative_to(guard.workspace_root))
+    result: dict[str, Any] = {
+        "status": "success",
+        "file": rel_path,
+        "replacements": match_count,
+        "bytes": len(new_text.encode(encoding, errors="ignore")),
+    }
+
+    # 生成 text diff
+    diff_data = _generate_text_diff(old_text, new_text, rel_path)
+    if diff_data is not None:
+        result["_text_diff"] = diff_data
+
+    return json.dumps(result, ensure_ascii=False)
 
 
 def run_code(
@@ -933,6 +1066,36 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=write_text_file,
+            write_effect="workspace_write",
+        ),
+        ToolDef(
+            name="edit_text_file",
+            description=(
+                "精准编辑文本文件：查找 old_string 并替换为 new_string（类似 IDE 查找替换）。"
+                "适用场景：修改已有 .py/.txt/.csv/.json 等文本文件中的特定片段，无需重写整个文件。"
+                "old_string 必须在文件中唯一匹配（除非 replace_all=true）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "目标文件路径（相对于工作目录）"},
+                    "old_string": {"type": "string", "description": "要被替换的原始文本（必须精确匹配）"},
+                    "new_string": {"type": "string", "description": "替换后的新文本"},
+                    "encoding": {
+                        "type": "string",
+                        "description": "文本编码",
+                        "default": "utf-8",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "是否替换所有匹配项（默认仅替换首个且要求唯一）",
+                        "default": False,
+                    },
+                },
+                "required": ["file_path", "old_string", "new_string"],
+                "additionalProperties": False,
+            },
+            func=edit_text_file,
             write_effect="workspace_write",
         ),
         ToolDef(

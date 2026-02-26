@@ -259,7 +259,7 @@ class TestCloseSafety:
 class TestCallToolTimeout:
     """当 call_tool 超时时应抛出 asyncio.TimeoutError。
 
-    Validates: Requirement 5.4
+    验证：需求 5.4
     """
 
     @pytest.mark.asyncio
@@ -329,7 +329,7 @@ class TestCallToolTimeout:
 class TestCallToolError:
     """当 MCP Server 返回 isError=True 时应抛出 RuntimeError。
 
-    Validates: Requirement 5.5
+    验证：需求 5.5
     """
 
     @pytest.mark.asyncio
