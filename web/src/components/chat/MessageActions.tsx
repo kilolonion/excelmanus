@@ -86,7 +86,7 @@ export const MessageActions = React.memo(function MessageActions({
 
   const handleFeedback = useCallback((type: "up" | "down") => {
     setFeedback((prev) => (prev === type ? null : type));
-    // TODO: Send feedback to backend API when available
+    // TODO：后端 API 就绪后发送反馈
   }, []);
 
   const fetchModelsOnce = useCallback(() => {
@@ -98,7 +98,7 @@ export const MessageActions = React.memo(function MessageActions({
   }, [modelsLoaded]);
 
   const hasText = blocks.some((b) => b.type === "text");
-  if (!hasText) return null;
+  if (!hasText || isStreaming) return null;
 
   const groups = groupByProvider(models);
   const canRetry = !!onRetry && !isStreaming;

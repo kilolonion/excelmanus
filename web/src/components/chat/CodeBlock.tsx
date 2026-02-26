@@ -15,7 +15,7 @@ function ensureHljs(): Promise<void> {
   if (_hljsLoading) return _hljsLoading;
   _hljsLoading = import("highlight.js/lib/core").then(async (mod) => {
     const hljs = mod.default;
-    // Register commonly needed languages
+    // 注册常用语言
     const langs = await Promise.all([
       import("highlight.js/lib/languages/python"),
       import("highlight.js/lib/languages/javascript"),
@@ -35,7 +35,7 @@ function ensureHljs(): Promise<void> {
       "sql", "xml", "css", "markdown", "yaml", "shell", "plaintext",
     ];
     langs.forEach((l, i) => hljs.registerLanguage(names[i], l.default));
-    // Aliases
+    // 别名
     hljs.registerLanguage("py", langs[0].default);
     hljs.registerLanguage("js", langs[1].default);
     hljs.registerLanguage("ts", langs[2].default);
@@ -50,8 +50,7 @@ function ensureHljs(): Promise<void> {
 }
 
 // ------------------------------------------------------------------
-// Rainbow Brackets: post-process hljs HTML to colorize brackets
-// Three color families by bracket type, cycling by nesting depth
+// 彩虹括号：后处理 hljs HTML 为括号上色，按括号类型分三色族、按嵌套深度循环
 // ------------------------------------------------------------------
 
 const CURLY_COLORS = ["#e5a100", "#d7ba7d", "#c08b30", "#ffd700"];  // {} gold
@@ -70,14 +69,14 @@ function colorizeBracketsHtml(html: string): string {
   const depths: Record<string, number> = { "{": 0, "(": 0, "[": 0 };
   let inTag = false;
   let stringSpanDepth = 0;
-  let spanStack: boolean[] = [];  // true = this span is a string span
+  let spanStack: boolean[] = [];  // true 表示该 span 为字符串 span
   let result = "";
   let i = 0;
 
   while (i < html.length) {
     const ch = html[i];
 
-    // Track HTML tags to detect hljs-string spans
+    // 追踪 HTML 标签以检测 hljs-string 片段
     if (ch === "<") {
       const closeTag = html.startsWith("</span", i);
       if (closeTag) {
@@ -99,7 +98,7 @@ function colorizeBracketsHtml(html: string): string {
         i = end + 1;
         continue;
       }
-      // Other tags: pass through
+      // 其他标签透传
       inTag = true;
       result += ch;
       i++;
@@ -112,14 +111,14 @@ function colorizeBracketsHtml(html: string): string {
       continue;
     }
 
-    // Skip brackets inside string literals
+    // 跳过字符串字面量内的括号
     if (stringSpanDepth > 0) {
       result += ch;
       i++;
       continue;
     }
 
-    // Handle HTML entities for brackets
+    // 处理括号的 HTML 实体
     let bracket: string | null = null;
     let consumed = 1;
     if (ch === "{" || ch === "}" || ch === "(" || ch === ")" || ch === "[" || ch === "]") {
@@ -166,7 +165,7 @@ export const CodeBlock = React.memo(function CodeBlock({
   const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
   const codeRef = useRef<HTMLElement>(null);
 
-  // Highlight on mount / when code or language changes
+  // 挂载或 code/语言变化时高亮
   useEffect(() => {
     let cancelled = false;
     ensureHljs().then(() => {
@@ -177,7 +176,7 @@ export const CodeBlock = React.memo(function CodeBlock({
           : _hljs.highlightAuto(code);
         if (!cancelled) setHighlightedHtml(colorizeBracketsHtml(result.value));
       } catch {
-        // Fallback: no highlighting
+        // 回退：不高亮
         if (!cancelled) setHighlightedHtml(null);
       }
     });

@@ -55,7 +55,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
   const activeRef = useRef<HTMLSpanElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
-  /* Track previous stage index for enter animation direction */
+  /* 记录上一阶段索引，用于进入动画方向 */
   const prevIdxRef = useRef(-1);
   const [animatingKey, setAnimatingKey] = useState<string | null>(null);
 
@@ -98,7 +98,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
 
   useEffect(() => {
     if (currentIdx < 0) return;
-    // trigger pop-in animation when stage changes
+    // 阶段变化时触发弹出动画
     if (prevIdxRef.current !== currentIdx) {
       const key = STAGES[currentIdx]?.key;
       if (key) {
@@ -111,7 +111,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
   }, [currentIdx]);
 
   useEffect(() => {
-    // smooth-scroll the active chip into view
+    // 将当前 chip 平滑滚动到视内
     requestAnimationFrame(() => {
       activeRef.current?.scrollIntoView({
         behavior: "smooth",
@@ -134,7 +134,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
     );
   }
 
-  // Show completed + current + one ahead (window of up to 4)
+  // 显示已完成 + 当前 + 下一个（最多 4 个的窗口）
   const visibleStages = STAGES.filter((_, i) => {
     if (currentIdx < 0) return false;
     return i <= currentIdx + 1 && i >= Math.max(0, currentIdx - 2);

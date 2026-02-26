@@ -17,32 +17,29 @@ interface AuthProviderProps {
 }
 
 /**
- * Optimistic auth provider.
+ * 乐观认证提供者。
  *
- * If localStorage already has a non-expired JWT the page renders immediately;
- * a background fetch to /auth/me validates the session silently.
- * The loading spinner only appears when there is genuinely no local token
- * and we must wait for a refresh attempt.
+ * 若 localStorage 中已有未过期的 JWT 则立即渲染页面；
+ * 通过后台请求 /auth/me 静默校验会话。
+ * 仅当确实没有本地 token 且需等待刷新尝试时才显示加载动画。
  */
 export function AuthProvider({ children, authEnabled = false }: AuthProviderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [hydrated, setHydrated] = useState(false);
-  // `gateOpen` controls whether children are rendered.
-  // Starts `true` — we only close the gate when we know for sure the user
-  // has no usable local token and must wait for a network round-trip.
+  // gateOpen 控制是否渲染子节点。初始为 true，仅在确认用户无可用本地 token 且需等待网络请求时才关闭。
   const [gateOpen, setGateOpen] = useState(true);
   const [showSpinner, setShowSpinner] = useState(false);
   const validatedRef = useRef(false);
 
-  // ── Hydration listener ───────────────────────────────────
+  // ── 水合监听 ───────────────────────────────────
   useEffect(() => {
     const unsub = useAuthStore.persist.onFinishHydration(() => setHydrated(true));
     if (useAuthStore.persist.hasHydrated()) setHydrated(true);
     return unsub;
   }, []);
 
-  // ── Decide gate state immediately after hydration ────────
+  // ── 水合后立即决定 gate 状态 ────────
   useEffect(() => {
     if (!hydrated || !authEnabled) return;
 
@@ -50,30 +47,30 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
 
     if (isPublic) {
-      // Public pages always render immediately
+      // 公开页始终立即渲染
       setGateOpen(true);
       return;
     }
 
     if (isAuthenticated && accessToken && !isTokenExpired(accessToken)) {
-      // Good local token → render immediately, validate in background
+      // 本地 token 有效 → 立即渲染，后台校验
       setGateOpen(true);
       return;
     }
 
-    // No usable token locally — must wait for refresh / redirect
+    // 本地无可用 token，需等待刷新或重定向
     setGateOpen(false);
     setShowSpinner(true);
   }, [hydrated, authEnabled, pathname]);
 
-  // ── Background validation (runs once per mount) ──────────
+  // ── 后台校验（每次挂载执行一次）──────────
   const validateSession = useCallback(async () => {
     if (!authEnabled) return;
 
     const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
     const { isAuthenticated, accessToken, refreshToken } = useAuthStore.getState();
 
-    // Case 1: No token at all
+    // 情况 1：完全没有 token
     if (!isAuthenticated || !accessToken) {
       if (refreshToken) {
         const refreshed = await refreshAccessToken();
@@ -88,13 +85,13 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
       return;
     }
 
-    // Case 2: Authenticated user on a public page → redirect to home
+    // 情况 2：已认证用户访问公开页 → 重定向到首页
     if (isPublic) {
       router.replace("/");
       return;
     }
 
-    // Case 3: Token expired locally → try refresh first
+    // 情况 3：本地 token 已过期 → 先尝试刷新
     if (isTokenExpired(accessToken)) {
       if (refreshToken) {
         const refreshed = await refreshAccessToken();
@@ -110,7 +107,7 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
       return;
     }
 
-    // Case 4: Token looks valid locally → silent background check
+    // 情况 4：本地 token 看似有效 → 静默后台校验
     try {
       const user = await fetchCurrentUser();
       if (!user) {
@@ -132,14 +129,14 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     validateSession();
   }, [hydrated, validateSession]);
 
-  // ── Render logic ─────────────────────────────────────────
+  // ── 渲染逻辑 ─────────────────────────────────────────
 
   if (!authEnabled) return <>{children}</>;
 
-  // Still waiting for zustand to hydrate from localStorage
+  // 仍在等待 zustand 从 localStorage 水合
   if (!hydrated) return null;
 
-  // Gate closed: no usable local token, waiting for network
+  // gate 关闭：无可用本地 token，等待网络
   if (!gateOpen && showSpinner) {
     return (
       <div className="h-screen flex items-center justify-center bg-background">

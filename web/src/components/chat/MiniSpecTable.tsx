@@ -68,13 +68,13 @@ function getCellHighlight(
   if (!isNew) return null;
   switch (stageKey) {
     case "vlm_extract_structure":
-      return "bg-zinc-200/50 dark:bg-zinc-700/30"; // skeleton gray
+      return "bg-zinc-200/50 dark:bg-zinc-700/30"; // 骨架灰
     case "vlm_extract_data":
-      return "bg-emerald-100/60 dark:bg-emerald-900/20"; // data green
+      return "bg-emerald-100/60 dark:bg-emerald-900/20"; // 数据绿
     case "vlm_extract_style":
-      return "bg-amber-100/60 dark:bg-amber-900/20"; // style yellow
+      return "bg-amber-100/60 dark:bg-amber-900/20"; // 样式黄
     case "vlm_extract_verification":
-      return "bg-blue-100/60 dark:bg-blue-900/20"; // verification blue
+      return "bg-blue-100/60 dark:bg-blue-900/20"; // 校验蓝
     default:
       return "bg-emerald-100/60 dark:bg-emerald-900/20";
   }
@@ -90,7 +90,7 @@ export const MiniSpecTable = React.memo(function MiniSpecTable({
   const sheet: SheetData | null = useMemo(() => {
     const sheets = (spec as { sheets?: SheetData[] }).sheets;
     if (!sheets || sheets.length === 0) return null;
-    return sheets[0]; // Show first sheet
+    return sheets[0]; // 显示第一个 sheet
   }, [spec]);
 
   const grid = useMemo(() => {
@@ -101,7 +101,7 @@ export const MiniSpecTable = React.memo(function MiniSpecTable({
     const cols = Math.min(dims.cols || 0, maxCols);
     if (rows === 0 || cols === 0) return null;
 
-    // Build cell map
+    // 构建单元格映射
     const cellMap = new Map<string, CellData>();
     for (const cell of sheet.cells || []) {
       const parsed = parseAddress(cell.address);
@@ -110,12 +110,12 @@ export const MiniSpecTable = React.memo(function MiniSpecTable({
       }
     }
 
-    // Build diff set (added cells)
+    // 构建 diff 集合（新增单元格）
     const addedCells = new Set<string>();
     if (diffHighlights?.changes) {
       for (const ch of diffHighlights.changes) {
         if (ch.cells_added && ch.cells_added > 0) {
-          // All cells in this phase are "new" for structure/data phases
+          // 结构/数据阶段中本阶段所有单元格视为「新增」
           for (const cell of sheet.cells || []) {
             const parsed = parseAddress(cell.address);
             if (parsed) addedCells.add(`${parsed.row},${parsed.col}`);

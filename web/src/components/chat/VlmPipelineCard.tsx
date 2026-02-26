@@ -149,7 +149,7 @@ function VlmTimelineNode({
   const [specData, setSpecData] = useState<Record<string, unknown> | null>(null);
   const [loadingSpec, setLoadingSpec] = useState(false);
 
-  // Elapsed timer for active phase
+  // 当前阶段的已用时间
   const [elapsed, setElapsed] = useState(0);
   const startRef = useRef(Date.now());
   useEffect(() => {
@@ -179,7 +179,7 @@ function VlmTimelineNode({
           setSpecData(json);
         }
       } catch {
-        // Failed to load spec
+        // 加载 spec 失败
       } finally {
         setLoadingSpec(false);
       }
@@ -318,14 +318,14 @@ function VlmTimelineNode({
 function UncertaintySummary({ phases }: { phases: VlmPhaseEntry[] }) {
   const totalUncertainties = phases.reduce((acc, p) => {
     const changes = p.diff?.changes ?? [];
-    // Count from diff summary text if available
+    // 若有 diff 摘要文本则从中计数
     return acc;
   }, 0);
 
-  // Don't show if no meaningful data
+  // 无有效数据时不显示
   if (phases.length === 0) return null;
 
-  // Extract uncertainty count from the last phase's diff summary
+  // 从最后一阶段的 diff 摘要中提取不确定数量
   const lastPhase = phases[phases.length - 1];
   const match = lastPhase?.diff?.summary?.match(/(\d+)\s*个不确定/);
   const count = match ? parseInt(match[1], 10) : 0;
