@@ -17,7 +17,7 @@ class SubagentFileChange:
 
     path: str
     tool_name: str
-    change_type: str = "write"  # write | format | delete | create | code_modified
+    change_type: str = "write"  # 取值：write | format | delete | create | code_modified
     sheets_affected: tuple[str, ...] = ()
 
 

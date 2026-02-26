@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 _EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"})
 
 
-# ── Quota helpers (migrated from auth/workspace.py) ────────
+# ── 配额辅助（自 auth/workspace.py 迁移） ────────
 
 
 DEFAULT_MAX_SIZE_MB = 100
-DEFAULT_MAX_FILES = 5
+DEFAULT_MAX_FILES = 200
 
 
 def _env_int(name: str, default: int) -> int:
@@ -412,7 +412,7 @@ class IsolatedWorkspace:
         """Create a ``SandboxEnv`` for executing code in this workspace."""
         return SandboxEnv(workspace=self, transaction=transaction)
 
-    # -- Quota operations (delegated from auth/workspace.py) -----------------
+    # -- 配额操作（委托自 auth/workspace.py） -----------------
 
     def get_usage(self) -> WorkspaceUsage:
         files = scan_workspace(str(self._root_dir))

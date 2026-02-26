@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 
+_builtin_range = range  # 保存内置 range，避免被同名函数参数遮蔽
+
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
@@ -49,6 +51,10 @@ _TITLE_HINT_PREFIXES = (
     "仪表盘",
     "机密",
 )
+
+# ── CSV/TSV 支持 ──────────────────────────────────────────
+
+_CSV_EXTENSIONS: frozenset[str] = frozenset({".csv", ".tsv", ".txt"})
 
 # ── Skill 元数据 ──────────────────────────────────────────
 
@@ -118,6 +124,25 @@ def _normalize_cell(value: Any) -> Any:
         text = value.strip()
         return text if text else None
     return value
+
+
+def _is_csv_file(path: Any) -> bool:
+    """判断文件是否为 CSV/TSV 格式。"""
+    from pathlib import Path
+
+    p = Path(path) if not isinstance(path, Path) else path
+    return p.suffix.lower() in _CSV_EXTENSIONS
+
+
+def _serialize_cell_value(value: Any) -> Any:
+    """将单元格值序列化为 JSON 兼容类型。"""
+    if value is None:
+        return None
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, (int, float, bool)):
+        return value
+    return str(value)
 
 
 def _trim_trailing_nulls_generic(row: list[Any]) -> list[Any]:
@@ -432,7 +457,13 @@ def _resolve_formula_columns(
 
 
 def _get_sheet_total_rows(safe_path: Any, sheet_name: str | None) -> int | None:
-    """用 openpyxl read_only 模式快速获取 sheet 总行数（不加载全部数据）。"""
+    """快速获取 sheet/CSV 总行数（不加载全部数据）。"""
+    if _is_csv_file(safe_path):
+        try:
+            with open(safe_path, encoding="utf-8", errors="replace") as f:
+                return max(sum(1 for _ in f) - 1, 0)  # 减去 header 行
+        except Exception:
+            return None
     try:
         from openpyxl import load_workbook
         wb = load_workbook(safe_path, read_only=True, data_only=True)
@@ -448,13 +479,33 @@ def _get_sheet_total_rows(safe_path: Any, sheet_name: str | None) -> int | None:
         return None
 
 
+def _read_csv_df(
+    safe_path: Any,
+    max_rows: int | None = None,
+    header_row: int | None = None,
+) -> tuple[pd.DataFrame, int]:
+    """读取 CSV/TSV 文件为 DataFrame。"""
+    from pathlib import Path
+
+    p = Path(safe_path) if not isinstance(safe_path, Path) else safe_path
+    sep = "\t" if p.suffix.lower() == ".tsv" else ","
+    kwargs: dict[str, Any] = {"filepath_or_buffer": safe_path, "sep": sep}
+    if header_row is not None:
+        kwargs["header"] = header_row
+    if max_rows is not None:
+        kwargs["nrows"] = max_rows
+    effective_header = header_row if header_row is not None else 0
+    df = pd.read_csv(**kwargs)
+    return df, effective_header
+
+
 def _read_df(
     safe_path: Any,
     sheet_name: str | None,
     max_rows: int | None = None,
     header_row: int | None = None,
 ) -> tuple[pd.DataFrame, int]:
-    """统一读取 Excel 为 DataFrame，含 header 自动检测 + 公式列求值。
+    """统一读取 Excel/CSV 为 DataFrame，含 header 自动检测 + 公式列求值。
 
     当自动检测的 header_row 导致超过 50% 列名为 Unnamed 时，
     自动向下尝试最多 5 行寻找更合理的表头。
@@ -462,6 +513,10 @@ def _read_df(
     Returns:
         (DataFrame, effective_header_row) 元组。
     """
+    # CSV/TSV 走专用路径
+    if _is_csv_file(safe_path):
+        return _read_csv_df(safe_path, max_rows=max_rows, header_row=header_row)
+
     kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
     effective_header = kwargs.get("header", 0)
     df = pd.read_excel(**kwargs)
@@ -501,6 +556,45 @@ def _read_df(
 # ── 工具函数 ──────────────────────────────────────────────
 
 
+def _read_range_direct(
+    safe_path: Any,
+    sheet_name: str | None,
+    cell_range: str,
+) -> dict[str, Any]:
+    """用 openpyxl read_only 模式读取指定坐标范围的原始单元格值。"""
+    from openpyxl import load_workbook
+    from openpyxl.utils.cell import range_boundaries
+
+    wb = load_workbook(safe_path, read_only=True, data_only=True)
+    try:
+        if sheet_name:
+            resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+            ws = wb[resolved] if resolved else wb.active
+        else:
+            ws = wb.active
+        if ws is None:
+            return {"error": "无法打开工作表"}
+
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        rows: list[list[Any]] = []
+        for row in ws.iter_rows(
+            min_row=min_row, max_row=max_row,
+            min_col=min_col, max_col=max_col,
+            values_only=True,
+        ):
+            rows.append([_serialize_cell_value(c) for c in row])
+
+        return {
+            "range": cell_range,
+            "start_row": min_row,
+            "end_row": max_row,
+            "rows_count": len(rows),
+            "columns_count": max_col - min_col + 1,
+            "data": rows,
+        }
+    finally:
+        wb.close()
+
 
 def read_excel(
     file_path: str,
@@ -510,12 +604,15 @@ def read_excel(
     header_row: int | None = None,
     include: list[str] | None = None,
     max_style_scan_rows: int = 200,
+    range: str | None = None,
+    offset: int | None = None,
+    sample_rows: int | None = None,
 ) -> str:
-    """读取 Excel 文件并返回数据摘要，可通过 include 按需附加额外维度。
+    """读取 Excel/CSV 文件并返回数据摘要，可通过 include 按需附加额外维度。
 
     Args:
-        file_path: Excel 文件路径（相对或绝对）。
-        sheet_name: 工作表名称，默认读取第一个。
+        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xlsm/.csv/.tsv。
+        sheet_name: 工作表名称，默认读取第一个（CSV 时忽略）。
         max_rows: 最大读取行数，默认全部读取。
         include_style_summary: 是否附带样式概览（已废弃，请用 include=["styles"]）。
         header_row: 列头所在行号（从0开始），默认自动检测。
@@ -531,8 +628,13 @@ def read_excel(
             column_widths — 非默认列宽
             formulas — 含公式的单元格
             categorical_summary — 分类列的 value_counts（unique 值 < 阈值的列）
+            summary — 每列数据质量概要（null 率、unique 数、min/max、高频值）
             vba — VBA 宏信息（仅 .xlsm 文件有效，含模块列表及可选源码）
         max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
+        range: Excel 坐标范围（如 "A1:F20"、"B100:D200"），指定后进入精确读取模式，
+            绕过 pandas 直接用 openpyxl 读取指定区域，大文件友好。不支持 CSV。
+        offset: 数据行偏移（从0开始，header 之后起算），与 max_rows 组合实现分页。
+        sample_rows: 等距采样行数，用于了解大表数据分布。
 
     Returns:
         JSON 格式的数据摘要字符串。
@@ -540,11 +642,32 @@ def read_excel(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
-    df, effective_header = _read_df(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
+    # ── range 模式：精确读取指定坐标范围 ──
+    if range is not None:
+        if _is_csv_file(safe_path):
+            return json.dumps(
+                {"error": "range 参数不支持 CSV 文件，请使用 offset + max_rows 分页读取"},
+                ensure_ascii=False,
+            )
+        result = _read_range_direct(safe_path, sheet_name, range)
+        result["file"] = str(safe_path.name)
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
-    # 当 max_rows 限制了读取行数时，获取 sheet 实际总行数
+    # ── 标准模式 ──
+    # offset 调整：读取 offset + max_rows 行再切片
+    effective_max_rows = max_rows
+    if offset is not None and offset > 0 and max_rows is not None:
+        effective_max_rows = offset + max_rows
+
+    df, effective_header = _read_df(safe_path, sheet_name, max_rows=effective_max_rows, header_row=header_row)
+
+    # 应用 offset 切片
+    if offset is not None and offset > 0:
+        df = df.iloc[offset:].reset_index(drop=True)
+
+    # 当 max_rows/offset 限制了读取范围时，获取 sheet 实际总行数
     total_rows_in_sheet: int | None = None
-    if max_rows is not None:
+    if max_rows is not None or (offset is not None and offset > 0):
         total_rows_in_sheet = _get_sheet_total_rows(safe_path, sheet_name)
 
     # 构建摘要信息
@@ -566,6 +689,25 @@ def read_excel(
     summary["columns"] = [str(c) for c in df.columns]
     summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
     summary["preview"] = json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso"))
+
+    # 自动 tail 预览：表格 > 20 行时附加最后 5 行
+    if df.shape[0] > 20:
+        tail_start = df.shape[0] - 5
+        summary["tail_preview"] = json.loads(
+            df.tail(5).to_json(orient="records", force_ascii=False, date_format="iso")
+        )
+        summary["tail_note"] = f"显示最后 5 行（第 {tail_start + 1}~{df.shape[0]} 行）"
+
+    # 等距采样：sample_rows 指定时附加采样数据
+    if sample_rows is not None and sample_rows > 0 and len(df) > sample_rows:
+        step = max(1, len(df) // sample_rows)
+        indices = list(_builtin_range(0, len(df), step))[:sample_rows]
+        sampled_df = df.iloc[indices]
+        summary["sample_preview"] = json.loads(
+            sampled_df.to_json(orient="records", force_ascii=False, date_format="iso")
+        )
+        summary["sample_note"] = f"等距采样 {len(indices)} 行（共 {len(df)} 行，间隔 {step}）"
+
     formula_meta = df.attrs.get("formula_resolution")
     if isinstance(formula_meta, dict):
         if formula_meta.get("resolved_columns") or formula_meta.get("unresolved_columns"):
@@ -601,13 +743,17 @@ def read_excel(
         summary["categorical_summary"] = _collect_categorical_summary(df)
         include_set.discard("categorical_summary")
 
+    if "summary" in include_set:
+        summary["data_summary"] = _collect_data_summary(df)
+        include_set.discard("summary")
+
     # vba 维度：基于文件级别，不依赖 worksheet
     if "vba" in include_set:
         summary["vba"] = _collect_vba_info(safe_path)
         include_set.discard("vba")
 
-    # 分发 include 维度采集（需要用 openpyxl 打开，非 data_only 以获取公式）
-    if include_set:
+    # 分发 include 维度采集（需要用 openpyxl 打开，CSV 不支持）
+    if include_set and not _is_csv_file(safe_path):
         from openpyxl import load_workbook
 
         # styles/charts/images/freeze_panes 等需要非 data_only 模式
@@ -736,7 +882,8 @@ def filter_data(
     Args:
         file_path: Excel 文件路径。
         column: 要过滤的列名（单条件模式）。
-        operator: 比较运算符，支持 eq/ne/gt/ge/lt/le/contains（单条件模式）。
+        operator: 比较运算符（单条件模式）。支持：
+            eq/ne/gt/ge/lt/le/contains/in/not_in/between/isnull/notnull/startswith/endswith
         value: 比较值（单条件模式）。
         sheet_name: 工作表名称，默认第一个。
         header_row: 列头所在行号（从0开始），默认自动检测。
@@ -764,6 +911,13 @@ def filter_data(
         "lt": lambda s, v: s < v,
         "le": lambda s, v: s <= v,
         "contains": lambda s, v: s.astype(str).str.contains(str(v), na=False),
+        "in": lambda s, v: s.isin(v if isinstance(v, list) else [v]),
+        "not_in": lambda s, v: ~s.isin(v if isinstance(v, list) else [v]),
+        "between": lambda s, v: s.between(v[0], v[1]) if isinstance(v, list) and len(v) >= 2 else pd.Series([False] * len(s), index=s.index),
+        "isnull": lambda s, v: s.isna(),
+        "notnull": lambda s, v: s.notna(),
+        "startswith": lambda s, v: s.astype(str).str.startswith(str(v), na=False),
+        "endswith": lambda s, v: s.astype(str).str.endswith(str(v), na=False),
     }
 
     # 构建条件列表：兼容单条件和多条件
@@ -1297,6 +1451,7 @@ INCLUDE_DIMENSIONS = (
     "column_widths",
     "formulas",
     "categorical_summary",
+    "summary",
     "vba",
 )
 
@@ -1323,6 +1478,29 @@ def _collect_categorical_summary(
             vc = series.value_counts(dropna=True)
             result[str(col)] = {str(k): int(v) for k, v in vc.items()}
     return {"threshold": threshold, "columns": result}
+
+
+def _collect_data_summary(df: "pd.DataFrame") -> dict[str, Any]:
+    """计算每列数据质量概要：null 率、unique 数、min/max（数值列）、top_values（分类列）。"""
+    result: dict[str, Any] = {}
+    for col in df.columns:
+        col_str = str(col)
+        series = df[col]
+        info: dict[str, Any] = {
+            "null_rate": round(float(series.isna().mean()), 4),
+            "unique": int(series.nunique()),
+        }
+        if pd.api.types.is_numeric_dtype(series):
+            desc = series.describe()
+            info["min"] = desc.get("min")
+            info["max"] = desc.get("max")
+            info["mean"] = round(float(desc.get("mean", 0)), 2)
+        else:
+            vc = series.dropna().value_counts().head(3)
+            if not vc.empty:
+                info["top_values"] = [str(v) for v in vc.index.tolist()]
+        result[col_str] = info
+    return result
 
 
 def _color_to_hex_short(color: Any) -> str | None:
@@ -2154,8 +2332,9 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="read_excel",
             description=(
-                "读取 Excel 数据摘要（形状、列名、类型、前10行预览），通过 include 按需附加样式/图表/公式等维度。"
-                "适用场景：首次探查文件结构、确认列名与数据类型、查看样本数据。"
+                "读取 Excel/CSV 数据摘要（形状、列名、类型、前10行+后5行预览），通过 include 按需附加样式/图表/公式/数据概要等维度。"
+                "支持 range 精确读取指定坐标区域、offset+max_rows 分页、sample_rows 等距采样。"
+                "适用场景：探查文件结构、确认列名与数据类型、查看任意区域数据、了解数据分布。"
                 "不适用：批量数据处理或跨表操作（改用 run_code + pandas）。"
             ),
             input_schema={
@@ -2163,11 +2342,11 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径（相对于工作目录）",
+                        "description": "Excel/CSV 文件路径（相对于工作目录），支持 .xlsx/.xlsm/.csv/.tsv",
                     },
                     "sheet_name": {
                         "type": "string",
-                        "description": "工作表名称，默认读取第一个 sheet",
+                        "description": "工作表名称，默认读取第一个 sheet（CSV 时忽略）",
                     },
                     "max_rows": {
                         "type": "integer",
@@ -2178,6 +2357,20 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "列头行号（0-indexed，即第1行=0），默认自动检测",
                         "minimum": 0,
+                    },
+                    "range": {
+                        "type": "string",
+                        "description": "Excel 坐标范围（如 'A1:F20'、'B100:D200'），指定后精确读取该区域，大文件友好。不支持 CSV",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "数据行偏移（从0开始，header 之后起算），与 max_rows 组合实现分页",
+                        "minimum": 0,
+                    },
+                    "sample_rows": {
+                        "type": "integer",
+                        "description": "等距采样行数，用于了解大表数据分布",
+                        "minimum": 1,
                     },
                     "include": {
                         "type": "array",
@@ -2194,6 +2387,7 @@ def get_tools() -> list[ToolDef]:
                                 "column_widths",
                                 "formulas",
                                 "categorical_summary",
+                                "summary",
                             ],
                         },
                         "description": "按需附加的额外维度列表",
@@ -2235,11 +2429,11 @@ def get_tools() -> list[ToolDef]:
                     },
                     "operator": {
                         "type": "string",
-                        "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains"],
+                        "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains", "in", "not_in", "between", "isnull", "notnull", "startswith", "endswith"],
                         "description": "比较运算符（单条件模式）",
                     },
                     "value": {
-                        "description": "比较值（单条件模式）",
+                        "description": "比较值（单条件模式）：in/not_in 传数组，between 传 [min,max]，isnull/notnull 可不传",
                     },
                     "conditions": {
                         "type": "array",
@@ -2249,7 +2443,7 @@ def get_tools() -> list[ToolDef]:
                                 "column": {"type": "string"},
                                 "operator": {
                                     "type": "string",
-                                    "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains"],
+                                    "enum": ["eq", "ne", "gt", "ge", "lt", "le", "contains", "in", "not_in", "between", "isnull", "notnull", "startswith", "endswith"],
                                 },
                                 "value": {},
                             },

@@ -29,15 +29,23 @@ class FocusService:
         range_ref: str | None = None,
         rows: int | None = None,
     ) -> dict[str, Any]:
-        """执行 focus_window，必要时触发补读并回写窗口。"""
+        """执行 focus_window，必要时触发补读并回写窗口。
+
+        成功后返回中包含 preview/columns/viewport 等字段，
+        使 agent 在当轮就能看到滚动/展开后的数据（与 read_excel 对齐）。
+        """
         action_result = self._manager.focus_window_action(
             window_id=window_id,
             action=action,
             range_ref=range_ref,
             rows=rows,
         )
-        if action_result.get("status") != "needs_refill":
+        if action_result.get("status") == "error":
             return action_result
+
+        if action_result.get("status") != "needs_refill":
+            # 缓存命中或 restore/clear_filter：直接附加预览快照
+            return self._attach_snapshot(action_result)
 
         if self._refill_reader is None:
             return {
@@ -80,7 +88,7 @@ class FocusService:
         if ingest_result.get("status") != "ok":
             return ingest_result
 
-        return {
+        result = {
             "status": "ok",
             "action": action,
             "window_id": window_id,
@@ -89,3 +97,14 @@ class FocusService:
             "rows": ingest_result.get("rows", 0),
             "tool_name": refill.get("tool_name"),
         }
+        return self._attach_snapshot(result)
+
+    def _attach_snapshot(self, result: dict[str, Any]) -> dict[str, Any]:
+        """将窗口预览快照附加到 focus_window 返回中。"""
+        wid = str(result.get("window_id") or "").strip()
+        if not wid:
+            return result
+        snapshot = self._manager.build_focus_snapshot(wid)
+        if snapshot:
+            result["snapshot"] = snapshot
+        return result

@@ -870,7 +870,7 @@ def offer_download(file_path: str, description: str = "") -> str:
     由 tool_dispatcher 检测后发射 FILE_DOWNLOAD SSE 事件，前端渲染为下载卡片。
     """
     guard = _get_guard()
-    safe_path = guard.resolve(file_path)
+    safe_path = guard.resolve_and_validate(file_path)
     if not safe_path.is_file():
         raise FileNotFoundError(f"文件不存在: {file_path}")
 
