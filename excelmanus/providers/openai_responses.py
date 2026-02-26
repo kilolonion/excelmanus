@@ -101,11 +101,33 @@ def _chat_messages_to_responses_input(
             continue
 
         if role == "user":
-            input_items.append({
-                "type": "message",
-                "role": "user",
-                "content": content or "",
-            })
+            # Multimodal content: convert Chat Completions parts to Responses API format
+            if isinstance(content, list):
+                converted_parts: list[dict[str, Any]] = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = part.get("type", "")
+                    if part_type == "text":
+                        converted_parts.append({"type": "input_text", "text": part.get("text", "")})
+                    elif part_type == "image_url":
+                        img_info = part.get("image_url", {})
+                        url = img_info.get("url", "") if isinstance(img_info, dict) else str(img_info)
+                        detail = img_info.get("detail", "auto") if isinstance(img_info, dict) else "auto"
+                        converted_parts.append({"type": "input_image", "image_url": url, "detail": detail})
+                    else:
+                        converted_parts.append(part)
+                input_items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": converted_parts if converted_parts else "",
+                })
+            else:
+                input_items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": content or "",
+                })
             continue
 
         if role == "assistant":
