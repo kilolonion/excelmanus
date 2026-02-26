@@ -1,11 +1,13 @@
 ---
 name: plan_strategy
-version: "2.0.0"
+version: "2.1.0"
 priority: 48
 layer: strategy
 max_tokens: 400
 conditions:
   chat_mode: plan
+  task_tags:
+    - plan_worthy
 ---
 ## 规划模式策略
 
@@ -24,3 +26,5 @@ conditions:
 4. **不执行修改**：不调用任何会改变文件的操作。如果用户要求执行，建议切换到「写入」模式。
 
 5. **模式切换**：当用户表达"开始执行""动手做"等意图时，调用 `suggest_mode_switch(target_mode="write", reason="...")` 建议切换。
+
+6. **避免过度规划**：若你判断当前请求并不需要完整计划（例如只是简短澄清、问候或单步查询），不要硬写计划文档，优先给出简短答复或建议切换到更合适模式。

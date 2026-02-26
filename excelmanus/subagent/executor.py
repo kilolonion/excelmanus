@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -69,6 +70,12 @@ class SubagentExecutor:
         full_access_enabled: bool = False,
         tool_result_enricher: ToolResultEnricher | None = None,
         enriched_contexts: list[str] | None = None,
+        session_turn: int | None = None,
+        workspace_context: str = "",
+        file_access_guard: Any | None = None,
+        sandbox_env: Any | None = None,
+        cow_mappings: dict[str, str] | None = None,
+        workspace_root: str = "",
     ) -> SubagentResult:
         """执行单次子代理任务。"""
         conversation_id = str(uuid4())
@@ -92,6 +99,7 @@ class SubagentExecutor:
             config=config,
             parent_context=parent_context,
             enriched_contexts=enriched_contexts,
+            workspace_context=workspace_context,
         )
         persistent_memory, memory_extractor, memory_client = self._create_memory_components(
             config=config
@@ -121,7 +129,11 @@ class SubagentExecutor:
         pending_id: str | None = None
         structured_changes: list[SubagentFileChange] = []
         observed_files: set[str] = set()
-        consecutive_failures = 0
+        repeated_failure_streak = 0
+        similar_failure_streak = 0
+        last_failure_signature: str | None = None
+        last_category_signature: str | None = None
+        _failure_hint_injected_at: int = 0
         last_summary = ""
         success = True
         error: str | None = None
@@ -166,7 +178,7 @@ class SubagentExecutor:
                 memory.add_assistant_tool_message(assistant_message_to_dict(message))
 
                 breaker_skip_msg = (
-                    f"工具未执行：连续 {config.max_consecutive_failures} 次工具调用失败，已触发熔断。"
+                    f"工具未执行：同一失败重复 {config.max_consecutive_failures} 次，已触发熔断。"
                 )
                 pending_skip_msg = "工具未执行：子代理命中待确认操作，当前轮次已终止。"
 
@@ -182,12 +194,31 @@ class SubagentExecutor:
                     except Exception as exc:  # noqa: BLE001
                         parsed_error = f"子代理工具参数解析失败: {exc}"
                         memory.add_tool_result(call_id, parsed_error)
-                        consecutive_failures += 1
+                        current_signature = self._failure_signature(
+                            tool_name=tool_name,
+                            arguments={"_raw": str(raw_args or "")[:500]},
+                            error=parsed_error,
+                        )
+                        current_category = self._category_signature(
+                            tool_name=tool_name, error=parsed_error,
+                        )
+                        repeated_failure_streak = self._update_failure_streak(
+                            signature=current_signature,
+                            previous_signature=last_failure_signature,
+                            previous_streak=repeated_failure_streak,
+                        )
+                        similar_failure_streak = self._update_failure_streak(
+                            signature=current_category,
+                            previous_signature=last_category_signature,
+                            previous_streak=similar_failure_streak,
+                        )
+                        last_failure_signature = current_signature
+                        last_category_signature = current_category
                         error = parsed_error
                         success = False
-                        if consecutive_failures >= config.max_consecutive_failures:
+                        if repeated_failure_streak >= config.max_consecutive_failures:
                             last_summary = (
-                                f"子代理连续 {config.max_consecutive_failures} 次失败，已终止。"
+                                f"子代理检测到同一失败重复 {config.max_consecutive_failures} 次，已终止当前策略。"
                             )
                             success = False
                             tool_calls += self._backfill_tool_results_for_remaining_calls(
@@ -219,14 +250,15 @@ class SubagentExecutor:
                         full_access_enabled=full_access_enabled,
                         persistent_memory=persistent_memory,
                         tool_result_enricher=tool_result_enricher,
+                        session_turn=session_turn,
+                        file_access_guard=file_access_guard,
+                        sandbox_env=sandbox_env,
+                        cow_mappings=cow_mappings,
+                        workspace_root=workspace_root,
                     )
-                    max_chars = (
-                        _FULL_MODE_SUMMARY_MAX_CHARS
-                        if config.capability_mode == "full"
-                        else _SUMMARY_MAX_CHARS
-                    )
-                    content = result.result[:max_chars]
-                    memory.add_tool_result(call_id, content)
+                    # 工具结果已在 _execute_tool 内经过 ToolDef 级截断，
+                    # 此处不再做二次硬截断，避免丢失关键信息。
+                    memory.add_tool_result(call_id, result.result)
                     self._emit_safe(
                         on_event,
                         ToolCallEvent(
@@ -270,15 +302,38 @@ class SubagentExecutor:
                         break
 
                     if result.success:
-                        consecutive_failures = 0
+                        repeated_failure_streak = 0
+                        similar_failure_streak = 0
+                        last_failure_signature = None
+                        last_category_signature = None
                     else:
                         success = False
                         error = result.error or result.result
-                        consecutive_failures += 1
+                        current_signature = self._failure_signature(
+                            tool_name=tool_name,
+                            arguments=args,
+                            error=error,
+                        )
+                        current_category = self._category_signature(
+                            tool_name=tool_name, error=error,
+                        )
+                        repeated_failure_streak = self._update_failure_streak(
+                            signature=current_signature,
+                            previous_signature=last_failure_signature,
+                            previous_streak=repeated_failure_streak,
+                        )
+                        similar_failure_streak = self._update_failure_streak(
+                            signature=current_category,
+                            previous_signature=last_category_signature,
+                            previous_streak=similar_failure_streak,
+                        )
+                        last_failure_signature = current_signature
+                        last_category_signature = current_category
 
-                    if consecutive_failures >= config.max_consecutive_failures:
+                    # ── 渐进降级熔断 ──
+                    if repeated_failure_streak >= config.max_consecutive_failures:
                         last_summary = (
-                            f"子代理连续 {config.max_consecutive_failures} 次工具调用失败，已终止。"
+                            f"子代理检测到同一失败重复 {config.max_consecutive_failures} 次，已终止当前策略。"
                         )
                         success = False
                         tool_calls += self._backfill_tool_results_for_remaining_calls(
@@ -288,7 +343,22 @@ class SubagentExecutor:
                         )
                         break
 
-                if pending_id is not None or consecutive_failures >= config.max_consecutive_failures:
+                    # 渐进提示：相似失败达到阈值时注入引导，不终止
+                    warn_threshold = max(2, (config.max_consecutive_failures + 1) // 2)
+                    if (
+                        similar_failure_streak >= warn_threshold
+                        and _failure_hint_injected_at < similar_failure_streak
+                    ):
+                        _failure_hint_injected_at = similar_failure_streak
+                        hint = self._build_failure_hint(
+                            tool_name=tool_name,
+                            streak=similar_failure_streak,
+                            max_failures=config.max_consecutive_failures,
+                            error=error,
+                        )
+                        memory.add_user_message(hint)
+
+                if pending_id is not None or repeated_failure_streak >= config.max_consecutive_failures:
                     break
 
             if not last_summary:
@@ -301,6 +371,18 @@ class SubagentExecutor:
             error = str(exc)
             last_summary = f"子代理执行失败：{exc}"
         finally:
+            # ── 异常退出时追加中间产出摘要，确保主代理获得已有信息 ──
+            if not success and (iterations > 0 or tool_calls > 0):
+                partial = self._build_partial_progress_summary(
+                    memory=memory,
+                    observed_files=observed_files,
+                    structured_changes=structured_changes,
+                    iterations=iterations,
+                    tool_calls=tool_calls,
+                )
+                if partial:
+                    last_summary = f"{last_summary}\n\n【已完成的工作】\n{partial}"
+
             # 确保 HTTP 连接池在任何退出路径下都被释放
             _close = getattr(client, "close", None)
             if callable(_close):
@@ -377,6 +459,8 @@ class SubagentExecutor:
         tool_scope: list[str],
         tool_result_enricher: ToolResultEnricher | None,
         log_prefix: str = "subagent unknown",
+        file_access_guard: Any | None = None,
+        sandbox_env: Any | None = None,
     ) -> _ExecResult:
         """探针→执行→错误检测→探针对比→截断→增强 的通用流水线。
 
@@ -407,6 +491,8 @@ class SubagentExecutor:
                 tool_name=tool_name,
                 arguments=arguments,
                 tool_scope=tool_scope,
+                file_access_guard=file_access_guard,
+                sandbox_env=sandbox_env,
             )
         except Exception as exc:  # noqa: BLE001
             error = f"工具执行错误: {exc}"
@@ -502,6 +588,7 @@ class SubagentExecutor:
         config: SubagentConfig,
         parent_context: str,
         enriched_contexts: list[str] | None = None,
+        workspace_context: str = "",
     ) -> str:
         """构建子代理系统提示。
 
@@ -530,6 +617,9 @@ class SubagentExecutor:
         parts = [composer_prompt or config.system_prompt.strip() or default_prompt]
         if parent_context.strip():
             parts.append("## 主会话上下文\n" + parent_context.strip())
+        # S1: 注入文件全景 + CoW 路径映射，让子代理知道工作区有哪些文件
+        if workspace_context.strip():
+            parts.append(workspace_context.strip())
         # full 模式：注入主代理级别的丰富上下文
         if config.capability_mode == "full" and enriched_contexts:
             for ctx in enriched_contexts:
@@ -549,8 +639,21 @@ class SubagentExecutor:
         full_access_enabled: bool,
         persistent_memory: "PersistentMemory | None",
         tool_result_enricher: ToolResultEnricher | None,
+        session_turn: int | None,
+        file_access_guard: Any | None = None,
+        sandbox_env: Any | None = None,
+        cow_mappings: dict[str, str] | None = None,
+        workspace_root: str = "",
     ) -> _ExecResult:
         """执行子代理内单次工具调用（含审批桥接）。"""
+        # S2: CoW 路径重定向（与主代理 ToolDispatcher 对齐）
+        arguments, cow_reminders = self._redirect_cow_paths(
+            tool_name=tool_name,
+            arguments=arguments,
+            cow_mappings=cow_mappings,
+            workspace_root=workspace_root,
+        )
+
         if not registry.is_tool_available(tool_name):
             return _ExecResult(
                 success=False,
@@ -611,13 +714,19 @@ class SubagentExecutor:
                     tool_scope=tool_scope,
                     tool_result_enricher=tool_result_enricher,
                     log_prefix="subagent mcp unknown",
+                    file_access_guard=file_access_guard,
+                    sandbox_env=sandbox_env,
                 )
 
             def _execute(name: str, args: dict[str, Any], scope: list[str]) -> Any:
                 from excelmanus.tools import memory_tools
 
-                with memory_tools.bind_memory_context(persistent_memory):
-                    return registry.call_tool(name, args, tool_scope=scope)
+                _tokens = self._set_contextvars(file_access_guard, sandbox_env)
+                try:
+                    with memory_tools.bind_memory_context(persistent_memory):
+                        return registry.call_tool(name, args, tool_scope=scope)
+                finally:
+                    self._reset_contextvars(_tokens)
 
             try:
                 result_text, record = await asyncio.to_thread(
@@ -629,6 +738,7 @@ class SubagentExecutor:
                     execute=_execute,
                     undoable=not self._approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
                     created_at_utc=created_at_utc,
+                    session_turn=session_turn,
                 )
             except Exception as exc:  # noqa: BLE001
                 error = f"工具执行错误: {exc}"
@@ -661,6 +771,8 @@ class SubagentExecutor:
             arguments=arguments,
             tool_scope=tool_scope,
             tool_result_enricher=tool_result_enricher,
+            file_access_guard=file_access_guard,
+            sandbox_env=sandbox_env,
         )
 
     async def _call_tool_with_memory_context(
@@ -671,15 +783,97 @@ class SubagentExecutor:
         tool_name: str,
         arguments: dict[str, Any],
         tool_scope: list[str],
+        file_access_guard: Any | None = None,
+        sandbox_env: Any | None = None,
     ) -> Any:
-        """在线程池执行工具时绑定记忆上下文，避免会话间串扰。"""
+        """在线程池执行工具时绑定记忆上下文和安全上下文，避免会话间串扰。"""
         from excelmanus.tools import memory_tools
 
         def _call() -> Any:
-            with memory_tools.bind_memory_context(persistent_memory):
-                return registry.call_tool(tool_name, arguments, tool_scope=tool_scope)
+            _tokens = self._set_contextvars(file_access_guard, sandbox_env)
+            try:
+                with memory_tools.bind_memory_context(persistent_memory):
+                    return registry.call_tool(tool_name, arguments, tool_scope=tool_scope)
+            finally:
+                self._reset_contextvars(_tokens)
 
         return await asyncio.to_thread(_call)
+
+    @staticmethod
+    def _set_contextvars(
+        file_access_guard: Any | None,
+        sandbox_env: Any | None,
+    ) -> list[Any]:
+        """设置 FileAccessGuard + sandbox env contextvars，返回用于恢复的 token 列表。"""
+        tokens: list[Any] = []
+        if file_access_guard is not None:
+            from excelmanus.tools._guard_ctx import set_guard
+            tokens.append(("guard", set_guard(file_access_guard)))
+        if sandbox_env is not None:
+            from excelmanus.tools.code_tools import set_sandbox_env
+            tokens.append(("sandbox", set_sandbox_env(sandbox_env)))
+        return tokens
+
+    @staticmethod
+    def _reset_contextvars(tokens: list[Any]) -> None:
+        """恢复 _set_contextvars 设置的 contextvars。"""
+        for kind, token in tokens:
+            if kind == "guard":
+                from excelmanus.tools._guard_ctx import reset_guard
+                reset_guard(token)
+            elif kind == "sandbox":
+                from excelmanus.tools.code_tools import _current_sandbox_env
+                _current_sandbox_env.reset(token)
+
+    @staticmethod
+    def _redirect_cow_paths(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        cow_mappings: dict[str, str] | None,
+        workspace_root: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """检查工具参数中的文件路径是否命中 CoW 注册表，自动重定向。
+
+        简化版实现，与主代理 ToolDispatcher._redirect_cow_paths 对齐。
+        """
+        if not cow_mappings:
+            return arguments, []
+
+        _PATH_FIELDS = ("file_path", "path", "source_file", "target_file",
+                        "output_path", "directory", "source", "destination")
+        path_fields = [f for f in _PATH_FIELDS if f in arguments]
+        if not path_fields:
+            return arguments, []
+
+        redirected = dict(arguments)
+        reminders: list[str] = []
+        for field_name in path_fields:
+            raw = arguments.get(field_name)
+            if raw is None:
+                continue
+            raw_str = str(raw).strip()
+            if not raw_str:
+                continue
+            rel_path = raw_str
+            if workspace_root and raw_str.startswith(workspace_root):
+                rel_path = raw_str[len(workspace_root):].lstrip("/")
+            redirect = cow_mappings.get(rel_path)
+            if redirect is not None:
+                if raw_str.startswith(workspace_root):
+                    new_path = f"{workspace_root}/{redirect}"
+                else:
+                    new_path = redirect
+                redirected[field_name] = new_path
+                reminders.append(
+                    f"⚠️ 路径 `{raw_str}` 是受保护的原始文件，"
+                    f"已自动重定向到副本 `{new_path}`。"
+                )
+                logger.info(
+                    "子代理 CoW 路径拦截: tool=%s field=%s %s → %s",
+                    tool_name, field_name, raw_str, new_path,
+                )
+        return redirected, reminders
 
     def _create_memory_components(
         self,
@@ -766,6 +960,132 @@ class SubagentExecutor:
             memory.add_tool_result(call_id, content)
             backfilled += 1
         return backfilled
+
+    @staticmethod
+    def _failure_signature(
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        error: str | None,
+    ) -> str:
+        """构造失败签名：同工具 + 同参数 + 同错误才视为同一失败。"""
+        try:
+            canonical_args = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001
+            canonical_args = str(arguments)
+        error_text = (error or "").strip()
+        if len(error_text) > 240:
+            error_text = error_text[:240]
+        raw = f"{tool_name}|{canonical_args}|{error_text}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _category_signature(*, tool_name: str, error: str | None) -> str:
+        """构造类别签名：同工具 + 相似错误类别即视为同类失败。
+
+        与 _failure_signature 不同，此签名不包含完整参数，
+        用于渐进提示（早期预警），而非硬切终止。
+        """
+        error_text = (error or "").strip().lower()
+        # 提取错误类别关键词
+        category = "unknown"
+        for kw, cat in (
+            ("not found", "not_found"), ("不存在", "not_found"), ("找不到", "not_found"),
+            ("no such file", "not_found"), ("filenotfound", "not_found"),
+            ("permission", "permission"), ("权限", "permission"), ("denied", "permission"),
+            ("timeout", "timeout"), ("超时", "timeout"), ("timed out", "timeout"),
+            ("parse", "parse_error"), ("解析", "parse_error"), ("invalid", "parse_error"),
+            ("json", "parse_error"), ("syntax", "parse_error"),
+            ("toolnotallowed", "not_allowed"), ("不在", "not_allowed"),
+            ("connection", "network"), ("连接", "network"), ("network", "network"),
+        ):
+            if kw in error_text:
+                category = cat
+                break
+        raw = f"{tool_name}|{category}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_failure_hint(
+        *,
+        tool_name: str,
+        streak: int,
+        max_failures: int,
+        error: str | None,
+    ) -> str:
+        """构建渐进降级提示消息，引导子代理换策略。"""
+        error_brief = (error or "")[:120]
+        remaining = max_failures - streak
+        if remaining <= 1:
+            urgency = "即将触发终止"
+        else:
+            urgency = f"还剩 {remaining} 次机会"
+        return (
+            f"[系统提示] 工具 `{tool_name}` 已连续出现 {streak} 次相似失败"
+            f"（{urgency}）。\n"
+            f"最近错误: {error_brief}\n"
+            "请尝试以下策略之一：\n"
+            "1. 换用其他可用工具完成同样目标\n"
+            "2. 修改参数（如换用其他路径、范围、sheet名）\n"
+            "3. 如果目标确实不可达，直接汇报当前已获取的信息并结束"
+        )
+
+    @staticmethod
+    def _update_failure_streak(
+        *,
+        signature: str,
+        previous_signature: str | None,
+        previous_streak: int,
+    ) -> int:
+        if previous_signature == signature:
+            return previous_streak + 1
+        return 1
+
+    @staticmethod
+    def _build_partial_progress_summary(
+        *,
+        memory: ConversationMemory,
+        observed_files: set[str],
+        structured_changes: list[SubagentFileChange],
+        iterations: int,
+        tool_calls: int,
+    ) -> str:
+        """从对话历史提取子代理已完成的有用工作摘要。
+
+        在异常退出时调用，确保主代理不会丢失已获取的中间信息。
+        """
+        # 收集 assistant 文本消息（排除纯 tool_calls 消息）
+        assistant_texts: list[str] = []
+        for msg in memory.messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                text = content.strip()
+                if len(text) > 200:
+                    text = text[:200] + "…"
+                assistant_texts.append(text)
+
+        parts: list[str] = []
+
+        # 统计信息
+        if iterations > 0 or tool_calls > 0:
+            parts.append(f"已执行 {iterations} 轮迭代、{tool_calls} 次工具调用")
+        if observed_files:
+            file_list = ", ".join(sorted(observed_files)[:5])
+            suffix = f" 等共 {len(observed_files)} 个" if len(observed_files) > 5 else ""
+            parts.append(f"涉及文件: {file_list}{suffix}")
+        if structured_changes:
+            parts.append(f"已产生 {len(structured_changes)} 条结构化变更")
+
+        # 最后一条有实质内容的 assistant 分析
+        if assistant_texts:
+            last_text = assistant_texts[-1]
+            parts.append(f"中间分析: {last_text}")
+
+        if not parts:
+            return ""
+        return "\n".join(parts)
 
     @staticmethod
     def _truncate(text: str, max_chars: int = _SUMMARY_MAX_CHARS) -> str:
