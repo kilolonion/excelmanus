@@ -135,8 +135,27 @@ class ConversationMemory:
 
         Args:
             content: 纯文本字符串或多模态 content parts 列表。
+                     当 content 为列表且包含 image_url 类型的 part 时，
+                     自动注册到图片追踪系统，使 mark_images_sent() 可以
+                     在首轮 LLM 调用后将 base64 降级为文本引用。
         """
-        self._messages.append({"role": "user", "content": content})
+        # 检测多模态内容中的图片并注册追踪
+        has_images = False
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    has_images = True
+                    break
+
+        if has_images:
+            self._image_seq += 1
+            image_id = self._image_seq
+            self._messages.append({
+                "role": "user", "content": content, "_image_id": image_id,
+            })
+            self._fresh_image_ids.add(image_id)
+        else:
+            self._messages.append({"role": "user", "content": content})
         self._truncate_if_needed()
 
     def add_image_message(
@@ -351,15 +370,33 @@ class ConversationMemory:
 
         在每轮 LLM 调用完成后调用。fresh 图片在本轮已随完整 base64
         发送给 LLM，后续轮次只需保留短文本引用即可。
+
+        对于多模态消息（text + image 混合），保留原始文本部分，
+        仅将 image_url 部分替换为短文本引用。
         """
         if not self._fresh_image_ids:
             return
         for i, msg in enumerate(self._messages):
             image_id = msg.get("_image_id")
             if image_id is not None and image_id in self._fresh_image_ids:
+                # Extract text parts from multimodal content before degrading
+                original_text = ""
+                content = msg.get("content")
+                if isinstance(content, list):
+                    text_parts = [
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ]
+                    original_text = "\n".join(t for t in text_parts if t)
+
+                image_ref = f"[图片 #{image_id} 已在之前的对话中发送]"
+                degraded_content = (
+                    f"{original_text}\n{image_ref}" if original_text else image_ref
+                )
                 self._messages[i] = {
                     "role": "user",
-                    "content": f"[图片 #{image_id} 已在之前的对话中发送]",
+                    "content": degraded_content,
                     "_image_id": image_id,
                     "_image_downgraded": True,
                 }
