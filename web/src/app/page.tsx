@@ -16,6 +16,8 @@ import type { AttachedFile } from "@/lib/types";
 export default function Home() {
   const messages = useChatStore((s) => s.messages);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
@@ -38,6 +40,10 @@ export default function Home() {
   };
 
   const hasMessages = messages.length > 0;
+  // 会话恢复中：activeSessionId 已从 localStorage 恢复但消息尚未加载
+  // 不展示 WelcomePage，避免闪烁
+  const isRestoringSession = !!activeSessionId && !hasMessages
+    && (currentSessionId !== activeSessionId || isLoadingMessages);
 
   return (
     <div className="flex flex-col h-full">
@@ -57,6 +63,8 @@ export default function Home() {
             retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
           }}
         />
+      ) : isRestoringSession ? (
+        <div className="flex-1" />
       ) : (
         <WelcomePage onSuggestionClick={handleSend} />
       )}

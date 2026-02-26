@@ -12,6 +12,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { baseMarkdownComponents } from "@/components/chat/MarkdownComponents";
 
 interface CommandResultDialogProps {
   open: boolean;
@@ -40,7 +41,7 @@ export function CommandResultDialog({
         <ScrollArea className="px-5 pb-5" style={{ maxHeight: "calc(70vh - 80px)" }}>
           {format === "markdown" ? (
             <div className="prose prose-sm max-w-none text-foreground">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={baseMarkdownComponents}>{result}</ReactMarkdown>
             </div>
           ) : (
             <pre className="text-sm whitespace-pre-wrap text-foreground">{result}</pre>

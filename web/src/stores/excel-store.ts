@@ -8,10 +8,30 @@ import {
   type BackupFile,
 } from "@/lib/api";
 
+/** Univer 兼容的单元格样式（轻量子集） */
+export interface CellStyle {
+  bl?: number;               // bold
+  it?: number;               // italic
+  ul?: { s: number };        // underline
+  st?: { s: number };        // strikethrough
+  fs?: number;               // font size
+  ff?: string;               // font family
+  cl?: { rgb: string };      // font color
+  bg?: { rgb: string };      // background color
+  ht?: number;               // horizontal alignment
+  vt?: number;               // vertical alignment
+  tb?: number;               // wrap text
+  tr?: { a: number };        // text rotation
+  bd?: Record<string, { s: number; cl?: { rgb: string } }>; // borders
+  n?: { pattern: string };   // number format
+}
+
 export interface ExcelCellDiff {
   cell: string;
   old: string | number | boolean | null;
   new: string | number | boolean | null;
+  oldStyle?: CellStyle | null;
+  newStyle?: CellStyle | null;
 }
 
 export interface ExcelDiffEntry {
@@ -31,6 +51,7 @@ export interface ExcelPreviewData {
   rows: (string | number | null)[][];
   totalRows: number;
   truncated: boolean;
+  cellStyles?: (CellStyle | null)[][];
 }
 
 export interface TextDiffEntry {

@@ -23,7 +23,7 @@ import { SubagentBlock } from "./SubagentBlock";
 import { TaskList } from "./TaskList";
 import { UndoableCard } from "./UndoableCard";
 import { PipelineStepper } from "./PipelineStepper";
-import { CodeBlock } from "./CodeBlock";
+import { baseMarkdownComponents } from "./MarkdownComponents";
 import { MessageActions } from "./MessageActions";
 import { VlmPipelineCard } from "./VlmPipelineCard";
 import { useChatStore } from "@/stores/chat-store";
@@ -90,6 +90,7 @@ function FileDownloadLink({ href, children }: { href: string; children: React.Re
 }
 
 const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components"] = {
+  ...baseMarkdownComponents,
   p({ children }) {
     return <p>{processChildren(children)}</p>;
   },
@@ -107,28 +108,6 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
       </a>
     );
   },
-  // 围栏代码块 → 带语法高亮与复制按钮的 CodeBlock
-  pre({ children }) {
-    // react-markdown 将围栏代码包在 <pre><code>…</code></pre> 中，此处透传由 code 组件通过 CodeBlock 渲染
-    return <>{children}</>;
-  },
-  code({ className, children, node, ...rest }) {
-    const match = /language-(\w+)/.exec(className || "");
-    const codeString = String(children).replace(/\n$/, "");
-    // 围栏代码块（有语言类或为多行）
-    if (match || (node?.position && codeString.includes("\n"))) {
-      return <CodeBlock language={match?.[1]} code={codeString} />;
-    }
-    // 行内代码
-    return (
-      <code
-        className="rounded px-1 py-0.5 text-[12.5px] font-mono bg-[var(--em-primary-alpha-06)] text-[var(--em-primary-dark)]"
-        {...rest}
-      >
-        {children}
-      </code>
-    );
-  },
 };
 
 const MAX_COLLAPSED_HEIGHT_ASSISTANT = 400; // px
@@ -136,12 +115,14 @@ const MAX_COLLAPSED_HEIGHT_ASSISTANT = 400; // px
 const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
   content,
   isStreamingText,
+  defaultExpanded,
 }: {
   content: string;
   isStreamingText?: boolean;
+  defaultExpanded?: boolean;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const [needsExpand, setNeedsExpand] = useState(false);
 
   useEffect(() => {
@@ -371,6 +352,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
             isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
             showCollapseButton={false}
             onCollapse={undefined}
+            defaultExpanded={block.type === "text"}
           />
         ))}
 
@@ -492,7 +474,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   isThinkingActive, 
   isStreamingText,
   showCollapseButton,
-  onCollapse
+  onCollapse,
+  defaultExpanded
 }: { 
   block: AssistantBlock; 
   blockIndex: number; 
@@ -501,6 +484,7 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   isStreamingText?: boolean;
   showCollapseButton?: boolean;
   onCollapse?: () => void;
+  defaultExpanded?: boolean;
 }) {
   switch (block.type) {
     case "thinking":
@@ -517,7 +501,7 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       if (saveMatch) {
         return <SaveResultCard path={saveMatch[1]} />;
       }
-      return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} />;
+      return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} defaultExpanded={defaultExpanded} />;
     }
     case "tool_call": {
       const isVlmExtract = block.name === "extract_table_spec";

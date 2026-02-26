@@ -15,6 +15,7 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  ArrowUpDown,
   Search,
   Loader2,
   AlertCircle,
@@ -24,6 +25,12 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   fetchAdminUsers,
@@ -719,45 +726,53 @@ export default function AdminPage() {
         </div>
 
         {/* Search & sort */}
-        <div className="flex flex-col sm:flex-row gap-3">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索用户邮箱或名称..."
-              className="w-full h-9 rounded-lg border border-border bg-background pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
-            />
-          </div>
-          <div className="flex gap-1.5 flex-wrap">
-            {(
-              [
-                ["created_at", "注册时间"],
-                ["email", "邮箱"],
-                ["role", "角色"],
-                ["workspace_size", "存储"],
-                ["workspace_files", "文件"],
-              ] as [SortField, string][]
-            ).map(([field, label]) => (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索用户邮箱或名称..."
+            className="w-full h-9 rounded-lg border border-border bg-background pl-9 pr-24 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+          />
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
               <Button
-                key={field}
-                variant={sortField === field ? "default" : "outline"}
+                variant="ghost"
                 size="sm"
-                className="text-xs gap-1 h-8"
-                style={sortField === field ? { backgroundColor: "var(--em-primary)" } : undefined}
-                onClick={() => toggleSort(field)}
+                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 text-xs gap-1 text-muted-foreground hover:text-foreground"
               >
-                {label}
-                {sortField === field &&
-                  (sortDir === "asc" ? (
-                    <ChevronUp className="h-3 w-3" />
-                  ) : (
-                    <ChevronDown className="h-3 w-3" />
-                  ))}
+                <ArrowUpDown className="h-3 w-3" />
+                {{ created_at: "注册时间", email: "邮箱", role: "角色", workspace_size: "存储", workspace_files: "文件" }[sortField]}
+                {sortDir === "asc" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
               </Button>
-            ))}
-          </div>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[120px]">
+              {(
+                [
+                  ["created_at", "注册时间"],
+                  ["email", "邮箱"],
+                  ["role", "角色"],
+                  ["workspace_size", "存储"],
+                  ["workspace_files", "文件"],
+                ] as [SortField, string][]
+              ).map(([field, label]) => (
+                <DropdownMenuItem
+                  key={field}
+                  className="text-xs gap-2"
+                  onClick={() => toggleSort(field)}
+                >
+                  <span className="flex-1">{label}</span>
+                  {sortField === field &&
+                    (sortDir === "asc" ? (
+                      <ChevronUp className="h-3 w-3 text-[var(--em-primary)]" />
+                    ) : (
+                      <ChevronDown className="h-3 w-3 text-[var(--em-primary)]" />
+                    ))}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {/* Error */}

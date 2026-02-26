@@ -5,8 +5,23 @@ import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
-import { useExcelStore } from "@/stores/excel-store";
+import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile } from "@/lib/types";
+
+/** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
+function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item: unknown) => {
+    const c = item as Record<string, unknown>;
+    return {
+      cell: (c.cell as string) || "",
+      old: c.old as string | number | boolean | null,
+      new: c.new as string | number | boolean | null,
+      oldStyle: (c.old_style ?? c.oldStyle ?? null) as ExcelCellDiff["oldStyle"],
+      newStyle: (c.new_style ?? c.newStyle ?? null) as ExcelCellDiff["newStyle"],
+    };
+  });
+}
 
 const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 function _isImageFile(name: string): boolean {
@@ -67,11 +82,14 @@ class DeltaBatcher {
   }
 
   dispose() {
-    this._disposed = true;
+    if (this._disposed) return;
+    // 先刷新残余内容到 store，防止断连/热重载时丢失尾部 delta
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
+    this._doFlush();
+    this._disposed = true;
     this._textBuf = "";
     this._thinkingBuf = "";
   }
@@ -472,6 +490,13 @@ export async function sendMessage(
             break;
           }
 
+          case "retract_thinking": {
+            thinkingInProgress = false;
+            batcher.flush();
+            S().retractLastThinking(assistantMsgId);
+            break;
+          }
+
           // ── 文本 ───────────────────────────────────
           case "text_delta": {
             S().setPipelineStatus(null);
@@ -786,6 +811,7 @@ export async function sendMessage(
               rows: (data.rows as (string | number | null)[][]) || [],
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
+              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
             });
             if (epFilePath) {
               const epFilename = epFilePath.split("/").pop() || epFilePath;
@@ -801,7 +827,7 @@ export async function sendMessage(
               filePath: edFilePath,
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
-              changes: (data.changes as { cell: string; old: string | number | null; new: string | number | null }[]) || [],
+              changes: _mapDiffChanges(data.changes as unknown[]),
               timestamp: Date.now(),
             });
             if (edFilePath) {
@@ -1516,6 +1542,7 @@ export async function sendContinuation(
               rows: (data.rows as (string | number | null)[][]) || [],
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
+              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
             });
             if (epFilePath2) {
               const fn = epFilePath2.split("/").pop() || epFilePath2;
@@ -1531,7 +1558,7 @@ export async function sendContinuation(
               filePath: edFilePath2,
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
-              changes: (data.changes as { cell: string; old: string | number | null; new: string | number | null }[]) || [],
+              changes: _mapDiffChanges(data.changes as unknown[]),
               timestamp: Date.now(),
             });
             if (edFilePath2) {
@@ -2462,6 +2489,7 @@ export async function subscribeToSession(sessionId: string) {
               rows: (data.rows as (string | number | null)[][]) || [],
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
+              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
             });
             if (epFilePath) {
               const fn = epFilePath.split("/").pop() || epFilePath;
@@ -2477,7 +2505,7 @@ export async function subscribeToSession(sessionId: string) {
               filePath: edFilePath,
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
-              changes: (data.changes as { cell: string; old: string | number | null; new: string | number | null }[]) || [],
+              changes: _mapDiffChanges(data.changes as unknown[]),
               timestamp: Date.now(),
             });
             if (edFilePath) {
