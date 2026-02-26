@@ -1,4 +1,4 @@
-"""Single entrypoint for domain mutation."""
+"""领域变更的单一入口。"""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from .domain import ExplorerWindow, SheetWindow, Window
 
 
 class DeltaReject(ValueError):
-    """Raised when a delta cannot be applied to a window."""
+    """当增量无法应用到窗口时抛出。"""
 
 
 def apply_delta(window: Window, delta: WindowDelta) -> Window:
-    """Apply a delta through kind-checked mutation pipeline."""
+    """经类型校验的变更管道应用增量。"""
 
     if window.kind != delta.kind:
         raise DeltaReject(f"kind mismatch: window={window.kind} delta={delta.kind}")

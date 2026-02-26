@@ -976,7 +976,7 @@ class WindowPerceptionManager:
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
     ) -> Window | None:
-        """Locate window by strong identity, then minimal active fallback."""
+        """先按强身份定位窗口，再按最小活跃回退。"""
 
         if window_type == WindowType.EXPLORER:
             directory = normalize_path(extract_directory(arguments, result_json)) or "."
@@ -1076,7 +1076,7 @@ class WindowPerceptionManager:
         arguments: dict[str, Any],
         result_json: dict[str, Any] | None,
     ) -> None:
-        """Apply kind-guarded delta contract then ingest mutable state."""
+        """应用经类型校验的增量契约并摄入可变状态。"""
 
         delta = self._build_window_delta(
             window=window,

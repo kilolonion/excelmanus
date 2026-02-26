@@ -1,4 +1,4 @@
-"""Projection DTOs for read-only rendering/confirmation."""
+"""只读渲染/确认用的投影 DTO。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class NoticeProjection:
-    """Read-only notice projection used by renderer."""
+    """渲染器使用的只读通知投影。"""
 
     window_id: str
     kind: str
@@ -25,7 +25,7 @@ class NoticeProjection:
 
 @dataclass(frozen=True)
 class ToolPayloadProjection:
-    """Read-only tool payload projection used by perception block renderer."""
+    """感知块渲染器使用的只读工具载荷投影。"""
 
     window_type: str
     title: str
@@ -54,7 +54,7 @@ class ToolPayloadProjection:
 
 @dataclass(frozen=True)
 class ConfirmationProjection:
-    """Read-only confirmation projection."""
+    """只读确认投影。"""
 
     window_label: str
     operation: str

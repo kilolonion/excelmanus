@@ -1,4 +1,4 @@
-"""Projection builder service."""
+"""投影构建服务。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .projection_models import ConfirmationProjection, NoticeProjection, ToolPay
 
 
 def project_notice(window: Window, ctx: dict[str, Any] | None = None) -> NoticeProjection:
-    """Build read-only notice projection from mutable window state."""
+    """从可变窗口状态构建只读通知投影。"""
 
     context = ctx if isinstance(ctx, dict) else {}
     identity = str(context.get("identity") or _infer_identity(window))
@@ -43,7 +43,7 @@ def project_notice(window: Window, ctx: dict[str, Any] | None = None) -> NoticeP
 
 
 def project_tool_payload(window: Window | None) -> ToolPayloadProjection | None:
-    """Build read-only tool payload projection from window state."""
+    """从窗口状态构建只读工具载荷投影。"""
 
     if window is None:
         return None
@@ -103,7 +103,7 @@ def project_confirmation(
     tool_name: str,
     repeat_warning: bool = False,
 ) -> ConfirmationProjection:
-    """Build read-only confirmation projection from window state."""
+    """从窗口状态构建只读确认投影。"""
 
     rows = int(window.total_rows or (window.viewport.total_rows if window.viewport else 0) or len(window.data_buffer))
     cols = int(window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns or window.schema))

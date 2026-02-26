@@ -1,4 +1,4 @@
-"""Window domain models with typed containers."""
+"""窗口领域模型，带类型化容器。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .models import CachedRange, ChangeRecord, ColumnDef, DetailLevel, IntentTag
 
 @dataclass
 class LifecycleState:
-    """Cross-cutting lifecycle state."""
+    """横切生命周期状态。"""
 
     detail_level: DetailLevel = DetailLevel.FULL
     idle_turns: int = 0
@@ -20,7 +20,7 @@ class LifecycleState:
 
 @dataclass
 class IntentState:
-    """Cross-cutting intent state."""
+    """横切意图状态。"""
 
     tag: IntentTag = IntentTag.GENERAL
     confidence: float = 0.0
@@ -31,7 +31,7 @@ class IntentState:
 
 @dataclass
 class AuditState:
-    """Cross-cutting audit state."""
+    """横切审计状态。"""
 
     operation_history: list[OpEntry] = field(default_factory=list)
     max_history_entries: int = 20
@@ -43,7 +43,7 @@ class AuditState:
 
 @dataclass
 class FocusState:
-    """Cross-cutting focus state."""
+    """横切焦点状态。"""
 
     is_active: bool = False
     last_action: str = ""
@@ -51,7 +51,7 @@ class FocusState:
 
 @dataclass
 class BaseWindow:
-    """Common base for all window kinds."""
+    """所有窗口类型的公共基类。"""
 
     id: str
     kind: str
@@ -190,7 +190,7 @@ class BaseWindow:
 
 @dataclass
 class ExplorerData:
-    """Explorer-specific data container."""
+    """资源管理器窗口专用数据容器。"""
 
     directory: str = "."
     entries: list[str] = field(default_factory=list)
@@ -198,7 +198,7 @@ class ExplorerData:
 
 @dataclass
 class ExplorerWindow(BaseWindow):
-    """Explorer window with typed data container."""
+    """带类型化数据容器的资源管理器窗口。"""
 
     data: ExplorerData = field(default_factory=ExplorerData)
 
@@ -244,7 +244,7 @@ class ExplorerWindow(BaseWindow):
 
 @dataclass
 class SheetCache:
-    """Sheet cache/state container."""
+    """表格缓存/状态容器。"""
 
     preview_rows: list[Any] = field(default_factory=list)
     data_buffer: list[dict[str, Any]] = field(default_factory=list)
@@ -252,13 +252,13 @@ class SheetCache:
     max_cached_rows: int = 200
     stale_hint: str | None = None
     unfiltered_buffer: list[dict[str, Any]] | None = None
-    last_op_kind: str | None = None        # "read" | "write" | "filter" | None
+    last_op_kind: str | None = None        # 取值："read" | "write" | "filter" | None
     last_write_range: str | None = None    # 写操作受影响范围
 
 
 @dataclass
 class SheetStyle:
-    """Sheet style/state container."""
+    """表格样式/状态容器。"""
 
     freeze_panes: str | None = None
     summary: str = ""
@@ -270,7 +270,7 @@ class SheetStyle:
 
 @dataclass
 class SheetFilter:
-    """Sheet filter/state container."""
+    """表格筛选/状态容器。"""
 
     state: dict[str, Any] | None = None
     status_bar: dict[str, Any] = field(default_factory=dict)
@@ -278,7 +278,7 @@ class SheetFilter:
 
 @dataclass
 class SheetSchema:
-    """Sheet schema/state container."""
+    """表格结构/状态容器。"""
 
     schema: list[ColumnDef] = field(default_factory=list)
     columns: list[ColumnDef] = field(default_factory=list)
@@ -286,7 +286,7 @@ class SheetSchema:
 
 @dataclass
 class SheetFocus:
-    """Sheet focus/viewport helpers."""
+    """表格焦点/视口辅助。"""
 
     viewport_range: str = ""
     scroll_position: dict[str, Any] = field(default_factory=dict)
@@ -294,7 +294,7 @@ class SheetFocus:
 
 @dataclass
 class SheetData:
-    """Sheet-specific typed data container."""
+    """表格专用类型化数据容器。"""
 
     file_path: str = ""
     sheet_name: str = ""
@@ -312,7 +312,7 @@ class SheetData:
 
 @dataclass
 class SheetWindow(BaseWindow):
-    """Sheet window with typed data container."""
+    """带类型化数据容器的表格窗口。"""
 
     data: SheetData = field(default_factory=SheetData)
 
