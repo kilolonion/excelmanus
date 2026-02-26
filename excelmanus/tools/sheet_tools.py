@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
-from excelmanus.tools._helpers import resolve_sheet_name
+from excelmanus.tools._helpers import check_file_exists, resolve_sheet_name
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.sheet")
@@ -108,6 +108,10 @@ def list_sheets(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    not_found = check_file_exists(safe_path, file_path, guard)
+    if not_found is not None:
+        return not_found
 
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_LIST_SHEETS_DIMENSIONS)
