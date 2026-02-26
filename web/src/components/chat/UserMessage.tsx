@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X, Download, Pencil } from "lucide-react";
+import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -15,18 +15,28 @@ function isExcelFile(filename: string): boolean {
   return EXCEL_EXTS.has(ext);
 }
 
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+function isImageFile(filename: string): boolean {
+  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  return IMAGE_EXTS.has(ext);
+}
+
+const ACCEPTED_EDIT_EXTENSIONS = ".xlsx,.xls,.csv,.png,.jpg,.jpeg";
+
 interface UserMessageProps {
   content: string;
   files?: FileAttachment[];
-  onEditAndResend?: (newContent: string) => void;
+  onEditAndResend?: (newContent: string, files?: File[]) => void;
   isStreaming?: boolean;
 }
 
 export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming }: UserMessageProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
+  const [editFiles, setEditFiles] = useState<File[]>([]);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (editing && textareaRef.current) {
@@ -44,14 +54,16 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const cancelEdit = useCallback(() => {
     setEditing(false);
     setEditText(content);
+    setEditFiles([]);
   }, [content]);
 
   const confirmEdit = useCallback(() => {
     const trimmed = editText.trim();
-    if (!trimmed) return;
+    if (!trimmed && editFiles.length === 0) return;
     setEditing(false);
-    onEditAndResend?.(trimmed);
-  }, [editText, onEditAndResend]);
+    onEditAndResend?.(trimmed, editFiles.length > 0 ? editFiles : undefined);
+    setEditFiles([]);
+  }, [editText, editFiles, onEditAndResend]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -84,7 +96,47 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               className="w-full text-[13px] leading-relaxed rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
               rows={Math.min(editText.split("\n").length + 1, 8)}
             />
+            {editFiles.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {editFiles.map((f, i) => (
+                  <Badge key={i} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
+                    {isImageFile(f.name) && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
+                    <span className="truncate">{f.name}</span>
+                    <button
+                      type="button"
+                      className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
+                      title="移除"
+                      onClick={() => setEditFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            )}
+            <input
+              ref={editFileInputRef}
+              type="file"
+              accept={ACCEPTED_EDIT_EXTENSIONS}
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const selected = e.target.files;
+                if (selected && selected.length > 0) {
+                  setEditFiles((prev) => [...prev, ...Array.from(selected)]);
+                }
+                e.target.value = "";
+              }}
+            />
             <div className="flex gap-1.5">
+              <button
+                onClick={() => editFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
+                title="添加附件"
+              >
+                <Plus className="h-3 w-3" />
+                附件
+              </button>
               <button
                 onClick={confirmEdit}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
@@ -128,11 +180,14 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           <div className="flex flex-wrap gap-1.5 mt-2">
             {files.map((f, i) => {
               const excel = isExcelFile(f.filename);
+              const image = isImageFile(f.filename);
               return (
                 <Badge
                   key={i}
                   variant="secondary"
-                  className={`text-xs gap-1 pr-1 ${excel ? "cursor-pointer hover:bg-secondary/70" : ""}`}
+                  className={`text-xs gap-1 pr-1 max-w-[200px] ${
+                    excel ? "cursor-pointer hover:bg-secondary/70" : ""
+                  }`}
                   onClick={
                     excel
                       ? () => {
@@ -145,10 +200,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                       : undefined
                   }
                 >
-                  {f.filename}
+                  {image && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
+                  <span className="truncate">{f.filename}</span>
                   <button
                     type="button"
-                    className="rounded p-0.5 hover:bg-foreground/10 transition-colors"
+                    className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
                     title="下载"
                     onClick={(e) => {
                       e.stopPropagation();

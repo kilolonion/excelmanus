@@ -68,9 +68,15 @@ interface ExcelState {
   selectionMode: boolean;
   pendingSelection: { filePath: string; sheet: string; range: string } | null;
 
+  // Quick-add file mention to chat input (set by sidebar, consumed by ChatInput)
+  pendingFileMention: { path: string; filename: string } | null;
+
   // Paths the user explicitly dismissed — survives across remounts so that
   // auto-discovery (workspace scan / session recovery) won't re-add them.
   dismissedPaths: Set<string>;
+
+  // Workspace file tree refresh signal (bumped on files_changed events)
+  workspaceFilesVersion: number;
 
   // Backup apply
   pendingBackups: BackupFile[];
@@ -98,12 +104,16 @@ interface ExcelState {
   exitSelectionMode: () => void;
   confirmSelection: (sel: { filePath: string; sheet: string; range: string }) => void;
   clearPendingSelection: () => void;
+  /** Insert @file:filename into chat input from sidebar click. */
+  mentionFileToInput: (file: { path: string; filename: string }) => void;
+  clearPendingFileMention: () => void;
   fetchBackups: (sessionId: string) => Promise<void>;
   applyFile: (sessionId: string, filePath: string) => Promise<boolean>;
   applyAll: (sessionId: string) => Promise<number>;
   discardFile: (sessionId: string, filePath: string) => Promise<void>;
   discardAll: (sessionId: string) => Promise<void>;
   isFileApplied: (filePath: string) => boolean;
+  bumpWorkspaceFilesVersion: () => void;
   clearSession: () => void;
 }
 
@@ -121,7 +131,9 @@ export const useExcelStore = create<ExcelState>()(
   fullViewSheet: null,
   selectionMode: false,
   pendingSelection: null,
+  pendingFileMention: null,
   dismissedPaths: new Set<string>(),
+  workspaceFilesVersion: 0,
   pendingBackups: [],
   backupEnabled: false,
   backupLoading: false,
@@ -181,7 +193,7 @@ export const useExcelStore = create<ExcelState>()(
         lastUsedAt: Date.now(),
       };
       const updated = [entry, ...filtered].slice(0, MAX_RECENT_FILES);
-      return { recentFiles: updated };
+      return { recentFiles: updated, workspaceFilesVersion: state.workspaceFilesVersion + 1 };
     }),
 
   removeRecentFile: (path) =>
@@ -254,6 +266,10 @@ export const useExcelStore = create<ExcelState>()(
     set({ selectionMode: false, pendingSelection: sel }),
 
   clearPendingSelection: () => set({ pendingSelection: null }),
+
+  mentionFileToInput: (file) => set({ pendingFileMention: file }),
+
+  clearPendingFileMention: () => set({ pendingFileMention: null }),
 
   fetchBackups: async (sessionId) => {
     set({ backupLoading: true });
@@ -339,6 +355,9 @@ export const useExcelStore = create<ExcelState>()(
   isFileApplied: (filePath) => {
     return get().appliedPaths.has(normalizeExcelPath(filePath));
   },
+
+  bumpWorkspaceFilesVersion: () =>
+    set((state) => ({ workspaceFilesVersion: state.workspaceFilesVersion + 1 })),
 
   clearSession: () =>
     set({

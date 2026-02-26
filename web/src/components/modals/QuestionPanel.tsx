@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { HelpCircle } from "lucide-react";
+import { HelpCircle, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useChatStore } from "@/stores/chat-store";
-import { sendContinuation } from "@/lib/chat-actions";
+import { useSessionStore } from "@/stores/session-store";
+import { answerQuestion, abortChat } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 
 export function QuestionPanel() {
@@ -17,19 +18,31 @@ export function QuestionPanel() {
   if (!pendingQuestion) return null;
 
   const hasOptions = pendingQuestion.options.length > 0;
+  const otherSelected = selected.has("Other") || selected.has("其他");
 
   const handleSubmit = () => {
     let answer: string;
     if (hasOptions) {
-      answer = Array.from(selected).join(", ");
+      if (otherSelected && freeText.trim()) {
+        const others = Array.from(selected).filter((s) => s !== "Other" && s !== "其他");
+        answer = others.length > 0 ? `${others.join(", ")}\n${freeText.trim()}` : freeText.trim();
+      } else {
+        answer = Array.from(selected).join(", ");
+      }
     } else {
       answer = freeText;
     }
     if (!answer.trim()) return;
+    const questionId = pendingQuestion.id;
+    const sessionId = useSessionStore.getState().activeSessionId;
     setPendingQuestion(null);
-    sendContinuation(answer);
     setSelected(new Set());
     setFreeText("");
+    if (sessionId && questionId) {
+      answerQuestion(sessionId, questionId, answer).catch((err) =>
+        console.error("[QuestionPanel] answerQuestion failed:", err),
+      );
+    }
   };
 
   const toggleOption = (label: string) => {
@@ -56,9 +69,22 @@ export function QuestionPanel() {
       >
         <div className="flex items-center gap-2 mb-2">
           <HelpCircle className="h-4 w-4" style={{ color: "var(--em-cyan)" }} />
-          <span className="font-semibold text-sm">
+          <span className="font-semibold text-sm flex-1">
             {pendingQuestion.header || "请回答问题"}
           </span>
+          <button
+            onClick={() => {
+              const sid = useSessionStore.getState().activeSessionId;
+              setPendingQuestion(null);
+              setSelected(new Set());
+              setFreeText("");
+              if (sid) abortChat(sid).catch(() => {});
+            }}
+            className="text-muted-foreground hover:text-foreground transition-colors p-0.5 rounded"
+            title="取消并终止任务"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
         {pendingQuestion.text && (
@@ -85,6 +111,18 @@ export function QuestionPanel() {
                 )}
               </button>
             ))}
+            {otherSelected && (
+              <Input
+                value={freeText}
+                onChange={(e) => setFreeText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSubmit();
+                }}
+                placeholder="输入自定义回答..."
+                className="mt-1.5"
+                autoFocus
+              />
+            )}
           </div>
         ) : (
           <Input
@@ -103,7 +141,11 @@ export function QuestionPanel() {
           className="w-full text-white"
           style={{ backgroundColor: "var(--em-primary)" }}
           onClick={handleSubmit}
-          disabled={hasOptions ? selected.size === 0 : !freeText.trim()}
+          disabled={
+            hasOptions
+              ? selected.size === 0 || (otherSelected && !freeText.trim() && selected.size === 1)
+              : !freeText.trim()
+          }
         >
           提交回答
         </Button>

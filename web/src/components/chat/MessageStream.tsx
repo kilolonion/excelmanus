@@ -13,7 +13,9 @@ import type { Message } from "@/lib/types";
 interface MessageStreamProps {
   messages: Message[];
   isStreaming: boolean;
-  onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean) => void;
+  onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => void;
+  onRetry?: (assistantMessageId: string) => void;
+  onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
 }
 
 const TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 minutes
@@ -58,7 +60,7 @@ function computeTimestampIndices(messages: Message[]): Set<number> {
   return indices;
 }
 
-export function MessageStream({ messages, isStreaming, onEditAndResend }: MessageStreamProps) {
+export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry, onRetryWithModel }: MessageStreamProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const renderedIdsRef = useRef(new Set<string>());
@@ -66,13 +68,14 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
   const initialScrollDoneRef = useRef(false);
   // 添加一个 ref 来跟踪上一次的消息数量
   const prevMessageCountRef = useRef(0);
-  // 标记初始加载是否已完成定位（用于移动端兜底）
-  const [initialLoadReady, setInitialLoadReady] = useState(false);
+  // 定位期间屏蔽 handleScroll，防止 scroll 事件触发 setState 风暴
+  const positioningRef = useRef(false);
 
   const [rollbackDialog, setRollbackDialog] = useState<{
     open: boolean;
     messageId: string;
     newContent: string;
+    files?: File[];
   }>({ open: false, messageId: "", newContent: "" });
 
   const virtualizer = useVirtualizer({
@@ -118,53 +121,80 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
   // SSR 安全的 useLayoutEffect
   const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-  // 初次加载定位：在浏览器 paint 之前同步执行，用户永远看不到从顶部滚下来的过程
+  // ── 初次加载定位 ──────────────────────────────────────────────
+  // 关键发现：virtualizer.scrollToIndex() 在 layoutEffect 中是 **no-op**，
+  // 因为 virtualizer 内部的 scrollElement 在 render 阶段缓存了 null
+  // （viewportRef 在 commit 后才设置），要到 useEffect 才重新读取。
+  //
+  // 因此 layoutEffect 中只能用 **原生 scrollTop**（viewportRef commit 后可用）。
+  // 首帧 paint：viewport 在底部，virtualizer 渲染的顶部 items 被滚出可视区。
+  // useEffect 帧：virtualizer 初始化 → 检测到 scrollTop 在底部 → 渲染底部 items。
+  // rAF 帧：精确修正 + 退出定位模式。
+  //
+  // positioningRef 屏蔽 handleScroll，避免 setState 风暴。
   useIsomorphicLayoutEffect(() => {
-    const currentMessageCount = messages.length;
-    const prevMessageCount = prevMessageCountRef.current;
+    const currentCount = messages.length;
+    const prevCount = prevMessageCountRef.current;
 
-    prevMessageCountRef.current = currentMessageCount;
-
-    if (currentMessageCount === 0) {
+    if (currentCount === 0) {
       initialScrollDoneRef.current = false;
-      setInitialLoadReady(false);
+      positioningRef.current = false;
+      prevMessageCountRef.current = 0;
       return;
     }
 
-    if (prevMessageCount === 0 && currentMessageCount > 0) {
+    if (prevCount === 0 && currentCount > 0) {
       // 初次加载（刷新恢复 / 会话切换后消息到达）
-      // 标记所有已有消息为"已渲染"，跳过入场动画
       for (const msg of messages) {
         renderedIdsRef.current.add(msg.id);
       }
 
-      // 在 paint 之前同步定位到底部
-      // useLayoutEffect 保证此处执行时 DOM 已更新但浏览器尚未绘制
-      forceScrollToEnd();
+      positioningRef.current = true;
       initialScrollDoneRef.current = true;
-      setInitialLoadReady(true);
+      prevMessageCountRef.current = currentCount;
 
-      // 一次 rAF 修正：虚拟化器首次渲染使用 estimateSize，
-      // 实际 measureElement 回调后位置可能有微小偏差
+      // ① 原生 scrollTop 定位（layoutEffect 中唯一可靠的方式）
+      // viewportRef 在 React commit 后已指向真实 DOM 元素
+      const vp = viewportRef.current;
+      if (vp) {
+        vp.scrollTop = vp.scrollHeight;
+      }
+
+      // ② rAF：virtualizer 已在 useEffect 中完成初始化，
+      //    此时 scrollToIndex 可正常工作，做精确修正
       requestAnimationFrame(() => {
-        forceScrollToEnd();
+        virtualizer.scrollToIndex(currentCount - 1, { align: "end" });
+        const viewport = viewportRef.current;
+        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+        positioningRef.current = false;
       });
-
-      return;
     }
-  }, [messages, forceScrollToEnd]);
+    // 非初次加载场景不更新 prevMessageCountRef —— 交给下面的 useEffect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, virtualizer]);
 
-  // 新消息追加时的滚动（独立 effect，仅处理增量场景）
+  // ── 新消息追加时的滚动 ────────────────────────────────────────
   useEffect(() => {
     const currentMessageCount = messages.length;
-    // 仅在非初次加载且消息增加时触发
-    if (initialScrollDoneRef.current && currentMessageCount > prevMessageCountRef.current) {
+    const prevCount = prevMessageCountRef.current;
+
+    if (currentMessageCount === 0) {
+      prevMessageCountRef.current = 0;
+      return;
+    }
+
+    // 初始定位由 layoutEffect 处理，这里跳过
+    if (!initialScrollDoneRef.current) return;
+
+    if (currentMessageCount > prevCount) {
       scrollToBottom(false);
     }
-    // 注意：prevMessageCountRef 由上面的 layoutEffect 维护，这里不要重复更新
+    prevMessageCountRef.current = currentMessageCount;
   }, [messages.length, scrollToBottom]);
 
   const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    // 定位期间屏蔽，防止 scroll 事件触发 setAutoScroll → re-render 风暴
+    if (positioningRef.current) return;
     const container = event.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = container;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
@@ -172,7 +202,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
   }, []);
 
   const handleEditAndResend = useCallback(
-    (messageId: string, newContent: string) => {
+    (messageId: string, newContent: string, files?: File[]) => {
       if (!onEditAndResend) return;
 
       const msgIndex = messages.findIndex((m) => m.id === messageId);
@@ -188,29 +218,30 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
       }
 
       if (!hasFileChanges) {
-        onEditAndResend(messageId, newContent, false);
+        onEditAndResend(messageId, newContent, false, files);
         return;
       }
 
       const pref = getRollbackFilePreference();
       if (pref !== null) {
-        onEditAndResend(messageId, newContent, pref === "always_rollback");
+        onEditAndResend(messageId, newContent, pref === "always_rollback", files);
         return;
       }
 
-      setRollbackDialog({ open: true, messageId, newContent });
+      setRollbackDialog({ open: true, messageId, newContent, files });
     },
     [onEditAndResend, messages]
   );
 
   const handleRollbackConfirm = useCallback(
     (rollbackFiles: boolean) => {
+      const pendingFiles = rollbackDialog.files;
       setRollbackDialog({ open: false, messageId: "", newContent: "" });
       if (onEditAndResend) {
-        onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles);
+        onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles, pendingFiles);
       }
     },
-    [onEditAndResend, rollbackDialog.messageId, rollbackDialog.newContent]
+    [onEditAndResend, rollbackDialog.messageId, rollbackDialog.newContent, rollbackDialog.files]
   );
 
   const handleRollbackCancel = useCallback(() => {
@@ -237,9 +268,6 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
             height: virtualizer.getTotalSize(),
             position: "relative",
             width: "100%",
-            // useLayoutEffect 在 paint 前完成定位，通常不需要隐藏
-            // 保留作为极端情况兜底（如 SSR hydration 延迟）
-            opacity: (messages.length === 0 || initialLoadReady) ? 1 : 0,
           }}
         >
           {virtualItems.map((virtualRow) => {
@@ -283,7 +311,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
                       isStreaming={isStreaming}
                       onEditAndResend={
                         onEditAndResend
-                          ? (newContent: string) => handleEditAndResend(message.id, newContent)
+                          ? (newContent: string, files?: File[]) => handleEditAndResend(message.id, newContent, files)
                           : undefined
                       }
                     />
@@ -293,6 +321,8 @@ export function MessageStream({ messages, isStreaming, onEditAndResend }: Messag
                       blocks={message.blocks}
                       affectedFiles={message.affectedFiles}
                       isLastMessage={isLast}
+                      onRetry={onRetry ? () => onRetry(message.id) : undefined}
+                      onRetryWithModel={onRetryWithModel ? (model: string) => onRetryWithModel(message.id, model) : undefined}
                     />
                   )}
                 </motion.div>
