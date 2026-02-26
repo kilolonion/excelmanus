@@ -117,7 +117,7 @@ _READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
 })
 
 # ── 审批解析器回调类型 ──────────────────────────────────────
-# 返回 "accept" / "reject" / "fullaccess" / None（等同 reject）。
+# 返回值为 "accept" / "reject" / "fullaccess" / None（None 等同 reject）。
 # CLI 传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
 ApprovalResolver = Callable[[PendingApproval], Awaitable[str | None]]
 
@@ -1035,14 +1035,14 @@ class AgentEngine:
 
         # ── Workspace Manifest（工作区文件清单） ─────────────
         self._database = database
-        self._llm_call_store: Any = None  # LLMCallStore | None
+        self._llm_call_store: Any = None  # 类型：LLMCallStore | None
         if database is not None:
             try:
                 from excelmanus.stores.llm_call_store import LLMCallStore as _LCS
                 self._llm_call_store = _LCS(database, user_id=user_id)
             except Exception:
                 logger.debug("LLM 调用日志初始化失败", exc_info=True)
-        self._workspace_manifest: Any = None  # WorkspaceManifest | None
+        self._workspace_manifest: Any = None  # 类型：WorkspaceManifest | None
         self._workspace_manifest_built: bool = False
         self._manifest_refresh_needed: bool = False
         self._workspace_manifest_prewarm_task: asyncio.Task[Any] | None = None
@@ -1052,8 +1052,8 @@ class AgentEngine:
         self._persistent_memory = persistent_memory
         self._memory_extractor = memory_extractor
         # 语义记忆增强层（延迟初始化，待首轮 chat 时异步同步索引）
-        self._semantic_memory: Any = None  # SemanticMemory | None
-        self._embedding_client: Any = None  # EmbeddingClient | None
+        self._semantic_memory: Any = None  # 类型：SemanticMemory | None
+        self._embedding_client: Any = None  # 类型：EmbeddingClient | None
         if persistent_memory is not None and config.embedding_enabled:
             try:
                 from excelmanus.embedding.client import EmbeddingClient
@@ -1090,7 +1090,7 @@ class AgentEngine:
                 )
 
         # ── 用户自定义规则 ─────────────────────────────────
-        self._rules_manager: Any = None  # RulesManager | None
+        self._rules_manager: Any = None  # 类型：RulesManager | None
         try:
             from excelmanus.rules import RulesManager as _RM
             from excelmanus.stores.rules_store import RulesStore as _RS

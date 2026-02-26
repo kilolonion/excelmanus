@@ -123,7 +123,7 @@ class SkillMatchResult:
     system_contexts: list[str] = field(default_factory=list)
     tool_scope: list[str] = field(default_factory=list)
     parameterized: bool = False
-    write_hint: str = "unknown"  # "may_write" | "read_only" | "unknown"
+    write_hint: str = "unknown"  # 取值："may_write" | "read_only" | "unknown"
     sheet_count: int = 0  # 路由阶段检测到的 sheet 数量
     max_total_rows: int = 0  # 路由阶段检测到的最大 sheet 行数
     task_tags: tuple[str, ...] = ()  # LLM/词法 推断的任务标签

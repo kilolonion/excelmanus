@@ -1,4 +1,4 @@
-"""Phase 4 补丁应用逻辑。"""
+"""阶段 4 补丁应用逻辑。"""
 
 from __future__ import annotations
 

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 # ── 只读安全白名单（低风险） ───────────────────────────────
 
-# 仅显式白名单中的工具在 readOnly 模式下可直接执行。
-# default 模式下的确认/审计行为由写入分层（Tier A/Tier B）决定。
+# 仅显式白名单中的工具在只读模式下可直接执行。
+# 默认模式下的确认/审计行为由写入分层（Tier A/Tier B）决定。
 READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "read_excel",
