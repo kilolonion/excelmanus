@@ -48,6 +48,7 @@ export interface ExcelDiffEntry {
   affectedRange: string;
   changes: ExcelCellDiff[];
   mergeRanges?: MergeRange[];
+  oldMergeRanges?: MergeRange[];
   metadataHints?: string[];
   timestamp: number;
 }
@@ -203,19 +204,32 @@ export const useExcelStore = create<ExcelState>()(
   setActiveSheet: (sheet) => set({ activeSheet: sheet }),
 
   addDiff: (diff) =>
-    set((state) => ({
-      diffs: [...state.diffs, diff],
-      // 如果面板打开且是同一文件 → 触发刷新
-      refreshCounter:
-        state.panelOpen && state.activeFilePath === diff.filePath
-          ? state.refreshCounter + 1
-          : state.refreshCounter,
-    })),
+    set((state) => {
+      // 按 toolCallId + filePath + sheet 去重，避免重放/多路径发射导致重复
+      const dupKey = `${diff.toolCallId}|${diff.filePath}|${diff.sheet}`;
+      const isDup = state.diffs.some(
+        (d) => `${d.toolCallId}|${d.filePath}|${d.sheet}` === dupKey,
+      );
+      if (isDup) return state;
+      return {
+        diffs: [...state.diffs, diff],
+        // 如果面板打开且是同一文件 → 触发刷新
+        refreshCounter:
+          state.panelOpen && state.activeFilePath === diff.filePath
+            ? state.refreshCounter + 1
+            : state.refreshCounter,
+      };
+    }),
 
   addTextDiff: (diff) =>
-    set((state) => ({
-      textDiffs: [...state.textDiffs, diff],
-    })),
+    set((state) => {
+      const dupKey = `${diff.toolCallId}|${diff.filePath}`;
+      const isDup = state.textDiffs.some(
+        (d) => `${d.toolCallId}|${d.filePath}` === dupKey,
+      );
+      if (isDup) return state;
+      return { textDiffs: [...state.textDiffs, diff] };
+    }),
 
   appendStreamingArgs: (toolCallId, delta) =>
     set((state) => ({
@@ -452,7 +466,6 @@ export const useExcelStore = create<ExcelState>()(
       name: "excelmanus-excel-files",
       partialize: (state) => ({
         recentFiles: state.recentFiles,
-        diffs: state.diffs.slice(-MAX_PERSISTED_DIFFS),
         dismissedPaths: Array.from(state.dismissedPaths),
       }),
       merge: (persisted, current) => {
@@ -460,9 +473,11 @@ export const useExcelStore = create<ExcelState>()(
         const dismissed = Array.isArray(p?.dismissedPaths)
           ? new Set<string>(p.dismissedPaths as string[])
           : new Set<string>();
+        // diffs / textDiffs 是会话级瞬态数据，不从 localStorage 恢复
+        const { diffs: _d, textDiffs: _td, ...safeP } = (p ?? {}) as Record<string, unknown>;
         return {
           ...current,
-          ...(p ?? {}),
+          ...safeP,
           dismissedPaths: dismissed,
           appliedPaths: new Set<string>(),
         };

@@ -831,6 +831,7 @@ export async function sendMessage(
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
               mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
               metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });
@@ -1566,6 +1567,7 @@ export async function sendContinuation(
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
               mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
               metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });
@@ -2517,6 +2519,7 @@ export async function subscribeToSession(sessionId: string) {
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
               mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
               metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });

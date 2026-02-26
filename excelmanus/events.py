@@ -125,6 +125,7 @@ class ToolCallEvent:
     excel_affected_range: str = ""
     excel_changes: List[Dict[str, Any]] = field(default_factory=list)
     excel_merge_ranges: List[Dict[str, int]] = field(default_factory=list)
+    excel_old_merge_ranges: List[Dict[str, int]] = field(default_factory=list)
     excel_metadata_hints: List[str] = field(default_factory=list)
     # text_diff 事件字段
     text_diff_file_path: str = ""
