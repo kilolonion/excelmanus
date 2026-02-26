@@ -49,7 +49,7 @@ class ModelCapabilities:
     supports_tool_calling: bool | None = None
     supports_vision: bool | None = None
     supports_thinking: bool | None = None
-    thinking_type: str = ""  # "claude"|"gemini"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+    thinking_type: str = ""  # "claude"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
     detected_at: str = ""
     probe_errors: dict[str, str] = field(default_factory=dict)
     manual_override: bool = False
@@ -204,7 +204,7 @@ async def probe_thinking(
     """探测模型是否支持输出思考过程。
 
     返回 (supported, error_msg, thinking_type)。
-    thinking_type: "claude"|"gemini"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+    thinking_type: "claude"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
     """
     messages = [{"role": "user", "content": "What is 17*23? Think step by step."}]
 
@@ -519,6 +519,7 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("siliconflow", re.compile(r"siliconflow", re.IGNORECASE)),
     ("openrouter", re.compile(r"openrouter\.ai", re.IGNORECASE)),
     ("xai", re.compile(r"api\.x\.ai", re.IGNORECASE)),
+    ("openai", re.compile(r"api\.openai\.com", re.IGNORECASE)),
     ("together", re.compile(r"together", re.IGNORECASE)),
     ("groq", re.compile(r"groq\.com", re.IGNORECASE)),
 ]
@@ -581,9 +582,22 @@ def _get_thinking_strategies(
             "openrouter",
         ))
         strategies.append(("plain", {}, "deepseek"))
+    elif provider == "openai":
+        # OpenAI o1/o3/GPT-5 系列: reasoning_effort 等级制
+        if any(model_lower.startswith(p) for p in ("o1", "o3", "o4", "gpt-5")):
+            strategies.append((
+                "openai_reasoning",
+                {"reasoning_effort": "low"},
+                "openai_reasoning",
+            ))
     elif provider == "xai":
-        # xAI Grok: 仅 grok-3-mini 返回 reasoning_content
+        # xAI Grok: grok-3-mini 支持 reasoning_effort（low/high 两档）
         if "mini" in model_lower:
+            strategies.append((
+                "xai_reasoning",
+                {"reasoning_effort": "low"},
+                "openai_reasoning",
+            ))
             strategies.append(("plain", {}, "deepseek"))
 
     # ── 通用兜底策略 ──────────────────────────────────────
