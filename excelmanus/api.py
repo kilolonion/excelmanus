@@ -504,6 +504,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
                 rows=list(event.excel_rows or [])[:50],
                 total_rows=event.excel_total_rows or 0,
                 truncated=bool(event.excel_truncated),
+                cell_styles=list(event.excel_cell_styles or [])[:51],
             )
             ch.save_affected_file(session_id, pub_path)
         elif event.event_type == EventType.FILES_CHANGED:
@@ -777,6 +778,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         chat_history=chat_history,
         database=_database,
         config_store=_config_store,
+        user_store=None,  # 延迟设置，等 UserStore 初始化完成后注入
     )
     await _session_manager.start_background_cleanup()
 
@@ -822,6 +824,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.workspace_root = _config.workspace_root
             # Auth 即隔离：auth_enabled 时自动启用会话隔离，无需额外开关。
             app.state.session_isolation_enabled = auth_enabled
+            # 将 UserStore 注入 SessionManager，使其能读取用户自定义 LLM 配置
+            if _session_manager is not None:
+                _session_manager._user_store = _user_store
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -1766,10 +1771,15 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
 
     # 附着新的订阅者队列
     event_queue = stream_state.attach()
-    # skip_replay=True 时丢弃缓冲（前端已从后端加载了消息），否则重放
+    # skip_replay=True 时仅保留 SSE-only 事件（thinking/iteration 等不进 SQLite，
+    # 前端无法从后端消息恢复），丢弃可从后端持久化消息恢复的事件。
+    _SSE_ONLY_EVENT_TYPES = {
+        EventType.THINKING, EventType.THINKING_DELTA,
+        EventType.ITERATION_START, EventType.RETRACT_THINKING,
+    }
     if request.skip_replay:
-        stream_state.drain_buffer()  # 清空缓冲但不使用
-        buffered_events: list[ToolCallEvent] = []
+        all_buffered = stream_state.drain_buffer()
+        buffered_events = [e for e in all_buffered if e.event_type in _SSE_ONLY_EVENT_TYPES]
     else:
         buffered_events = stream_state.drain_buffer()
 
@@ -2011,6 +2021,7 @@ def _sse_event_to_sse(
         EventType.SUBAGENT_TOOL_END,
         EventType.PENDING_APPROVAL,  # 新增：safe_mode 下过滤审批事件
         EventType.APPROVAL_RESOLVED,
+        EventType.RETRACT_THINKING,
     }:
         return None
 
@@ -2036,6 +2047,7 @@ def _sse_event_to_sse(
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
         EventType.FILE_DOWNLOAD: "file_download",
+        EventType.RETRACT_THINKING: "retract_thinking",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -2241,6 +2253,7 @@ def _sse_event_to_sse(
             "rows": event.excel_rows[:50],
             "total_rows": event.excel_total_rows,
             "truncated": event.excel_truncated,
+            "cell_styles": event.excel_cell_styles[:51] if event.excel_cell_styles else [],
         }
     elif event.event_type == EventType.EXCEL_DIFF:
         data = {
@@ -2284,6 +2297,8 @@ def _sse_event_to_sse(
             "filename": sanitize_external_text(event.download_filename, max_len=260),
             "description": sanitize_external_text(event.download_description, max_len=500),
         }
+    elif event.event_type == EventType.RETRACT_THINKING:
+        data = {"iteration": event.iteration}
     else:
         data = event.to_dict()
 
@@ -2989,116 +3004,10 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
 
+        from excelmanus.tools._style_extract import extract_cell_style as _extract_cell_style
+
         wb = load_workbook(resolved, data_only=True, read_only=not with_styles)
         sheet_names = wb.sheetnames
-
-        def _resolve_color(color_obj: Any) -> str | None:
-            """将 openpyxl Color 对象转为 #RRGGBB 字符串。"""
-            if color_obj is None:
-                return None
-            try:
-                if color_obj.type == "rgb" and color_obj.rgb and color_obj.rgb != "00000000":
-                    rgb = str(color_obj.rgb)
-                    # openpyxl rgb 可能是 AARRGGBB 格式
-                    if len(rgb) == 8:
-                        return f"#{rgb[2:]}"
-                    elif len(rgb) == 6:
-                        return f"#{rgb}"
-                if color_obj.type == "indexed" and color_obj.indexed is not None:
-                    # 常见索引色映射（简化版）
-                    _IDX_COLORS = {
-                        0: "#000000", 1: "#FFFFFF", 2: "#FF0000", 3: "#00FF00",
-                        4: "#0000FF", 5: "#FFFF00", 6: "#FF00FF", 7: "#00FFFF",
-                        8: "#000000", 9: "#FFFFFF", 10: "#FF0000", 11: "#00FF00",
-                        12: "#0000FF", 13: "#FFFF00", 14: "#FF00FF", 15: "#00FFFF",
-                        16: "#800000", 17: "#008000", 18: "#000080", 19: "#808000",
-                        20: "#800080", 21: "#008080", 22: "#C0C0C0", 23: "#808080",
-                    }
-                    return _IDX_COLORS.get(color_obj.indexed)
-                if color_obj.type == "theme" and color_obj.theme is not None:
-                    # 主题色简化映射
-                    _THEME_COLORS = {
-                        0: "#FFFFFF", 1: "#000000", 2: "#44546A", 3: "#E7E6E6",
-                        4: "#4472C4", 5: "#ED7D31", 6: "#A5A5A5", 7: "#FFC000",
-                        8: "#5B9BD5", 9: "#70AD47",
-                    }
-                    return _THEME_COLORS.get(color_obj.theme)
-            except Exception:
-                pass
-            return None
-
-        def _extract_cell_style(cell_obj: Any) -> dict | None:
-            """提取单元格样式，返回 Univer 兼容的样式 dict，无样式返回 None。"""
-            style: dict[str, Any] = {}
-            try:
-                font = cell_obj.font
-                if font:
-                    if font.bold:
-                        style["bl"] = 1
-                    if font.italic:
-                        style["it"] = 1
-                    if font.underline and font.underline != "none":
-                        style["ul"] = {"s": 1}
-                    if font.strike:
-                        style["st"] = {"s": 1}
-                    if font.size and font.size != 11:
-                        style["fs"] = font.size
-                    if font.name and font.name != "Calibri":
-                        style["ff"] = font.name
-                    fc = _resolve_color(font.color)
-                    if fc:
-                        style["cl"] = {"rgb": fc}
-            except Exception:
-                pass
-            try:
-                fill = cell_obj.fill
-                if fill and fill.patternType and fill.patternType != "none":
-                    bg = _resolve_color(fill.fgColor)
-                    if bg:
-                        style["bg"] = {"rgb": bg}
-            except Exception:
-                pass
-            try:
-                alignment = cell_obj.alignment
-                if alignment:
-                    h_map = {"left": 0, "center": 1, "right": 2, "justify": 3}
-                    v_map = {"top": 0, "center": 1, "bottom": 2}
-                    if alignment.horizontal and alignment.horizontal in h_map:
-                        style["ht"] = h_map[alignment.horizontal]
-                    if alignment.vertical and alignment.vertical in v_map:
-                        style["vt"] = v_map[alignment.vertical]
-                    if alignment.wrapText:
-                        style["tb"] = 1
-                    if alignment.textRotation:
-                        style["tr"] = {"a": alignment.textRotation}
-            except Exception:
-                pass
-            try:
-                border = cell_obj.border
-                if border:
-                    _BORDER_STYLE_MAP = {
-                        "thin": 1, "medium": 2, "thick": 3, "dashed": 4,
-                        "dotted": 5, "double": 6, "hair": 7,
-                        "mediumDashed": 8, "dashDot": 9, "mediumDashDot": 10,
-                        "dashDotDot": 11, "mediumDashDotDot": 12, "slantDashDot": 13,
-                    }
-                    for side_name, univer_key in [("left", "l"), ("right", "r"), ("top", "t"), ("bottom", "b")]:
-                        side = getattr(border, side_name, None)
-                        if side and side.style:
-                            bd_entry: dict[str, Any] = {"s": _BORDER_STYLE_MAP.get(side.style, 1)}
-                            bc = _resolve_color(side.color)
-                            if bc:
-                                bd_entry["cl"] = {"rgb": bc}
-                            style.setdefault("bd", {})[univer_key] = bd_entry
-            except Exception:
-                pass
-            try:
-                nf = cell_obj.number_format
-                if nf and nf != "General":
-                    style["n"] = {"pattern": nf}
-            except Exception:
-                pass
-            return style if style else None
 
         def _read_sheet(ws_obj: Any) -> dict:
             """读取单个工作表并返回快照 dict。"""
@@ -4265,6 +4174,19 @@ def _collect_user_section(request: Request, user_id: str) -> dict[str, Any]:
     }
 
 
+@_router.get("/api/v1/config/models/user")
+async def get_user_model_config(request: Request) -> JSONResponse:
+    """获取当前用户的自定义 LLM 配置（api_key 脱敏返回）。"""
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        return JSONResponse(content={"api_key": "", "base_url": "", "model": ""})
+    data = _collect_user_section(request, user_id)
+    # 脱敏 API key
+    if data.get("api_key"):
+        data["api_key"] = _mask_key(data["api_key"])
+    return JSONResponse(content=data)
+
+
 async def _get_config_transfer_scope(request: Request) -> tuple[str | None, bool] | JSONResponse:
     """返回配置导出/导入的权限范围。成功返回 (user_id, is_admin_scope)，失败返回错误响应。
 
@@ -4752,7 +4674,6 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "vlm_enhance": "EXCELMANUS_VLM_ENHANCE",
     "main_model_vision": "EXCELMANUS_MAIN_MODEL_VISION",
     "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
-    "prefetch_explorer": "EXCELMANUS_PREFETCH_EXPLORER",
     "chat_history_enabled": "EXCELMANUS_CHAT_HISTORY_ENABLED",
     "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
     "log_level": "EXCELMANUS_LOG_LEVEL",
@@ -4791,7 +4712,6 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "vlm_enhance": _config.vlm_enhance,
         "main_model_vision": _config.main_model_vision,
         "parallel_readonly_tools": _config.parallel_readonly_tools,
-        "prefetch_explorer": _config.prefetch_explorer,
         "chat_history_enabled": _config.chat_history_enabled,
         "hooks_command_enabled": _config.hooks_command_enabled,
         "log_level": _config.log_level,
@@ -4824,7 +4744,6 @@ class RuntimeConfigUpdate(BaseModel):
     vlm_enhance: bool | None = None
     main_model_vision: Literal["auto", "true", "false"] | None = None
     parallel_readonly_tools: bool | None = None
-    prefetch_explorer: bool | None = None
     chat_history_enabled: bool | None = None
     hooks_command_enabled: bool | None = None
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None
