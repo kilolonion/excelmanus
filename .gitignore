@@ -65,6 +65,7 @@ logs/
 # 临时 / 生成文件
 # ==============================
 *.png
+!docs/images/*.png
 *.csv
 *.xlsx
 *.log
