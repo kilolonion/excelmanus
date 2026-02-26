@@ -14,7 +14,7 @@ export async function clearAllCachedMessages(): Promise<void> {
       await del(key);
     }
   } catch {
-    // silently ignore
+    // 静默忽略
   }
 }
 
@@ -31,7 +31,7 @@ export async function saveCachedMessages(sessionId: string, messages: Message[])
     await set(`${PREFIX}${sessionId}`, messages);
     await evictOldest();
   } catch {
-    // silently ignore
+    // 静默忽略
   }
 }
 
@@ -39,7 +39,7 @@ export async function deleteCachedMessages(sessionId: string): Promise<void> {
   try {
     await del(`${PREFIX}${sessionId}`);
   } catch {
-    // silently ignore
+    // 静默忽略
   }
 }
 

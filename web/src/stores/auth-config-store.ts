@@ -21,7 +21,7 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
         set({ authEnabled: enabled, checked: true });
         return enabled;
       }
-    } catch { /* backend unreachable */ }
+    } catch { /* 后端不可达 */ }
     set({ authEnabled: false, checked: true });
     return false;
   },

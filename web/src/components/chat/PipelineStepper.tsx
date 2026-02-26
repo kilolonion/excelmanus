@@ -142,7 +142,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
 
   return (
     <div className="relative group/stepper">
-      {/* Left gradient mask */}
+      {/* 左侧渐变遮罩 */}
       <div
         className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 z-10 transition-opacity duration-200"
         style={{
@@ -151,7 +151,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
           opacity: canScrollLeft ? 1 : 0,
         }}
       />
-      {/* Right gradient mask */}
+      {/* 右侧渐变遮罩 */}
       <div
         className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 z-10 transition-opacity duration-200"
         style={{
@@ -161,7 +161,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
         }}
       />
 
-      {/* Scrollable track */}
+      {/* 可滚动轨道 */}
       <div
         ref={scrollRef}
         className="flex items-center gap-1 py-1.5 text-xs text-muted-foreground overflow-x-auto scrollbar-none"
@@ -176,7 +176,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
 
           return (
             <React.Fragment key={stage.key}>
-              {/* Connector line */}
+              {/* 连接线 */}
               {vi > 0 && (
                 <span className="flex items-center mx-0.5 flex-shrink-0">
                   <span
@@ -198,7 +198,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                 </span>
               )}
 
-              {/* Stage chip */}
+              {/* 阶段芯片 */}
               <span
                 ref={isCurrent ? activeRef : undefined}
                 className={`
@@ -214,7 +214,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                   ${isAnimating ? "animate-chip-enter" : ""}
                 `}
               >
-                {/* Icon */}
+                {/* 图标 */}
                 <span
                   className={`flex-shrink-0 flex items-center justify-center rounded-full transition-all duration-300 ${
                     isCurrent
@@ -237,10 +237,10 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                   )}
                 </span>
 
-                {/* Label */}
+                {/* 标签 */}
                 <span className="leading-none">{stage.label}</span>
 
-                {/* Elapsed badge */}
+                {/* 已用时间徽章 */}
                 {isCurrent && elapsed > 0 && (
                   <span
                     className="text-[10px] leading-none opacity-60 tabular-nums bg-[var(--em-primary)]/8 px-1 py-0.5 rounded"

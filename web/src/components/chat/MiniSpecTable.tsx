@@ -146,7 +146,7 @@ export const MiniSpecTable = React.memo(function MiniSpecTable({
 
   return (
     <div className="rounded-lg border border-border/40 overflow-hidden">
-      {/* Sheet name */}
+      {/* 工作表名 */}
       <div className="px-2 py-1 bg-muted/20 text-[10px] text-muted-foreground flex items-center justify-between">
         <span className="font-medium">{sheet.name}</span>
         <span>
@@ -154,7 +154,7 @@ export const MiniSpecTable = React.memo(function MiniSpecTable({
         </span>
       </div>
 
-      {/* Table */}
+      {/* 表格 */}
       <div className="overflow-x-auto">
         <table className="w-full text-[10px] border-collapse">
           <thead>

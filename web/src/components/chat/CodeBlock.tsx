@@ -194,7 +194,7 @@ export const CodeBlock = React.memo(function CodeBlock({
 
   return (
     <div className="group/code relative my-2 rounded-lg overflow-hidden border border-border/50">
-      {/* Header bar */}
+      {/* 标题栏 */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-zinc-100 dark:bg-zinc-800/80 border-b border-border/40">
         <span className="text-[11px] font-medium text-muted-foreground font-mono select-none">
           {displayLang}
@@ -219,7 +219,7 @@ export const CodeBlock = React.memo(function CodeBlock({
         </button>
       </div>
 
-      {/* Code body */}
+      {/* 代码主体 */}
       <div className="overflow-x-auto bg-zinc-50 dark:bg-zinc-900">
         <pre className="!m-0 !rounded-none !bg-transparent p-3">
           {highlightedHtml ? (

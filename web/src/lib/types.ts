@@ -4,6 +4,15 @@ export interface FileAttachment {
   size: number;
 }
 
+/** 输入框中附件的上传追踪状态 */
+export interface AttachedFile {
+  id: string;
+  file: File;
+  status: "uploading" | "success" | "failed";
+  uploadResult?: { filename: string; path: string; size: number };
+  error?: string;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -23,6 +32,7 @@ export interface SessionDetail {
   chatMode: "write" | "read" | "plan";
   currentModel: string | null;
   currentModelName: string | null;
+  visionCapable: boolean;
   messages: unknown[];
   pendingApproval: Approval | null;
   pendingQuestion: Question | null;
@@ -65,6 +75,7 @@ export type AssistantBlock =
       toolName: string;
       success: boolean;
       undoable: boolean;
+      hasChanges?: boolean;
       undone?: boolean;
       undoError?: string;
     }
