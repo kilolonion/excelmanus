@@ -2,7 +2,7 @@
 
 测试五种查询类型的正确性、错误处理和注册逻辑。
 
-**Validates: Requirements 3.1–3.3, 4.1–4.3, 5.1–5.3, 6.1–6.4, 7.1–7.2, 8.1–8.3, 12.1**
+**验证：需求 3.1–3.3、4.1–4.3、5.1–5.3、6.1–6.4、7.1–7.2、8.1–8.3、12.1**
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ class TestBatchQuery:
 
 
 class TestRegistration:
-    """Validates: Requirements 3.1–3.3"""
+    """验证：需求 3.1–3.3"""
 
     def test_tool_registered(self, registry: ToolRegistry) -> None:
         """introspect_capability 应被注册到 ToolRegistry。"""
@@ -149,7 +149,7 @@ class TestRegistration:
 
 
 class TestToolDetail:
-    """Validates: Requirements 4.1–4.3"""
+    """验证：需求 4.1–4.3"""
 
     def test_existing_tool(self, registry: ToolRegistry) -> None:
         """查询已注册工具应返回 schema 和权限信息。"""
@@ -197,7 +197,7 @@ class TestToolDetail:
 
 
 class TestCategoryTools:
-    """Validates: Requirements 5.1–5.3"""
+    """验证：需求 5.1–5.3"""
 
     def test_valid_category(self, registry: ToolRegistry) -> None:
         """查询有效分类应返回该分类下所有工具。"""
@@ -227,7 +227,7 @@ class TestCategoryTools:
 
 
 class TestCanIDo:
-    """Validates: Requirements 6.1–6.4"""
+    """验证：需求 6.1–6.4"""
 
     def test_matching_query(self, registry: ToolRegistry) -> None:
         """使用工具描述关键词应匹配到对应工具。"""
@@ -278,7 +278,7 @@ class TestCanIDo:
 
 
 class TestRelatedTools:
-    """Validates: Requirements 7.1–7.2"""
+    """验证：需求 7.1–7.2"""
 
     def test_same_category(self, registry: ToolRegistry) -> None:
         """应返回同分类的其他工具。"""
@@ -348,7 +348,7 @@ class TestExtendedCapabilitiesConstants:
 
 
 class TestNoSideEffects:
-    """Validates: Requirements 8.1–8.3"""
+    """验证：需求 8.1–8.3"""
 
     def test_registry_unchanged(self, registry: ToolRegistry) -> None:
         """调用后 ToolRegistry 状态不变。"""
@@ -372,7 +372,7 @@ class TestNoSideEffects:
 
 
 class TestRegistryNotInitialized:
-    """Validates: Requirement 12.1"""
+    """验证：需求 12.1"""
 
     def test_returns_error(self, empty_registry: ToolRegistry) -> None:
         """未初始化时应返回错误提示。"""
