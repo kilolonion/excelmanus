@@ -526,7 +526,6 @@ class ExtractTableSpecHandler(BaseToolHandler):
         file_path = arguments.get("file_path", "")
         output_path = arguments.get("output_path", "outputs/replica_spec.json")
         skip_style = arguments.get("skip_style", False)
-        resume_from_spec = arguments.get("resume_from_spec")  # 断点续跑参数
 
         # ── 校验文件（基于 workspace_root 解析相对路径） ──
         from excelmanus.security import FileAccessGuard, SecurityViolationError
@@ -577,32 +576,12 @@ class ExtractTableSpecHandler(BaseToolHandler):
         mime = mime_map.get(ext, "image/png")
 
         # ── 调用 VLM 提取 ──
-        # 解析断点续跑参数
-        resume_from_phase = None
-        resume_spec_path = None
-        if resume_from_spec:
-            try:
-                rp = guard.resolve_and_validate(resume_from_spec)
-                if rp.is_file():
-                    # 从文件名推断已完成的阶段号（例如 replica_spec_p2.json → 阶段 2）
-                    stem = rp.stem
-                    if "_p" in stem:
-                        phase_str = stem.rsplit("_p", 1)[-1]
-                        if phase_str.isdigit():
-                            resume_from_phase = int(phase_str)
-                            resume_spec_path = str(rp)
-            except Exception:
-                pass  # 解析失败则从头开始
-
         result_str = await self._dispatcher._run_vlm_extract_spec(
             image_b64=b64,
             mime=mime,
             file_path=str(path),
             output_path=output_path,
             skip_style=skip_style,
-            resume_from_phase=resume_from_phase,
-            resume_spec_path=resume_spec_path,
-            on_event=on_event,
         )
         success = '"status": "ok"' in result_str or '"status": "paused"' in result_str
         error = None if success else result_str

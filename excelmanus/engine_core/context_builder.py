@@ -329,10 +329,6 @@ class ContextBuilder:
         if file_registry_notice:
             base_prompt = base_prompt + "\n\n" + file_registry_notice
 
-        # 注入预取上下文（explorer 子代理预取的文件摘要）
-        prefetch_context = getattr(e, "_prefetch_context", "") or ""
-        if prefetch_context:
-            base_prompt = base_prompt + "\n\n" + prefetch_context
 
         # ── 半静态内容（轮次级稳定，最大化 Provider prompt cache 前缀） ──
 
@@ -398,8 +394,6 @@ class ContextBuilder:
             _snapshot_components["file_registry_notice"] = file_registry_notice
         if mcp_context:
             _snapshot_components["mcp_context"] = mcp_context
-        if prefetch_context:
-            _snapshot_components["prefetch_context"] = prefetch_context
         if runtime_line:
             _snapshot_components["runtime_metadata"] = runtime_line
         if _strategy_text_captured:
