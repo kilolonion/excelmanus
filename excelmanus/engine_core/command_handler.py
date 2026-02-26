@@ -16,8 +16,8 @@ from excelmanus.control_commands import (
 from excelmanus.logger import get_logger
 
 # 延迟导入，运行时使用以避免循环依赖：
-# - SkillMatchResult (from excelmanus.skillpacks.router)
-# - EventType, ToolCallEvent (from excelmanus.events)
+# - SkillMatchResult（来自 excelmanus.skillpacks.router）
+# - EventType, ToolCallEvent（来自 excelmanus.events）
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -465,6 +465,7 @@ class CommandHandler:
                 result=exec_result,
                 success=exec_ok,
                 approval_undoable=record.undoable,
+                approval_has_changes=bool(record.changes),
             ),
         )
 

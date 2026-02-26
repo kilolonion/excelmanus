@@ -26,14 +26,12 @@ _SHEET_TOOLS = {
     "read_sheet",
     "filter_data",
     "list_sheets",
-    # Macro 工具
-    "vlookup_write",
-    "computed_column",
     # MCP 工具名
     "describe_sheets",
     "write_to_sheet",
     "format_range",
     "focus_window_refill",
+    "focus_window",
 }
 
 _MCP_EXPLORER_SUFFIXES = {
@@ -55,15 +53,13 @@ _READ_LIKE_TOOLS = {
     # analyze_data: Batch 4 精简
     "filter_data",
     "focus_window_refill",
+    "focus_window",
 }
 
 _WRITE_LIKE_TOOLS = {
     # MCP 工具名
     "write_to_sheet",
     "format_range",
-    # Macro 工具
-    "vlookup_write",
-    "computed_column",
 }
 
 _INTENT_USER_KEYWORDS: dict[IntentTag, tuple[str, ...]] = {
@@ -296,7 +292,7 @@ def _intent_from_tool(
         if _has_formula_signal(arguments=arguments, result_json=result_json):
             return IntentTag.FORMULA, 0.9, "tool_formula_signal"
         return IntentTag.ENTRY, 0.84, "tool_entry"
-    if tool in {"read_excel", "read_sheet", "focus_window_refill"}:
+    if tool in {"read_excel", "read_sheet", "focus_window_refill", "focus_window"}:
         if current_tag != IntentTag.GENERAL:
             return current_tag, 0.7, "tool_read_carry"
         return IntentTag.AGGREGATE, 0.62, "tool_read_default_aggregate"

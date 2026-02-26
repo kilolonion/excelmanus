@@ -883,6 +883,21 @@ class WindowPerceptionManager:
         parsed = parse_json_payload(result_text)
         result_json = parsed if isinstance(parsed, dict) else None
 
+        # focus_window 快速路径：状态已由 focus_window_action 更新，
+        # 跳过 _update_sheet_window 避免二次 ingest，仅构建感知 payload。
+        if tool_name in {"focus_window", "focus_window_refill"}:
+            window_id = str(
+                arguments.get("window_id")
+                or (result_json or {}).get("window_id")
+                or ""
+            ).strip()
+            window = self._windows.get(window_id) if window_id else None
+            if window is None and self._active_window_id:
+                window = self._windows.get(self._active_window_id)
+            if window is not None:
+                return build_tool_perception_payload(window)
+            return None
+
         self._operation_seq += 1
 
         if classification.window_type == WindowType.EXPLORER:
@@ -1737,6 +1752,36 @@ class WindowPerceptionManager:
             "range": range_ref,
             "rows": len(rows),
             "cols": len(window.columns or window.schema),
+        }
+
+    def build_focus_snapshot(self, window_id: str) -> dict[str, Any]:
+        """从已更新的窗口中提取预览快照，供 focus_window 返回给 agent。
+
+        返回 dict 包含 preview/columns/total_rows/total_cols/viewport 等字段，
+        使 agent 在当轮就能看到滚动/展开后的数据。
+        """
+        window = self._windows.get(window_id)
+        if window is None or window.type != WindowType.SHEET:
+            return {}
+
+        # 提取前 N 行预览（与 read_excel 返回格式对齐）
+        max_preview = min(20, max(1, int(self._budget.default_rows)))
+        preview_rows: list[dict[str, Any]] = []
+        if window.data_buffer:
+            preview_rows = list(window.data_buffer[:max_preview])
+
+        columns = list(window.columns or window.schema or [])
+        viewport = window.viewport
+        return {
+            "preview": preview_rows,
+            "columns": columns,
+            "total_rows": window.total_rows,
+            "total_cols": window.total_cols,
+            "file_path": window.file_path or "",
+            "sheet_name": window.sheet_name or "",
+            "viewport_range": window.viewport_range or "",
+            "visible_rows": viewport.visible_rows if viewport else 0,
+            "visible_cols": viewport.visible_cols if viewport else 0,
         }
 
     def _classify_tool(self, tool_name: str):

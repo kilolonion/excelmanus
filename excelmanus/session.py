@@ -141,6 +141,22 @@ class SessionManager:
                 if entry.engine.current_model == model:
                     entry.engine.set_model_capabilities(caps)
 
+    async def broadcast_aux_config(
+        self,
+        *,
+        aux_model: str | None = None,
+        aux_api_key: str | None = None,
+        aux_base_url: str | None = None,
+    ) -> None:
+        """向所有活跃会话广播 AUX 配置变更（锁保护）。"""
+        async with self._lock:
+            for entry in self._sessions.values():
+                entry.engine.update_aux_config(
+                    aux_model=aux_model,
+                    aux_api_key=aux_api_key,
+                    aux_base_url=aux_base_url,
+                )
+
     def set_sandbox_docker_enabled(self, enabled: bool) -> None:
         """Update the Docker sandbox flag (called by API lifespan).
 
@@ -1024,6 +1040,7 @@ class SessionManager:
                     "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
                     "current_model": engine.current_model,
                     "current_model_name": engine.current_model_name,
+                    "vision_capable": engine.is_vision_capable or engine.vlm_enhance_available,
                     "pending_approval": pending_approval_data,
                     "pending_question": pending_question_data,
                     "last_route": last_route_data,
@@ -1046,6 +1063,7 @@ class SessionManager:
                 "chat_mode": "write",
                 "current_model": None,
                 "current_model_name": None,
+                "vision_capable": False,
                 "pending_approval": None,
                 "pending_question": None,
                 "last_route": None,

@@ -288,7 +288,7 @@ class _SessionStreamState:
 
 _session_stream_states: dict[str, _SessionStreamState] = {}
 _rules_manager: Any = None  # RulesManager | None
-_api_persistent_memory: Any = None  # PersistentMemory | None (shared for API)
+_api_persistent_memory: Any = None  # PersistentMemory | None（API 层共享）
 _database: Any = None  # Database | None
 _config_store: Any = None  # ConfigStore | None
 _router = APIRouter()
@@ -2132,6 +2132,7 @@ def _sse_event_to_sse(
             "result": sanitize_external_text(event.result or "", max_len=2000),
             "success": event.success,
             "undoable": event.approval_undoable,
+            "has_changes": event.approval_has_changes,
         }
         sse_type = "approval_resolved"
     elif event.event_type == EventType.EXCEL_PREVIEW:
@@ -2601,7 +2602,7 @@ async def list_workspace_files(request: Request) -> JSONResponse:
     from pathlib import Path as _Path
 
     ws = _resolve_workspace(request)
-    uploads = ws.get_upload_dir()  # creates uploads/ if absent
+    uploads = ws.get_upload_dir()  # 若不存在则创建 uploads/ 目录
 
     import re
     _upload_prefix_re = re.compile(r"^[0-9a-f]{8}_")
@@ -3137,10 +3138,24 @@ def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
     return target
 
 
+_UPLOAD_MAX_PART_SIZE = 100 * 1024 * 1024  # 100 MB – 覆盖 Starlette 默认的 1 MB 限制
+
+
 @_router.post("/api/v1/upload")
-async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...)) -> JSONResponse:
-    """上传文件到 workspace uploads 目录（支持可选 folder 参数指定子目录）。"""
+async def upload_file(raw_request: Request) -> JSONResponse:
+    """上传文件到 workspace uploads 目录（支持可选 folder 参数指定子目录）。
+
+    注意: 不使用 FastAPI 的 UploadFile 依赖注入，改为手动调用
+    ``request.form(max_part_size=...)`` 以突破 Starlette 0.50+ 默认的
+    1 MB multipart 大小限制。
+    """
     assert _config is not None, "服务未初始化"
+
+    form = await raw_request.form(max_part_size=_UPLOAD_MAX_PART_SIZE)
+    file = form.get("file")
+    logger.info("upload_file: form keys=%s, file type=%s, file=%r", list(form.keys()), type(file).__name__, file)
+    if file is None or not hasattr(file, "read"):
+        return _error_json_response(400, f"缺少 file 字段 (got {type(file).__name__})")
 
     filename = file.filename or "unnamed"
     ext = os.path.splitext(filename)[1].lower()
@@ -3161,14 +3176,10 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
 
     upload_dir = ws.get_upload_dir()
 
-    # Support optional folder= form field or query param
+    # 支持可选的 folder= 表单字段或查询参数
     folder = raw_request.query_params.get("folder", "")
     if not folder:
-        try:
-            form = await raw_request.form()
-            folder = str(form.get("folder", ""))
-        except Exception:
-            folder = ""
+        folder = str(form.get("folder", ""))
 
     if folder:
         target_dir = _safe_uploads_path(upload_dir, folder)
@@ -3195,7 +3206,7 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
     })
 
 
-# ── File management APIs ─────────────────────────────────────
+# ── 文件管理 API ─────────────────────────────────────
 
 
 @_router.post("/api/v1/files/workspace/mkdir")
@@ -3255,7 +3266,7 @@ async def workspace_delete_item(request: Request) -> JSONResponse:
         return _error_json_response(400, "非法目标路径")
     if not target.exists():
         return _error_json_response(404, "路径不存在")
-    # Prevent deleting the uploads root itself
+    # 防止删除上传根目录本身
     if target.resolve() == uploads.resolve():
         return _error_json_response(400, "无法删除根目录")
 
@@ -3871,6 +3882,14 @@ async def update_model_config(
             if val is not None:
                 object.__setattr__(_config, config_attr, val)
 
+    # AUX 变更需广播到所有活跃 engine，避免子代理/路由/顾问使用过时快照
+    if section == "aux" and _session_manager is not None:
+        await _session_manager.broadcast_aux_config(
+            aux_model=_config.aux_model if _config else None,
+            aux_api_key=_config.aux_api_key if _config else None,
+            aux_base_url=_config.aux_base_url if _config else None,
+        )
+
     return JSONResponse(content={"status": "ok", "section": section, "updated": list(updates.keys())})
 
 
@@ -4475,13 +4494,33 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "tool_schema_validation_mode": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE",
     "tool_schema_validation_canary_percent": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT",
     "tool_schema_strict_path": "EXCELMANUS_TOOL_SCHEMA_STRICT_PATH",
+    "guard_mode": "EXCELMANUS_GUARD_MODE",
+    # ── 新增精选核心配置项 ──
+    "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
+    "max_sessions": "EXCELMANUS_MAX_SESSIONS",
+    "max_consecutive_failures": "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
+    "memory_enabled": "EXCELMANUS_MEMORY_ENABLED",
+    "memory_auto_extract_interval": "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
+    "max_context_tokens": "EXCELMANUS_MAX_CONTEXT_TOKENS",
+    "summarization_enabled": "EXCELMANUS_SUMMARIZATION_ENABLED",
+    "window_perception_enabled": "EXCELMANUS_WINDOW_PERCEPTION_ENABLED",
+    "vlm_enhance": "EXCELMANUS_VLM_ENHANCE",
+    "main_model_vision": "EXCELMANUS_MAIN_MODEL_VISION",
+    "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
+    "prefetch_explorer": "EXCELMANUS_PREFETCH_EXPLORER",
+    "chat_history_enabled": "EXCELMANUS_CHAT_HISTORY_ENABLED",
+    "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
+    "log_level": "EXCELMANUS_LOG_LEVEL",
 }
 
 
 @_router.get("/api/v1/config/runtime")
-async def get_runtime_config() -> JSONResponse:
+async def get_runtime_config(request: Request) -> JSONResponse:
     """读取运行时行为配置。"""
     assert _config is not None, "服务未初始化"
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
     return JSONResponse(content={
         "subagent_enabled": _config.subagent_enabled,
         "backup_enabled": _config.backup_enabled,
@@ -4494,6 +4533,23 @@ async def get_runtime_config() -> JSONResponse:
         "tool_schema_validation_mode": _config.tool_schema_validation_mode,
         "tool_schema_validation_canary_percent": _config.tool_schema_validation_canary_percent,
         "tool_schema_strict_path": _config.tool_schema_strict_path,
+        "guard_mode": _config.guard_mode,
+        # ── 新增精选核心配置项 ──
+        "session_ttl_seconds": _config.session_ttl_seconds,
+        "max_sessions": _config.max_sessions,
+        "max_consecutive_failures": _config.max_consecutive_failures,
+        "memory_enabled": _config.memory_enabled,
+        "memory_auto_extract_interval": _config.memory_auto_extract_interval,
+        "max_context_tokens": _config.max_context_tokens,
+        "summarization_enabled": _config.summarization_enabled,
+        "window_perception_enabled": _config.window_perception_enabled,
+        "vlm_enhance": _config.vlm_enhance,
+        "main_model_vision": _config.main_model_vision,
+        "parallel_readonly_tools": _config.parallel_readonly_tools,
+        "prefetch_explorer": _config.prefetch_explorer,
+        "chat_history_enabled": _config.chat_history_enabled,
+        "hooks_command_enabled": _config.hooks_command_enabled,
+        "log_level": _config.log_level,
     })
 
 
@@ -4510,12 +4566,32 @@ class RuntimeConfigUpdate(BaseModel):
     tool_schema_validation_mode: Literal["off", "shadow", "enforce"] | None = None
     tool_schema_validation_canary_percent: int | None = Field(default=None, ge=0, le=100)
     tool_schema_strict_path: bool | None = None
+    guard_mode: Literal["off", "soft"] | None = None
+    # ── 新增精选核心配置项 ──
+    session_ttl_seconds: int | None = Field(default=None, gt=0)
+    max_sessions: int | None = Field(default=None, gt=0)
+    max_consecutive_failures: int | None = Field(default=None, gt=0)
+    memory_enabled: bool | None = None
+    memory_auto_extract_interval: int | None = Field(default=None, ge=0)
+    max_context_tokens: int | None = Field(default=None, gt=0)
+    summarization_enabled: bool | None = None
+    window_perception_enabled: bool | None = None
+    vlm_enhance: bool | None = None
+    main_model_vision: Literal["auto", "true", "false"] | None = None
+    parallel_readonly_tools: bool | None = None
+    prefetch_explorer: bool | None = None
+    chat_history_enabled: bool | None = None
+    hooks_command_enabled: bool | None = None
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None
 
 
 @_router.put("/api/v1/config/runtime")
-async def update_runtime_config(request: RuntimeConfigUpdate) -> JSONResponse:
+async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Request) -> JSONResponse:
     """更新运行时行为配置并持久化到 .env。"""
     assert _config is not None, "服务未初始化"
+    guard_error = await _require_admin_if_auth_enabled(raw_request)
+    if guard_error is not None:
+        return guard_error
 
     env_path = _find_env_file()
     lines = _read_env_file(env_path)
