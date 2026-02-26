@@ -536,7 +536,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         const startLetter = colIndexToLetter(startCol);
         const endLetter = colIndexToLetter(startCol + numCols - 1);
-        const startRowNum = startRow + 1;  // Excel 行号为 1-based
+        const startRowNum = startRow + 1;  // Excel 行号为从 1 开始
         const endRowNum = startRow + numRows;
 
         const rangeStr = `${startLetter}${startRowNum}:${endLetter}${endRowNum}`;

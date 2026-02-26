@@ -179,7 +179,7 @@ export function SessionSync() {
 
         setFullAccessEnabled(detail.fullAccessEnabled);
         setVisionCapable(detail.visionCapable);
-        // NOTE: 不要在轮询中用后端 chatMode 覆盖前端状态。
+        // 注意：不要在轮询中用后端 chatMode 覆盖前端状态。
         // chatMode 的权威来源是前端用户操作（ChatModeTabs 点击），
         // 后端 _current_chat_mode 只在 engine.chat() 调用时更新，
         // 轮询覆盖会导致用户切换模式后几秒被重置回旧值。
@@ -226,7 +226,7 @@ export function SessionSync() {
               // 先设置 streaming 避免下一轮 poll 重复触发
               latest.setStreaming(true);
               subscribeToSession(activeSessionId).catch(() => {
-                // subscribe 失败时回退到轮询模式
+                // 订阅失败时回退到轮询模式
                 const s = useChatStore.getState();
                 if (!s.abortController) s.setStreaming(false);
               });
