@@ -261,8 +261,12 @@ def write_cells(
             ws, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
             with_styles=True,
         )
+        # 写入前合并区域
+        from excelmanus.tools._style_extract import extract_merge_ranges as _extract_mr
+        _old_merges = _extract_mr(ws)
     except Exception:
         before_snapshot = []
+        _old_merges = []
 
     try:
         if single_mode:
@@ -340,6 +344,7 @@ def write_cells(
             ws_after, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
             with_styles=True,
         )
+        _new_merges = _extract_mr(ws_after)
         wb_after.close()
         excel_diff = _compute_cell_diff(before_snapshot, after_snapshot)
         if excel_diff:
@@ -352,6 +357,8 @@ def write_cells(
                 "sheet": sheet_name or "",
                 "affected_range": affected_range,
                 "changes": excel_diff,
+                "old_merge_ranges": _old_merges,
+                "new_merge_ranges": _new_merges,
             }
     except Exception as exc:
         logger.debug("写入后 diff 捕获失败: %s", exc)

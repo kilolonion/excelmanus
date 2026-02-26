@@ -241,21 +241,34 @@ class SubagentExecutor:
                             subagent_tool_index=tool_calls,
                         ),
                     )
-                    result = await self._execute_tool(
-                        config=config,
-                        registry=filtered_registry,
-                        tool_name=tool_name,
-                        arguments=args,
-                        tool_scope=tool_scope,
-                        full_access_enabled=full_access_enabled,
-                        persistent_memory=persistent_memory,
-                        tool_result_enricher=tool_result_enricher,
-                        session_turn=session_turn,
-                        file_access_guard=file_access_guard,
-                        sandbox_env=sandbox_env,
-                        cow_mappings=cow_mappings,
-                        workspace_root=workspace_root,
-                    )
+                    _tool_timeout = getattr(config, "tool_timeout", 300)
+                    try:
+                        result = await asyncio.wait_for(
+                            self._execute_tool(
+                                config=config,
+                                registry=filtered_registry,
+                                tool_name=tool_name,
+                                arguments=args,
+                                tool_scope=tool_scope,
+                                full_access_enabled=full_access_enabled,
+                                persistent_memory=persistent_memory,
+                                tool_result_enricher=tool_result_enricher,
+                                session_turn=session_turn,
+                                file_access_guard=file_access_guard,
+                                sandbox_env=sandbox_env,
+                                cow_mappings=cow_mappings,
+                                workspace_root=workspace_root,
+                            ),
+                            timeout=_tool_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        result = ToolCallResult(
+                            tool_name=tool_name,
+                            arguments=args,
+                            result=f"[错误] 工具 {tool_name} 执行超时（{_tool_timeout}s）",
+                            success=False,
+                            error=f"timeout after {_tool_timeout}s",
+                        )
                     # 工具结果已在 _execute_tool 内经过 ToolDef 级截断，
                     # 此处不再做二次硬截断，避免丢失关键信息。
                     memory.add_tool_result(call_id, result.result)
