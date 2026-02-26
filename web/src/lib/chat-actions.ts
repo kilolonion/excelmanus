@@ -1,12 +1,12 @@
 import { consumeSSE } from "./sse";
-import { buildApiUrl, uploadFile } from "./api";
+import { buildApiUrl } from "./api";
 import { uuid } from "@/lib/utils";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
-import type { AssistantBlock, TaskItem } from "@/lib/types";
+import type { AssistantBlock, TaskItem, AttachedFile } from "@/lib/types";
 
 const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 function _isImageFile(name: string): boolean {
@@ -22,7 +22,7 @@ function _fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      // result is "data:<mime>;base64,<data>" — extract just the base64 part
+      // result 格式为 "data:<mime>;base64,<data>" — 仅提取 base64 部分
       const result = reader.result as string;
       const idx = result.indexOf(",");
       resolve(idx >= 0 ? result.slice(idx + 1) : result);
@@ -33,8 +33,8 @@ function _fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// RAF-based delta batcher: buffers high-frequency text_delta / thinking_delta
-// events and flushes them once per animation frame to avoid excessive re-renders.
+// 基于 RAF 的增量批处理器：缓冲高频 text_delta / thinking_delta 事件，
+// 每个动画帧最多刷新一次，避免过度重渲染。
 // 改进：增加立即刷新机制，确保非增量事件不会与缓冲的增量事件产生时序问题
 // ---------------------------------------------------------------------------
 class DeltaBatcher {
@@ -106,8 +106,8 @@ class DeltaBatcher {
   }
 }
 
-// Token stats deferred from a call that ended with a pending interaction
-// (askuser / approval). sendContinuation accumulates these into its final stats.
+// 因待处理交互（askuser / approval）而延迟的 Token 统计。
+// sendContinuation 会将这些累积到最终统计中。
 let _deferredTokenStats: {
   promptTokens: number;
   completionTokens: number;
@@ -117,7 +117,7 @@ let _deferredTokenStats: {
 
 export async function sendMessage(
   text: string,
-  files?: File[],
+  files?: AttachedFile[],
   sessionId?: string | null
 ) {
   const store = useChatStore.getState();
@@ -125,47 +125,60 @@ export async function sendMessage(
 
   if (store.isStreaming) return;
 
-  // Upload files first, separating images from documents
+  // 尽早创建 AbortController 并设置流式状态 - 在任何异步操作（base64 编码）之前。
+  // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
+  // 如果延迟到文件处理之后，SessionSync 的 effect 可能在 await 间隙触发，
+  // 发现 abortController===null 后调用 switchSession，清空 addUserMessage 即将创建的消息。
+  const abortController = new AbortController();
+  store.setAbortController(abortController);
+  store.setStreaming(true);
+  store.setPipelineStatus({
+    stage: "connecting",
+    message: "正在连接...",
+    startedAt: Date.now(),
+  });
+
+  // 文件已由 ChatInput 预先上传。这里只需：
+  // 1. 收集上传成功的路径用于 agent 通知
+  // 2. 将图片编码为 base64 用于 SSE 多模态载荷
   const uploadedDocPaths: string[] = [];
   const uploadedImagePaths: string[] = [];
   const imageAttachments: { data: string; media_type: string }[] = [];
-  // Track per-file upload results so we can populate user message attachments
   const fileUploadResults: { filename: string; path: string; size: number }[] = [];
   if (files && files.length > 0) {
-    for (const file of files) {
-      const isImage = _isImageLike(file);
+    for (const af of files) {
+      const isImage = _isImageLike(af.file);
 
-      // 图片应优先尝试 base64 编码，不能依赖 upload 成功。
-      // 否则上传失败（格式限制/配额/网络）时，LLM 会完全收不到图片内容。
+      // 将图片编码为 base64 用于 LLM 多模态载荷。
+      // 即使文件上传失败，也能确保 agent 可以"看到"图片。
       if (isImage) {
         try {
-          const b64 = await _fileToBase64(file);
+          const b64 = await _fileToBase64(af.file);
           imageAttachments.push({
             data: b64,
-            media_type: file.type || "image/png",
+            media_type: af.file.type || "image/png",
           });
         } catch (b64Err) {
-          console.error("Base64 encoding failed for image:", file.name, b64Err);
+          console.error("Base64 encoding failed for image:", af.file.name, b64Err);
         }
       }
 
-      try {
-        const result = await uploadFile(file);
-        fileUploadResults.push({ filename: file.name, path: result.path, size: file.size });
+      // 使用预上传的结果
+      if (af.status === "success" && af.uploadResult) {
+        fileUploadResults.push(af.uploadResult);
         if (isImage) {
-          uploadedImagePaths.push(result.path);
+          uploadedImagePaths.push(af.uploadResult.path);
         } else {
-          uploadedDocPaths.push(result.path);
+          uploadedDocPaths.push(af.uploadResult.path);
         }
-      } catch (err) {
-        console.error("Upload failed:", file.name, err);
-        // Still record the file so it appears in the user message (without path)
-        fileUploadResults.push({ filename: file.name, path: "", size: file.size });
+      } else {
+        // 上传失败或仍在进行中 — 记录但不含路径
+        fileUploadResults.push({ filename: af.file.name, path: "", size: af.file.size });
       }
     }
   }
 
-  // Build structured file notice for the agent
+  // 为 agent 构建结构化文件通知
   let messageContent = text;
   const notices: string[] = [];
   for (const p of uploadedDocPaths) {
@@ -180,10 +193,9 @@ export async function sendMessage(
 
   const effectiveSessionId = sessionId || sessionStore.activeSessionId;
 
-  // Synchronise currentSessionId BEFORE adding messages so that
-  // SessionSync's useEffect (which fires after the next render) sees
-  // currentSessionId === activeSessionId and skips the destructive
-  // switchSession() call that would wipe the messages we're about to add.
+  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
+  //（在下次渲染后触发）看到 currentSessionId === activeSessionId，
+  // 从而跳过会清空我们即将添加的消息的 switchSession() 调用。
   if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
     if (store.currentSessionId && store.messages.length > 0) {
       store.saveCurrentSession();
@@ -201,22 +213,11 @@ export async function sendMessage(
   const assistantMsgId = uuid();
   store.addAssistantMessage(assistantMsgId);
 
-  const abortController = new AbortController();
-  store.setAbortController(abortController);
-  store.setStreaming(true);
-  // Immediately show pipeline progress so the user sees feedback before the
-  // SSE connection is even established (covers network RTT + acquire_for_chat).
-  store.setPipelineStatus({
-    stage: "connecting",
-    message: "正在连接...",
-    startedAt: Date.now(),
-  });
-
-  // Helper: get fresh store state
+  // 辅助函数：获取最新的 store 状态
   const S = () => useChatStore.getState();
 
-  // RAF-batched delta flusher: accumulates text_delta / thinking_delta and
-  // applies them to the store at most once per animation frame.
+  // RAF 批量增量刷新器：累积 text_delta / thinking_delta，
+  // 每个动画帧最多应用一次到 store。
   const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
     if (textDelta) {
       const msg = getLastAssistantMessage(S().messages, assistantMsgId);
@@ -242,7 +243,7 @@ export async function sendMessage(
     }
   });
 
-  // Helper: get last block of specific type from current assistant message
+  // 辅助函数：从当前 assistant 消息中获取指定类型的最后一个 block
   const getLastBlockOfType = (type: string) => {
     const msg = getLastAssistantMessage(S().messages, assistantMsgId);
     if (!msg) return null;
@@ -300,7 +301,7 @@ export async function sendMessage(
   const finalizeThinking = () => {
     if (!thinkingInProgress) return;
     thinkingInProgress = false;
-    // Flush any buffered thinking deltas before finalizing duration
+    // 在确定时长之前刷新所有缓冲的思考增量
     batcher.flush();
     S().updateBlockByType(assistantMsgId, "thinking", (b) => {
       if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
@@ -310,7 +311,7 @@ export async function sendMessage(
     });
   };
 
-  // Diagnostic: log image attachment status
+  // 诊断日志：记录图片附件状态
   if (files && files.length > 0) {
     console.log(
       "[sendMessage] files=%d, imageAttachments=%d, uploadedImagePaths=%o",
@@ -342,23 +343,22 @@ export async function sendMessage(
         if (event.event !== "thinking_delta" && event.event !== "thinking") {
           finalizeThinking();
         }
-        // Flush buffered deltas before any non-delta event to preserve block order
+        // 在任何非增量事件前刷新缓冲的增量，以保持 block 顺序
         if (event.event !== "text_delta" && event.event !== "thinking_delta") {
           batcher.flush();
         }
 
         switch (event.event) {
-          // ── Session ────────────────────────────────
+          // ── 会话 ────────────────────────────────
           case "session_init": {
             const sid = data.session_id as string;
             const ss = useSessionStore.getState();
             if (!ss.activeSessionId) {
               ss.setActiveSession(sid);
             }
-            // Only sync the session id without clearing/reloading messages.
-            // switchSession() would clear the messages array and trigger an
-            // async backend load whose restored IDs won't match userMsgId,
-            // causing duplicate user bubbles.
+            // 仅同步会话 ID 而不清空/重新加载消息。
+            // switchSession() 会清空消息数组并触发异步后端加载，
+            // 恢复的 ID 不会与 userMsgId 匹配，导致用户气泡重复。
             const chatState = S();
             if (chatState.currentSessionId !== sid) {
               if (chatState.currentSessionId && chatState.messages.length > 0) {
@@ -369,7 +369,7 @@ export async function sendMessage(
             if (text) {
               ss.updateSessionTitle(ss.activeSessionId || sid, text.slice(0, 60));
             }
-            // Sync mode state
+            // 同步模式状态
             const ui = useUIStore.getState();
             if (typeof data.full_access_enabled === "boolean") {
               ui.setFullAccessEnabled(data.full_access_enabled);
@@ -380,7 +380,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Pipeline Progress ─────────────────────
+          // ── 流水线进度 ─────────────────────
           case "pipeline_progress": {
             const stage = (data.stage as string) || "";
             const pipelineMsg = (data.message as string) || "";
@@ -395,7 +395,7 @@ export async function sendMessage(
               phaseIndex, totalPhases, specPath, diff, checkpoint,
             });
 
-            // Accumulate VLM extract phases for the timeline card
+            // 累积 VLM 提取阶段用于时间线卡片
             if (stage.startsWith("vlm_extract_") && phaseIndex != null && totalPhases != null) {
               S().pushVlmPhase({
                 stage,
@@ -410,9 +410,9 @@ export async function sendMessage(
             break;
           }
 
-          // ── Route ──────────────────────────────────
+          // ── 路由 ──────────────────────────────────
           case "route_start": {
-            // Routing started — optional status indicator
+            // 路由已启动 — 可选的状态指示器
             break;
           }
           case "route_end": {
@@ -429,7 +429,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Iteration ──────────────────────────────
+          // ── 迭代 ──────────────────────────────
           case "iteration_start": {
             const iter = (data.iteration as number) || 0;
             if (iter > 1) {
@@ -441,16 +441,16 @@ export async function sendMessage(
             break;
           }
 
-          // ── Thinking ───────────────────────────────
+          // ── 思考 ───────────────────────────────
           case "thinking_delta": {
             S().setPipelineStatus(null);
             const lastThinking = getLastBlockOfType("thinking");
             if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              // Existing open thinking block — batch the delta
+              // 已有未关闭的思考 block — 批量缓冲增量
               batcher.pushThinking((data.content as string) || "");
             } else {
-              // No open thinking block yet — flush any pending text first,
-              // then create a new thinking block synchronously.
+              // 尚无未关闭的思考 block — 先刷新待处理的文本，
+              // 然后同步创建新的思考 block。
               batcher.flush();
               S().appendBlock(assistantMsgId, {
                 type: "thinking",
@@ -472,10 +472,10 @@ export async function sendMessage(
             break;
           }
 
-          // ── Text ───────────────────────────────────
+          // ── 文本 ───────────────────────────────────
           case "text_delta": {
             S().setPipelineStatus(null);
-            // Ensure a text block exists for the batcher to append into.
+            // 确保存在文本 block 供批处理器追加内容。
             const msg = getLastAssistantMessage(S().messages, assistantMsgId);
             const lastBlock = msg?.blocks[msg.blocks.length - 1];
             if (!lastBlock || lastBlock.type !== "text") {
@@ -488,7 +488,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Tool Calls ─────────────────────────────
+          // ── 工具调用 ─────────────────────────────
           case "tool_call_start": {
             S().setPipelineStatus(null);
             const toolCallIdRaw = data.tool_call_id;
@@ -511,7 +511,7 @@ export async function sendMessage(
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
             S().updateToolCallBlock(assistantMsgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
-                // If already pending (from pending_approval event), keep pending status but update result
+                // 如果已为 pending（来自 pending_approval 事件），保持 pending 状态但更新结果
                 if (b.status === "pending") {
                   return {
                     ...b,
@@ -532,7 +532,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Subagent ───────────────────────────────
+          // ── 子代理 ───────────────────────────────
           case "subagent_start": {
             S().appendBlock(assistantMsgId, {
               type: "subagent",
@@ -589,7 +589,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Interactive ────────────────────────────
+          // ── 交互 ────────────────────────────
           case "user_question": {
             S().setPendingQuestion({
               id: (data.id as string) || "",
@@ -602,7 +602,7 @@ export async function sendMessage(
           }
 
           case "pending_approval": {
-            // Mark the associated tool_call block as "pending"
+            // 将关联的 tool_call block 标记为 "pending"
             const approvalToolCallId = (data.tool_call_id as string) || null;
             S().updateToolCallBlock(assistantMsgId, approvalToolCallId, (b) => {
               if (b.type === "tool_call") {
@@ -625,10 +625,11 @@ export async function sendMessage(
             const approvalId = (data.approval_id as string) || "";
             const success = Boolean(data.success);
             const undoable = Boolean(data.undoable);
+            const hasChanges = Boolean(data.has_changes);
             const arResult = (data.result as string) || undefined;
 
             S().setPendingApproval(null);
-            // Transition the pending tool_call block to success/error and attach result
+            // 将 pending 状态的 tool_call block 转换为 success/error 并附加结果
             const arToolCallId = (data.tool_call_id as string) || null;
             S().updateToolCallBlock(assistantMsgId, arToolCallId, (b) => {
               if (b.type === "tool_call" && b.status === "pending") {
@@ -647,11 +648,12 @@ export async function sendMessage(
               toolName,
               success,
               undoable,
+              hasChanges,
             });
             break;
           }
 
-          // ── Task List ──────────────────────────────
+          // ── 任务列表 ──────────────────────────────
           case "task_update": {
             const payloadItems = normalizeTaskItems(data.task_list);
             const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
@@ -676,7 +678,7 @@ export async function sendMessage(
             break;
           }
 
-          // ── Excel Preview / Diff ───────────────────
+          // ── Excel 预览 / 差异 ───────────────────
           case "excel_preview": {
             const epFilePath = (data.file_path as string) || "";
             useExcelStore.getState().addPreview({
@@ -764,22 +766,22 @@ export async function sendMessage(
             break;
           }
 
-          // ── Reply & Done ───────────────────────────
+          // ── 回复与完成 ───────────────────────────
           case "reply": {
             const content = (data.content as string) || "";
-            // Suppress reply text when there's a pending approval or question
-            // — the text is already shown inside the tool call card / panel.
+            // 存在待处理审批或问题时抑制回复文本
+            // — 文本已在工具调用卡片/面板中展示。
             const hasPendingInteraction =
               S().pendingApproval !== null || S().pendingQuestion !== null;
             if (content && !hasPendingInteraction) {
               const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-              // Skip if a text block already exists (populated by streaming text_delta events)
+              // 如果已存在文本 block（由流式 text_delta 事件填充）则跳过
               const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
               if (!hasTextBlock) {
                 S().appendBlock(assistantMsgId, { type: "text", content });
               }
             }
-            // Sync mode state from reply
+            // 从 reply 同步模式状态
             const uiReply = useUIStore.getState();
             if (typeof data.full_access_enabled === "boolean") {
               uiReply.setFullAccessEnabled(data.full_access_enabled);
@@ -787,11 +789,11 @@ export async function sendMessage(
             if (typeof data.chat_mode === "string") {
               uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
             }
-            // Token stats handling
+            // Token 统计处理
             const totalTokens = (data.total_tokens as number) || 0;
             if (totalTokens > 0) {
               if (hasPendingInteraction) {
-                // Defer token stats — a continuation will display accumulated totals.
+                // 延迟 Token 统计 — 后续的 continuation 将展示累计总数。
                 _deferredTokenStats = {
                   promptTokens: (data.prompt_tokens as number) || 0,
                   completionTokens: (data.completion_tokens as number) || 0,
@@ -820,7 +822,7 @@ export async function sendMessage(
             } else if (modeName === "chat_mode") {
               uiMode.setChatMode(data.value as "write" | "read" | "plan");
             }
-            // Show mode change as a status block in chat
+            // 在聊天中以状态 block 展示模式变更
             const _modeLabelMap: Record<string, string> = { full_access: "Full Access", chat_mode: "Chat Mode" };
             const modeLabel = _modeLabelMap[modeName] || modeName;
             const modeAction = enabled ? "已开启" : "已关闭";
@@ -833,7 +835,7 @@ export async function sendMessage(
           }
 
           case "done": {
-            // Save session messages
+            // 保存会话消息
             S().setPipelineStatus(null);
             S().saveCurrentSession();
             S().setStreaming(false);
@@ -842,10 +844,9 @@ export async function sendMessage(
           }
 
           case "error": {
-            // Non-fatal: append the error message but do NOT kill streaming
-            // state. The SSE connection may still deliver subsequent events
-            // (tool calls, text, done). Cleanup is handled by "done" or the
-            // finally block when the connection actually closes.
+            // 非致命错误：追加错误信息但不终止流式状态。
+            // SSE 连接可能仍会传递后续事件（工具调用、文本、done）。
+            // 清理由 "done" 事件或连接实际关闭时的 finally 块处理。
             _hadStreamError = true;
             S().setPipelineStatus(null);
             S().appendBlock(assistantMsgId, {
@@ -856,7 +857,7 @@ export async function sendMessage(
           }
 
           default:
-            // Ignore unknown events silently
+            // 静默忽略未知事件
             break;
         }
       },
@@ -877,21 +878,20 @@ export async function sendMessage(
     S().setStreaming(false);
     S().setAbortController(null);
 
-    // Auto-recovery: if errors occurred during the stream, schedule a
-    // backend refresh so the user sees the authoritative conversation
-    // state without needing a manual page reload.
+    // 自动恢复：如果流式传输期间发生错误，调度一次后端刷新，
+    // 使用户无需手动刷新页面即可看到权威的对话状态。
     if (_hadStreamError && effectiveSessionId) {
       const sid = effectiveSessionId;
       setTimeout(async () => {
         try {
           const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
           const chat = useChatStore.getState();
-          // Only refresh if we're still on the same session and not streaming
+          // 仅在仍在同一会话且未在流式传输时刷新
           if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // silent — SessionSync polling will eventually recover
+          // 静默处理 — SessionSync 轮询最终会恢复
         }
       }, 1500);
     }
@@ -937,7 +937,7 @@ export async function sendContinuation(
 
   const S = () => useChatStore.getState();
 
-  // RAF-batched delta flusher for continuation stream
+  // 用于 continuation 流的 RAF 批量增量刷新器
   const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
     if (textDelta) {
       const msg = getLastAssistantMessage(S().messages, msgId);
@@ -1039,13 +1039,13 @@ export async function sendContinuation(
         if (event.event !== "thinking_delta" && event.event !== "thinking") {
           finalizeThinking();
         }
-        // Flush buffered deltas before any non-delta event to preserve block order
+        // 在任何非增量事件前刷新缓冲的增量，以保持 block 顺序
         if (event.event !== "text_delta" && event.event !== "thinking_delta") {
           batcher.flush();
         }
 
         switch (event.event) {
-          // Skip session_init — session already exists
+          // 跳过 session_init — 会话已存在
           case "session_init":
             break;
 
@@ -1252,9 +1252,10 @@ export async function sendContinuation(
             const approvalId = (data.approval_id as string) || "";
             const success = Boolean(data.success);
             const undoable = Boolean(data.undoable);
+            const hasChanges = Boolean(data.has_changes);
             const arResult = (data.result as string) || undefined;
             S().setPendingApproval(null);
-            // Transition the pending tool_call block to success/error and attach result
+            // 将 pending 状态的 tool_call block 转换为 success/error 并附加结果
             const arToolCallId = (data.tool_call_id as string) || null;
             S().updateToolCallBlock(msgId, arToolCallId, (b) => {
               if (b.type === "tool_call" && b.status === "pending") {
@@ -1273,6 +1274,7 @@ export async function sendContinuation(
               toolName,
               success,
               undoable,
+              hasChanges,
             });
             break;
           }
@@ -1419,7 +1421,7 @@ export async function sendContinuation(
             const totalTokens = (data.total_tokens as number) || 0;
             if (totalTokens > 0) {
               if (hasPendingInteraction) {
-                // Defer — another continuation will display the accumulated total.
+                // 延迟 — 后续的 continuation 将展示累计总数。
                 _deferredTokenStats = {
                   promptTokens: (data.prompt_tokens as number) || 0,
                   completionTokens: (data.completion_tokens as number) || 0,
@@ -1427,7 +1429,7 @@ export async function sendContinuation(
                   iterations: (data.iterations as number) || 0,
                 };
               } else {
-                // Accumulate: deferred stats from prior call + any leftover blocks + current
+                // 累加：前次调用的延迟统计 + 剩余 block + 当前
                 let accPrompt = (data.prompt_tokens as number) || 0;
                 let accCompletion = (data.completion_tokens as number) || 0;
                 let accTotal = totalTokens;
@@ -1519,7 +1521,7 @@ export async function sendContinuation(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // silent — SessionSync polling will eventually recover
+          // 静默处理 — SessionSync 轮询最终会恢复
         }
       }, 1500);
     }
@@ -1574,8 +1576,27 @@ export async function rollbackAndResend(
   const truncated = messages.slice(0, msgIndex);
   store.setMessages(truncated);
 
+  // 预先上传文件（与 ChatInput 的 triggerUpload 相同），
+  // 确保 sendMessage 收到带有 uploadResult 的正确 AttachedFile 对象。
+  let attached: AttachedFile[] | undefined;
+  if (files && files.length > 0) {
+    const { uploadFile } = await import("./api");
+    attached = await Promise.all(
+      files.map(async (f, i): Promise<AttachedFile> => {
+        const id = `resend-${Date.now()}-${i}`;
+        try {
+          const uploadResult = await uploadFile(f);
+          return { id, file: f, status: "success" as const, uploadResult };
+        } catch (err) {
+          console.error("Edit-resend upload failed:", f.name, err);
+          return { id, file: f, status: "failed" as const, error: String(err) };
+        }
+      }),
+    );
+  }
+
   // sendMessage 会在前后端各添加用户消息 + 触发流式回复
-  await sendMessage(newContent, files, effectiveSessionId);
+  await sendMessage(newContent, attached, effectiveSessionId);
 }
 
 /**
@@ -1655,26 +1676,19 @@ export function stopGeneration() {
   const store = useChatStore.getState();
   if (!store.abortController) return;
 
-  // 1. Tell the backend to cancel the server-side task
+  // 1. 通知后端取消服务端任务
   const sessionId = store.currentSessionId;
   if (sessionId) {
-    const token = useAuthStore.getState().accessToken;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    fetch(buildApiUrl("/chat/abort", { direct: true }), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ session_id: sessionId }),
-    }).catch(() => {});
+    import("./api").then(({ abortChat }) => abortChat(sessionId)).catch(() => {});
   }
 
-  // 2. Abort the frontend SSE connection
+  // 2. 中断前端 SSE 连接
   store.abortController.abort();
   store.setAbortController(null);
   store.setStreaming(false);
 
-  // 3. Patch the last assistant message: mark in-flight blocks as failed
-  //    and append a visible "stopped" indicator.
+  // 3. 修补最后一条 assistant 消息：将进行中的 block 标记为失败，
+  //    并追加可见的"已停止"指示器。
   const messages = store.messages;
   const lastMsg = [...messages].reverse().find((m) => m.role === "assistant");
   if (lastMsg && lastMsg.role === "assistant") {
@@ -1708,7 +1722,7 @@ export function stopGeneration() {
 }
 
 // ---------------------------------------------------------------------------
-// Active subscribe guard: prevents multiple concurrent subscribe connections.
+// 活跃订阅守卫：防止多个并发的 subscribe 连接。
 // ---------------------------------------------------------------------------
 let _activeSubscribeSessionId: string | null = null;
 
@@ -1721,11 +1735,11 @@ let _activeSubscribeSessionId: string | null = null;
 export async function subscribeToSession(sessionId: string) {
   const store = useChatStore.getState();
 
-  // Prevent duplicate subscribe connections
+  // 防止重复的 subscribe 连接
   if (store.abortController) return;
   if (_activeSubscribeSessionId === sessionId) return;
 
-  // Find the last assistant message to append events to
+  // 查找最后一条 assistant 消息用于追加事件
   const messages = store.messages;
   let assistantMsgId: string | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -1734,7 +1748,7 @@ export async function subscribeToSession(sessionId: string) {
       break;
     }
   }
-  // If no assistant message yet, create one
+  // 如果尚无 assistant 消息，创建一条
   if (!assistantMsgId) {
     assistantMsgId = uuid();
     store.addAssistantMessage(assistantMsgId);
@@ -2075,6 +2089,7 @@ export async function subscribeToSession(sessionId: string) {
             const approvalId = (data.approval_id as string) || "";
             const success = Boolean(data.success);
             const undoable = Boolean(data.undoable);
+            const hasChanges = Boolean(data.has_changes);
             const arResult = (data.result as string) || undefined;
             S().setPendingApproval(null);
             const arToolCallId = (data.tool_call_id as string) || null;
@@ -2095,6 +2110,7 @@ export async function subscribeToSession(sessionId: string) {
               toolName,
               success,
               undoable,
+              hasChanges,
             });
             break;
           }
@@ -2300,7 +2316,7 @@ export async function subscribeToSession(sessionId: string) {
           await refreshSessionMessagesFromBackend(sid);
         }
       } catch {
-        // silent — SessionSync polling will eventually recover
+        // 静默处理 — SessionSync 轮询最终会恢复
       }
     }, 1500);
   }

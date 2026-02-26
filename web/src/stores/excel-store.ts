@@ -68,23 +68,22 @@ interface ExcelState {
   selectionMode: boolean;
   pendingSelection: { filePath: string; sheet: string; range: string } | null;
 
-  // Quick-add file mention to chat input (set by sidebar, consumed by ChatInput)
+  // 快速添加文件提及到聊天输入（由侧栏设置，ChatInput 消费）
   pendingFileMention: { path: string; filename: string } | null;
 
-  // Paths the user explicitly dismissed — survives across remounts so that
-  // auto-discovery (workspace scan / session recovery) won't re-add them.
+  // 用户明确关闭的路径，在重挂载间保留，以便自动发现（工作区扫描/会话恢复）不会再次加入。
   dismissedPaths: Set<string>;
 
-  // Workspace file tree refresh signal (bumped on files_changed events)
+  // 工作区文件树刷新信号（在 files_changed 事件时递增）
   workspaceFilesVersion: number;
 
-  // Backup apply
+  // 备份应用
   pendingBackups: BackupFile[];
   backupEnabled: boolean;
   backupLoading: boolean;
   appliedPaths: Set<string>;
 
-  // Actions
+  // 操作
   openPanel: (filePath: string, sheet?: string) => void;
   closePanel: () => void;
   setActiveSheet: (sheet: string) => void;
@@ -339,7 +338,7 @@ export const useExcelStore = create<ExcelState>()(
         ),
       }));
     } catch {
-      // ignore
+      // 忽略
     }
   },
 
@@ -348,7 +347,7 @@ export const useExcelStore = create<ExcelState>()(
       await discardBackup({ sessionId });
       set({ pendingBackups: [] });
     } catch {
-      // ignore
+      // 忽略
     }
   },
 

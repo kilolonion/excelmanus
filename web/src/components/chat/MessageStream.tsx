@@ -18,7 +18,7 @@ interface MessageStreamProps {
   onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
 }
 
-const TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 minutes
+const TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 分钟
 
 function formatTimestamp(ts: number): string {
   const now = Date.now();
@@ -48,7 +48,7 @@ function formatTimestamp(ts: number): string {
 function computeTimestampIndices(messages: Message[]): Set<number> {
   const indices = new Set<number>();
   if (messages.length === 0) return indices;
-  // Always show timestamp on the first message if it has one
+  // 首条消息若有时间戳则始终显示
   if (messages[0].timestamp) indices.add(0);
   for (let i = 1; i < messages.length; i++) {
     const prev = messages[i - 1].timestamp;

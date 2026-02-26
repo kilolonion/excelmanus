@@ -10,7 +10,7 @@ import {
   isFallbackSessionTitle,
 } from "@/lib/session-title";
 
-// In-memory fast cache (supplements IndexedDB)
+// 内存快速缓存（补充 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
 
 // F5: switchSession 取消令牌 — 递增版本号，旧的 loadAndSwitch 检测到版本变化后放弃更新
@@ -27,8 +27,8 @@ interface LoadMessagesOptions {
 }
 
 /**
- * Convert backend LLM messages (role/content dicts) to frontend Message[].
- * Groups consecutive assistant/tool messages into a single assistant Message with blocks.
+ * 将后端 LLM 消息（role/content 字典）转换为前端 Message[]。
+ * 将连续的 assistant/tool 消息合并为带 blocks 的单一 assistant 消息。
  */
 const _EXCEL_WRITE_TOOL_NAMES = new Set([
   "write_cells", "insert_rows", "insert_columns",
@@ -39,42 +39,89 @@ const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
 const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(（\[])([^ \t\r\n`"'()（）\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)）\]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
 
-// Block types produced only by SSE events — not persisted in backend message
-// store.  When refreshing from backend, these must be carried over from the
-// existing in-memory messages to avoid visual data loss (e.g. thinking blocks
-// disappearing after SessionSync detects inFlight→false).
+// 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
+// 从后端刷新时，必须从现有内存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 后 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action",
 ]);
 
 /**
- * Merge SSE-only blocks (thinking, iteration, approval_action) from
- * `oldMessages` into `newMessages` so that a backend refresh does not
- * discard them.  Matching is positional among assistant messages.
+ * 将仅由 SSE 产生的块（thinking、iteration、approval_action）从 oldMessages 合并到 newMessages，
+ * 使后端刷新不会丢弃它们。在 assistant 消息间按位置匹配。
  */
 function _preserveSseOnlyBlocks(
   oldMessages: Message[],
   newMessages: Message[],
 ): Message[] {
-  // Collect old assistant messages in order
+  // 按顺序收集旧 assistant 消息
   const oldAssistant: AssistantBlock[][] = [];
   for (const m of oldMessages) {
     if (m.role === "assistant") oldAssistant.push(m.blocks);
   }
   if (oldAssistant.length === 0) return newMessages;
 
+  // 同时保留用户消息的文件：内存中的消息可能含有更完整的 FileAttachment（含实际上传大小），
+  // 而后端从通知字符串无法完全还原。
+  const oldUserFiles: (FileAttachment[] | undefined)[] = [];
+  for (const m of oldMessages) {
+    if (m.role === "user") oldUserFiles.push(m.files);
+  }
+
   let aIdx = 0;
+  let uIdx = 0;
   return newMessages.map((msg) => {
+    if (msg.role === "user") {
+      const oldFiles = oldUserFiles[uIdx++];
+      // 若旧消息有文件而新消息没有或更少，优先保留旧的
+      if (oldFiles && oldFiles.length > 0 && (!msg.files || msg.files.length === 0)) {
+        return { ...msg, files: oldFiles };
+      }
+      return msg;
+    }
     if (msg.role !== "assistant") return msg;
     const oldBlocks = oldAssistant[aIdx++];
     if (!oldBlocks) return msg;
 
-    const sseBlocks = oldBlocks.filter((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type));
-    if (sseBlocks.length === 0) return msg;
+    // 按 toolCallId 建立旧 tool_call 块映射，用于状态恢复。
+    // SSE 事件携带的状态（error/result/status）比后端持久化更完整，此映射用于延续该状态。
+    const oldToolCallMap = new Map<string, AssistantBlock>();
+    for (const ob of oldBlocks) {
+      if (ob.type === "tool_call" && ob.toolCallId) {
+        oldToolCallMap.set(ob.toolCallId, ob);
+      }
+    }
 
-    // Use old block ordering as template: keep SSE-only blocks in place,
-    // replace backend-persisted blocks with their refreshed counterparts.
-    const newBackendBlocks = [...msg.blocks]; // all non-SSE
+    const sseBlocks = oldBlocks.filter((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type));
+    if (sseBlocks.length === 0 && oldToolCallMap.size === 0) return msg;
+
+    // 以旧块顺序为模板：保留仅 SSE 的块不动，用刷新后的块替换后端持久化的块。
+    const newBackendBlocks = msg.blocks.map((nb) => {
+      // 延续 SSE 产生的 tool_call 状态（错误状态、结果、错误信息），后端转换可能已丢失。
+      if (
+        nb.type === "tool_call"
+        && nb.toolCallId
+        && oldToolCallMap.has(nb.toolCallId)
+      ) {
+        const ob = oldToolCallMap.get(nb.toolCallId)!;
+        if (ob.type === "tool_call") {
+          // 若旧块为错误状态则保留（后端对已解析调用总是返回 "success"）。
+          if (ob.status === "error" && nb.status === "success") {
+            return { ...nb, status: ob.status, result: ob.result, error: ob.error };
+          }
+          // 若新块缺少结果文本则沿用旧的
+          if (!nb.result && ob.result) {
+            return { ...nb, result: ob.result };
+          }
+        }
+      }
+      return nb;
+    });
+
+    if (sseBlocks.length === 0) {
+      // 无仅 SSE 的块需要按位合并，但上面可能已修补了 tool_call 状态。
+      return { ...msg, blocks: newBackendBlocks };
+    }
+
     let ni = 0;
     const merged: AssistantBlock[] = [];
 
@@ -87,8 +134,7 @@ function _preserveSseOnlyBlocks(
         }
       }
     }
-    // Append any remaining new blocks (e.g. tool_calls added after last
-    // SSE-only block in the old message).
+    // 追加剩余的新块（如旧消息中最后一个仅 SSE 块之后新增的 tool_calls）。
     while (ni < newBackendBlocks.length) {
       merged.push(newBackendBlocks[ni++]);
     }
@@ -124,7 +170,7 @@ function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
       return parsed as Record<string, unknown>;
     }
   } catch {
-    // fall through
+    // 继续向下
   }
   for (let i = text.length - 1; i >= 1; i--) {
     if (text[i] !== "}") continue;
@@ -134,7 +180,7 @@ function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
         return parsed as Record<string, unknown>;
       }
     } catch {
-      // continue searching a valid JSON suffix boundary
+      // 继续查找合法 JSON 后缀边界
     }
   }
   return null;
@@ -203,17 +249,62 @@ function _buildRecoveredDiffFromToolResult(
   };
 }
 
+function _isToolResultError(content: string): boolean {
+  // 简单启发：检查工具结果 JSON 是否含顶层 "status": "error"。
+  // 与后端约定一致：失败的工具调用以 {"status": "error", "message": "..."} 作为工具消息内容。
+  const text = content.trim();
+  if (!text.startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && parsed.status === "error";
+  } catch {
+    // 回退：对截断或大结果做简单子串检查
+    return /"status"\s*:\s*"error"/.test(text.slice(0, 200));
+  }
+}
+
+// 匹配 sendMessage 注入的文件上传通知的正则
+// "[已上传文件: ./path/to/file.xlsx]" or "[已上传图片: ./path/to/image.png]"
+const _UPLOAD_NOTICE_RE = /\[已上传(?:文件|图片):\s*([^\]]+)\]/g;
+
+/**
+ * 从用户消息内容中的上传通知行提取 FileAttachment[]，
+ * 返回去除通知后的内容及附件列表。
+ */
+function _extractFileAttachmentsFromContent(
+  rawContent: string,
+): { content: string; files: FileAttachment[] } {
+  const files: FileAttachment[] = [];
+  _UPLOAD_NOTICE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = _UPLOAD_NOTICE_RE.exec(rawContent)) !== null) {
+    const filePath = match[1].trim();
+    if (!filePath) continue;
+    const filename = filePath.split("/").pop() || filePath;
+    files.push({ filename, path: filePath, size: 0 });
+  }
+  // 为展示去掉内容中所有通知行；通知在开头，每行一条，后接 \n\n。
+  const cleaned = rawContent
+    .replace(/\[已上传(?:文件|图片):\s*[^\]]+\]\n?/g, "")
+    .replace(/^\n+/, "")
+    .trim();
+  return { content: cleaned || rawContent.trim(), files };
+}
+
 function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
   const resolvedToolCallIds = new Set<string>();
   const toolResultByCallId = new Map<string, string>();
+  const toolErrorCallIds = new Set<string>();
   for (const item of raw) {
     const msg = item as Record<string, unknown>;
     if (msg.role === "tool" && typeof msg.tool_call_id === "string") {
       resolvedToolCallIds.add(msg.tool_call_id);
-      if (typeof msg.content === "string") {
-        toolResultByCallId.set(msg.tool_call_id, msg.content);
-      } else {
-        toolResultByCallId.set(msg.tool_call_id, JSON.stringify(msg.content ?? ""));
+      const resultText = typeof msg.content === "string"
+        ? msg.content
+        : JSON.stringify(msg.content ?? "");
+      toolResultByCallId.set(msg.tool_call_id, resultText);
+      if (_isToolResultError(resultText)) {
+        toolErrorCallIds.add(msg.tool_call_id);
       }
     }
   }
@@ -225,8 +316,41 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     const msg = item as Record<string, unknown>;
     const role = msg.role as string;
     if (role === "user") {
-      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "");
-      result.push({ id: _nextId(), role: "user", content });
+      let content: string;
+      if (typeof msg.content === "string") {
+        // 去掉 mark_images_sent() 注入的尾部降级图片占位符（如 "\n[图片 #1 已在之前的对话中发送]"）。
+        content = msg.content.replace(/\n?\[图片 #\d+ 已在之前的对话中发送\]\s*$/g, "").trim();
+        // 跳过仅包含系统注入图片的消息（C 通道降级），其整条内容仅为占位符时跳过。
+        if (!content) continue;
+      } else if (Array.isArray(msg.content)) {
+        // 多模态消息（文本 + image_url 部分）。仅提取文本部分；将 image_url 部分替换为短占位符，避免原始 base64 泄露到 UI。
+        const textParts: string[] = [];
+        let imageCount = 0;
+        for (const part of msg.content as Record<string, unknown>[]) {
+          if (part.type === "text" && typeof part.text === "string") {
+            textParts.push(part.text as string);
+          } else if (part.type === "image_url") {
+            imageCount++;
+          }
+        }
+        const hasText = textParts.some((t) => t.trim().length > 0);
+        // 仅当无有意义文本时显示图片占位符；已有文本时占位符是多余噪音。
+        if (imageCount > 0 && !hasText) {
+          textParts.push(
+            imageCount === 1 ? "[发送了一张图片]" : `[发送了 ${imageCount} 张图片]`,
+          );
+        }
+        content = textParts.join("\n").trim() || "(多模态消息)";
+      } else {
+        content = JSON.stringify(msg.content ?? "");
+      }
+      // 从内容中嵌入的上传通知提取文件附件
+      const extracted = _extractFileAttachmentsFromContent(content);
+      const userMsg: Message = { id: _nextId(), role: "user", content: extracted.content };
+      if (extracted.files.length > 0) {
+        userMsg.files = extracted.files;
+      }
+      result.push(userMsg);
     } else if (role === "assistant") {
       const blocks: AssistantBlock[] = [];
       const affectedFilePaths = new Set<string>();
@@ -245,12 +369,14 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           } catch {
             args = {};
           }
+          const isError = tcId ? toolErrorCallIds.has(tcId) : false;
           blocks.push({
             type: "tool_call",
             toolCallId: tcId,
             name: toolName,
             args,
-            status: hasResult ? "success" : "running",
+            status: hasResult ? (isError ? "error" : "success") : "running",
+            result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
           if (_EXCEL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
             const argFilePath = typeof args.file_path === "string" ? args.file_path : "";
@@ -433,7 +559,7 @@ function _restoreAffectedFilesOnMessages(
   });
 
   if (changed) {
-    // Session may have changed while async recovery was in flight.
+    // 异步恢复期间会话可能已切换。
     const latest = useChatStore.getState().currentSessionId;
     if (latest !== sessionId) return;
 
@@ -446,8 +572,7 @@ function _restoreAffectedFilesOnMessages(
 }
 
 /**
- * Async loader: IDB → backend API fallback.
- * Updates the store only if the session is still active.
+ * 异步加载：优先 IDB，回退到后端 API。仅当会话仍为当前会话时更新 store。
  */
 async function _loadMessagesAsync(sessionId: string): Promise<void> {
   const opts: LoadMessagesOptions = {};
@@ -473,7 +598,7 @@ async function _loadMessagesAsyncWithOptions(
   const shouldPreferCache = opts.preferCache !== false;
   const shouldReplaceVisibleMessages = opts.replaceVisibleMessages === true;
 
-  // Try IndexedDB first
+  // 优先尝试 IndexedDB
   if (shouldPreferCache) {
     const cached = await loadCachedMessages(sessionId);
     if (cached && cached.length > 0) {
@@ -494,7 +619,7 @@ async function _loadMessagesAsyncWithOptions(
     }
   }
 
-  // Fall back to backend API
+  // 回退到后端 API
   try {
     const raw = await fetchSessionMessages(sessionId, 200, 0);
     if (raw.length === 0) return;
@@ -504,9 +629,8 @@ async function _loadMessagesAsyncWithOptions(
       recoveredFilePaths,
     } = _convertBackendMessages(raw);
     _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths);
-    // When replacing visible messages, carry over SSE-only blocks
-    // (thinking, iteration, approval_action) from the current store so
-    // that a backend refresh does not discard them.
+    // 替换可见消息时，从当前 store 带出仅 SSE 的块（thinking、iteration、approval_action），
+    // 避免后端刷新时被丢弃。
     const store = useChatStore.getState();
     const shouldReplace =
       store.currentSessionId === sessionId
@@ -521,12 +645,42 @@ async function _loadMessagesAsyncWithOptions(
     maybeBackfillTitle(finalMessages);
     saveCachedMessages(sessionId, finalMessages).catch(() => {});
     if (shouldReplace) {
-      useChatStore.setState({ messages: finalMessages });
+      // 若合并结果与 store 当前内容语义等价则避免视觉闪烁。
+      // 完整深度比较成本高，故做轻量结构检查：消息数、角色、块数与类型、文本内容一致。
+      const cur = useChatStore.getState().messages;
+      let equiv = cur.length === finalMessages.length;
+      if (equiv) {
+        for (let i = 0; i < cur.length && equiv; i++) {
+          const cm = cur[i];
+          const fm = finalMessages[i];
+          if (cm.role !== fm.role) { equiv = false; break; }
+          if (cm.role === "user" && fm.role === "user") {
+            equiv = cm.content === fm.content;
+          } else if (cm.role === "assistant" && fm.role === "assistant") {
+            if (cm.blocks.length !== fm.blocks.length) { equiv = false; break; }
+            for (let j = 0; j < cm.blocks.length && equiv; j++) {
+              const cb = cm.blocks[j];
+              const fb = fm.blocks[j];
+              if (cb.type !== fb.type) { equiv = false; break; }
+              if (cb.type === "tool_call" && fb.type === "tool_call") {
+                equiv = cb.status === fb.status && cb.toolCallId === fb.toolCallId;
+              } else if (cb.type === "text" && fb.type === "text") {
+                equiv = cb.content === fb.content;
+              } else if (cb.type === "thinking" && fb.type === "thinking") {
+                equiv = cb.content === fb.content;
+              }
+            }
+          }
+        }
+      }
+      if (!equiv) {
+        useChatStore.setState({ messages: finalMessages });
+      }
     }
     // 消息已加载，立即恢复 Excel 事件并回填 affectedFiles
     _loadPersistedExcelEvents(sessionId).catch(() => {});
   } catch {
-    // silently ignore
+    // 静默忽略
   }
 }
 
@@ -581,6 +735,7 @@ interface ChatState {
   currentSessionId: string | null;
   isStreaming: boolean;
   pendingApproval: Approval | null;
+  _lastDismissedApprovalId: string | null;
   pendingQuestion: Question | null;
   abortController: AbortController | null;
   pipelineStatus: PipelineStatus | null;
@@ -600,6 +755,7 @@ interface ChatState {
   addAffectedFiles: (messageId: string, files: string[]) => void;
   setStreaming: (streaming: boolean) => void;
   setPendingApproval: (approval: Approval | null) => void;
+  dismissApproval: (approvalId: string) => void;
   setPendingQuestion: (question: Question | null) => void;
   setAbortController: (controller: AbortController | null) => void;
   setPipelineStatus: (status: PipelineStatus | null) => void;
@@ -617,6 +773,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentSessionId: null,
   isStreaming: false,
   pendingApproval: null,
+  _lastDismissedApprovalId: null,
   pendingQuestion: null,
   abortController: null,
   pipelineStatus: null,
@@ -712,6 +869,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   setPendingApproval: (approval) => set({ pendingApproval: approval }),
+  dismissApproval: (approvalId) => set({ pendingApproval: null, _lastDismissedApprovalId: approvalId }),
   setPendingQuestion: (question) => set({ pendingQuestion: question }),
   setAbortController: (controller) => set({ abortController: controller }),
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
@@ -777,25 +935,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   switchSession: (sessionId) => {
     const state = get();
 
-    // Only skip if we're on this session AND actively streaming.
-    // Previously this also skipped when messages.length > 0, which
-    // caused clicks to be silently ignored after async message load.
+    // 仅当处于当前会话且正在流式输出时跳过。此前在 messages.length > 0 时也会跳过，导致异步加载后点击被静默忽略。
     if (sessionId && sessionId === state.currentSessionId) {
       if (state.abortController) return;
-      // Already loaded — no need to re-fetch
+      // 已加载，无需重新拉取
       if (state.messages.length > 0) return;
     }
 
-    // Save current session messages to both caches
+    // 将当前会话消息写入两处缓存
     if (state.currentSessionId && state.messages.length > 0) {
       _sessionMessages.set(state.currentSessionId, [...state.messages]);
       saveCachedMessages(state.currentSessionId, state.messages).catch(() => {});
     }
     
-    // Load target session messages from memory cache first
+    // 先从内存缓存加载目标会话消息
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
-      // F5: bump version even for sync cache hit to cancel any pending async loads
+      // F5：即使命中同步缓存也递增版本，以取消未完成的异步加载
       ++_switchSessionVersion;
       set({
         currentSessionId: sessionId,

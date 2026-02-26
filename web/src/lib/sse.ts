@@ -1,4 +1,4 @@
-import { useAuthStore } from "@/stores/auth-store";
+import { directFetch } from "./api";
 
 export interface SSEEvent {
   event: string;
@@ -13,13 +13,9 @@ export async function consumeSSE(
   handler: SSEHandler,
   signal?: AbortSignal
 ): Promise<void> {
-  const token = useAuthStore.getState().accessToken;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const response = await fetch(url, {
+  const response = await directFetch(url, {
     method: "POST",
-    headers,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal,
   });
@@ -44,12 +40,12 @@ export async function consumeSSE(
       try {
         handler({ event: currentEvent, data });
       } catch (handlerErr) {
-        // Handler exceptions must NOT kill the SSE read loop — log and continue
-        // so that subsequent events (tool calls, text deltas, done) still arrive.
+        // 处理器异常不能中断 SSE 读取循环 — 记录日志并继续，
+        // 确保后续事件（工具调用、文本增量、done）仍能送达。
         console.error("[SSE] handler error for event", currentEvent, handlerErr);
       }
     } catch {
-      // skip malformed JSON
+      // 跳过格式错误的 JSON
     }
     currentEvent = "";
     currentDataLines = [];
