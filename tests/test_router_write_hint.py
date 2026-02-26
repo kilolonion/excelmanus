@@ -304,3 +304,78 @@ def test_short_write_commands_not_affected_by_fallback(message: str) -> None:
     """短写入命令应被 _MAY_WRITE_HINT_RE 优先匹配，不受兜底规则影响。"""
     result = SkillRouter._classify_write_hint_lexical(message)
     assert result == "may_write", f"Expected 'may_write' for: {message!r}, got {result!r}"
+
+
+# ── image_replica 词法标签 + 策略注入 ──
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "请帮我复刻这张图片里的表格",
+        "照着这张图做一个Excel表格",
+        "按照图片还原表格",
+        "replicate this table from the screenshot",
+        "create excel from image",
+        "照着做",
+        "图片复刻",
+        "做成一样的",
+        "仿照这个表格做一个",
+        "截图还原成Excel",
+        "photo to excel spreadsheet",
+    ],
+)
+def test_image_replica_tag_detected(message: str) -> None:
+    """图片复刻相关消息应触发 image_replica 标签。"""
+    tags = SkillRouter._classify_task_tags_lexical(message)
+    assert "image_replica" in tags, f"Expected 'image_replica' in tags for: {message!r}, got {tags}"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "请帮我分析一下数据",
+        "写入A列数据",
+        "创建一个图表",
+        "format the header row",
+        "read the excel file",
+    ],
+)
+def test_image_replica_tag_not_false_positive(message: str) -> None:
+    """非图片复刻消息不应触发 image_replica 标签。"""
+    tags = SkillRouter._classify_task_tags_lexical(message)
+    assert "image_replica" not in tags, f"Unexpected 'image_replica' in tags for: {message!r}, got {tags}"
+
+
+def test_image_replica_strategy_injected_when_tag_present() -> None:
+    """当 task_tags 包含 image_replica 时，PromptComposer 应注入复刻策略。"""
+    from pathlib import Path
+    from excelmanus.prompt_composer import PromptComposer, PromptContext
+
+    composer = PromptComposer(Path("excelmanus/prompts"))
+    composer.load_all()
+    ctx = PromptContext(
+        chat_mode="write",
+        write_hint="may_write",
+        task_tags=["image_replica"],
+    )
+    text = composer.compose_strategies_text(ctx)
+    assert "图片表格复刻策略" in text
+    assert "extract_table_spec" in text
+    assert "rebuild_excel_from_spec" in text
+
+
+def test_image_replica_strategy_not_injected_without_tag() -> None:
+    """无 image_replica tag 时不应注入复刻策略。"""
+    from pathlib import Path
+    from excelmanus.prompt_composer import PromptComposer, PromptContext
+
+    composer = PromptComposer(Path("excelmanus/prompts"))
+    composer.load_all()
+    ctx = PromptContext(
+        chat_mode="write",
+        write_hint="may_write",
+        task_tags=[],
+    )
+    text = composer.compose_strategies_text(ctx)
+    assert "图片表格复刻策略" not in text

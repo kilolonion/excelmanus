@@ -82,7 +82,7 @@ class TestComputeInlineSuggestion:
         assert result == "p"
 
     def test_partial_command_with_multiple_matches(self):
-        # /h matches /help and /history — should return first match suffix
+        # /h 同时匹配 /help 与 /history，应返回首个匹配的后缀
         result = compute_inline_suggestion("/h")
         assert result is not None
 

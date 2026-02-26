@@ -1409,7 +1409,7 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
         # 重复读取不再触发降级，模式保持 adaptive 解析结果
-        # Mode stays at whatever adaptive resolved (unified for gpt-5.3)
+        # 模式保持为 adaptive 解析结果（如 gpt-5.3 统一为 unified）
         assert engine._effective_window_return_mode() in ("unified", "anchored")
 
         switch_message = engine.switch_model("deepseek")

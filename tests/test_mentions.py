@@ -405,7 +405,7 @@ class TestResolverExcelRange:
         assert "Name" in result.context_block
         assert "Alice" in result.context_block
         assert "Bob" in result.context_block
-        # Row 4 (Carol) should NOT be included (range is A1:C3)
+        # 第 4 行（Carol）不应包含在内（范围为 A1:C3）
         assert "Carol" not in result.context_block
 
     def test_excel_range_single_cell(self, tmp_path: Path) -> None:
@@ -473,7 +473,7 @@ class TestResolverExcelRange:
         result = resolver._resolve_file(mention)
 
         assert result.error is None
-        # Should contain pipe-separated table
+        # 应包含管道分隔的表格
         assert "| A | B |" in result.context_block
         assert "| --- | --- |" in result.context_block
         assert "Product" in result.context_block
@@ -1043,7 +1043,7 @@ def _display_text(completion) -> str:
     d = completion.display
     if isinstance(d, str):
         return d
-    # FormattedText: list of (style, text) tuples
+    # FormattedText：(style, text) 元组列表
     try:
         return "".join(t for _, t in d)
     except Exception:

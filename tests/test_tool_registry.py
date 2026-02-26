@@ -89,21 +89,18 @@ class TestToolRegistry:
         assert payload["tool"] == "need_file_path"
         assert "file_path" in payload["required_fields"]
 
-    def test_register_builtin_tools_includes_macro_and_image_tools(self, tmp_path) -> None:
-        """内置注册应覆盖 macro/image 工具，避免模块清单漂移。"""
+    def test_register_builtin_tools_includes_image_tools(self, tmp_path) -> None:
+        """内置注册应覆盖 image 工具，避免模块清单漂移。"""
         registry = ToolRegistry()
         registry.register_builtin_tools(str(tmp_path))
 
         tool_names = set(registry.get_tool_names())
         assert "read_image" in tool_names
-        assert "vlookup_write" in tool_names
-        assert "computed_column" in tool_names
 
     def test_builtin_module_manifest_is_single_source(self) -> None:
         """模块清单应包含关键模块且不重复，作为注册唯一事实源。"""
         module_paths = registry_module._BUILTIN_TOOL_MODULE_PATHS
         assert module_paths == tuple(dict.fromkeys(module_paths))
-        assert "excelmanus.tools.macro_tools" in module_paths
         assert "excelmanus.tools.image_tools" in module_paths
         assert "excelmanus.tools.memory_tools" in module_paths
 
