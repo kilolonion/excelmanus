@@ -3,11 +3,12 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { Circle, Wrench, Package, Activity, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings } from "lucide-react";
 import { apiGet } from "@/lib/api";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { useUIStore } from "@/stores/ui-store";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
 import { logout, fetchMyWorkspaceUsage, type WorkspaceUsage } from "@/lib/auth-api";
 import {
@@ -45,6 +46,20 @@ export function StatusFooter() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [reconnectFlash, setReconnectFlash] = useState(false);
   const prevConnected = useRef<boolean | null>(null);
+  const isMobile = useIsMobile();
+  const [openTooltipId, setOpenTooltipId] = useState<string | null>(null);
+
+  // 移动端：点击 tooltip 区域外关闭当前打开的 tooltip
+  useEffect(() => {
+    if (!isMobile || !openTooltipId) return;
+    const handler = (e: PointerEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-slot="tooltip-trigger"]') || target.closest('[data-slot="tooltip-content"]')) return;
+      setOpenTooltipId(null);
+    };
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [isMobile, openTooltipId]);
 
   const poll = useCallback(async () => {
     try {
@@ -89,8 +104,6 @@ export function StatusFooter() {
   // 已连接时添加脉冲动画类
   const dotClasses = `h-2 w-2 fill-current ${dotColor}${connected === true ? " animate-pulse-green" : ""}`;
 
-  const statusItem = "flex items-center gap-0.5 cursor-default rounded-sm";
-
   return (
     <>
       {/* 渐变分隔线 */}
@@ -102,93 +115,55 @@ export function StatusFooter() {
         }}
       />
 
-      <div className="px-3 py-2 flex flex-col gap-1.5 flex-shrink-0">
-        {/* Row 1: User badge */}
-        <UserBadge />
-
-        {/* Row 2: Status indicators + settings */}
-        <div className="flex items-center justify-between">
-          <TooltipProvider delayDuration={300}>
-            <div className="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
-              {/* 连接状态 */}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span
-                    className={`${statusItem}${reconnectFlash ? " animate-pulse-green" : ""}`}
-                    style={reconnectFlash ? { color: "var(--em-primary)" } : undefined}
-                    tabIndex={0}
-                  >
-                    <Circle className={dotClasses} />
-                    {health?.version ? (
-                      <span className="truncate max-w-[48px]">v{health.version}</span>
-                    ) : (
-                      <span>{dotLabel}</span>
-                    )}
+      <div className="px-3 py-2 flex items-center justify-between flex-shrink-0">
+        {/* Left: connection status + version + compact metrics */}
+        <TooltipProvider delayDuration={300}>
+          <Tooltip
+            open={isMobile ? openTooltipId === "conn" : undefined}
+            onOpenChange={isMobile ? () => {} : undefined}
+          >
+            <TooltipTrigger asChild>
+              <span
+                className={`flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-default rounded-sm${reconnectFlash ? " animate-pulse-green" : ""}`}
+                style={reconnectFlash ? { color: "var(--em-primary)" } : undefined}
+                tabIndex={0}
+                onClick={isMobile ? () => setOpenTooltipId((prev) => prev === "conn" ? null : "conn") : undefined}
+              >
+                <Circle className={dotClasses} />
+                {health?.version ? (
+                  <span className="truncate max-w-[56px]">v{health.version}</span>
+                ) : (
+                  <span>{dotLabel}</span>
+                )}
+                {health && (
+                  <span className="text-muted-foreground/50 hidden sm:inline">
+                    · {health.tools.length}T · {health.skillpacks.length}S
                   </span>
-                </TooltipTrigger>
-                <TooltipContent side="top" className="text-xs">
-                  <span style={{ color: "var(--em-primary)" }}>{dotLabel}</span>
-                  {health && <><br />模型: {health.model}</>}
-                </TooltipContent>
-              </Tooltip>
-
+                )}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              <span style={{ color: "var(--em-primary)" }}>{dotLabel}</span>
               {health && (
                 <>
-                  <span className="text-border">·</span>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className={statusItem} tabIndex={0}>
-                        <Wrench className="h-2.5 w-2.5" style={{ color: "var(--em-primary)" }} />
-                        <AnimatePresence mode="wait">
-                          <motion.span key={health.tools.length} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                            {health.tools.length}
-                          </motion.span>
-                        </AnimatePresence>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="text-xs">
-                      <span style={{ color: "var(--em-primary)" }}>已注册工具:</span> {health.tools.length}
-                    </TooltipContent>
-                  </Tooltip>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className={statusItem} tabIndex={0}>
-                        <Package className="h-2.5 w-2.5" style={{ color: "var(--em-primary)" }} />
-                        <AnimatePresence mode="wait">
-                          <motion.span key={health.skillpacks.length} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                            {health.skillpacks.length}
-                          </motion.span>
-                        </AnimatePresence>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="text-xs">
-                      <span style={{ color: "var(--em-primary)" }}>已加载技能包:</span> {health.skillpacks.length}
-                    </TooltipContent>
-                  </Tooltip>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className={statusItem} tabIndex={0}>
-                        <Activity className="h-2.5 w-2.5" style={{ color: "var(--em-primary)" }} />
-                        <AnimatePresence mode="wait">
-                          <motion.span key={health.active_sessions} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                            {health.active_sessions}
-                          </motion.span>
-                        </AnimatePresence>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="text-xs">
-                      <span style={{ color: "var(--em-primary)" }}>活跃会话:</span> {health.active_sessions}
-                    </TooltipContent>
-                  </Tooltip>
+                  <br />模型: {health.model}
+                  <br />工具: {health.tools.length} · 技能包: {health.skillpacks.length} · 会话: {health.active_sessions}
                 </>
               )}
-            </div>
-          </TooltipProvider>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
 
-          <div className="transition-transform duration-300 ease-out hover:rotate-90 flex-shrink-0">
+        {/* Right: user badge + settings */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="hidden md:block">
+            <UserBadge compact />
+          </div>
+          <div className="hidden md:block transition-transform duration-300 ease-out hover:rotate-90">
             <SettingsDialog />
+          </div>
+          <div className="md:hidden">
+            <UserBadge compact />
           </div>
         </div>
       </div>
@@ -241,10 +216,11 @@ function WorkspaceIndicator({ usage }: { usage: WorkspaceUsage | null }) {
   );
 }
 
-function UserBadge() {
+function UserBadge({ compact = false }: { compact?: boolean }) {
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
+  const openSettings = useUIStore((s) => s.openSettings);
   const recentAccounts = useRecentAccountsStore((s) => s.accounts);
   const removeAccount = useRecentAccountsStore((s) => s.removeAccount);
   const [wsUsage, setWsUsage] = useState<WorkspaceUsage | null>(null);
@@ -253,6 +229,18 @@ function UserBadge() {
     if (!authEnabled || !user) return;
     fetchMyWorkspaceUsage().then(setWsUsage).catch(() => {});
   }, [authEnabled, user]);
+
+  // compact mode without auth or user: plain settings gear
+  if (compact && (!authEnabled || !user)) {
+    return (
+      <button
+        onClick={() => openSettings("model")}
+        className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+      >
+        <Settings className="h-4 w-4" />
+      </button>
+    );
+  }
 
   if (!authEnabled) return null;
 
@@ -289,14 +277,20 @@ function UserBadge() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button className="flex items-center gap-2 w-full rounded-lg px-2 py-1.5 text-left hover:bg-muted/60 transition-colors outline-none group">
-          <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={7} />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate leading-tight">{displayLabel}</p>
-            <p className="text-[11px] text-muted-foreground truncate leading-tight">{user.email}</p>
-          </div>
-          <ChevronUp className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
-        </button>
+        {compact ? (
+          <button className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
+            <Settings className="h-4 w-4" />
+          </button>
+        ) : (
+          <button className="flex items-center gap-2 w-full rounded-lg px-2 py-1.5 text-left hover:bg-muted/60 transition-colors outline-none group">
+            <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={7} />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate leading-tight">{displayLabel}</p>
+              <p className="text-[11px] text-muted-foreground truncate leading-tight">{user.email}</p>
+            </div>
+            <ChevronUp className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+          </button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="start" className="w-64 mb-1">
         <DropdownMenuLabel className="font-normal">
@@ -366,6 +360,16 @@ function UserBadge() {
         <DropdownMenuItem onClick={handleSwitchNew} className="gap-2 cursor-pointer">
           <ArrowRightLeft className="h-4 w-4" />
           {otherAccounts.length > 0 ? "使用其他账号登录" : "切换账号"}
+        </DropdownMenuItem>
+
+        <DropdownMenuSeparator />
+
+        <DropdownMenuItem
+          onClick={() => openSettings("model")}
+          className="gap-2 cursor-pointer"
+        >
+          <Settings className="h-4 w-4" />
+          设置
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />

@@ -1,31 +1,29 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useIsMobile, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
-import { uuid } from "@/lib/utils";
+import { useIsMobile } from "@/hooks/use-mobile";
 import {
-  MessageSquarePlus,
   PanelLeftClose,
   PanelLeft,
-  ChevronDown,
-  Trash2,
+  MessageSquare,
+  FolderOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useChatStore } from "@/stores/chat-store";
-import { useExcelStore } from "@/stores/excel-store";
 import { sidebarTransition, sidebarContentVariants, useMotionSafe } from "@/lib/sidebar-motion";
 import { SessionList } from "./SessionList";
 import { ExcelFilesBar } from "./ExcelFilesBar";
 import { StatusFooter } from "./StatusFooter";
+
+type SidebarTab = "chats" | "files";
+
+const tabs: { key: SidebarTab; label: string; icon: typeof MessageSquare }[] = [
+  { key: "chats", label: "对话", icon: MessageSquare },
+  { key: "files", label: "文件", icon: FolderOpen },
+];
 
 /** Hook: swipe-left to close sidebar on mobile */
 function useSwipeToClose(enabled: boolean, onClose: () => void) {
@@ -57,39 +55,14 @@ export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const isMobile = useIsMobile();
-  const isDesktop = useIsDesktop();
-  const isMediumScreen = useIsMediumScreen();
   
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const sessions = useSessionStore((s) => s.sessions);
-  const addSession = useSessionStore((s) => s.addSession);
-  const setActiveSession = useSessionStore((s) => s.setActiveSession);
-  const switchSession = useChatStore((s) => s.switchSession);
-  const clearAllHistory = useChatStore((s) => s.clearAllHistory);
-  const recentFiles = useExcelStore((s) => s.recentFiles);
   const { safeTransition } = useMotionSafe();
-  const [newChatHover, setNewChatHover] = useState(false);
-  const [chatOpen, setChatOpen] = useState(true);
-  const [excelOpen, setExcelOpen] = useState(true);
-  const [clearing, setClearing] = useState(false);
+  const [activeTab, setActiveTab] = useState<SidebarTab>("chats");
 
   // 首次渲染跳过动画，避免侧栏闪烁
   const isFirstRender = useRef(true);
   useEffect(() => { isFirstRender.current = false; }, []);
-
-  const handleNewChat = () => {
-    const id = uuid();
-    addSession({
-      id,
-      title: "新对话",
-      messageCount: 0,
-      inFlight: false,
-    });
-    setActiveSession(id);
-    switchSession(id);
-  };
-
-  const hasExcelFiles = recentFiles.length > 0;
 
   // 移动端左滑关闭侧栏
   const swipe = useSwipeToClose(isMobile && sidebarOpen, toggleSidebar);
@@ -118,7 +91,7 @@ export function Sidebar() {
         )}
       </AnimatePresence>
       <motion.aside
-        animate={{ width: isMobile ? (sidebarOpen ? 280 : 0) : (sidebarOpen ? 260 : 0) }}
+        animate={{ width: isMobile ? (sidebarOpen ? "min(85vw, 320px)" : 0) : (sidebarOpen ? 260 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
         className={`flex flex-col border-r border-border ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
@@ -134,8 +107,8 @@ export function Sidebar() {
         <motion.div 
           className="flex flex-col h-full"
           style={{ 
-            width: isMobile ? "280px" : "260px",
-            minWidth: isMobile ? "280px" : "260px"
+            width: isMobile ? "min(85vw, 320px)" : "260px",
+            minWidth: isMobile ? "min(85vw, 320px)" : "260px"
           }}
           variants={sidebarContentVariants}
           animate={sidebarOpen ? "open" : "closed"}
@@ -169,96 +142,50 @@ export function Sidebar() {
         }}
       />
 
-      {/* New Chat Button */}
-      <div className="p-3">
-        <Button
-          className="w-full justify-start gap-2 text-white hover:scale-[1.02] transition-transform duration-150 ease-out"
-          size="sm"
-          style={{
-            backgroundColor: newChatHover
-              ? "var(--em-primary-light)"
-              : "var(--em-primary)",
-          }}
-          onPointerEnter={() => setNewChatHover(true)}
-          onPointerLeave={() => setNewChatHover(false)}
-          onClick={handleNewChat}
-        >
-          <MessageSquarePlus className="h-4 w-4" />
-          新建对话
-        </Button>
+      {/* Tab Navigation */}
+      <div className="px-3 flex gap-1 flex-shrink-0">
+        {tabs.map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            className="relative flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md cursor-pointer transition-colors duration-150 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)]"
+            style={activeTab === key ? { color: "var(--em-primary)" } : { color: "var(--muted-foreground)" }}
+            onClick={() => setActiveTab(key)}
+          >
+            {activeTab === key && (
+              <motion.div
+                layoutId="sidebar-tab-indicator"
+                className="absolute inset-0 rounded-md"
+                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+                transition={{ type: "spring", stiffness: 400, damping: 30 }}
+              />
+            )}
+            <Icon className="h-3.5 w-3.5 relative z-10" />
+            <span className="relative z-10">{label}</span>
+          </button>
+        ))}
       </div>
 
-      {/* Two-section scrollable area */}
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* Section 1: Chat History */}
-        <Collapsible open={chatOpen} onOpenChange={setChatOpen} className={`flex flex-col min-h-0 ${chatOpen ? "flex-1" : "flex-shrink-0"}`}>
-          <CollapsibleTrigger asChild>
-            <div className="flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors cursor-pointer select-none group/collapse">
-              <span>对话历史</span>
-              <div className="flex items-center gap-0.5">
-                {sessions.length > 0 && (
-                  <button
-                    type="button"
-                    className="p-0.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors md:opacity-0 md:group-hover/collapse:opacity-100 focus:opacity-100"
-                    onClick={async (e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (clearing) return;
-                      if (!window.confirm("确定清空所有会话历史？此操作不可恢复。")) return;
-                      setClearing(true);
-                      try {
-                        await clearAllHistory();
-                      } finally {
-                        setClearing(false);
-                      }
-                    }}
-                    title="清空全部历史"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
-                )}
-                <ChevronDown
-                  className={`h-3 w-3 transition-transform duration-200 ${
-                    chatOpen ? "" : "-rotate-90"
-                  }`}
-                />
-              </div>
-            </div>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="flex-1 min-h-0">
-            <ScrollArea className="h-full px-2">
-              <SessionList />
-            </ScrollArea>
-          </CollapsibleContent>
-        </Collapsible>
+      {/* Divider */}
+      <div
+        className="mx-3 mt-2 mb-1 h-px flex-shrink-0"
+        style={{ background: "linear-gradient(to right, transparent, var(--border), transparent)" }}
+      />
 
-        {/* Divider between sections */}
-        <div className="mx-3 my-2 flex-shrink-0 flex items-center gap-2">
-          <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to right, transparent, var(--em-primary))" }} />
-          <div className="h-1 w-1 rounded-full opacity-40" style={{ backgroundColor: "var(--em-primary)" }} />
-          <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to left, transparent, var(--em-primary))" }} />
-        </div>
-
-        {/* Section 2: Workspace Files — expands when chat is collapsed */}
-        <Collapsible open={excelOpen} onOpenChange={setExcelOpen} className={`flex flex-col min-h-0 ${chatOpen ? "flex-shrink-0" : "flex-1"}`} style={chatOpen ? { maxHeight: "40%" } : undefined}>
-          <CollapsibleTrigger className="flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors cursor-pointer select-none">
-            <span>工作区文件</span>
-            <ChevronDown
-              className={`h-3 w-3 transition-transform duration-200 ${
-                excelOpen ? "" : "-rotate-90"
-              }`}
-            />
-          </CollapsibleTrigger>
-          <CollapsibleContent className="flex-1 min-h-0 overflow-hidden">
-            <ScrollArea className="h-full">
-              <ExcelFilesBar embedded />
-            </ScrollArea>
-          </CollapsibleContent>
-        </Collapsible>
+      {/* Tab Content — full scroll area */}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <ScrollArea className="h-full px-2">
+          {activeTab === "chats" ? (
+            <SessionList />
+          ) : (
+            <ExcelFilesBar embedded />
+          )}
+        </ScrollArea>
       </div>
 
         {/* Footer */}
-        <StatusFooter />
+        <div style={{ paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : undefined }}>
+          <StatusFooter />
+        </div>
         </motion.div>
       </motion.aside>
     </>

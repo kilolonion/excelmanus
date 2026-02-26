@@ -368,6 +368,106 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
   margin-bottom: 0.5em;
 }
 
+/* ── Markdown Table ── */
+.md-table-wrap {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  scrollbar-width: thin;
+}
+
+.md-table-wrap::-webkit-scrollbar {
+  height: 4px;
+}
+
+.md-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 4px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.md-thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.md-th {
+  padding: 7px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted-foreground);
+  background: oklch(0.97 0 0);
+  border-bottom: 1.5px solid var(--border);
+  white-space: nowrap;
+}
+
+.dark .md-th {
+  background: oklch(0.22 0 0);
+}
+
+.md-td {
+  padding: 6px 12px;
+  border-bottom: 1px solid oklch(0.94 0 0);
+  color: var(--foreground);
+}
+
+.dark .md-td {
+  border-bottom-color: oklch(0.25 0 0);
+}
+
+.md-tbody .md-tr:last-child .md-td {
+  border-bottom: none;
+}
+
+/* 斑马纹 */
+.md-tbody .md-tr:nth-child(even) .md-td {
+  background: oklch(0.98 0 0);
+}
+
+.dark .md-tbody .md-tr:nth-child(even) .md-td {
+  background: oklch(0.19 0 0);
+}
+
+/* 悬浮高亮 */
+.md-tbody .md-tr:hover .md-td {
+  background: var(--em-primary-alpha-06);
+}
+
+/* ── Markdown Blockquote ── */
+.md-blockquote {
+  border-left: 3px solid var(--em-primary);
+  padding: 0.35em 0.8em;
+  margin: 0.5em 0;
+  background: var(--em-primary-alpha-06);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+}
+
+.md-blockquote p {
+  margin: 0.2em 0;
+}
+
+/* ── Markdown HR ── */
+.md-hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
+  margin: 1em 0;
+}
+
 /* Hide scrollbar while keeping scroll functional */
 .scrollbar-none {
   scrollbar-width: none;
@@ -509,7 +609,6 @@ button:active:not(:disabled),
   .overflow-auto,
   [data-radix-scroll-area-viewport] {
     -webkit-overflow-scrolling: touch;
-    scroll-behavior: smooth;
   }
 }
 

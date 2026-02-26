@@ -42,11 +42,11 @@ const _MAX_DIFFS_IN_STORE = 500;
 // 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
 // 从后端刷新时，必须从现有内存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 后 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
-  "thinking", "iteration", "approval_action",
+  "thinking", "iteration", "approval_action", "subagent",
 ]);
 
 /**
- * 将仅由 SSE 产生的块（thinking、iteration、approval_action）从 oldMessages 合并到 newMessages，
+ * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
  * 使后端刷新不会丢弃它们。在 assistant 消息间按位置匹配。
  */
 function _preserveSseOnlyBlocks(
@@ -334,11 +334,11 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           }
         }
         const hasText = textParts.some((t) => t.trim().length > 0);
-        // 仅当无有意义文本时显示图片占位符；已有文本时占位符是多余噪音。
+        // 跳过系统注入的纯图片消息（C 通道 add_image_message 产物）：
+        // 这些消息仅含 image_url 部分、无文本，由工具执行时自动注入，
+        // 不应在 UI 中显示为用户发送的气泡。
         if (imageCount > 0 && !hasText) {
-          textParts.push(
-            imageCount === 1 ? "[发送了一张图片]" : `[发送了 ${imageCount} 张图片]`,
-          );
+          continue;
         }
         content = textParts.join("\n").trim() || "(多模态消息)";
       } else {
@@ -375,7 +375,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             toolCallId: tcId,
             name: toolName,
             args,
-            status: hasResult ? (isError ? "error" : "success") : "running",
+            status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
           if (_EXCEL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
@@ -740,6 +740,7 @@ interface ChatState {
   abortController: AbortController | null;
   pipelineStatus: PipelineStatus | null;
   vlmPhases: VlmPhaseEntry[];
+  isLoadingMessages: boolean;
 
   setMessages: (messages: Message[]) => void;
   addUserMessage: (id: string, content: string, files?: FileAttachment[]) => void;
@@ -753,6 +754,7 @@ interface ChatState {
     updater: (block: AssistantBlock) => AssistantBlock,
   ) => void;
   addAffectedFiles: (messageId: string, files: string[]) => void;
+  retractLastThinking: (messageId: string) => void;
   setStreaming: (streaming: boolean) => void;
   setPendingApproval: (approval: Approval | null) => void;
   dismissApproval: (approvalId: string) => void;
@@ -778,6 +780,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   abortController: null,
   pipelineStatus: null,
   vlmPhases: [],
+  isLoadingMessages: false,
 
   setMessages: (messages) => set({ messages }),
   addUserMessage: (id, content, files) =>
@@ -867,6 +870,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { ...m, affectedFiles: Array.from(existing) };
       }),
     })),
+  retractLastThinking: (messageId) =>
+    set((state) => ({
+      messages: state.messages.map((m) => {
+        if (m.id !== messageId || m.role !== "assistant" || m.blocks.length === 0)
+          return m;
+        const blocks = [...m.blocks];
+        // Remove the last unclosed thinking block
+        const lastIdx = blocks.length - 1;
+        if (blocks[lastIdx].type === "thinking" && blocks[lastIdx].duration == null) {
+          blocks.pop();
+          // Also remove a preceding iteration divider if it's now the last block
+          if (blocks.length > 0 && blocks[blocks.length - 1].type === "iteration") {
+            blocks.pop();
+          }
+        }
+        return { ...m, blocks };
+      }),
+    })),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   setPendingApproval: (approval) => set({ pendingApproval: approval }),
   dismissApproval: (approvalId) => set({ pendingApproval: null, _lastDismissedApprovalId: approvalId }),
@@ -886,7 +907,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 清除 IndexedDB 缓存
       deleteCachedMessages(currentSessionId).catch(() => {});
     }
-    set({ messages: [], pendingApproval: null, pendingQuestion: null, pipelineStatus: null });
+    set({ messages: [], isLoadingMessages: false, pendingApproval: null, pendingQuestion: null, pipelineStatus: null });
   },
 
   removeSessionCache: (sessionId) => {
@@ -898,6 +919,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         currentSessionId: null,
         messages: [],
+        isLoadingMessages: false,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
@@ -919,6 +941,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       currentSessionId: null,
       messages: [],
+      isLoadingMessages: false,
       pendingApproval: null,
       pendingQuestion: null,
     });
@@ -956,6 +979,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         currentSessionId: sessionId,
         messages: memCached,
+        isLoadingMessages: false,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
@@ -973,6 +997,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           currentSessionId: null,
           messages: [],
+          isLoadingMessages: false,
           pendingApproval: null,
           pendingQuestion: null,
           pipelineStatus: null,
@@ -990,6 +1015,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           set({
             currentSessionId: sessionId,
             messages: cached,
+            isLoadingMessages: false,
             pendingApproval: null,
             pendingQuestion: null,
             pipelineStatus: null,
@@ -1013,12 +1039,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingQuestion: null,
         pipelineStatus: null,
       });
-      _loadMessagesAsync(sessionId).catch(() => {});
+      _loadMessagesAsync(sessionId).catch(() => {}).finally(() => {
+        if (_switchSessionVersion === myVersion) {
+          useChatStore.setState({ isLoadingMessages: false });
+        }
+      });
     };
 
     // 立即更新 currentSessionId，但保持当前消息直到新消息加载完成
     set({
       currentSessionId: sessionId,
+      isLoadingMessages: true,
       pendingApproval: null,
       pendingQuestion: null,
       pipelineStatus: null,

@@ -129,6 +129,199 @@ function getHealthError(caps: ModelCapabilities | null | undefined): string {
   return caps.health_error || caps.probe_errors?.health || "";
 }
 
+// ── 普通用户自定义 API 配置面板 ─────────────────────────────
+
+function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
+  const [draft, setDraft] = useState({ api_key: "", base_url: "", model: "" });
+  const [loaded, setLoaded] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  // 加载当前用户的自定义 LLM 配置
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiGet<{ api_key: string; base_url: string; model: string }>("/config/models/user");
+        if (!cancelled) {
+          setDraft({
+            api_key: data.api_key || "",
+            base_url: data.base_url || "",
+            model: data.model || "",
+          });
+          setLoaded(true);
+        }
+      } catch {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const { updateProfile } = await import("@/lib/auth-api");
+      const body: Record<string, string> = {};
+      if (draft.api_key && !isMaskedApiKey(draft.api_key)) body.llm_api_key = draft.api_key;
+      if (draft.base_url) body.llm_base_url = draft.base_url;
+      if (draft.model) body.llm_model = draft.model;
+      await updateProfile(body);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      // 忽略
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      const { updateProfile } = await import("@/lib/auth-api");
+      await updateProfile({ llm_api_key: "", llm_base_url: "", llm_model: "" });
+      setDraft({ api_key: "", base_url: "", model: "" });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      // 忽略
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const hasCustomConfig = !!(draft.api_key || draft.base_url || draft.model);
+
+  if (!loaded) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 用户自定义 API 配置 */}
+      <div className="rounded-lg border border-border p-4">
+        <div className="flex items-center gap-2 mb-1">
+          <Unlock className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+          <h3 className="font-semibold text-sm">我的 API 配置</h3>
+          {hasCustomConfig && (
+            <Badge variant="secondary" className="text-[10px] ml-auto">已配置</Badge>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mb-3">
+          配置您自己的 API Key 后，对话将使用您的 API 额度。留空则使用系统默认配置。
+        </p>
+
+        <div className="space-y-2">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+            <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">Model ID</label>
+            <Input
+              value={draft.model}
+              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+              className="h-8 text-xs font-mono"
+              placeholder="如: gpt-4o, qwen-plus, claude-sonnet-4 ..."
+            />
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+            <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">Base URL</label>
+            <Input
+              value={draft.base_url}
+              onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
+              className="h-8 text-xs font-mono"
+              placeholder="https://api.openai.com/v1 ..."
+            />
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+            <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">API Key</label>
+            <div className="flex-1 relative">
+              <Input
+                value={draft.api_key}
+                onChange={(e) => setDraft((d) => ({ ...d, api_key: e.target.value }))}
+                type={showKey ? "text" : "password"}
+                className="h-8 text-xs font-mono pr-8"
+                placeholder="sk-..."
+              />
+              <button
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
+                onClick={() => setShowKey((v) => !v)}
+              >
+                {showKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
+          {hasCustomConfig && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 sm:h-7 text-xs gap-1"
+              onClick={handleClear}
+              disabled={clearing}
+            >
+              {clearing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+              清除配置
+            </Button>
+          )}
+          <Button
+            size="sm"
+            className="h-8 sm:h-7 text-xs gap-1 text-white"
+            style={{ backgroundColor: "var(--em-primary)" }}
+            onClick={handleSave}
+            disabled={saving}
+          >
+            {saving ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : saved ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <Save className="h-3 w-3" />
+            )}
+            {saved ? "已保存" : "保存"}
+          </Button>
+        </div>
+      </div>
+
+      {/* 可用模型列表 */}
+      <div className="rounded-lg border border-border p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Lock className="h-4 w-4 text-muted-foreground" />
+          <h3 className="font-semibold text-sm">系统模型</h3>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          以下模型由管理员配置，您可以通过顶部模型选择器切换。
+        </p>
+        {user?.allowedModels && user.allowedModels.length > 0 && (
+          <div className="mt-3">
+            <div className="flex flex-wrap gap-1.5">
+              <Badge variant="secondary" className="text-[10px]">default</Badge>
+              {user.allowedModels.map((m) => (
+                <Badge key={m} variant="secondary" className="text-[10px]">{m}</Badge>
+              ))}
+            </div>
+          </div>
+        )}
+        {(!user?.allowedModels || user.allowedModels.length === 0) && (
+          <p className="text-xs text-muted-foreground mt-2">
+            您可以使用所有已配置的模型。
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── 管理员模型配置面板 ─────────────────────────────────────
+
+type AuthUser = NonNullable<ReturnType<typeof useAuthStore.getState>["user"]>;
+
 export function ModelTab() {
   const [config, setConfig] = useState<ModelConfig | null>(null);
   const [loading, setLoading] = useState(false);
@@ -363,35 +556,7 @@ export function ModelTab() {
   }
 
   if (!isAdmin) {
-    return (
-      <div className="space-y-4">
-        <div className="rounded-lg border border-border p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Lock className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
-            <h3 className="font-semibold text-sm">模型配置</h3>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            模型配置由管理员管理。您可以通过顶部模型选择器切换可用模型。
-          </p>
-          {user?.allowedModels && user.allowedModels.length > 0 && (
-            <div className="mt-3">
-              <p className="text-xs text-muted-foreground mb-1.5">您可使用的模型：</p>
-              <div className="flex flex-wrap gap-1.5">
-                <Badge variant="secondary" className="text-[10px]">default</Badge>
-                {user.allowedModels.map((m) => (
-                  <Badge key={m} variant="secondary" className="text-[10px]">{m}</Badge>
-                ))}
-              </div>
-            </div>
-          )}
-          {(!user?.allowedModels || user.allowedModels.length === 0) && (
-            <p className="text-xs text-muted-foreground mt-2">
-              您可以使用所有已配置的模型。
-            </p>
-          )}
-        </div>
-      </div>
-    );
+    return <UserApiConfigPanel user={user} />;
   }
 
   return (
