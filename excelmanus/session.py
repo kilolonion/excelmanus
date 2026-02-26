@@ -23,6 +23,7 @@ from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
 from excelmanus.conversation_persistence import ConversationPersistence
 
 if __import__("typing").TYPE_CHECKING:
+    from excelmanus.auth.store import UserStore
     from excelmanus.chat_history import ChatHistoryStore
     from excelmanus.database import Database
 
@@ -91,6 +92,7 @@ class SessionManager:
         chat_history: ChatHistoryStore | None = None,
         database: "Database | None" = None,
         config_store: Any = None,
+        user_store: "UserStore | None" = None,
     ) -> None:
         self._max_sessions = max_sessions
         self._ttl_seconds = ttl_seconds
@@ -104,6 +106,7 @@ class SessionManager:
         )
         self._database = database
         self._config_store = config_store
+        self._user_store = user_store
         self._mcp_initialized = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
@@ -351,9 +354,25 @@ class SessionManager:
         )
         engine_config = self._config
         if user_id is not None:
-            engine_config = replace(
-                self._config, workspace_root=str(isolated_ws.root_dir)
-            )
+            overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
+            # 用户自定义 LLM 配置覆盖全局默认值
+            if self._user_store is not None:
+                user_rec = self._user_store.get_by_id(user_id)
+                if user_rec is not None:
+                    if user_rec.llm_api_key:
+                        overrides["api_key"] = user_rec.llm_api_key
+                    if user_rec.llm_base_url:
+                        overrides["base_url"] = user_rec.llm_base_url
+                    if user_rec.llm_model:
+                        overrides["model"] = user_rec.llm_model
+                    if any(k in overrides for k in ("api_key", "base_url", "model")):
+                        logger.info(
+                            "用户 %s 使用自定义 LLM 配置 (model=%s, base_url=%s)",
+                            user_id,
+                            overrides.get("model", "<inherited>"),
+                            overrides.get("base_url", "<inherited>"),
+                        )
+            engine_config = replace(self._config, **overrides)
         persistent_memory, memory_extractor = self._create_memory_components(
             user_id=user_id, scope=scope,
         )
@@ -461,6 +480,7 @@ class SessionManager:
                 scope=scope,
             )
             engine._session_id = new_id
+            engine._approval.set_session_id(new_id)
             engine.set_message_snapshot_index(
                 len(history_messages) if history_messages else 0
             )
