@@ -307,6 +307,19 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
                 if "alignment" in s:
                     cell.alignment = s["alignment"]
                 styles_applied += 1
+            else:
+                # 无显式样式时，根据 value_type 推断默认对齐
+                inferred_h = None
+                if cell_spec.value_type == "number":
+                    inferred_h = "right"
+                elif cell_spec.value_type == "date":
+                    inferred_h = "center"
+                elif cell_spec.value_type == "string" and cell_spec.value:
+                    inferred_h = "left"
+                if inferred_h:
+                    cell.alignment = Alignment(
+                        horizontal=inferred_h, vertical="center",
+                    )
 
             cells_written += 1
 
@@ -338,6 +351,14 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
                     continue
                 ws.merge_cells(mr.range)
                 merges_applied += 1
+                # 合并单元格锚点强制居中对齐
+                anchor_cell = ws[anchor]
+                if not anchor_cell.alignment or (
+                    anchor_cell.alignment.horizontal in (None, "general")
+                ):
+                    anchor_cell.alignment = Alignment(
+                        horizontal="center", vertical="center",
+                    )
             except Exception as exc:
                 skipped_items.append(f"merge {mr.range}: {exc}")
 
@@ -363,6 +384,64 @@ def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft
         # 冻结窗格
         if sheet_spec.freeze_panes:
             ws.freeze_panes = sheet_spec.freeze_panes
+
+    # ── auto_fit 收尾：对列宽/行高缺失或不完整的 sheet 自动适配 ──
+    from excelmanus.tools.format_tools import (
+        _COL_PADDING,
+        _MAX_COL_WIDTH,
+        _MIN_COL_WIDTH,
+        _estimate_display_width,
+        _estimate_row_height,
+    )
+    from openpyxl.cell.cell import MergedCell as _MergedCell
+
+    for sheet_spec in spec.sheets:
+        ws = wb[sheet_spec.name]
+        # 列宽 auto_fit：当 spec 未提供足够的列宽时补充
+        has_col_widths = bool(sheet_spec.column_widths)
+        if not has_col_widths:
+            merged_non_anchor: set[str] = set()
+            for mr in ws.merged_cells.ranges:
+                a = f"{get_column_letter(mr.min_col)}{mr.min_row}"
+                for r in range(mr.min_row, mr.max_row + 1):
+                    for c in range(mr.min_col, mr.max_col + 1):
+                        addr = f"{get_column_letter(c)}{r}"
+                        if addr != a:
+                            merged_non_anchor.add(addr)
+            for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row or 1):
+                max_w = 0.0
+                cl = get_column_letter(col_cells[0].column)
+                for c in col_cells:
+                    coord = f"{cl}{c.row}"
+                    if coord in merged_non_anchor or c.value is None:
+                        continue
+                    fs = 11.0
+                    ib = False
+                    if c.font:
+                        if c.font.size:
+                            fs = float(c.font.size)
+                        if c.font.bold:
+                            ib = True
+                    nf = c.number_format if c.number_format != "General" else None
+                    w = _estimate_display_width(c.value, fs, ib, nf)
+                    if w > max_w:
+                        max_w = w
+                width = max(_MIN_COL_WIDTH, min(max_w + _COL_PADDING, _MAX_COL_WIDTH))
+                ws.column_dimensions[cl].width = width
+
+        # 行高 auto_fit：当 spec 未提供行高时补充
+        has_row_heights = bool(sheet_spec.row_heights)
+        if not has_row_heights:
+            col_widths_map: dict[str, float] = {}
+            for cl_letter, dim in ws.column_dimensions.items():
+                if dim.width is not None:
+                    col_widths_map[cl_letter] = dim.width
+            for row_idx in range(1, (ws.max_row or 0) + 1):
+                row_cells = [c for c in ws[row_idx] if not isinstance(c, _MergedCell)]
+                if not row_cells:
+                    continue
+                h = _estimate_row_height(row_cells, col_widths_map)
+                ws.row_dimensions[row_idx].height = h
 
     # 保存
     try:
@@ -420,6 +499,7 @@ def verify_excel_replica(
     merge_conflicts: list[str] = []
     missing: list[str] = []
     low_confidence: list[str] = []
+    style_diffs: list[str] = []
     total_cells = 0
 
     for sheet_spec in spec.sheets:
@@ -472,6 +552,65 @@ def verify_excel_replica(
             if mr.range not in actual_merges:
                 mismatches.append(f"{sheet_spec.name}: 合并范围 {mr.range} 缺失")
 
+        # ── 样式维度验证 ──────────────────────────────────
+
+        # 对齐比对
+        for cell_spec in sheet_spec.cells:
+            if not cell_spec.style_id or cell_spec.style_id not in sheet_spec.styles:
+                continue
+            style_cls = sheet_spec.styles[cell_spec.style_id]
+            if not style_cls.alignment:
+                continue
+            try:
+                actual_cell = ws[cell_spec.address]
+                actual_align = actual_cell.alignment
+            except Exception:
+                continue
+            spec_h = style_cls.alignment.horizontal
+            spec_v = style_cls.alignment.vertical
+            actual_h = actual_align.horizontal if actual_align else None
+            actual_v = actual_align.vertical if actual_align else None
+            # 'general' 和 None 视为等价
+            norm_h = lambda x: None if x in (None, "general") else x
+            if norm_h(spec_h) and norm_h(spec_h) != norm_h(actual_h):
+                style_diffs.append(
+                    f"{sheet_spec.name}!{cell_spec.address}: "
+                    f"水平对齐 期望={spec_h} 实际={actual_h}"
+                )
+            if spec_v and spec_v != (actual_v or "bottom"):
+                style_diffs.append(
+                    f"{sheet_spec.name}!{cell_spec.address}: "
+                    f"垂直对齐 期望={spec_v} 实际={actual_v}"
+                )
+
+        # 列宽偏差（容差 ±2）
+        max_col_used = ws.max_column or 1
+        for i, expected_w in enumerate(sheet_spec.column_widths):
+            if i >= max_col_used + 10:
+                break
+            col_letter = get_column_letter(i + 1)
+            actual_dim = ws.column_dimensions.get(col_letter)
+            actual_w = actual_dim.width if actual_dim and actual_dim.width else 8.0
+            if abs(expected_w - actual_w) > 2.0:
+                style_diffs.append(
+                    f"{sheet_spec.name} 列{col_letter}: "
+                    f"列宽 期望={expected_w:.1f} 实际={actual_w:.1f}"
+                )
+
+        # 行高偏差（容差 ±3）
+        for row_str, expected_h in sheet_spec.row_heights.items():
+            try:
+                row_num = int(row_str)
+            except ValueError:
+                continue
+            actual_dim = ws.row_dimensions.get(row_num)
+            actual_h = actual_dim.height if actual_dim and actual_dim.height else 15.0
+            if abs(expected_h - actual_h) > 3.0:
+                style_diffs.append(
+                    f"{sheet_spec.name} 行{row_num}: "
+                    f"行高 期望={expected_h:.1f} 实际={actual_h:.1f}"
+                )
+
     # 收集低置信项
     for u in spec.uncertainties:
         low_confidence.append(f"{u.location}: {u.reason} (置信度={u.confidence:.0%})")
@@ -483,7 +622,7 @@ def verify_excel_replica(
         "# ReplicaSpec 验证报告\n",
         f"**匹配率**: {match_rate:.1%} ({matches}/{total_cells})\n",
     ]
-    if not mismatches and not missing and not merge_conflicts:
+    if not mismatches and not missing and not merge_conflicts and not style_diffs:
         report_lines.append("## ✅ 全部匹配\n")
     if mismatches:
         report_lines.append(f"## ❌ 不匹配项 ({len(mismatches)})\n")
@@ -500,6 +639,12 @@ def verify_excel_replica(
         report_lines.append(f"## ⚠️ 缺失项 ({len(missing)})\n")
         for m in missing:
             report_lines.append(f"- {m}")
+        report_lines.append("")
+    if style_diffs:
+        report_lines.append(f"## 📐 样式偏差 ({len(style_diffs)})\n")
+        report_lines.append("以下样式属性与 Spec 不一致（对齐/列宽/行高）：\n")
+        for sd in style_diffs:
+            report_lines.append(f"- {sd}")
         report_lines.append("")
     if low_confidence:
         report_lines.append(f"## 🔍 低置信项 ({len(low_confidence)})\n")
@@ -520,8 +665,9 @@ def verify_excel_replica(
             "missing": len(missing),
             "conflict": len(mismatches),
             "merge_conflicts": len(merge_conflicts),
+            "style_diffs": len(style_diffs),
             "low_confidence": len(low_confidence),
-            "total": len(missing) + len(mismatches) + len(low_confidence),
+            "total": len(missing) + len(mismatches) + len(style_diffs) + len(low_confidence),
         },
     }, ensure_ascii=False)
 
@@ -641,7 +787,7 @@ def get_tools() -> list[ToolDef]:
             name="extract_table_spec",
             description=(
                 "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON。"
-                "支持多表格检测，采用渐进式 4 阶段提取。"
+                "支持多表格检测，采用两阶段 VLM 提取（数据 + 样式）。"
             ),
             input_schema={
                 "type": "object",
@@ -659,10 +805,6 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "跳过样式提取（仅提取数据结构，速度更快）",
                         "default": False,
-                    },
-                    "resume_from_spec": {
-                        "type": "string",
-                        "description": "断点续跑：传入中间 spec 文件路径，从该阶段之后继续",
                     },
                 },
                 "required": ["file_path"],
