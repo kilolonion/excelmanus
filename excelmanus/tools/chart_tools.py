@@ -450,8 +450,91 @@ def create_excel_chart(
 def get_tools() -> list[ToolDef]:
     """返回可视化 Skill 的所有工具定义。
 
-    Batch 3 精简：create_chart/create_excel_chart 已删除，由 run_code 替代。
+    create_excel_chart 恢复为专用工具（原生 Excel 图表，最常用）。
+    create_chart（matplotlib PNG 导出）保留实现但不注册，通过 run_code + skillpack 模板使用。
     """
-    return []
+    return [
+        ToolDef(
+            name="create_excel_chart",
+            description=(
+                "在 Excel 工作表中插入原生图表对象（嵌入式图表，可交互、随数据更新）。"
+                "支持 bar/line/pie/scatter/area 五种类型，可指定数据范围、分类轴、标题和放置位置。"
+                "适用场景：用户要求'在 Excel 中画图'、'插入图表到工作表'、'生成带图表的 Excel'。"
+                "不适用：需要导出为独立图片文件时，改用 run_code + matplotlib。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径（相对于工作目录）",
+                    },
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["bar", "line", "pie", "scatter", "area"],
+                        "description": "图表类型",
+                    },
+                    "data_range": {
+                        "type": "string",
+                        "description": "数据区域引用（如 'B1:B20'），包含数值数据。多系列时可指定多列范围（如 'B1:D20'）。第一行默认作为系列名。",
+                    },
+                    "categories_range": {
+                        "type": "string",
+                        "description": "分类轴标签区域（如 'A2:A20'），可选",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "数据源工作表名称，默认活动工作表",
+                    },
+                    "target_cell": {
+                        "type": "string",
+                        "description": "图表放置位置的锚点单元格（如 'E1'），默认 'A1'",
+                        "default": "A1",
+                    },
+                    "target_sheet": {
+                        "type": "string",
+                        "description": "图表放置的目标工作表名称，默认与数据源相同。若不存在则自动创建。",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "图表标题",
+                    },
+                    "x_title": {
+                        "type": "string",
+                        "description": "X 轴标题（饼图无效）",
+                    },
+                    "y_title": {
+                        "type": "string",
+                        "description": "Y 轴标题（饼图无效）",
+                    },
+                    "style": {
+                        "type": "integer",
+                        "description": "Excel 图表样式编号（1-48），可选",
+                        "minimum": 1,
+                        "maximum": 48,
+                    },
+                    "width": {
+                        "type": "number",
+                        "description": "图表宽度（厘米），默认 15",
+                        "default": 15.0,
+                    },
+                    "height": {
+                        "type": "number",
+                        "description": "图表高度（厘米），默认 10",
+                        "default": 10.0,
+                    },
+                    "from_rows": {
+                        "type": "boolean",
+                        "description": "是否按行读取数据（默认按列），True 则每一行是一个系列",
+                        "default": False,
+                    },
+                },
+                "required": ["file_path", "chart_type", "data_range"],
+                "additionalProperties": False,
+            },
+            func=create_excel_chart,
+            write_effect="workspace_write",
+        ),
+    ]
 
 

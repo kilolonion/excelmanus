@@ -75,6 +75,8 @@ MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
 MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "copy_file",
+        # 图表工具（写 Excel，低风险）
+        "create_excel_chart",
         # Vision 工具（写文件，自动审批）
         "rebuild_excel_from_spec",
         "verify_excel_replica",
@@ -101,6 +103,7 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "copy_file": ("destination",),
     "rename_file": ("source", "destination"),
     "delete_file": ("file_path",),
+    "create_excel_chart": ("file_path",),
     "rebuild_excel_from_spec": ("output_path",),
     "verify_excel_replica": ("report_path",),
 }
@@ -156,6 +159,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     # format: Batch 2 精简
     # advanced_format + chart + sheet写入: Batch 3 精简
     "sheet": ("list_sheets", "focus_window"),  # list_sheets 保留为只读结构发现
+    "chart": ("create_excel_chart",),
     "file": (
         "list_directory", "copy_file", "rename_file", "delete_file",
         # get_file_info, find_files, read_text_file: Batch 5 精简
@@ -197,6 +201,8 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "rebuild_excel_from_spec": "从 ReplicaSpec JSON 确定性编译为 Excel 文件",
     "verify_excel_replica": "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
     "extract_table_spec": "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON，支持多表格",
+    # 图表
+    "create_excel_chart": "在 Excel 工作表中插入原生图表（bar/line/pie/scatter/area），支持数据范围、分类轴、标题和放置位置",
 }
 
 
