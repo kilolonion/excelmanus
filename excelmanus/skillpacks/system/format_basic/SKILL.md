@@ -5,7 +5,8 @@ file_patterns:
   - "*.xlsx"
 resources:
   - references/color_palette.md
-version: "2.0.0"
+  - references/aesthetic_guide.md
+version: "3.0.0"
 ---
 格式化任务标准流程：
 
@@ -37,3 +38,8 @@ version: "2.0.0"
 5. 输出规范
 - 返回修改范围与影响单元格数量。
 - 建议用户核实关键格式变更。
+
+6. 审美设计
+- 美化/专业排版任务时，参考 `references/aesthetic_guide.md` 获取完整设计原则、五套专业色板、场景模板和反模式清单。
+- 核心原则：三色克制、字号层级递减、无框优先用交替行色、数据从 B2 开始留呼吸空间。
+- 不确定配色时默认使用**商务蓝色板**（主色 002060 + 表头 4472C4 + 交替行 D6E4F0）。

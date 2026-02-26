@@ -1,9 +1,9 @@
 ---
 name: formatting
-version: "1.1.0"
+version: "2.0.0"
 priority: 48
 layer: strategy
-max_tokens: 250
+max_tokens: 350
 conditions: {}
 ---
 ## 格式化任务策略
@@ -20,4 +20,9 @@ conditions: {}
 
 6. **输出格式校准**：写入缺失值/空值前，先观察目标区域已有数据的表示方式（空单元格、空字符串、N/A 等），保持一致。当用户提示中出现"output may be empty string"或类似表述时，缺失值用空字符串或空单元格输出，保持与原数据一致。
 
-7. **收尾动作**：格式化任务结束时，执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 自动调整列宽和行高，确保表格布局美观。参考 table_layout 策略的相关配置（数字右对齐、文本左对齐、标题居中等）。
+7. **收尾动作**：格式化任务结束时，执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 自动调整列宽和行高，确保表格布局美观。参考 table_layout 策略的相关配置（数字右对齐、文本左对齐、标题居中、单元格居中对齐等）。
+
+8. **审美三原则**（所有涉及样式的任务均适用）：
+   - **克制用色**：全表主色不超过 3 种（1 主色 + 1 辅色 + 中性灰），避免彩虹效果。深色文字配浅色背景，禁止亮色底+亮色字。
+   - **视觉层次**：通过字号递减（标题 14–16pt → 表头 11–12pt → 正文 10–11pt）、加粗/底色区分标题→表头→数据→汇总四层层级，而非堆砌颜色。
+   - **留白呼吸**：数据区与表格边缘至少留 1 行 1 列空白；密集表格使用交替行色（白 + 极浅灰 F2F2F2）提升可读性。激活 `format_basic` 技能包获取完整美学设计指南。
