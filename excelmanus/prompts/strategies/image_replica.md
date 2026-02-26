@@ -1,16 +1,33 @@
 ---
 name: image_replica
-version: "2.0.0"
+version: "2.1.0"
 priority: 32
 layer: strategy
-max_tokens: 500
+max_tokens: 600
 conditions:
   task_tags:
     - image_replica
 ---
 ## 图片表格复刻策略
 
-当用户提供图片并要求复刻/仿照/照着做表格时，**必须优先使用自动化流水线**，禁止直接 `run_code` 从零构建。
+### 快速模式（用户明确要求时）
+
+当用户消息中**明确表达**以下意图之一时，**跳过自动化流水线**，直接进入快速生成路径：
+- 快速做 / 快速生成 / 赶时间 / 先出个大致的
+- 不需要精准样式 / 样式不重要 / 格式随意 / 大概就行
+- 随便做做 / 先弄个差不多的 / 不用太讲究
+
+**快速模式流程**：
+1. 图片已在视觉上下文中（用户上传时模型自动可见），直接分析表格的行列结构、数据内容和大致样式
+2. 用 `run_code` + openpyxl **一次性**构建 Excel：数据写入 + 基础样式（字体/边框/对齐/列宽）合并在同一段代码中
+3. 执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 收尾
+4. 用 `finish_task` 交付，说明已按快速模式生成，如需精修可再次要求
+
+> **注意**：快速模式下不调用 `extract_table_spec` / `rebuild_excel_from_spec` / `verify_excel_replica`，优先速度而非像素级还原。
+
+---
+
+当用户**未明确要求快速**时，按下方标准流程执行。
 
 ### 推荐流程（自动化流水线）
 

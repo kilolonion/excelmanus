@@ -209,7 +209,7 @@ class TestCallVlmResponseFormat:
         mock_client.chat.completions.create = mock_create
 
         rf = {"type": "json_object"}
-        raw, err = await ToolDispatcher._call_vlm_with_retry(
+        raw, err, fr = await ToolDispatcher._call_vlm_with_retry(
             dispatcher,
             messages=[{"role": "user", "content": "test"}],
             vlm_client=mock_client,
@@ -240,7 +240,7 @@ class TestCallVlmResponseFormat:
         mock_client = MagicMock()
         mock_client.chat.completions.create = mock_create
 
-        raw, err = await ToolDispatcher._call_vlm_with_retry(
+        raw, err, fr = await ToolDispatcher._call_vlm_with_retry(
             dispatcher,
             messages=[{"role": "user", "content": "test"}],
             vlm_client=mock_client,
@@ -283,3 +283,57 @@ class TestParseVlmJson:
     def test_empty_returns_none(self):
         from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
         assert _parse_vlm_json("") is None
+
+    def test_truncated_json_without_repair_returns_none(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        truncated = '{"tables": [{"name": "Sheet1", "cells": [{"addr": "A1"'
+        assert _parse_vlm_json(truncated) is None
+
+    def test_truncated_json_with_repair_succeeds(self):
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        truncated = '{"tables": [{"name": "Sheet1", "cells": [{"addr": "A1", "val": "hello"},'
+        result = _parse_vlm_json(truncated, try_repair=True)
+        assert result is not None
+        assert result["tables"][0]["name"] == "Sheet1"
+        assert result["tables"][0]["cells"][0]["addr"] == "A1"
+
+    def test_truncated_json_repair_preserves_complete_cells(self):
+        """修复截断 JSON 时保留所有已完成的单元格数据（含部分有效的末尾元素）。"""
+        from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json
+        truncated = (
+            '{"tables": [{"name": "S1", "cells": ['
+            '{"addr": "A1", "val": "x"}, '
+            '{"addr": "A2", "val": "y"}, '
+            '{"addr": "A3", "val":'  # 截断在值位置
+        )
+        result = _parse_vlm_json(truncated, try_repair=True)
+        assert result is not None
+        cells = result["tables"][0]["cells"]
+        # A3 的 addr 仍然有效（val 被截断丢弃），所以保留 3 个 cell
+        assert len(cells) == 3
+        assert cells[0]["addr"] == "A1"
+        assert cells[1]["addr"] == "A2"
+        assert cells[2]["addr"] == "A3"
+        assert "val" not in cells[2]  # val 被截断
+
+
+class TestRepairTruncatedJson:
+    def test_repair_nested_arrays(self):
+        from excelmanus.engine_core.tool_dispatcher import _repair_truncated_json
+        # 截断在 4 处，修复回退到最后一个 , 之前，保留 [3]
+        fragment = '{"a": [1, 2, [3, 4'
+        result = _repair_truncated_json(fragment)
+        assert result is not None
+        assert result["a"][:2] == [1, 2]
+        assert 3 in result["a"][2]
+
+    def test_repair_with_strings(self):
+        from excelmanus.engine_core.tool_dispatcher import _repair_truncated_json
+        fragment = '{"key": "value", "arr": [{"n": "test"}'
+        result = _repair_truncated_json(fragment)
+        assert result is not None
+        assert result["key"] == "value"
+
+    def test_unrepairable_returns_none(self):
+        from excelmanus.engine_core.tool_dispatcher import _repair_truncated_json
+        assert _repair_truncated_json('just text') is None

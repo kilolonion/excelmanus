@@ -51,24 +51,15 @@ _PHASE_INDEX = {
 _JSON_FENCE_RE = _re.compile(r"```(?:json)?\s*(.*?)```", _re.DOTALL | _re.IGNORECASE)
 
 
-def _parse_vlm_json(text: str) -> dict[str, Any] | None:
-    """从 VLM 输出中提取 JSON dict。"""
-    content = (text or "").strip()
-    if not content:
-        return None
-    candidates = [content]
-    candidates.extend(_JSON_FENCE_RE.findall(content))
-    for c in candidates:
-        c = c.strip()
-        if not c:
-            continue
-        try:
-            obj = json.loads(c)
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            continue
-    return None
+def _parse_vlm_json(text: str, *, try_repair: bool = False) -> dict[str, Any] | None:
+    """从 VLM 输出中提取 JSON dict。
+
+    Args:
+        text: VLM 原始输出文本。
+        try_repair: 为 True 时尝试修复被截断的 JSON（补全未闭合的括号）。
+    """
+    from excelmanus.engine_core.tool_dispatcher import _parse_vlm_json as _shared_parse
+    return _shared_parse(text, try_repair=try_repair)
 
 
 def compute_phase_diff(
@@ -355,9 +346,15 @@ class ProgressivePipeline:
             logger.warning("Phase %s VLM 调用失败: %s", phase.value, error)
             return None
 
-        parsed = _parse_vlm_json(raw_text)
+        # 启发式截断检测（_vlm_caller 不返回 finish_reason）
+        from excelmanus.engine_core.tool_dispatcher import _is_likely_truncated
+        likely_trunc = _is_likely_truncated(raw_text, None)
+        parsed = _parse_vlm_json(raw_text, try_repair=likely_trunc)
         if parsed is None:
-            logger.warning("Phase %s VLM 返回无法解析为 JSON", phase.value)
+            logger.warning(
+                "Phase %s VLM 返回无法解析为 JSON（%d 字符，可能截断=%s）",
+                phase.value, len(raw_text), likely_trunc,
+            )
         return parsed
 
     # ── Spec 保存/加载 ──
