@@ -808,7 +808,7 @@ export default function AdminPage() {
       </div>
 
       {/* Toast notifications */}
-      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+      <div className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] right-4 left-4 sm:left-auto z-50 flex flex-col gap-2">
         <AnimatePresence>
           {toasts.map((t) => (
             <motion.div

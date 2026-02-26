@@ -23,7 +23,7 @@ const nextConfig: NextConfig = {
     // 前后端同机: http://localhost:8000
     // 前后端分离: http://<后端IP>:8000
     const backend =
-      process.env.BACKEND_INTERNAL_URL || "http://localhost:8000";
+      process.env.BACKEND_INTERNAL_URL || "http://127.0.0.1:8000";
     return [
       {
         source: "/api/v1/:path*",

@@ -308,7 +308,7 @@ export function SessionStatusBar() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-5 w-5 p-0"
+                className="h-7 w-7 p-0"
                 disabled={extracting || !activeSessionId}
                 onClick={() => void handleMemoryExtract()}
                 aria-label={extracting ? "记忆提取中" : "提取记忆"}

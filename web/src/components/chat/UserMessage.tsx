@@ -190,7 +190,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 e.target.value = "";
               }}
             />
-            <div className="flex gap-1.5 relative">
+            <div className="flex flex-wrap gap-1.5 relative">
               <button
                 onClick={() => editFileInputRef.current?.click()}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
@@ -214,7 +214,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               {wsPickerOpen && (
                 <div
                   ref={wsPickerRef}
-                  className="absolute bottom-full left-0 mb-1 w-64 max-h-48 overflow-y-auto rounded-lg border bg-popover shadow-lg z-50"
+                  className="absolute bottom-full left-0 mb-1 w-64 max-w-[calc(100vw-3rem)] max-h-48 overflow-y-auto rounded-lg border bg-popover shadow-lg z-50"
                 >
                   <div className="sticky top-0 bg-popover border-b px-2 py-1.5">
                     <input
