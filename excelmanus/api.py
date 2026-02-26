@@ -287,10 +287,10 @@ class _SessionStreamState:
 
 
 _session_stream_states: dict[str, _SessionStreamState] = {}
-_rules_manager: Any = None  # RulesManager | None
-_api_persistent_memory: Any = None  # PersistentMemory | None（API 层共享）
-_database: Any = None  # Database | None
-_config_store: Any = None  # ConfigStore | None
+_rules_manager: Any = None  # 类型：RulesManager | None
+_api_persistent_memory: Any = None  # 类型：PersistentMemory | None（API 层共享）
+_database: Any = None  # 类型：Database | None
+_config_store: Any = None  # 类型：ConfigStore | None
 _router = APIRouter()
 
 

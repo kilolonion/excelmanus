@@ -35,7 +35,7 @@ class PhaseResult(BaseModel):
 
 
 class CorrectionPatch(BaseModel):
-    """Phase 4 单条修正补丁。"""
+    """阶段 4 单条修正补丁。"""
 
     target: Literal["cell", "merge", "style", "dimension"]
     sheet_name: str | None = None
@@ -48,7 +48,7 @@ class CorrectionPatch(BaseModel):
 
 
 class VerificationResult(BaseModel):
-    """Phase 4 校验输出。"""
+    """阶段 4 校验输出。"""
 
     patches: list[CorrectionPatch] = Field(default_factory=list)
     overall_confidence: float = 0.9

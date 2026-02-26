@@ -127,32 +127,33 @@ class SubagentOrchestrator:
             on_event=on_event,
         )
 
-        # ── Post-subagent Hook ──
-        post_hook_raw = engine._run_skill_hook(
-            skill=hook_skill,
-            event=HookEvent.SUBAGENT_STOP,
-            payload={
-                "task": task_text,
-                "agent_name": picked_agent,
-                "success": result.success,
-                "summary": result.summary,
-            },
-        )
-        post_hook = await engine._resolve_hook_result(
-            event=HookEvent.SUBAGENT_STOP,
-            hook_result=post_hook_raw,
-            on_event=on_event,
-        )
-        if post_hook is not None and post_hook.decision == HookDecision.DENY:
-            reason = post_hook.reason or "Hook 拒绝了子代理结果。"
-            return DelegateSubagentOutcome(
-                reply=f"子代理执行结果已被 Hook 拦截：{reason}",
-                success=False,
-                picked_agent=picked_agent,
-                task_text=task_text,
-                normalized_paths=normalized_paths,
-                subagent_result=result,
+        # ── Post-subagent Hook（A1: 无激活技能时跳过） ──
+        if hook_skill is not None:
+            post_hook_raw = engine._run_skill_hook(
+                skill=hook_skill,
+                event=HookEvent.SUBAGENT_STOP,
+                payload={
+                    "task": task_text,
+                    "agent_name": picked_agent,
+                    "success": result.success,
+                    "summary": result.summary,
+                },
             )
+            post_hook = await engine._resolve_hook_result(
+                event=HookEvent.SUBAGENT_STOP,
+                hook_result=post_hook_raw,
+                on_event=on_event,
+            )
+            if post_hook is not None and post_hook.decision == HookDecision.DENY:
+                reason = post_hook.reason or "Hook 拒绝了子代理结果。"
+                return DelegateSubagentOutcome(
+                    reply=f"子代理执行结果已被 Hook 拦截：{reason}",
+                    success=False,
+                    picked_agent=picked_agent,
+                    task_text=task_text,
+                    normalized_paths=normalized_paths,
+                    subagent_result=result,
+                )
 
         if result.success:
             engine._window_perception.observe_subagent_context(

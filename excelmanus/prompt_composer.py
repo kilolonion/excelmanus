@@ -39,7 +39,7 @@ class PromptSegment:
 class PromptContext:
     """当前请求的上下文信号，用于策略匹配。"""
 
-    chat_mode: str = "write"  # "write" | "read" | "plan"
+    chat_mode: str = "write"  # 取值："write" | "read" | "plan"
     write_hint: str = "unknown"
     sheet_count: int = 0
     total_rows: int = 0

@@ -196,8 +196,8 @@ class ExcelTarget:
 
     file_path: str
     sheet_name: str | None = None
-    operation: str = "unknown"  # "read" | "write" | "unknown"
-    source: str = ""           # "pd.read_excel" | "df.to_excel" | ...
+    operation: str = "unknown"  # 取值："read" | "write" | "unknown"
+    source: str = ""           # 示例："pd.read_excel" | "df.to_excel" | ...
 
 
 # ── Excel 目标提取 ──────────────────────────────────────
