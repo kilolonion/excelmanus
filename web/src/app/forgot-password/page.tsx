@@ -89,7 +89,7 @@ export default function ForgotPasswordPage() {
 
   useEffect(() => () => clearInterval(cooldownRef.current!), []);
 
-  // Step 1: submit email
+  // 步骤 1：提交邮箱
   const handleSendCode = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -105,7 +105,7 @@ export default function ForgotPasswordPage() {
     }
   }, [email]);
 
-  // Step 2: verify code + set new password
+  // 步骤 2：验证验证码并设置新密码
   const handleReset = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (code.length !== 6) return;
@@ -122,7 +122,7 @@ export default function ForgotPasswordPage() {
     }
   }, [email, code, newPassword]);
 
-  // Auto-submit when 6 digits entered and password filled
+  // 输入 6 位验证码且密码已填时自动提交
   useEffect(() => {
     if (step === "code" && code.length === 6 && newPassword.length >= 8 && !loading) {
       const timer = setTimeout(() => {

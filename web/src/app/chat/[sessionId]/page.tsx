@@ -11,6 +11,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
+import type { AttachedFile } from "@/lib/types";
 
 function ChatPage() {
   const params = useParams();
@@ -26,7 +27,7 @@ function ChatPage() {
     setActiveSession(sessionId);
   }, [sessionId, setActiveSession]);
 
-  const handleSend = (text: string, files?: File[]) => {
+  const handleSend = (text: string, files?: AttachedFile[]) => {
     sendMessage(text, files, sessionId);
   };
 

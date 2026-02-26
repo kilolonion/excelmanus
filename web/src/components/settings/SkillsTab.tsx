@@ -74,15 +74,15 @@ export function SkillsTab() {
   const [saving, setSaving] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
 
-  // Import: file path
+  // 导入：文件路径
   const [filePath, setFilePath] = useState("");
   const [fileOverwrite, setFileOverwrite] = useState(false);
 
-  // Import: GitHub URL
+  // 导入：GitHub URL
   const [githubUrl, setGithubUrl] = useState("");
   const [githubOverwrite, setGithubOverwrite] = useState(false);
 
-  // Import: manual create
+  // 导入：手动创建
   const [formDraft, setFormDraft] = useState({
     name: "",
     description: "",
@@ -90,7 +90,7 @@ export function SkillsTab() {
     filePatterns: "",
   });
 
-  // Edit mode
+  // 编辑模式
   const [jsonDraft, setJsonDraft] = useState("");
   const [editMode, setEditMode] = useState<"form" | "json">("form");
 
@@ -100,7 +100,7 @@ export function SkillsTab() {
       const data = await apiGet<SkillSummary[]>("/skills");
       setSkills(data);
     } catch {
-      // Backend not ready
+      // 后端未就绪
     } finally {
       setLoading(false);
     }
@@ -115,7 +115,7 @@ export function SkillsTab() {
       const data = await apiGet<SkillDetail>(`/skills/${encodeURIComponent(name)}`);
       setSkillDetails((prev) => ({ ...prev, [name]: data }));
     } catch {
-      // ignore
+      // 忽略
     }
   };
 

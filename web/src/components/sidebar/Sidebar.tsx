@@ -44,7 +44,7 @@ function useSwipeToClose(enabled: boolean, onClose: () => void) {
     const dy = Math.abs(t.clientY - touchRef.current.startY);
     const dt = Date.now() - touchRef.current.startTime;
     touchRef.current = null;
-    // Swipe left: dx < -60px, mostly horizontal, within 400ms
+    // 左滑：dx < -60px，基本水平，400ms 内
     if (dx < -60 && dy < 80 && dt < 400) {
       onClose();
     }
@@ -73,7 +73,7 @@ export function Sidebar() {
   const [excelOpen, setExcelOpen] = useState(true);
   const [clearing, setClearing] = useState(false);
 
-  // Skip animation on first render to prevent sidebar flash
+  // 首次渲染跳过动画，避免侧栏闪烁
   const isFirstRender = useRef(true);
   useEffect(() => { isFirstRender.current = false; }, []);
 
@@ -91,10 +91,10 @@ export function Sidebar() {
 
   const hasExcelFiles = recentFiles.length > 0;
 
-  // Swipe-left to close sidebar on mobile
+  // 移动端左滑关闭侧栏
   const swipe = useSwipeToClose(isMobile && sidebarOpen, toggleSidebar);
 
-  // Auto-close sidebar on mobile (initial mount + session changes)
+  // 移动端自动收起侧栏（首次挂载及会话变化时）
   useEffect(() => {
     if (isMobile && sidebarOpen) {
       toggleSidebar();

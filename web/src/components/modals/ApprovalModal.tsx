@@ -16,7 +16,7 @@ const RISK_CONFIG = {
 
 export function ApprovalModal() {
   const pendingApproval = useChatStore((s) => s.pendingApproval);
-  const setPendingApproval = useChatStore((s) => s.setPendingApproval);
+  const dismissApproval = useChatStore((s) => s.dismissApproval);
   const messages = useChatStore((s) => s.messages);
   const [showHistory, setShowHistory] = useState(false);
 
@@ -47,7 +47,7 @@ export function ApprovalModal() {
   const handleAction = (action: "accept" | "reject" | "fullaccess") => {
     const approvalId = pendingApproval.id;
     const sessionId = useSessionStore.getState().activeSessionId;
-    setPendingApproval(null);
+    dismissApproval(approvalId);
     if (sessionId && approvalId) {
       submitApproval(sessionId, approvalId, action).catch((err) =>
         console.error("[ApprovalModal] submitApproval failed:", err),
@@ -81,7 +81,7 @@ export function ApprovalModal() {
             <button
               onClick={() => {
                 const sid = useSessionStore.getState().activeSessionId;
-                setPendingApproval(null);
+                dismissApproval(pendingApproval.id);
                 if (sid) abortChat(sid).catch(() => {});
               }}
               className="text-muted-foreground hover:text-foreground transition-colors p-0.5 rounded"

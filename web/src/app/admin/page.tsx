@@ -550,7 +550,7 @@ export default function AdminPage() {
       return;
     }
     loadUsers();
-    // Fetch available model names for the permissions editor
+    // 获取权限编辑器可用的模型名
     import("@/lib/api").then(({ apiGet }) => {
       apiGet<{ models: { name: string }[] }>("/models")
         .then((data) => setAllModelNames(data.models.map((m) => m.name)))

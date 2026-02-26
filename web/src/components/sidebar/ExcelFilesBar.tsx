@@ -110,18 +110,18 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  // View mode: flat list vs folder tree
+  // 视图模式：扁平列表 vs 文件夹树
   const [treeView, setTreeView] = useState(true);
 
-  // All workspace files for tree view
+  // 工作区全部文件供树形展示
   const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; filename: string; is_dir?: boolean }[]>([]);
   const [wsFilesLoaded, setWsFilesLoaded] = useState(false);
 
-  // Multi-select mode
+  // 多选模式
   const [selectMode, setSelectMode] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
 
-  // Remove confirmation dialog
+  // 删除确认弹窗
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [pendingRemovePaths, setPendingRemovePaths] = useState<string[]>([]);
 
@@ -178,12 +178,12 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     refreshWorkspaceFiles();
   }, [wsFilesLoaded, refreshWorkspaceFiles]);
 
-  // Auto-refresh tree when agent creates/modifies files (files_changed SSE events)
+  // Agent 创建/修改文件时自动刷新树（files_changed SSE 事件）
   const prevVersionRef = useRef(workspaceFilesVersion);
   useEffect(() => {
     if (workspaceFilesVersion === prevVersionRef.current) return;
     prevVersionRef.current = workspaceFilesVersion;
-    // Small delay to batch rapid successive events
+    // 短延迟以合并快速连续事件
     const timer = setTimeout(() => refreshWorkspaceFiles(), 500);
     return () => clearTimeout(timer);
   }, [workspaceFilesVersion, refreshWorkspaceFiles]);
@@ -197,7 +197,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           const result = await uploadFile(file);
           addRecentFile({ path: result.path, filename: result.filename });
         } catch {
-          // upload failed silently
+          // 上传静默失败
         }
       }
       e.target.value = "";
@@ -225,7 +225,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     [openFullView, selectMode]
   );
 
-  // Show confirmation dialog before removing
+  // 移除前显示确认对话框
   const requestRemove = useCallback((paths: string[]) => {
     if (paths.length === 0) return;
     setPendingRemovePaths(paths);
@@ -275,7 +275,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   const isClearAll = pendingRemovePaths.length === recentFiles.length && recentFiles.length > 0;
 
-  // Empty state — only shown when not embedded (parent handles visibility)
+  // 空状态：仅非嵌入时显示（父组件控制可见性）
   if (recentFiles.length === 0 && !embedded) {
     return (
       <div className="px-3 pb-2">
@@ -681,13 +681,13 @@ function buildTree(files: { path: string; filename: string; is_dir?: boolean }[]
     if (parts.length === 0) continue;
 
     if (file.is_dir) {
-      // Create folder node (and intermediate folders)
+      // 创建文件夹节点（及中间目录）
       let current = root;
       for (let i = 0; i < parts.length; i++) {
         current = ensureFolder(current, parts[i], parts.slice(0, i + 1).join("/"));
       }
     } else {
-      // Create file node with intermediate folders
+      // 创建文件节点及中间目录
       let current = root;
       for (let i = 0; i < parts.length - 1; i++) {
         current = ensureFolder(current, parts[i], parts.slice(0, i + 1).join("/"));
@@ -708,7 +708,7 @@ function buildTree(files: { path: string; filename: string; is_dir?: boolean }[]
 function collapseTree(node: TreeNode): TreeNode {
   node.children = node.children.map(collapseTree);
 
-  // Sort: folders first, then files, both alphabetical
+  // 排序：先文件夹后文件，均按字母序
   node.children.sort((a, b) => {
     const aIsDir = !a.file;
     const bIsDir = !b.file;
@@ -716,7 +716,7 @@ function collapseTree(node: TreeNode): TreeNode {
     return a.name.localeCompare(b.name);
   });
 
-  // Collapse single-child folders (like VSCode)
+  // 折叠单子文件夹（类似 VSCode）
   if (!node.file && node.children.length === 1 && !node.children[0].file && node.name !== "") {
     const child = node.children[0];
     return {
@@ -762,7 +762,7 @@ function FileTreeView(props: TreeViewProps) {
           const result = await uploadFileToFolder(file, uploadTargetFolder);
           props.onAddRecentFile({ path: result.path, filename: result.filename });
         } catch {
-          // silent
+          // 静默
         }
       }
       e.target.value = "";
@@ -828,7 +828,7 @@ function InlineRenameInput({
 
   useEffect(() => {
     inputRef.current?.focus();
-    // Select the name part without extension
+    // 选择不含扩展名的名称部分
     const dotIdx = defaultValue.lastIndexOf(".");
     inputRef.current?.setSelectionRange(0, dotIdx > 0 ? dotIdx : defaultValue.length);
   }, [defaultValue]);

@@ -11,6 +11,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
+import type { AttachedFile } from "@/lib/types";
 
 export default function Home() {
   const messages = useChatStore((s) => s.messages);
@@ -22,7 +23,7 @@ export default function Home() {
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const cmdResult = useCommandResult();
 
-  const handleSend = (text: string, files?: File[]) => {
+  const handleSend = (text: string, files?: AttachedFile[]) => {
     if (!activeSessionId) {
       const id = uuid();
       addSession({
