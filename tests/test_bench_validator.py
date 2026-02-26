@@ -370,7 +370,7 @@ class TestSerialization:
         assert d["passed"] is False
         assert d["expected"] == "<= 3"
         assert d["actual"] == 5
-        assert "severity" not in d  # default "error" is omitted
+        assert "severity" not in d  # 默认 "error" 被省略
 
     def test_validation_summary_to_dict(self):
         vs = ValidationSummary(total=2, passed=1, failed=1, results=[
@@ -473,7 +473,7 @@ class TestGoldenCells:
         golden_result = v.results[0]
         assert golden_result.rule == "golden_cells"
         assert golden_result.passed is False
-        assert golden_result.actual["matched"] == 2  # A1 and B2 match
+        assert golden_result.actual["matched"] == 2  # A1 与 B2 匹配
         assert golden_result.actual["total_cells"] == 4
         assert len(golden_result.actual["mismatches_sample"]) == 2
 

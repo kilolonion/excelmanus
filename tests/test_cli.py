@@ -227,7 +227,7 @@ class TestCliEntryPoints:
         with patch(
             "excelmanus.cli.main.asyncio.run", side_effect=_raise_keyboard_interrupt
         ):
-            main()  # should not raise
+            main()  # 不应抛出异常
 
 
 # ── 配置测试 ──

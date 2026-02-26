@@ -89,11 +89,11 @@ def test_list_applied_respects_limit(tmp_path: Path) -> None:
 
 
 def test_list_applied_survives_restart(tmp_path: Path) -> None:
-    """list_applied should find records from filesystem after restart."""
+    """重启后 list_applied 应从文件系统找到记录。"""
     manager1 = ApprovalManager(str(tmp_path))
     aid = _execute_write(tmp_path, manager1, "persist.txt")
 
-    # Simulate restart with fresh manager
+    # 模拟重启：使用新的 manager 实例
     manager2 = ApprovalManager(str(tmp_path))
     records = manager2.list_applied()
     ids = [r.approval_id for r in records]

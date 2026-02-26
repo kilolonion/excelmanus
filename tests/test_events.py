@@ -283,6 +283,7 @@ class TestToolCallEventFields:
             "approval_tool_name",
             "approval_arguments",
             "approval_undoable",
+            "approval_has_changes",
             "approval_risk_level",
             "approval_args_summary",
             "text_delta",

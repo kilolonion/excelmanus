@@ -154,7 +154,7 @@ async def test_subscribe_no_active_task_returns_done():
     sm = MagicMock(spec=SessionManager)
     _setup_api_globals(sm)
 
-    # Mock _has_session_access to return True
+    # 模拟 _has_session_access 返回 True
     with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
@@ -193,7 +193,7 @@ async def test_subscribe_with_active_task_streams_events():
     chat_task = asyncio.create_task(_fake_chat())
     api_module._active_chat_tasks[session_id] = chat_task
 
-    # Mock engine for reply generation
+    # 模拟 engine 用于生成回复
     mock_engine = MagicMock()
     mock_engine.last_route_result = MagicMock(
         route_mode="write", skills_used=[], tool_scope=[]

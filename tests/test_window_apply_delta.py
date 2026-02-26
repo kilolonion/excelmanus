@@ -12,7 +12,7 @@ def test_apply_delta_rejects_kind_mismatch() -> None:
     with pytest.raises(DeltaReject):
         apply_delta(window, delta)
 
-    # Keep import coverage for both delta contracts in this first task.
+    # 在本任务中保留两种 delta 契约的导入覆盖。
     assert ExplorerDelta(directory="/tmp").kind == "explorer"
 
 

@@ -69,7 +69,6 @@ def _reset_tool_guards() -> None:
         "excelmanus.tools.sheet_tools",
         "excelmanus.tools.file_tools",
         "excelmanus.tools.image_tools",
-        "excelmanus.tools.macro_tools",
         "excelmanus.tools.code_tools",
         "excelmanus.tools.shell_tools",
     ]

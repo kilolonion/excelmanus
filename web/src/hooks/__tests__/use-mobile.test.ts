@@ -4,7 +4,7 @@
 import { renderHook } from '@testing-library/react';
 import { useIsMobile, useIsTablet, useIsDesktop, useIsMediumScreen } from '../use-mobile';
 
-// Mock window.matchMedia
+// 模拟 window.matchMedia
 const mockMatchMedia = (matches: boolean) => ({
   matches,
   media: '',
@@ -18,7 +18,7 @@ const mockMatchMedia = (matches: boolean) => ({
 
 describe('响应式断点 hooks', () => {
   beforeEach(() => {
-    // Reset window.matchMedia mock
+    // 重置 window.matchMedia 模拟
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: jest.fn().mockImplementation(() => mockMatchMedia(false)),
