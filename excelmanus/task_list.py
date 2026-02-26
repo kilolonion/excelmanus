@@ -101,6 +101,16 @@ class TaskStore:
 
     def __init__(self) -> None:
         self._task_list: TaskList | None = None
+        self._plan_file_path: str | None = None
+
+    @property
+    def plan_file_path(self) -> str | None:
+        """关联的计划文档路径（相对于工作区根目录）。"""
+        return self._plan_file_path
+
+    @plan_file_path.setter
+    def plan_file_path(self, value: str | None) -> None:
+        self._plan_file_path = value
 
     @property
     def current(self) -> TaskList | None:
@@ -155,5 +165,6 @@ class TaskStore:
         return item
 
     def clear(self) -> None:
-        """清除当前任务清单。"""
+        """清除当前任务清单和关联的计划文档路径。"""
         self._task_list = None
+        self._plan_file_path = None
