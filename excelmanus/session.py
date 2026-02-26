@@ -8,6 +8,7 @@ import time
 import uuid
 from dataclasses import replace
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from excelmanus.config import ExcelManusConfig
@@ -154,6 +155,22 @@ class SessionManager:
             engine.sandbox_env = ws.create_sandbox_env(
                 transaction=engine.transaction,
             )
+
+    def notify_file_deleted(self, file_path: str) -> None:
+        """W4: 通知所有活跃 session 的 FVM 文件已被删除，清理 staging 条目。"""
+        for entry in self._sessions.values():
+            try:
+                entry.engine._fvm.remove_staging_for_path(file_path)
+            except Exception:
+                pass
+
+    def notify_file_renamed(self, old_path: str, new_path: str) -> None:
+        """W5: 通知所有活跃 session 的 FVM 文件已被重命名，更新 staging 条目。"""
+        for entry in self._sessions.values():
+            try:
+                entry.engine._fvm.rename_staging_path(old_path, new_path)
+            except Exception:
+                pass
 
     def _resolve_user_config_store(self, user_id: str | None) -> Any:
         """返回用户级 ConfigStore（用于 active_model 等偏好）。"""
@@ -443,6 +460,13 @@ class SessionManager:
                 )
             else:
                 logger.info("创建新会话并加锁 %s（当前总数: %d）", new_id, len(self._sessions))
+                # F2: 新建（非恢复）会话立即写入 SQLite，防止 TTL 清理或进程重启导致会话丢失
+                if self._chat_history is not None:
+                    try:
+                        if not self._chat_history.session_exists(new_id, user_id=user_id):
+                            self._chat_history.create_session(new_id, "", user_id=user_id)
+                    except Exception:
+                        logger.warning("新建会话 %s 立即持久化失败", new_id, exc_info=True)
 
         # 初始化 MCP 连接（失败不影响会话创建）；放在锁外避免阻塞并发请求。
         if created:
@@ -507,6 +531,24 @@ class SessionManager:
                     )
             except Exception:
                 logger.warning("会话 %s 消息持久化失败", session_id, exc_info=True)
+
+    def flush_messages_sync(self, session_id: str) -> None:
+        """同步增量持久化会话消息（供 SSE 事件回调在流式传输中间调用）。
+
+        此方法直接读取 engine 可变状态，但由于 SSE 事件回调在 engine.chat()
+        内部同步触发，与 engine 的消息修改在同一协程内，不存在并发问题。
+        """
+        if self._conv_persistence is None:
+            return
+        entry = self._sessions.get(session_id)
+        if entry is None:
+            return
+        try:
+            self._conv_persistence.sync_new_messages(
+                session_id, entry.engine, user_id=entry.user_id,
+            )
+        except Exception:
+            logger.debug("会话 %s 中间持久化失败", session_id, exc_info=True)
 
     async def delete(self, session_id: str, *, user_id: str | None = None) -> bool:
         """删除指定会话。
@@ -661,19 +703,19 @@ class SessionManager:
         """
         new_status = "archived" if archive else "active"
 
-        # 检查内存中是否存在
+        # R2: 在锁内捕获 entry 引用，避免锁释放后并发删除导致 None
+        entry: _SessionEntry | None = None
         async with self._lock:
             in_memory = session_id in self._sessions
-            if in_memory and user_id is not None:
-                entry = self._sessions.get(session_id)
-                if entry is not None and entry.user_id != user_id:
+            if in_memory:
+                entry = self._sessions[session_id]
+                if user_id is not None and entry.user_id != user_id:
                     return False  # 不属于当前用户
 
-        if in_memory:
+        if in_memory and entry is not None:
             # 活跃会话：先持久化到 SQLite（确保记录存在），再更新状态
             if self._chat_history is not None:
-                entry = self._sessions.get(session_id)
-                if entry is not None and self._conv_persistence is not None:
+                if self._conv_persistence is not None:
                     self._conv_persistence.sync_new_messages(
                         session_id, entry.engine, user_id=entry.user_id
                     )
@@ -781,6 +823,11 @@ class SessionManager:
             return None
         return entry.engine
 
+    def is_session_in_flight(self, session_id: str) -> bool:
+        """W10: 检查会话是否正在处理中（用于防止 backup apply 竞态）。"""
+        entry = self._sessions.get(session_id)
+        return entry.in_flight if entry is not None else False
+
     def session_exists(self, session_id: str) -> bool:
         """检查会话是否存在（内存或 SQLite 历史）。"""
         if session_id in self._sessions:
@@ -857,6 +904,7 @@ class SessionManager:
         """
         in_memory_ids: set[str] = set()
         results: list[dict] = []
+        now = time.monotonic()
 
         async with self._lock:
             for sid, entry in self._sessions.items():
@@ -873,12 +921,19 @@ class SessionManager:
                             if isinstance(content, str):
                                 title = content[:80]
                             break
+                # 将 monotonic last_access 转换为 wall-clock ISO 时间戳
+                # monotonic 不可直接转 wall-clock，需用当前两者的差值推算
+                wall_updated = time.time() - (now - entry.last_access)
+                updated_at_iso = datetime.fromtimestamp(
+                    wall_updated, tz=timezone.utc
+                ).isoformat()
                 results.append({
                     "id": sid,
                     "title": title or f"会话 {sid[:8]}",
                     "message_count": msg_count,
                     "in_flight": entry.in_flight,
                     "status": "active",
+                    "updated_at": updated_at_iso,
                 })
 
         # 合并 SQLite 中的历史会话（排除已在内存中的）
@@ -901,6 +956,8 @@ class SessionManager:
             except Exception:
                 logger.warning("合并 SQLite 会话列表失败", exc_info=True)
 
+        # F6: 全局按 updated_at 降序排序，保证前端收到的列表顺序一致
+        results.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
         return results
 
     async def get_session_detail(

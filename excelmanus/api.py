@@ -3,6 +3,7 @@
 端点：
 - POST   /api/v1/chat                        对话接口（完整 JSON）
 - POST   /api/v1/chat/stream                  对话接口（SSE 流式）
+- POST   /api/v1/chat/subscribe                 SSE 重连（页面刷新后接入正在执行的任务）
 - POST   /api/v1/chat/abort                   终止活跃聊天任务
 - GET    /api/v1/skills                      列出 Skillpack 摘要
 - GET    /api/v1/skills/{name}               查询 Skillpack 详情
@@ -243,6 +244,49 @@ _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _config: ExcelManusConfig | None = None
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
+
+
+class _SessionStreamState:
+    """管理单个会话的 SSE 事件流状态，支持断连后缓冲与重连。
+
+    当客户端断开时（如页面刷新），事件被缓冲到 event_buffer；
+    新客户端通过 /chat/subscribe 重连时，先重放缓冲事件，再接收实时事件。
+    """
+
+    __slots__ = ("event_buffer", "subscriber_queue", "_buffer_limit")
+
+    def __init__(self, buffer_limit: int = 500) -> None:
+        self.event_buffer: list[ToolCallEvent] = []
+        self.subscriber_queue: asyncio.Queue[ToolCallEvent | None] | None = None
+        self._buffer_limit = buffer_limit
+
+    def deliver(self, event: ToolCallEvent) -> None:
+        """投递事件：有订阅者时入队，否则缓冲。"""
+        q = self.subscriber_queue
+        if q is not None:
+            q.put_nowait(event)
+        else:
+            if len(self.event_buffer) < self._buffer_limit:
+                self.event_buffer.append(event)
+
+    def attach(self) -> asyncio.Queue[ToolCallEvent | None]:
+        """创建新订阅者队列并附着。返回新队列。"""
+        q: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
+        self.subscriber_queue = q
+        return q
+
+    def detach(self) -> None:
+        """断开当前订阅者，后续事件进入缓冲。"""
+        self.subscriber_queue = None
+
+    def drain_buffer(self) -> list[ToolCallEvent]:
+        """取出并清空缓冲区。"""
+        buf = self.event_buffer
+        self.event_buffer = []
+        return buf
+
+
+_session_stream_states: dict[str, _SessionStreamState] = {}
 _rules_manager: Any = None  # RulesManager | None
 _api_persistent_memory: Any = None  # PersistentMemory | None (shared for API)
 _database: Any = None  # Database | None
@@ -938,7 +982,7 @@ _error_responses: dict = {
 def _is_save_command(message: str) -> bool:
     """判断消息是否为 /save 命令（含 /save 或 /save <路径>）。
 
-    支持带文件上传前缀的消息格式（如 "[已上传: x]\\n\\n/save"）。
+    支持带文件上传前缀的消息格式（如 "[已上传文件: x]\\n\\n/save"）。
     """
     stripped = message.strip()
     # 若有 \\n\\n，取最后一段作为用户输入（网页端上传文件时会在前加前缀）
@@ -1034,9 +1078,12 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     )
 
     if _is_save_command(request.message):
-        reply_text = await _handle_save_command(
-            _session_manager, session_id, engine, request.message
-        )
+        try:
+            reply_text = await _handle_save_command(
+                _session_manager, session_id, engine, request.message
+            )
+        finally:
+            await _session_manager.release_for_chat(session_id)
         return ChatResponse(
             session_id=session_id,
             reply=guard_public_reply(reply_text),
@@ -1130,6 +1177,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 })
             else:
                 yield _sse_format("done", {})
+            finally:
+                # R1: 必须释放 in_flight 锁，否则会话永久不可用
+                await _session_manager.release_for_chat(session_id)
 
         return StreamingResponse(
             _save_stream(),
@@ -1141,19 +1191,36 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             },
         )
 
-    # 用 asyncio.Queue 桥接同步回调与异步生成器
-    event_queue: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
-    stream_attached = True
+    # 用 _SessionStreamState 管理事件缓冲与订阅者队列，支持断连重连
+    stream_state = _SessionStreamState()
+    _session_stream_states[session_id] = stream_state
+    event_queue = stream_state.attach()
 
     def _on_event(event: ToolCallEvent) -> None:
-        """引擎事件回调：将事件放入队列，同时持久化 Excel 事件。"""
-        if stream_attached:
-            event_queue.put_nowait(event)
+        """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
+
+        F4: 在 TOOL_CALL_END 事件后增量持久化消息到 SQLite，
+        防止流式传输中途刷新或进程重启导致消息丢失。
+        """
+        stream_state.deliver(event)
         _persist_excel_event(session_id, event)
+        if (
+            event.event_type == EventType.TOOL_CALL_END
+            and _session_manager is not None
+        ):
+            _session_manager.flush_messages_sync(session_id)
 
     display_text, mention_contexts = await _resolve_mentions(
         request.message, engine,
     )
+
+    if request.images:
+        logger.info(
+            "chat_stream 收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
+            len(request.images),
+            [img.media_type for img in request.images],
+            [len(img.data) for img in request.images],
+        )
 
     async def _run_chat() -> ChatResult:
         """后台执行 engine.chat，完成后向队列发送结束信号。"""
@@ -1173,7 +1240,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
     async def _event_generator() -> AsyncIterator[str]:
         """SSE 事件生成器：从队列消费事件并格式化为 SSE 文本。"""
-        nonlocal stream_attached
         safe_mode = _is_external_safe_mode()
         # 先推送 session_id
         yield _sse_format("session_init", {"session_id": session_id})
@@ -1188,9 +1254,13 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
         _active_chat_tasks[session_id] = chat_task
 
         def _cleanup_active_chat_task(done_task: asyncio.Task[Any]) -> None:
-            """后台 chat 任务完成后清理活跃任务映射，避免刷新断连导致状态丢失。"""
+            """后台 chat 任务完成后清理活跃任务映射与流状态。"""
             if _active_chat_tasks.get(session_id) is done_task:
                 _active_chat_tasks.pop(session_id, None)
+            # 任务完成后，清理 stream state（如果没有活跃订阅者）
+            ss = _session_stream_states.get(session_id)
+            if ss is not None and ss.subscriber_queue is None:
+                _session_stream_states.pop(session_id, None)
             try:
                 done_task.result()
             except asyncio.CancelledError:
@@ -1281,7 +1351,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
         except (asyncio.CancelledError, GeneratorExit):
             # 客户端断开（如页面刷新）时允许 chat 在后台继续。
-            stream_attached = False
+            # 分离订阅者，后续事件进入缓冲，供 /chat/subscribe 重连时重放。
+            stream_state.detach()
             logger.info("会话 %s 的流式连接已断开，后台任务继续执行", session_id)
         except Exception as exc:
             error_id = str(uuid.uuid4())
@@ -1300,9 +1371,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 except (asyncio.CancelledError, Exception):
                     pass
         finally:
-            stream_attached = False
-            if chat_task.done() and _active_chat_tasks.get(session_id) is chat_task:
-                _active_chat_tasks.pop(session_id, None)
+            stream_state.detach()
+            if chat_task.done():
+                if _active_chat_tasks.get(session_id) is chat_task:
+                    _active_chat_tasks.pop(session_id, None)
+                _session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
 
     return StreamingResponse(
@@ -1324,6 +1397,28 @@ class AbortRequest(BaseModel):
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ]
+
+
+class AnswerQuestionRequest(BaseModel):
+    """回答问题请求体（阻塞式 ask_user）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    answer: str
+
+
+class ApproveRequest(BaseModel):
+    """审批决策请求体（阻塞式审批）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    decision: Literal["accept", "reject", "fullaccess"]
 
 
 class BackupApplyRequest(BaseModel):
@@ -1384,6 +1479,9 @@ async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSO
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    # W10: 防止在 agent 活跃写入期间 apply，避免文件竞态
+    if _session_manager.is_session_in_flight(request.session_id):
+        return _error_json_response(409, "会话正在处理中，请等待完成后再应用备份。")
     tx = engine.transaction
     if tx is None:
         return _error_json_response(400, "该会话未启用备份模式。")
@@ -1424,6 +1522,9 @@ async def backup_discard(request: BackupDiscardRequest, raw_request: Request) ->
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    # R3: 防止在 agent 活跃写入期间 discard，避免删除正在被写入的 staged 文件
+    if _session_manager.is_session_in_flight(request.session_id):
+        return _error_json_response(409, "会话正在处理中，请等待完成后再丢弃备份。")
     tx = engine.transaction
     if tx is None:
         return _error_json_response(400, "该会话未启用备份模式。")
@@ -1455,6 +1556,65 @@ async def workspace_commit(request: BackupApplyRequest, raw_request: Request) ->
 @_router.post("/api/v1/workspace/rollback")
 async def workspace_rollback(request: BackupDiscardRequest, raw_request: Request) -> JSONResponse:
     return await backup_discard(request, raw_request)
+
+
+# ── 轮次 Checkpoint API ──────────────────────────────────
+
+
+@_router.get("/api/v1/checkpoint/list")
+async def checkpoint_list(session_id: str, request: Request) -> JSONResponse:
+    """列出指定会话的轮次 checkpoint 时间线。"""
+    assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(request)
+    engine = _session_manager.get_engine(session_id, user_id=user_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+    if not engine.checkpoint_enabled:
+        return JSONResponse(status_code=200, content={
+            "checkpoints": [], "checkpoint_enabled": False,
+        })
+    cps = engine.file_version_manager.list_turn_checkpoints()
+    items = []
+    for cp in cps:
+        items.append({
+            "turn_number": cp.turn_number,
+            "created_at": cp.created_at,
+            "files_modified": cp.files_modified,
+            "tool_names": cp.tool_names,
+            "version_count": len(cp.version_ids),
+        })
+    return JSONResponse(status_code=200, content={
+        "checkpoints": items, "checkpoint_enabled": True,
+    })
+
+
+class CheckpointRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+    turn_number: int
+
+
+@_router.post("/api/v1/checkpoint/rollback")
+async def checkpoint_rollback(
+    request: CheckpointRollbackRequest, raw_request: Request,
+) -> JSONResponse:
+    """回退到指定轮次之前的文件状态。"""
+    assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(raw_request)
+    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    if not engine.checkpoint_enabled:
+        return _error_json_response(400, "该会话未启用 checkpoint 模式。")
+    if _session_manager.is_session_in_flight(request.session_id):
+        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
+    restored = engine.file_version_manager.rollback_to_turn(request.turn_number)
+    return JSONResponse(status_code=200, content={
+        "status": "ok",
+        "turn_number": request.turn_number,
+        "restored_files": restored,
+        "count": len(restored),
+    })
 
 
 @_router.post("/api/v1/chat/rollback")
@@ -1504,6 +1664,184 @@ async def chat_turns(session_id: str, request: Request) -> JSONResponse:
     )
 
 
+class _SubscribeRequest(BaseModel):
+    """SSE 重连请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    skip_replay: bool = Field(
+        default=False,
+        description="跳过缓冲事件重放，仅接收实时新事件。"
+        "前端已从后端加载了当前消息时使用，避免重复 block。",
+    )
+
+
+@_router.post("/api/v1/chat/subscribe", responses=_error_responses)
+async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> StreamingResponse:
+    """SSE 重连端点：页面刷新后重新接入正在执行的聊天任务事件流。
+
+    先重放断连期间缓冲的事件，再实时推送后续事件，直到任务完成。
+    若任务已结束，返回 done 事件后关闭。
+    """
+    session_id = request.session_id
+
+    if not await _has_session_access(session_id, raw_request):
+        return _error_json_response(404, f"会话 '{session_id}' 不存在。")  # type: ignore[return-value]
+
+    chat_task = _active_chat_tasks.get(session_id)
+    stream_state = _session_stream_states.get(session_id)
+
+    # 没有活跃任务或 stream_state → 返回即时 done
+    if chat_task is None or chat_task.done() or stream_state is None:
+        async def _done_stream() -> AsyncIterator[str]:
+            yield _sse_format("session_init", {"session_id": session_id})
+            yield _sse_format("subscribe_resume", {"status": "completed"})
+            yield _sse_format("done", {})
+
+        return StreamingResponse(
+            _done_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # 附着新的订阅者队列
+    event_queue = stream_state.attach()
+    # skip_replay=True 时丢弃缓冲（前端已从后端加载了消息），否则重放
+    if request.skip_replay:
+        stream_state.drain_buffer()  # 清空缓冲但不使用
+        buffered_events: list[ToolCallEvent] = []
+    else:
+        buffered_events = stream_state.drain_buffer()
+
+    safe_mode = _is_external_safe_mode()
+
+    async def _subscribe_generator() -> AsyncIterator[str]:
+        yield _sse_format("session_init", {"session_id": session_id})
+        yield _sse_format("subscribe_resume", {
+            "status": "reconnected",
+            "buffered_count": len(buffered_events),
+        })
+
+        # 重放缓冲事件（skip_replay 时为空）
+        for event in buffered_events:
+            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+            if sse is not None:
+                yield sse
+
+        # 实时消费后续事件
+        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = asyncio.create_task(
+            event_queue.get()
+        )
+
+        async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
+            if task is None or task.done():
+                return
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            while True:
+                assert queue_get_task is not None
+                wait_set: set[asyncio.Task[Any]] = {queue_get_task}
+                if not chat_task.done():
+                    wait_set.add(chat_task)
+                done_set, _ = await asyncio.wait(
+                    wait_set,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if queue_get_task in done_set:
+                    event = queue_get_task.result()
+                    if event is not None:
+                        sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                        if sse is not None:
+                            yield sse
+                    if chat_task.done():
+                        queue_get_task = None
+                    else:
+                        queue_get_task = asyncio.create_task(event_queue.get())
+
+                if chat_task.done() and (queue_get_task is None or queue_get_task not in done_set):
+                    # 排空队列中剩余事件
+                    while True:
+                        try:
+                            event = event_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if event is not None:
+                            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                            if sse is not None:
+                                yield sse
+                    break
+
+            # chat 任务完成：获取结果并发送 reply + done
+            if not chat_task.cancelled():
+                try:
+                    chat_result = chat_task.result()
+                    assert _session_manager is not None
+                    engine = _session_manager.get_engine(session_id)
+                    if engine is not None:
+                        normalized_reply = guard_public_reply((chat_result.reply or "").strip())
+                        route = engine.last_route_result
+                        route_mode, skills_used, tool_scope = _public_route_fields(
+                            route.route_mode,
+                            route.skills_used,
+                            route.tool_scope,
+                        )
+                        yield _sse_format("reply", {
+                            "content": normalized_reply,
+                            "skills_used": skills_used,
+                            "tool_scope": tool_scope,
+                            "route_mode": route_mode,
+                            "iterations": chat_result.iterations,
+                            "truncated": chat_result.truncated,
+                            "prompt_tokens": chat_result.prompt_tokens,
+                            "completion_tokens": chat_result.completion_tokens,
+                            "total_tokens": chat_result.total_tokens,
+                        })
+                except (asyncio.CancelledError, Exception):
+                    pass
+            yield _sse_format("done", {})
+
+        except (asyncio.CancelledError, GeneratorExit):
+            stream_state.detach()
+            logger.info("会话 %s 的重连流式连接再次断开", session_id)
+        except Exception as exc:
+            error_id = str(uuid.uuid4())
+            logger.error(
+                "SSE subscribe 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True
+            )
+            yield _sse_format("error", {
+                "error": "服务内部错误，请联系管理员。",
+                "error_id": error_id,
+            })
+        finally:
+            stream_state.detach()
+            if chat_task.done():
+                _session_stream_states.pop(session_id, None)
+            await _cancel_task(queue_get_task)
+
+    return StreamingResponse(
+        _subscribe_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @_router.post("/api/v1/chat/abort")
 async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONResponse:
     """终止指定会话的活跃聊天任务。"""
@@ -1524,6 +1862,74 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
         status_code=200,
         content={"status": "cancelled"},
     )
+
+
+@_router.post("/api/v1/chat/{session_id}/answer", responses=_error_responses)
+async def chat_answer(
+    session_id: str,
+    request: AnswerQuestionRequest,
+    raw_request: Request,
+) -> JSONResponse:
+    """提交 ask_user 问题的回答，resolve 阻塞中的 Future。"""
+    assert _session_manager is not None, "服务未初始化"
+    if not await _has_session_access(session_id, raw_request):
+        return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
+
+    engine = _session_manager.get_engine(session_id)
+    if engine is None:
+        return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
+
+    registry = engine.interaction_registry
+    # 构造 payload：兼容 QuestionFlowManager 的 parse_answer 格式
+    payload = {"raw_input": request.answer, "question_id": request.question_id}
+
+    # 尝试解析选项（如果 question_flow 中有对应问题）
+    try:
+        pending_q = engine._question_flow.current()
+        if pending_q is not None and pending_q.question_id == request.question_id:
+            parsed = engine._question_flow.parse_answer(request.answer, pending_q)
+            payload = parsed.to_tool_result()
+    except Exception:
+        logger.debug("解析回答失败，使用原始文本", exc_info=True)
+
+    ok = registry.resolve(request.question_id, payload)
+    if not ok:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"问题 {request.question_id} 不存在或已回答"},
+        )
+    logger.info("问题已回答: session=%s question=%s", session_id, request.question_id)
+    return JSONResponse(status_code=200, content={"status": "answered"})
+
+
+@_router.post("/api/v1/chat/{session_id}/approve", responses=_error_responses)
+async def chat_approve(
+    session_id: str,
+    request: ApproveRequest,
+    raw_request: Request,
+) -> JSONResponse:
+    """提交审批决策，resolve 阻塞中的 Future。"""
+    assert _session_manager is not None, "服务未初始化"
+    if not await _has_session_access(session_id, raw_request):
+        return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
+
+    engine = _session_manager.get_engine(session_id)
+    if engine is None:
+        return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
+
+    registry = engine.interaction_registry
+    payload = {"decision": request.decision, "approval_id": request.approval_id}
+    ok = registry.resolve(request.approval_id, payload)
+    if not ok:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"审批 {request.approval_id} 不存在或已处理"},
+        )
+    logger.info(
+        "审批已决策: session=%s approval=%s decision=%s",
+        session_id, request.approval_id, request.decision,
+    )
+    return JSONResponse(status_code=200, content={"status": "resolved"})
 
 
 def _sse_format(event_type: str, data: dict) -> str:
@@ -2190,57 +2596,57 @@ _MAX_WORKSPACE_FILES = 2000
 
 @_router.get("/api/v1/files/workspace/list")
 async def list_workspace_files(request: Request) -> JSONResponse:
-    """扫描当前用户 workspace 中所有文件（用于文件树视图）。"""
+    """扫描用户 uploads/ 目录中的文件与文件夹（用于文件树视图）。"""
     assert _config is not None, "服务未初始化"
     from pathlib import Path as _Path
 
-    workspace = _Path(_resolve_workspace_root(request)).resolve()
-    skip_dirs = {
-        "node_modules", "__pycache__", ".venv", ".git", ".next",
-        ".tox", "dist", "build", ".eggs", ".mypy_cache", ".pytest_cache",
-        "excelmanus.egg-info",
-    }
-    skip_exts = {".pyc", ".pyo", ".so", ".dylib", ".dll", ".o", ".a"}
-    results: list[dict[str, Any]] = []
+    ws = _resolve_workspace(request)
+    uploads = ws.get_upload_dir()  # creates uploads/ if absent
 
     import re
     _upload_prefix_re = re.compile(r"^[0-9a-f]{8}_")
-    uploads_dir = str(workspace / "uploads")
-    backups_dir = str((workspace / "outputs" / "backups").resolve())
-    audits_dir = str((workspace / "outputs" / "audits").resolve())
 
-    for root, dirs, filenames in os.walk(workspace):
-        dirs[:] = sorted(d for d in dirs if d not in skip_dirs and not d.startswith("."))
-        root_resolved = str(_Path(root).resolve())
-        if root_resolved.startswith(backups_dir) or root_resolved.startswith(audits_dir):
-            dirs.clear()
-            continue
+    results: list[dict[str, Any]] = []
+    for root, dirs, filenames in os.walk(uploads):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        rel_root = os.path.relpath(root, uploads)
+        for dname in dirs:
+            full = os.path.join(root, dname)
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                continue
+            rel = os.path.join(rel_root, dname) if rel_root != "." else dname
+            results.append({
+                "path": rel,
+                "filename": dname,
+                "modified_at": mtime,
+                "is_dir": True,
+            })
         for fname in sorted(filenames):
             if fname.startswith("."):
                 continue
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in skip_exts:
-                continue
             full = os.path.join(root, fname)
             try:
-                rel = os.path.relpath(full, workspace)
                 mtime = os.path.getmtime(full)
             except OSError:
                 continue
             display_name = fname
-            if root == uploads_dir and _upload_prefix_re.match(fname):
+            if _upload_prefix_re.match(fname):
                 display_name = fname[9:]
+            rel = os.path.join(rel_root, fname) if rel_root != "." else fname
             results.append({
-                "path": f"./{rel}",
+                "path": rel,
                 "filename": display_name,
                 "modified_at": mtime,
+                "is_dir": False,
             })
             if len(results) >= _MAX_WORKSPACE_FILES:
                 break
         if len(results) >= _MAX_WORKSPACE_FILES:
             break
 
-    results.sort(key=lambda x: x["modified_at"], reverse=True)
+    results.sort(key=lambda x: (not x["is_dir"], x["path"].lower()))
     return JSONResponse(content={"files": results, "truncated": len(results) >= _MAX_WORKSPACE_FILES})
 
 
@@ -2719,9 +3125,21 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
 _ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
 
 
+def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
+    """Resolve *relative* under *uploads_dir* and ensure it stays within bounds."""
+    from pathlib import Path as _Path
+    cleaned = relative.replace("\\", "/").strip("/")
+    if ".." in cleaned.split("/"):
+        return None
+    target = (uploads_dir / cleaned).resolve()
+    if not str(target).startswith(str(uploads_dir.resolve())):
+        return None
+    return target
+
+
 @_router.post("/api/v1/upload")
 async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...)) -> JSONResponse:
-    """上传文件到 workspace uploads 目录。"""
+    """上传文件到 workspace uploads 目录（支持可选 folder 参数指定子目录）。"""
     assert _config is not None, "服务未初始化"
 
     filename = file.filename or "unnamed"
@@ -2743,8 +3161,25 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
 
     upload_dir = ws.get_upload_dir()
 
+    # Support optional folder= form field or query param
+    folder = raw_request.query_params.get("folder", "")
+    if not folder:
+        try:
+            form = await raw_request.form()
+            folder = str(form.get("folder", ""))
+        except Exception:
+            folder = ""
+
+    if folder:
+        target_dir = _safe_uploads_path(upload_dir, folder)
+        if target_dir is None:
+            return _error_json_response(400, "非法目标路径")
+        target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir = upload_dir
+
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
-    dest_path = upload_dir / safe_name
+    dest_path = target_dir / safe_name
 
     with open(dest_path, "wb") as f:
         f.write(content)
@@ -2758,6 +3193,109 @@ async def upload_file(raw_request: Request, file: UploadFile = FastAPIFile(...))
         "path": rel_path,
         "size": len(content),
     })
+
+
+# ── File management APIs ─────────────────────────────────────
+
+
+@_router.post("/api/v1/files/workspace/mkdir")
+async def workspace_mkdir(request: Request) -> JSONResponse:
+    """在 uploads/ 下创建子目录。"""
+    assert _config is not None, "服务未初始化"
+    body = await request.json()
+    path = body.get("path", "").strip()
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    ws = _resolve_workspace(request)
+    uploads = ws.get_upload_dir()
+    target = _safe_uploads_path(uploads, path)
+    if target is None:
+        return _error_json_response(400, "非法目标路径")
+    if target.exists():
+        return _error_json_response(409, "目录已存在")
+    target.mkdir(parents=True, exist_ok=True)
+    return JSONResponse(content={"status": "created", "path": path})
+
+
+@_router.post("/api/v1/files/workspace/create")
+async def workspace_create_file(request: Request) -> JSONResponse:
+    """在 uploads/ 下创建空文件。"""
+    assert _config is not None, "服务未初始化"
+    body = await request.json()
+    path = body.get("path", "").strip()
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    ws = _resolve_workspace(request)
+    uploads = ws.get_upload_dir()
+    target = _safe_uploads_path(uploads, path)
+    if target is None:
+        return _error_json_response(400, "非法目标路径")
+    if target.exists():
+        return _error_json_response(409, "文件已存在")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch()
+    return JSONResponse(content={"status": "created", "path": path})
+
+
+@_router.delete("/api/v1/files/workspace/item")
+async def workspace_delete_item(request: Request) -> JSONResponse:
+    """删除 uploads/ 下的文件或文件夹。"""
+    assert _config is not None, "服务未初始化"
+    body = await request.json()
+    path = body.get("path", "").strip()
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    ws = _resolve_workspace(request)
+    uploads = ws.get_upload_dir()
+    target = _safe_uploads_path(uploads, path)
+    if target is None:
+        return _error_json_response(400, "非法目标路径")
+    if not target.exists():
+        return _error_json_response(404, "路径不存在")
+    # Prevent deleting the uploads root itself
+    if target.resolve() == uploads.resolve():
+        return _error_json_response(400, "无法删除根目录")
+
+    import shutil
+    if target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    # W4: 通知所有活跃 session 清理关联 staging 条目
+    if _session_manager is not None:
+        _session_manager.notify_file_deleted(str(target))
+    return JSONResponse(content={"status": "deleted", "path": path})
+
+
+@_router.post("/api/v1/files/workspace/rename")
+async def workspace_rename_item(request: Request) -> JSONResponse:
+    """重命名 uploads/ 下的文件或文件夹。"""
+    assert _config is not None, "服务未初始化"
+    body = await request.json()
+    old_path = body.get("old_path", "").strip()
+    new_path = body.get("new_path", "").strip()
+    if not old_path or not new_path:
+        return _error_json_response(400, "缺少 old_path 或 new_path 参数")
+
+    ws = _resolve_workspace(request)
+    uploads = ws.get_upload_dir()
+    src = _safe_uploads_path(uploads, old_path)
+    dst = _safe_uploads_path(uploads, new_path)
+    if src is None or dst is None:
+        return _error_json_response(400, "非法路径")
+    if not src.exists():
+        return _error_json_response(404, "源路径不存在")
+    if dst.exists():
+        return _error_json_response(409, "目标路径已存在")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    # W5: 通知所有活跃 session 更新 staging 映射
+    if _session_manager is not None:
+        _session_manager.notify_file_renamed(str(src), str(dst))
+    return JSONResponse(content={"status": "renamed", "old_path": old_path, "new_path": new_path})
 
 
 @_router.post("/api/v1/files/reveal")
@@ -3928,6 +4466,7 @@ async def update_model_capabilities(request: Request) -> JSONResponse:
 _RUNTIME_ENV_KEYS: dict[str, str] = {
     "subagent_enabled": "EXCELMANUS_SUBAGENT_ENABLED",
     "backup_enabled": "EXCELMANUS_BACKUP_ENABLED",
+    "checkpoint_enabled": "EXCELMANUS_CHECKPOINT_ENABLED",
     "external_safe_mode": "EXCELMANUS_EXTERNAL_SAFE_MODE",
     "max_iterations": "EXCELMANUS_MAX_ITERATIONS",
     "compaction_enabled": "EXCELMANUS_COMPACTION_ENABLED",
@@ -3946,6 +4485,7 @@ async def get_runtime_config() -> JSONResponse:
     return JSONResponse(content={
         "subagent_enabled": _config.subagent_enabled,
         "backup_enabled": _config.backup_enabled,
+        "checkpoint_enabled": _config.checkpoint_enabled,
         "external_safe_mode": _config.external_safe_mode,
         "max_iterations": _config.max_iterations,
         "compaction_enabled": _config.compaction_enabled,
@@ -3961,6 +4501,7 @@ class RuntimeConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     subagent_enabled: bool | None = None
     backup_enabled: bool | None = None
+    checkpoint_enabled: bool | None = None
     external_safe_mode: bool | None = None
     max_iterations: int | None = None
     compaction_enabled: bool | None = None

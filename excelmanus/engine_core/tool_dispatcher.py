@@ -48,6 +48,38 @@ if TYPE_CHECKING:
 
 logger = get_logger("tool_dispatcher")
 
+
+def _render_finish_task_report(
+    report: dict[str, Any] | None,
+    summary: str,
+) -> str:
+    """将 finish_task 的参数渲染为用户可读文本。
+
+    新格式只有 summary + affected_files；兼容旧格式的 report dict。
+    """
+    # 新格式：直接使用 summary 自然语言
+    if not report or not isinstance(report, dict):
+        return summary.strip() if summary else ""
+
+    # 旧格式兼容：将 report dict 的各字段拼接为自然段落
+    parts: list[str] = []
+    for key in ("operations", "key_findings", "explanation", "suggestions"):
+        text = (report.get(key) or "").strip()
+        if text:
+            parts.append(text)
+
+    affected_files = report.get("affected_files")
+    if affected_files and isinstance(affected_files, list):
+        file_lines = [f"- {f}" for f in affected_files if isinstance(f, str) and f.strip()]
+        if file_lines:
+            parts.append("涉及文件：\n" + "\n".join(file_lines))
+
+    if not parts:
+        return summary.strip() if summary else ""
+
+    return "\n\n".join(parts)
+
+
 # JSON fence 提取正则（复用 small_model 的逻辑，避免跨模块依赖）
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
@@ -103,12 +135,14 @@ class ToolDispatcher:
             HighRiskApprovalHandler,
             PlanInterceptHandler,
             SkillActivationHandler,
+            SuggestModeSwitchHandler,
         )
         self._handlers = [
             SkillActivationHandler(engine, self),
             DelegationHandler(engine, self),
             FinishTaskHandler(engine, self),
             AskUserHandler(engine, self),
+            SuggestModeSwitchHandler(engine, self),
             PlanInterceptHandler(engine, self),
             ExtractTableSpecHandler(engine, self),
             CodePolicyHandler(engine, self),
@@ -947,7 +981,7 @@ class ToolDispatcher:
                     error = result_str
                     log_tool_call(logger, tool_name, arguments, error=error)
             else:
-                outcome = await self._dispatch_tool_execution(
+                outcome = await self._dispatch_via_handlers(
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
                     arguments=arguments,
@@ -1048,16 +1082,60 @@ class ToolDispatcher:
         """通过策略处理器表分发工具执行（替代 if-elif 链）。
 
         遍历 self._handlers，第一个 can_handle 返回 True 的 handler 负责执行。
+        并保留旧 _dispatch_tool_execution 的统一异常语义。
         """
-        for handler in self._handlers:
-            if handler.can_handle(tool_name):
+        from excelmanus.engine import _AuditedExecutionError
+
+        try:
+            for handler in self._handlers:
+                if not handler.can_handle(tool_name):
+                    continue
+
+                handler_kwargs: dict[str, Any] = {
+                    "tool_scope": tool_scope,
+                    "on_event": on_event,
+                    "iteration": iteration,
+                    "route_result": route_result,
+                }
+                if handler.__class__.__name__ == "HighRiskApprovalHandler":
+                    handler_kwargs["skip_high_risk_approval_by_hook"] = skip_high_risk_approval_by_hook
+
                 return await handler.handle(
-                    tool_name, tool_call_id, arguments,
-                    tool_scope=tool_scope, on_event=on_event,
-                    iteration=iteration, route_result=route_result,
+                    tool_name,
+                    tool_call_id,
+                    arguments,
+                    **handler_kwargs,
                 )
-        # 不应到达此处（DefaultToolHandler 总是匹配）
-        raise RuntimeError(f"No handler found for tool: {tool_name}")
+
+            # 不应到达此处（DefaultToolHandler 总是匹配）
+            raise RuntimeError(f"No handler found for tool: {tool_name}")
+        except ValueError as exc:
+            result_str = str(exc)
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+        except ToolNotAllowedError:
+            permission_error = {
+                "error_code": "TOOL_NOT_ALLOWED",
+                "tool": tool_name,
+                "message": f"工具 '{tool_name}' 不在当前授权范围内。",
+            }
+            result_str = json.dumps(permission_error, ensure_ascii=False)
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+        except Exception as exc:
+            root_exc: Exception = exc
+            audit_record = None
+            if isinstance(exc, _AuditedExecutionError):
+                audit_record = exc.record
+                root_exc = exc.cause
+            result_str = f"工具执行错误: {root_exc}"
+            log_tool_call(logger, tool_name, arguments, error=str(root_exc))
+            return _ToolExecOutcome(
+                result_str=result_str,
+                success=False,
+                error=str(root_exc),
+                audit_record=audit_record,
+            )
 
     async def _dispatch_tool_execution(
         self,
@@ -1129,10 +1207,7 @@ class ToolDispatcher:
                                     sub_result is not None
                                     and sub_result.structured_changes
                                 ):
-                                    e.record_workspace_write_action(
-                                        tool_name="delegate",
-                                        arguments={"task": pd_sub_outcome.task_text},
-                                    )
+                                    e.record_workspace_write_action()
                                     logger.info(
                                         "delegate(parallel) 写入传播: agent=%s, changes=%d",
                                         pd_sub_outcome.picked_agent,
@@ -1259,10 +1334,7 @@ class ToolDispatcher:
                                 and sub_result is not None
                                 and sub_result.structured_changes
                             ):
-                                e.record_workspace_write_action(
-                                    tool_name="delegate",
-                                    arguments={"task": pd_sub_outcome.task_text},
-                                )
+                                e.record_workspace_write_action()
                                 logger.info(
                                     "delegate(parallel-compat) 写入传播: agent=%s, changes=%d",
                                     pd_sub_outcome.picked_agent,
@@ -1280,7 +1352,7 @@ class ToolDispatcher:
                     error=error if not success else None,
                 )
             elif tool_name == "ask_user":
-                result_str, question_id = e.handle_ask_user(
+                result_str = await e.handle_ask_user_blocking(
                     arguments=arguments,
                     tool_call_id=tool_call_id,
                     on_event=on_event,
@@ -1288,8 +1360,6 @@ class ToolDispatcher:
                 )
                 success = True
                 error = None
-                pending_question = True
-                defer_tool_result = True
                 log_tool_call(
                     logger,
                     tool_name,
@@ -1297,7 +1367,9 @@ class ToolDispatcher:
                     result=result_str,
                 )
             elif tool_name == "suggest_mode_switch":
-                # 将模式切换建议转化为 USER_QUESTION 事件
+                # 将模式切换建议转化为 USER_QUESTION 事件（阻塞等待）
+                import asyncio as _asyncio
+                from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT as _SMT
                 target_mode = str(arguments.get("target_mode", "write")).strip()
                 reason = str(arguments.get("reason", "")).strip()
                 _mode_labels = {"write": "写入", "read": "读取", "plan": "计划"}
@@ -1320,12 +1392,20 @@ class ToolDispatcher:
                     on_event=on_event,
                     iteration=iteration,
                 )
-                result_str = f"已向用户发起模式切换建议（目标：{target_label}）。"
-                question_id = pending_q.question_id
+                _sms_fut = e._interaction_registry.create(pending_q.question_id)
+                try:
+                    _sms_payload = await _asyncio.wait_for(_sms_fut, timeout=_SMT)
+                except (_asyncio.TimeoutError, _asyncio.CancelledError):
+                    e._question_flow.pop_current()
+                    e._interaction_registry.cleanup_done()
+                    _sms_payload = None
+                else:
+                    e._question_flow.pop_current()
+                    e._interaction_registry.cleanup_done()
+                import json as _sms_json
+                result_str = _sms_json.dumps(_sms_payload, ensure_ascii=False) if isinstance(_sms_payload, dict) else str(_sms_payload or "超时/取消")
                 success = True
                 error = None
-                pending_question = True
-                defer_tool_result = True
                 log_tool_call(
                     logger,
                     tool_name,
@@ -1360,6 +1440,8 @@ class ToolDispatcher:
                     _rc_before_snap = self._snapshot_excel_for_diff(
                         _rc_excel_targets, e.config.workspace_root,
                     ) if _rc_excel_targets else {}
+                    # uploads 目录快照（检测新建/变更文件）
+                    _uploads_before = self._snapshot_uploads_dir(e.config.workspace_root)
                     result_value, audit_record = await e.execute_tool_with_audit(
                         tool_name=tool_name,
                         arguments=_augmented_args,
@@ -1405,10 +1487,13 @@ class ToolDispatcher:
                             iteration=iteration,
                         )
                     # ── run_code → files_changed 事件 ──
+                    _uploads_after = self._snapshot_uploads_dir(e.config.workspace_root)
+                    _uploads_changed = self._diff_uploads_snapshots(_uploads_before, _uploads_after)
                     self._emit_files_changed_from_audit(
                         e, on_event, tool_call_id, _code_arg,
                         audit_record.changes if audit_record else None,
                         iteration,
+                        extra_changed_paths=_uploads_changed or None,
                     )
                     # ── run_code 后: 对比快照生成 Excel diff ──
                     if _rc_excel_targets and on_event is not None:
@@ -1470,6 +1555,8 @@ class ToolDispatcher:
                             _rc_before_snap_s = self._snapshot_excel_for_diff(
                                 _rc_targets_s, e.config.workspace_root,
                             ) if _rc_targets_s else {}
+                            # uploads 目录快照（检测新建/变更文件）
+                            _uploads_before_s = self._snapshot_uploads_dir(e.config.workspace_root)
                             result_value, audit_record = await e.execute_tool_with_audit(
                                 tool_name=tool_name,
                                 arguments=_sanitized_args,
@@ -1514,10 +1601,13 @@ class ToolDispatcher:
                                     iteration=iteration,
                                 )
                             # ── run_code(清洗) → files_changed 事件 ──
+                            _uploads_after_s = self._snapshot_uploads_dir(e.config.workspace_root)
+                            _uploads_changed_s = self._diff_uploads_snapshots(_uploads_before_s, _uploads_after_s)
                             self._emit_files_changed_from_audit(
                                 e, on_event, tool_call_id, _sanitized_code,
                                 audit_record.changes if audit_record else None,
                                 iteration,
+                                extra_changed_paths=_uploads_changed_s or None,
                             )
                             # ── run_code(清洗) 后: 对比快照生成 Excel diff ──
                             if _rc_targets_s and on_event is not None:
@@ -1909,6 +1999,46 @@ class ToolDispatcher:
 
         return result_str, success, error
 
+    # ── uploads 目录快照（检测 run_code 新建/变更文件）────────
+
+    @staticmethod
+    def _snapshot_uploads_dir(workspace_root: str) -> dict[str, float] | None:
+        """对 uploads/ 目录做轻量 mtime 快照，返回 {rel_path: mtime}。"""
+        import os
+        from pathlib import Path as _P
+        uploads = _P(workspace_root) / "uploads"
+        if not uploads.is_dir():
+            return None
+        snap: dict[str, float] = {}
+        try:
+            for root, _dirs, files in os.walk(uploads):
+                _dirs[:] = [d for d in _dirs if not d.startswith(".")]
+                for fname in files:
+                    if fname.startswith("."):
+                        continue
+                    full = os.path.join(root, fname)
+                    try:
+                        snap[os.path.relpath(full, uploads)] = os.path.getmtime(full)
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        return snap
+
+    @staticmethod
+    def _diff_uploads_snapshots(
+        before: dict[str, float] | None,
+        after: dict[str, float] | None,
+    ) -> list[str]:
+        """对比 uploads 快照，返回新建或修改的相对路径列表。"""
+        if before is None or after is None:
+            return []
+        changed: list[str] = []
+        for rel_path, mtime in after.items():
+            if rel_path not in before or before[rel_path] != mtime:
+                changed.append(rel_path)
+        return changed
+
     # ── Excel 预览/Diff 事件辅助 ────────────────────────────
 
     _EXCEL_READ_TOOLS = {"read_excel"}
@@ -2075,8 +2205,9 @@ class ToolDispatcher:
         code: str,
         audit_changes: list[Any] | None,
         iteration: int,
+        extra_changed_paths: list[str] | None = None,
     ) -> None:
-        """run_code 执行后，从审计和 AST 中提取受影响 Excel 文件并发射 FILES_CHANGED 事件。"""
+        """run_code 执行后，从审计、AST 和 mtime 探针中提取受影响文件并发射 FILES_CHANGED 事件。"""
         from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.security.code_policy import extract_excel_targets
         from excelmanus.window_perception.extractor import is_excel_path, normalize_path
@@ -2096,6 +2227,12 @@ class ToolDispatcher:
                 norm = normalize_path(target.file_path)
                 if norm and is_excel_path(norm):
                     affected.add(norm)
+
+        # mtime 探针检测到的新建/变更文件（不限文件类型）
+        if extra_changed_paths:
+            for p in extra_changed_paths:
+                if p:
+                    affected.add(p)
 
         if not affected or on_event is None:
             return

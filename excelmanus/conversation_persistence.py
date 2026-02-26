@@ -67,6 +67,24 @@ class ConversationPersistence:
         self._chat_history.save_turn_messages(session_id, new_msgs, turn_number=turn)
         engine.set_message_snapshot_index(len(messages))
 
+        # F9: 同步更新 SQLite 中的会话标题（从第一条用户消息派生）
+        self._sync_title(session_id, messages)
+
+    def _sync_title(self, session_id: str, messages: list) -> None:
+        """从消息列表中派生标题并更新 SQLite（仅当当前标题为空时）。"""
+        try:
+            title = ""
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        title = content.strip()[:80]
+                        break
+            if title:
+                self._chat_history.update_session(session_id, title=title)
+        except Exception:
+            logger.debug("会话 %s 标题同步失败", session_id, exc_info=True)
+
     def sync_from_snapshot(
         self,
         session_id: str,
@@ -96,6 +114,9 @@ class ConversationPersistence:
         self._chat_history.save_turn_messages(
             session_id, new_msgs, turn_number=snapshot.turn
         )
+
+        # F9: 同步更新 SQLite 中的会话标题
+        self._sync_title(session_id, snapshot.messages)
 
     def reset_after_rollback(
         self,
