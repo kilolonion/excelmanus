@@ -9,6 +9,7 @@ mcp.json
 server.crt
 server.key
 id_new_server.pem.pub
+*.pem.pub
 
 # ==============================
 # Python
@@ -36,6 +37,7 @@ htmlcov/
 .vscode/
 .idea/
 .cursor/
+.claude/
 .kiro/
 .windsurf/
 .codex/
@@ -73,9 +75,10 @@ logs/
 # 内部开发文档与任务
 # ==============================
 tasks/
-docs/
-README_*.md
+dev-docs/
+docs/plans/
 !README.md
+!README_EN.md
 
 # ==============================
 # 锁文件

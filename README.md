@@ -6,6 +6,10 @@
   <strong>v1.5.7</strong> · 用自然语言操作 Excel —— 读数据、写公式、跑分析、画图表，说一句话就够了。
 </p>
 
+<p align="center">
+  中文 · <a href="README_EN.md">English</a>
+</p>
+
 ExcelManus 是一个基于大语言模型的 Excel 智能代理。你不需要记住任何函数语法或者写 VBA，只需要告诉它你想做什么，它会自己完成剩下的事。支持 OpenAI、Claude、Gemini 等主流模型，从 URL 自动识别 Provider，无需手动切换。
 
 ## 能做什么
@@ -132,7 +136,7 @@ excelmanus-api
 | `POST /api/v1/config/import`       | 导入配置令牌         |
 | `GET /api/v1/health`               | 健康检查             |
 
-SSE 流推送 26 种事件类型，覆盖思考过程、工具调用、子代理执行、Pipeline 进度、Excel 预览 / diff、审批请求、记忆提取等。
+SSE 流推送 25 种事件类型，覆盖思考过程、工具调用、子代理执行、Pipeline 进度、Excel 预览 / diff、审批请求、记忆提取等。
 
 ## 模型支持
 
@@ -198,6 +202,7 @@ Skillpack 让你在不改代码的情况下给 Agent 注入领域知识。
 | `file_ops`          | 文件管理                          |
 | `sheet_ops`         | 工作表管理与跨表操作              |
 | `excel_code_runner` | 用 Python 脚本处理大文件          |
+| `run_code_templates` | run_code 常用代码模板库          |
 
 协议详见 `docs/skillpack_protocol.md`。
 
@@ -229,7 +234,7 @@ docker compose --profile production up -d     # 带 Nginx 反向代理
 
 ### 手动部署（宝塔面板 / 裸机）
 
-适用于不使用 Docker 的场景，详见 [docs/deployment-baota.md](docs/deployment-baota.md)。
+适用于不使用 Docker 的场景，详见 [docs/ops-manual.md](docs/ops-manual.md)。
 
 ### 一键更新
 
@@ -308,7 +313,6 @@ location /api/ {
 
 **关键点**：SSE（Server-Sent Events）不是 WebSocket，不需要 `Connection: upgrade` 头部。如果对所有 `/api/` 请求都设置 `Connection: upgrade`，会导致 SSE 连接失败，表现为发送消息时显示 fail to fetch。
 
-## 多用户与认证
 ## 多用户与认证
 
 ExcelManus 支持多用户模式，启用认证后自动启用用户隔离（Auth 即隔离），每个用户拥有独立的工作区目录和数据库。

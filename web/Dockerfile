@@ -7,6 +7,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 
 # Build
+# NEXT_PUBLIC_BACKEND_ORIGIN 在 next build 时内联到客户端 JS 中：
+#   - 留空（默认）→ 前端自动回退 http://{hostname}:8000 直连后端
+#   - "same-origin" → 走同源（Nginx 反向代理 /api/ 且关闭 buffering 时使用）
+ARG NEXT_PUBLIC_BACKEND_ORIGIN=""
+ENV NEXT_PUBLIC_BACKEND_ORIGIN=${NEXT_PUBLIC_BACKEND_ORIGIN}
 COPY . .
 RUN npm run build
 
