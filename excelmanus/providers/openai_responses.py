@@ -101,7 +101,7 @@ def _chat_messages_to_responses_input(
             continue
 
         if role == "user":
-            # Multimodal content: convert Chat Completions parts to Responses API format
+            # 多模态内容：将 Chat Completions 格式转换为 Responses API 格式
             if isinstance(content, list):
                 converted_parts: list[dict[str, Any]] = []
                 for part in content:

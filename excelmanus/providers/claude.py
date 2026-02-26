@@ -605,7 +605,7 @@ class ClaudeClient:
                 current_tool_name: str | None = None
                 current_tool_json: str = ""
                 tool_call_index: int = -1
-                # Prompt caching 统计（从 message_start 事件提取）
+                # 提示词缓存统计（从 message_start 事件提取）
                 _cache_creation_tokens: int = 0
                 _cache_read_tokens: int = 0
 
