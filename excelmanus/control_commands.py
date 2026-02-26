@@ -67,8 +67,13 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(
+        command="/registry",
+        description="文件注册表扫描",
+        arguments=("status", "scan"),
+    ),
+    ControlCommandSpec(
         command="/manifest",
-        description="工作区清单构建",
+        description="文件注册表（/registry 别名）",
         arguments=("status", "build"),
     ),
     ControlCommandSpec(

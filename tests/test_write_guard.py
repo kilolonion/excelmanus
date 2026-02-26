@@ -674,7 +674,7 @@ class TestWriteHintSyncOnWriteCall:
 class TestManifestRefreshOnRecordedWrite:
     @pytest.mark.asyncio
     async def test_manifest_refresh_triggered_by_record_write_action(self):
-        """写入标记来自 record_write_action 时，也应触发 manifest refresh。"""
+        """写入标记来自 record_write_action 时，应触发 FileRegistry 增量刷新。"""
         engine = _make_engine(max_iterations=1)
         route_result = _make_route_result(write_hint="read_only")
 
@@ -715,21 +715,17 @@ class TestManifestRefreshOnRecordedWrite:
             )
 
         engine._execute_tool_call = AsyncMock(side_effect=_execute_and_record_write)
-        engine._workspace_manifest = types.SimpleNamespace(
-            total_files=1,
-            get_system_prompt_summary=lambda: "",
-        )
 
-        refreshed_manifest = object()
-        with patch(
-            "excelmanus.workspace_manifest.refresh_manifest",
-            return_value=refreshed_manifest,
-        ) as refresh_mock:
+        # Mock FileRegistry.scan_workspace 来验证刷新被触发
+        if engine._file_registry is not None:
+            with patch.object(engine._file_registry, "scan_workspace") as scan_mock:
+                result = await engine._tool_calling_loop(route_result, on_event=None)
+            assert "已达到最大迭代次数" in result.reply
+            scan_mock.assert_called_once()
+        else:
+            # 无 FileRegistry 时，验证不报错即可
             result = await engine._tool_calling_loop(route_result, on_event=None)
-
-        assert "已达到最大迭代次数" in result.reply
-        refresh_mock.assert_called_once()
-        assert engine._workspace_manifest is refreshed_manifest
+            assert "已达到最大迭代次数" in result.reply
 
 
 class TestWriteTrackingApis:

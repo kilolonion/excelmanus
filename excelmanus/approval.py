@@ -132,8 +132,8 @@ class ApprovalManager:
         self._applied: dict[str, AppliedApprovalRecord] = {}
         self._mcp_auto_approved: set[str] = set()
         self._db_store: "ApprovalStore | None" = None
-        # 统一文件版本管理器（由 engine 注入）
-        self._fvm: Any = None
+        # FileRegistry 引用（由 engine 注入，唯一接口）
+        self._file_registry: Any = None
         if database is not None:
             from excelmanus.stores.approval_store import ApprovalStore as _AS
             self._db_store = _AS(database)
@@ -465,9 +465,9 @@ class ApprovalManager:
             if any(change.path in rel_paths for change in record.changes):
                 record.undoable = False
                 count += 1
-        # 同步失效 FileVersionManager 中的版本链
-        if self._fvm is not None:
-            self._fvm.invalidate_undo(rel_paths)
+        # 同步失效版本链
+        if self._file_registry is not None and self._file_registry.has_versions:
+            self._file_registry.invalidate_undo(rel_paths)
         return count
 
     def undo(self, approval_id: str) -> str:
@@ -479,17 +479,22 @@ class ApprovalManager:
         if not record.changes:
             return f"记录 `{approval_id}` 没有可回滚的文件变更。"
 
-        # ── 优先使用 FileVersionManager 恢复到真正的原始版本 ──
-        if self._fvm is not None:
+        # ── 使用 FileRegistry 恢复到原始版本 ──
+        _ver_source = (
+            self._file_registry
+            if self._file_registry is not None and self._file_registry.has_versions
+            else None
+        )
+        if _ver_source is not None:
             restored = 0
             failed: list[str] = []
             for change in record.changes:
                 if change.before_exists:
-                    ok = self._fvm.restore_to_original(change.path)
+                    ok = _ver_source.restore_to_original(change.path)
                     if ok:
                         restored += 1
                     else:
-                        # fallback 到旧的快照恢复
+                        # 回退到旧的快照恢复
                         if not self._legacy_restore_change(change):
                             failed.append(change.path)
                         else:

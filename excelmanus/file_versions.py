@@ -1,5 +1,11 @@
 """FileVersionManager：统一文件版本管理层。
 
+.. deprecated::
+    此模块已被 ``excelmanus.file_registry.FileRegistry`` 组合使用。
+    FileRegistry 通过 ``enable_versions=True`` 内部创建并管理 FVM 实例，
+    外部代码应通过 FileRegistry 的委托方法访问版本管理功能。
+    本模块将在后续清理阶段移除，当前保留供 FileRegistry 内部组合。
+
 收敛 WorkspaceTransaction staging、ApprovalManager snapshot、CoW 注册表
 三套独立的文件保护机制，提供单一版本链 + 角色标签的统一抽象。
 

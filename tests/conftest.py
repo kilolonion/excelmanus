@@ -7,8 +7,8 @@ import pytest
 from hypothesis import settings as hyp_settings, HealthCheck
 
 # ---------------------------------------------------------------------------
-# Hypothesis profiles: 本地开发默认 dev（快速），CI 通过
-# --hypothesis-profile=ci 切换到完整模式
+# Hypothesis 配置：本地开发默认 dev（快速），CI 使用完整模式；
+# 可通过 --hypothesis-profile=ci 切换。
 # ---------------------------------------------------------------------------
 hyp_settings.register_profile(
     "dev",

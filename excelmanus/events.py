@@ -21,6 +21,8 @@ class EventType(Enum):
     SUBAGENT_END = "subagent_end"
     SUBAGENT_ITERATION = "subagent_iteration"
     SUBAGENT_SUMMARY = "subagent_summary"
+    SUBAGENT_TOOL_START = "subagent_tool_start"
+    SUBAGENT_TOOL_END = "subagent_tool_end"
     CHAT_SUMMARY = "chat_summary"
     TASK_LIST_CREATED = "task_list_created"
     TASK_ITEM_UPDATED = "task_item_updated"
@@ -29,13 +31,16 @@ class EventType(Enum):
     APPROVAL_RESOLVED = "approval_resolved"
     THINKING_DELTA = "thinking_delta"
     TEXT_DELTA = "text_delta"
+    TOOL_CALL_ARGS_DELTA = "tool_call_args_delta"
     MODE_CHANGED = "mode_changed"
     EXCEL_PREVIEW = "excel_preview"
     EXCEL_DIFF = "excel_diff"
+    TEXT_DIFF = "text_diff"
     FILES_CHANGED = "files_changed"
     PIPELINE_PROGRESS = "pipeline_progress"
     MEMORY_EXTRACTED = "memory_extracted"
     FILE_DOWNLOAD = "file_download"
+    PLAN_CREATED = "plan_created"
 
 
 @dataclass
@@ -70,6 +75,7 @@ class ToolCallEvent:
     subagent_conversation_id: str = ""
     subagent_iterations: int = 0
     subagent_tool_calls: int = 0
+    subagent_tool_index: int = 0  # 子代理内部工具调用序号
     # 执行摘要字段
     total_iterations: int = 0
     total_tool_calls: int = 0
@@ -103,6 +109,7 @@ class ToolCallEvent:
     # 流式 delta 字段
     text_delta: str = ""
     thinking_delta: str = ""
+    args_delta: str = ""
     # 模式变更事件字段
     mode_name: str = ""        # "full_access" | "plan_mode"
     mode_enabled: bool = False
@@ -115,6 +122,12 @@ class ToolCallEvent:
     excel_truncated: bool = False
     excel_affected_range: str = ""
     excel_changes: List[Dict[str, Any]] = field(default_factory=list)
+    # text_diff 事件字段
+    text_diff_file_path: str = ""
+    text_diff_hunks: List[str] = field(default_factory=list)
+    text_diff_additions: int = 0
+    text_diff_deletions: int = 0
+    text_diff_truncated: bool = False
     # files_changed 事件字段
     changed_files: List[str] = field(default_factory=list)
     # pipeline_progress 事件字段
@@ -132,6 +145,10 @@ class ToolCallEvent:
     download_file_path: str = ""
     download_filename: str = ""
     download_description: str = ""
+    # plan_created 事件字段
+    plan_file_path: str = ""
+    plan_title: str = ""
+    plan_task_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

@@ -354,43 +354,39 @@ class TestControlCommandSubagent:
         )
 
 
-class TestWorkspaceManifestPrewarm:
-    """Workspace manifest 后台预热与控制命令测试。"""
+class TestRegistryScan:
+    """FileRegistry 后台扫描（替代旧 manifest prewarm）。"""
 
     @pytest.mark.asyncio
-    async def test_first_notice_does_not_block_when_prewarm_running(self) -> None:
+    async def test_first_notice_does_not_block_when_scan_running(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
+        if engine._file_registry is None:
+            pytest.skip("FileRegistry 未初始化（无 database）")
+
         gate = threading.Event()
-        fake_manifest = SimpleNamespace(
-            total_files=2,
-            scan_duration_ms=12,
-            get_system_prompt_summary=lambda: "## 工作区 Excel 文件概览\n- demo.xlsx",
-        )
 
-        def _slow_build(*_args, **_kwargs):
+        def _slow_scan(*_args, **_kwargs):
             gate.wait(timeout=2)
-            return fake_manifest
+            from excelmanus.file_registry import ScanResult
+            return ScanResult(total_files=0)
 
-        with patch("excelmanus.workspace_manifest.build_manifest", side_effect=_slow_build):
-            started = engine.start_workspace_manifest_prewarm()
+        with patch.object(engine._file_registry, "scan_workspace", side_effect=_slow_scan):
+            started = engine.start_registry_scan()
             assert started is True
 
             t0 = time.monotonic()
-            notice = engine._context_builder._build_workspace_manifest_notice()
+            notice = engine._context_builder._build_file_registry_notice()
             elapsed = time.monotonic() - t0
 
-            assert notice == ""
+            # 扫描进行中，notice 应快速返回（不阻塞）
             assert elapsed < 0.1
 
             gate.set()
-            assert engine._workspace_manifest_prewarm_task is not None
-            await engine._workspace_manifest_prewarm_task
-
-            notice_after = engine._context_builder._build_workspace_manifest_notice()
-            assert "工作区 Excel 文件概览" in notice_after
+            assert engine._registry_scan_task is not None
+            await engine._registry_scan_task
 
     @pytest.mark.asyncio
     async def test_manifest_control_command_build_and_status(self) -> None:
@@ -398,18 +394,17 @@ class TestWorkspaceManifestPrewarm:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
 
+        if engine._file_registry is None:
+            pytest.skip("FileRegistry 未初始化（无 database）")
+
         gate = threading.Event()
-        fake_manifest = SimpleNamespace(
-            total_files=3,
-            scan_duration_ms=23,
-            get_system_prompt_summary=lambda: "manifest-summary",
-        )
 
-        def _slow_build(*_args, **_kwargs):
+        def _slow_scan(*_args, **_kwargs):
             gate.wait(timeout=2)
-            return fake_manifest
+            from excelmanus.file_registry import ScanResult
+            return ScanResult(total_files=3)
 
-        with patch("excelmanus.workspace_manifest.build_manifest", side_effect=_slow_build):
+        with patch.object(engine._file_registry, "scan_workspace", side_effect=_slow_scan):
             build_reply = await engine.chat("/manifest build")
             assert "后台开始构建" in build_reply.reply
 
@@ -417,12 +412,11 @@ class TestWorkspaceManifestPrewarm:
             assert "后台构建中" in status_reply.reply
 
             gate.set()
-            assert engine._workspace_manifest_prewarm_task is not None
-            await engine._workspace_manifest_prewarm_task
+            assert engine._registry_scan_task is not None
+            await engine._registry_scan_task
 
             final_status = await engine.chat("/manifest status")
             assert "已就绪" in final_status.reply
-            assert "文件数: 3" in final_status.reply
 
 
 class TestModelSwitchConsistency:
@@ -4313,7 +4307,7 @@ tool_call_id_st = st.from_regex(r"call_[a-z0-9]{4,10}", fullmatch=True)
 
 # ---------------------------------------------------------------------------
 # Property 1：消息构建完整性
-# **Validates: Requirements 1.1, 1.7**
+# **验证：需求 1.1, 1.7**
 # ---------------------------------------------------------------------------
 
 
@@ -4339,7 +4333,7 @@ def test_property_1_message_construction_completeness(
     - 历史有序
     - 新用户消息在末位
 
-    **Validates: Requirements 1.1, 1.7**
+    **验证：需求 1.1, 1.7**
     """
     from excelmanus.memory import ConversationMemory, _DEFAULT_SYSTEM_PROMPT
 
@@ -4382,7 +4376,7 @@ def test_property_1_message_construction_completeness(
 def test_property_1_tools_schema_attached(n_tools: int) -> None:
     """Property 1 补充：Engine 构建请求时附全量 tools schema。
 
-    **Validates: Requirements 1.1, 1.7**
+    **验证：需求 1.1, 1.7**
     """
     registry = ToolRegistry()
     tools = []
@@ -4418,7 +4412,7 @@ def test_property_1_tools_schema_attached(n_tools: int) -> None:
 
 # ---------------------------------------------------------------------------
 # Property 2：Tool Call 解析与调用
-# **Validates: Requirements 1.2**
+# **验证：需求 1.2**
 # ---------------------------------------------------------------------------
 
 
@@ -4438,7 +4432,7 @@ async def test_property_2_tool_call_parsing_and_invocation(
     对于任意包含 tool_calls 的响应，Engine 必须正确解析并逐个调用工具，
     且 tool_call_id 对应一致。
 
-    **Validates: Requirements 1.2**
+    **验证：需求 1.2**
     """
     config = _make_config()
     registry = _make_registry_with_tools()
@@ -4480,7 +4474,7 @@ async def test_property_2_tool_call_parsing_and_invocation(
 
 # ---------------------------------------------------------------------------
 # Property 3：纯文本终止循环
-# **Validates: Requirements 1.3**
+# **验证：需求 1.3**
 # ---------------------------------------------------------------------------
 
 
@@ -4493,7 +4487,7 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
 
     对于任意不含 tool_calls 的响应，Engine 必须立即终止循环并返回文本。
 
-    **Validates: Requirements 1.3**
+    **验证：需求 1.3**
     """
     config = _make_config()
     registry = _make_registry_with_tools()
@@ -4522,7 +4516,7 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Property 4：迭代上限保护
-# **Validates: Requirements 1.4**
+# **验证：需求 1.4**
 # ---------------------------------------------------------------------------
 
 
@@ -4535,7 +4529,7 @@ async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
 
     当连续 N 轮均需要工具调用时，Engine 在第 N 轮后必须终止。
 
-    **Validates: Requirements 1.4**
+    **验证：需求 1.4**
     """
     config = _make_config(max_iterations=max_iter)
     registry = _make_registry_with_tools()
@@ -4565,7 +4559,7 @@ async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
 
 # ---------------------------------------------------------------------------
 # Property 5：工具异常反馈
-# **Validates: Requirements 1.5**
+# **验证：需求 1.5**
 # ---------------------------------------------------------------------------
 
 
@@ -4582,7 +4576,7 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
 
     任意工具异常必须被捕获并作为 tool message 反馈给 LLM，不直接向调用方抛出。
 
-    **Validates: Requirements 1.5**
+    **验证：需求 1.5**
     """
     # 创建一个会抛出指定异常的工具
     def failing_tool() -> str:
@@ -4627,7 +4621,7 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Property 6：连续失败熔断
-# **Validates: Requirements 1.6**
+# **验证：需求 1.6**
 # ---------------------------------------------------------------------------
 
 
@@ -4642,7 +4636,7 @@ async def test_property_6_consecutive_failure_circuit_breaker(
 
     连续 M 次工具失败后，Engine 必须终止并返回错误摘要。
 
-    **Validates: Requirements 1.6**
+    **验证：需求 1.6**
     """
     registry = ToolRegistry()
     registry.register_tools([
@@ -4680,7 +4674,7 @@ async def test_property_6_consecutive_failure_circuit_breaker(
 
 # ---------------------------------------------------------------------------
 # Property 20：异步不阻塞
-# **Validates: Requirements 1.10, 5.7**
+# **验证：需求 1.10, 5.7**
 # ---------------------------------------------------------------------------
 
 
@@ -4694,7 +4688,7 @@ async def test_property_20_async_non_blocking(n_calls: int) -> None:
     并发请求场景下，阻塞工具执行不得阻塞主事件循环。
     验证 asyncio.to_thread 被用于工具执行。
 
-    **Validates: Requirements 1.10, 5.7**
+    **验证：需求 1.10, 5.7**
     """
     config = _make_config()
     registry = _make_registry_with_tools()

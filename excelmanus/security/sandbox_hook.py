@@ -87,9 +87,9 @@ exec(compile(open(_script, encoding="utf-8").read(), _script, "exec"),
 '''
 
 _RED_FS_GUARD_TEMPLATE = '''\
-"""ExcelManus RED filesystem guard wrapper (Docker mode, auto-generated).
+"""ExcelManus RED 文件系统守卫包装（Docker 模式，自动生成）。
 
-RED tier 无 import/exec/socket 限制，仅保留：
+RED 层级无 import/exec/socket 限制，仅保留：
 - Filesystem Guard（工作区范围 + bench CoW + staging 重定向）
 - openpyxl atomic save 保护
 """

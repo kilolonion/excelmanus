@@ -73,7 +73,8 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 _ALWAYS_AVAILABLE_TOOLS = (
-    "task_create", "task_update", "ask_user", "delegate",
+    "task_create", "task_update", "write_plan", "edit_text_file",
+    "ask_user", "delegate",
     "delegate_to_subagent", "parallel_delegate",
     "memory_save", "memory_read_topic",
 )
@@ -98,23 +99,6 @@ _SKILL_AGENT_ALIASES = {
     "generalpurpose": "subagent",
     "analyst": "subagent",
 }
-
-# ── 子代理自动选择：关键词规则 ──────────────────────────────
-# 写入意图关键词：命中时优先使用通用 subagent（避免 explorer 被误选）
-_WRITE_INTENT_KEYWORDS: frozenset[str] = frozenset({
-    "写入", "修改", "删除", "创建", "生成", "新增", "插入", "替换", "更新",
-    "保存", "导出", "输出", "覆盖", "追加", "合并", "拆分", "格式化",
-    "画图", "图表", "公式", "计算列", "vlookup", "运行", "执行",
-    "write", "create", "delete", "update", "save", "export", "run",
-})
-# 只读意图关键词：命中时优先使用 explorer
-_READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
-    "查看", "分析", "读取", "统计", "定位", "检查", "预览", "概况",
-    "列出", "搜索", "查找", "对比", "比较", "探索", "浏览", "扫描",
-    "有哪些", "多少", "几个", "什么结构", "哪些列", "哪些sheet",
-    "read", "analyze", "inspect", "list", "search", "find", "explore",
-    "preview", "scan", "count", "structure",
-})
 
 # ── 审批解析器回调类型 ──────────────────────────────────────
 # 返回值为 "accept" / "reject" / "fullaccess" / None（None 等同 reject）。
@@ -906,6 +890,11 @@ class AgentEngine:
         # 任务清单存储：单会话内存级，闭包注入避免全局状态污染
         self._task_store = TaskStore()
         self._registry.register_tools(task_tools.get_tools(self._task_store))
+        # 计划文档工具：绑定 TaskStore + workspace，write_plan 一次调用生成文档+TaskList
+        from excelmanus.tools import plan_tools
+        self._registry.register_tools(
+            plan_tools.get_tools(self._task_store, config.workspace_root)
+        )
         # U1 修复：注册 introspect_capability 工具
         register_introspection_tools(self._registry)
         # 会话级权限控制：默认限制代码 Skillpack，显式 /fullaccess 后解锁
@@ -941,18 +930,26 @@ class AgentEngine:
                 root_dir=config.workspace_root,
                 transaction_enabled=config.backup_enabled,
             )
-        # 统一文件版本管理器（会话级实例）
-        from excelmanus.file_versions import FileVersionManager as _FVM
-        self._fvm = _FVM(Path(config.workspace_root))
+        # ── FileRegistry（元数据 + 版本管理统一接口）────
+        self._file_registry: Any = None
+        if database is not None:
+            try:
+                from excelmanus.file_registry import FileRegistry
+                self._file_registry = FileRegistry(
+                    database, self._config.workspace_root, enable_versions=True,
+                )
+            except Exception:
+                logger.debug("FileRegistry 初始化失败", exc_info=True)
         self._transaction: WorkspaceTransaction | None = (
-            self._workspace.create_transaction(fvm=self._fvm)
+            self._workspace.create_transaction(
+                registry=self._file_registry,
+            )
             if self._workspace.transaction_enabled
             else None
         )
-        # 将 fvm 共享给 ApprovalManager
-        self._approval._fvm = self._fvm
-        # 将 fvm 共享给 SessionState（CoW 注册表统一）
-        self._state._fvm = self._fvm
+        # 将 registry 共享给 ApprovalManager / SessionState
+        self._approval._file_registry = self._file_registry
+        self._state._file_registry = self._file_registry
         self._sandbox_env: SandboxEnv = self._workspace.create_sandbox_env(
             transaction=self._transaction,
         )
@@ -1042,11 +1039,11 @@ class AgentEngine:
                 self._llm_call_store = _LCS(database, user_id=user_id)
             except Exception:
                 logger.debug("LLM 调用日志初始化失败", exc_info=True)
-        self._workspace_manifest: Any = None  # 类型：WorkspaceManifest | None
-        self._workspace_manifest_built: bool = False
+        # manifest 基础设施已移除，仅保留 FileRegistry scan 相关状态
+        self._registry_scan_task: asyncio.Task[Any] | None = None
+        self._registry_scan_done: bool = False
+        self._registry_scan_error: str | None = None
         self._manifest_refresh_needed: bool = False
-        self._workspace_manifest_prewarm_task: asyncio.Task[Any] | None = None
-        self._workspace_manifest_last_error: str | None = None
 
         # ── 持久记忆集成 ────────────────────────
         self._persistent_memory = persistent_memory
@@ -1413,95 +1410,75 @@ class AgentEngine:
             "turn_index": turn_index,
         }
 
-    async def _build_workspace_manifest_prewarm(self, *, silent: bool = True) -> None:
-        """后台构建 workspace manifest，完成后写入缓存。"""
+    async def _run_registry_scan(self) -> None:
+        """后台执行 FileRegistry 全量扫描。"""
+        if self._file_registry is None:
+            return
         try:
-            from excelmanus.workspace_manifest import build_manifest
-
-            manifest = await asyncio.to_thread(
-                build_manifest,
-                self._config.workspace_root,
-                silent=silent,
-                database=self._database,
-            )
+            await asyncio.to_thread(self._file_registry.scan_workspace)
+            self._registry_scan_done = True
+            self._registry_scan_error = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            self._workspace_manifest = None
-            self._workspace_manifest_built = False
-            self._workspace_manifest_last_error = str(exc) or exc.__class__.__name__
-            logger.debug("Workspace manifest 后台预热失败", exc_info=True)
-            return
+            self._registry_scan_done = False
+            self._registry_scan_error = str(exc) or exc.__class__.__name__
+            logger.debug("FileRegistry 后台扫描失败", exc_info=True)
 
-        self._workspace_manifest = manifest
-        self._workspace_manifest_built = True
-        self._workspace_manifest_last_error = None
-
-    def start_workspace_manifest_prewarm(self, *, force: bool = False) -> bool:
-        """启动 workspace manifest 后台预热（非阻塞）。"""
-        task = self._workspace_manifest_prewarm_task
+    def start_registry_scan(self, *, force: bool = False) -> bool:
+        """启动 FileRegistry 后台扫描。"""
+        if self._file_registry is None:
+            return False
+        task = self._registry_scan_task
         if task is not None and not task.done():
             return False
-
-        if not force and self._workspace_manifest_built and self._workspace_manifest is not None:
+        if not force and self._registry_scan_done:
             return False
-
-        if force:
-            self._workspace_manifest = None
-            self._workspace_manifest_built = False
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.debug("当前线程无运行中的事件循环，跳过 workspace manifest 预热")
+            logger.debug("当前线程无运行中的事件循环，跳过 FileRegistry 扫描")
             return False
 
-        self._workspace_manifest_last_error = None
-        self._workspace_manifest_prewarm_task = loop.create_task(
-            self._build_workspace_manifest_prewarm(silent=True)
-        )
+        self._registry_scan_error = None
+        self._registry_scan_task = loop.create_task(self._run_registry_scan())
         return True
 
-    async def await_workspace_manifest(self, timeout: float = 3.0) -> bool:
-        """等待后台 manifest 预热完成，超时则放弃（不阻塞对话）。
-
-        在首轮对话构建 system prompt 前调用，给后台任务一个短暂的等待窗口，
-        使第一条消息就能拿到工作区概览。超时后静默返回，不影响对话流程。
-
-        Returns:
-            True 表示 manifest 已就绪，False 表示超时或无任务。
-        """
-        if self._workspace_manifest_built and self._workspace_manifest is not None:
+    async def await_registry_scan(self, timeout: float = 3.0) -> bool:
+        """等待 FileRegistry 扫描完成。"""
+        if self._registry_scan_done:
             return True
-        task = self._workspace_manifest_prewarm_task
+        task = self._registry_scan_task
         if task is None or task.done():
-            return self._workspace_manifest is not None
+            return self._registry_scan_done
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.debug("await_workspace_manifest 超时 (%.1fs)，继续对话", timeout)
+            logger.debug("await FileRegistry scan 超时 (%.1fs)，继续对话", timeout)
             return False
         except Exception:  # noqa: BLE001
-            logger.debug("await_workspace_manifest 异常", exc_info=True)
+            logger.debug("await FileRegistry scan 异常", exc_info=True)
             return False
-        return self._workspace_manifest is not None
+        return self._registry_scan_done
 
     @property
-    def workspace_manifest(self) -> Any:
-        """工作区 Manifest 缓存（只读）。"""
-        return self._workspace_manifest
+    def file_registry(self) -> Any:
+        """FileRegistry 实例（只读）。"""
+        return self._file_registry
 
-    def workspace_manifest_build_status(self) -> dict[str, Any]:
-        """返回 workspace manifest 后台构建状态。"""
-        if self._workspace_manifest_built and self._workspace_manifest is not None:
+    def registry_scan_status(self) -> dict[str, Any]:
+        """返回 FileRegistry 扫描状态。"""
+        if self._registry_scan_done:
+            reg_count = len(self._file_registry.list_all()) if self._file_registry else 0
             return {
                 "state": "ready",
-                "total_files": int(getattr(self._workspace_manifest, "total_files", 0)),
-                "scan_duration_ms": int(getattr(self._workspace_manifest, "scan_duration_ms", 0)),
+                "total_files": reg_count,
+                "scan_duration_ms": None,
                 "error": None,
+                "registry_files": reg_count,
             }
-
-        task = self._workspace_manifest_prewarm_task
+        task = self._registry_scan_task
         if task is not None and not task.done():
             return {
                 "state": "building",
@@ -1509,15 +1486,13 @@ class AgentEngine:
                 "scan_duration_ms": None,
                 "error": None,
             }
-
-        if self._workspace_manifest_last_error:
+        if self._registry_scan_error:
             return {
                 "state": "error",
                 "total_files": None,
                 "scan_duration_ms": None,
-                "error": self._workspace_manifest_last_error,
+                "error": self._registry_scan_error,
             }
-
         return {
             "state": "idle",
             "total_files": None,
@@ -1525,22 +1500,21 @@ class AgentEngine:
             "error": None,
         }
 
-    async def _cancel_workspace_manifest_prewarm(self) -> None:
-        """取消进行中的 workspace manifest 后台预热任务。"""
-        task = self._workspace_manifest_prewarm_task
+    async def _cancel_registry_scan(self) -> None:
+        """取消进行中的 FileRegistry 扫描任务。"""
+        task = self._registry_scan_task
         if task is None or task.done():
             return
-
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.debug("取消 workspace manifest 预热任务时发生异常", exc_info=True)
+            logger.debug("取消 FileRegistry 扫描任务时发生异常", exc_info=True)
         finally:
-            if self._workspace_manifest_prewarm_task is task:
-                self._workspace_manifest_prewarm_task = None
+            if self._registry_scan_task is task:
+                self._registry_scan_task = None
 
     async def extract_and_save_memory(
         self,
@@ -1603,7 +1577,7 @@ class AgentEngine:
 
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
-        await self._cancel_workspace_manifest_prewarm()
+        await self._cancel_registry_scan()
 
         if self._active_skills:
             _primary = self._active_skills[-1]
@@ -1796,9 +1770,11 @@ class AgentEngine:
         return self._workspace
 
     @property
-    def file_version_manager(self) -> "FileVersionManager":
-        """统一文件版本管理器（会话级实例）。"""
-        return self._fvm
+    def file_version_manager(self) -> Any:
+        """统一文件版本管理器（委托 FileRegistry）。"""
+        if self._file_registry is not None and self._file_registry.has_versions:
+            return self._file_registry.fvm
+        return None
 
     @property
     def transaction(self) -> WorkspaceTransaction | None:
@@ -3535,17 +3511,9 @@ class AgentEngine:
 
     @staticmethod
     def _normalize_subagent_file_paths(file_paths: list[Any] | None) -> list[str]:
-        """规范化 subagent 输入文件路径。"""
-        if not file_paths:
-            return []
-        normalized: list[str] = []
-        for item in file_paths:
-            if not isinstance(item, str):
-                continue
-            path = item.strip()
-            if path:
-                normalized.append(path)
-        return normalized
+        """规范化 subagent 输入文件路径。委托给 SubagentOrchestrator。"""
+        from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
+        return SubagentOrchestrator.normalize_file_paths(file_paths)
 
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""
@@ -3568,31 +3536,10 @@ class AgentEngine:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """基于关键词规则选择子代理（不调用 LLM）。
-
-        规则优先级：
-        1. 任务文本含写入意图关键词 → subagent（通用全能力）
-        2. 任务文本含只读意图关键词且 explorer 可用 → explorer
-        3. 以上均未命中 → subagent（安全回退）
-        """
-        _, candidates = self._subagent_registry.build_catalog()
-        if not candidates:
-            return "subagent"
-
-        candidate_set = set(candidates)
-        task_lower = task.lower()
-
-        # 写入意图优先：一旦命中写入关键词，直接走通用 subagent
-        has_write_intent = any(kw in task_lower for kw in _WRITE_INTENT_KEYWORDS)
-        if has_write_intent:
-            return "subagent"
-
-        # 只读意图：命中且 explorer 已注册
-        has_read_intent = any(kw in task_lower for kw in _READ_INTENT_KEYWORDS)
-        if has_read_intent and "explorer" in candidate_set:
-            return "explorer"
-
-        return "subagent"
+        """基于关键词规则选择子代理。委托给 SubagentOrchestrator。"""
+        return await self._subagent_orchestrator.auto_select_subagent(
+            task=task, file_paths=file_paths,
+        )
 
     async def run_subagent(
         self,
@@ -4597,7 +4544,7 @@ class AgentEngine:
             if iteration == start_iteration:
                 # 首轮：给事件循环一个 tick 处理已完成的线程回调，再短暂等待 manifest
                 await asyncio.sleep(0)
-                await self.await_workspace_manifest(timeout=0.05)
+                await self.await_registry_scan(timeout=0.05)
                 self._emit(
                     on_event,
                     ToolCallEvent(
@@ -5329,17 +5276,20 @@ class AgentEngine:
             # ── Turn Checkpoint：每轮结束后对被修改文件做快照 ──
             if self._checkpoint_enabled and self._has_write_tool_call:
                 try:
-                    dirty = list(self._fvm.staged_file_map().keys()) or list(
-                        self._fvm.list_all_tracked()
+                    _reg = self._file_registry
+                    if _reg is None or not _reg.has_versions:
+                        raise RuntimeError("checkpoint requires FileRegistry with versions")
+                    dirty = list(_reg.staged_file_map().keys()) or list(
+                        _reg.list_all_tracked()
                     )
                     turn_tools = [
                         r.tool_name for r in all_tool_results
                         if r.tool_name and r.success
                     ]
-                    cp = self._fvm.create_turn_checkpoint(
+                    cp = _reg.create_turn_checkpoint(
                         turn_number=iteration,
                         dirty_files=dirty,
-                        tool_names=turn_tools[-5:],  # 只保留最近 5 个工具名
+                        tool_names=turn_tools[-5:],
                     )
                     if cp:
                         logger.debug(
@@ -5501,18 +5451,16 @@ class AgentEngine:
         )
 
     def _try_refresh_manifest(self) -> None:
-        """写入操作后增量刷新 Workspace Manifest（debounce：每轮最多一次）。"""
-        if not self._manifest_refresh_needed or self._workspace_manifest is None:
+        """写入操作后增量刷新 FileRegistry（debounce：每轮最多一次）。"""
+        if not self._manifest_refresh_needed:
             return
         self._manifest_refresh_needed = False
-        try:
-            from excelmanus.workspace_manifest import refresh_manifest
-            self._workspace_manifest = refresh_manifest(
-                self._workspace_manifest, database=self._database,
-            )
-            logger.info("Workspace manifest 增量刷新完成")
-        except Exception:
-            logger.debug("Workspace manifest 增量刷新失败", exc_info=True)
+        if self._file_registry is not None:
+            try:
+                self._file_registry.scan_workspace()
+                logger.info("FileRegistry 增量刷新完成")
+            except Exception:
+                logger.debug("FileRegistry 增量刷新失败", exc_info=True)
 
     async def _execute_tool_call(
         self,
@@ -6716,6 +6664,7 @@ class AgentEngine:
                         pipeline_stage="generating_tool_call",
                         pipeline_message="正在生成工具调用...",
                     ))
+                _TEXT_STREAMING_TOOLS = {"write_text_file", "edit_text_file", "write_plan"}
                 for tc_delta in delta_tool_calls:
                     idx = getattr(tc_delta, "index", 0)
                     if idx not in tool_calls_accumulated:
@@ -6732,6 +6681,16 @@ class AgentEngine:
                         args = getattr(fn, "arguments", None)
                         if args:
                             tool_calls_accumulated[idx]["arguments"] += args
+                            # 为文本写入工具发射流式参数 delta 事件
+                            _tc_name = tool_calls_accumulated[idx]["name"]
+                            if _tc_name in _TEXT_STREAMING_TOOLS:
+                                self._emit(on_event, ToolCallEvent(
+                                    event_type=EventType.TOOL_CALL_ARGS_DELTA,
+                                    tool_call_id=tool_calls_accumulated[idx]["id"],
+                                    tool_name=_tc_name,
+                                    args_delta=args,
+                                    iteration=iteration,
+                                ))
                     tc_id = getattr(tc_delta, "id", None)
                     if tc_id:
                         tool_calls_accumulated[idx]["id"] = tc_id

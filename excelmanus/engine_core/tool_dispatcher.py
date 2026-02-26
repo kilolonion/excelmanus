@@ -736,8 +736,11 @@ class ToolDispatcher:
             READ_ONLY_SAFE_TOOLS,
         )
 
+        # 优先从 FileRegistry 查询 CoW 重定向，回退到 state.cow_path_registry
+        _file_reg = self._engine.file_registry
+        _use_file_reg = _file_reg is not None and _file_reg.has_versions
         registry = self._engine.state.cow_path_registry
-        if not registry:
+        if not registry and not _use_file_reg:
             return arguments, []
 
         path_fields: list[str] = []
@@ -772,7 +775,12 @@ class ToolDispatcher:
             rel_path = raw_str
             if workspace_root and raw_str.startswith(workspace_root):
                 rel_path = raw_str[len(workspace_root):].lstrip("/")
-            redirect = registry.get(rel_path)
+            # 优先从 FileRegistry 查询，回退到 state dict
+            redirect = None
+            if _use_file_reg:
+                redirect = _file_reg.lookup_cow_redirect(rel_path)
+            if redirect is None:
+                redirect = registry.get(rel_path)
             if redirect is not None:
                 # 保持原始路径格式（绝对/相对）
                 if raw_str.startswith(workspace_root):
@@ -1997,8 +2005,76 @@ class ToolDispatcher:
                         if _pv:
                             _state.record_affected_file(_pv)
 
-        # 任务清单事件：成功执行 task_create/task_update 后发射对应事件
-        if success and tool_name == "task_create":
+        # 写后事件记录到 FileRegistry
+        if success:
+            _freg = e.file_registry
+            if _freg is not None:
+                try:
+                    _write_paths: list[str] = []
+                    if tool_name in self._EXCEL_WRITE_TOOLS:
+                        _wp = (arguments.get("file_path") or "").strip()
+                        if _wp:
+                            _write_paths.append(_wp)
+                    elif e.get_tool_write_effect(tool_name) == "workspace_write":
+                        for _pk2 in ("file_path", "output_path", "path", "target_path"):
+                            _pv2 = (arguments.get(_pk2) or "").strip()
+                            if _pv2:
+                                _write_paths.append(_pv2)
+                    for _wpath in _write_paths:
+                        _entry = _freg.get_by_path(_wpath)
+                        if _entry is not None:
+                            _freg.record_event(
+                                _entry.id,
+                                "tool_write",
+                                tool_name=tool_name,
+                                turn=e.state.session_turn,
+                            )
+                except Exception:
+                    logger.debug("FileRegistry 写后事件记录失败", exc_info=True)
+
+        # 任务清单事件：成功执行 task_create/task_update/write_plan 后发射对应事件
+        if success and tool_name == "write_plan":
+            task_list = e._task_store.current
+            if task_list is not None:
+                plan_path = e._task_store.plan_file_path or ""
+                e.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PLAN_CREATED,
+                        plan_file_path=plan_path,
+                        plan_title=task_list.title,
+                        plan_task_count=len(task_list.items),
+                    ),
+                )
+                # 同时发射 TASK_LIST_CREATED 以复用前端任务清单渲染
+                e.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TASK_LIST_CREATED,
+                        task_list_data=task_list.to_dict(),
+                    ),
+                )
+            # write_plan 返回纯文本（非 JSON），_emit_excel_events 无法检测 _text_diff，
+            # 因此在此处直接计算 diff 并发射 TEXT_DIFF 事件。
+            _plan_content = (arguments.get("content") or "").strip()
+            _plan_path = e._task_store.plan_file_path or ""
+            if _plan_content and _plan_path and on_event is not None:
+                from excelmanus.tools.code_tools import _generate_text_diff
+                _td = _generate_text_diff("", _plan_content, _plan_path)
+                if _td is not None:
+                    e.emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.TEXT_DIFF,
+                            tool_call_id=tool_call_id,
+                            text_diff_file_path=_td.get("file_path", ""),
+                            text_diff_hunks=_td.get("hunks", [])[:300],
+                            text_diff_additions=_td.get("additions", 0),
+                            text_diff_deletions=_td.get("deletions", 0),
+                            text_diff_truncated=_td.get("truncated", False),
+                        ),
+                    )
+        elif success and tool_name == "task_create":
             task_list = e._task_store.current
             if task_list is not None:
                 e.emit(
@@ -2205,6 +2281,24 @@ class ToolDispatcher:
                         excel_sheet=diff_data.get("sheet", ""),
                         excel_affected_range=diff_data.get("affected_range", ""),
                         excel_changes=changes[:200],
+                    ),
+                )
+
+        # _text_diff 对应 TEXT_DIFF（write_text_file / edit_text_file 在结果中附带）
+        text_diff_data = parsed.get("_text_diff")
+        if isinstance(text_diff_data, dict):
+            hunks = text_diff_data.get("hunks", [])
+            if hunks:
+                e.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TEXT_DIFF,
+                        tool_call_id=tool_call_id,
+                        text_diff_file_path=text_diff_data.get("file_path", ""),
+                        text_diff_hunks=hunks[:300],
+                        text_diff_additions=text_diff_data.get("additions", 0),
+                        text_diff_deletions=text_diff_data.get("deletions", 0),
+                        text_diff_truncated=text_diff_data.get("truncated", False),
                     ),
                 )
 

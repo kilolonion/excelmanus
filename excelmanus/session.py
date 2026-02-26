@@ -158,10 +158,9 @@ class SessionManager:
                 )
 
     def set_sandbox_docker_enabled(self, enabled: bool) -> None:
-        """Update the Docker sandbox flag (called by API lifespan).
+        """更新 Docker 沙盒开关（由 API lifespan 调用）。
 
-        Also propagates to all active sessions so that existing sessions
-        pick up the change without requiring recreation.
+        同时同步到所有活跃会话，使已有会话无需重建即可生效。
         """
         self._sandbox_config = SandboxConfig(docker_enabled=enabled)
         for entry in self._sessions.values():
@@ -173,18 +172,22 @@ class SessionManager:
             )
 
     def notify_file_deleted(self, file_path: str) -> None:
-        """W4: 通知所有活跃 session 的 FVM 文件已被删除，清理 staging 条目。"""
+        """W4: 通知所有活跃 session 文件已被删除，清理 staging 条目。"""
         for entry in self._sessions.values():
             try:
-                entry.engine._fvm.remove_staging_for_path(file_path)
+                _reg = entry.engine.file_registry
+                if _reg is not None and _reg.has_versions:
+                    _reg.remove_staging_for_path(file_path)
             except Exception:
                 pass
 
     def notify_file_renamed(self, old_path: str, new_path: str) -> None:
-        """W5: 通知所有活跃 session 的 FVM 文件已被重命名，更新 staging 条目。"""
+        """W5: 通知所有活跃 session 文件已被重命名，更新 staging 条目。"""
         for entry in self._sessions.values():
             try:
-                entry.engine._fvm.rename_staging_path(old_path, new_path)
+                _reg = entry.engine.file_registry
+                if _reg is not None and _reg.has_versions:
+                    _reg.rename_staging_path(old_path, new_path)
             except Exception:
                 pass
 
@@ -390,7 +393,7 @@ class SessionManager:
                     engine.set_model_capabilities(caps)
             except Exception:
                 logger.debug("加载模型能力缓存失败", exc_info=True)
-        engine.start_workspace_manifest_prewarm()
+        engine.start_registry_scan()
         return engine
 
 

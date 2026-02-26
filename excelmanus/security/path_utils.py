@@ -1,6 +1,6 @@
 """路径校验公共工具：工作区范围内路径解析与转换。
 
-收敛 FileAccessGuard、WorkspaceTransaction、FileVersionManager 中
+收敛 FileAccessGuard、WorkspaceTransaction、FileRegistry 中
 重复的「路径在工作区内」校验逻辑为单一入口。
 
 注意：sandbox_hook 在子进程内运行，无法直接引用本模块，

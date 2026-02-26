@@ -168,6 +168,8 @@ class TestRedirectCowPaths:
         _state = SessionState()
         engine._state = _state
         engine.state = _state
+        # file_registry 默认不可用，避免 MagicMock 自动创建导致误匹配
+        engine.file_registry = None
         if registry:
             _state.register_cow_mappings(registry)
         engine.config.workspace_root = workspace_root
@@ -234,7 +236,7 @@ class TestRedirectCowPaths:
 
 
 class TestBuildCowPathNotice:
-    """ContextBuilder._build_cow_path_notice 测试。"""
+    """ContextBuilder._build_file_registry_notice CoW 部分测试（统一接口）。"""
 
     def _make_builder(self, registry: dict[str, str] | None = None):
         from excelmanus.engine_core.context_builder import ContextBuilder
@@ -243,6 +245,8 @@ class TestBuildCowPathNotice:
         _state = SessionState()
         engine._state = _state
         engine.state = _state
+        # 禁用 FileRegistry，只测试 CoW 映射注入
+        engine.file_registry = None
         if registry:
             _state.register_cow_mappings(registry)
         builder = ContextBuilder(engine)
@@ -250,13 +254,13 @@ class TestBuildCowPathNotice:
 
     def test_empty_registry_returns_empty(self):
         builder = self._make_builder()
-        assert builder._build_cow_path_notice() == ""
+        assert builder._build_file_registry_notice() == ""
 
     def test_single_mapping_notice(self):
         builder = self._make_builder(
             registry={"bench/external/data.xlsx": "outputs/data.xlsx"},
         )
-        notice = builder._build_cow_path_notice()
+        notice = builder._build_file_registry_notice()
         assert "⚠️ 文件保护路径映射（CoW）" in notice
         assert "bench/external/data.xlsx" in notice
         assert "outputs/data.xlsx" in notice
@@ -269,7 +273,7 @@ class TestBuildCowPathNotice:
                 "bench/external/b.xlsx": "outputs/b.xlsx",
             },
         )
-        notice = builder._build_cow_path_notice()
+        notice = builder._build_file_registry_notice()
         assert "a.xlsx" in notice
         assert "b.xlsx" in notice
         # 应该是表格格式
@@ -279,6 +283,6 @@ class TestBuildCowPathNotice:
         builder = self._make_builder(
             registry={"src.xlsx": "outputs/src.xlsx"},
         )
-        notice = builder._build_cow_path_notice()
+        notice = builder._build_file_registry_notice()
         assert "| 原始路径（禁止访问） | 副本路径（请使用） |" in notice
         assert "| `src.xlsx` | `outputs/src.xlsx` |" in notice

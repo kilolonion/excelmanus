@@ -4,7 +4,7 @@
 
 Property 1: B1 所有退出路径调用 manifest 刷新
 Property 2: B1 run_code 成功后置位刷新标记
-Property 3: B3 构建失败后 _workspace_manifest_built 保持 False
+Property 3: B3 构建失败后 _registry_scan_done 保持 False
 Property 4: B4 非法阈值使用默认值
 Property 5: U1 初始化后 introspect_capability 可用
 Property 6: Preservation — max_iter 路径行为不变
@@ -27,10 +27,10 @@ from hypothesis import strategies as st
 
 
 def _make_engine_stub(built: bool = False) -> MagicMock:
-    """构造一个最小化的 engine stub，模拟 context_builder 所需属性。"""
+    """构造一个最小化的 engine stub，模拟 registry scan 所需属性。"""
     e = MagicMock()
-    e._workspace_manifest_built = built
-    e._workspace_manifest = None
+    e._registry_scan_done = built
+    e._file_registry = None
     e._config.workspace_root = "/fake/workspace"
     return e
 
@@ -42,81 +42,81 @@ def _make_context_builder(engine_stub: MagicMock) -> MagicMock:
     return cb
 
 
-def _run_build_workspace_manifest(engine_stub: MagicMock, raises: bool) -> None:
-    """直接执行 context_builder 中 _build_workspace_manifest 的核心逻辑。
+def _run_registry_scan(engine_stub: MagicMock, raises: bool) -> None:
+    """模拟 FileRegistry 后台扫描的核心逻辑。
 
-    复制修复后的代码逻辑，用于独立验证，不依赖完整 ContextBuilder 实例化。
+    复制修复后的代码逻辑，用于独立验证，不依赖完整引擎实例化。
     """
     import logging
     logger = logging.getLogger(__name__)
 
     e = engine_stub
-    if not e._workspace_manifest_built:
+    if not e._registry_scan_done:
         try:
             if raises:
                 raise OSError("模拟磁盘 I/O 错误")
-            # 模拟成功构建
-            e._workspace_manifest = object()
-            e._workspace_manifest_built = True
+            # 模拟成功扫描
+            e._file_registry = object()
+            e._registry_scan_done = True
         except Exception:
-            logger.debug("Workspace manifest 构建失败（测试模拟）")
-            e._workspace_manifest = None
-            # _workspace_manifest_built 保持 False
+            logger.debug("FileRegistry 扫描失败（测试模拟）")
+            e._file_registry = None
+            # _registry_scan_done 保持 False
 
 
-class TestB3ManifestBuildFailureRecoverable:
-    """Property 3: build_manifest 失败后 _workspace_manifest_built 保持 False。"""
+class TestB3RegistryScanFailureRecoverable:
+    """Property 3: registry scan 失败后 _registry_scan_done 保持 False。"""
 
     @given(st.booleans())
-    def test_property3_failure_keeps_built_false(self, raises: bool) -> None:
-        """对任意 raises 值：失败时 built=False，成功时 built=True。"""
+    def test_property3_failure_keeps_scan_done_false(self, raises: bool) -> None:
+        """对任意 raises 值：失败时 done=False，成功时 done=True。"""
         engine = _make_engine_stub(built=False)
-        _run_build_workspace_manifest(engine, raises=raises)
+        _run_registry_scan(engine, raises=raises)
 
         if raises:
             # Property 3: 失败后保持 False，允许重试
-            assert engine._workspace_manifest_built is False
-            assert engine._workspace_manifest is None
+            assert engine._registry_scan_done is False
+            assert engine._file_registry is None
         else:
             # Property 7 (preservation): 成功后置 True，缓存结果
-            assert engine._workspace_manifest_built is True
-            assert engine._workspace_manifest is not None
+            assert engine._registry_scan_done is True
+            assert engine._file_registry is not None
 
     def test_property3_failure_then_retry_succeeds(self) -> None:
-        """失败后再次调用能成功构建（可恢复性验证）。"""
+        """失败后再次调用能成功扫描（可恢复性验证）。"""
         engine = _make_engine_stub(built=False)
 
         # 第一次：失败
-        _run_build_workspace_manifest(engine, raises=True)
-        assert engine._workspace_manifest_built is False
+        _run_registry_scan(engine, raises=True)
+        assert engine._registry_scan_done is False
 
         # 第二次：成功
-        _run_build_workspace_manifest(engine, raises=False)
-        assert engine._workspace_manifest_built is True
-        assert engine._workspace_manifest is not None
+        _run_registry_scan(engine, raises=False)
+        assert engine._registry_scan_done is True
+        assert engine._file_registry is not None
 
 
-class TestB3ManifestBuildCachePreservation:
-    """Property 7: build_manifest 成功后多次调用仅构建一次。"""
+class TestB3RegistryScanCachePreservation:
+    """Property 7: registry scan 成功后多次调用仅扫描一次。"""
 
     @given(st.integers(min_value=2, max_value=10))
     def test_property7_cache_reuse(self, call_count: int) -> None:
-        """成功构建后，后续 call_count 次调用均复用缓存，不重复构建。"""
-        build_call_count = 0
+        """成功扫描后，后续 call_count 次调用均复用缓存，不重复扫描。"""
+        scan_call_count = 0
 
         def run_once(engine: MagicMock) -> None:
-            nonlocal build_call_count
-            if not engine._workspace_manifest_built:
-                build_call_count += 1
-                engine._workspace_manifest = object()
-                engine._workspace_manifest_built = True
+            nonlocal scan_call_count
+            if not engine._registry_scan_done:
+                scan_call_count += 1
+                engine._file_registry = object()
+                engine._registry_scan_done = True
 
         engine = _make_engine_stub(built=False)
         for _ in range(call_count):
             run_once(engine)
 
-        assert build_call_count == 1
-        assert engine._workspace_manifest_built is True
+        assert scan_call_count == 1
+        assert engine._registry_scan_done is True
 
 
 # ---------------------------------------------------------------------------
@@ -241,23 +241,24 @@ class TestB1ManifestRefreshOnExit:
         text_reply_source = inspect.getsource(AgentEngine._handle_text_reply)
         assert "_finalize_result(" in text_reply_source
 
-    def test_property1_pending_approval_calls_refresh(self) -> None:
-        """pending_approval 退出路径调用 _try_refresh_manifest。"""
+    def test_property1_pending_approval_handled_inline(self) -> None:
+        """pending_approval 在循环内内联处理（不再有独立退出路径）。"""
         from excelmanus.engine import AgentEngine
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
-        block = source[source.find("工具调用进入待确认队列"):]
-        assert "return _finalize_result(" in block
+        # P6: 审批已改为内联解决，验证内联审批代码存在
+        assert "tc_result.pending_approval" in source
+        assert "内联审批" in source
 
-    def test_property1_ask_user_calls_refresh(self) -> None:
-        """ask_user 退出路径调用 _try_refresh_manifest。"""
+    def test_property1_ask_user_handled_blocking(self) -> None:
+        """ask_user 在循环内阻塞等待（不再有独立退出路径）。"""
         from excelmanus.engine import AgentEngine
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
 
-        block = source[source.find("命中 ask_user，进入待回答状态"):]
-        assert "return _finalize_result(" in block
+        # P6: ask_user 已改为阻塞式，循环不中断
+        assert "旧的 ask_user 退出路径已移除" in source
 
     def test_property1_breaker_calls_refresh(self) -> None:
         """breaker_triggered 退出路径调用 _try_refresh_manifest。"""

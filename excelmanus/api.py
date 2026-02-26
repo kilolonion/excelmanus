@@ -291,7 +291,25 @@ _rules_manager: Any = None  # 类型：RulesManager | None
 _api_persistent_memory: Any = None  # 类型：PersistentMemory | None（API 层共享）
 _database: Any = None  # 类型：Database | None
 _config_store: Any = None  # 类型：ConfigStore | None
+_file_registries: dict[str, Any] = {}  # workspace_root → FileRegistry（上传接入）
 _router = APIRouter()
+
+
+def _get_file_registry(workspace_root: str) -> Any:
+    """获取或懒创建指定工作区的 FileRegistry 实例。"""
+    if _database is None:
+        return None
+    reg = _file_registries.get(workspace_root)
+    if reg is not None:
+        return reg
+    try:
+        from excelmanus.file_registry import FileRegistry
+        reg = FileRegistry(_database, workspace_root)
+        _file_registries[workspace_root] = reg
+        return reg
+    except Exception:
+        logger.debug("FileRegistry 创建失败 (%s)", workspace_root, exc_info=True)
+        return None
 
 
 def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
@@ -1573,7 +1591,13 @@ async def checkpoint_list(session_id: str, request: Request) -> JSONResponse:
         return JSONResponse(status_code=200, content={
             "checkpoints": [], "checkpoint_enabled": False,
         })
-    cps = engine.file_version_manager.list_turn_checkpoints()
+    _reg = engine.file_registry
+    if _reg is None or not getattr(_reg, 'has_versions', False):
+        return JSONResponse(status_code=200, content={
+            "checkpoints": [], "checkpoint_enabled": True,
+            "error": "FileRegistry not available",
+        })
+    cps = _reg.list_turn_checkpoints()
     items = []
     for cp in cps:
         items.append({
@@ -1608,7 +1632,10 @@ async def checkpoint_rollback(
         return _error_json_response(400, "该会话未启用 checkpoint 模式。")
     if _session_manager.is_session_in_flight(request.session_id):
         return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
-    restored = engine.file_version_manager.rollback_to_turn(request.turn_number)
+    _reg = engine.file_registry
+    if _reg is None or not getattr(_reg, 'has_versions', False):
+        return _error_json_response(400, "FileRegistry not available for rollback.")
+    restored = _reg.rollback_to_turn(request.turn_number)
     return JSONResponse(status_code=200, content={
         "status": "ok",
         "turn_number": request.turn_number,
@@ -1954,6 +1981,8 @@ def _sse_event_to_sse(
         EventType.SUBAGENT_ITERATION,
         EventType.SUBAGENT_SUMMARY,
         EventType.SUBAGENT_END,
+        EventType.SUBAGENT_TOOL_START,
+        EventType.SUBAGENT_TOOL_END,
         EventType.PENDING_APPROVAL,  # 新增：safe_mode 下过滤审批事件
         EventType.APPROVAL_RESOLVED,
     }:
@@ -1968,11 +1997,15 @@ def _sse_event_to_sse(
         EventType.SUBAGENT_ITERATION: "subagent_iteration",
         EventType.SUBAGENT_SUMMARY: "subagent_summary",
         EventType.SUBAGENT_END: "subagent_end",
+        EventType.SUBAGENT_TOOL_START: "subagent_tool_start",
+        EventType.SUBAGENT_TOOL_END: "subagent_tool_end",
         EventType.USER_QUESTION: "user_question",
         EventType.THINKING_DELTA: "thinking_delta",
         EventType.TEXT_DELTA: "text_delta",
+        EventType.TOOL_CALL_ARGS_DELTA: "tool_call_args_delta",
         EventType.EXCEL_PREVIEW: "excel_preview",
         EventType.EXCEL_DIFF: "excel_diff",
+        EventType.TEXT_DIFF: "text_diff",
         EventType.FILES_CHANGED: "files_changed",
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
@@ -2071,6 +2104,38 @@ def _sse_event_to_sse(
             "iterations": event.subagent_iterations,
             "tool_calls": event.subagent_tool_calls,
         }
+    elif event.event_type == EventType.SUBAGENT_TOOL_START:
+        data = {
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
+            "tool_name": event.tool_name,
+            "arguments": sanitize_external_data(
+                event.arguments if isinstance(event.arguments, dict) else {},
+                max_len=500,
+            ),
+            "tool_index": event.subagent_tool_index,
+        }
+    elif event.event_type == EventType.SUBAGENT_TOOL_END:
+        data = {
+            "conversation_id": sanitize_external_text(
+                event.subagent_conversation_id,
+                max_len=120,
+            ),
+            "tool_name": event.tool_name,
+            "success": event.success,
+            "result": sanitize_external_text(
+                event.result[:300] if event.result else "",
+                max_len=300,
+            ),
+            "error": (
+                sanitize_external_text(event.error, max_len=200)
+                if event.error
+                else None
+            ),
+            "tool_index": event.subagent_tool_index,
+        }
     elif event.event_type == EventType.USER_QUESTION:
         options: list[dict[str, str]] = []
         for option in event.question_options:
@@ -2113,6 +2178,12 @@ def _sse_event_to_sse(
             "content": event.text_delta,
             "iteration": event.iteration,
         }
+    elif event.event_type == EventType.TOOL_CALL_ARGS_DELTA:
+        data = {
+            "tool_call_id": event.tool_call_id,
+            "tool_name": event.tool_name,
+            "args_delta": event.args_delta,
+        }
     elif event.event_type == EventType.PENDING_APPROVAL:
         data = {
             "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
@@ -2152,6 +2223,15 @@ def _sse_event_to_sse(
             "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
             "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
             "changes": event.excel_changes[:200],
+        }
+    elif event.event_type == EventType.TEXT_DIFF:
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "file_path": sanitize_external_text(event.text_diff_file_path, max_len=500),
+            "hunks": event.text_diff_hunks[:300],
+            "additions": event.text_diff_additions,
+            "deletions": event.text_diff_deletions,
+            "truncated": event.text_diff_truncated,
         }
     elif event.event_type == EventType.FILES_CHANGED:
         data = {
@@ -2649,6 +2729,67 @@ async def list_workspace_files(request: Request) -> JSONResponse:
 
     results.sort(key=lambda x: (not x["is_dir"], x["path"].lower()))
     return JSONResponse(content={"files": results, "truncated": len(results) >= _MAX_WORKSPACE_FILES})
+
+
+@_router.get("/api/v1/files/registry")
+async def get_file_registry(request: Request) -> JSONResponse:
+    """返回 FileRegistry 全量文件列表 + 可选事件历史。
+
+    Query params:
+      - include_deleted: bool (default false) — 是否包含已软删除的文件
+      - include_events: bool (default false) — 是否附带每个文件的事件历史
+      - file_id: str (optional) — 仅返回指定文件及其事件/谱系
+    """
+    assert _config is not None, "服务未初始化"
+
+    ws_root = _resolve_workspace_root(request)
+    registry = _get_file_registry(ws_root)
+    if registry is None:
+        return JSONResponse(content={"files": [], "total": 0})
+
+    include_deleted = request.query_params.get("include_deleted", "").lower() in ("1", "true")
+    include_events = request.query_params.get("include_events", "").lower() in ("1", "true")
+    file_id = request.query_params.get("file_id", "").strip()
+
+    def _event_to_dict(evt: Any) -> dict[str, Any]:
+        return {
+            "id": evt.id,
+            "file_id": evt.file_id,
+            "event_type": evt.event_type,
+            "session_id": evt.session_id,
+            "turn": evt.turn,
+            "tool_name": evt.tool_name,
+            "details": evt.details,
+            "created_at": evt.created_at,
+        }
+
+    # 单文件查询模式
+    if file_id:
+        entry = registry.get_by_id(file_id)
+        if entry is None:
+            # 退而求其次：按路径查
+            entry = registry.get_by_path(file_id)
+        if entry is None:
+            return _error_json_response(404, f"文件未找到: {file_id}")
+        file_dict = entry.to_dict()
+        if include_events:
+            file_dict["events"] = [_event_to_dict(e) for e in registry.get_events(entry.id)]
+        children = registry.get_children(entry.id)
+        file_dict["children"] = [c.to_dict() for c in children]
+        lineage = registry.get_lineage(entry.id)
+        file_dict["lineage"] = [a.to_dict() for a in lineage]
+        return JSONResponse(content={"file": file_dict})
+
+    # 全量列表模式
+    entries = registry.list_all(include_deleted=include_deleted)
+    files: list[dict[str, Any]] = []
+    for entry in entries:
+        d = entry.to_dict()
+        if include_events:
+            d["events"] = [_event_to_dict(e) for e in registry.get_events(entry.id)]
+        files.append(d)
+
+    return JSONResponse(content={"files": files, "total": len(files)})
 
 
 @_router.get("/api/v1/files/excel")
@@ -3199,6 +3340,19 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         ws.enforce_quota()
 
     rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
+
+    # 注册到 FileRegistry
+    registry = _get_file_registry(str(ws.root_dir))
+    if registry is not None:
+        try:
+            registry.register_upload(
+                canonical_path=str(dest_path.relative_to(ws.root_dir)),
+                original_name=filename,
+                size_bytes=len(content),
+            )
+        except Exception:
+            logger.debug("FileRegistry register_upload 失败", exc_info=True)
+
     return JSONResponse(content={
         "filename": filename,
         "path": rel_path,
@@ -3457,10 +3611,12 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
 
     if engine is None:
         if can_restore:
+            _idle = _normalize_manifest_status({"state": "idle"})
             return JSONResponse(content={
                 "session_id": session_id,
                 "compaction": {"enabled": False},
-                "manifest": _normalize_manifest_status({"state": "idle"}),
+                "registry": _idle,
+                "manifest": _idle,
             })
         return _error_json_response(404, f"会话不存在: {session_id}")
 
@@ -3471,18 +3627,19 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     except Exception:
         pass
 
-    # 工作区清单状态
-    manifest: dict[str, Any] = {"state": "idle"}
+    # 文件注册表扫描状态
+    registry: dict[str, Any] = {"state": "idle"}
     try:
-        manifest = engine.workspace_manifest_build_status()
+        registry = engine.registry_scan_status()
     except Exception:
         pass
-    manifest = _normalize_manifest_status(manifest)
+    registry = _normalize_manifest_status(registry)
 
     return JSONResponse(content={
         "session_id": session_id,
         "compaction": compaction,
-        "manifest": manifest,
+        "registry": registry,
+        "manifest": registry,
     })
 
 
@@ -3542,8 +3699,9 @@ async def extract_session_memory(session_id: str, request: Request) -> JSONRespo
 
 
 @_router.post("/api/v1/sessions/{session_id}/manifest/rebuild")
+@_router.post("/api/v1/sessions/{session_id}/registry/scan")
 async def rebuild_session_manifest(session_id: str, request: Request) -> JSONResponse:
-    """触发指定会话的工作区清单后台重建（force=True）。"""
+    """触发指定会话的 FileRegistry 后台扫描（force=True）。"""
     assert _session_manager is not None, "服务未初始化"
     user_id = _get_isolation_user_id(request)
 
@@ -3554,15 +3712,15 @@ async def rebuild_session_manifest(session_id: str, request: Request) -> JSONRes
         return _error_json_response(404, f"会话不存在: {session_id}")
 
     try:
-        started = engine.start_workspace_manifest_prewarm(force=True)
+        started = engine.start_registry_scan(force=True)
     except Exception as exc:
-        logger.warning("会话 %s 触发 manifest rebuild 失败: %s", session_id, exc)
-        return _error_json_response(500, f"清单重建失败: {exc}")
+        logger.warning("会话 %s 触发 registry scan 失败: %s", session_id, exc)
+        return _error_json_response(500, f"文件扫描失败: {exc}")
 
     return JSONResponse(content={
         "session_id": session_id,
         "started": started,
-        "message": "清单重建已启动" if started else "清单正在构建中，请稍候",
+        "message": "文件扫描已启动" if started else "扫描正在进行中，请稍候",
     })
 
 
@@ -5045,9 +5203,9 @@ async def execute_command(request: Request) -> JSONResponse:
         hint = "计划模式: **关闭**（默认）\n\n使用 `/plan on` 开启，开启后 Agent 会先输出计划再执行"
         return JSONResponse(content={"result": hint, "format": "markdown"})
 
-    # /manifest status
-    if command == "/manifest status":
-        return JSONResponse(content={"result": "工作区清单: 请通过 `/manifest build` 触发构建\n\n清单会在会话首轮自动预热构建", "format": "markdown"})
+    # /manifest status | /registry status
+    if command in ("/manifest status", "/registry status"):
+        return JSONResponse(content={"result": "文件注册表: 请通过 `/registry scan` 触发扫描\n\n注册表会在会话首轮自动扫描构建", "format": "markdown"})
 
     # /save
     if command == "/save":
