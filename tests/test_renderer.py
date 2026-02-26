@@ -654,7 +654,7 @@ class TestStreamRendererUnit:
         renderer.handle_event(event)
         output = _get_output(console)
 
-        # In minimal style, iteration renders turn/calls but not name
+        # 最小化样式下，迭代只渲染 turn/calls，不渲染 name
         assert "2" in output
         assert "3" in output
 

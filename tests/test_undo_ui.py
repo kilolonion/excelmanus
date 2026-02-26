@@ -1,4 +1,4 @@
-"""Tests for /undo UI enhancements: list_applied, command handler, API endpoints."""
+"""撤销 UI 增强测试：list_applied、命令处理、API 端点。"""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from excelmanus.approval import ApprovalManager
 
 
 def _execute_write(tmp_path: Path, manager: ApprovalManager, filename: str) -> str:
-    """Helper: create a file via execute_and_audit and return the approval_id."""
+    """辅助方法：通过 execute_and_audit 创建文件并返回 approval_id。"""
     target = tmp_path / filename
     approval_id = manager.new_approval_id()
 
@@ -47,7 +47,7 @@ def test_list_applied_returns_records_newest_first(tmp_path: Path) -> None:
     records = manager.list_applied()
     assert len(records) >= 2
     ids = [r.approval_id for r in records]
-    # Most recent first
+    # 按时间倒序，最近的在先
     assert ids.index(id2) < ids.index(id1)
 
 
@@ -55,7 +55,7 @@ def test_list_applied_undoable_only(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     _execute_write(tmp_path, manager, "undoable.txt")
 
-    # Create a non-undoable record
+    # 创建一条不可撤销的记录
     non_undo_id = manager.new_approval_id()
 
     def execute_noop(tool_name: str, arguments: dict, tool_scope: list) -> str:

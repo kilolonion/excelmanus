@@ -147,7 +147,7 @@ class TestCollectDirectoryFiles:
         files = _collect_directory_files(skill_dir)
         assert "SKILL.md" in files
         assert "scripts/helper.py" in files
-        # Hidden files excluded
+        # 隐藏文件被排除
         assert ".hidden" not in files
 
     def test_ignores_pycache(self, tmp_path: Path):
@@ -195,7 +195,7 @@ class TestImportFromLocalPath:
         assert "SKILL.md" in result.files_copied
         assert "scripts/run.sh" in result.files_copied
 
-        # Files actually exist
+        # 文件实际存在
         assert (dest / "test-skill" / "SKILL.md").exists()
         assert (dest / "test-skill" / "scripts" / "run.sh").exists()
 
