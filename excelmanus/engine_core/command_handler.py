@@ -186,7 +186,7 @@ class CommandHandler:
         if command == "/compact":
             return await self._handle_compact_command(parts)
 
-        if command in ("/manifest", "/registry"):
+        if command == "/registry":
             return self._handle_registry_command(parts)
 
         if command == "/accept":
@@ -293,7 +293,7 @@ class CommandHandler:
         )
 
     def _handle_registry_command(self, parts: list[str]) -> str:
-        """处理 /registry (或兼容的 /manifest) 命令。"""
+        """处理 /registry 命令。"""
         e = self._engine
         action = parts[1].strip().lower() if len(parts) >= 2 else "status"
 
@@ -322,7 +322,7 @@ class CommandHandler:
                 )
             return "FileRegistry：尚未开始。可执行 `/registry scan` 开始后台扫描。"
 
-        if action in {"build", "scan"}:
+        if action == "scan":
             started = e.start_registry_scan(force=False)
             if started:
                 return "已在后台开始 FileRegistry 扫描。你可以继续当前对话。"
@@ -363,10 +363,12 @@ class CommandHandler:
                 f"备份目录：{tx.staging_dir if tx else 'N/A'}"
             )
 
-        if action == "on" and not too_many_args:
+        if action == "on" and (len(parts) == 2 or len(parts) == 3):
             scope = "all"
             if len(parts) == 3 and parts[2].strip().lower() == "--excel-only":
                 scope = "excel_only"
+            if e.file_registry is None or not e.file_registry.has_versions:
+                return "无法开启备份沙盒：FileRegistry 未就绪或版本管理未启用。"
             e.workspace.transaction_enabled = True
             e.workspace.transaction_scope = scope
             e.transaction = e.workspace.create_transaction(

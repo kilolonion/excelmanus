@@ -72,6 +72,53 @@ if TYPE_CHECKING:
     from excelmanus.memory_extractor import MemoryExtractor
 
 logger = get_logger("engine")
+
+# ── Thinking 配置 ──────────────────────────────────────────────
+_EFFORT_RATIOS: dict[str, float] = {
+    "none": 0.0, "minimal": 0.10, "low": 0.20,
+    "medium": 0.50, "high": 0.80, "xhigh": 0.95,
+}
+
+# effort → Gemini thinkingLevel 映射
+_EFFORT_TO_GEMINI_LEVEL: dict[str, str] = {
+    "none": "minimal", "minimal": "minimal", "low": "low",
+    "medium": "medium", "high": "high", "xhigh": "high",
+}
+
+# effort → OpenAI reasoning_effort 映射
+_EFFORT_TO_OPENAI: dict[str, str] = {
+    "none": "none", "minimal": "minimal", "low": "low",
+    "medium": "medium", "high": "high", "xhigh": "high",
+}
+
+
+@dataclass
+class ThinkingConfig:
+    """Thinking（推理深度）统一配置，支持等级制和预算制。"""
+
+    effort: str = "medium"  # none|minimal|low|medium|high|xhigh
+    budget_tokens: int = 0  # >0 时覆盖 effort 换算值
+
+    @property
+    def is_disabled(self) -> bool:
+        return self.effort == "none" and self.budget_tokens <= 0
+
+    def effective_budget(self, max_tokens: int = 16384) -> int:
+        """计算有效 token 预算。budget_tokens > 0 直接返回，否则按 effort 比例换算。"""
+        if self.budget_tokens > 0:
+            return self.budget_tokens
+        ratio = _EFFORT_RATIOS.get(self.effort, 0.5)
+        return max(1024, int(max_tokens * ratio)) if ratio > 0 else 0
+
+    @property
+    def openai_effort(self) -> str:
+        return _EFFORT_TO_OPENAI.get(self.effort, "medium")
+
+    @property
+    def gemini_level(self) -> str:
+        return _EFFORT_TO_GEMINI_LEVEL.get(self.effort, "high")
+
+
 _ALWAYS_AVAILABLE_TOOLS = (
     "task_create", "task_update", "write_plan", "edit_text_file",
     "ask_user", "delegate",
@@ -940,13 +987,17 @@ class AgentEngine:
                 )
             except Exception:
                 logger.debug("FileRegistry 初始化失败", exc_info=True)
-        self._transaction: WorkspaceTransaction | None = (
-            self._workspace.create_transaction(
-                registry=self._file_registry,
-            )
-            if self._workspace.transaction_enabled
-            else None
-        )
+        self._transaction: WorkspaceTransaction | None = None
+        if self._workspace.transaction_enabled:
+            if self._file_registry is not None and self._file_registry.has_versions:
+                self._transaction = self._workspace.create_transaction(
+                    registry=self._file_registry,
+                )
+            else:
+                logger.warning(
+                    "备份沙盒已禁用：FileRegistry 不可用或未启用版本管理。",
+                )
+                self._workspace.transaction_enabled = False
         # 将 registry 共享给 ApprovalManager / SessionState
         self._approval._file_registry = self._file_registry
         self._state._file_registry = self._file_registry
@@ -1030,7 +1081,7 @@ class AgentEngine:
         except Exception:
             logger.debug("PromptComposer 初始化失败，策略注入不可用", exc_info=True)
 
-        # ── Workspace Manifest（工作区文件清单） ─────────────
+        # ── FileRegistry（工作区文件注册表） ─────────────
         self._database = database
         self._llm_call_store: Any = None  # 类型：LLMCallStore | None
         if database is not None:
@@ -1039,11 +1090,11 @@ class AgentEngine:
                 self._llm_call_store = _LCS(database, user_id=user_id)
             except Exception:
                 logger.debug("LLM 调用日志初始化失败", exc_info=True)
-        # manifest 基础设施已移除，仅保留 FileRegistry scan 相关状态
+        # 仅保留 FileRegistry scan 相关状态
         self._registry_scan_task: asyncio.Task[Any] | None = None
         self._registry_scan_done: bool = False
         self._registry_scan_error: str | None = None
-        self._manifest_refresh_needed: bool = False
+        self._registry_refresh_needed: bool = False
 
         # ── 持久记忆集成 ────────────────────────
         self._persistent_memory = persistent_memory
@@ -1109,7 +1160,10 @@ class AgentEngine:
         # ── 模型能力探测结果（由 API 层或启动时注入） ──
         from excelmanus.model_probe import ModelCapabilities
         self._model_capabilities: ModelCapabilities | None = None
-        self._thinking_budget: int = 10000
+        self._thinking_config = ThinkingConfig(
+            effort=config.thinking_effort,
+            budget_tokens=config.thinking_budget,
+        )
 
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
@@ -1347,17 +1401,110 @@ class AgentEngine:
         return "unknown"
 
     def _record_workspace_write_action(self) -> None:
-        """记录工作区写入：写入态 + manifest 刷新标记。"""
+        """记录工作区写入：写入态 + registry 刷新标记。"""
         self._state.record_write_action()
-        self._manifest_refresh_needed = True
+        self._registry_refresh_needed = True
 
     def _record_external_write_action(self) -> None:
-        """记录工作区外写入：仅写入态，不触发 manifest 刷新。"""
+        """记录工作区外写入：仅写入态，不触发 registry 刷新。"""
         self._state.record_write_action()
 
     def _record_write_action(self) -> None:
         """兼容入口：等价于工作区写入记录。"""
         self._record_workspace_write_action()
+
+    def rollback_preview(self, turn_index: int) -> dict:
+        """预览回滚到第 turn_index 个用户轮次后会影响的文件变更。
+
+        Returns:
+            {turn_index, removed_messages, file_changes: [{path, change_type, before_size, after_size, diff}]}
+        """
+        # 计算将被移除的消息数
+        turns = self._memory.list_user_turns()
+        removed_count = 0
+        for turn in turns:
+            if turn["index"] > turn_index:
+                removed_count += 1
+        # 还需加上助手消息
+        msgs = self._memory.messages
+        target_msg_index = None
+        for turn in turns:
+            if turn["index"] == turn_index:
+                target_msg_index = turn["msg_index"]
+                break
+        if target_msg_index is not None:
+            removed_count = len(msgs) - target_msg_index - 1
+        else:
+            removed_count = 0
+
+        # 收集该轮次之后的 approval 文件变更
+        applied = self._approval.list_applied(limit=100)
+        file_changes: list[dict] = []
+        seen_paths: set[str] = set()
+        for record in applied:
+            if not record.undoable:
+                continue
+            if record.session_turn is not None and record.session_turn <= turn_index:
+                continue
+            for change in record.changes:
+                if change.path in seen_paths:
+                    continue
+                seen_paths.add(change.path)
+                # 确定变更类型
+                if not change.before_exists and change.after_exists:
+                    change_type = "added"
+                elif change.before_exists and not change.after_exists:
+                    change_type = "deleted"
+                else:
+                    change_type = "modified"
+
+                diff_text: str | None = None
+                if not change.is_binary and change.text_diff_file:
+                    diff_path = Path(self._approval.workspace_root) / change.text_diff_file
+                    if diff_path.exists():
+                        try:
+                            raw = diff_path.read_text(encoding="utf-8", errors="replace")
+                            # 提取与此文件相关的 diff hunk
+                            diff_text = self._extract_file_diff(raw, change.path)
+                            if diff_text and len(diff_text) > 3000:
+                                diff_text = diff_text[:3000] + "\n... (truncated)"
+                        except OSError:
+                            pass
+
+                file_changes.append({
+                    "path": change.path,
+                    "change_type": change_type,
+                    "before_size": change.before_size,
+                    "after_size": change.after_size,
+                    "is_binary": change.is_binary,
+                    "diff": diff_text,
+                    "tool_name": record.tool_name,
+                })
+
+        return {
+            "turn_index": turn_index,
+            "removed_messages": removed_count,
+            "file_changes": file_changes,
+        }
+
+    @staticmethod
+    def _extract_file_diff(patch_text: str, file_path: str) -> str | None:
+        """从 unified diff patch 中提取指定文件的 diff 段落。"""
+        lines = patch_text.split("\n")
+        result_lines: list[str] = []
+        in_target = False
+        for line in lines:
+            if line.startswith("--- ") or line.startswith("+++ "):
+                if file_path in line:
+                    in_target = True
+                    result_lines.append(line)
+                elif in_target and line.startswith("--- "):
+                    break
+                else:
+                    in_target = False
+            elif in_target:
+                result_lines.append(line)
+        return "\n".join(result_lines) if result_lines else patch_text if len(patch_text) < 2000 else None
 
     def rollback_conversation(
         self,
@@ -1381,13 +1528,16 @@ class AgentEngine:
 
         file_results: list[str] = []
         if rollback_files:
-            # 逆序回滚该轮次之后产生的审批记录
+            # 逆序回滚该轮次之后产生的审批记录（newest-first）
             applied = self._approval.list_applied(limit=100)
-            # 获取目标轮次对应的 session_turn（近似：turn_index 即 session turn）
             for record in applied:
-                if record.undoable:
-                    result = self._approval.undo(record.approval_id)
-                    file_results.append(result)
+                if not record.undoable:
+                    continue
+                # 仅回滚目标轮次之后的记录；session_turn 未知时保守纳入
+                if record.session_turn is not None and record.session_turn <= turn_index:
+                    continue
+                result = self._approval.undo(record.approval_id)
+                file_results.append(result)
 
         # 重置 session turn 到目标轮次
         self._state.session_turn = turn_index
@@ -3302,6 +3452,8 @@ class AgentEngine:
                     "name": "finish_task",
                     "description": (
                         "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
+                        "在计划模式下，若当前请求不需要完整计划文档（如问候、简短澄清、单步查询），"
+                        "也可直接调用 finish_task 收束本轮。"
                         "用自然语言在 summary 中向用户汇报：做了什么、关键结果、涉及的文件，"
                         "有价值时可附带后续建议。语气自然，像同事间的简洁对话，不要套模板。"
                     ),
@@ -3599,14 +3751,36 @@ class AgentEngine:
         if runtime_config.capability_mode == "full":
             enriched_contexts = self._build_full_mode_contexts()
 
-        result = await self._subagent_executor.run(
-            config=runtime_config,
-            prompt=prompt,
+        # S1: 构建文件全景 + CoW 路径映射，让子代理知道工作区文件布局
+        workspace_context = self._context_builder._build_file_registry_notice()
+        # S2: 获取 CoW 映射供子代理工具调用时重定向
+        cow_mappings: dict[str, str] = {}
+        try:
+            if hasattr(self._state, "get_cow_mappings"):
+                _cow = self._state.get_cow_mappings()
+                if isinstance(_cow, dict):
+                    cow_mappings = _cow
+        except Exception:
+            pass
+
+        _shared_run_kwargs = dict(
             parent_context="\n\n".join(parent_context_parts),
             on_event=on_event,
             full_access_enabled=self._full_access_enabled,
             tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
             enriched_contexts=enriched_contexts,
+            session_turn=self._state.session_turn,
+            workspace_context=workspace_context,
+            file_access_guard=self._file_access_guard,
+            sandbox_env=self._sandbox_env,
+            cow_mappings=cow_mappings,
+            workspace_root=self._config.workspace_root,
+        )
+
+        result = await self._subagent_executor.run(
+            config=runtime_config,
+            prompt=prompt,
+            **_shared_run_kwargs,
         )
         if self._should_retry_subagent_with_active_model(
             source_config=config,
@@ -3623,11 +3797,7 @@ class AgentEngine:
             return await self._subagent_executor.run(
                 config=retry_config,
                 prompt=prompt,
-                parent_context="\n\n".join(parent_context_parts),
-                on_event=on_event,
-                full_access_enabled=self._full_access_enabled,
-                tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
-                enriched_contexts=enriched_contexts,
+                **_shared_run_kwargs,
             )
         return result
 
@@ -4472,8 +4642,8 @@ class AgentEngine:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
 
         def _finalize_result(**kwargs: Any) -> ChatResult:
-            """统一出口：刷新 manifest + 自动发射 FILES_CHANGED 事件。"""
-            self._try_refresh_manifest()
+            """统一出口：刷新 registry + 自动发射 FILES_CHANGED 事件。"""
+            self._try_refresh_registry()
             # 自动发射 FILES_CHANGED 事件（替代 finish_task 的 affected_files）
             if self._state.affected_files and on_event is not None:
                 from excelmanus.events import EventType, ToolCallEvent
@@ -4542,7 +4712,7 @@ class AgentEngine:
             # ── 后台 LLM 分类已内化到 router 同步流程，无需收割 ──
 
             if iteration == start_iteration:
-                # 首轮：给事件循环一个 tick 处理已完成的线程回调，再短暂等待 manifest
+                # 首轮：给事件循环一个 tick 处理已完成的线程回调，再短暂等待 registry
                 await asyncio.sleep(0)
                 await self.await_registry_scan(timeout=0.05)
                 self._emit(
@@ -4645,19 +4815,25 @@ class AgentEngine:
             if tools:
                 kwargs["tools"] = tools
 
-            # 注入 thinking 参数（根据探测到的 thinking_type）
+            # 注入 thinking 参数（根据探测到的 thinking_type + ThinkingConfig）
             caps = self._model_capabilities
-            if caps and caps.supports_thinking and self._thinking_budget > 0:
+            tc = self._thinking_config
+            if caps and caps.supports_thinking and not tc.is_disabled:
                 ttype = caps.thinking_type
+                budget = tc.effective_budget()
                 if ttype == "claude":
                     kwargs["_thinking_enabled"] = True
-                    kwargs["_thinking_budget"] = self._thinking_budget
+                    kwargs["_thinking_budget"] = budget
                 elif ttype == "gemini":
-                    kwargs["_thinking_budget"] = self._thinking_budget
+                    kwargs["_thinking_budget"] = budget
+                elif ttype == "gemini_level":
+                    kwargs["_thinking_level"] = tc.gemini_level
+                elif ttype == "openai_reasoning":
+                    kwargs["reasoning_effort"] = tc.openai_effort
                 elif ttype == "enable_thinking":
                     extra = kwargs.get("extra_body", {})
                     extra["enable_thinking"] = True
-                    extra["thinking_budget"] = self._thinking_budget
+                    extra["thinking_budget"] = budget
                     kwargs["extra_body"] = extra
                 elif ttype == "glm_thinking":
                     extra = kwargs.get("extra_body", {})
@@ -4665,7 +4841,11 @@ class AgentEngine:
                     kwargs["extra_body"] = extra
                 elif ttype == "openrouter":
                     extra = kwargs.get("extra_body", {})
-                    extra["reasoning"] = {"max_tokens": self._thinking_budget}
+                    # OpenRouter 统一接口：同时传 effort 和 max_tokens
+                    extra["reasoning"] = {
+                        "effort": tc.openai_effort,
+                        "max_tokens": budget,
+                    }
                     kwargs["extra_body"] = extra
                 # "deepseek" → 模型自动输出推理内容，无需额外参数
 
@@ -5450,11 +5630,11 @@ class AgentEngine:
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
-    def _try_refresh_manifest(self) -> None:
+    def _try_refresh_registry(self) -> None:
         """写入操作后增量刷新 FileRegistry（debounce：每轮最多一次）。"""
-        if not self._manifest_refresh_needed:
+        if not self._registry_refresh_needed:
             return
-        self._manifest_refresh_needed = False
+        self._registry_refresh_needed = False
         if self._file_registry is not None:
             try:
                 self._file_registry.scan_workspace()
@@ -5704,6 +5884,7 @@ class AgentEngine:
                 execute=_execute,
                 undoable=undoable,
                 created_at_utc=created_at_utc,
+                session_turn=self._state.session_turn,
             )
         except Exception as exc:  # noqa: BLE001
             # execute_and_audit 在失败时会先写入 manifest 与 _applied，再抛异常。
@@ -5908,8 +6089,32 @@ class AgentEngine:
         return self._model_capabilities
 
     def set_thinking_budget(self, budget: int) -> None:
-        """设置 thinking token 预算。"""
-        self._thinking_budget = max(0, budget)
+        """设置 thinking token 预算（兼容旧接口）。"""
+        self._thinking_config = ThinkingConfig(
+            effort=self._thinking_config.effort,
+            budget_tokens=max(0, budget),
+        )
+
+    def set_thinking_effort(self, effort: str) -> None:
+        """设置 thinking 等级。"""
+        if effort not in _EFFORT_RATIOS:
+            logger.warning("无效的 thinking effort: %r，忽略", effort)
+            return
+        self._thinking_config = ThinkingConfig(
+            effort=effort,
+            budget_tokens=self._thinking_config.budget_tokens,
+        )
+
+    def set_thinking_config(self, effort: str | None = None, budget: int | None = None) -> None:
+        """统一设置 thinking 配置。"""
+        new_effort = effort if effort and effort in _EFFORT_RATIOS else self._thinking_config.effort
+        new_budget = max(0, budget) if budget is not None else self._thinking_config.budget_tokens
+        self._thinking_config = ThinkingConfig(effort=new_effort, budget_tokens=new_budget)
+
+    @property
+    def thinking_config(self) -> ThinkingConfig:
+        """当前 thinking 配置（只读）。"""
+        return self._thinking_config
 
     # ── 多模型切换 ──────────────────────────────────
 

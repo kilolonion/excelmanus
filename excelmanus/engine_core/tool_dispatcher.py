@@ -738,7 +738,11 @@ class ToolDispatcher:
 
         # 仅从 FileRegistry 查询 CoW 重定向
         _file_reg = self._engine.file_registry
-        _use_file_reg = _file_reg is not None and _file_reg.has_versions
+        _use_file_reg = bool(
+            _file_reg is not None
+            and getattr(_file_reg, "has_versions", False)
+            and hasattr(_file_reg, "lookup_cow_redirect")
+        )
         if not _use_file_reg:
             return arguments, []
 
@@ -775,7 +779,7 @@ class ToolDispatcher:
             if workspace_root and raw_str.startswith(workspace_root):
                 rel_path = raw_str[len(workspace_root):].lstrip("/")
             redirect = _file_reg.lookup_cow_redirect(rel_path)
-            if redirect is not None:
+            if isinstance(redirect, str):
                 # 保持原始路径格式（绝对/相对）
                 if raw_str.startswith(workspace_root):
                     new_path = f"{workspace_root}/{redirect}"

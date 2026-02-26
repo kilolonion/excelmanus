@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,25 @@ _READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
     "read", "analyze", "inspect", "list", "search", "find", "explore",
     "preview", "scan", "count", "structure",
 })
+
+_EXPLORER_SKIP_KEYWORDS: frozenset[str] = frozenset({
+    "解释", "说明", "总结", "归纳", "翻译", "润色", "改写", "建议",
+    "为什么", "怎么", "如何", "区别", "思路", "方案", "what", "why",
+    "how", "explain", "summary", "summarize", "difference", "advice",
+})
+_TRIVIAL_PATTERNS: frozenset[str] = frozenset({
+    "你好", "您好", "谢谢", "感谢", "好的", "收到", "明白", "了解",
+    "知道了", "好吧", "行", "可以", "没问题", "没事",
+    "ok", "thanks", "thank you", "hi", "hello", "got it", "sure",
+    "understood", "noted", "fine", "great", "yes", "no",
+})
+_EXPLORER_REQUIRED_CUES: frozenset[str] = frozenset({
+    "sheet", "工作表", "表格", "列名", "行数", "单元格", "范围", "公式", "统计", "读取", "分析",
+    "查找", "筛选", "预览", "文件", "路径", "数据", "read", "analyze", "filter",
+    "inspect", "search", "excel", "xlsx", "csv", "cell",
+})
+_EXCEL_FILE_PATTERN = re.compile(r"[\w./\\-]+\.(xlsx|xlsm|xls|csv)\b", re.IGNORECASE)
+_CELL_REF_PATTERN = re.compile(r"\b[A-Za-z]{1,3}\d{1,6}(?::[A-Za-z]{1,3}\d{1,6})?\b")
 
 
 @dataclass
@@ -104,6 +124,21 @@ class SubagentOrchestrator:
             )
         picked_agent = engine._normalize_skill_agent_name(picked_agent) or "subagent"
 
+        if picked_agent == "explorer" and self._should_fast_exit_explorer(
+            task=task_text,
+            file_paths=normalized_paths,
+        ):
+            return DelegateSubagentOutcome(
+                reply=(
+                    "任务偏轻量且未提供可探索的数据上下文，已跳过 explorer。"
+                    "请主代理直接给出结论或答复。"
+                ),
+                success=True,
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+            )
+
         # ── Pre-subagent Hook（A1: 无激活技能时跳过，避免冗余 async 开销） ──
         hook_skill = engine._active_skills[-1] if engine._active_skills else None
         if hook_skill is not None:
@@ -171,19 +206,13 @@ class SubagentOrchestrator:
                 )
 
         if result.success:
-            engine._window_perception.observe_subagent_context(
-                candidate_paths=[*normalized_paths, *result.observed_files],
-                subagent_name=picked_agent,
-                task=task_text,
+            self._sync_subagent_observations(
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+                observed_files=result.observed_files,
+                structured_changes=result.structured_changes,
             )
-            # 子代理有写入时，标记 window 为 stale 并清缓存
-            if result.structured_changes:
-                engine._window_perception.observe_subagent_writes(
-                    structured_changes=result.structured_changes,
-                    subagent_name=picked_agent,
-                    task=task_text,
-                )
-            engine._context_builder.mark_window_notice_dirty()
             return DelegateSubagentOutcome(
                 reply=result.summary,
                 success=True,
@@ -193,14 +222,57 @@ class SubagentOrchestrator:
                 subagent_result=result,
             )
 
+        partial_observed = bool(result.observed_files)
+        partial_changes = bool(result.structured_changes)
+        if partial_observed or partial_changes:
+            self._sync_subagent_observations(
+                picked_agent=picked_agent,
+                task_text=task_text,
+                normalized_paths=normalized_paths,
+                observed_files=result.observed_files,
+                structured_changes=result.structured_changes,
+            )
+
+        partial_hint = ""
+        if (partial_observed or partial_changes) and "已完成的工作" not in result.summary:
+            partial_hint = (
+                "（已保留部分产出"
+                f"：发现文件 {len(result.observed_files)} 个"
+                f"，结构化变更 {len(result.structured_changes)} 条）"
+            )
+
         return DelegateSubagentOutcome(
-            reply=f"子代理执行失败（{picked_agent}）：{result.summary}",
+            reply=f"子代理执行失败（{picked_agent}）：{result.summary}{partial_hint}",
             success=False,
             picked_agent=picked_agent,
             task_text=task_text,
             normalized_paths=normalized_paths,
             subagent_result=result,
         )
+
+    def _sync_subagent_observations(
+        self,
+        *,
+        picked_agent: str,
+        task_text: str,
+        normalized_paths: list[str],
+        observed_files: list[str],
+        structured_changes: list[Any],
+    ) -> None:
+        """同步子代理产出的上下文与写入线索到主会话。"""
+        engine = self._engine
+        engine._window_perception.observe_subagent_context(
+            candidate_paths=[*normalized_paths, *observed_files],
+            subagent_name=picked_agent,
+            task=task_text,
+        )
+        if structured_changes:
+            engine._window_perception.observe_subagent_writes(
+                structured_changes=structured_changes,
+                subagent_name=picked_agent,
+                task=task_text,
+            )
+        engine._context_builder.mark_window_notice_dirty()
 
     # ── 并行委派 ──────────────────────────────────────────
 
@@ -364,3 +436,45 @@ class SubagentOrchestrator:
                     )
                 seen[normalized_lower] = i
         return None
+
+    @staticmethod
+    def _should_fast_exit_explorer(*, task: str, file_paths: list[str]) -> bool:
+        """判断 explorer 是否可直接快速退出（无需强制探索）。
+
+        三层检测：
+        1. 纯对话模式（问候/确认/感谢）→ 无条件退出
+        2. 短任务 + 无数据线索 → 退出（不要求必须有 ? 或 skip keywords）
+        3. 原有 skip keywords / 问号检测 → 退出
+        """
+        if file_paths:
+            return False
+
+        task_text = task.strip()
+        if not task_text:
+            return False
+
+        lowered = task_text.lower()
+
+        # Layer 1: 纯对话 — 任务文本完全是问候/确认/感谢，无论长度都退出
+        if lowered.rstrip("。！？.!? ") in _TRIVIAL_PATTERNS:
+            return True
+
+        # 有明确数据线索时不退出
+        if _EXCEL_FILE_PATTERN.search(task_text) or _CELL_REF_PATTERN.search(task_text):
+            return False
+        if any(cue in lowered for cue in _EXPLORER_REQUIRED_CUES):
+            return False
+
+        # Layer 2: 短任务 + 无数据线索 → 直接退出
+        if len(task_text) <= 60:
+            return True
+
+        if len(task_text) > 120:
+            return False
+
+        # Layer 3: 原有逻辑——问号或 skip keywords
+        return (
+            "?" in task_text
+            or "？" in task_text
+            or any(kw in lowered for kw in _EXPLORER_SKIP_KEYWORDS)
+        )
