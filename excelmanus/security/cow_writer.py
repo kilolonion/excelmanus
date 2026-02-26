@@ -1,6 +1,6 @@
 """工具层写入保护：路径校验 + Bench CoW + 原子写入。
 
-macro_tools 等需要在 agent 进程内直接写入 Excel 的模块共用此层，
+需要在 agent 进程内直接写入 Excel 的模块共用此层，
 与 run_code 沙盒中的 Auto-CoW 行为保持一致。
 """
 

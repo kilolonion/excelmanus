@@ -162,7 +162,7 @@ class TestYellowSandbox:
         assert "ctypes_ok" in result.stdout
 
     def test_import_socket_allowed(self, workspace: Path) -> None:
-        # socket should NOT be blocked in YELLOW
+        # YELLOW 模式下不应拦截 socket
         result = _run_in_sandbox(workspace, "import socket\nprint('socket_ok')", "YELLOW")
         assert result.returncode == 0
         assert "socket_ok" in result.stdout
@@ -173,7 +173,7 @@ class TestYellowSandbox:
         assert "安全策略禁止" in result.stderr
 
     def test_network_module_not_blocked(self, workspace: Path) -> None:
-        # requests may not be installed, just verify the hook doesn't block it
+        # requests 可能未安装，仅验证 hook 不拦截其导入
         code = "try:\n    import requests\n    print('import_ok')\nexcept ImportError:\n    print('not_installed_ok')"
         result = _run_in_sandbox(workspace, code, "YELLOW")
         assert result.returncode == 0
@@ -204,7 +204,7 @@ class TestAutoCoW:
         
         outputs_dir = workspace / "outputs"
         
-        # EXCELMANUS_BENCH_PROTECTED_DIRS="bench/external" is default
+        # 默认 EXCELMANUS_BENCH_PROTECTED_DIRS="bench/external"
         code = (
             "import os\n"
             f"with open(r'{target}', 'w') as f:\n"

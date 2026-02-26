@@ -29,9 +29,6 @@ EXPECTED_MUTATING_CONFIRM_TOOLS = {
 
 EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "copy_file",
-    # Macro 工具
-    "vlookup_write",
-    "computed_column",
     # Vision 工具
     "rebuild_excel_from_spec",
     "verify_excel_replica",
@@ -75,7 +72,7 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
     mutating_like = {
         name
         for name in registered
-        if name in {"run_code", "run_shell", "vlookup_write", "computed_column", "rebuild_excel_from_spec", "verify_excel_replica"}
+        if name in {"run_code", "run_shell", "rebuild_excel_from_spec", "verify_excel_replica"}
         or name.startswith(prefixes)
     }
     from excelmanus.tools.policy import CODE_POLICY_DYNAMIC_TOOLS
@@ -130,7 +127,7 @@ def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
     registry.register_builtin_tools(str(tmp_path))
     registered = set(registry.get_tool_names())
     meta_tools = {"memory_save", "memory_read_topic", "task_create", "task_update",
-                  "focus_window", "inspect_excel_files"}
+                  "inspect_excel_files", "offer_download", "sleep"}
     uncategorized = registered - categorized - meta_tools
     assert not uncategorized, f"未分类工具: {sorted(uncategorized)}"
 

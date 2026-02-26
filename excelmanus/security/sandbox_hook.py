@@ -7,17 +7,17 @@ from excelmanus.security.module_manifest import SOCKET_MODULE_BLOCKED_CALLS
 
 
 # GREEN 模式禁止导入的模块
-# NOTE: ctypes 已移除 — pandas/numpy 等数据处理库间接依赖 ctypes，
+# 说明：ctypes 已移除 — pandas/numpy 等数据处理库间接依赖 ctypes，
 # 禁止会导致 GREEN tier 下 pandas 完全不可用。ctypes 的理论风险（FFI 调用）
 # 在 LLM agent 场景下极低，且仍有 os.system 等多层防护兜底。
 #
-# NOTE: subprocess/signal/multiprocessing 已从 import 封禁列表移除 —
+# 说明：subprocess/signal/multiprocessing 已从 import 封禁列表移除 —
 # pandas 3.x 初始化链中 _config/localization.py 顶层 import subprocess，
 # matplotlib 的后端检测也依赖 subprocess。signal/multiprocessing 被 numpy
 # 等库间接使用。改为 Layer 6 函数级 monkey-patch：允许 import，但禁止
 # 用户脚本直接调用 subprocess.Popen/run/call 等进程创建函数。
 #
-# NOTE: socket 已从 import 封禁列表移除 —
+# 说明：socket 已从 import 封禁列表移除 —
 # matplotlib.pyplot 初始化链中 backend_bases.py 顶层 import socket。
 # 改为 Layer 6 函数级 monkey-patch：允许 import，但禁止创建 socket
 # 实例（即禁止实际网络通信）。gethostname 等只读信息函数仍可用。
@@ -34,7 +34,7 @@ _GREEN_BLOCKED: tuple[str, ...] = (
 )
 
 # YELLOW 模式禁止导入的模块（子集）
-# NOTE: subprocess/signal/multiprocessing 已移除，理由同 GREEN。
+# 说明：subprocess/signal/multiprocessing 已移除，理由同 GREEN。
 _YELLOW_BLOCKED: tuple[str, ...] = (
     "pty", "pexpect",
 )
@@ -102,7 +102,7 @@ _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = "RED"
 _SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
 
-# ── staging map (transaction-aware redirect) ──
+# ── 暂存映射（事务感知重定向）──
 import json as _json_mod
 _STAGING_MAP_RAW = os.environ.get("EXCELMANUS_STAGING_MAP", "{{}}")
 try:
@@ -115,7 +115,7 @@ _STAGING_LOOKUP = {{os.path.realpath(k): os.path.realpath(v) for k, v in _STAGIN
 
 _original_open = builtins.open
 
-# ── Filesystem Guard ──
+# ── 文件系统守卫 ──
 _BENCH_PROTECTED_DIRS_RAW = os.environ.get("EXCELMANUS_BENCH_PROTECTED_DIRS", "bench/external")
 _BENCH_PROTECTED_DIRS = [
     os.path.realpath(os.path.join(_WORKSPACE_ROOT, d.strip()))
@@ -179,7 +179,7 @@ def _guarded_open(file, mode="r", *args, **kwargs):
 
 builtins.open = _guarded_open
 
-# ── openpyxl save 原子写入保护 ──
+# ── openpyxl 保存原子写入保护 ──
 def _patch_openpyxl_save():
     try:
         from openpyxl.workbook import Workbook as _Wb
@@ -218,7 +218,7 @@ def _patch_openpyxl_save():
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
 
-# ── execute user script ──
+# ── 执行用户脚本 ──
 if len(sys.argv) < 2:
     print("Usage: wrapper.py <script.py> [args...]", file=sys.stderr)
     sys.exit(1)
@@ -245,13 +245,13 @@ import importlib.abc
 import importlib.machinery
 import builtins
 
-# ── config ──
+# ── 配置 ──
 _BLOCKED_MODULES = {blocked_modules}
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = {tier}
 _SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
 
-# ── staging map (transaction-aware redirect) ──
+# ── 暂存映射（事务感知重定向）──
 import json as _json_mod
 _STAGING_MAP_RAW = os.environ.get("EXCELMANUS_STAGING_MAP", "{{}}")
 try:
@@ -262,7 +262,7 @@ except (ValueError, TypeError):
     _STAGING_MAP = {{}}
 _STAGING_LOOKUP = {{os.path.realpath(k): os.path.realpath(v) for k, v in _STAGING_MAP.items()}}
 
-# ── save original refs before monkey-patch ──
+# ── monkey-patch 前保存原始引用 ──
 _original_open = builtins.open
 _real_exec = builtins.exec
 _real_compile = builtins.compile
@@ -378,7 +378,7 @@ if hasattr(os, "popen"):
         raise RuntimeError("os.popen() 被安全策略禁止 [等级: " + _TIER + "]")
     os.popen = _b2
 
-# ── Layer 4: Build restricted __builtins__ for user code ──
+# ── 第 4 层：为用户代码构建受限的 __builtins__ ──
 # 不全局 patch builtins.exec/eval（会破坏 import 机制）。
 # 改为向用户脚本提供受限的 __builtins__ 字典。
 def _blocked_exec(*args, **kwargs):
@@ -445,8 +445,8 @@ def _patch_openpyxl_save():
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
 
-# ── Layer 6: subprocess / socket function guard ──
-# subprocess 模块允许导入（pandas/matplotlib 等库初始化链依趖），
+# ── 第 6 层：subprocess / socket 函数守卫 ──
+# subprocess 模块允许导入（pandas/matplotlib 等库初始化链依赖），
 # 但禁止用户脚本直接调用进程创建函数。
 try:
     import subprocess as _subprocess_mod
@@ -525,7 +525,7 @@ try:
 except ImportError:
     pass
 
-# ── execute user script ──
+# ── 执行用户脚本 ──
 if len(sys.argv) < 2:
     print("Usage: wrapper.py <script.py> [args...]", file=sys.stderr)
     sys.exit(1)

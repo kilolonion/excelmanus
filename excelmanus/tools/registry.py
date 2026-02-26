@@ -54,7 +54,6 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.tools.code_tools",
     "excelmanus.tools.shell_tools",
     "excelmanus.tools.sheet_tools",
-    "excelmanus.tools.macro_tools",
     "excelmanus.tools.focus_tools",
     "excelmanus.tools.image_tools",
     "excelmanus.tools.memory_tools",
@@ -449,7 +448,7 @@ class ToolRegistry:
             return "off"
         if mode == "shadow":
             return "shadow"
-        # mode == "enforce"
+        # 模式为 "enforce" 时
         return "enforce" if self._is_canary_hit(tool_name=tool_name, arguments=arguments) else "shadow"
 
     def validate_arguments_by_schema(
