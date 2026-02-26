@@ -31,6 +31,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "introspect_capability",
         # Vision 工具：读取图片，只读
         "read_image",
+        # 窗口聚焦工具：切换视口/滚动/展开，纯状态操作无文件写入
+        "focus_window",
     }
 )
 
@@ -72,9 +74,6 @@ MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
 MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "copy_file",
-        # Macro 工具（声明式复合操作，审计不拦截）
-        "vlookup_write",
-        "computed_column",
         # Vision 工具（写文件，自动审批）
         "rebuild_excel_from_spec",
         "verify_excel_replica",
@@ -100,8 +99,6 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "copy_file": ("destination",),
     "rename_file": ("source", "destination"),
     "delete_file": ("file_path",),
-    "vlookup_write": ("file_path",),
-    "computed_column": ("file_path",),
     "rebuild_excel_from_spec": ("output_path",),
     "verify_excel_replica": ("report_path",),
 }
@@ -156,13 +153,12 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     # data_write: Batch 1 精简
     # format: Batch 2 精简
     # advanced_format + chart + sheet写入: Batch 3 精简
-    "sheet": ("list_sheets",),  # list_sheets 保留为只读结构发现
+    "sheet": ("list_sheets", "focus_window"),  # list_sheets 保留为只读结构发现
     "file": (
         "list_directory", "copy_file", "rename_file", "delete_file",
         # get_file_info, find_files, read_text_file: Batch 5 精简
     ),
     "code": ("write_text_file", "run_code", "run_shell"),
-    "macro": ("vlookup_write", "computed_column"),
     "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica", "extract_table_spec"),
 }
 
@@ -171,10 +167,10 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     # 数据读取
-    "read_excel": "读取 Excel 数据摘要与前10行预览，可按需附加样式/图表/公式等维度",
+    "read_excel": "读取 Excel/CSV 数据摘要与首尾预览，支持 range 精确读取、分页、采样，可按需附加样式/图表/公式/数据概要等维度",
     "inspect_excel_files": "批量扫描目录下所有 Excel 文件概况，快速了解工作区全貌",
     # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
-    "filter_data": "按条件筛选 Excel 数据行，支持多条件组合、排序和 Top-N",
+    "filter_data": "按条件筛选 Excel/CSV 数据行，支持 14 种运算符、多条件组合、排序和 Top-N",
     # 数据写入
     # write_excel, write_cells, transform_data, insert_rows, insert_columns: Batch 1 精简
     # Batch 2 精简（format 全部）
@@ -191,11 +187,10 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
     "run_code": "执行 Python 代码或脚本，适用于批量数据处理、复杂变换、跨表操作等场景（已配备安全沙盒）",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
-    # 宏工具
-    "vlookup_write": "跨表匹配写回：从源表查找/聚合数据写入目标表新列（类 VLOOKUP）",
-    "computed_column": "新增计算列：用声明式表达式计算新列并写回",
     # 视觉工具
     "read_image": "读取本地图片文件并加载到视觉上下文，支持 png/jpg/gif/bmp/webp",
+    # 窗口聚焦
+    "focus_window": "切换数据窗口视口：滚动到指定区域/向下展开更多行/清除筛选/恢复全量视图，window_id 见窗口感知上下文",
     "rebuild_excel_from_spec": "从 ReplicaSpec JSON 确定性编译为 Excel 文件",
     "verify_excel_replica": "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
     "extract_table_spec": "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON，支持多表格",
