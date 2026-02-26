@@ -293,45 +293,28 @@ class TestVbaExemptEngineIntegration:
 
     @pytest.mark.asyncio
     async def test_no_vba_exempt_for_normal_request(self) -> None:
-        """普通请求不应设置 _vba_exempt。"""
+        """普通请求不应设置 _vba_exempt；guard_mode=off 时门禁不触发。"""
         engine = self._make_engine(max_iterations=3)
         route_result = self._make_route_result()
         engine._route_skills = AsyncMock(return_value=route_result)
 
         vba_reply = "Sub MyMacro()\n  MsgBox \"Hello\"\nEnd Sub"
         engine._client.chat.completions.create = AsyncMock(
-            side_effect=[
-                types.SimpleNamespace(
-                    choices=[
-                        types.SimpleNamespace(
-                            message=types.SimpleNamespace(
-                                content=vba_reply, tool_calls=None
-                            )
+            return_value=types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content=vba_reply, tool_calls=None
                         )
-                    ]
-                ),
-                types.SimpleNamespace(
-                    choices=[
-                        types.SimpleNamespace(
-                            message=types.SimpleNamespace(
-                                content="done", tool_calls=None
-                            )
-                        )
-                    ]
-                ),
-            ]
+                    )
+                ]
+            ),
         )
 
         result = await engine.chat("帮我汇总销售数据")
         assert engine._vba_exempt is False
-        # 应触发 execution_guard（VBA 代码被检测）
-        user_messages = [
-            str(m.get("content", ""))
-            for m in engine.memory.get_messages()
-            if m.get("role") == "user"
-        ]
-        guard_fired = any("⚠️" in msg and "公式或代码建议" in msg for msg in user_messages)
-        assert guard_fired
+        # guard_mode=off（默认）：门禁不触发，文本直接放行
+        assert result.reply == vba_reply
 
     @pytest.mark.asyncio
     async def test_vba_exempt_resets_on_new_task(self) -> None:
