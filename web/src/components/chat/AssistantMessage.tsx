@@ -226,9 +226,11 @@ interface AssistantMessageProps {
   blocks: AssistantBlock[];
   affectedFiles?: string[];
   isLastMessage?: boolean;
+  onRetry?: () => void;
+  onRetryWithModel?: (modelName: string) => void;
 }
 
-export const AssistantMessage = React.memo(function AssistantMessage({ messageId, blocks, affectedFiles, isLastMessage }: AssistantMessageProps) {
+export const AssistantMessage = React.memo(function AssistantMessage({ messageId, blocks, affectedFiles, isLastMessage, onRetry, onRetryWithModel }: AssistantMessageProps) {
   const [collapsed, setCollapsed] = useState(false);
   // Only the last message needs to subscribe to streaming-related state
   const pipelineStatus = useChatStore((s) => isLastMessage ? s.pipelineStatus : null);
@@ -338,7 +340,12 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
           <AffectedFilesBadges files={affectedFiles} />
         )}
 
-        <MessageActions blocks={blocks} />
+        <MessageActions
+          blocks={blocks}
+          onRetry={onRetry}
+          onRetryWithModel={onRetryWithModel}
+          isStreaming={isStreaming}
+        />
       </div>
     </div>
   );

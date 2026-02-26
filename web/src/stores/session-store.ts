@@ -27,7 +27,11 @@ export const useSessionStore = create<SessionState>()(
       setActiveSession: (id) => set({ activeSessionId: id }),
       addSession: (session) =>
         set((state) => {
-          const withTs = { ...session, updatedAt: session.updatedAt ?? new Date().toISOString() };
+          const withTs = {
+            ...session,
+            updatedAt: session.updatedAt ?? new Date().toISOString(),
+            createdAt: session.createdAt ?? Date.now(),
+          };
           const next = [withTs, ...state.sessions].sort(
             (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")
           );
@@ -71,10 +75,22 @@ export const useSessionStore = create<SessionState>()(
           // Remove local-only sessions not present in the backend response.
           // Keep the active session to protect optimistic creates that haven't
           // reached the server yet.
+          // F3: Also keep sessions created locally within the last 30s (grace period)
+          // to prevent premature pruning of optimistic creates before the first
+          // message reaches the backend.
+          // F7: Skip pruning entirely when the backend returns an empty list
+          // (likely a transient error) to prevent session list flickering.
           const remoteIds = new Set(remote.map((s) => s.id));
-          for (const [id] of localMap) {
-            if (!remoteIds.has(id) && id !== state.activeSessionId) {
-              localMap.delete(id);
+          const GRACE_PERIOD_MS = 30_000;
+          const now = Date.now();
+          if (remote.length > 0) {
+            for (const [id, local] of localMap) {
+              if (!remoteIds.has(id) && id !== state.activeSessionId) {
+                if (local.createdAt && (now - local.createdAt) < GRACE_PERIOD_MS) {
+                  continue;
+                }
+                localMap.delete(id);
+              }
             }
           }
 

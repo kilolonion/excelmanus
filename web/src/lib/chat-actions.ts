@@ -8,6 +8,30 @@ import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
 
+const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+function _isImageFile(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && _IMAGE_EXTS.has(name.slice(dot).toLowerCase());
+}
+
+function _isImageLike(file: File): boolean {
+  return _isImageFile(file.name) || (file.type || "").toLowerCase().startsWith("image/");
+}
+
+function _fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // result is "data:<mime>;base64,<data>" — extract just the base64 part
+      const result = reader.result as string;
+      const idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // RAF-based delta batcher: buffers high-frequency text_delta / thinking_delta
 // events and flushes them once per animation frame to avoid excessive re-renders.
@@ -101,23 +125,57 @@ export async function sendMessage(
 
   if (store.isStreaming) return;
 
-  // Upload files first
-  const uploadedPaths: string[] = [];
+  // Upload files first, separating images from documents
+  const uploadedDocPaths: string[] = [];
+  const uploadedImagePaths: string[] = [];
+  const imageAttachments: { data: string; media_type: string }[] = [];
+  // Track per-file upload results so we can populate user message attachments
+  const fileUploadResults: { filename: string; path: string; size: number }[] = [];
   if (files && files.length > 0) {
     for (const file of files) {
+      const isImage = _isImageLike(file);
+
+      // 图片应优先尝试 base64 编码，不能依赖 upload 成功。
+      // 否则上传失败（格式限制/配额/网络）时，LLM 会完全收不到图片内容。
+      if (isImage) {
+        try {
+          const b64 = await _fileToBase64(file);
+          imageAttachments.push({
+            data: b64,
+            media_type: file.type || "image/png",
+          });
+        } catch (b64Err) {
+          console.error("Base64 encoding failed for image:", file.name, b64Err);
+        }
+      }
+
       try {
         const result = await uploadFile(file);
-        uploadedPaths.push(result.path);
+        fileUploadResults.push({ filename: file.name, path: result.path, size: file.size });
+        if (isImage) {
+          uploadedImagePaths.push(result.path);
+        } else {
+          uploadedDocPaths.push(result.path);
+        }
       } catch (err) {
-        console.error("Upload failed:", err);
+        console.error("Upload failed:", file.name, err);
+        // Still record the file so it appears in the user message (without path)
+        fileUploadResults.push({ filename: file.name, path: "", size: file.size });
       }
     }
   }
 
+  // Build structured file notice for the agent
   let messageContent = text;
-  if (uploadedPaths.length > 0) {
-    const fileList = uploadedPaths.map((p) => `[已上传: ${p}]`).join("\n");
-    messageContent = `${fileList}\n\n${text}`;
+  const notices: string[] = [];
+  for (const p of uploadedDocPaths) {
+    notices.push(`[已上传文件: ${p}]`);
+  }
+  for (const p of uploadedImagePaths) {
+    notices.push(`[已上传图片: ${p}]`);
+  }
+  if (notices.length > 0) {
+    messageContent = `${notices.join("\n")}\n\n${text}`;
   }
 
   const effectiveSessionId = sessionId || sessionStore.activeSessionId;
@@ -137,7 +195,7 @@ export async function sendMessage(
   store.addUserMessage(
     userMsgId,
     text,
-    files?.map((f) => ({ filename: f.name, path: "", size: f.size }))
+    fileUploadResults.length > 0 ? fileUploadResults : undefined
   );
 
   const assistantMsgId = uuid();
@@ -252,6 +310,23 @@ export async function sendMessage(
     });
   };
 
+  // Diagnostic: log image attachment status
+  if (files && files.length > 0) {
+    console.log(
+      "[sendMessage] files=%d, imageAttachments=%d, uploadedImagePaths=%o",
+      files.length,
+      imageAttachments.length,
+      uploadedImagePaths,
+    );
+    for (const att of imageAttachments) {
+      console.log(
+        "[sendMessage] image: media_type=%s, data_length=%d",
+        att.media_type,
+        att.data.length,
+      );
+    }
+  }
+
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
@@ -259,6 +334,7 @@ export async function sendMessage(
         message: messageContent,
         session_id: effectiveSessionId,
         chat_mode: useUIStore.getState().chatMode,
+        ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
         const data = event.data;
@@ -648,6 +724,11 @@ export async function sendMessage(
             }
             if (changedFiles.length > 0) {
               S().addAffectedFiles(assistantMsgId, changedFiles);
+              excelStore.bumpWorkspaceFilesVersion();
+              // W7: 自动刷新备份列表
+              if (effectiveSessionId) {
+                excelStore.fetchBackups(effectiveSessionId);
+              }
             }
             break;
           }
@@ -1263,6 +1344,11 @@ export async function sendContinuation(
             }
             if (changedFiles2.length > 0) {
               S().addAffectedFiles(msgId, changedFiles2);
+              excelStore2.bumpWorkspaceFilesVersion();
+              // W7: 自动刷新备份列表
+              if (effectiveSessionId) {
+                excelStore2.fetchBackups(effectiveSessionId);
+              }
             }
             break;
           }
@@ -1451,6 +1537,7 @@ export async function rollbackAndResend(
   newContent: string,
   rollbackFiles: boolean,
   sessionId: string | null,
+  files?: File[],
 ) {
   const store = useChatStore.getState();
   if (store.isStreaming) return;
@@ -1488,7 +1575,80 @@ export async function rollbackAndResend(
   store.setMessages(truncated);
 
   // sendMessage 会在前后端各添加用户消息 + 触发流式回复
-  await sendMessage(newContent, undefined, effectiveSessionId);
+  await sendMessage(newContent, files, effectiveSessionId);
+}
+
+/**
+ * 重试指定 assistant 消息：回滚到其前一条 user 消息，然后重新发送。
+ * 如果指定了 switchToModel，会先切换模型再重新发送。
+ */
+export async function retryAssistantMessage(
+  assistantMessageId: string,
+  sessionId: string | null,
+  switchToModel?: string,
+) {
+  const store = useChatStore.getState();
+  if (store.isStreaming) return;
+
+  const messages = store.messages;
+  const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
+  if (assistantIdx === -1) return;
+
+  // 找到该 assistant 消息前面最近的 user 消息
+  let userIdx = -1;
+  for (let i = assistantIdx - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      userIdx = i;
+      break;
+    }
+  }
+  if (userIdx === -1) return;
+
+  const userMessage = messages[userIdx];
+  if (userMessage.role !== "user") return;
+  const userContent = userMessage.content;
+
+  // 计算 turn_index（第几个 user 消息）
+  let turnIndex = 0;
+  for (let i = 0; i < userIdx; i++) {
+    if (messages[i].role === "user") turnIndex++;
+  }
+
+  const effectiveSessionId = sessionId || store.currentSessionId;
+  if (!effectiveSessionId) return;
+
+  // 如果需要切换模型，先切换
+  if (switchToModel) {
+    try {
+      const { apiPut } = await import("./api");
+      await apiPut("/models/active", { name: switchToModel });
+      useUIStore.getState().setCurrentModel(switchToModel);
+    } catch (err) {
+      console.error("Model switch failed:", err);
+      return;
+    }
+  }
+
+  // 调用后端 rollback API
+  try {
+    const { rollbackChat } = await import("./api");
+    await rollbackChat({
+      sessionId: effectiveSessionId,
+      turnIndex,
+      rollbackFiles: false,
+      resendMode: true,
+    });
+  } catch (err) {
+    console.error("Rollback failed:", err);
+    return;
+  }
+
+  // 前端截断到 user 消息之前
+  const truncated = messages.slice(0, userIdx);
+  store.setMessages(truncated);
+
+  // 重新发送
+  await sendMessage(userContent, undefined, effectiveSessionId);
 }
 
 export function stopGeneration() {
@@ -1544,6 +1704,605 @@ export function stopGeneration() {
       )
     );
     store.saveCurrentSession();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Active subscribe guard: prevents multiple concurrent subscribe connections.
+// ---------------------------------------------------------------------------
+let _activeSubscribeSessionId: string | null = null;
+
+/**
+ * SSE 重连：页面刷新后重新接入正在执行的聊天任务事件流。
+ * 复用最后一条 assistant 消息（若存在），不创建新的用户消息。
+ *
+ * 由 SessionSync 在检测到 in_flight && !hasLocalLiveStream 时调用。
+ */
+export async function subscribeToSession(sessionId: string) {
+  const store = useChatStore.getState();
+
+  // Prevent duplicate subscribe connections
+  if (store.abortController) return;
+  if (_activeSubscribeSessionId === sessionId) return;
+
+  // Find the last assistant message to append events to
+  const messages = store.messages;
+  let assistantMsgId: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      assistantMsgId = messages[i].id;
+      break;
+    }
+  }
+  // If no assistant message yet, create one
+  if (!assistantMsgId) {
+    assistantMsgId = uuid();
+    store.addAssistantMessage(assistantMsgId);
+  }
+
+  const msgId = assistantMsgId;
+  _activeSubscribeSessionId = sessionId;
+
+  const abortController = new AbortController();
+  store.setAbortController(abortController);
+  store.setStreaming(true);
+  store.setPipelineStatus({
+    stage: "reconnecting",
+    message: "正在重连...",
+    startedAt: Date.now(),
+  });
+
+  const S = () => useChatStore.getState();
+
+  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
+    if (textDelta) {
+      const msg = getLastAssistantMessage(S().messages, msgId);
+      const lastBlock = msg?.blocks[msg.blocks.length - 1];
+      if (lastBlock && lastBlock.type === "text") {
+        S().updateLastBlock(msgId, (b) => {
+          if (b.type === "text") {
+            return { ...b, content: b.content + textDelta };
+          }
+          return b;
+        });
+      } else {
+        S().appendBlock(msgId, { type: "text", content: textDelta });
+      }
+    }
+    if (thinkingDelta) {
+      S().updateBlockByType(msgId, "thinking", (b) => {
+        if (b.type === "thinking") {
+          return { ...b, content: b.content + thinkingDelta };
+        }
+        return b;
+      });
+    }
+  });
+
+  const getLastBlockOfType = (type: string) => {
+    const msg = getLastAssistantMessage(S().messages, msgId);
+    if (!msg) return null;
+    for (let i = msg.blocks.length - 1; i >= 0; i--) {
+      if (msg.blocks[i].type === type) return msg.blocks[i];
+    }
+    return null;
+  };
+
+  const normalizeTaskItems = (taskListPayload: unknown): TaskItem[] => {
+    let rawItems: unknown[] = [];
+    if (Array.isArray(taskListPayload)) {
+      rawItems = taskListPayload;
+    } else if (
+      taskListPayload
+      && typeof taskListPayload === "object"
+      && "items" in taskListPayload
+      && Array.isArray((taskListPayload as { items?: unknown[] }).items)
+    ) {
+      rawItems = (taskListPayload as { items: unknown[] }).items;
+    }
+    return rawItems.map((rawItem, i) => {
+      const item = rawItem as Record<string, unknown>;
+      return {
+        content:
+          (item.content as string)
+          || (item.title as string)
+          || (item.description as string)
+          || `任务 ${i + 1}`,
+        status: (item.status as string) || "pending",
+        index: typeof item.index === "number" ? item.index : i,
+        verification: (item.verification as string) || undefined,
+      };
+    });
+  };
+
+  const applyTaskStatusPatch = (
+    items: TaskItem[],
+    taskIndex: number | null,
+    taskStatus: string,
+  ): TaskItem[] => {
+    if (taskIndex === null || !taskStatus) return items;
+    return items.map((item) =>
+      item.index === taskIndex ? { ...item, status: taskStatus } : item
+    );
+  };
+
+  let thinkingInProgress = false;
+
+  const finalizeThinking = () => {
+    if (!thinkingInProgress) return;
+    thinkingInProgress = false;
+    batcher.flush();
+    S().updateBlockByType(msgId, "thinking", (b) => {
+      if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
+        return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
+      }
+      return b;
+    });
+  };
+
+  try {
+    await consumeSSE(
+      buildApiUrl("/chat/subscribe", { direct: true }),
+      { session_id: sessionId, skip_replay: true },
+      (event) => {
+        const data = event.data;
+
+        if (event.event !== "thinking_delta" && event.event !== "thinking") {
+          finalizeThinking();
+        }
+        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
+          batcher.flush();
+        }
+
+        switch (event.event) {
+          case "session_init":
+            break;
+
+          case "subscribe_resume": {
+            const status = (data.status as string) || "";
+            if (status === "reconnected") {
+              S().setPipelineStatus({
+                stage: "resuming",
+                message: "正在恢复事件流...",
+                startedAt: Date.now(),
+              });
+            }
+            break;
+          }
+
+          case "pipeline_progress": {
+            const stage = (data.stage as string) || "";
+            const pipelineMsg = (data.message as string) || "";
+            S().setPipelineStatus({
+              stage,
+              message: pipelineMsg,
+              startedAt: Date.now(),
+              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
+              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
+              specPath: (data.spec_path as string) || undefined,
+              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
+              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
+            });
+            break;
+          }
+
+          case "route_end": {
+            const mode = (data.route_mode as string) || "";
+            const skills = (data.skills_used as string[]) || [];
+            if (mode) {
+              S().appendBlock(msgId, {
+                type: "status",
+                label: `路由: ${mode}`,
+                detail: skills.length > 0 ? `技能: ${skills.join(", ")}` : undefined,
+                variant: "route",
+              });
+            }
+            break;
+          }
+
+          case "iteration_start": {
+            const iter = (data.iteration as number) || 0;
+            if (iter > 1) {
+              S().appendBlock(msgId, { type: "iteration", iteration: iter });
+            }
+            break;
+          }
+
+          case "thinking_delta": {
+            S().setPipelineStatus(null);
+            const lastThinking = getLastBlockOfType("thinking");
+            if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
+              batcher.pushThinking((data.content as string) || "");
+            } else {
+              batcher.flush();
+              S().appendBlock(msgId, {
+                type: "thinking",
+                content: (data.content as string) || "",
+                startedAt: Date.now(),
+              });
+            }
+            thinkingInProgress = true;
+            break;
+          }
+
+          case "thinking": {
+            S().appendBlock(msgId, {
+              type: "thinking",
+              content: (data.content as string) || "",
+              duration: (data.duration as number) || undefined,
+              startedAt: Date.now(),
+            });
+            break;
+          }
+
+          case "text_delta": {
+            S().setPipelineStatus(null);
+            const msg = getLastAssistantMessage(S().messages, msgId);
+            const lastBlock = msg?.blocks[msg.blocks.length - 1];
+            if (!lastBlock || lastBlock.type !== "text") {
+              S().appendBlock(msgId, { type: "text", content: "" });
+            }
+            batcher.pushText((data.content as string) || "");
+            break;
+          }
+
+          case "tool_call_start": {
+            S().setPipelineStatus(null);
+            const toolCallIdRaw = data.tool_call_id;
+            const toolCallIdVal = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
+              ? toolCallIdRaw
+              : undefined;
+            S().appendBlock(msgId, {
+              type: "tool_call",
+              toolCallId: toolCallIdVal,
+              name: (data.tool_name as string) || "",
+              args: (data.arguments as Record<string, unknown>) || {},
+              status: "running",
+              iteration: (data.iteration as number) || undefined,
+            });
+            break;
+          }
+
+          case "tool_call_end": {
+            const toolCallIdRaw = data.tool_call_id;
+            const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
+            S().updateToolCallBlock(msgId, toolCallId, (b) => {
+              if (b.type === "tool_call") {
+                if (b.status === "pending") {
+                  return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
+                }
+                if (b.status === "running") {
+                  return {
+                    ...b,
+                    status: data.success ? "success" : "error",
+                    result: (data.result as string) || undefined,
+                    error: (data.error as string) || undefined,
+                  } as AssistantBlock;
+                }
+              }
+              return b;
+            });
+            break;
+          }
+
+          case "subagent_start": {
+            S().appendBlock(msgId, {
+              type: "subagent",
+              name: (data.name as string) || "",
+              reason: (data.reason as string) || "",
+              iterations: 0,
+              toolCalls: 0,
+              status: "running",
+            });
+            break;
+          }
+
+          case "subagent_iteration": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type === "subagent" && b.status === "running") {
+                return {
+                  ...b,
+                  iterations: (data.iteration as number) || b.iterations,
+                  toolCalls: (data.tool_calls as number) || b.toolCalls,
+                };
+              }
+              return b;
+            });
+            break;
+          }
+
+          case "subagent_summary": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type === "subagent") {
+                return {
+                  ...b,
+                  summary: (data.summary as string) || "",
+                  iterations: (data.iterations as number) || b.iterations,
+                  toolCalls: (data.tool_calls as number) || b.toolCalls,
+                };
+              }
+              return b;
+            });
+            break;
+          }
+
+          case "subagent_end": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type === "subagent") {
+                return {
+                  ...b,
+                  status: "done",
+                  iterations: (data.iterations as number) || b.iterations,
+                  toolCalls: (data.tool_calls as number) || b.toolCalls,
+                };
+              }
+              return b;
+            });
+            break;
+          }
+
+          case "pending_approval": {
+            const paToolCallId = (data.tool_call_id as string) || null;
+            S().updateToolCallBlock(msgId, paToolCallId, (b) => {
+              if (b.type === "tool_call") {
+                return { ...b, status: "pending" as const } as AssistantBlock;
+              }
+              return b;
+            });
+            S().setPendingApproval({
+              id: (data.approval_id as string) || "",
+              toolName: (data.approval_tool_name as string) || "",
+              arguments: {},
+              riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
+              argsSummary: (data.args_summary as Record<string, string>) || {},
+            });
+            break;
+          }
+
+          case "user_question": {
+            S().setPendingQuestion({
+              id: (data.id as string) || "",
+              header: (data.header as string) || "",
+              text: (data.text as string) || "",
+              options: (data.options as { label: string; description: string }[]) || [],
+              multiSelect: Boolean(data.multi_select),
+            });
+            break;
+          }
+
+          case "approval_resolved": {
+            const toolName = (data.approval_tool_name as string) || "";
+            const approvalId = (data.approval_id as string) || "";
+            const success = Boolean(data.success);
+            const undoable = Boolean(data.undoable);
+            const arResult = (data.result as string) || undefined;
+            S().setPendingApproval(null);
+            const arToolCallId = (data.tool_call_id as string) || null;
+            S().updateToolCallBlock(msgId, arToolCallId, (b) => {
+              if (b.type === "tool_call" && b.status === "pending") {
+                return {
+                  ...b,
+                  status: success ? ("success" as const) : ("error" as const),
+                  result: arResult ?? b.result,
+                  error: success ? undefined : (arResult ?? b.error),
+                } as AssistantBlock;
+              }
+              return b;
+            });
+            S().appendBlock(msgId, {
+              type: "approval_action",
+              approvalId,
+              toolName,
+              success,
+              undoable,
+            });
+            break;
+          }
+
+          case "task_update": {
+            const payloadItems = normalizeTaskItems(data.task_list);
+            const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
+            const taskStatus = typeof data.task_status === "string" ? data.task_status : "";
+            const existingTaskList = getLastBlockOfType("task_list");
+            if (existingTaskList && existingTaskList.type === "task_list") {
+              S().updateBlockByType(msgId, "task_list", (b) => {
+                if (b.type !== "task_list") return b;
+                const baseItems = payloadItems.length > 0 ? payloadItems : b.items;
+                return { ...b, items: applyTaskStatusPatch(baseItems, taskIndex, taskStatus) };
+              });
+            } else if (payloadItems.length > 0) {
+              S().appendBlock(msgId, {
+                type: "task_list",
+                items: applyTaskStatusPatch(payloadItems, taskIndex, taskStatus),
+              });
+            }
+            break;
+          }
+
+          case "excel_preview": {
+            const epFilePath = (data.file_path as string) || "";
+            useExcelStore.getState().addPreview({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: epFilePath,
+              sheet: (data.sheet as string) || "",
+              columns: (data.columns as string[]) || [],
+              rows: (data.rows as (string | number | null)[][]) || [],
+              totalRows: (data.total_rows as number) || 0,
+              truncated: Boolean(data.truncated),
+            });
+            if (epFilePath) {
+              const fn = epFilePath.split("/").pop() || epFilePath;
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath, filename: fn });
+            }
+            break;
+          }
+
+          case "excel_diff": {
+            const edFilePath = (data.file_path as string) || "";
+            useExcelStore.getState().addDiff({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: edFilePath,
+              sheet: (data.sheet as string) || "",
+              affectedRange: (data.affected_range as string) || "",
+              changes: (data.changes as { cell: string; old: string | number | null; new: string | number | null }[]) || [],
+              timestamp: Date.now(),
+            });
+            if (edFilePath) {
+              const fn = edFilePath.split("/").pop() || edFilePath;
+              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
+              S().addAffectedFiles(msgId, [edFilePath]);
+            }
+            break;
+          }
+
+          case "files_changed": {
+            const changedFiles = (data.files as string[]) || [];
+            const excelStore = useExcelStore.getState();
+            for (const filePath of changedFiles) {
+              if (filePath) {
+                const filename = filePath.split("/").pop() || filePath;
+                excelStore.addRecentFileIfNotDismissed({ path: filePath, filename });
+              }
+            }
+            if (changedFiles.length > 0) {
+              S().addAffectedFiles(msgId, changedFiles);
+              excelStore.bumpWorkspaceFilesVersion();
+              // W7: 自动刷新备份列表
+              if (sessionId) {
+                excelStore.fetchBackups(sessionId);
+              }
+            }
+            break;
+          }
+
+          case "memory_extracted": {
+            const memEntries = (data.entries as { id: string; content: string; category: string }[]) || [];
+            const memTrigger = (data.trigger as string) || "session_end";
+            const memCount = (data.count as number) || memEntries.length;
+            if (memCount > 0) {
+              S().appendBlock(msgId, {
+                type: "memory_extracted",
+                entries: memEntries,
+                trigger: memTrigger,
+                count: memCount,
+              });
+            }
+            break;
+          }
+
+          case "file_download": {
+            const dlFilePath = (data.file_path as string) || "";
+            const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
+            const dlDescription = (data.description as string) || "";
+            if (dlFilePath) {
+              S().appendBlock(msgId, {
+                type: "file_download",
+                toolCallId: (data.tool_call_id as string) || undefined,
+                filePath: dlFilePath,
+                filename: dlFilename,
+                description: dlDescription,
+              });
+            }
+            break;
+          }
+
+          case "mode_changed": {
+            const uiMode = useUIStore.getState();
+            const modeName = data.mode_name as string;
+            const enabled = Boolean(data.enabled);
+            if (modeName === "full_access") uiMode.setFullAccessEnabled(enabled);
+            else if (modeName === "chat_mode") uiMode.setChatMode(data.value as "write" | "read" | "plan");
+            S().appendBlock(msgId, {
+              type: "status",
+              label: `${enabled ? "已开启" : "已关闭"} ${modeName === "full_access" ? "Full Access" : modeName}`,
+              variant: "info",
+            });
+            break;
+          }
+
+          case "reply": {
+            const content = (data.content as string) || "";
+            const hasPendingInteraction =
+              S().pendingApproval !== null || S().pendingQuestion !== null;
+            if (content && !hasPendingInteraction) {
+              const msg = getLastAssistantMessage(S().messages, msgId);
+              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
+              if (!hasTextBlock) {
+                S().appendBlock(msgId, { type: "text", content });
+              }
+            }
+            const uiReply = useUIStore.getState();
+            if (typeof data.full_access_enabled === "boolean") {
+              uiReply.setFullAccessEnabled(data.full_access_enabled);
+            }
+            if (typeof data.chat_mode === "string") {
+              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
+            }
+            const totalTokens = (data.total_tokens as number) || 0;
+            if (totalTokens > 0 && !hasPendingInteraction) {
+              S().appendBlock(msgId, {
+                type: "token_stats",
+                promptTokens: (data.prompt_tokens as number) || 0,
+                completionTokens: (data.completion_tokens as number) || 0,
+                totalTokens,
+                iterations: (data.iterations as number) || 0,
+              });
+            }
+            break;
+          }
+
+          case "done": {
+            S().setPipelineStatus(null);
+            S().saveCurrentSession();
+            S().setStreaming(false);
+            S().setAbortController(null);
+            break;
+          }
+
+          case "error": {
+            S().setPipelineStatus(null);
+            S().appendBlock(msgId, {
+              type: "text",
+              content: `⚠️ ${(data.error as string) || "发生未知错误"}`,
+            });
+            break;
+          }
+
+          default:
+            break;
+        }
+      },
+      abortController.signal,
+    );
+  } catch (err) {
+    if ((err as Error).name !== "AbortError") {
+      S().appendBlock(msgId, {
+        type: "text",
+        content: `⚠️ 重连错误: ${(err as Error).message}`,
+      });
+    }
+  } finally {
+    _activeSubscribeSessionId = null;
+    batcher.dispose();
+    S().setPipelineStatus(null);
+    S().saveCurrentSession();
+    S().setStreaming(false);
+    S().setAbortController(null);
+
+    // 最终一致性：从后端加载权威消息，确保前端与后端状态完全同步。
+    // 延迟执行以确保后端 release_for_chat 已完成消息持久化。
+    const sid = sessionId;
+    setTimeout(async () => {
+      try {
+        const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+        const chat = useChatStore.getState();
+        if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+          await refreshSessionMessagesFromBackend(sid);
+        }
+      } catch {
+        // silent — SessionSync polling will eventually recover
+      }
+    }, 1500);
   }
 }
 

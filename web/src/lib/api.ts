@@ -333,6 +333,58 @@ export async function undoApproval(approvalId: string, sessionId: string): Promi
   return apiPost(`/approvals/${approvalId}/undo?${qs}`, {});
 }
 
+// ── Inline Interaction API (blocking ask_user / approval) ──
+
+export async function answerQuestion(
+  sessionId: string,
+  questionId: string,
+  answer: string,
+): Promise<{ status: string }> {
+  const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/answer`, { direct: true });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ question_id: questionId, answer }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Answer error: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function submitApproval(
+  sessionId: string,
+  approvalId: string,
+  decision: "accept" | "reject" | "fullaccess",
+): Promise<{ status: string }> {
+  const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/approve`, { direct: true });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ approval_id: approvalId, decision }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Approve error: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function abortChat(sessionId: string): Promise<{ status: string }> {
+  const url = buildApiUrl("/chat/abort", { direct: true });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `Abort error: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function rollbackChat(opts: {
   sessionId: string;
   turnIndex: number;
@@ -425,6 +477,7 @@ export interface ExcelFileListItem {
   path: string;
   filename: string;
   modified_at: number;
+  is_dir?: boolean;
 }
 
 export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
@@ -441,6 +494,79 @@ export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
+}
+
+// ── Workspace file management APIs ───────────────────────
+
+export async function workspaceMkdir(path: string): Promise<void> {
+  const url = buildApiUrl("/files/workspace/mkdir");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `mkdir error: ${res.status}`);
+  }
+}
+
+export async function workspaceCreateFile(path: string): Promise<void> {
+  const url = buildApiUrl("/files/workspace/create");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `create error: ${res.status}`);
+  }
+}
+
+export async function workspaceDeleteItem(path: string): Promise<void> {
+  const url = buildApiUrl("/files/workspace/item");
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `delete error: ${res.status}`);
+  }
+}
+
+export async function workspaceRenameItem(oldPath: string, newPath: string): Promise<void> {
+  const url = buildApiUrl("/files/workspace/rename");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `rename error: ${res.status}`);
+  }
+}
+
+export async function uploadFileToFolder(
+  file: File,
+  folder: string
+): Promise<{ filename: string; path: string; size: number }> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("folder", folder);
+  const res = await fetch(buildApiUrl("/upload"), {
+    method: "POST",
+    headers: { ...getAuthHeaders() },
+    body: formData,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Upload error: ${res.status}`);
+  }
+  return res.json();
 }
 
 export interface AllSheetsSnapshotResponse {

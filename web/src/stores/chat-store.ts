@@ -13,6 +13,9 @@ import {
 // In-memory fast cache (supplements IndexedDB)
 const _sessionMessages = new Map<string, Message[]>();
 
+// F5: switchSession 取消令牌 — 递增版本号，旧的 loadAndSwitch 检测到版本变化后放弃更新
+let _switchSessionVersion = 0;
+
 let _msgIdCounter = 0;
 function _nextId(): string {
   return `restored-${++_msgIdCounter}-${Date.now()}`;
@@ -35,6 +38,64 @@ const _EXCEL_WRITE_TOOL_NAMES = new Set([
 const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
 const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(（\[])([^ \t\r\n`"'()（）\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)）\]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
+
+// Block types produced only by SSE events — not persisted in backend message
+// store.  When refreshing from backend, these must be carried over from the
+// existing in-memory messages to avoid visual data loss (e.g. thinking blocks
+// disappearing after SessionSync detects inFlight→false).
+const _SSE_ONLY_BLOCK_TYPES = new Set([
+  "thinking", "iteration", "approval_action",
+]);
+
+/**
+ * Merge SSE-only blocks (thinking, iteration, approval_action) from
+ * `oldMessages` into `newMessages` so that a backend refresh does not
+ * discard them.  Matching is positional among assistant messages.
+ */
+function _preserveSseOnlyBlocks(
+  oldMessages: Message[],
+  newMessages: Message[],
+): Message[] {
+  // Collect old assistant messages in order
+  const oldAssistant: AssistantBlock[][] = [];
+  for (const m of oldMessages) {
+    if (m.role === "assistant") oldAssistant.push(m.blocks);
+  }
+  if (oldAssistant.length === 0) return newMessages;
+
+  let aIdx = 0;
+  return newMessages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const oldBlocks = oldAssistant[aIdx++];
+    if (!oldBlocks) return msg;
+
+    const sseBlocks = oldBlocks.filter((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type));
+    if (sseBlocks.length === 0) return msg;
+
+    // Use old block ordering as template: keep SSE-only blocks in place,
+    // replace backend-persisted blocks with their refreshed counterparts.
+    const newBackendBlocks = [...msg.blocks]; // all non-SSE
+    let ni = 0;
+    const merged: AssistantBlock[] = [];
+
+    for (const ob of oldBlocks) {
+      if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
+        merged.push(ob);
+      } else {
+        if (ni < newBackendBlocks.length) {
+          merged.push(newBackendBlocks[ni++]);
+        }
+      }
+    }
+    // Append any remaining new blocks (e.g. tool_calls added after last
+    // SSE-only block in the old message).
+    while (ni < newBackendBlocks.length) {
+      merged.push(newBackendBlocks[ni++]);
+    }
+
+    return { ...msg, blocks: merged };
+  });
+}
 
 interface BackendConversionResult {
   messages: Message[];
@@ -443,17 +504,24 @@ async function _loadMessagesAsyncWithOptions(
       recoveredFilePaths,
     } = _convertBackendMessages(raw);
     _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths);
-    _sessionMessages.set(sessionId, messages);
-    maybeBackfillTitle(messages);
-    saveCachedMessages(sessionId, messages).catch(() => {});
+    // When replacing visible messages, carry over SSE-only blocks
+    // (thinking, iteration, approval_action) from the current store so
+    // that a backend refresh does not discard them.
     const store = useChatStore.getState();
-    if (
+    const shouldReplace =
       store.currentSessionId === sessionId
       && !store.isStreaming
       && !store.abortController
-      && (store.messages.length === 0 || shouldReplaceVisibleMessages)
-    ) {
-      useChatStore.setState({ messages });
+      && (store.messages.length === 0 || shouldReplaceVisibleMessages);
+    const finalMessages =
+      shouldReplace && shouldReplaceVisibleMessages && store.messages.length > 0
+        ? _preserveSseOnlyBlocks(store.messages, messages)
+        : messages;
+    _sessionMessages.set(sessionId, finalMessages);
+    maybeBackfillTitle(finalMessages);
+    saveCachedMessages(sessionId, finalMessages).catch(() => {});
+    if (shouldReplace) {
+      useChatStore.setState({ messages: finalMessages });
     }
     // 消息已加载，立即恢复 Excel 事件并回填 affectedFiles
     _loadPersistedExcelEvents(sessionId).catch(() => {});
@@ -727,6 +795,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Load target session messages from memory cache first
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
+      // F5: bump version even for sync cache hit to cancel any pending async loads
+      ++_switchSessionVersion;
       set({
         currentSessionId: sessionId,
         messages: memCached,
@@ -736,6 +806,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return;
     }
+
+    // F5: 递增版本号，取消之前的 loadAndSwitch 异步操作
+    const myVersion = ++_switchSessionVersion;
 
     // 改进：不立即清空消息，而是先尝试从 IndexedDB 加载
     // 只有在确实没有缓存时才清空，减少消息闪烁
@@ -755,38 +828,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         const cached = await loadCachedMessages(sessionId);
         if (cached && cached.length > 0) {
-          // 检查是否仍然是目标会话（用户可能已经切换到其他会话）
-          const currentState = get();
-          if (currentState.currentSessionId === sessionId) {
-            _sessionMessages.set(sessionId, cached);
-            set({
-              currentSessionId: sessionId,
-              messages: cached,
-              pendingApproval: null,
-              pendingQuestion: null,
-              pipelineStatus: null,
-            });
-            // 立即恢复 Excel 事件，确保 diff 数据及时显示
-            _loadPersistedExcelEvents(sessionId).catch(() => {});
-            return;
-          }
+          // F5: 检查版本号 — 若已被更新的 switchSession 调用取代则放弃
+          if (_switchSessionVersion !== myVersion) return;
+          _sessionMessages.set(sessionId, cached);
+          set({
+            currentSessionId: sessionId,
+            messages: cached,
+            pendingApproval: null,
+            pendingQuestion: null,
+            pipelineStatus: null,
+          });
+          // 立即恢复 Excel 事件，确保 diff 数据及时显示
+          _loadPersistedExcelEvents(sessionId).catch(() => {});
+          return;
         }
       } catch {
         // IndexedDB 失败，继续后续流程
       }
 
+      // F5: 再次检查版本号
+      if (_switchSessionVersion !== myVersion) return;
+
       // IndexedDB 没有缓存，现在才清空并异步加载
-      const currentState = get();
-      if (currentState.currentSessionId === sessionId) {
-        set({
-          currentSessionId: sessionId,
-          messages: [],
-          pendingApproval: null,
-          pendingQuestion: null,
-          pipelineStatus: null,
-        });
-        _loadMessagesAsync(sessionId).catch(() => {});
-      }
+      set({
+        currentSessionId: sessionId,
+        messages: [],
+        pendingApproval: null,
+        pendingQuestion: null,
+        pipelineStatus: null,
+      });
+      _loadMessagesAsync(sessionId).catch(() => {});
     };
 
     // 立即更新 currentSessionId，但保持当前消息直到新消息加载完成

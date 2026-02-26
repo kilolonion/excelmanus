@@ -55,6 +55,12 @@ const ACCEPTED_EXTENSIONS = {
   "image/jpeg": [".jpg", ".jpeg"],
 };
 
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+function isImageFile(name: string): boolean {
+  const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
+  return IMAGE_EXTS.has(ext);
+}
+
 // Slash commands (mirrors CLI _STATIC_SLASH_COMMANDS + control_commands)
 const SLASH_COMMANDS: { command: string; description: string; icon: React.ReactNode; args?: string[] }[] = [
   // Base commands
@@ -194,6 +200,40 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const backdropRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
 
+  // Stable preview URLs for image thumbnails — avoids creating a new
+  // blob URL on every re-render and prevents mobile browsers from GC-ing
+  // the preview while the user is still composing.
+  const previewUrlCache = useRef(new Map<File, string>());
+
+  const getPreviewUrl = useCallback((file: File): string => {
+    let url = previewUrlCache.current.get(file);
+    if (!url) {
+      url = URL.createObjectURL(file);
+      previewUrlCache.current.set(file, url);
+    }
+    return url;
+  }, []);
+
+  // Revoke URLs for files that have been removed
+  useEffect(() => {
+    const currentFiles = new Set(files);
+    previewUrlCache.current.forEach((url, file) => {
+      if (!currentFiles.has(file)) {
+        URL.revokeObjectURL(url);
+        previewUrlCache.current.delete(file);
+      }
+    });
+  }, [files]);
+
+  // Revoke all preview URLs on unmount
+  useEffect(() => {
+    const cache = previewUrlCache.current;
+    return () => {
+      cache.forEach((url) => URL.revokeObjectURL(url));
+      cache.clear();
+    };
+  }, []);
+
   // Build a Set of known slash command names for quick lookup
   const slashCommandNames = useMemo(
     () => new Set(SLASH_COMMANDS.map((c) => c.command)),
@@ -282,30 +322,34 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
   }, []);
 
-  // Insert @filename mentions at current cursor position for given files
+  // Insert @filename mentions at current cursor position for given files.
+  // Image files are added as attachments only (no text mention) to avoid
+  // bloating the input area on mobile.
   const insertFileMentions = useCallback((newFiles: File[]) => {
     setFiles((prev) => [...prev, ...newFiles]);
-    // Track tokens for highlighting
-    setConfirmedTokens((prev) => {
-      const next = new Set(prev);
-      newFiles.forEach((f) => next.add(`@${f.name}`));
-      return next;
-    });
-    const textarea = textareaRef.current;
-    const cursorPos = textarea?.selectionStart ?? text.length;
-    const before = text.slice(0, cursorPos);
-    const after = text.slice(cursorPos);
-    const mentions = newFiles.map((f) => `@${f.name}`).join(" ");
-    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
-    const prefix = needsSpace ? " " : "";
-    const newText = before + prefix + mentions + " " + after;
-    setText(newText);
-    // Move cursor after inserted mentions
-    const newCursorPos = (before + prefix + mentions + " ").length;
-    requestAnimationFrame(() => {
-      textarea?.focus();
-      textarea?.setSelectionRange(newCursorPos, newCursorPos);
-    });
+    // Only insert text mentions for non-image files (Excel/CSV)
+    const docFiles = newFiles.filter((f) => !isImageFile(f.name));
+    if (docFiles.length > 0) {
+      setConfirmedTokens((prev) => {
+        const next = new Set(prev);
+        docFiles.forEach((f) => next.add(`@${f.name}`));
+        return next;
+      });
+      const textarea = textareaRef.current;
+      const cursorPos = textarea?.selectionStart ?? text.length;
+      const before = text.slice(0, cursorPos);
+      const after = text.slice(cursorPos);
+      const mentions = docFiles.map((f) => `@${f.name}`).join(" ");
+      const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
+      const prefix = needsSpace ? " " : "";
+      const newText = before + prefix + mentions + " " + after;
+      setText(newText);
+      const newCursorPos = (before + prefix + mentions + " ").length;
+      requestAnimationFrame(() => {
+        textarea?.focus();
+        textarea?.setSelectionRange(newCursorPos, newCursorPos);
+      });
+    }
   }, [text]);
 
   // Watch for confirmed Excel range selections from the excel-store
@@ -344,6 +388,40 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     clearPendingSelection();
   }, [pendingSelection, clearPendingSelection, text]);
+
+  // Watch for quick-add file mentions from the sidebar @ button
+  const pendingFileMention = useExcelStore((s) => s.pendingFileMention);
+  const clearPendingFileMention = useExcelStore((s) => s.clearPendingFileMention);
+
+  useEffect(() => {
+    if (!pendingFileMention) return;
+    const { path, filename } = pendingFileMention;
+    const mention = `@file:${filename}`;
+
+    setConfirmedTokens((prev) => new Set(prev).add(mention));
+    const textarea = textareaRef.current;
+    const cursorPos = textarea?.selectionStart ?? text.length;
+    const before = text.slice(0, cursorPos);
+    const after = text.slice(cursorPos);
+    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
+    const prefix = needsSpace ? " " : "";
+    const newText = before + prefix + mention + " " + after;
+    setText(newText);
+    const newCursorPos = (before + prefix + mention + " ").length;
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(newCursorPos, newCursorPos);
+      autoResize();
+    });
+
+    // Track in recent files
+    const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+    if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
+      useExcelStore.getState().addRecentFile({ path, filename });
+    }
+
+    clearPendingFileMention();
+  }, [pendingFileMention, clearPendingFileMention, text, autoResize]);
 
   const onDrop = useCallback((accepted: File[]) => {
     insertFileMentions(accepted);
@@ -1012,21 +1090,44 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       {/* File attachment chips */}
       {files.length > 0 && (
         <div className="flex flex-wrap gap-1.5 px-4 sm:px-14 pt-2.5 pb-0">
-          {files.map((f, i) => (
-            <span
-              key={`${f.name}-${i}`}
-              className="inline-flex items-center gap-1 rounded-full bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] text-xs font-medium pl-2.5 pr-1 py-0.5"
-            >
-              {f.name}
-              <button
-                type="button"
-                className="rounded-full p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors"
-                onClick={() => removeFile(i)}
+          {files.map((f, i) =>
+            isImageFile(f.name) ? (
+              /* Image thumbnail chip */
+              <span
+                key={`${f.name}-${i}`}
+                className="relative inline-flex items-end rounded-lg overflow-hidden bg-muted/40 border border-border/40"
+                style={{ maxWidth: "80px" }}
               >
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          ))}
+                <img
+                  src={getPreviewUrl(f)}
+                  alt={f.name}
+                  className="h-14 w-full object-cover"
+                />
+                <button
+                  type="button"
+                  className="touch-compact absolute top-0.5 right-0.5 h-5 w-5 flex items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors shadow-sm"
+                  onClick={() => removeFile(i)}
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            ) : (
+              /* Document file chip */
+              <span
+                key={`${f.name}-${i}`}
+                className="inline-flex items-center gap-1 rounded-full bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] text-xs font-medium pl-2.5 pr-1 py-0.5 max-w-[200px]"
+              >
+                <span className="truncate">{f.name}</span>
+                <button
+                  type="button"
+                  className="rounded-full p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors flex-shrink-0"
+                  onClick={() => removeFile(i)}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )
+          )}
         </div>
       )}
 

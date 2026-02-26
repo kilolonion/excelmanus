@@ -10,7 +10,7 @@ import { ExcelFullView } from "@/components/excel/ExcelFullView";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { sendMessage, stopGeneration, rollbackAndResend } from "@/lib/chat-actions";
+import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 
 function ChatPage() {
   const params = useParams();
@@ -38,8 +38,14 @@ function ChatPage() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, sessionId);
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => {
+            rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files);
+          }}
+          onRetry={(assistantMessageId: string) => {
+            retryAssistantMessage(assistantMessageId, sessionId);
+          }}
+          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+            retryAssistantMessage(assistantMessageId, sessionId, modelName);
           }}
           // 传递sessionId作为key，确保会话切换时重新创建组件
           key={sessionId}

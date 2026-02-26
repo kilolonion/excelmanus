@@ -11,6 +11,8 @@ export interface Session {
   inFlight: boolean;
   updatedAt?: string;
   status?: "active" | "archived";
+  /** 本地创建时间戳（Date.now()），用于 mergeSessions 宽限期保护 */
+  createdAt?: number;
 }
 
 export interface SessionDetail {

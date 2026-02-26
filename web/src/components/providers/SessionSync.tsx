@@ -6,6 +6,7 @@ import {
   refreshSessionMessagesFromBackend,
   useChatStore,
 } from "@/stores/chat-store";
+import { subscribeToSession } from "@/lib/chat-actions";
 import { useUIStore } from "@/stores/ui-store";
 import { fetchSessionDetail, fetchSessions } from "@/lib/api";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
@@ -204,10 +205,6 @@ export function SessionSync() {
 
         // 页面刷新后没有本地 stream 连接时，用后端 in_flight 状态接管。
         if (!hasLocalLiveStream) {
-          if (detail.inFlight !== chat.isStreaming) {
-            chat.setStreaming(detail.inFlight);
-          }
-
           // 仅在以下情况刷新消息（避免轮询期间替换消息数组导致编辑状态丢失）：
           // 1) 首次加载且本地消息为空（页面刷新恢复）
           // 2) inFlight 刚从 true -> false（后端处理完毕），做最终同步
@@ -221,12 +218,32 @@ export function SessionSync() {
 
           if (shouldRefresh) {
             const latestChat = useChatStore.getState();
-            // 增强保护：确保没有活跃的 SSE 连接且不在流式处理中
-            if (latestChat.abortController === null &&
-              !latestChat.isStreaming &&
-              latestChat.messages.length === 0) {
-              await refreshSessionMessagesFromBackend(activeSessionId);
+            // 确保没有活跃的 SSE 连接且不在流式处理中
+            if (latestChat.abortController === null && !latestChat.isStreaming) {
+              // 首次加载需要 messages 为空才刷新；inFlight→false 始终刷新（权威最终同步）
+              const isInitialEmpty = !wasInFlight && latestChat.messages.length === 0;
+              const isTaskJustFinished = wasInFlight && !detail.inFlight;
+              if (isInitialEmpty || isTaskJustFinished) {
+                await refreshSessionMessagesFromBackend(activeSessionId);
+              }
             }
+          }
+
+          // SSE 重连：检测到后端仍在处理且前端无活跃 SSE 连接时，
+          // 自动调用 subscribeToSession 重新接入事件流。
+          if (detail.inFlight) {
+            const latest = useChatStore.getState();
+            if (!latest.abortController && !latest.isStreaming) {
+              // 先设置 streaming 避免下一轮 poll 重复触发
+              latest.setStreaming(true);
+              subscribeToSession(activeSessionId).catch(() => {
+                // subscribe 失败时回退到轮询模式
+                const s = useChatStore.getState();
+                if (!s.abortController) s.setStreaming(false);
+              });
+            }
+          } else if (detail.inFlight !== chat.isStreaming) {
+            chat.setStreaming(detail.inFlight);
           }
 
           // 注意：refreshSessionMessagesFromBackend 已更新 store，需重新获取最新状态

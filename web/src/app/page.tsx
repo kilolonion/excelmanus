@@ -9,7 +9,7 @@ import { ExcelFullView } from "@/components/excel/ExcelFullView";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { sendMessage, stopGeneration, rollbackAndResend } from "@/lib/chat-actions";
+import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
 
 export default function Home() {
@@ -46,8 +46,14 @@ export default function Home() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId);
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => {
+            rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files);
+          }}
+          onRetry={(assistantMessageId: string) => {
+            retryAssistantMessage(assistantMessageId, activeSessionId);
+          }}
+          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+            retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
           }}
         />
       ) : (

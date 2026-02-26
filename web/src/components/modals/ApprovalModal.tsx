@@ -1,9 +1,10 @@
 "use client";
 
-import { ShieldCheck, ShieldX, ShieldAlert, History } from "lucide-react";
+import { ShieldCheck, ShieldX, ShieldAlert, History, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chat-store";
-import { sendContinuation } from "@/lib/chat-actions";
+import { useSessionStore } from "@/stores/session-store";
+import { submitApproval, abortChat } from "@/lib/api";
 import { motion, AnimatePresence } from "framer-motion";
 import { useMemo, useState } from "react";
 
@@ -44,13 +45,14 @@ export function ApprovalModal() {
   if (!pendingApproval) return null;
 
   const handleAction = (action: "accept" | "reject" | "fullaccess") => {
-    const commandMap = {
-      accept: `/accept ${pendingApproval.id}`,
-      reject: `/reject ${pendingApproval.id}`,
-      fullaccess: "/fullaccess on",
-    };
+    const approvalId = pendingApproval.id;
+    const sessionId = useSessionStore.getState().activeSessionId;
     setPendingApproval(null);
-    sendContinuation(commandMap[action]);
+    if (sessionId && approvalId) {
+      submitApproval(sessionId, approvalId, action).catch((err) =>
+        console.error("[ApprovalModal] submitApproval failed:", err),
+      );
+    }
   };
 
   const riskLevel = pendingApproval.riskLevel || "high";
@@ -67,7 +69,7 @@ export function ApprovalModal() {
         className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] sm:bottom-24 left-1/2 -translate-x-1/2 z-50 w-[calc(100vw-2rem)] sm:w-[520px] max-w-[90vw]"
       >
         <div className="bg-card border border-border rounded-2xl shadow-lg p-4" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
-          {/* 标题行：风险等级 + 工具名 */}
+          {/* 标题行：风险等级 + 工具名 + 取消按钮 */}
           <div className="flex items-center gap-2 mb-3">
             <ShieldAlert className={`h-5 w-5 ${risk.color}`} />
             <span className="font-semibold text-sm">工具审批请求</span>
@@ -76,6 +78,17 @@ export function ApprovalModal() {
             >
               {risk.label}
             </span>
+            <button
+              onClick={() => {
+                const sid = useSessionStore.getState().activeSessionId;
+                setPendingApproval(null);
+                if (sid) abortChat(sid).catch(() => {});
+              }}
+              className="text-muted-foreground hover:text-foreground transition-colors p-0.5 rounded"
+              title="取消并终止任务"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
 
           {/* 工具名 */}
