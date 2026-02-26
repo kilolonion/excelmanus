@@ -139,15 +139,16 @@ class DelegationHandler(BaseToolHandler):
         if success and sub_result is not None and sub_result.structured_changes:
             e.record_write_action()
 
-        # 子代理审批问题
-        pending_question = False
-        question_id = None
-        defer_tool_result = False
+        # 子代理审批问题：阻塞等待用户决策
         if (
             not success
             and sub_result is not None
             and sub_result.pending_approval_id is not None
         ):
+            import asyncio
+            import json as _json
+            from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
+
             pending = e.approval.pending
             approval_id_value = sub_result.pending_approval_id
             high_risk_tool = (
@@ -165,18 +166,38 @@ class DelegationHandler(BaseToolHandler):
                 on_event=on_event,
                 iteration=iteration,
             )
-            result_str = f"已创建待回答问题 `{question.question_id}`。"
-            question_id = question.question_id
-            pending_question = True
-            defer_tool_result = True
-            success = True
-            error = None
+            # 阻塞等待用户回答（支持 question_resolver / InteractionRegistry）
+            try:
+                payload = await e.await_question_answer(question)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                e._question_flow.pop_current()
+                e._interaction_registry.cleanup_done()
+                result_str = "子代理审批问题超时/取消。"
+                log_tool_call(logger, "delegate", arguments, result=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+            e._question_flow.pop_current()
+            e._interaction_registry.cleanup_done()
+
+            # 处理子代理审批回答（accept/fullaccess-retry/reject）
+            if isinstance(payload, dict):
+                result_str, success = await e.process_subagent_approval_inline(
+                    payload=payload,
+                    approval_id=approval_id_value,
+                    picked_agent=delegate_outcome.picked_agent or "subagent",
+                    task_text=delegate_outcome.task_text,
+                    normalized_paths=delegate_outcome.normalized_paths,
+                    on_event=on_event,
+                )
+                error = None if success else result_str
+            else:
+                result_str = str(payload)
+                success = True
+                error = None
 
         log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
         return _ToolExecOutcome(
             result_str=result_str, success=success, error=error,
-            pending_question=pending_question, question_id=question_id,
-            defer_tool_result=defer_tool_result,
         )
 
     def _handle_list(self, arguments):
@@ -270,7 +291,11 @@ class FinishTaskHandler(BaseToolHandler):
 # ---------------------------------------------------------------------------
 
 class AskUserHandler(BaseToolHandler):
-    """处理 ask_user 工具调用。"""
+    """处理 ask_user 工具调用。
+
+    阻塞模式：await 用户回答（通过 InteractionRegistry Future），
+    返回回答内容作为 tool result，循环不中断。
+    """
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "ask_user"
@@ -278,14 +303,76 @@ class AskUserHandler(BaseToolHandler):
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
-        result_str, question_id = self._engine.handle_ask_user(
+        result_str = await self._engine.handle_ask_user_blocking(
             arguments=arguments, tool_call_id=tool_call_id, on_event=on_event, iteration=iteration,
         )
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(
             result_str=result_str, success=True,
-            pending_question=True, question_id=question_id, defer_tool_result=True,
+            pending_question=False, question_id=None, defer_tool_result=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# SuggestModeSwitchHandler
+# ---------------------------------------------------------------------------
+
+class SuggestModeSwitchHandler(BaseToolHandler):
+    """处理 suggest_mode_switch 工具调用。
+
+    阻塞模式：await 用户选择后返回结果。
+    """
+
+    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
+        return tool_name == "suggest_mode_switch"
+
+    async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
+        import asyncio
+        import json as _json
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
+
+        e = self._engine
+        target_mode = str(arguments.get("target_mode", "write")).strip()
+        reason = str(arguments.get("reason", "")).strip()
+        mode_labels = {"write": "写入", "read": "读取", "plan": "计划"}
+        target_label = mode_labels.get(target_mode, target_mode)
+
+        question_payload = {
+            "header": "建议切换模式",
+            "text": f"{reason}\n\n是否切换到「{target_label}」模式？",
+            "options": [
+                {"label": f"切换到{target_label}", "description": f"切换到{target_label}模式继续"},
+                {"label": "保持当前模式", "description": "不切换，继续当前模式"},
+            ],
+            "multiSelect": False,
+        }
+
+        pending_q = e._question_flow.enqueue(
+            question_payload=question_payload,
+            tool_call_id=tool_call_id,
+        )
+        e._emit_user_question_event(
+            question=pending_q,
+            on_event=on_event,
+            iteration=iteration,
+        )
+
+        # 阻塞等待用户回答（支持 question_resolver / InteractionRegistry）
+        try:
+            payload = await e.await_question_answer(pending_q)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            e._question_flow.pop_current()
+            e._interaction_registry.cleanup_done()
+            result_str = "用户未回答模式切换建议（超时/取消）。"
+            log_tool_call(logger, tool_name, arguments, result=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=True)
+
+        e._question_flow.pop_current()
+        e._interaction_registry.cleanup_done()
+        result_str = _json.dumps(payload, ensure_ascii=False) if isinstance(payload, dict) else str(payload)
+        log_tool_call(logger, tool_name, arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
 
 
 # ---------------------------------------------------------------------------
@@ -304,14 +391,14 @@ class PlanInterceptHandler(BaseToolHandler):
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
-        result_str, plan_id, plan_error = await self._engine.intercept_task_create_with_plan(
+        result_str, _plan_id, plan_error = await self._engine.intercept_task_create_with_plan(
             arguments=arguments, route_result=route_result, tool_call_id=tool_call_id, on_event=on_event,
         )
         success = plan_error is None
         log_tool_call(logger, tool_name, arguments, result=result_str if success else None, error=plan_error if not success else None)
         return _ToolExecOutcome(
             result_str=result_str, success=success, error=plan_error,
-            pending_plan=success, plan_id=plan_id, defer_tool_result=success,
+            defer_tool_result=success,
         )
 
 
@@ -615,6 +702,8 @@ class CodePolicyHandler(BaseToolHandler):
         _before_snap = dispatcher._snapshot_excel_for_diff(
             _excel_targets, e.config.workspace_root,
         ) if _excel_targets else {}
+        # uploads 目录快照（检测新建/变更文件）
+        _uploads_before = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
 
         result_value, audit_record = await e.execute_tool_with_audit(
             tool_name=tool_name, arguments=_augmented_args, tool_scope=tool_scope,
@@ -652,10 +741,13 @@ class CodePolicyHandler(BaseToolHandler):
             )
 
         # ── files_changed 事件 ──
+        _uploads_after = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
+        _uploads_changed = dispatcher._diff_uploads_snapshots(_uploads_before, _uploads_after)
         dispatcher._emit_files_changed_from_audit(
             e, on_event, tool_call_id, code,
             audit_record.changes if audit_record else None,
             iteration,
+            extra_changed_paths=_uploads_changed or None,
         )
 
         # ── Excel diff ──

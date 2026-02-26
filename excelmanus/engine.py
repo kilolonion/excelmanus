@@ -35,6 +35,7 @@ from excelmanus.plan_mode import (
     parse_plan_markdown,
     utc_now_iso,
 )
+from excelmanus.interaction import InteractionRegistry, DEFAULT_INTERACTION_TIMEOUT
 from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
 from excelmanus.skillpacks import (
     SkillMatchResult,
@@ -119,6 +120,11 @@ _READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
 # 返回 "accept" / "reject" / "fullaccess" / None（等同 reject）。
 # CLI 传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
 ApprovalResolver = Callable[[PendingApproval], Awaitable[str | None]]
+
+# ── 问题解析器回调类型 ──────────────────────────────────────
+# CLI/bench 传入交互式问答实现；Web API 不传则使用 InteractionRegistry Future。
+# 回调接收 PendingQuestion，返回用户原始回答文本。
+QuestionResolver = Callable[[PendingQuestion], Awaitable[str]]
 
 
 def _normalize_write_hint(value: Any) -> str:
@@ -442,6 +448,36 @@ def _looks_like_clarification(text: str) -> bool:
     if len(stripped) < 500 and question_marks >= 2:
         return True
     return False
+
+
+# ── 等待用户操作检测：agent 正在等待用户上传/提供素材 ────────
+
+_WAITING_FOR_USER_ACTION_PATTERNS = _re.compile(
+    r"(?:"
+    # 中文：请求用户上传/发送/提供文件/图片
+    r"请(?:直接)?(?:上传|发送|提供|附上|拖入|粘贴)(?:.*?(?:图片|文件|截图|附件|素材|源文件|原始文件|照片|图像|表格))"
+    r"|(?:上传|发送|提供|附上)(?:到|至|后|完成后|之后)(?:.*?(?:我|就|即可|立刻|马上))"
+    r"|(?:等待|等你|等您|待你|待您)(?:上传|提供|发送|附上)"
+    r"|(?:需要|还需|缺少)(?:.*?(?:上传|提供|发送))(?:.*?(?:图片|文件|截图|附件|素材|源))"
+    r"|(?:尚未|还没有?|未)(?:收到|检测到|发现|看到)(?:.*?(?:图片|文件|截图|附件|上传))"
+    # 英文
+    r"|please\s+(?:upload|send|provide|attach|drag)\s+(?:the\s+)?(?:image|file|screenshot|attachment)"
+    r"|(?:waiting|wait)\s+(?:for\s+)?(?:you|your)\s+(?:upload|file|image|input)"
+    r"|(?:once|after)\s+(?:you\s+)?(?:upload|provide|send|attach)"
+    r")",
+    _re.IGNORECASE,
+)
+
+
+def _looks_like_waiting_for_user_action(text: str) -> bool:
+    """检测文本是否表示 agent 正在等待用户执行操作（上传文件等）。
+
+    用于在写入门禁/执行守卫触发前放行，避免 agent 被迫空转。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return bool(_WAITING_FOR_USER_ACTION_PATTERNS.search(stripped))
 
 
 # ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
@@ -938,6 +974,10 @@ class AgentEngine:
         self._pending_question_route_result: SkillMatchResult | None = None
         self._pending_approval_route_result: SkillMatchResult | None = None
         self._pending_approval_tool_call_id: str | None = None
+        self._interaction_registry = InteractionRegistry()
+        self._question_resolver: QuestionResolver | None = None
+        self._checkpoint_enabled: bool = config.checkpoint_enabled
+        self._turn_dirty_files: set[str] = set()  # 当前轮次被写的文件路径
         self._bench_mode: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
         self._current_chat_mode: str = "write"
@@ -1281,6 +1321,14 @@ class AgentEngine:
     @_execution_guard_fired.setter
     def _execution_guard_fired(self, value: bool) -> None:
         self._state.execution_guard_fired = value
+
+    @property
+    def _finish_task_warned(self) -> bool:
+        return self._state.finish_task_warned
+
+    @_finish_task_warned.setter
+    def _finish_task_warned(self, value: bool) -> None:
+        self._state.finish_task_warned = value
 
     @property
     def _vba_exempt(self) -> bool:
@@ -1680,6 +1728,15 @@ class AgentEngine:
         self._workspace.transaction_enabled = value
 
     @property
+    def checkpoint_enabled(self) -> bool:
+        """当前会话是否启用轮次 checkpoint 模式。"""
+        return self._checkpoint_enabled
+
+    @checkpoint_enabled.setter
+    def checkpoint_enabled(self, value: bool) -> None:
+        self._checkpoint_enabled = value
+
+    @property
     def workspace(self) -> IsolatedWorkspace:
         return self._workspace
 
@@ -2028,9 +2085,11 @@ class AgentEngine:
         mention_contexts: list[ResolvedMention] | None = None,
         images: list[dict[str, Any]] | None = None,
         approval_resolver: ApprovalResolver | None = None,
+        question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        self._question_resolver = question_resolver
         normalized_images: list[dict[str, str]] = []
         for item in images or []:
             if not isinstance(item, dict):
@@ -2047,11 +2106,22 @@ class AgentEngine:
                 "detail": detail,
             })
 
+        if normalized_images:
+            logger.info(
+                "收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
+                len(normalized_images),
+                [img["media_type"] for img in normalized_images],
+                [len(img["data"]) for img in normalized_images],
+            )
+
         def _add_user_turn_to_memory(text: str) -> None:
             if not normalized_images:
                 self._memory.add_user_message(text)
                 return
 
+            # Build a single multimodal user message with text + images.
+            # Keeping everything in one message avoids consecutive user
+            # messages which Claude's API would reject.
             parts: list[dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
@@ -2408,7 +2478,9 @@ class AgentEngine:
 
         try:
             chat_result = await self._tool_calling_loop(
-                route_result, on_event, approval_resolver=approval_resolver,
+                route_result, on_event,
+                approval_resolver=approval_resolver,
+                question_resolver=question_resolver,
             )
         finally:
             # 清理后台 task，避免悬挂
@@ -3154,6 +3226,62 @@ class AgentEngine:
             },
         ]
 
+        # ── finish_task：agent 主动终止任务的逃逸出口 ──
+        if getattr(self, "_bench_mode", False):
+            finish_task_tool = {
+                "type": "function",
+                "function": {
+                    "name": "finish_task",
+                    "description": (
+                        "任务完成声明。写入操作执行完毕后调用。"
+                        "只需一句话概括即可，不要详细展开。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string",
+                                "description": "一句话完成摘要",
+                            },
+                        },
+                        "required": ["summary"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        else:
+            finish_task_tool = {
+                "type": "function",
+                "function": {
+                    "name": "finish_task",
+                    "description": (
+                        "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
+                        "用自然语言在 summary 中向用户汇报：做了什么、关键结果、涉及的文件，"
+                        "有价值时可附带后续建议。语气自然，像同事间的简洁对话，不要套模板。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string",
+                                "description": (
+                                    "用自然语言汇报任务结果。内容应涵盖：做了什么、关键数据/发现、涉及哪些文件。"
+                                    "如有必要可附带后续建议。不要逐条罗列，用流畅的段落表达即可。"
+                                ),
+                            },
+                            "affected_files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "涉及修改的文件路径列表（用于触发文件刷新事件）",
+                            },
+                        },
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        tools.append(finish_task_tool)
+
         return tools
 
     def _build_v5_tools(self, *, write_hint: str = "unknown") -> list[dict[str, Any]]:
@@ -3866,6 +3994,129 @@ class AgentEngine:
             first.question_id,
         )
 
+    async def handle_ask_user_blocking(
+        self,
+        *,
+        arguments: dict[str, Any],
+        tool_call_id: str,
+        on_event: EventCallback | None,
+        iteration: int,
+    ) -> str:
+        """阻塞式 ask_user：创建问题、发射事件、await 用户回答。
+
+        逐个等待每个问题的回答，收集后返回合并结果字符串给 LLM。
+
+        - CLI/bench 模式：使用 _question_resolver 回调（同步交互）。
+        - Web 模式：使用 InteractionRegistry Future（等待 /answer API）。
+        超时 DEFAULT_INTERACTION_TIMEOUT 秒后返回超时消息。
+        """
+        # ── 统一 questions 数组模式 ──
+        questions_value = arguments.get("questions")
+        if not isinstance(questions_value, list) or len(questions_value) == 0:
+            question_value = arguments.get("question")
+            if isinstance(question_value, dict):
+                questions_value = [question_value]
+            else:
+                raise ValueError("工具参数错误: questions 必须为非空数组。")
+
+        pending_list = self._question_flow.enqueue_batch(
+            questions_payload=questions_value,
+            tool_call_id=tool_call_id,
+        )
+
+        resolver = getattr(self, "_question_resolver", None)
+        collected_answers: list[dict[str, Any]] = []
+
+        for i, pending_q in enumerate(pending_list):
+            # 发射当前问题事件
+            self._emit_user_question_event(
+                question=pending_q,
+                on_event=on_event,
+                iteration=iteration,
+            )
+
+            if resolver is not None:
+                # ── CLI/bench 模式：通过回调获取回答 ──
+                try:
+                    raw_answer = await resolver(pending_q)
+                except Exception as _qr_exc:
+                    logger.warning("question_resolver 异常: %s", _qr_exc)
+                    raw_answer = ""
+                self._question_flow.pop_current()
+                try:
+                    parsed = self._question_flow.parse_answer(raw_answer, question=pending_q)
+                    payload = parsed.to_tool_result()
+                except Exception:
+                    payload = {"raw_input": raw_answer}
+            else:
+                # ── Web 模式：创建 Future 并等待 /answer API ──
+                fut = self._interaction_registry.create(pending_q.question_id)
+                try:
+                    payload = await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    for remaining in pending_list[i:]:
+                        self._question_flow.pop_current()
+                        self._interaction_registry.cancel(remaining.question_id)
+                    self._interaction_registry.cleanup_done()
+                    return f"等待用户回答超时（{int(DEFAULT_INTERACTION_TIMEOUT)}s），已取消问题。"
+                except asyncio.CancelledError:
+                    for remaining in pending_list[i:]:
+                        self._question_flow.pop_current()
+                    self._interaction_registry.cleanup_done()
+                    return "用户取消了问题。"
+                self._question_flow.pop_current()
+
+            if isinstance(payload, dict):
+                collected_answers.append(payload)
+            else:
+                collected_answers.append({"raw_input": str(payload)})
+
+            # 发射已回答事件
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    approval_id=pending_q.question_id,
+                    approval_tool_name="ask_user",
+                    result=str(payload.get("raw_input", payload) if isinstance(payload, dict) else payload),
+                    success=True,
+                    iteration=iteration,
+                ),
+            )
+
+        self._interaction_registry.cleanup_done()
+
+        # 格式化合并结果
+        if len(collected_answers) == 1:
+            answer = collected_answers[0]
+            return json.dumps(answer, ensure_ascii=False)
+        return json.dumps(collected_answers, ensure_ascii=False)
+
+    async def await_question_answer(
+        self,
+        pending_q: PendingQuestion,
+    ) -> Any:
+        """统一等待用户回答：优先 question_resolver，回退到 InteractionRegistry Future。
+
+        返回 payload（dict 或 str）。超时/取消时抛出 asyncio.TimeoutError / CancelledError。
+        """
+        resolver = self._question_resolver
+        if resolver is not None:
+            raw_answer = await resolver(pending_q)
+            try:
+                parsed = self._question_flow.parse_answer(raw_answer, question=pending_q)
+                return parsed.to_tool_result()
+            except Exception:
+                return {"raw_input": raw_answer}
+        else:
+            fut = self._interaction_registry.create(pending_q.question_id)
+            return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+
+    @property
+    def interaction_registry(self) -> InteractionRegistry:
+        """公开交互注册表，供 API 层 resolve 用户回答/审批。"""
+        return self._interaction_registry
+
     def _enqueue_subagent_approval_question(
         self,
         *,
@@ -3918,6 +4169,81 @@ class AgentEngine:
             iteration=iteration,
         )
         return pending
+
+    async def process_subagent_approval_inline(
+        self,
+        *,
+        payload: dict[str, Any],
+        approval_id: str,
+        picked_agent: str,
+        task_text: str,
+        normalized_paths: list[str],
+        on_event: EventCallback | None,
+    ) -> tuple[str, bool]:
+        """处理子代理审批回答（阻塞模式下内联调用）。
+
+        返回 (result_str, success)。
+        """
+        selected_options = payload.get("selected_options", [])
+        selected_label = (
+            str(selected_options[0].get("label", "")).strip()
+            if selected_options
+            else ""
+        )
+        file_paths = normalized_paths if isinstance(normalized_paths, list) else []
+
+        if not approval_id:
+            return ("系统问题上下文缺失：approval_id 为空。", False)
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_ACCEPT:
+            accept_reply = await self._handle_accept_command(
+                ["/accept", approval_id], on_event=on_event,
+            )
+            reply = (
+                f"{accept_reply}\n"
+                "若需要子代理自动继续执行，建议选择「开启 fullaccess 后重试（推荐）」。"
+            )
+            return (reply, True)
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY:
+            lines: list[str] = []
+            if not self._full_access_enabled:
+                self._full_access_enabled = True
+                lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
+            else:
+                lines.append("fullaccess 已开启。")
+
+            reject_reply = self._handle_reject_command(
+                ["/reject", approval_id], on_event=on_event,
+            )
+            lines.append(reject_reply)
+
+            rerun_reply = await self._handle_delegate_to_subagent(
+                task=task_text,
+                agent_name=picked_agent or None,
+                file_paths=file_paths,
+                on_event=on_event,
+            )
+            lines.append("已按当前权限重新执行子代理任务：")
+            lines.append(rerun_reply)
+            return ("\n".join(lines), True)
+
+        if selected_label == _SUBAGENT_APPROVAL_OPTION_REJECT:
+            self._handle_reject_command(
+                ["/reject", approval_id], on_event=on_event,
+            )
+            return ("已拒绝该操作。\n如需自动执行高风险步骤，可先使用 `/fullaccess on` 后重新发起任务。", True)
+
+        # 兜底：手动模式
+        manual = (
+            "已记录你的回答。\n"
+            f"当前审批 ID: `{approval_id}`\n"
+            "你可以手动执行以下命令：\n"
+            f"- `/accept {approval_id}`\n"
+            "- `/fullaccess on`（可选）\n"
+            f"- `/reject {approval_id}`"
+        )
+        return (manual, True)
 
     async def _handle_subagent_approval_answer(
         self,
@@ -4115,7 +4441,8 @@ class AgentEngine:
             is_new_task=False,
         )
         return await self._tool_calling_loop(
-            route_to_resume, on_event, start_iteration=resume_iteration
+            route_to_resume, on_event, start_iteration=resume_iteration,
+            question_resolver=self._question_resolver,
         )
 
     async def _tool_calling_loop(
@@ -4125,6 +4452,7 @@ class AgentEngine:
         *,
         start_iteration: int = 1,
         approval_resolver: ApprovalResolver | None = None,
+        question_resolver: QuestionResolver | None = None,
     ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
 
@@ -4470,6 +4798,7 @@ class AgentEngine:
                 text_action, text_result = self._handle_text_reply(
                     message=message,
                     iteration=iteration,
+                    start_iteration=start_iteration,
                     max_iter=max_iter,
                     write_hint=write_hint,
                     consecutive_text_only=consecutive_text_only,
@@ -4528,8 +4857,6 @@ class AgentEngine:
             breaker_skip_error = (
                 f"工具未执行：连续 {max_failures} 次工具调用失败，已触发熔断。"
             )
-            question_started = False
-
             # ── 批次拆分：相邻只读工具合并为并行批次 ──
             if self._config.parallel_readonly_tools:
                 from excelmanus.tools.policy import PARALLELIZABLE_READONLY_TOOLS
@@ -4557,28 +4884,6 @@ class AgentEngine:
                             self._memory.add_tool_result(tool_call_id, breaker_skip_error)
                     continue
 
-                if question_started:
-                    # ask_user 仍需执行（入队），仅跳过非 ask_user 工具
-                    _has_ask_user = any(
-                        getattr(getattr(tc, "function", None), "name", "") == "ask_user"
-                        for tc in _batch.tool_calls
-                    )
-                    if not _has_ask_user:
-                        for tc in _batch.tool_calls:
-                            function = getattr(tc, "function", None)
-                            tool_name = getattr(function, "name", "")
-                            tool_call_id = getattr(tc, "id", "")
-                            skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
-                            all_tool_results.append(ToolCallResult(
-                                tool_name=tool_name, arguments={},
-                                result=skipped_msg, success=True, error=None,
-                            ))
-                            if tool_call_id:
-                                self._memory.add_tool_result(tool_call_id, skipped_msg)
-                            self._last_tool_call_count += 1
-                            self._last_success_count += 1
-                        continue
-
                 if _batch.parallel:
                     # ── 并行路径：只读工具并发执行 ──
                     _parallel_results = await self._execute_tool_calls_parallel(
@@ -4601,6 +4906,30 @@ class AgentEngine:
                         except Exception:
                             _tc_args = {}
                         self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
+
+                        # finish_task 成功接受时退出循环
+                        if (
+                            tc_result.tool_name == "finish_task"
+                            and tc_result.success
+                            and tc_result.finish_accepted
+                        ):
+                            if tool_call_id:
+                                self._memory.add_tool_result(tool_call_id, tc_result.result)
+                            self._last_iteration_count = iteration
+                            self._last_tool_call_count += 1
+                            self._last_success_count += 1
+                            reply = tc_result.result
+                            self._memory.add_assistant_message(reply)
+                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                            return _finalize_result(
+                                reply=reply,
+                                tool_calls=list(all_tool_results),
+                                iterations=iteration,
+                                truncated=False,
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                total_tokens=total_prompt_tokens + total_completion_tokens,
+                            )
 
                         # 按序写入 memory
                         if not tc_result.defer_tool_result and tool_call_id:
@@ -4645,22 +4974,6 @@ class AgentEngine:
                                 self._memory.add_tool_result(tool_call_id, breaker_skip_error)
                             continue
 
-                        if question_started and tool_name != "ask_user":
-                            skipped_msg = "工具未执行：存在待回答问题，当前轮次已跳过。"
-                            skipped_result = ToolCallResult(
-                                tool_name=tool_name,
-                                arguments={},
-                                result=skipped_msg,
-                                success=True,
-                                error=None,
-                            )
-                            all_tool_results.append(skipped_result)
-                            if tool_call_id:
-                                self._memory.add_tool_result(tool_call_id, skipped_msg)
-                            self._last_tool_call_count += 1
-                            self._last_success_count += 1
-                            continue
-
                         tc_result = await self._execute_tool_call(
                             tc,
                             tool_scope,
@@ -4680,6 +4993,30 @@ class AgentEngine:
                         except Exception:
                             _tc_args = {}
                         self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
+
+                        # finish_task 成功接受时退出循环
+                        if (
+                            tc_result.tool_name == "finish_task"
+                            and tc_result.success
+                            and tc_result.finish_accepted
+                        ):
+                            if tool_call_id:
+                                self._memory.add_tool_result(tool_call_id, tc_result.result)
+                            self._last_iteration_count = iteration
+                            self._last_tool_call_count += 1
+                            self._last_success_count += 1
+                            reply = tc_result.result
+                            self._memory.add_assistant_message(reply)
+                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+                            return _finalize_result(
+                                reply=reply,
+                                tool_calls=list(all_tool_results),
+                                iterations=iteration,
+                                truncated=False,
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                total_tokens=total_prompt_tokens + total_completion_tokens,
+                            )
 
                         if not tc_result.defer_tool_result and tool_call_id:
                             self._memory.add_tool_result(tool_call_id, tc_result.result)
@@ -4770,28 +5107,101 @@ class AgentEngine:
                                     logger.info("内联审批拒绝: %s", tc_result.approval_id)
                                 # 内联审批完成，不退出循环，继续处理后续工具调用
                             else:
-                                # ── 无 resolver（Web API 等）：保持现有行为，退出循环 ──
-                                self._pending_approval_route_result = current_route_result
-                                self._pending_approval_tool_call_id = tool_call_id
-                                reply = tc_result.result
-                                self._memory.add_assistant_message(reply)
-                                self._last_iteration_count = iteration
-                                logger.info("工具调用进入待确认队列: %s", tc_result.approval_id)
-                                logger.info("最终结果摘要: %s", _summarize_text(reply))
-                                return _finalize_result(
-                                    reply=reply,
-                                    tool_calls=list(all_tool_results),
-                                    iterations=iteration,
-                                    truncated=False,
-                                    prompt_tokens=total_prompt_tokens,
-                                    completion_tokens=total_completion_tokens,
-                                    total_tokens=total_prompt_tokens + total_completion_tokens,
-                                )
-
-                        if tc_result.pending_question:
-                            question_started = True
-                            if self._pending_question_route_result is None:
-                                self._pending_question_route_result = current_route_result
+                                # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
+                                approval_id = tc_result.approval_id or (pending.approval_id if pending else "")
+                                logger.info("阻塞等待审批决策: %s", approval_id)
+                                fut = self._interaction_registry.create(approval_id)
+                                try:
+                                    decision_payload = await asyncio.wait_for(
+                                        fut, timeout=DEFAULT_INTERACTION_TIMEOUT,
+                                    )
+                                except asyncio.TimeoutError:
+                                    reject_msg = self._approval.reject_pending(approval_id)
+                                    if tool_call_id:
+                                        self._memory.replace_tool_result(tool_call_id, reject_msg)
+                                    tc_result = replace(
+                                        tc_result,
+                                        pending_approval=False, success=False,
+                                        result=reject_msg, error=reject_msg,
+                                    )
+                                    logger.info("审批等待超时，自动拒绝: %s", approval_id)
+                                    self._interaction_registry.cleanup_done()
+                                except asyncio.CancelledError:
+                                    reject_msg = self._approval.reject_pending(approval_id)
+                                    if tool_call_id:
+                                        self._memory.replace_tool_result(tool_call_id, reject_msg)
+                                    tc_result = replace(
+                                        tc_result,
+                                        pending_approval=False, success=False,
+                                        result=reject_msg, error=reject_msg,
+                                    )
+                                    self._interaction_registry.cleanup_done()
+                                else:
+                                    decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
+                                    self._interaction_registry.cleanup_done()
+                                    if decision in ("accept", "fullaccess"):
+                                        if decision == "fullaccess":
+                                            self._full_access_enabled = True
+                                            logger.info("Web 审批: fullaccess 已开启")
+                                        exec_ok, exec_result, exec_record = await self._execute_approved_pending(
+                                            pending, on_event=on_event,
+                                        )
+                                        if tool_call_id:
+                                            self._memory.replace_tool_result(tool_call_id, exec_result)
+                                        self._emit(
+                                            on_event,
+                                            ToolCallEvent(
+                                                event_type=EventType.APPROVAL_RESOLVED,
+                                                approval_id=approval_id,
+                                                approval_tool_name=pending.tool_name,
+                                                result=exec_result,
+                                                success=exec_ok,
+                                                iteration=iteration,
+                                                approval_undoable=bool(
+                                                    exec_record is not None and exec_record.undoable
+                                                ),
+                                            ),
+                                        )
+                                        tc_result = replace(
+                                            tc_result,
+                                            pending_approval=False,
+                                            success=exec_ok,
+                                            result=exec_result,
+                                            error=None if exec_ok else exec_result,
+                                        )
+                                        if exec_ok and exec_record is not None:
+                                            _effect = self._get_tool_write_effect(pending.tool_name)
+                                            if exec_record.changes or _effect == "workspace_write":
+                                                self._record_workspace_write_action()
+                                            elif _effect == "external_write":
+                                                self._record_external_write_action()
+                                            if self._has_write_tool_call and write_hint != "may_write":
+                                                write_hint = "may_write"
+                                        logger.info(
+                                            "Web 审批完成: decision=%s ok=%s tool=%s",
+                                            decision, exec_ok, pending.tool_name,
+                                        )
+                                    else:
+                                        reject_msg = self._approval.reject_pending(approval_id)
+                                        if tool_call_id:
+                                            self._memory.replace_tool_result(tool_call_id, reject_msg)
+                                        self._emit(
+                                            on_event,
+                                            ToolCallEvent(
+                                                event_type=EventType.APPROVAL_RESOLVED,
+                                                approval_id=approval_id,
+                                                approval_tool_name=pending.tool_name if pending else "",
+                                                result=reject_msg,
+                                                success=False,
+                                                iteration=iteration,
+                                            ),
+                                        )
+                                        tc_result = replace(
+                                            tc_result,
+                                            pending_approval=False, success=False,
+                                            result=reject_msg, error=reject_msg,
+                                        )
+                                        logger.info("Web 审批拒绝: %s", approval_id)
 
                         # 更新统计
                         self._last_tool_call_count += 1
@@ -4829,20 +5239,9 @@ class AgentEngine:
                             breaker_summary = "\n".join(recent_errors)
                             breaker_triggered = True
 
-            if self._question_flow.has_pending():
-                reply = self._question_flow.format_prompt()
-                self._last_iteration_count = iteration
-                logger.info("命中 ask_user，进入待回答状态")
-                logger.info("最终结果摘要: %s", _summarize_text(reply))
-                return _finalize_result(
-                    reply=reply,
-                    tool_calls=list(all_tool_results),
-                    iterations=iteration,
-                    truncated=False,
-                    prompt_tokens=total_prompt_tokens,
-                    completion_tokens=total_completion_tokens,
-                    total_tokens=total_prompt_tokens + total_completion_tokens,
-                )
+            # NOTE: 旧的 ask_user 退出路径已移除。
+            # 阻塞式 ask_user 在 AskUserHandler 内 await Future，
+            # 返回用户回答作为 tool result，循环不中断。
 
             # ── Stuck Detection：检测重复/冗余工具调用模式 ──
             stuck_warning = self._state.detect_stuck_pattern()
@@ -4851,6 +5250,29 @@ class AgentEngine:
                 if diag:
                     diag.guard_events.append("stuck_detection")
                 logger.warning("Stuck Detection 触发: %s", stuck_warning[:100])
+
+            # ── Turn Checkpoint：每轮结束后对被修改文件做快照 ──
+            if self._checkpoint_enabled and self._has_write_tool_call:
+                try:
+                    dirty = list(self._fvm.staged_file_map().keys()) or list(
+                        self._fvm.list_all_tracked()
+                    )
+                    turn_tools = [
+                        r.tool_name for r in all_tool_results
+                        if r.tool_name and r.success
+                    ]
+                    cp = self._fvm.create_turn_checkpoint(
+                        turn_number=iteration,
+                        dirty_files=dirty,
+                        tool_names=turn_tools[-5:],  # 只保留最近 5 个工具名
+                    )
+                    if cp:
+                        logger.debug(
+                            "Turn checkpoint created: turn=%d files=%d",
+                            iteration, len(cp.files_modified),
+                        )
+                except Exception:
+                    logger.warning("Turn checkpoint 创建失败", exc_info=True)
 
             if breaker_triggered:
                 reply = (
@@ -4891,6 +5313,7 @@ class AgentEngine:
         *,
         message: Any,
         iteration: int,
+        start_iteration: int,
         max_iter: int,
         write_hint: str,
         consecutive_text_only: int,
@@ -4930,16 +5353,10 @@ class AgentEngine:
 
         self._memory.add_assistant_message(reply_text)
 
-        # ── 澄清放行：agent 在首轮无工具调用时返回澄清性文本，直接放行 ──
-        # 当 agent 判断用户指令模糊而选择文本回复反问时，这是合理行为，
-        # 不应被执行守卫或写入门禁拦截强制继续。
-        if (
-            iteration == 0
-            and not all_tool_results
-            and _looks_like_clarification(reply_text)
-        ):
+        # ── 澄清放行：agent 返回澄清性文本，直接放行 ──
+        if _looks_like_clarification(reply_text):
             self._last_iteration_count = iteration
-            logger.info("澄清放行：首轮无工具调用，检测到澄清性文本回复")
+            logger.info("澄清放行：检测到澄清性文本回复")
             return "return", _finalize_result(
                 reply=reply_text,
                 tool_calls=list(all_tool_results),
@@ -4950,62 +5367,51 @@ class AgentEngine:
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-        # ── 执行守卫：检测"仅建议不执行"并强制继续 ──
-        if (
-            write_hint != "may_write"
-            and not self._active_skills
-            and iteration < max_iter - 1
-            and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
-            and not self._execution_guard_fired
-        ):
-            self._execution_guard_fired = True
-            guard_msg = (
-                "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
-                "你拥有完整的 Excel 工具集可直接操作数据。"
-                "请立即调用对应工具执行操作。"
-                "严禁给出 VBA 宏代码、AppleScript 或外部脚本替代执行。"
-                "你的所有能力均可通过内置工具实现，无需用户离开本系统。"
-            )
-            self._memory.add_user_message(guard_msg)
+        # ── 等待用户操作放行：agent 需要用户上传/提供素材时，不应被门禁强制继续 ──
+        if _looks_like_waiting_for_user_action(reply_text):
+            self._last_iteration_count = iteration
             if diag:
-                diag.guard_events.append("execution_guard")
-            logger.info("执行守卫触发：检测到公式建议未写入，注入继续执行提示")
-            return "continue", consecutive_text_only
+                diag.guard_events.append("waiting_for_user_passthrough")
+            logger.info("等待用户操作放行：检测到 agent 正在等待用户提供素材")
+            return "return", _finalize_result(
+                reply=reply_text,
+                tool_calls=list(all_tool_results),
+                iterations=iteration,
+                truncated=False,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
 
-        # ── 写入门禁：write_hint == "may_write" 时检查是否有实际写入 ──
-        if write_hint == "may_write" and not self._has_write_tool_call:
-            consecutive_text_only += 1
-            if consecutive_text_only < 2 and iteration < max_iter:
-                guard_msg = (
-                    "你尚未调用任何写入工具完成实际操作。"
-                    "如果当前任务确实仅涉及筛选/统计/分析/查找且无需写回文件，"
-                    "请直接用文本回复分析结果。"
-                    "如果任务需要写入，请立即调用对应写入/格式化/图表工具执行。"
-                    "注意：你拥有完整的 Excel 工具集可直接操作数据，"
-                    "严禁建议用户运行 VBA 宏、AppleScript 或任何外部脚本。"
-                    "严禁在文本中输出 VBA 代码块作为操作方案。"
-                    "禁止以文本建议替代工具执行。"
-                )
-                self._memory.add_user_message(guard_msg)
+        # ── guard_mode 控制：执行守卫 & 写入门禁 ──
+        _guard_mode = getattr(self._config, "guard_mode", "off")
+
+        if _guard_mode == "soft":
+            # ── soft 模式：执行守卫 — 仅记录诊断，不强制继续 ──
+            if (
+                write_hint != "may_write"
+                and not self._active_skills
+                and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
+                and not self._execution_guard_fired
+                and not all_tool_results
+            ):
+                self._execution_guard_fired = True
                 if diag:
-                    diag.guard_events.append("write_guard")
-                logger.info("写入门禁触发：无写入工具调用，注入继续执行提示 (consecutive=%d)", consecutive_text_only)
-                return "continue", consecutive_text_only
-            else:
-                self._last_iteration_count = iteration
+                    diag.guard_events.append("execution_guard_soft")
+                logger.info("执行守卫(soft)：检测到公式建议未写入（仅记录，不强制继续）")
+
+            # ── soft 模式：写入门禁 — 仅记录诊断，不强制继续 ──
+            if write_hint == "may_write" and not self._has_write_tool_call:
                 if diag:
-                    diag.guard_events.append("write_guard_exit")
-                logger.warning("写入门禁：连续 %d 次纯文本退出，强制结束", consecutive_text_only)
-                return "return", _finalize_result(
-                    reply=reply_text,
-                    tool_calls=list(all_tool_results),
-                    iterations=iteration,
-                    truncated=False,
-                    prompt_tokens=total_prompt_tokens,
-                    completion_tokens=total_completion_tokens,
-                    total_tokens=total_prompt_tokens + total_completion_tokens,
-                    write_guard_triggered=True,
-                )
+                    diag.guard_events.append("write_guard_soft")
+                logger.info("写入门禁(soft)：无写入工具调用（仅记录，不强制继续）")
+
+        elif _guard_mode == "off":
+            # ── off 模式：完全跳过所有门禁，agent 自然停止 ──
+            pass
+
+        else:
+            logger.warning("未知 guard_mode=%r，按 off 处理", _guard_mode)
 
         self._last_iteration_count = iteration
         logger.info("最终结果摘要: %s", _summarize_text(reply_text))

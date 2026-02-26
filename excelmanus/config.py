@@ -423,6 +423,8 @@ class ExcelManusConfig:
     main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True
+    # 轮次 checkpoint 模式：每轮工具调用结束后自动快照被修改文件，支持按轮回退
+    checkpoint_enabled: bool = False
     # 代码策略引擎配置
     code_policy_enabled: bool = True
     code_policy_green_auto_approve: bool = True
@@ -454,6 +456,8 @@ class ExcelManusConfig:
     chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
     # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
     cli_layout_mode: str = "dashboard"
+    # 文本回复门禁模式：off（默认，完全关闭执行守卫和写入门禁）/ soft（降级为软提示后放行）
+    guard_mode: str = "off"
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -1197,6 +1201,13 @@ def load_config() -> ExcelManusConfig:
         True,
     )
 
+    # 轮次 checkpoint 模式
+    checkpoint_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_CHECKPOINT_ENABLED"),
+        "EXCELMANUS_CHECKPOINT_ENABLED",
+        False,
+    )
+
     # 代码策略引擎配置
     code_policy_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_CODE_POLICY_ENABLED"),
@@ -1304,6 +1315,12 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_CLI_LAYOUT_MODE")
     )
 
+    # 文本回复门禁模式
+    guard_mode = (os.environ.get("EXCELMANUS_GUARD_MODE", "off").strip().lower())
+    if guard_mode not in ("off", "soft"):
+        logger.warning("EXCELMANUS_GUARD_MODE=%r 无效，回退到 'off'", guard_mode)
+        guard_mode = "off"
+
     # 多模型配置档案
     models = _parse_models(
         os.environ.get("EXCELMANUS_MODELS"),
@@ -1394,6 +1411,7 @@ def load_config() -> ExcelManusConfig:
         vlm_enhance=vlm_enhance,
         main_model_vision=main_model_vision,
         backup_enabled=backup_enabled,
+        checkpoint_enabled=checkpoint_enabled,
         code_policy_enabled=code_policy_enabled,
         code_policy_green_auto_approve=code_policy_green_auto_approve,
         code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
@@ -1418,5 +1436,6 @@ def load_config() -> ExcelManusConfig:
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,
+        guard_mode=guard_mode,
         models=models,
     )

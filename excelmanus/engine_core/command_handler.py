@@ -424,21 +424,37 @@ class CommandHandler:
         if pending.approval_id != approval_id:
             return f"待确认 ID 不匹配。当前待确认 ID 为 `{pending.approval_id}`。"
 
+        # 提前保存并清理状态，确保所有路径（成功/失败）都能正确发射事件
+        saved_tool_call_id = e._pending_approval_tool_call_id
+        e._pending_approval_tool_call_id = None
+
         exec_ok, exec_result, record = await e._execute_approved_pending(
             pending, on_event=on_event,
         )
+
+        from excelmanus.events import EventType, ToolCallEvent
+
         if not exec_ok or record is None:
+            route_to_resume = e._pending_approval_route_result
             e._pending_approval_route_result = None
+            # ── 失败时也必须发射 APPROVAL_RESOLVED，否则前端卡片永远停在 pending ──
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    tool_call_id=saved_tool_call_id or "",
+                    approval_id=approval_id,
+                    approval_tool_name=pending.tool_name,
+                    result=exec_result,
+                    success=False,
+                ),
+            )
             return exec_result
 
         route_to_resume = e._pending_approval_route_result
         e._pending_approval_route_result = None
-        saved_tool_call_id = e._pending_approval_tool_call_id
-        e._pending_approval_tool_call_id = None
 
         # ── 发射 APPROVAL_RESOLVED 事件，携带 tool_call_id 供前端更新卡片 ──
-        from excelmanus.events import EventType, ToolCallEvent
-
         e.emit(
             on_event,
             ToolCallEvent(
@@ -458,21 +474,26 @@ class CommandHandler:
         # 移除审批提示对应的 assistant 尾部消息（避免 LLM 重复看到审批文本）
         e.memory.remove_last_assistant_if(lambda c: "待确认队列" in c)
 
-        # 仅在仍有未完成任务时恢复主循环；普通单步高风险确认不应额外触发一次 LLM 调用。
-        if route_to_resume is None or not e._has_incomplete_tasks():
+        # ── 恢复主循环，让 LLM 看到工具结果并生成自然语言回复 ──
+        if route_to_resume is None:
             return exec_result
 
         resume_iteration = e._last_iteration_count + 1
+        has_tasks = e._has_incomplete_tasks()
         e._set_window_perception_turn_hints(
-            user_message="审批已通过，继续执行剩余子任务",
+            user_message="审批已通过，继续执行" + ("剩余子任务" if has_tasks else ""),
             is_new_task=False,
         )
-        resumed = await e._tool_calling_loop(
-            route_to_resume,
-            on_event,
-            start_iteration=resume_iteration,
-        )
-        return resumed.reply
+        try:
+            resumed = await e._tool_calling_loop(
+                route_to_resume,
+                on_event,
+                start_iteration=resume_iteration,
+            )
+            return resumed.reply
+        except Exception as exc:
+            logger.warning("审批后恢复主循环异常: %s", exc, exc_info=True)
+            return exec_result
 
     def _handle_reject_command(
         self,
