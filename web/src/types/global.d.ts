@@ -1,1 +1,1 @@
-/* Global type declarations */
+/* 全局类型声明 */
