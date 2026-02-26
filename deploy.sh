@@ -72,7 +72,7 @@ set -euo pipefail
 #    --version            显示版本
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION="2.0.0"
+VERSION="1.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── 颜色 ──
