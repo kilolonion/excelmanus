@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
+import re
+import unicodedata
 from typing import Any
 
 from openpyxl import load_workbook
@@ -218,19 +221,40 @@ def adjust_column_width(
             adjusted[col_letter.upper()] = width
 
     elif auto_fit:
-        # 自动适配：遍历所有列，取每列最大内容长度
+        # 收集合并单元格的非锚点位置（跳过这些单元格）
+        merged_non_anchor: set[str] = set()
+        for mr in ws.merged_cells.ranges:
+            anchor = f"{get_column_letter(mr.min_col)}{mr.min_row}"
+            for r in range(mr.min_row, mr.max_row + 1):
+                for c in range(mr.min_col, mr.max_col + 1):
+                    addr = f"{get_column_letter(c)}{r}"
+                    if addr != anchor:
+                        merged_non_anchor.add(addr)
+
+        # 自动适配：遍历所有列，取每列最大显示宽度
         for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
-            max_len = 0
+            max_w = 0.0
             col_letter = get_column_letter(col_cells[0].column)
             for cell in col_cells:
-                if cell.value is not None:
-                    cell_len = len(str(cell.value))
-                    if cell_len > max_len:
-                        max_len = cell_len
-            # 加 2 作为边距
-            width = max_len + 2
+                coord = f"{col_letter}{cell.row}"
+                if coord in merged_non_anchor:
+                    continue
+                if cell.value is None:
+                    continue
+                font_size = 11.0
+                is_bold = False
+                if cell.font:
+                    if cell.font.size:
+                        font_size = float(cell.font.size)
+                    if cell.font.bold:
+                        is_bold = True
+                nf = cell.number_format if cell.number_format != "General" else None
+                w = _estimate_display_width(cell.value, font_size, is_bold, nf)
+                if w > max_w:
+                    max_w = w
+            width = max(_MIN_COL_WIDTH, min(max_w + _COL_PADDING, _MAX_COL_WIDTH))
             ws.column_dimensions[col_letter].width = width
-            adjusted[col_letter] = width
+            adjusted[col_letter] = round(width, 2)
 
     wb.save(safe_path)
     wb.close()
@@ -411,13 +435,16 @@ def adjust_row_height(
             ws.row_dimensions[row_num].height = height
             adjusted[str(row_num)] = height
     elif auto_fit:
-        for row_idx in range(1, ws.max_row + 1):
-            # 基于行内最大字体大小估算行高
-            max_font_size = 11.0
-            for cell in ws[row_idx]:
-                if cell.font and cell.font.size:
-                    max_font_size = max(max_font_size, float(cell.font.size))
-            height = max_font_size * 1.5
+        # 收集当前列宽用于 wrap_text 行数估算
+        current_col_widths: dict[str, float] = {}
+        for col_letter, dim in ws.column_dimensions.items():
+            if dim.width is not None:
+                current_col_widths[col_letter] = dim.width
+        for row_idx in range(1, (ws.max_row or 0) + 1):
+            row_cells = [cell for cell in ws[row_idx] if not isinstance(cell, MergedCell)]
+            if not row_cells:
+                continue
+            height = _estimate_row_height(row_cells, current_col_widths)
             ws.row_dimensions[row_idx].height = height
             adjusted[str(row_idx)] = height
 
@@ -508,6 +535,150 @@ def unmerge_cells_tool(
         },
         ensure_ascii=False,
     )
+
+
+# ── 列宽 / 行高智能估算 ─────────────────────────────────
+
+_MIN_COL_WIDTH = 8.0
+_MAX_COL_WIDTH = 60.0
+_COL_PADDING = 2.5
+_MIN_ROW_HEIGHT = 15.0
+
+
+def _is_wide_char(ch: str) -> bool:
+    """判断字符是否为东亚宽字符（CJK / 全角）。"""
+    ea = unicodedata.east_asian_width(ch)
+    return ea in ("W", "F")
+
+
+def _display_char_width(text: str) -> float:
+    """计算文本的显示字符宽度（CJK 字符按 2.0 计）。"""
+    width = 0.0
+    for ch in text:
+        width += 2.0 if _is_wide_char(ch) else 1.0
+    return width
+
+
+def _format_number_display(value: Any, number_format: str | None) -> str | None:
+    """尝试模拟 number_format 后的显示文本长度。
+
+    不追求 100% 精确——仅用于列宽估算。
+    """
+    if value is None or number_format is None or number_format == "General":
+        return None
+    try:
+        num = float(value)
+    except (ValueError, TypeError):
+        return None
+
+    fmt = number_format
+    result_len_hint: str | None = None
+
+    # 百分比：0.85 → "85%" or "85.0%"
+    if "%" in fmt:
+        pct = num * 100
+        dec_match = re.search(r"0\.(0+)%", fmt)
+        decimals = len(dec_match.group(1)) if dec_match else 0
+        result_len_hint = f"{pct:,.{decimals}f}%" if "#,##" in fmt else f"{pct:.{decimals}f}%"
+        return result_len_hint
+
+    # 千分位 + 小数
+    dec_match = re.search(r"0\.(0+)", fmt)
+    decimals = len(dec_match.group(1)) if dec_match else 0
+    has_comma = "#,##" in fmt or "," in fmt
+
+    if has_comma:
+        result_len_hint = f"{num:,.{decimals}f}"
+    elif decimals > 0:
+        result_len_hint = f"{num:.{decimals}f}"
+
+    # 货币前缀/后缀
+    for sym in ("$", "¥", "€", "£", "₩"):
+        if sym in fmt and result_len_hint:
+            result_len_hint = sym + result_len_hint
+            break
+
+    return result_len_hint
+
+
+def _estimate_display_width(
+    value: Any,
+    font_size: float = 11.0,
+    is_bold: bool = False,
+    number_format: str | None = None,
+) -> float:
+    """估算单元格内容的显示字符宽度。
+
+    返回以 Excel 列宽单位（≈字符数）计的宽度。
+    """
+    if value is None:
+        return 0.0
+
+    # 优先使用 number_format 模拟的显示文本
+    display = _format_number_display(value, number_format)
+    text = display if display is not None else str(value)
+
+    # 多行取最长行
+    lines = text.split("\n")
+    char_width = max(_display_char_width(line) for line in lines) if lines else 0.0
+
+    # 字体缩放
+    scale = font_size / 11.0
+    if is_bold:
+        scale *= 1.07
+
+    return char_width * scale
+
+
+def _estimate_row_height(
+    row_cells: tuple | list,
+    col_widths: dict[str, float] | None = None,
+) -> float:
+    """估算一行的合适行高（pt）。
+
+    考虑字体大小和 wrap_text 多行。
+    """
+    max_height = _MIN_ROW_HEIGHT
+
+    for cell in row_cells:
+        font_size = 11.0
+        if cell.font and cell.font.size:
+            font_size = float(cell.font.size)
+
+        # 基础单行行高
+        has_cjk = False
+        val_str = str(cell.value) if cell.value is not None else ""
+        if any(_is_wide_char(ch) for ch in val_str):
+            has_cjk = True
+        line_height = font_size * (1.45 if has_cjk else 1.35)
+
+        # wrap_text 多行估算
+        wrap = cell.alignment and cell.alignment.wrap_text
+        if wrap and cell.value is not None and col_widths:
+            col_letter = get_column_letter(cell.column)
+            col_w = col_widths.get(col_letter, 8.0)
+            # 可用字符宽度 ≈ 列宽 - padding
+            usable = max(col_w - 1.0, 4.0)
+            display_w = _estimate_display_width(
+                cell.value,
+                font_size=font_size,
+                is_bold=bool(cell.font and cell.font.bold),
+                number_format=cell.number_format if cell.number_format != "General" else None,
+            )
+            num_lines = max(1, math.ceil(display_w / usable))
+            # 也考虑显式换行符
+            explicit_lines = val_str.count("\n") + 1
+            num_lines = max(num_lines, explicit_lines)
+            cell_height = line_height * num_lines
+        else:
+            # 非 wrap 也考虑显式换行符
+            explicit_lines = val_str.count("\n") + 1
+            cell_height = line_height * explicit_lines
+
+        if cell_height > max_height:
+            max_height = cell_height
+
+    return round(max_height, 1)
 
 
 # ── 内部辅助函数 ──────────────────────────────────────────
