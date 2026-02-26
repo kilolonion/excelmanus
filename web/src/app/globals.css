@@ -49,7 +49,7 @@
 
 :root {
   --radius: 0.625rem;
-  /* ExcelManus brand colors */
+  /* ExcelManus 品牌色 */
   --em-primary: #217346;
   --em-primary-light: #33a867;
   --em-accent: #107c41;
@@ -129,7 +129,7 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  /* ExcelManus dark theme overrides */
+  /* ExcelManus 深色主题覆盖 */
   --em-sidebar-bg: #1a1a1b;
   --em-primary-light: #2d8f56;
   --em-primary-alpha-06: rgba(33, 115, 70, 0.08);
@@ -171,7 +171,7 @@
   }
 }
 
-/* Session / file card selected indicator shimmer */
+/* 会话/文件卡片选中指示条动画 */
 @keyframes indicator-enter {
   from {
     transform: scaleY(0);
@@ -189,7 +189,7 @@
   transform-origin: center;
 }
 
-/* Subtle selected card glow */
+/* 选中卡片微光 */
 .card-selected-glow {
   box-shadow: inset 0 0 0 1px var(--em-primary-alpha-15),
     0 0 8px var(--em-primary-alpha-10);
@@ -200,9 +200,8 @@
     0 0 12px var(--em-primary-alpha-15);
 }
 
-/* Ensure Univer Excel preview area is never transparent.
-   The workbench-layout container must have a solid background so the
-   spreadsheet canvas and grid lines are always visible. */
+/* 确保 Univer Excel 预览区域不透明：
+   workbench-layout 容器需有实色背景，以便表格画布与网格线始终可见。 */
 [data-u-comp="workbench-layout"] {
   background-color: #fff !important;
 }

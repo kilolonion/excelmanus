@@ -2165,7 +2165,7 @@ class ToolDispatcher:
         if not isinstance(parsed, dict):
             return
 
-        # read_excel → EXCEL_PREVIEW
+        # 工具 read_excel 对应事件 EXCEL_PREVIEW
         if tool_name in self._EXCEL_READ_TOOLS:
             columns = parsed.get("columns", [])
             preview = parsed.get("preview", [])
@@ -2191,7 +2191,7 @@ class ToolDispatcher:
                     ),
                 )
 
-        # _excel_diff → EXCEL_DIFF (写入工具在结果中附带)
+        # _excel_diff 对应 EXCEL_DIFF（写入工具在结果中附带）
         diff_data = parsed.get("_excel_diff")
         if isinstance(diff_data, dict):
             changes = diff_data.get("changes", [])
@@ -2208,7 +2208,7 @@ class ToolDispatcher:
                     ),
                 )
 
-        # _file_download → FILE_DOWNLOAD (offer_download 工具在结果中附带)
+        # _file_download 对应 FILE_DOWNLOAD（offer_download 工具在结果中附带）
         dl_data = parsed.get("_file_download")
         if isinstance(dl_data, dict) and dl_data.get("file_path"):
             e.emit(
