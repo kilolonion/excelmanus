@@ -2,9 +2,10 @@
 
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { ExternalLink, Plus, Minus, RefreshCw } from "lucide-react";
-import type { ExcelDiffEntry, ExcelCellDiff, CellStyle } from "@/stores/excel-store";
+import type { ExcelDiffEntry, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS } from "./cell-style-utils";
+import { buildMergeMaps, type MergeSpan } from "./merge-utils";
 
 // ── 阈值 ────────────────────────────────────────────────
 const INLINE_THRESHOLD = 5;
@@ -241,6 +242,8 @@ function GridHalfTable({
   rows,
   cellMap,
   badge,
+  masterMap,
+  hiddenSet,
 }: {
   label: string;
   side: "before" | "after";
@@ -248,6 +251,8 @@ function GridHalfTable({
   rows: number[];
   cellMap: Map<string, GridCell>;
   badge?: React.ReactNode;
+  masterMap?: Map<string, MergeSpan>;
+  hiddenSet?: Set<string>;
 }) {
   return (
     <div className="flex-1 min-w-0 overflow-x-auto">
@@ -281,11 +286,17 @@ function GridHalfTable({
                 {r}
               </td>
               {cols.map((c) => {
+                // 合并单元格检测
+                if (hiddenSet?.has(`${r},${c}`)) return null;
+                const mergeSpan = masterMap?.get(`${r},${c}`);
+
                 const ref = `${indexToColLetter(c)}${r}`;
                 const cell = cellMap.get(ref);
                 if (!cell) {
                   return (
-                    <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center">
+                    <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center"
+                      colSpan={mergeSpan?.colSpan} rowSpan={mergeSpan?.rowSpan}
+                    >
                       <span className="text-muted-foreground/15">·</span>
                     </td>
                   );
@@ -297,7 +308,9 @@ function GridHalfTable({
 
                 if (isEmptySlot) {
                   return (
-                    <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center">
+                    <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center"
+                      colSpan={mergeSpan?.colSpan} rowSpan={mergeSpan?.rowSpan}
+                    >
                       <span className="text-muted-foreground/20">—</span>
                     </td>
                   );
@@ -310,6 +323,8 @@ function GridHalfTable({
                     className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] ${CELL_BG[cell.type]} ${CELL_BORDER[cell.type]} font-medium`}
                     style={css}
                     title={formatCellValue(val) || undefined}
+                    colSpan={mergeSpan?.colSpan}
+                    rowSpan={mergeSpan?.rowSpan}
                   >
                     {formatCellValue(val) || <span className="text-muted-foreground/20">—</span>}
                   </td>
@@ -327,9 +342,11 @@ function GridHalfTable({
 function GridSingleView({
   changes,
   profile,
+  mergeRanges,
 }: {
   changes: ExcelCellDiff[];
   profile: "all-added" | "all-deleted";
+  mergeRanges?: MergeRange[];
 }) {
   const { cols, rows, cellMap } = useMemo(() => {
     let minCol = Infinity, maxCol = 0, minRow = Infinity, maxRow = 0;
@@ -363,6 +380,11 @@ function GridSingleView({
   const side = profile === "all-added" ? "after" as const : "before" as const;
   const label = profile === "all-added" ? "写入内容" : "删除内容";
 
+  const { masterMap: mMap, hiddenSet: hSet } = useMemo(
+    () => buildMergeMaps(mergeRanges),
+    [mergeRanges],
+  );
+
   return (
     <div className="max-h-[360px] overflow-y-auto overflow-x-auto" style={{ touchAction: "pan-x pan-y" }}>
       <GridHalfTable
@@ -371,6 +393,8 @@ function GridSingleView({
         cols={cols}
         rows={rows}
         cellMap={cellMap}
+        masterMap={mMap}
+        hiddenSet={hSet}
         badge={
           <span className={`text-[9px] px-1.5 py-px rounded-full font-medium ${
             profile === "all-added"
@@ -385,10 +409,10 @@ function GridSingleView({
   );
 }
 
-function GridDiffView({ changes, layout, profile }: { changes: ExcelCellDiff[]; layout: DiffLayout; profile: DiffProfile }) {
+function GridDiffView({ changes, layout, profile, mergeRanges }: { changes: ExcelCellDiff[]; layout: DiffLayout; profile: DiffProfile; mergeRanges?: MergeRange[] }) {
   // 全增/全删：单表展示，不浪费空间显示空表
   if (profile !== "mixed") {
-    return <GridSingleView changes={changes} profile={profile} />;
+    return <GridSingleView changes={changes} profile={profile} mergeRanges={mergeRanges} />;
   }
 
   const { cols, rows, cellMap } = useMemo(() => {
@@ -420,6 +444,11 @@ function GridDiffView({ changes, layout, profile }: { changes: ExcelCellDiff[]; 
     return { cols: colArr, rows: rowArr, cellMap: map };
   }, [changes]);
 
+  const { masterMap: mMap, hiddenSet: hSet } = useMemo(
+    () => buildMergeMaps(mergeRanges),
+    [mergeRanges],
+  );
+
   const isVertical = layout === "vertical";
 
   return (
@@ -429,12 +458,12 @@ function GridDiffView({ changes, layout, profile }: { changes: ExcelCellDiff[]; 
       }`}
       style={{ touchAction: "pan-x pan-y" }}
     >
-      <GridHalfTable label="Before" side="before" cols={cols} rows={rows} cellMap={cellMap} />
+      <GridHalfTable label="Before" side="before" cols={cols} rows={rows} cellMap={cellMap} masterMap={mMap} hiddenSet={hSet} />
       <div className={isVertical
         ? "h-px bg-border/60 flex-shrink-0"
         : "w-px bg-border/60 flex-shrink-0"
       } />
-      <GridHalfTable label="After" side="after" cols={cols} rows={rows} cellMap={cellMap} />
+      <GridHalfTable label="After" side="after" cols={cols} rows={rows} cellMap={cellMap} masterMap={mMap} hiddenSet={hSet} />
     </div>
   );
 }
@@ -550,7 +579,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
       {useInline ? (
         <InlineDiffView changes={data.changes} layout={layout} />
       ) : (
-        <GridDiffView changes={data.changes} layout={layout} profile={profile} />
+        <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} />
       )}
 
       {/* Footer */}
@@ -578,6 +607,18 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
           <span className="ml-auto text-muted-foreground/30 text-[9px]">{layout === "vertical" ? "↕" : "↔"}</span>
         )}
       </div>
+      {/* 元数据提示 — 预览中无法展示的工作表特征 */}
+      {data.metadataHints && data.metadataHints.length > 0 && (
+        <div className="px-3 py-1 bg-blue-50/50 dark:bg-blue-950/20 border-t border-blue-100/60 dark:border-blue-900/30 text-[10px] text-blue-600/80 dark:text-blue-400/80 flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+          <span className="font-medium text-blue-500/70 dark:text-blue-400/60 select-none">ℹ</span>
+          {data.metadataHints.map((hint, i) => (
+            <span key={i} className="inline-flex items-center gap-0.5 bg-blue-100/60 dark:bg-blue-900/30 rounded px-1.5 py-px">
+              {hint}
+            </span>
+          ))}
+          <span className="text-blue-400/50 dark:text-blue-500/40 ml-auto">打开文件查看完整效果</span>
+        </div>
+      )}
     </div>
   );
 }

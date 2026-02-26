@@ -26,6 +26,13 @@ export interface CellStyle {
   n?: { pattern: string };   // number format
 }
 
+export interface MergeRange {
+  min_row: number;
+  min_col: number;
+  max_row: number;
+  max_col: number;
+}
+
 export interface ExcelCellDiff {
   cell: string;
   old: string | number | boolean | null;
@@ -40,6 +47,8 @@ export interface ExcelDiffEntry {
   sheet: string;
   affectedRange: string;
   changes: ExcelCellDiff[];
+  mergeRanges?: MergeRange[];
+  metadataHints?: string[];
   timestamp: number;
 }
 
@@ -52,6 +61,8 @@ export interface ExcelPreviewData {
   totalRows: number;
   truncated: boolean;
   cellStyles?: (CellStyle | null)[][];
+  mergeRanges?: MergeRange[];
+  metadataHints?: string[];
 }
 
 export interface TextDiffEntry {

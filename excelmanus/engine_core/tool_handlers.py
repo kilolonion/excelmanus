@@ -755,6 +755,15 @@ class CodePolicyHandler(BaseToolHandler):
                 _diffs = dispatcher._compute_snapshot_diffs(_before_snap, _after_snap)
                 from excelmanus.events import EventType, ToolCallEvent
                 for _rd in _diffs:
+                    _rd_merges: list[dict[str, int]] = []
+                    _rd_hints: list[str] = []
+                    try:
+                        _rd_merges, _rd_hints = dispatcher._extract_sheet_metadata(
+                            _rd["file_path"], _rd["sheet"] or None,
+                            e.config.workspace_root,
+                        )
+                    except Exception:
+                        pass
                     e.emit(
                         on_event,
                         ToolCallEvent(
@@ -764,6 +773,8 @@ class CodePolicyHandler(BaseToolHandler):
                             excel_sheet=_rd["sheet"],
                             excel_affected_range=_rd["affected_range"],
                             excel_changes=_rd["changes"],
+                            excel_merge_ranges=_rd_merges,
+                            excel_metadata_hints=_rd_hints,
                         ),
                     )
             except Exception:
