@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \":*)",
-      "Bash(python -c \"from excelmanus.auth.middleware import AuthMiddleware; print\\(''Import OK, type:'', type\\(AuthMiddleware\\)\\)\")"
-    ]
-  }
-}

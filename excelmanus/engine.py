@@ -646,7 +646,7 @@ class TurnDiagnostic:
     completion_tokens: int = 0
     # provider 缓存命中的 token 数（OpenAI prompt_tokens_details.cached_tokens）
     cached_tokens: int = 0
-    # Anthropic prompt caching 专用字段
+    # Anthropic 提示词缓存专用字段
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     # TTFT（Time To First Token）毫秒
@@ -1689,6 +1689,51 @@ class AgentEngine:
         """当前活跃模型的 base_url（只读）。"""
         return self._active_base_url
 
+    def update_aux_config(
+        self,
+        *,
+        aux_model: str | None = None,
+        aux_api_key: str | None = None,
+        aux_base_url: str | None = None,
+    ) -> None:
+        """热更新 AUX 配置（路由 + 子代理默认模型 + 窗口感知顾问）。
+
+        当前端通过 API 修改 AUX 配置时，由 SessionManager 广播调用，
+        确保已存活的引擎实例不会使用过时的 AUX 快照。
+        """
+        # 更新 frozen dataclass 上的 aux 字段
+        object.__setattr__(self._config, "aux_model", aux_model)
+        object.__setattr__(self._config, "aux_api_key", aux_api_key)
+        object.__setattr__(self._config, "aux_base_url", aux_base_url)
+
+        # 重建路由 / 窗口感知顾问的 client 与 model
+        _aux_api_key = aux_api_key or self._config.api_key
+        _aux_base_url = aux_base_url or self._config.base_url
+        if aux_model:
+            self._router_client = create_client(
+                api_key=_aux_api_key,
+                base_url=_aux_base_url,
+            )
+            self._router_model = aux_model
+            self._router_follow_active_model = False
+        else:
+            self._router_client = self._client
+            self._router_model = self._active_model
+            self._router_follow_active_model = True
+
+        _adv_model = aux_model or self._active_model
+        self._advisor_client = create_client(
+            api_key=_aux_api_key,
+            base_url=_aux_base_url,
+        )
+        self._advisor_model = _adv_model
+        self._advisor_follow_active_model = not aux_model
+        logger.info(
+            "AUX 配置热更新: model=%s, base_url=%s",
+            aux_model or "(跟随主模型)",
+            aux_base_url or "(跟随主模型)",
+        )
+
     def get_compaction_status(self) -> dict[str, Any]:
         """返回上下文压缩状态，供 API 层查询。"""
         return self._compaction_manager.get_status(self._memory, None)
@@ -1712,6 +1757,16 @@ class AgentEngine:
     def full_access_enabled(self) -> bool:
         """当前会话是否启用 fullaccess。"""
         return self._full_access_enabled
+
+    @property
+    def is_vision_capable(self) -> bool:
+        """主模型是否支持视觉输入（只读）。"""
+        return self._is_vision_capable
+
+    @property
+    def vlm_enhance_available(self) -> bool:
+        """VLM 增强通道是否可用（只读）。"""
+        return self._vlm_enhance_available
 
     @property
     def subagent_enabled(self) -> bool:
@@ -2114,14 +2169,29 @@ class AgentEngine:
                 [len(img["data"]) for img in normalized_images],
             )
 
+        # ── 视觉能力前置检查：主模型不支持视觉且无 VLM 时直接拒绝 ──
+        if normalized_images and not self._is_vision_capable and not self._vlm_enhance_available:
+            reject_msg = (
+                "当前主模型不支持图片识别，且未配置视觉模型（VLM），无法处理图片附件。\n\n"
+                "请通过以下任一方式启用图片支持：\n"
+                "1. 切换到支持视觉的主模型（如 GPT-4o、Claude Sonnet、Qwen-VL 等），"
+                "或设置 `EXCELMANUS_MAIN_MODEL_VISION=true`\n"
+                "2. 配置独立视觉模型：设置 `EXCELMANUS_VLM_BASE_URL` 和 `EXCELMANUS_VLM_MODEL`"
+            )
+            logger.warning(
+                "拒绝图片请求: main_vision=%s, vlm_enhance=%s",
+                self._is_vision_capable, self._vlm_enhance_available,
+            )
+            return ChatResult(reply=reject_msg)
+
         def _add_user_turn_to_memory(text: str) -> None:
             if not normalized_images:
                 self._memory.add_user_message(text)
                 return
 
-            # Build a single multimodal user message with text + images.
-            # Keeping everything in one message avoids consecutive user
-            # messages which Claude's API would reject.
+            # 构建包含文本 + 图片的单条多模态用户消息。
+            # 将所有内容放在一条消息中可避免连续的用户消息，
+            # 否则 Claude 的 API 会拒绝。
             parts: list[dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
@@ -3548,11 +3618,10 @@ class AgentEngine:
 
         # 运行时模型选择：子代理自身 > 全局 aux_model > 当前激活主模型。
         resolved_model = config.model or self._config.aux_model or self._active_model
-        # verifier 场景：若 aux_model 明确绑定到 AUX 独立端点，
+        # 内置子代理场景：若 aux_model 明确绑定到 AUX 独立端点，
         # 而当前子代理运行端点不同，则优先回退到 active model，避免端点/模型错配。
         if (
-            agent_name == "verifier"
-            and config.model is None
+            config.model is None
             and self._config.aux_model
             and self._config.aux_base_url
             and self._config.aux_base_url != runtime_base_url
@@ -3592,15 +3661,15 @@ class AgentEngine:
             tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
             enriched_contexts=enriched_contexts,
         )
-        if self._should_retry_verifier_with_active_model(
-            agent_name=agent_name,
+        if self._should_retry_subagent_with_active_model(
             source_config=config,
             attempted_model=resolved_model,
             result=result,
         ):
             retry_config = replace(runtime_config, model=self._active_model)
             logger.warning(
-                "verifier 子代理模型 %r 不可用，回退 active model %r 重试一次。",
+                "%s 子代理模型 %r 不可用，回退 active model %r 重试一次。",
+                agent_name,
                 resolved_model,
                 self._active_model,
             )
@@ -3624,25 +3693,24 @@ class AgentEngine:
             "未配置模型",
             "model not found",
             "model_not_found",
+            "not found the model",
             "unknown model",
             "no such model",
             "does not exist",
             "invalid model",
             "unsupported model",
             "model is not available",
+            "resource_not_found",
         )
         return any(marker in lowered for marker in markers)
 
-    def _should_retry_verifier_with_active_model(
+    def _should_retry_subagent_with_active_model(
         self,
         *,
-        agent_name: str,
         source_config: Any,
         attempted_model: str,
         result: SubagentResult,
     ) -> bool:
-        if agent_name != "verifier":
-            return False
         if source_config.model is not None:
             return False
         if attempted_model == self._active_model:
@@ -3830,7 +3898,7 @@ class AgentEngine:
             on_event=on_event,
         )
 
-    # TODO: 过渡期残余，待测试迁移后删除
+    # 待办：过渡期残余，待测试迁移后删除
     # 当前调用方：test_pbt_llm_routing.py:477, test_engine.py:2691, engine.py:3233
     async def _handle_delegate_to_subagent(
         self,
@@ -4654,7 +4722,7 @@ class AgentEngine:
                     kwargs["extra_body"] = extra
                 # "deepseek" → 模型自动输出推理内容，无需额外参数
 
-            # Prompt Cache 优化：同一 session_turn 内共享 cache key，
+            # 提示词缓存优化：同一 session_turn 内共享 cache key，
             # 确保 OpenAI 路由到同一缓存机器，最大化系统提示前缀 cache hit。
             if self._config.prompt_cache_key_enabled:
                 kwargs["prompt_cache_key"] = f"em_s{self._session_turn}"
@@ -4985,7 +5053,7 @@ class AgentEngine:
                         consecutive_text_only = 0
                         all_tool_results.append(tc_result)
 
-                        # Stuck Detection：记录工具调用到滑动窗口
+                        # 卡死检测：记录工具调用到滑动窗口
                         try:
                             _tc_args, _ = self._tool_dispatcher.parse_arguments(
                                 getattr(function, "arguments", None)
@@ -5055,6 +5123,9 @@ class AgentEngine:
                                             iteration=iteration,
                                             approval_undoable=bool(
                                                 exec_record is not None and exec_record.undoable
+                                            ),
+                                            approval_has_changes=bool(
+                                                exec_record is not None and exec_record.changes
                                             ),
                                         ),
                                     )
@@ -5160,6 +5231,9 @@ class AgentEngine:
                                                 approval_undoable=bool(
                                                     exec_record is not None and exec_record.undoable
                                                 ),
+                                                approval_has_changes=bool(
+                                                    exec_record is not None and exec_record.changes
+                                                ),
                                             ),
                                         )
                                         tc_result = replace(
@@ -5215,6 +5289,7 @@ class AgentEngine:
                                     tool_name=tc_result.tool_name,
                                     arguments=tc_result.arguments,
                                 )
+                                self._context_builder.mark_window_notice_dirty()
                                 if write_hint != "may_write":
                                     write_hint = "may_write"
                             elif _write_effect == "external_write":
@@ -5239,7 +5314,7 @@ class AgentEngine:
                             breaker_summary = "\n".join(recent_errors)
                             breaker_triggered = True
 
-            # NOTE: 旧的 ask_user 退出路径已移除。
+            # 说明：旧的 ask_user 退出路径已移除。
             # 阻塞式 ask_user 在 AskUserHandler 内 await Future，
             # 返回用户回答作为 tool result，循环不中断。
 
@@ -5708,7 +5783,7 @@ class AgentEngine:
                 tool_scope=None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=pending.tool_name not in {"run_code", "run_shell"},
+                undoable=not self._approval.is_read_only_safe_tool(pending.tool_name) and pending.tool_name not in {"run_code", "run_shell"},
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:
@@ -5752,6 +5827,7 @@ class AgentEngine:
                 stdout_tail=_rc_stdout,
                 iteration=0,
             )
+            self._context_builder.mark_window_notice_dirty()
         # ── run_code RED 路径 → files_changed 事件 ──
         if pending.tool_name == "run_code" and on_event is not None:
             self._tool_dispatcher._emit_files_changed_from_audit(
@@ -6205,7 +6281,7 @@ class AgentEngine:
             truncated=False,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     async def _handle_control_command(
         self,
         user_message: str,
@@ -6217,33 +6293,33 @@ class AgentEngine:
             user_message, on_event=on_event,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     async def _handle_accept_command(
         self, parts: list[str], *, on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_accept_command(parts, on_event=on_event)
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _handle_reject_command(self, parts: list[str], *, on_event: EventCallback | None = None) -> str:
         return self._command_handler._handle_reject_command(parts, on_event=on_event)
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     async def _handle_plan_approve(
         self, *, parts: list[str], on_event: EventCallback | None = None,
     ) -> str:
         return await self._command_handler._handle_plan_approve(parts=parts, on_event=on_event)
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _handle_plan_reject(self, *, parts: list[str]) -> str:
         return self._command_handler._handle_plan_reject(parts=parts)
 
     # ── Context Builder 委托方法 ──────────────────────────────
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _all_tool_names(self) -> list[str]:
         return self._context_builder._all_tool_names()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _focus_window_refill_reader(
         self, *, file_path: str, sheet_name: str, range_ref: str,
     ) -> dict[str, Any]:
@@ -6251,7 +6327,7 @@ class AgentEngine:
             file_path=file_path, sheet_name=sheet_name, range_ref=range_ref,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
@@ -6262,23 +6338,23 @@ class AgentEngine:
             skill_contexts, route_result=route_result,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _build_access_notice(self) -> str:
         return self._context_builder._build_access_notice()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _build_backup_notice(self) -> str:
         return self._context_builder._build_backup_notice()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _build_mcp_context_notice(self) -> str:
         return self._context_builder._build_mcp_context_notice()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _build_window_perception_notice(self) -> str:
         return self._context_builder._build_window_perception_notice()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _build_tool_index_notice(
         self, *, compact: bool = False, max_tools_per_category: int = 8,
     ) -> str:
@@ -6286,7 +6362,7 @@ class AgentEngine:
             compact=compact, max_tools_per_category=max_tools_per_category,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _set_window_perception_turn_hints(
         self,
         *,
@@ -6300,17 +6376,17 @@ class AgentEngine:
             task_tags=task_tags,
         )
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _redirect_backup_paths(
         self, tool_name: str, arguments: dict[str, Any],
     ) -> dict[str, Any]:
         return self._context_builder._redirect_backup_paths(tool_name, arguments)
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     def _has_incomplete_tasks(self) -> bool:
         return self._context_builder._has_incomplete_tasks()
 
-    # DEPRECATED: 转发 wrapper，待测试迁移后删除
+    # 已弃用：转发 wrapper，待测试迁移后删除
     async def _auto_continue_task_loop(
         self,
         route_result: SkillMatchResult,

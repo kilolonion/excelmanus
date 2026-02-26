@@ -40,6 +40,12 @@ class ContextBuilder:
         self._engine = engine
         # O3+O4: 基于内容指纹的 token 计数缓存，避免重复 tiktoken 编码
         self._token_count_cache: dict[str, int] = {}
+        # C2: 轮次级静态 notice 缓存，同一 session_turn 内不重复构建
+        self._turn_notice_cache: dict[str, str] = {}
+        self._turn_notice_cache_key: int = -1
+        # W1: 窗口感知 notice 脏标记缓存
+        self._window_notice_cache: str | None = None
+        self._window_notice_dirty: bool = True
 
     def _all_tool_names(self) -> list[str]:
         e = self._engine
@@ -281,33 +287,48 @@ class ContextBuilder:
         e = self._engine
         base_prompt = e.memory.system_prompt
 
+        # ── C2: 轮次级静态 notice 缓存失效检测 ──
+        _turn = e._session_turn
+        if _turn != self._turn_notice_cache_key:
+            self._turn_notice_cache.clear()
+            self._turn_notice_cache_key = _turn
+        _nc = self._turn_notice_cache
+
+        def _cached_notice(key: str, builder: Any) -> str:
+            val = _nc.get(key)
+            if val is not None:
+                return val
+            val = builder()
+            _nc[key] = val
+            return val
+
         # ── 静态/半静态内容（前缀区域，最大化 cache 命中） ──
 
-        rules_notice = self._build_rules_notice()
+        rules_notice = _cached_notice("rules", self._build_rules_notice)
         if rules_notice:
             base_prompt = base_prompt + "\n\n" + rules_notice
 
-        access_notice = e._build_access_notice()
+        access_notice = _cached_notice("access", self._build_access_notice)
         if access_notice:
             base_prompt = base_prompt + "\n\n" + access_notice
 
-        backup_notice = e._build_backup_notice()
+        backup_notice = _cached_notice("backup", self._build_backup_notice)
         if backup_notice:
             base_prompt = base_prompt + "\n\n" + backup_notice
 
-        cow_path_notice = self._build_cow_path_notice()
+        cow_path_notice = self._build_cow_path_notice()  # 不缓存：turn 内可增长
         if cow_path_notice:
             base_prompt = base_prompt + "\n\n" + cow_path_notice
 
-        mcp_context = e._build_mcp_context_notice()
+        mcp_context = _cached_notice("mcp", self._build_mcp_context_notice)
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        workspace_manifest_notice = self._build_workspace_manifest_notice()
+        workspace_manifest_notice = _cached_notice("manifest", self._build_workspace_manifest_notice)
         if workspace_manifest_notice:
             base_prompt = base_prompt + "\n\n" + workspace_manifest_notice
 
-        uploads_notice = self._build_uploads_notice()
+        uploads_notice = _cached_notice("uploads", self._build_uploads_notice)
         if uploads_notice:
             base_prompt = base_prompt + "\n\n" + uploads_notice
 
@@ -451,7 +472,7 @@ class ContextBuilder:
             total_tokens = _cached_count
         else:
             total_tokens = self._system_prompts_token_count(prompts)
-            # LRU 淘汰
+            # LRU 淘汰（最近最少使用）
             if len(self._token_count_cache) >= self._TOKEN_COUNT_CACHE_MAX:
                 self._token_count_cache.pop(next(iter(self._token_count_cache)))
             self._token_count_cache[_content_fingerprint] = total_tokens
@@ -706,7 +727,9 @@ class ContextBuilder:
             lines.append(f"- **{name}**（{tool_count} 个工具）：{tools_str}")
         lines.append(
             "以上 MCP 工具已注册，工具名带 `mcp_{server}_` 前缀，可直接调用。"
-            "当用户询问你有哪些 MCP 或外部能力时，据此如实回答。"
+            "当用户询问你有哪些 MCP 或外部能力时，据此如实回答。\n"
+            "**工具优先级**：当内置工具（不带 `mcp_` 前缀）能完成任务时，"
+            "优先使用内置工具。MCP 工具仅在内置工具无法覆盖的场景下使用。"
         )
         return "\n".join(lines)
 
@@ -836,14 +859,30 @@ class ContextBuilder:
         )
         return "\n".join(lines)
 
+    def mark_window_notice_dirty(self) -> None:
+        """标记窗口感知 notice 缓存为脏，下次构建时重新渲染。
+
+        应在工具执行修改窗口状态后调用（observe_write_tool_call、
+        observe_code_execution 等），以及每个新 turn 开始时隐式失效。
+        """
+        self._window_notice_dirty = True
+
     def _build_window_perception_notice(self) -> str:
-        """渲染窗口感知系统注入文本。"""
+        """渲染窗口感知系统注入文本。
+
+        W1: 使用脏标记缓存——窗口状态未变时复用上次渲染结果。
+        """
+        if not self._window_notice_dirty and self._window_notice_cache is not None:
+            return self._window_notice_cache
         e = self._engine
         requested_mode = e._requested_window_return_mode()
-        return e._window_perception.build_system_notice(
+        result = e._window_perception.build_system_notice(
             mode=requested_mode,
             model_id=e.active_model,
         )
+        self._window_notice_cache = result
+        self._window_notice_dirty = False
+        return result
     def _build_tool_index_notice(
         self,
         *,
