@@ -78,6 +78,7 @@ logs/
 tasks/
 dev-docs/
 docs/plans/
+docs/audit_*.md
 !README.md
 !README_EN.md
 
