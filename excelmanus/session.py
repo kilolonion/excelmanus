@@ -874,7 +874,7 @@ class SessionManager:
         """获取引擎，若会话仅在 SQLite 中存在则懒恢复。
 
         不改变 in_flight 状态，恢复后立即释放。
-        适用于只读查询场景（status、compact、memory extract、manifest rebuild）。
+        适用于只读查询场景（status、compact、memory extract、registry scan）。
         """
         engine = self.get_engine(session_id, user_id=user_id)
         if engine is not None:
