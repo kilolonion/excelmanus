@@ -584,7 +584,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
             try:
                 rp = guard.resolve_and_validate(resume_from_spec)
                 if rp.is_file():
-                    # 从文件名推断已完成的阶段号 (e.g. replica_spec_p2.json → phase 2)
+                    # 从文件名推断已完成的阶段号（例如 replica_spec_p2.json → 阶段 2）
                     stem = rp.stem
                     if "_p" in stem:
                         phase_str = stem.rsplit("_p", 1)[-1]
@@ -755,6 +755,7 @@ class CodePolicyHandler(BaseToolHandler):
                 stdout_tail=_stdout_tail,
                 iteration=iteration,
             )
+            e._context_builder.mark_window_notice_dirty()
 
         # ── files_changed 事件 ──
         _uploads_after = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
