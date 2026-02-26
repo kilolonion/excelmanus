@@ -171,7 +171,7 @@ if _PROMPT_TOOLKIT_ENABLED:
                 return
 
             parts = text.split(" ", 1)
-            cmd_part = parts[0]  # e.g. "/config"
+            cmd_part = parts[0]  # 例如 "/config"
 
             if len(parts) == 1:
                 # 阶段一：补全命令本体

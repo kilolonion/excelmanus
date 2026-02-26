@@ -237,7 +237,7 @@ exec(compile(_code, _script, "exec"), {{
 '''
 
 _SANDBOX_WRAPPER_TEMPLATE = '''\
-"""ExcelManus sandbox wrapper (auto-generated)."""
+"""ExcelManus 沙盒包装（自动生成）。"""
 import sys
 import os
 import tempfile as _tmpmod

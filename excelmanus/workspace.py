@@ -1,7 +1,7 @@
-"""Unified workspace isolation layer.
+"""统一工作区隔离层。
 
-Every session operates within an ``IsolatedWorkspace`` that encapsulates
-file-system root, transactional staging, sandbox configuration, and quotas.
+每个会话在 ``IsolatedWorkspace`` 内运行，封装文件系统根目录、
+事务化暂存、沙盒配置与配额。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class QuotaPolicy:
-    """Per-workspace storage limits."""
+    """每工作区的存储上限。"""
 
     max_bytes: int
     max_files: int
@@ -61,7 +61,7 @@ class QuotaPolicy:
 
 @dataclass
 class WorkspaceUsage:
-    """Current storage consumption for a workspace."""
+    """当前工作区的存储占用。"""
 
     total_bytes: int
     file_count: int
@@ -99,7 +99,7 @@ class WorkspaceUsage:
 
 
 def scan_workspace(workspace_dir: str) -> list[dict]:
-    """Walk *workspace_dir* and return file metadata sorted by mtime."""
+    """遍历 workspace_dir 并返回按修改时间排序的文件元数据。"""
     results: list[dict] = []
     ws_path = Path(workspace_dir)
     if not ws_path.is_dir():
@@ -131,28 +131,25 @@ def _cleanup_empty_parents(child: Path, root: Path) -> None:
             break
 
 
-# ── Sandbox configuration ──────────────────────────────────
+# ── 沙盒配置 ──────────────────────────────────
 
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Per-workspace sandbox settings."""
+    """每工作区的沙盒配置。"""
 
     docker_enabled: bool = False
 
 
-# ── WorkspaceTransaction ───────────────────────────────────
+# ── 工作区事务 ───────────────────────────────────
 
 
 class WorkspaceTransaction:
-    """Unified transactional file layer.
+    """统一的事务化文件层。
 
-    All staged mutations live under ``staging_dir`` until explicitly
-    committed or rolled back.
-
-    Internally delegates to :class:`FileVersionManager` for version
-    tracking and physical file operations, while preserving the original
-    public interface for backward compatibility.
+    所有暂存变更均位于 staging_dir 下，直至显式提交或回滚。
+    内部委托 FileVersionManager 做版本跟踪与物理文件操作，
+    同时保留原有公开接口以保持向后兼容。
     """
 
     def __init__(
@@ -175,7 +172,7 @@ class WorkspaceTransaction:
         # 统一版本管理器：优先使用外部注入，否则自建
         self._fvm: _FVM = fvm if fvm is not None else _FVM(workspace_root)
 
-    # -- Properties ----------------------------------------------------------
+    # -- 属性 ----------------------------------------------------------
 
     @property
     def tx_id(self) -> str:
@@ -203,52 +200,51 @@ class WorkspaceTransaction:
     def tracked_originals(self) -> set[str]:
         return set(self._fvm.staged_file_map().keys())
 
-    # -- Path helpers --------------------------------------------------------
+    # -- 路径辅助 --------------------------------------------------------
 
     def _resolve_and_validate(self, file_path: str) -> Path:
         return resolve_in_workspace(file_path, self._workspace_root)
 
-    # -- Core operations -----------------------------------------------------
+    # -- 核心操作 -----------------------------------------------------
 
     def stage_for_write(self, file_path: str) -> str:
-        """Ensure a staged copy exists for *file_path*.
+        """确保 file_path 存在对应的暂存副本。
 
-        Delegates to FileVersionManager.stage_for_write() which handles
-        original-version checkpointing and staging copy creation.
+        委托 FileVersionManager.stage_for_write() 处理原版检查点与暂存副本创建。
         """
         return self._fvm.stage_for_write(
             file_path, ref_id=self._tx_id, scope=self._scope,
         )
 
     def resolve_read(self, file_path: str) -> str:
-        """Return the staged path if it exists, otherwise the original."""
+        """若存在暂存路径则返回暂存路径，否则返回原路径。"""
         resolved = self._resolve_and_validate(file_path)
         rel = self._fvm._to_rel(resolved)
         staged = self._fvm.get_staged_path(rel)
         return staged if staged is not None else str(resolved)
 
     def commit_all(self) -> list[dict[str, str]]:
-        """Copy all staged files back to their original locations."""
+        """将所有暂存文件复制回原位置。"""
         return self._fvm.commit_all_staged()
 
     def commit_one(self, file_path: str) -> dict[str, str] | None:
-        """Commit a single staged file back to its original location."""
+        """将单个暂存文件提交回原位置。"""
         return self._fvm.commit_staged(file_path)
 
     def rollback_one(self, file_path: str) -> bool:
-        """Discard a single staged file."""
+        """丢弃单个暂存文件。"""
         return self._fvm.discard_staged(file_path)
 
     def rollback_all(self) -> None:
-        """Discard all staged files."""
+        """丢弃所有暂存文件。"""
         self._fvm.discard_all_staged()
 
     def cleanup_stale(self) -> int:
-        """Remove entries whose staged file no longer exists on disk."""
+        """移除暂存文件已不存在的条目。"""
         return self._fvm.prune_stale_staging()
 
     def to_relative(self, abs_path: str) -> str:
-        """Convert an absolute path to a workspace-relative ``./`` path."""
+        """将绝对路径转换为相对工作区的 ./ 路径。"""
         try:
             rel = Path(abs_path).relative_to(self._workspace_root)
             return f"./{rel}"
@@ -256,14 +252,13 @@ class WorkspaceTransaction:
             return abs_path
 
     def list_staged(self) -> list[dict[str, str]]:
-        """List all currently staged files."""
+        """列出当前所有暂存文件。"""
         return self._fvm.list_staged()
 
     def register_cow_mappings(self, mapping: dict[str, str]) -> None:
-        """Merge subprocess-level CoW mappings into this transaction.
+        """将子进程级 CoW 映射合并进本事务。
 
-        Delegates to FileVersionManager.register_cow_mapping() which
-        records both the staging entry and a version checkpoint.
+        委托 FileVersionManager.register_cow_mapping() 记录暂存条目与版本检查点。
         """
         if not mapping:
             return
@@ -271,15 +266,14 @@ class WorkspaceTransaction:
             self._fvm.register_cow_mapping(src_rel, dst_rel)
 
 
-# ── SandboxEnv ─────────────────────────────────────────────
+# ── 沙盒环境 ─────────────────────────────────────────────
 
 
 class SandboxEnv:
-    """Execution environment for a sandboxed code run.
+    """沙盒代码运行的执行环境。
 
-    Binds sandbox configuration, workspace mount paths, and the active
-    transaction so that CoW logs are written into the transaction's
-    staging area.
+    绑定沙盒配置、工作区挂载路径与当前事务，
+    使 CoW 日志写入事务的暂存区。
     """
 
     def __init__(
@@ -324,15 +318,14 @@ class SandboxEnv:
         return tmpdir
 
 
-# ── IsolatedWorkspace ──────────────────────────────────────
+# ── 隔离工作区 ──────────────────────────────────────
 
 
 class IsolatedWorkspace:
-    """Central abstraction for user/session file-system isolation.
+    """用户/会话文件系统隔离的核心抽象。
 
-    Holds the resolved workspace root, sandbox settings, and quota policy.
-    Creates per-session ``WorkspaceTransaction`` instances for staging
-    file mutations.
+    持有解析后的工作区根目录、沙盒配置与配额策略，
+    为文件变更暂存创建每会话的 WorkspaceTransaction 实例。
     """
 
     def __init__(
@@ -354,7 +347,7 @@ class IsolatedWorkspace:
         self._transaction_scope = transaction_scope
         self._staging_base = (self._root_dir / "outputs" / "backups").resolve()
 
-    # -- Properties ----------------------------------------------------------
+    # -- 属性 ----------------------------------------------------------
 
     @property
     def root_dir(self) -> Path:
@@ -388,14 +381,14 @@ class IsolatedWorkspace:
     def transaction_scope(self) -> str:
         return self._transaction_scope
 
-    # -- Factory helpers -----------------------------------------------------
+    # -- 工厂方法 -----------------------------------------------------
 
     def create_transaction(
         self,
         tx_id: str | None = None,
         fvm: "FileVersionManager | None" = None,
     ) -> WorkspaceTransaction:
-        """Create a new ``WorkspaceTransaction`` bound to this workspace."""
+        """创建绑定到本工作区的新 WorkspaceTransaction。"""
         if tx_id is None:
             tx_id = secrets.token_hex(8)
         return WorkspaceTransaction(
@@ -409,7 +402,7 @@ class IsolatedWorkspace:
     def create_sandbox_env(
         self, transaction: WorkspaceTransaction | None = None,
     ) -> SandboxEnv:
-        """Create a ``SandboxEnv`` for executing code in this workspace."""
+        """创建在本工作区内执行代码用的 SandboxEnv。"""
         return SandboxEnv(workspace=self, transaction=transaction)
 
     # -- 配额操作（委托自 auth/workspace.py） -----------------
@@ -426,7 +419,7 @@ class IsolatedWorkspace:
         )
 
     def enforce_quota(self) -> list[str]:
-        """Delete oldest files until within quota. Returns deleted paths."""
+        """按时间删除最旧文件直至满足配额，返回被删除路径列表。"""
         files = scan_workspace(str(self._root_dir))
         total = sum(f["size"] for f in files)
         deleted: list[str] = []
@@ -446,7 +439,7 @@ class IsolatedWorkspace:
         return deleted
 
     def check_upload_allowed(self, incoming_size: int) -> tuple[bool, str]:
-        """Pre-check whether an upload of *incoming_size* bytes is allowed."""
+        """预检是否允许上传 incoming_size 字节。"""
         files = scan_workspace(str(self._root_dir))
         current_size = sum(f["size"] for f in files)
         current_count = len(files)
@@ -458,12 +451,12 @@ class IsolatedWorkspace:
         return True, ""
 
     def get_upload_dir(self) -> Path:
-        """Return the upload directory, creating it if needed."""
+        """返回上传目录，不存在则创建。"""
         upload_dir = self._root_dir / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         return upload_dir
 
-    # -- Workspace resolution (replaces auth/workspace helpers) ──────────
+    # -- 工作区解析（替代 auth/workspace 辅助） ──────────
 
     @staticmethod
     def resolve(
@@ -475,10 +468,10 @@ class IsolatedWorkspace:
         transaction_enabled: bool = True,
         transaction_scope: str = "all",
     ) -> "IsolatedWorkspace":
-        """Resolve the workspace for a request.
+        """解析请求对应的工作区。
 
-        - auth_enabled + user_id  ->  per-user workspace
-        - otherwise               ->  shared workspace (backward compat)
+        - auth_enabled 且提供 user_id  ->  每用户工作区
+        - 否则                         ->  共享工作区（向后兼容）
         """
         if auth_enabled and user_id:
             root = os.path.join(global_workspace_root, "users", user_id)

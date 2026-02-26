@@ -579,7 +579,7 @@ class FileVersionManager:
             chain = self._chains.get(rel, [])
             for ver in chain:
                 if not ver.invalidated:
-                    # frozen dataclass → 需要 object.__setattr__
+                    # 冻结的 dataclass，需使用 object.__setattr__
                     object.__setattr__(ver, "invalidated", True)
                     count += 1
         return count

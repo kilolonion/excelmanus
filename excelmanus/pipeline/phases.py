@@ -36,7 +36,7 @@ def _is_valid_address(addr: str) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════
-# Phase 1 — Structure prompt
+# 阶段 1 — 结构提示
 # ════════════════════════════════════════════════════════════════
 
 PHASE1_STRUCTURE_PROMPT = """\
@@ -91,7 +91,7 @@ def build_phase1_prompt() -> str:
 
 
 # ════════════════════════════════════════════════════════════════
-# Phase 2 — Data prompt
+# 阶段 2 — 数据提示
 # ════════════════════════════════════════════════════════════════
 
 _PHASE2_DATA_PROMPT_TEMPLATE = """\
@@ -138,7 +138,7 @@ def build_phase2_prompt(structure_summary: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════
-# Phase 3 — Style prompt (复用 vision_extractor)
+# 阶段 3 — 样式提示（复用 vision_extractor）
 # ════════════════════════════════════════════════════════════════
 
 def build_phase3_prompt(data_summary: str) -> str:
@@ -146,7 +146,7 @@ def build_phase3_prompt(data_summary: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════
-# Phase 4 — Verification prompt
+# 阶段 4 — 校验提示
 # ════════════════════════════════════════════════════════════════
 
 _PHASE4_VERIFY_PROMPT_TEMPLATE = """\
@@ -219,7 +219,7 @@ def build_skeleton_spec(
     structure_json: dict[str, Any],
     provenance: dict[str, Any],
 ) -> ReplicaSpec:
-    """Phase 1 输出 → 骨架 ReplicaSpec（无 cells、无 styles）。"""
+    """阶段 1 输出 → 骨架 ReplicaSpec（无 cells、无 styles）。"""
     tables = structure_json.get("tables") or []
     if not tables:
         raise ValueError("Phase 1 结果中没有 tables 数据")
@@ -266,7 +266,7 @@ def fill_data_into_spec(
     skeleton: ReplicaSpec,
     data_json: dict[str, Any],
 ) -> ReplicaSpec:
-    """Phase 2 输出 → 将 cells 填入骨架 spec。"""
+    """阶段 2 输出 → 将 cells 填入骨架 spec。"""
     spec = ReplicaSpec.model_validate(skeleton.model_dump())
     tables = data_json.get("tables") or []
 
@@ -314,7 +314,7 @@ def apply_styles_to_spec(
     spec: ReplicaSpec,
     style_json: dict[str, Any],
 ) -> ReplicaSpec:
-    """Phase 3 输出 → 将样式应用到 spec。"""
+    """阶段 3 输出 → 将样式应用到 spec。"""
     patched = ReplicaSpec.model_validate(spec.model_dump())
 
     style_defs = style_json.get("styles") or {}
