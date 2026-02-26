@@ -53,6 +53,7 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.tools.code_tools",
     "excelmanus.tools.shell_tools",
     "excelmanus.tools.sheet_tools",
+    "excelmanus.tools.chart_tools",
     "excelmanus.tools.focus_tools",
     "excelmanus.tools.image_tools",
     "excelmanus.tools.memory_tools",

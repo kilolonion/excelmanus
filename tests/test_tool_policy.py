@@ -20,6 +20,7 @@ from excelmanus.tools.policy import (
 
 EXPECTED_MUTATING_CONFIRM_TOOLS = {
     "write_text_file",
+    "edit_text_file",
     "run_shell",
     "delete_file",
     "rename_file",
@@ -29,6 +30,8 @@ EXPECTED_MUTATING_CONFIRM_TOOLS = {
 
 EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "copy_file",
+    # 图表工具
+    "create_excel_chart",
     # Vision 工具
     "rebuild_excel_from_spec",
     "verify_excel_replica",
@@ -53,6 +56,7 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
 
     prefixes = (
         "write_",
+        "edit_",
         "copy_",
         "rename_",
         "delete_",
