@@ -1,8 +1,8 @@
-"""Per-session FileAccessGuard via contextvar.
+"""通过 contextvar 实现每会话的 FileAccessGuard。
 
-The tool dispatcher sets the contextvar before each tool call,
-so tool functions automatically pick up the correct per-user guard.
-Module-level ``_guard`` singletons remain as fallback for CLI mode.
+工具分发器在每次工具调用前设置 contextvar，
+工具函数即可自动获得对应用户的 guard。
+模块级 _guard 单例仍作为 CLI 模式下的回退。
 """
 
 from __future__ import annotations
@@ -19,15 +19,15 @@ _current_guard: contextvars.ContextVar["FileAccessGuard | None"] = contextvars.C
 
 
 def set_guard(guard: "FileAccessGuard") -> contextvars.Token:
-    """Set per-session FileAccessGuard. Returns reset token."""
+    """设置每会话的 FileAccessGuard，返回用于恢复的 token。"""
     return _current_guard.set(guard)
 
 
 def get_guard() -> "FileAccessGuard | None":
-    """Get per-session FileAccessGuard, or None to use module fallback."""
+    """获取每会话的 FileAccessGuard，为 None 时使用模块级回退。"""
     return _current_guard.get(None)
 
 
 def reset_guard(token: contextvars.Token) -> None:
-    """Reset contextvar to previous value."""
+    """将 contextvar 恢复为先前值。"""
     _current_guard.reset(token)
