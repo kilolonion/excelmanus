@@ -203,7 +203,7 @@ def _handle_can_i_do(description: str) -> str:
 
     lines: list[str] = []
 
-    # Layer 1: 内置工具匹配
+    # 层级 1：内置工具匹配
     scores: list[tuple[str, float]] = []
     for tool_name, tool_desc in TOOL_SHORT_DESCRIPTIONS.items():
         score = _compute_match_score(keywords, tool_desc)
@@ -219,7 +219,7 @@ def _handle_can_i_do(description: str) -> str:
             desc = TOOL_SHORT_DESCRIPTIONS.get(name, "")
             lines.append(f"  - {name} — {desc}")
 
-    # Layer 2: 扩展能力匹配（run_code + Python 库）
+    # 层级 2：扩展能力匹配（run_code + Python 库）
     ext_scores: list[tuple[str, float]] = []
     for cap_name, cap_desc in _EXTENDED_CAPABILITIES.items():
         score = _compute_match_score(keywords, cap_desc)
@@ -234,7 +234,7 @@ def _handle_can_i_do(description: str) -> str:
         for name, _s in top_ext:
             lines.append(f"  - {_EXTENDED_CAPABILITIES[name]}")
 
-    # Layer 3: 子代理能力匹配
+    # 层级 3：子代理能力匹配
     sub_matches: list[str] = []
     for sub_name, sub_desc in _SUBAGENT_CAPABILITIES.items():
         score = _compute_match_score(keywords, sub_desc)
@@ -244,7 +244,7 @@ def _handle_can_i_do(description: str) -> str:
         lines.append("子代理:")
         lines.extend(sub_matches)
 
-    # Layer 4: MCP 扩展工具匹配
+    # 层级 4：MCP 扩展工具匹配
     if _registry is not None:
         mcp_matches: list[str] = []
         for tool in _registry.get_all_tools():

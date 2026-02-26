@@ -67,12 +67,12 @@ def set_sandbox_env(env: Any) -> _contextvars.Token:
 
 
 def _get_active_sandbox_env() -> Any:
-    """Return the active SandboxEnv, or None."""
+    """返回当前生效的 SandboxEnv，若无则返回 None。"""
     return _current_sandbox_env.get(None)
 
 
 def _is_docker_sandbox() -> bool:
-    """Check if Docker sandbox is active, preferring per-session env."""
+    """检查是否启用 Docker 沙盒，优先使用每会话环境。"""
     env = _get_active_sandbox_env()
     if env is not None:
         return getattr(env, "docker_enabled", False)
