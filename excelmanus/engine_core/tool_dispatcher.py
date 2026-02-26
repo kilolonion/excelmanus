@@ -151,6 +151,27 @@ class ToolDispatcher:
             DefaultToolHandler(engine, self),  # 兜底，必须放最后
         ]
 
+        # T2: 按工具名建立 O(1) 索引，跳过需动态判断的 handler
+        _specific: dict[str, Any] = {}
+        _skill = SkillActivationHandler(engine, self)
+        _specific["activate_skill"] = _skill
+        _deleg = DelegationHandler(engine, self)
+        for _dn in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate"):
+            _specific[_dn] = _deleg
+        _specific["finish_task"] = FinishTaskHandler(engine, self)
+        _specific["ask_user"] = AskUserHandler(engine, self)
+        _specific["suggest_mode_switch"] = SuggestModeSwitchHandler(engine, self)
+        _specific["extract_table_spec"] = ExtractTableSpecHandler(engine, self)
+        self._specific_handlers: dict[str, Any] = _specific
+        # 动态/条件 handler + 兜底（保持原有顺序）
+        self._generic_handlers = [
+            PlanInterceptHandler(engine, self),
+            CodePolicyHandler(engine, self),
+            AuditOnlyHandler(engine, self),
+            HighRiskApprovalHandler(engine, self),
+            DefaultToolHandler(engine, self),
+        ]
+
     @property
     def _registry(self) -> Any:
         return self._engine.registry
@@ -1087,28 +1108,30 @@ class ToolDispatcher:
         from excelmanus.engine import _AuditedExecutionError
 
         try:
-            for handler in self._handlers:
-                if not handler.can_handle(tool_name):
-                    continue
+            # T2: O(1) 索引查找特定工具 handler，未命中时走动态/兜底链
+            handler = self._specific_handlers.get(tool_name)
+            if handler is None:
+                for handler in self._generic_handlers:
+                    if handler.can_handle(tool_name):
+                        break
+                else:
+                    raise RuntimeError(f"No handler found for tool: {tool_name}")
 
-                handler_kwargs: dict[str, Any] = {
-                    "tool_scope": tool_scope,
-                    "on_event": on_event,
-                    "iteration": iteration,
-                    "route_result": route_result,
-                }
-                if handler.__class__.__name__ == "HighRiskApprovalHandler":
-                    handler_kwargs["skip_high_risk_approval_by_hook"] = skip_high_risk_approval_by_hook
+            handler_kwargs: dict[str, Any] = {
+                "tool_scope": tool_scope,
+                "on_event": on_event,
+                "iteration": iteration,
+                "route_result": route_result,
+            }
+            if handler.__class__.__name__ == "HighRiskApprovalHandler":
+                handler_kwargs["skip_high_risk_approval_by_hook"] = skip_high_risk_approval_by_hook
 
-                return await handler.handle(
-                    tool_name,
-                    tool_call_id,
-                    arguments,
-                    **handler_kwargs,
-                )
-
-            # 不应到达此处（DefaultToolHandler 总是匹配）
-            raise RuntimeError(f"No handler found for tool: {tool_name}")
+            return await handler.handle(
+                tool_name,
+                tool_call_id,
+                arguments,
+                **handler_kwargs,
+            )
         except ValueError as exc:
             result_str = str(exc)
             log_tool_call(logger, tool_name, arguments, error=result_str)
@@ -1486,6 +1509,7 @@ class ToolDispatcher:
                             stdout_tail=_stdout_tail,
                             iteration=iteration,
                         )
+                        e._context_builder.mark_window_notice_dirty()
                     # ── run_code → files_changed 事件 ──
                     _uploads_after = self._snapshot_uploads_dir(e.config.workspace_root)
                     _uploads_changed = self._diff_uploads_snapshots(_uploads_before, _uploads_after)
@@ -1600,6 +1624,7 @@ class ToolDispatcher:
                                     stdout_tail=_stdout_tail_s,
                                     iteration=iteration,
                                 )
+                                e._context_builder.mark_window_notice_dirty()
                             # ── run_code(清洗) → files_changed 事件 ──
                             _uploads_after_s = self._snapshot_uploads_dir(e.config.workspace_root)
                             _uploads_changed_s = self._diff_uploads_snapshots(_uploads_before_s, _uploads_after_s)

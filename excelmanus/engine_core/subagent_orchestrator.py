@@ -89,31 +89,32 @@ class SubagentOrchestrator:
             )
         picked_agent = engine._normalize_skill_agent_name(picked_agent) or "subagent"
 
-        # ── Pre-subagent Hook ──
+        # ── Pre-subagent Hook（A1: 无激活技能时跳过，避免冗余 async 开销） ──
         hook_skill = engine._active_skills[-1] if engine._active_skills else None
-        pre_hook_raw = engine._run_skill_hook(
-            skill=hook_skill,
-            event=HookEvent.SUBAGENT_START,
-            payload={
-                "task": task_text,
-                "agent_name": picked_agent,
-                "file_paths": normalized_paths,
-            },
-        )
-        pre_hook = await engine._resolve_hook_result(
-            event=HookEvent.SUBAGENT_START,
-            hook_result=pre_hook_raw,
-            on_event=on_event,
-        )
-        if pre_hook is not None and pre_hook.decision == HookDecision.DENY:
-            reason = pre_hook.reason or "Hook 拒绝了子代理执行。"
-            return DelegateSubagentOutcome(
-                reply=f"子代理执行已被 Hook 拦截：{reason}",
-                success=False,
-                picked_agent=picked_agent,
-                task_text=task_text,
-                normalized_paths=normalized_paths,
+        if hook_skill is not None:
+            pre_hook_raw = engine._run_skill_hook(
+                skill=hook_skill,
+                event=HookEvent.SUBAGENT_START,
+                payload={
+                    "task": task_text,
+                    "agent_name": picked_agent,
+                    "file_paths": normalized_paths,
+                },
             )
+            pre_hook = await engine._resolve_hook_result(
+                event=HookEvent.SUBAGENT_START,
+                hook_result=pre_hook_raw,
+                on_event=on_event,
+            )
+            if pre_hook is not None and pre_hook.decision == HookDecision.DENY:
+                reason = pre_hook.reason or "Hook 拒绝了子代理执行。"
+                return DelegateSubagentOutcome(
+                    reply=f"子代理执行已被 Hook 拦截：{reason}",
+                    success=False,
+                    picked_agent=picked_agent,
+                    task_text=task_text,
+                    normalized_paths=normalized_paths,
+                )
 
         # ── 执行子代理 ──
         prompt = task_text
@@ -166,6 +167,7 @@ class SubagentOrchestrator:
                     subagent_name=picked_agent,
                     task=task_text,
                 )
+            engine._context_builder.mark_window_notice_dirty()
             return DelegateSubagentOutcome(
                 reply=result.summary,
                 success=True,
@@ -284,6 +286,7 @@ class SubagentOrchestrator:
                         subagent_name=outcome.picked_agent or "subagent",
                         task=outcome.task_text,
                     )
+                engine._context_builder.mark_window_notice_dirty()
 
         summary = "\n\n".join(reply_parts)
         return ParallelDelegateOutcome(
