@@ -1,4 +1,4 @@
-"""写入状态传播与执行守卫单元测试（finish_task 已移除，自然退出）。"""
+"""写入状态传播、执行守卫与 guard_mode 单元测试。"""
 
 from __future__ import annotations
 
@@ -338,30 +338,131 @@ class TestRunCodeWritePropagation:
         assert engine._has_write_tool_call is True
 
 
-class TestFinishTaskRemoved:
-    """finish_task 已移除，任何 write_hint 下都不应出现在工具列表中。"""
+class TestFinishTaskRestored:
+    """finish_task 已恢复，任何 write_hint 下都应出现在工具列表中。"""
 
-    def test_no_finish_task_in_any_write_hint(self):
+    def test_finish_task_in_all_write_hints(self):
         for hint in ("unknown", "read_only", "may_write"):
             engine = _make_engine()
             engine._current_write_hint = hint
             engine._skill_router = None
             tools = engine._build_meta_tools()
             names = [t["function"]["name"] for t in tools]
-            assert "finish_task" not in names, f"finish_task should not exist when write_hint={hint}"
+            assert "finish_task" in names, f"finish_task should exist when write_hint={hint}"
 
-    def test_no_finish_task_in_v5_tools(self):
+    def test_finish_task_in_v5_tools(self):
         engine = _make_engine()
         engine._current_write_hint = "may_write"
         tools = engine._build_v5_tools()
         names = [t["function"]["name"] for t in tools]
-        assert "finish_task" not in names
+        assert "finish_task" in names
 
+    def test_bench_mode_finish_task_has_summary_required(self):
+        engine = _make_engine()
+        engine._bench_mode = True
+        engine._skill_router = None
+        tools = engine._build_meta_tools()
+        ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
+        assert "summary" in ft["function"]["parameters"]["required"]
 
-class TestExecutionGuardState:
+    def test_normal_mode_finish_task_has_affected_files(self):
+        engine = _make_engine()
+        engine._bench_mode = False
+        engine._skill_router = None
+        tools = engine._build_meta_tools()
+        ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
+        props = ft["function"]["parameters"]["properties"]
+        assert "affected_files" in props
+
     @pytest.mark.asyncio
-    async def test_execution_guard_should_not_repeat_across_loop_resumes(self):
+    async def test_finish_accepted_exits_loop(self):
+        """finish_task 被接受后应立即退出 _tool_calling_loop。"""
+        engine = _make_engine(max_iterations=10)
+        engine._has_write_tool_call = True
+        route_result = _make_route_result(write_hint="may_write")
+
+        finish_tc = types.SimpleNamespace(
+            id="call_finish",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary":"已完成数据写入"}',
+            ),
+        )
+        finish_resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="", tool_calls=[finish_tc])
+            )]
+        )
+        # 提供足够的 mock 响应（流式尝试+回退可能消耗多个）
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[finish_resp] * 4
+        )
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="finish_task",
+                arguments={"summary": "已完成数据写入"},
+                result="✅ 任务完成\n\n已完成数据写入",
+                success=True,
+                finish_accepted=True,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert "任务完成" in result.reply
+        assert result.iterations == 1
+
+    @pytest.mark.asyncio
+    async def test_finish_not_accepted_continues_loop(self):
+        """finish_task 未被接受（首次无写入警告）不应退出循环。"""
         engine = _make_engine(max_iterations=3)
+        engine._has_write_tool_call = False
+        route_result = _make_route_result(write_hint="may_write")
+
+        finish_tc = types.SimpleNamespace(
+            id="call_finish",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary":"done"}',
+            ),
+        )
+        finish_resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="", tool_calls=[finish_tc])
+            )]
+        )
+        text_resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="继续执行中", tool_calls=None)
+            )]
+        )
+        # 提供足够的 mock 响应（流式尝试+回退可能消耗多个）
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[finish_resp] * 4 + [text_resp] * 4
+        )
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="finish_task",
+                arguments={"summary": "done"},
+                result="⚠️ 未检测到写入类工具的成功调用。",
+                success=True,
+                finish_accepted=False,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        # 应该继续到下一轮并返回文本
+        assert result.iterations > 1 or "继续执行中" in result.reply or "已达到最大迭代次数" in result.reply
+
+
+class TestGuardMode:
+    """guard_mode 配置测试：off（默认）完全跳过门禁，soft 仅记录诊断。"""
+
+    @pytest.mark.asyncio
+    async def test_guard_off_formula_text_passes_through(self):
+        """guard_mode=off 时公式文本直接放行，不注入守卫消息。"""
+        engine = _make_engine(max_iterations=3, guard_mode="off")
         route_result = _make_route_result(write_hint="unknown")
 
         formula_text = "请用公式 =SUM(A1:A2)"
@@ -370,66 +471,64 @@ class TestExecutionGuardState:
                 types.SimpleNamespace(
                     choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=formula_text, tool_calls=None))]
                 ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="loop-1-end", tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=formula_text, tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="loop-2-end", tool_calls=None))]
-                ),
             ]
         )
 
-        _ = await engine._tool_calling_loop(route_result, on_event=None)
-        second = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        guard_msg = "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
+        assert result.reply == formula_text
+        assert result.iterations == 1
+        # 不应注入任何守卫消息
         user_messages = [
             str(m.get("content", ""))
             for m in engine.memory.get_messages()
             if m.get("role") == "user"
         ]
-        guard_count = sum(guard_msg in msg for msg in user_messages)
-        assert guard_count == 1
-        assert second.reply == formula_text
+        guard_keywords = ["公式或代码建议", "写入工具"]
+        for msg in user_messages:
+            for kw in guard_keywords:
+                assert kw not in msg
 
     @pytest.mark.asyncio
-    async def test_execution_guard_resets_for_new_chat_tasks(self):
-        engine = _make_engine(max_iterations=3)
-        route_result = _make_route_result(write_hint="unknown")
-        engine._route_skills = AsyncMock(return_value=route_result)
+    async def test_guard_off_write_hint_may_write_passes_through(self):
+        """guard_mode=off 时 may_write 无写入也直接放行。"""
+        engine = _make_engine(max_iterations=3, guard_mode="off")
+        route_result = _make_route_result(write_hint="may_write")
 
-        formula_text = "请用公式 =SUM(A1:A2)"
+        text = "分析完成，数据如下..."
         engine._client.chat.completions.create = AsyncMock(
             side_effect=[
                 types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=formula_text, tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="task-1-end", tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=formula_text, tool_calls=None))]
-                ),
-                types.SimpleNamespace(
-                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="task-2-end", tool_calls=None))]
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=text, tool_calls=None))]
                 ),
             ]
         )
 
-        _ = await engine.chat("任务一")
-        _ = await engine.chat("任务二")
+        result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        guard_msg = "⚠️ 你刚才在文本中给出了公式或代码建议，但没有实际写入文件。"
-        user_messages = [
-            str(m.get("content", ""))
-            for m in engine.memory.get_messages()
-            if m.get("role") == "user"
-        ]
-        guard_count = sum(guard_msg in msg for msg in user_messages)
-        assert guard_count == 2
+        assert result.reply == text
+        assert result.iterations == 1
+        assert result.write_guard_triggered is False
+
+    @pytest.mark.asyncio
+    async def test_guard_soft_records_diag_but_passes_through(self):
+        """guard_mode=soft 时记录诊断事件但不强制继续。"""
+        engine = _make_engine(max_iterations=3, guard_mode="soft")
+        route_result = _make_route_result(write_hint="may_write")
+
+        text = "我来帮你分析数据"
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=text, tool_calls=None))]
+                ),
+            ]
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == text
+        assert result.iterations == 1
 
 
 class TestWriteHintSyncOnWriteCall:
@@ -561,6 +660,115 @@ class TestWriteTrackingApis:
 
         assert engine._has_write_tool_call is True
         assert engine._manifest_refresh_needed is False
+
+
+class TestWaitingForUserActionPassthrough:
+    """等待用户操作放行：agent 等待用户上传/提供素材时，写入门禁不应强制继续。
+
+    回归测试：用户上传图片场景中，agent 回复"请上传图片"后被写入门禁
+    强制继续，导致反复 list_directory 空转。
+    """
+
+    def test_pattern_detects_chinese_upload_request(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action(
+            "好的，我这边已就绪。请直接把图片上传到当前会话里，上传后我会立刻帮你按数据+样式完全复刻成 Excel。"
+        )
+
+    def test_pattern_detects_waiting_for_upload(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action("等你上传图片后我就开始处理。")
+
+    def test_pattern_detects_not_received_yet(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action(
+            "当前仍未检测到任何图片文件，缺少复刻源会导致无法执行写入。"
+        )
+
+    def test_pattern_detects_english_upload_request(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action(
+            "Please upload the image file so I can replicate it."
+        )
+
+    def test_pattern_does_not_match_normal_text(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert not _looks_like_waiting_for_user_action(
+            "我已经完成了所有数据的写入操作。"
+        )
+
+    def test_pattern_does_not_match_formula_advice(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert not _looks_like_waiting_for_user_action(
+            "你可以使用公式 =SUM(A1:A10) 来计算总和。"
+        )
+
+    def test_pattern_detects_provide_file(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action("请提供源文件，我来帮你处理。")
+
+    def test_pattern_detects_missing_material(self):
+        from excelmanus.engine import _looks_like_waiting_for_user_action
+        assert _looks_like_waiting_for_user_action(
+            "还需要你上传原始表格文件才能继续。"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_guard_bypassed_when_waiting_for_user(self):
+        """write_hint=may_write 但 agent 在等待用户上传 → 应直接放行，不强制继续。"""
+        engine = _make_engine(max_iterations=10)
+        route_result = _make_route_result(write_hint="may_write")
+
+        upload_text = "好的，请直接把图片上传到当前会话里，上传后我立刻帮你复刻。"
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=upload_text, tool_calls=None)
+                    )]
+                ),
+            ]
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        assert result.reply == upload_text
+        assert result.iterations == 1
+        # 确认写入门禁消息未被注入
+        user_messages = [
+            str(m.get("content", ""))
+            for m in engine.memory.get_messages()
+            if m.get("role") == "user"
+        ]
+        assert not any("尚未调用任何写入工具" in msg for msg in user_messages)
+
+    @pytest.mark.asyncio
+    async def test_write_guard_still_fires_for_non_waiting_text(self):
+        """write_hint=may_write 且 agent 不是在等用户 → 写入门禁仍应触发。"""
+        engine = _make_engine(max_iterations=5)
+        route_result = _make_route_result(write_hint="may_write")
+
+        normal_text = "我已经分析完数据了，结果如下：总计 100 条记录。"
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[
+                types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content=normal_text, tool_calls=None)
+                    )]
+                ),
+                types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="done", tool_calls=None)
+                    )]
+                ),
+            ]
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        # guard_mode=off 时写入门禁不强制继续，第一轮 text-only 直接返回
+        assert result.reply == normal_text
+        assert result.iterations == 1
 
 
 class TestRunCodeASTVariableWriteRegression:

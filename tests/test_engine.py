@@ -2719,6 +2719,7 @@ class TestDelegateSubagent:
         self,
         tmp_path: Path,
     ) -> None:
+        """阻塞式子代理审批：question_resolver 返回 '2'（fullaccess 重试）后内联处理。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -2749,6 +2750,11 @@ class TestDelegateSubagent:
             ]
         )
 
+        # 设置 question_resolver：选择选项 2（fullaccess 重试）
+        async def _resolver(q):
+            return "2"
+        engine._question_resolver = _resolver
+
         tc = SimpleNamespace(
             id="call_1",
             function=SimpleNamespace(
@@ -2770,16 +2776,10 @@ class TestDelegateSubagent:
             on_event=None,
             iteration=1,
         )
+        # 阻塞模式下，_execute_tool_call 内联完成审批流程
         assert first.success is True
-        assert first.pending_question is True
-        assert engine.has_pending_question() is True
-        prompt = engine._question_flow.format_prompt()
-        assert "fullaccess" in prompt
-        assert pending.approval_id in prompt
-
-        resumed = await engine.chat("2")
-        assert "已开启 fullaccess" in resumed.reply
-        assert "重试完成" in resumed.reply
+        assert "已开启 fullaccess" in first.result
+        assert "重试完成" in first.result
         assert engine.full_access_enabled is True
         assert engine._approval.pending is None
         assert engine.run_subagent.await_count == 2
@@ -2915,7 +2915,8 @@ class TestAskUserFlow:
         }
 
     @pytest.mark.asyncio
-    async def test_ask_user_suspends_and_resumes_without_reroute(self) -> None:
+    async def test_ask_user_blocking_inline_completes_without_reroute(self) -> None:
+        """阻塞式 ask_user：question_resolver 返回 '1' 后内联完成，不中断循环。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -2927,6 +2928,10 @@ class TestAskUserFlow:
             system_contexts=[],
         )
         engine._route_skills = AsyncMock(return_value=route_result)
+
+        # question_resolver：选择选项 1（方案A）
+        async def _resolver(q):
+            return "1"
 
         ask_response = _make_tool_call_response(
             [
@@ -2941,8 +2946,9 @@ class TestAskUserFlow:
             [("call_add", "add_numbers", json.dumps({"a": 1, "b": 2}))]
         )
         final_response = _make_text_response("已按你的选择完成，结果是 3。")
-        # 第一轮：第 1 次 create 返回 do_work（执行 add_numbers 后继续循环），第 2 次返回 ask（挂起）
-        # resumed：第 1 次 create 返回 final，直接得到最终回复
+        # 第 1 次：do_work → add_numbers → 循环继续
+        # 第 2 次：ask_user → 内联阻塞获取回答 → 循环继续
+        # 第 3 次：final text
         engine._client.chat.completions.create = AsyncMock(
             side_effect=[
                 do_work_response,
@@ -2951,19 +2957,10 @@ class TestAskUserFlow:
             ]
         )
 
-        first = await engine.chat("请完成任务")
-        assert "请先回答这个问题后再继续" in first.reply
-        assert engine.has_pending_question() is True
-        assert engine._route_skills.await_count == 1
-        # 第一轮只应入队 1 个问题（单题 payload）
-        assert engine._question_flow.queue_size() == 1, (
-            f"expected 1 pending question after first chat, got {engine._question_flow.queue_size()}"
-        )
-
-        resumed = await engine.chat("1")
-        assert resumed.reply == "已按你的选择完成，结果是 3。"
+        result = await engine.chat("请完成任务", question_resolver=_resolver)
+        assert result.reply == "已按你的选择完成，结果是 3。"
         assert engine.has_pending_question() is False
-        # 回答问题后直接恢复执行，不应重新路由
+        # 整个流程在一次 chat() 中完成，只路由一次
         assert engine._route_skills.await_count == 1
 
         tool_msgs = [m for m in engine.memory.get_messages() if m.get("role") == "tool"]
@@ -2974,7 +2971,8 @@ class TestAskUserFlow:
         assert ask_payload["selected_options"][0]["label"] == "方案A"
 
     @pytest.mark.asyncio
-    async def test_fifo_multiple_questions_and_skip_non_ask_user(self) -> None:
+    async def test_blocking_multiple_questions_resolved_inline(self) -> None:
+        """阻塞式多问题：question_resolver 依次回答两个问题后内联完成。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -2986,6 +2984,11 @@ class TestAskUserFlow:
             system_contexts=[],
         )
         engine._route_skills = AsyncMock(return_value=route_result)
+
+        # 依次回答两个问题
+        _answers = iter(["1", "1\n自定义策略"])
+        async def _resolver(q):
+            return next(_answers)
 
         first_round = _make_tool_call_response(
             [
@@ -3001,7 +3004,7 @@ class TestAskUserFlow:
                         ensure_ascii=False,
                     ),
                 ),
-                ("call_skip", "add_numbers", json.dumps({"a": 10, "b": 20})),
+                ("call_add", "add_numbers", json.dumps({"a": 10, "b": 20})),
                 (
                     "call_q2",
                     "ask_user",
@@ -3021,20 +3024,8 @@ class TestAskUserFlow:
             side_effect=[first_round, final_response]
         )
 
-        asked = await engine.chat("开始执行")
-        assert "选择开发语言" in asked.reply
-        assert engine.has_pending_question() is True
-        assert len(asked.tool_calls) == 3
-        skipped = next(r for r in asked.tool_calls if r.tool_name == "add_numbers")
-        assert skipped.success is True
-        assert "已跳过" in skipped.result
-
-        second_prompt = await engine.chat("1")
-        assert "选择约束策略" in second_prompt.reply
-        assert engine.has_pending_question() is True
-
-        done = await engine.chat("1\n自定义策略")
-        assert done.reply == "两个问题都确认完毕。"
+        result = await engine.chat("开始执行", question_resolver=_resolver)
+        assert result.reply == "两个问题都确认完毕。"
         assert engine.has_pending_question() is False
         assert engine._route_skills.await_count == 1
 
@@ -3047,7 +3038,8 @@ class TestAskUserFlow:
         assert q2_payload["other_text"] == "自定义策略"
 
     @pytest.mark.asyncio
-    async def test_pending_question_blocks_slash_command(self) -> None:
+    async def test_blocking_ask_user_no_pending_state_after_chat(self) -> None:
+        """阻塞式 ask_user：chat() 返回后不留 pending 状态。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -3059,6 +3051,9 @@ class TestAskUserFlow:
             system_contexts=[],
         )
         engine._route_skills = AsyncMock(return_value=route_result)
+
+        async def _resolver(q):
+            return "1"
 
         ask_response = _make_tool_call_response(
             [
@@ -3074,18 +3069,9 @@ class TestAskUserFlow:
             side_effect=[ask_response, final_response]
         )
 
-        first = await engine.chat("发起提问")
-        assert engine.has_pending_question() is True
-        assert "请先回答这个问题后再继续" in first.reply
-
-        blocked = await engine.chat("/help")
-        assert "请先回答后再使用命令" in blocked.reply
-        assert engine.has_pending_question() is True
-        # 待回答状态不触发重路由
-        assert engine._route_skills.await_count == 1
-
-        resumed = await engine.chat("1")
-        assert resumed.reply == "已恢复执行。"
+        result = await engine.chat("发起提问", question_resolver=_resolver)
+        # 阻塞模式下 chat() 返回时问题已解决
+        assert result.reply == "已恢复执行。"
         assert engine.has_pending_question() is False
 
 
@@ -3226,7 +3212,10 @@ class TestToolCallingLoopApprovalResolver:
         assert "已拒绝待确认操作" in rejected_tool_msg.get("content", "")
 
     @pytest.mark.asyncio
-    async def test_pending_approval_without_resolver_exits_loop(self) -> None:
+    async def test_pending_approval_without_resolver_blocks_and_resolves_via_registry(self) -> None:
+        """无 resolver 时，审批通过 InteractionRegistry Future 阻塞等待并内联处理。"""
+        import asyncio
+
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -3241,36 +3230,53 @@ class TestToolCallingLoopApprovalResolver:
             arguments={"command": "echo pending"},
             tool_scope=["run_shell"],
         )
-        pending_prompt = engine._format_pending_prompt(pending)
 
         engine._client.chat.completions.create = AsyncMock(
-            return_value=_make_tool_call_response(
-                [("call_pending", "run_shell", json.dumps({"command": "echo pending"}))]
-            )
+            side_effect=[
+                _make_tool_call_response(
+                    [("call_pending", "run_shell", json.dumps({"command": "echo pending"}))]
+                ),
+                _make_text_response("审批通过，已执行完成。"),
+            ]
         )
         engine._execute_tool_call = AsyncMock(
             return_value=ToolCallResult(
                 tool_name="run_shell",
                 arguments={"command": "echo pending"},
-                result=pending_prompt,
+                result="pending",
                 success=True,
                 pending_approval=True,
                 approval_id=pending.approval_id,
             )
         )
+        engine._execute_approved_pending = AsyncMock(
+            return_value=(True, "echo ok", None),
+        )
+
+        # 后台任务在 Future 创建后立即 resolve
+        async def _resolve_later():
+            for _ in range(50):
+                await asyncio.sleep(0.05)
+                if pending.approval_id in engine._interaction_registry._futures:
+                    engine._interaction_registry.resolve(
+                        pending.approval_id, {"decision": "accept"},
+                    )
+                    return
+        resolve_task = asyncio.create_task(_resolve_later())
 
         result = await engine._tool_calling_loop(route_result, on_event=None)
+        await resolve_task
 
-        assert result.reply == pending_prompt
-        assert engine._pending_approval_route_result is route_result
-        assert engine._pending_approval_tool_call_id == "call_pending"
+        assert "审批通过" in result.reply or "echo ok" in result.reply
+        engine._execute_approved_pending.assert_awaited_once()
 
 
 class TestToolCallingLoopWriteGuard:
     """_tool_calling_loop 写入门禁退出行为测试。"""
 
     @pytest.mark.asyncio
-    async def test_write_guard_sets_flag_after_second_text_only_turn(self) -> None:
+    async def test_write_guard_off_returns_first_text_response(self) -> None:
+        """guard_mode=off（默认）时，text-only 响应直接返回，不强制继续。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -3290,15 +3296,9 @@ class TestToolCallingLoopWriteGuard:
 
         result = await engine._tool_calling_loop(route_result, on_event=None)
 
-        assert result.reply == "仍未执行任何写入工具。"
-        assert result.write_guard_triggered is True
-        assert result.iterations == 2
-        user_messages = [
-            msg.get("content", "")
-            for msg in engine.memory.get_messages()
-            if msg.get("role") == "user"
-        ]
-        assert any("尚未调用任何写入工具" in item for item in user_messages)
+        # guard_mode=off：第一轮 text-only 直接返回
+        assert result.reply == "先解释步骤，暂未执行工具。"
+        assert result.iterations == 1
 
 
 class TestMetaToolDefinitions:
@@ -4867,33 +4867,36 @@ class TestApprovalFlow:
 
     @pytest.mark.asyncio
     async def test_high_risk_tool_requires_accept(self, tmp_path: Path) -> None:
+        """阻塞式审批：approval_resolver 返回 accept 后内联执行高风险工具。"""
         config = _make_config(workspace_root=str(tmp_path), window_perception_enabled=False)
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
+        captured_id = None
+        async def _accept(p):
+            nonlocal captured_id
+            captured_id = p.approval_id
+            return "accept"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "a.txt", "content": "hello"}))
         ])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
+        text_response = _make_text_response("文件已写入完成。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
 
-        first_reply = await engine.chat("写入文件")
-        assert "accept" in first_reply
-        assert not (tmp_path / "a.txt").exists()
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-
-        blocked = await engine.chat("继续执行")
-        assert "存在待确认操作" in blocked
-
-        accept_reply = await engine.chat(f"/accept {approval_id}")
+        reply = await engine.chat("写入文件", approval_resolver=_accept)
         assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hello"
-        assert (tmp_path / "outputs" / "approvals" / approval_id / "manifest.json").exists()
+        assert captured_id is not None
+        assert (tmp_path / "outputs" / "approvals" / captured_id / "manifest.json").exists()
 
     @pytest.mark.asyncio
     async def test_accept_resumes_task_list_execution_after_high_risk_gate(
         self,
         tmp_path: Path,
     ) -> None:
+        """阻塞式审批：accept 后继续执行后续工具调用。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
 
@@ -4927,6 +4930,9 @@ class TestApprovalFlow:
         )
         engine._route_skills = AsyncMock(return_value=route_result)
 
+        async def _accept(p):
+            return "accept"
+
         first_round = _make_tool_call_response([
             (
                 "call_write",
@@ -4942,70 +4948,82 @@ class TestApprovalFlow:
             side_effect=[first_round, resume_round, done_round]
         )
 
-        first_reply = await engine.chat("开始执行")
-        assert "待确认" in first_reply
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-
-        accept_reply = await engine.chat(f"/accept {approval_id}")
-        assert "后续子任务已完成" in accept_reply
+        reply = await engine.chat("开始执行", approval_resolver=_accept)
+        assert "后续子任务已完成" in reply
         assert (tmp_path / "resume.txt").read_text(encoding="utf-8") == "ok"
 
     @pytest.mark.asyncio
     async def test_reject_pending(self, tmp_path: Path) -> None:
+        """阻塞式审批：approval_resolver 返回 reject 后文件不写入。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
+        async def _reject(p):
+            return "reject"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "b.txt", "content": "world"}))
         ])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        await engine.chat("写文件")
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-
-        reject_reply = await engine.chat(f"/reject {approval_id}")
+        text_response = _make_text_response("已拒绝操作。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+        reply = await engine.chat("写文件", approval_resolver=_reject)
         assert engine._approval.pending is None
         assert not (tmp_path / "b.txt").exists()
 
     @pytest.mark.asyncio
     async def test_undo_after_accept(self, tmp_path: Path) -> None:
+        """阻塞式审批：accept 后 /undo 回滚文件。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
+        captured_id = None
+        async def _accept(p):
+            nonlocal captured_id
+            captured_id = p.approval_id
+            return "accept"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "c.txt", "content": "undo"}))
         ])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        await engine.chat("写文件")
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-        await engine.chat(f"/accept {approval_id}")
+        text_response = _make_text_response("文件已写入。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+        await engine.chat("写文件", approval_resolver=_accept)
         assert (tmp_path / "c.txt").exists()
+        assert captured_id is not None
 
-        undo_reply = await engine.chat(f"/undo {approval_id}")
+        undo_reply = await engine.chat(f"/undo {captured_id}")
         assert "已回滚" in undo_reply
         assert not (tmp_path / "c.txt").exists()
 
     @pytest.mark.asyncio
     async def test_failed_accept_still_writes_failed_manifest(self, tmp_path: Path) -> None:
+        """阻塞式审批：accept 后工具执行失败，manifest 记录失败状态。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_failing_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
+        captured_id = None
+        async def _accept(p):
+            nonlocal captured_id
+            captured_id = p.approval_id
+            return "accept"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "err.txt", "content": "x"}))
         ])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        await engine.chat("写文件")
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-
-        accept_reply = await engine.chat(f"/accept {approval_id}")
-        assert "accept 执行失败" in accept_reply
-        manifest_path = tmp_path / "outputs" / "approvals" / approval_id / "manifest.json"
+        text_response = _make_text_response("执行出错。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+        reply = await engine.chat("写文件", approval_resolver=_accept)
+        assert captured_id is not None
+        manifest_path = tmp_path / "outputs" / "approvals" / captured_id / "manifest.json"
         assert manifest_path.exists()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert manifest["execution"]["status"] == "failed"
@@ -5040,23 +5058,31 @@ class TestApprovalFlow:
 
     @pytest.mark.asyncio
     async def test_undo_after_restart_loads_manifest(self, tmp_path: Path) -> None:
+        """阻塞式审批：跨 engine 实例 /undo 回滚。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine1 = AgentEngine(config, registry)
         _activate_test_tools(engine1, ["write_text_file"])
 
+        captured_id = None
+        async def _accept(p):
+            nonlocal captured_id
+            captured_id = p.approval_id
+            return "accept"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "restart.txt", "content": "v"}))
         ])
-        engine1._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        await engine1.chat("写文件")
-        assert engine1._approval.pending is not None
-        approval_id = engine1._approval.pending.approval_id
-        await engine1.chat(f"/accept {approval_id}")
+        text_response = _make_text_response("写入完成。")
+        engine1._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+        await engine1.chat("写文件", approval_resolver=_accept)
         assert (tmp_path / "restart.txt").exists()
+        assert captured_id is not None
 
         engine2 = AgentEngine(config, registry)
-        undo_reply = await engine2.chat(f"/undo {approval_id}")
+        undo_reply = await engine2.chat(f"/undo {captured_id}")
         assert "已回滚" in undo_reply
         assert not (tmp_path / "restart.txt").exists()
 
@@ -5083,26 +5109,25 @@ class TestApprovalFlow:
         assert (tmp_path / "d.txt").read_text(encoding="utf-8") == "full"
 
     @pytest.mark.asyncio
-    async def test_fullaccess_on_auto_accepts_pending_approval(self, tmp_path: Path) -> None:
-        """开启 fullaccess 时若存在 pending approval，应自动执行并续上对话。"""
+    async def test_fullaccess_resolver_accepts_and_enables_fullaccess(self, tmp_path: Path) -> None:
+        """阻塞式审批：approval_resolver 返回 fullaccess 后自动开启并执行。"""
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
 
-        # 1) 触发高风险工具，产生 pending approval
+        async def _fullaccess(p):
+            return "fullaccess"
+
         tool_response = _make_tool_call_response([
             ("call_1", "write_text_file", json.dumps({"file_path": "auto.txt", "content": "hello"}))
         ])
-        engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        await engine.chat("写文件")
-        assert engine._approval.pending is not None
-        approval_id = engine._approval.pending.approval_id
-
-        # 2) 发送 /fullaccess on，应自动消化 pending
-        reply = await engine.chat("/fullaccess on")
-        assert "已开启" in reply
-        assert engine._approval.pending is None
+        text_response = _make_text_response("已完成。")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[tool_response, text_response]
+        )
+        reply = await engine.chat("写文件", approval_resolver=_fullaccess)
         assert engine.full_access_enabled is True
+        assert engine._approval.pending is None
         assert (tmp_path / "auto.txt").read_text(encoding="utf-8") == "hello"
 
     @pytest.mark.asyncio

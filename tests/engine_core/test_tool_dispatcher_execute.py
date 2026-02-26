@@ -88,6 +88,40 @@ class TestToolDispatcherExecute:
         assert events[-1].success is False
 
     @pytest.mark.asyncio
+    async def test_execute_dispatches_via_handlers_instead_of_legacy_if_chain(self) -> None:
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        engine = _make_engine()
+        dispatcher = engine._tool_dispatcher
+        dispatcher._dispatch_via_handlers = AsyncMock(
+            return_value=_ToolExecOutcome(result_str="handler ok", success=True)
+        )
+        dispatcher._dispatch_tool_execution = AsyncMock(
+            side_effect=AssertionError("legacy dispatch path should not be called")
+        )
+
+        tc = SimpleNamespace(
+            id="call_dispatch_via_handlers",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 1, "b": 2}),
+            ),
+        )
+
+        result = await dispatcher.execute(
+            tc=tc,
+            tool_scope=["add_numbers"],
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+
+        assert result.success is True
+        assert result.result == "handler ok"
+        dispatcher._dispatch_via_handlers.assert_awaited_once()
+        dispatcher._dispatch_tool_execution.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_execute_post_tool_hook_deny_turns_success_to_failure(self) -> None:
         engine = _make_engine()
         dispatcher = engine._tool_dispatcher
