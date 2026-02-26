@@ -11,7 +11,7 @@ from excelmanus.memory import ConversationMemory, TokenCounter, _DEFAULT_SYSTEM_
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# 测试固件
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()

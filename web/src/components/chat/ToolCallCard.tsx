@@ -319,14 +319,14 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
               {name}
             </span>
 
-            {/* Args preview */}
+            {/* 参数预览 */}
             {summary && (
               <span className="text-[10px] text-muted-foreground/70 truncate min-w-0">
                 {summary}
               </span>
             )}
 
-            {/* Right side: status cluster */}
+            {/* 右侧：状态簇 */}
             <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
               {isPending && (
                 <span className="text-[10px] font-medium px-1.5 py-px rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">待审批</span>
@@ -397,14 +397,14 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Excel inline preview / diff — always visible when data available */}
+      {/* Excel 内联预览/差异 — 有数据时始终显示 */}
       {preview && <ExcelPreviewTable data={preview} />}
       {diffs.length > 0 && (
         <div className="relative">
           {diffs.map((d, i) => (
             <ExcelDiffTable key={`${d.toolCallId}-${d.sheet}-${i}`} data={d} />
           ))}
-          {/* Inline apply button for this diff's file */}
+          {/* 本差异文件的内联应用按钮 */}
           {(hasPendingBackup || appliedInline) && (
             <div className="flex justify-end px-3 -mt-1 mb-2">
               {appliedInline ? (

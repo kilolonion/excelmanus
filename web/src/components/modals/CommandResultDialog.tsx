@@ -51,7 +51,7 @@ export function CommandResultDialog({
   );
 }
 
-// Hook to manage command result dialog state
+// 用于管理命令结果弹窗状态的 Hook
 export function useCommandResult() {
   const [state, setState] = useState<{
     open: boolean;

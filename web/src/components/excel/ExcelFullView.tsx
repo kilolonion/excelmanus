@@ -81,7 +81,7 @@ export function ExcelFullView() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Top bar */}
+      {/* 顶栏 */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/20 flex-shrink-0">
         <Button
           variant="ghost"
@@ -148,7 +148,7 @@ export function ExcelFullView() {
         </Button>
       </div>
 
-      {/* Univer Sheet — takes full remaining height */}
+      {/* Univer 表格 — 占满剩余高度 */}
       <div className="flex-1 min-h-0">
         <UniverSheet
           fileUrl={fileUrl}
@@ -159,7 +159,7 @@ export function ExcelFullView() {
         />
       </div>
 
-      {/* Selection confirmation bar */}
+      {/* 选区确认栏 */}
       {selectionMode && pendingRange && (
         <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2 flex-shrink-0">
           <span className="text-xs font-mono flex-1 truncate" style={{ color: "var(--em-primary)" }}>

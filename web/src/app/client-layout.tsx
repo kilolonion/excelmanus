@@ -32,16 +32,16 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
     <div className="flex h-viewport overflow-hidden">
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Top bar — model selector (ChatGPT style) */}
+        {/* 顶栏 — 模型选择器 */}
         <div className="flex items-center h-12 px-3 flex-shrink-0 border-b border-border/60">
-          {/* Left group: navigation + model */}
+          {/* 左侧：导航 + 模型 */}
           <SidebarToggle />
           <TopModelSelector />
           <div className="hidden sm:flex"><ModeBadges /></div>
 
           <div className="flex-1" />
 
-          {/* Right group: status indicators */}
+          {/* 右侧：状态指示 */}
           <div className="flex items-center gap-2 min-w-0">
             <BackupApplyBadge />
             <SessionStatusBar />

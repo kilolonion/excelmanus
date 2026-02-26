@@ -1,6 +1,6 @@
 import { useReducedMotion } from "framer-motion";
 
-// ── Unified Motion Token System ──
+// ── 统一动效 Token 系统 ──
 export const duration = {
   instant: 0.075,
   fast: 0.15,
