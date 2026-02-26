@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ExcelManus Web
 
-## Getting Started
+ExcelManus 的前端项目，基于 Next.js 16 + React 19 + Tailwind CSS 4 + shadcn/ui 构建。
 
-First, run the development server:
+## 技术栈
+
+- **框架**: Next.js 16 (App Router, standalone output)
+- **UI**: Tailwind CSS 4, shadcn/ui (Radix UI), Lucide React, Framer Motion
+- **状态管理**: Zustand
+- **Excel 预览**: Univer Sheets
+- **Markdown**: react-markdown + remark-gfm + highlight.js
+
+## 本地开发
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+浏览器访问 [http://localhost:3000](http://localhost:3000)。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+默认通过 `next.config.ts` 中的 rewrite 代理 `/api/v1/*` 请求到后端 `http://localhost:8000`，可通过 `BACKEND_INTERNAL_URL` 环境变量覆盖。
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 环境变量
 
-## Learn More
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `BACKEND_INTERNAL_URL` | Next.js 服务端 rewrite 代理目标地址 | `http://localhost:8000` |
+| `NEXT_PUBLIC_BACKEND_ORIGIN` | 客户端直连后端地址（构建时内联）。留空自动回退 `http://{hostname}:8000`；设为 `same-origin` 走 Nginx 反代 | 空 |
 
-To learn more about Next.js, take a look at the following resources:
+## 构建与部署
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run build
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+构建产物位于 `.next/standalone/`（standalone 模式）。部署时需手动复制静态资源：
 
-## Deploy on Vercel
+```bash
+cp -r public .next/standalone/
+cp -r .next/static .next/standalone/.next/
+node .next/standalone/server.js
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+也可使用 Docker：
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+docker build -t excelmanus-web .
+docker run -p 3000:3000 excelmanus-web
+```
+
+## 目录结构
+
+```
+src/
+├── app/          # Next.js App Router 页面
+├── components/   # UI 组件
+├── hooks/        # 自定义 React Hooks
+├── lib/          # 工具函数与 API 调用
+├── stores/       # Zustand 状态 store
+└── types/        # TypeScript 类型定义
+```
