@@ -1,4 +1,4 @@
-"""Identity-based window locator."""
+"""基于身份的窗口定位器。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ WINDOW_IDENTITY_CONFLICT = "WINDOW_IDENTITY_CONFLICT"
 
 
 class LocatorReject(ValueError):
-    """Explicit identity/locator reject."""
+    """显式身份/定位器拒绝。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -17,7 +17,7 @@ class LocatorReject(ValueError):
 
 
 class WindowLocator:
-    """Maps stable identities to window ids."""
+    """将稳定身份映射到窗口 id。"""
 
     def __init__(self) -> None:
         self._index: dict[WindowIdentity, str] = {}

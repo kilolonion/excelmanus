@@ -295,7 +295,7 @@ def _render_notice_projection(
     payload: ToolPayloadProjection | None = None,
     detail_level: DetailLevel = DetailLevel.FULL,
 ) -> str:
-    """Render notice DTO without reading mutable window fields."""
+    """在不读取可变窗口字段的情况下渲染通知 DTO。"""
     if projection.kind == "explorer":
         directory = payload.directory if payload is not None else projection.identity
         lines = [

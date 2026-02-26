@@ -85,7 +85,7 @@ def summarize_shape(
     explicit_rows: int = 0,
     explicit_cols: int = 0,
 ) -> tuple[int, int]:
-    """Return rows/cols shape with explicit shape as first priority."""
+    """返回行/列形状，优先使用显式形状。"""
 
     row_count = int(explicit_rows or len(rows))
     col_count = int(explicit_cols or len(columns))

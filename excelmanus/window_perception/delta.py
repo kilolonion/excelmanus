@@ -1,4 +1,4 @@
-"""Delta contracts for window mutation."""
+"""窗口变更的增量契约。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .models import DetailLevel, IntentTag
 
 @dataclass(frozen=True)
 class ExplorerDelta:
-    """Mutation contract for explorer windows."""
+    """资源管理器窗口的变更契约。"""
 
     directory: str | None = None
     kind: str = "explorer"
@@ -18,7 +18,7 @@ class ExplorerDelta:
 
 @dataclass(frozen=True)
 class SheetReadDelta:
-    """Mutation contract for sheet read ingestion."""
+    """表格读取摄入的变更契约。"""
 
     range_ref: str
     rows: int
@@ -29,7 +29,7 @@ class SheetReadDelta:
 
 @dataclass(frozen=True)
 class SheetWriteDelta:
-    """Mutation contract for sheet write updates."""
+    """表格写入更新的变更契约。"""
 
     target_range: str
     change_summary: str = ""
@@ -38,7 +38,7 @@ class SheetWriteDelta:
 
 @dataclass(frozen=True)
 class SheetFilterDelta:
-    """Mutation contract for sheet filter updates."""
+    """表格筛选更新的变更契约。"""
 
     filter_state: dict[str, Any] | None
     filtered_rows: int = 0
@@ -47,7 +47,7 @@ class SheetFilterDelta:
 
 @dataclass(frozen=True)
 class SheetStyleDelta:
-    """Mutation contract for sheet style updates."""
+    """表格样式更新的变更契约。"""
 
     style_summary: str = ""
     freeze_panes: str | None = None
@@ -60,7 +60,7 @@ class SheetStyleDelta:
 
 @dataclass(frozen=True)
 class SheetFocusDelta:
-    """Mutation contract for sheet focus lifecycle transitions."""
+    """表格焦点生命周期转换的变更契约。"""
 
     action: str
     detail_level: DetailLevel | None = None
@@ -70,7 +70,7 @@ class SheetFocusDelta:
 
 @dataclass(frozen=True)
 class LifecycleDelta:
-    """Mutation contract for shared lifecycle state."""
+    """共享生命周期状态的变更契约。"""
 
     detail_level: DetailLevel | None = None
     idle_turns: int | None = None
@@ -81,7 +81,7 @@ class LifecycleDelta:
 
 @dataclass(frozen=True)
 class IntentDelta:
-    """Mutation contract for shared intent state."""
+    """共享意图状态的变更契约。"""
 
     tag: IntentTag | None = None
     confidence: float | None = None
@@ -93,7 +93,7 @@ class IntentDelta:
 
 @dataclass(frozen=True)
 class FieldSetDelta:
-    """Generic field-set delta for manager-side controlled mutations."""
+    """管理器侧受控变更的通用字段设置增量。"""
 
     field: str
     value: Any
@@ -102,7 +102,7 @@ class FieldSetDelta:
 
 @dataclass(frozen=True)
 class FieldAppendDelta:
-    """Generic append delta for manager-side controlled mutations."""
+    """管理器侧受控变更的通用追加增量。"""
 
     field: str
     value: Any
