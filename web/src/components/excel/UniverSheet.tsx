@@ -52,11 +52,11 @@ function snapshotToWorkbookData(
     sheetOrder.push(sheetId);
 
     const cellData: Record<number, Record<number, any>> = {};
-    // Header row (row 0)
+    // 表头行（第 0 行）
     const headerRow: Record<number, any> = {};
     snap.headers.forEach((h, ci) => {
       const cell: any = { v: h };
-      // Apply style if available
+      // 若有样式则应用
       const styleKey = `0,${ci}`;
       if ((snap as any).cell_styles?.[styleKey]) {
         cell.s = (snap as any).cell_styles[styleKey];
@@ -65,7 +65,7 @@ function snapshotToWorkbookData(
     });
     cellData[0] = headerRow;
 
-    // Data rows (row 1+)
+    // 数据行（第 1 行起）
     snap.rows.forEach((row, ri) => {
       const rowData: Record<number, any> = {};
       row.forEach((val, ci) => {
@@ -77,7 +77,7 @@ function snapshotToWorkbookData(
           }
           rowData[ci] = cell;
         } else {
-          // Even null cells may have styles (e.g. background color)
+          // 即使空单元格也可能有样式（如背景色）
           const styleKey = `${ri + 1},${ci}`;
           if ((snap as any).cell_styles?.[styleKey]) {
             rowData[ci] = { v: null, s: (snap as any).cell_styles[styleKey] };
@@ -88,7 +88,7 @@ function snapshotToWorkbookData(
     });
 
     const colCount = Math.max(snap.headers.length, snap.column_letters.length, 26);
-    const rowCount = snap.rows.length + 1 + 50; // extra rows for editing
+    const rowCount = snap.rows.length + 1 + 50; // 额外行数供编辑
 
     const sheetData: any = {
       id: sheetId,
@@ -98,7 +98,7 @@ function snapshotToWorkbookData(
       columnCount: Math.max(colCount, 26),
     };
 
-    // Apply merged cells
+    // 应用合并单元格
     if ((snap as any).merged_cells?.length) {
       sheetData.mergeData = (snap as any).merged_cells.map((m: any) => ({
         startRow: m.startRow,
@@ -108,16 +108,16 @@ function snapshotToWorkbookData(
       }));
     }
 
-    // Apply column widths
+    // 应用列宽
     if ((snap as any).column_widths) {
       const colInfo: Record<number, any> = {};
       for (const [colIdx, width] of Object.entries((snap as any).column_widths)) {
-        colInfo[Number(colIdx)] = { w: (width as number) * 7.5 }; // Excel width units to pixels approx
+        colInfo[Number(colIdx)] = { w: (width as number) * 7.5 }; // Excel 列宽单位近似换算为像素
       }
       sheetData.columnData = colInfo;
     }
 
-    // Apply row heights
+    // 应用行高
     if ((snap as any).row_heights) {
       const rowInfo: Record<number, any> = {};
       for (const [rowIdx, height] of Object.entries((snap as any).row_heights)) {
@@ -137,7 +137,7 @@ function snapshotToWorkbookData(
 }
 
 /**
- * Convert a 0-based column index to Excel column letter (0→A, 25→Z, 26→AA).
+ * 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。
  */
 function colIndexToLetter(index: number): string {
   let result = "";
@@ -159,7 +159,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   const [error, setError] = useState<string | null>(null);
 
   const isMobile = useIsMobile();
-  // Auto-hide hint pill after 4 seconds
+  // 4 秒后自动隐藏提示条
   const [hintVisible, setHintVisible] = useState(true);
   useEffect(() => {
     if (!isMobile) return;
@@ -167,10 +167,10 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     return () => clearTimeout(t);
   }, [isMobile]);
 
-  // ── Mobile pointer-to-wheel adapter ────────────────────────────────────
-  // Univer scrolls by WheelEvent; touch drag on canvas is interpreted as selection.
-  // On mobile & non-selection-mode we intercept touch pointer events (capture phase),
-  // convert movement to synthetic wheel events, and block pointer propagation.
+  // ── 移动端 pointer 转 wheel 适配 ────────────────────────────────────
+  // Univer 通过 WheelEvent 滚动；触摸拖拽在 canvas 上会被当作选区。
+  // 移动端且非选区模式下，在捕获阶段拦截触摸指针事件，
+  // 将移动转换为合成 wheel 事件并阻止指针继续传播。
   useEffect(() => {
     if (!isMobile || selectionMode) return;
     const container = containerRef.current;
@@ -254,7 +254,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
       };
     }
 
-    // Fallback for legacy iOS/WebView without PointerEvent
+    // 兼容旧版 iOS/WebView 无 PointerEvent 时的回退
     let trackingTouch = false;
 
     const onTouchStartCapture = (e: TouchEvent) => {
@@ -314,7 +314,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         setLoading(true);
         setError(null);
 
-        // Single request to fetch ALL sheets at once (eliminates N serial HTTP round-trips)
+        // 单次请求拉取所有 sheet，避免 N 次串行 HTTP 往返
         const resp = await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
         if (loadVersion !== loadVersionRef.current) return;
 
@@ -331,10 +331,10 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
             api.disposeUnit?.(previousWorkbookId);
           }
         } catch {
-          // ignore stale workbook cleanup errors
+          // 忽略过期的 workbook 清理错误
         }
 
-        // Rotate workbook id on every reload to avoid duplicate unit conflicts.
+        // 每次重新加载时轮换 workbook id，避免单元冲突。
         let workbookId = createPreviewWorkbookId();
         workbookIdRef.current = workbookId;
         let workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
@@ -344,7 +344,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           if (!isDuplicateUnitIdError(createErr)) {
             throw createErr;
           }
-          // One-time retry with a fresh id to recover from stale runtime state.
+          // 使用新 id 重试一次以从过期运行时状态恢复
           workbookId = createPreviewWorkbookId();
           workbookIdRef.current = workbookId;
           workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
@@ -352,7 +352,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         }
         if (loadVersion !== loadVersionRef.current) return;
 
-        // Switch to initial sheet if specified
+        // 若指定了初始 sheet 则切换过去
         if (initialSheet) {
           try {
             const wb = api.getActiveWorkbook();
@@ -364,7 +364,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
               }
             }
           } catch {
-            // ignore sheet switching errors
+            // 忽略切换 sheet 错误
           }
         }
 
@@ -389,7 +389,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
     const init = async () => {
       try {
-        // Prefetch data in parallel with Univer engine loading
+        // 与 Univer 引擎加载并行预取数据
         const dataPromise = filePath
           ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
           : Promise.resolve(null);
@@ -426,10 +426,10 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         // 注意：此处只初始化 Univer 实例；工作簿创建与交互策略在后续流程处理。
 
-        // Use prefetched data if available, otherwise loadData will fetch again
+        // 若有预取数据则使用，否则 loadData 会再次请求
         const prefetchedData = await dataPromise;
         if (prefetchedData && prefetchedData.all_snapshots?.length) {
-          // Inject prefetched data directly
+          // 直接注入预取数据
           const loadVersion = ++loadVersionRef.current;
           try {
             const allSnapshots = prefetchedData.all_snapshots;
@@ -453,11 +453,11 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
                   const target = sheets?.find((s: any) => s.getName?.() === initialSheet);
                   if (target) target.activate();
                 }
-              } catch { /* ignore */ }
+              } catch { /* 忽略 */ }
             }
             if (loadVersion === loadVersionRef.current) setLoading(false);
           } catch {
-            // Prefetch path failed, fall back to normal loadData
+            // 预取失败，回退到正常 loadData
             await loadData(univerAPI);
           }
         } else {
@@ -479,39 +479,39 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         try {
           api.dispose();
         } catch {
-          // ignore dispose errors
+          // 忽略 dispose 错误
         }
       }
       univerRef.current = null;
     };
   }, [loadData]);
 
-  // Reload data when refreshCounter changes (after a write operation)
+  // refreshCounter 变化时重新加载（写操作之后）
   useEffect(() => {
     if (refreshCounter > 0 && univerRef.current) {
       loadData(univerRef.current);
     }
   }, [refreshCounter, loadData]);
 
-  // Highlight cells when highlightCells changes
+  // highlightCells 变化时高亮单元格
   useEffect(() => {
     if (!highlightCells?.length || !univerRef.current) return;
-    // Highlighting logic via Univer API would go here
+    // 通过 Univer API 的高亮逻辑在此实现
   }, [highlightCells]);
 
-  // Sync Univer selection state
+    // 同步 Univer 选区状态
   useEffect(() => {
     const api = univerRef.current;
     if (!api) return;
     try {
       const wb = api.getActiveWorkbook();
       if (!wb) return;
-      // Keep enabled; mobile non-selection-mode is controlled by pointer adapter above.
+      // 保持启用；移动端非选区模式由上方 pointer 适配器控制。
       wb.enableSelection();
-    } catch { /* ignore */ }
+    } catch { /* 忽略 */ }
   }, [selectionMode, loading]);
 
-  // Selection mode: listen for selection changes in Univer and report back
+  // 选区模式：监听 Univer 选区变化并回传
   useEffect(() => {
     if (!selectionMode || !univerRef.current) return;
     const api = univerRef.current;
@@ -536,18 +536,18 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         const startLetter = colIndexToLetter(startCol);
         const endLetter = colIndexToLetter(startCol + numCols - 1);
-        const startRowNum = startRow + 1;  // Excel is 1-based
+        const startRowNum = startRow + 1;  // Excel 行号为 1-based
         const endRowNum = startRow + numRows;
 
         const rangeStr = `${startLetter}${startRowNum}:${endLetter}${endRowNum}`;
         const sheetName = sheet.getName?.() || "Sheet1";
         onRangeSelected(rangeStr, sheetName);
       } catch {
-        // ignore selection read errors
+        // 忽略选区读取错误
       }
     };
 
-    // Subscribe to selection changes via Univer callback API
+    // 通过 Univer 回调 API 订阅选区变化
     let unsubscribe: (() => void) | null = null;
     try {
       const callback = api.getActiveWorkbook()?.getActiveSheet()?.onSelectionChange;
@@ -558,13 +558,13 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         }
       }
     } catch {
-      // Fallback: if onSelectionChange is not available, use pointerup
+      // 回退：若无 onSelectionChange 则用 pointerup
     }
 
-    // Fallback: also capture via pointerup on the container
+    // 回退：在容器上通过 pointerup 也捕获
     const container = containerRef.current;
     const handlePointerUp = () => {
-      // Small delay to let Univer update its internal selection state
+      // 短暂延迟以便 Univer 更新内部选区状态
       setTimeout(extractSelection, 50);
     };
     container?.addEventListener("pointerup", handlePointerUp);
@@ -576,7 +576,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     };
   }, [selectionMode, onRangeSelected]);
 
-  // Determine if we should show selection indicator
+  // 是否显示选区指示器
   const showSelectionIndicator = selectionMode;
 
 
@@ -588,13 +588,13 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         data-univer-container
         style={{ position: "relative" }}
       />
-      {/* Selection mode indicator (explicit button or mobile long-press) */}
+      {/* 选区模式指示（显式按钮或移动端长按） */}
       {showSelectionIndicator && (
         <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center gap-2 py-1.5 text-xs font-medium text-white pointer-events-none" style={{ backgroundColor: "var(--em-primary)" }}>
           <span>请在表格中选择一个区域</span>
         </div>
       )}
-      {/* Mobile hint: show on first load, auto-fade after 4s */}
+      {/* 移动端提示：首次加载显示，4 秒后自动淡出 */}
       {isMobile && hintVisible && !selectionMode && !loading && !error && (
         <div
           className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-black/60 text-white text-[10px] pointer-events-none"
@@ -613,7 +613,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           <span className="text-sm text-destructive">{error}</span>
         </div>
       )}
-      {/* CSS animation for ripple */}
+      {/* 水波纹 CSS 动画 */}
       <style jsx>{`
         @keyframes mobile-hint-fade {
           0% { opacity: 0; }

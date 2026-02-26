@@ -11,6 +11,8 @@ import {
   ChevronsUpDown,
   Brain,
   Download,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -30,7 +32,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
 import type { AssistantBlock } from "@/lib/types";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 /**
@@ -52,12 +54,12 @@ const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 
 const remarkPluginsStable = [remarkGfm];
 
-// File extensions recognized as downloadable workspace files
+// 识别为可下载工作区文件的扩展名
 const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
 
 function isWorkspaceFileLink(href: string): boolean {
   if (!href) return false;
-  // Relative paths: ./foo.xlsx, foo.xlsx, subdir/foo.xlsx
+  // 相对路径：./foo.xlsx、foo.xlsx、subdir/foo.xlsx
   if (href.startsWith("./") || href.startsWith("../") || !href.includes("://")) {
     return DOWNLOADABLE_EXTENSIONS.test(href);
   }
@@ -94,7 +96,7 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   li({ children }) {
     return <li>{processChildren(children)}</li>;
   },
-  // Intercept links: workspace file links → download button, others → normal <a>
+  // 拦截链接：工作区文件链接 → 下载按钮，其他 → 普通 <a>
   a({ href, children }) {
     if (href && isWorkspaceFileLink(href)) {
       return <FileDownloadLink href={href}>{children}</FileDownloadLink>;
@@ -105,20 +107,19 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
       </a>
     );
   },
-  // Fenced code blocks → CodeBlock with syntax highlighting + copy button
+  // 围栏代码块 → 带语法高亮与复制按钮的 CodeBlock
   pre({ children }) {
-    // react-markdown wraps fenced code in <pre><code>…</code></pre>
-    // We pass through so the code component handles rendering via CodeBlock
+    // react-markdown 将围栏代码包在 <pre><code>…</code></pre> 中，此处透传由 code 组件通过 CodeBlock 渲染
     return <>{children}</>;
   },
   code({ className, children, node, ...rest }) {
     const match = /language-(\w+)/.exec(className || "");
     const codeString = String(children).replace(/\n$/, "");
-    // Fenced code block (has language class or is multi-line)
+    // 围栏代码块（有语言类或为多行）
     if (match || (node?.position && codeString.includes("\n"))) {
       return <CodeBlock language={match?.[1]} code={codeString} />;
     }
-    // Inline code
+    // 行内代码
     return (
       <code
         className="rounded px-1 py-0.5 text-[12.5px] font-mono bg-[var(--em-primary-alpha-06)] text-[var(--em-primary-dark)]"
@@ -130,6 +131,8 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   },
 };
 
+const MAX_COLLAPSED_HEIGHT_ASSISTANT = 400; // px
+
 const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
   content,
   isStreamingText,
@@ -137,14 +140,54 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
   content: string;
   isStreamingText?: boolean;
 }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [needsExpand, setNeedsExpand] = useState(false);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setNeedsExpand(contentRef.current.scrollHeight > MAX_COLLAPSED_HEIGHT_ASSISTANT);
+    }
+  }, [content]);
+
   return (
-    <div className={`prose prose-sm max-w-none text-foreground text-[13px] leading-relaxed${isStreamingText ? " streaming-cursor" : ""}`}>
-      <ReactMarkdown
-        remarkPlugins={remarkPluginsStable}
-        components={markdownComponents}
+    <div className="relative">
+      <div
+        ref={contentRef}
+        className={`prose prose-sm max-w-none text-foreground text-[13px] leading-relaxed overflow-hidden transition-[max-height] duration-300${isStreamingText ? " streaming-cursor" : ""}`}
+        style={{
+          maxHeight: needsExpand && !expanded && !isStreamingText ? `${MAX_COLLAPSED_HEIGHT_ASSISTANT}px` : undefined,
+        }}
       >
-        {content}
-      </ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={remarkPluginsStable}
+          components={markdownComponents}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+      {needsExpand && !expanded && !isStreamingText && (
+        <div className="relative -mt-8 pt-8 bg-gradient-to-t from-background to-transparent">
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+          >
+            <ChevronDown className="h-3 w-3" />
+            展开全部
+          </button>
+        </div>
+      )}
+      {needsExpand && expanded && !isStreamingText && (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+        >
+          <ChevronUp className="h-3 w-3" />
+          收起
+        </button>
+      )}
     </div>
   );
 });
@@ -232,7 +275,7 @@ interface AssistantMessageProps {
 
 export const AssistantMessage = React.memo(function AssistantMessage({ messageId, blocks, affectedFiles, isLastMessage, onRetry, onRetryWithModel }: AssistantMessageProps) {
   const [collapsed, setCollapsed] = useState(false);
-  // Only the last message needs to subscribe to streaming-related state
+  // 仅最后一条消息需要订阅流式相关状态
   const pipelineStatus = useChatStore((s) => isLastMessage ? s.pipelineStatus : null);
   const isStreaming = useChatStore((s) => isLastMessage ? s.isStreaming : false);
 
@@ -241,9 +284,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
     [blocks],
   );
 
-  // Show pipeline progress whenever streaming — not just when blocks are empty.
-  // This ensures multi-iteration stages (preparing context, calling LLM, etc.)
-  // remain visible even after the first thinking/text block has arrived.
+  // 流式时始终显示 pipeline 进度，不限于 blocks 为空时。保证多轮阶段（准备上下文、调用 LLM 等）在首个 thinking/text 块到达后仍可见。
   const showPipeline = isStreaming && (blocks.length === 0 || pipelineStatus !== null);
 
   const lastBlockIdx = blocks.length - 1;
@@ -616,6 +657,7 @@ function ApprovalActionBlock({
       toolName={block.toolName}
       success={block.success}
       undoable={block.undoable}
+      hasChanges={block.hasChanges}
       undone={block.undone}
       undoError={block.undoError}
       onUndone={handleUndone}

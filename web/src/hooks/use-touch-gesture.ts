@@ -1,15 +1,15 @@
 import { useCallback, useRef } from "react";
 
 /**
- * Touch gesture states for mobile Excel interaction.
+ * 移动端 Excel 交互的触摸手势状态。
  *
- * State machine:
- *   IDLE → touchstart → PENDING (start long-press timer)
- *     ├─ move > threshold before timer → SCROLLING → touchend → IDLE
- *     ├─ timer fires (long press) → LONG_PRESS
- *     │    ├─ drag → SELECTING → touchend → IDLE
- *     │    └─ lift → IDLE (single cell select)
- *     └─ lift before timer, < threshold → TAP → IDLE
+ * 状态机：
+ *   IDLE → touchstart → PENDING（启动长按定时器）
+ *     ├─ 定时器触发前移动超过阈值 → SCROLLING → touchend → IDLE
+ *     ├─ 定时器触发（长按）→ LONG_PRESS
+ *     │    ├─ 拖动 → SELECTING → touchend → IDLE
+ *     │    └─ 抬起 → IDLE（单单元格选择）
+ *     └─ 定时器触发前抬起，移动小于阈值 → TAP → IDLE
  */
 export type GestureState =
   | "idle"
@@ -19,25 +19,25 @@ export type GestureState =
   | "selecting";
 
 export interface TouchGestureOptions {
-  /** Milliseconds to hold before triggering long press. Default: 400 */
+  /** 触发长按前需保持的毫秒数。默认：400 */
   longPressMs?: number;
-  /** Pixels of movement allowed during long press detection. Default: 10 */
+  /** 长按检测期间允许的移动像素数。默认：10 */
   moveThreshold?: number;
-  /** Called when long press is detected (selection mode should be enabled). */
+  /** 检测到长按时调用（应启用选区模式）。 */
   onLongPress?: (point: { x: number; y: number }) => void;
-  /** Called when gesture ends after selection (selection mode should be disabled). */
+  /** 选区结束后手势结束时调用（应禁用选区模式）。 */
   onSelectionEnd?: () => void;
-  /** Called on a quick tap (optional single-cell select). */
+  /** 快速点击时调用（可选的单单元格选择）。 */
   onTap?: (point: { x: number; y: number }) => void;
 }
 
 /**
- * Hook for detecting long-press vs scroll gestures on mobile.
- * Returns touch event handlers to attach to a container element.
+ * 移动端长按与滚动手势检测 Hook。
+ * 返回需绑定到容器元素的触摸事件处理器。
  *
- * - Quick swipe → scroll (no interference with Univer's native scroll)
- * - Long press (~400ms) → enable selection mode + haptic feedback
- * - After selection complete → back to scroll mode
+ * - 快速滑动 → 滚动（不干扰 Univer 原生滚动）
+ * - 长按（~400ms）→ 启用选区模式 + 触觉反馈
+ * - 选区完成后 → 恢复滚动模式
  */
 export function useTouchGesture(options: TouchGestureOptions = {}) {
   const {
@@ -66,13 +66,13 @@ export function useTouchGesture(options: TouchGestureOptions = {}) {
         navigator.vibrate(30);
       }
     } catch {
-      // Haptic not available — silent fail
+      // 触觉反馈不可用 — 静默失败
     }
   }, []);
 
   const handleTouchStart = useCallback(
     (e: React.TouchEvent) => {
-      // Only handle single-finger touches; multi-finger → pass through (pinch zoom)
+      // 仅处理单指触摸；多指 → 透传（捏合缩放）
       if (e.touches.length !== 1) {
         clearTimer();
         stateRef.current = "idle";
@@ -84,7 +84,7 @@ export function useTouchGesture(options: TouchGestureOptions = {}) {
       startTimeRef.current = Date.now();
       stateRef.current = "pending";
 
-      // Start long-press timer
+      // 启动长按定时器
       timerRef.current = setTimeout(() => {
         timerRef.current = null;
         if (stateRef.current === "pending" && startPointRef.current) {
@@ -111,27 +111,27 @@ export function useTouchGesture(options: TouchGestureOptions = {}) {
 
       switch (stateRef.current) {
         case "pending":
-          // Moved too far before timer → it's a scroll, cancel long-press
+          // 定时器触发前移动过远 → 判定为滚动，取消长按
           if (distance > moveThreshold) {
             clearTimer();
             stateRef.current = "scrolling";
-            // Don't prevent default — let Univer handle native scroll
+            // 不阻止默认行为 — 让 Univer 处理原生滚动
           }
           break;
 
         case "long_press":
-          // Any movement after long press → user is dragging to select
+          // 长按后的任何移动 → 用户正在拖拽选区
           if (distance > moveThreshold / 2) {
             stateRef.current = "selecting";
           }
           break;
 
         case "scrolling":
-          // Already scrolling — Univer handles it natively
+          // 已在滚动中 — Univer 原生处理
           break;
 
         case "selecting":
-          // Already selecting — Univer handles it natively
+          // 已在选区中 — Univer 原生处理
           break;
       }
     },
@@ -146,24 +146,24 @@ export function useTouchGesture(options: TouchGestureOptions = {}) {
 
       switch (state) {
         case "pending":
-          // Quick tap — no long press, no significant movement
+          // 快速点击 — 非长按，无明显移动
           if (startPointRef.current && elapsed < longPressMs) {
             onTap?.(startPointRef.current);
           }
           break;
 
         case "long_press":
-          // Long press detected but no drag — single cell selection
+          // 检测到长按但无拖动 — 单单元格选择
           onSelectionEnd?.();
           break;
 
         case "selecting":
-          // Drag selection complete
+          // 拖拽选区完成
           onSelectionEnd?.();
           break;
 
         case "scrolling":
-          // Scroll ended — nothing to do
+          // 滚动结束 — 无需操作
           break;
       }
 
