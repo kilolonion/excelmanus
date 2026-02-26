@@ -114,7 +114,6 @@ def _setup_api_globals(config=None, *, chat_history=None):
         "excelmanus.tools.format_tools",
         "excelmanus.tools.data_tools",
         "excelmanus.tools.image_tools",
-        "excelmanus.tools.macro_tools",
         "excelmanus.tools.advanced_format_tools",
     ]
     _saved_guards = {}
