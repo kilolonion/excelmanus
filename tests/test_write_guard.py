@@ -950,3 +950,90 @@ class TestRunCodeASTVariableWriteRegression:
             )
 
         assert engine._has_write_tool_call is True
+
+
+# ── 只读模式工具过滤回归测试 ──────────────────────────────────
+
+
+class TestReadOnlyToolFiltering:
+    """read_only 模式下不应暴露写工具。"""
+
+    def _tool_names(self, engine: AgentEngine, write_hint: str) -> set[str]:
+        engine._current_write_hint = write_hint
+        tools = engine._build_v5_tools(write_hint=write_hint)
+        return {t["function"]["name"] for t in tools}
+
+    def test_write_tools_excluded_in_read_only(self):
+        """edit_text_file / write_plan 等写工具不应出现在 read_only 工具列表中。"""
+        engine = _make_engine()
+        names = self._tool_names(engine, "read_only")
+        write_only = {"edit_text_file", "write_plan"}
+        leaked = write_only & names
+        assert not leaked, f"写工具泄漏到只读模式: {leaked}"
+
+    def test_delegate_excluded_in_read_only(self):
+        """delegate 系列元工具不应出现在 read_only 工具列表中。"""
+        engine = _make_engine()
+        names = self._tool_names(engine, "read_only")
+        delegate_tools = {"delegate", "delegate_to_subagent", "parallel_delegate"}
+        leaked = delegate_tools & names
+        assert not leaked, f"delegate 工具泄漏到只读模式: {leaked}"
+
+    def test_read_safe_tools_present_in_read_only(self):
+        """只读安全工具、ask_user、finish_task 应在 read_only 模式下可用。"""
+        engine = _make_engine()
+        names = self._tool_names(engine, "read_only")
+        expected = {"ask_user", "finish_task", "suggest_mode_switch"}
+        missing = expected - names
+        assert not missing, f"只读模式缺少必要工具: {missing}"
+
+    def test_delegate_present_in_may_write(self):
+        """may_write 模式下 delegate 系列元工具应正常存在。"""
+        engine = _make_engine()
+        names = self._tool_names(engine, "may_write")
+        expected_write = {"delegate"}
+        missing = expected_write - names
+        assert not missing, f"write 模式缺少 delegate 元工具: {missing}"
+
+    # ── plan 模式专项 ──
+
+    def _plan_tool_names(self, engine: AgentEngine) -> set[str]:
+        engine._current_chat_mode = "plan"
+        engine._current_write_hint = "read_only"
+        tools = engine._build_v5_tools(write_hint="read_only")
+        return {t["function"]["name"] for t in tools}
+
+    def test_plan_mode_allows_write_plan(self):
+        """plan 模式下 write_plan 应可用（核心功能）。"""
+        engine = _make_engine()
+        names = self._plan_tool_names(engine)
+        assert "write_plan" in names, "plan 模式缺少 write_plan"
+
+    def test_plan_mode_blocks_edit_text_file(self):
+        """plan 模式下 edit_text_file 不应可用。"""
+        engine = _make_engine()
+        names = self._plan_tool_names(engine)
+        assert "edit_text_file" not in names, "edit_text_file 泄漏到 plan 模式"
+
+    def test_plan_mode_blocks_delegate(self):
+        """plan 模式下 delegate 系列不应可用。"""
+        engine = _make_engine()
+        names = self._plan_tool_names(engine)
+        delegate_tools = {"delegate", "delegate_to_subagent", "parallel_delegate"}
+        leaked = delegate_tools & names
+        assert not leaked, f"delegate 工具泄漏到 plan 模式: {leaked}"
+
+    def test_plan_mode_keeps_read_safe(self):
+        """plan 模式下 ask_user/finish_task/suggest_mode_switch 应可用。"""
+        engine = _make_engine()
+        names = self._plan_tool_names(engine)
+        expected = {"ask_user", "finish_task", "suggest_mode_switch"}
+        missing = expected - names
+        assert not missing, f"plan 模式缺少必要工具: {missing}"
+
+    def test_read_mode_blocks_write_plan(self):
+        """纯 read 模式（非 plan）下 write_plan 不应可用。"""
+        engine = _make_engine()
+        engine._current_chat_mode = "read"
+        names = self._tool_names(engine, "read_only")
+        assert "write_plan" not in names, "write_plan 泄漏到纯 read 模式"

@@ -280,6 +280,91 @@ def test_register_mcp_auto_approve_replaces_not_accumulates(tmp_path: Path) -> N
     assert manager.is_mcp_auto_approved(old_tool) is False
 
 
+class TestSessionIdIsolation:
+    """回归测试：验证 list_applied 按 session_id 隔离，防止回退时跨会话污染。"""
+
+    @staticmethod
+    def _make_record(
+        manager: ApprovalManager,
+        tmp_path: Path,
+        filename: str,
+        session_id: str | None,
+        session_turn: int | None = None,
+    ) -> str:
+        target = tmp_path / filename
+        target.write_text("before\n", encoding="utf-8")
+        aid = manager.new_approval_id()
+
+        def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+            target.write_text("after\n", encoding="utf-8")
+            return '{"status":"success"}'
+
+        manager.execute_and_audit(
+            approval_id=aid,
+            tool_name="write_text_file",
+            arguments={"file_path": filename, "content": "after\n"},
+            tool_scope=["write_text_file"],
+            execute=execute,
+            undoable=True,
+            created_at_utc=manager.utc_now(),
+            session_turn=session_turn,
+            session_id=session_id,
+        )
+        return aid
+
+    def test_list_applied_filters_by_session_id(self, tmp_path: Path) -> None:
+        manager = ApprovalManager(str(tmp_path))
+        aid_a = self._make_record(manager, tmp_path, "a.txt", "sess-A", session_turn=1)
+        aid_b = self._make_record(manager, tmp_path, "b.txt", "sess-B", session_turn=1)
+
+        # 不过滤 → 两条都返回
+        all_records = manager.list_applied(limit=100)
+        all_ids = {r.approval_id for r in all_records}
+        assert aid_a in all_ids
+        assert aid_b in all_ids
+
+        # 按 session_id 过滤 → 只返回对应会话
+        a_records = manager.list_applied(limit=100, session_id="sess-A")
+        a_ids = {r.approval_id for r in a_records}
+        assert aid_a in a_ids
+        assert aid_b not in a_ids
+
+        b_records = manager.list_applied(limit=100, session_id="sess-B")
+        b_ids = {r.approval_id for r in b_records}
+        assert aid_b in b_ids
+        assert aid_a not in b_ids
+
+    def test_manifest_persists_session_id(self, tmp_path: Path) -> None:
+        manager = ApprovalManager(str(tmp_path))
+        aid = self._make_record(manager, tmp_path, "c.txt", "sess-C", session_turn=0)
+        record = manager.get_applied(aid)
+        assert record is not None
+        assert record.session_id == "sess-C"
+
+        # 从 manifest.json 重新加载，session_id 仍在
+        manager2 = ApprovalManager(str(tmp_path))
+        loaded = manager2.list_applied(limit=100, session_id="sess-C")
+        assert any(r.approval_id == aid for r in loaded)
+
+    def test_list_applied_with_nonexistent_session_returns_empty(self, tmp_path: Path) -> None:
+        manager = ApprovalManager(str(tmp_path))
+        self._make_record(manager, tmp_path, "d.txt", "sess-D", session_turn=0)
+        result = manager.list_applied(limit=100, session_id="sess-NONEXIST")
+        assert result == []
+
+    def test_set_session_id_updates_instance(self, tmp_path: Path) -> None:
+        manager = ApprovalManager(str(tmp_path))
+        assert manager._session_id is None
+        manager.set_session_id("sess-X")
+        assert manager._session_id == "sess-X"
+
+        # execute_and_audit 不显式传 session_id 时，使用实例级 _session_id
+        aid = self._make_record(manager, tmp_path, "e.txt", session_id=None, session_turn=0)
+        record = manager.get_applied(aid)
+        assert record is not None
+        assert record.session_id == "sess-X"
+
+
 def test_resolve_target_paths_covers_mutating_tools_with_path_rules(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     cases = [
