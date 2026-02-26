@@ -303,13 +303,13 @@ export function MCPTab() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs text-muted-foreground truncate max-w-[280px]" title={configPath}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs text-muted-foreground truncate" title={configPath}>
             配置文件: {configPath ? configPath.split("/").slice(-2).join("/") : "mcp.json"}
           </p>
         </div>
-        <div className="flex gap-1.5">
+        <div className="flex gap-1.5 flex-shrink-0">
           <Button
             size="sm"
             variant="outline"
@@ -345,7 +345,7 @@ export function MCPTab() {
       {/* Create / Edit form */}
       {(showCreate || editingServer) && (
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium">
               {editingServer ? `编辑: ${editingServer}` : "新增 MCP Server"}
             </span>
@@ -371,13 +371,13 @@ export function MCPTab() {
 
           {createMode === "form" ? (
             <div className="space-y-2">
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-muted-foreground">名称 *</label>
                   <Input
                     value={formDraft.name}
                     onChange={(e) => setFormDraft((d) => ({ ...d, name: e.target.value }))}
-                    className="h-7 text-xs"
+                    className="h-8 sm:h-7 text-xs"
                     placeholder="server-name"
                   />
                 </div>
@@ -457,7 +457,7 @@ export function MCPTab() {
                 </>
               )}
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-muted-foreground">Timeout (秒)</label>
                   <Input
@@ -466,7 +466,7 @@ export function MCPTab() {
                     onChange={(e) =>
                       setFormDraft((d) => ({ ...d, timeout: parseInt(e.target.value) || 30 }))
                     }
-                    className="h-7 text-xs"
+                    className="h-8 sm:h-7 text-xs"
                     min={1}
                   />
                 </div>
@@ -477,7 +477,7 @@ export function MCPTab() {
                   <Input
                     value={formDraft.autoApprove}
                     onChange={(e) => setFormDraft((d) => ({ ...d, autoApprove: e.target.value }))}
-                    className="h-7 text-xs font-mono"
+                    className="h-8 sm:h-7 text-xs font-mono"
                     placeholder="*, tool1, tool2"
                   />
                 </div>
@@ -540,7 +540,7 @@ export function MCPTab() {
             <div key={server.name} className="rounded-lg border border-border overflow-hidden">
               {/* Card header */}
               <div
-                className="px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
+                className="px-3 py-3 sm:py-2.5 cursor-pointer hover:bg-muted/50 active:bg-muted/60 transition-colors"
                 onClick={() =>
                   setExpandedServer(expandedServer === server.name ? null : server.name)
                 }

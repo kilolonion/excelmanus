@@ -113,11 +113,11 @@ export function MemoryTab() {
       </div>
 
       {/* Category filter chips */}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-0.5 -mx-1 px-1">
         <Button
           size="sm"
           variant={categoryFilter === null ? "default" : "outline"}
-          className="h-7 text-xs px-2.5"
+          className="h-8 sm:h-7 text-xs px-2.5 flex-shrink-0"
           onClick={() => setCategoryFilter(null)}
         >
           全部
@@ -127,7 +127,7 @@ export function MemoryTab() {
             key={cat}
             size="sm"
             variant={categoryFilter === cat ? "default" : "outline"}
-            className="h-7 text-xs px-2.5"
+            className="h-8 sm:h-7 text-xs px-2.5 flex-shrink-0"
             onClick={() => setCategoryFilter(cat)}
           >
             {CATEGORY_LABELS[cat] ?? cat}
@@ -168,7 +168,7 @@ export function MemoryTab() {
                   className="rounded-lg border border-border"
                 >
                   <div
-                    className="flex items-start gap-2 px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
+                    className="flex items-start gap-2 px-3 py-3 sm:py-2.5 cursor-pointer hover:bg-muted/50 active:bg-muted/60 transition-colors"
                     onClick={() => toggleExpand(entry.id)}
                   >
                     {isLong ? (

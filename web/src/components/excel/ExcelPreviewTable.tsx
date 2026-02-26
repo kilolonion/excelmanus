@@ -40,7 +40,7 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
       </div>
 
       {/* Table */}
-      <div className="overflow-x-auto max-h-[320px] overflow-y-auto">
+      <div className="overflow-x-auto max-h-[320px] overflow-y-auto" style={{ touchAction: "pan-x pan-y" }}>
         <table className="w-full border-collapse">
           <thead>
             <tr>

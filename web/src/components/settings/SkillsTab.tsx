@@ -279,7 +279,7 @@ export function SkillsTab() {
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
           <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.system}`} variant="secondary">system</Badge>
           <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.user}`} variant="secondary">user</Badge>
           <Badge className={`text-[10px] px-1.5 py-0 ${SOURCE_COLORS.project}`} variant="secondary">project</Badge>
@@ -288,7 +288,7 @@ export function SkillsTab() {
         <Button
           size="sm"
           variant="outline"
-          className="h-7 text-xs gap-1"
+          className="h-7 text-xs gap-1 flex-shrink-0"
           onClick={() => {
             resetImportState();
             setShowCreate(true);
@@ -303,13 +303,13 @@ export function SkillsTab() {
       {/* Import panel */}
       {showCreate && !editingSkill && (
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             <span className="text-xs font-medium">导入技能</span>
-            <div className="ml-auto flex gap-1">
+            <div className="sm:ml-auto flex gap-1 flex-wrap">
               <Button
                 size="sm"
                 variant={importTab === "file" ? "default" : "ghost"}
-                className="h-6 text-[10px] px-2 gap-1"
+                className="h-7 sm:h-6 text-[10px] px-2 gap-1"
                 onClick={() => { setImportTab("file"); setImportResult(null); }}
               >
                 <FolderOpen className="h-3 w-3" />
@@ -318,7 +318,7 @@ export function SkillsTab() {
               <Button
                 size="sm"
                 variant={importTab === "github" ? "default" : "ghost"}
-                className="h-6 text-[10px] px-2 gap-1"
+                className="h-7 sm:h-6 text-[10px] px-2 gap-1"
                 onClick={() => { setImportTab("github"); setImportResult(null); }}
               >
                 <Github className="h-3 w-3" />
@@ -327,7 +327,7 @@ export function SkillsTab() {
               <Button
                 size="sm"
                 variant={importTab === "manual" ? "default" : "ghost"}
-                className="h-6 text-[10px] px-2 gap-1"
+                className="h-7 sm:h-6 text-[10px] px-2 gap-1"
                 onClick={() => { setImportTab("manual"); setImportResult(null); }}
               >
                 <Pencil className="h-3 w-3" />
@@ -503,7 +503,7 @@ export function SkillsTab() {
       {/* Edit form */}
       {editingSkill && (
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium">编辑: {editingSkill}</span>
             <div className="ml-auto flex gap-1">
               <Button
@@ -606,8 +606,10 @@ export function SkillsTab() {
             <div key={skill.name} className="rounded-lg border border-border overflow-hidden">
               {/* Card header */}
               <div
-                className="px-3 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors"
-                onClick={() => toggleExpand(skill.name)}
+                className="px-3 py-3 sm:py-2.5 cursor-pointer hover:bg-muted/50 active:bg-muted/60 transition-colors"
+                onClick={() =>
+                  setExpandedSkill(expandedSkill === skill.name ? null : skill.name)
+                }
               >
                 {/* Row 1: icon + name + action buttons */}
                 <div className="flex items-center gap-2">

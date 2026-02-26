@@ -11,6 +11,7 @@ import {
   RotateCcw,
   Gauge,
   Shrink,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,7 @@ import { apiGet, apiPut } from "@/lib/api";
 interface RuntimeConfig {
   subagent_enabled: boolean;
   backup_enabled: boolean;
+  checkpoint_enabled: boolean;
   external_safe_mode: boolean;
   max_iterations: number;
   compaction_enabled: boolean;
@@ -49,6 +51,13 @@ const ITEMS: ToggleItem[] = [
     label: "备份沙盒",
     desc: "文件操作前自动创建备份副本",
     icon: <FolderArchive className="h-4 w-4" />,
+    type: "bool",
+  },
+  {
+    key: "checkpoint_enabled",
+    label: "轮次快照",
+    desc: "每轮工具调用后自动快照被修改文件，支持按轮回退",
+    icon: <History className="h-4 w-4" />,
     type: "bool",
   },
   {
@@ -161,12 +170,12 @@ export function RuntimeTab() {
           const value = merged[item.key];
           return (
             <div key={item.key}>
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-start gap-3 flex-1 min-w-0">
-                  <span className="mt-0.5 text-muted-foreground">{item.icon}</span>
+              <div className="flex items-center justify-between gap-3 sm:gap-4">
+                <div className="flex items-start gap-2.5 sm:gap-3 flex-1 min-w-0">
+                  <span className="mt-0.5 text-muted-foreground flex-shrink-0">{item.icon}</span>
                   <div className="min-w-0">
                     <div className="text-sm font-medium">{item.label}</div>
-                    <div className="text-xs text-muted-foreground">{item.desc}</div>
+                    <div className="text-[11px] sm:text-xs text-muted-foreground">{item.desc}</div>
                   </div>
                 </div>
 
@@ -176,11 +185,12 @@ export function RuntimeTab() {
                     onCheckedChange={(checked: boolean) =>
                       setDraft((prev) => ({ ...prev, [item.key]: checked }))
                     }
+                    className="flex-shrink-0"
                   />
                 ) : (
                   <Input
                     type="number"
-                    className="w-24 h-8 text-sm text-right"
+                    className="w-20 sm:w-24 h-8 text-sm text-right flex-shrink-0"
                     step={item.type === "float" ? 0.05 : 1}
                     min={item.type === "float" ? 0 : 1}
                     max={item.type === "float" ? 1 : 500}

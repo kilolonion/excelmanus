@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Plus,
   Trash2,
@@ -155,6 +155,17 @@ export function ModelTab() {
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
   const isAdmin = !authEnabled || !user || user.role === "admin";
+
+  const formRef = useRef<HTMLDivElement>(null);
+  const [pendingScrollToForm, setPendingScrollToForm] = useState(0);
+  const scrollToForm = useCallback(() => setPendingScrollToForm((n) => n + 1), []);
+  useEffect(() => {
+    if (!pendingScrollToForm) return;
+    // Wait for form to mount after state change, then scroll
+    requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }, [pendingScrollToForm]);
 
   const fetchAllCapabilities = useCallback(async () => {
     try {
@@ -354,11 +365,12 @@ export function ModelTab() {
               ? "border-destructive/40 bg-destructive/5"
               : "border-border"
           }`}>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
               <h3 className="font-semibold text-sm">{section.label}</h3>
-              <span className="text-xs text-muted-foreground ml-auto">{section.desc}</span>
+              <span className="text-xs text-muted-foreground ml-auto hidden sm:inline">{section.desc}</span>
             </div>
+            <p className="text-xs text-muted-foreground mt-0.5 ml-6 sm:hidden">{section.desc}</p>
             {isModelUnhealthy(sectionCaps) ? (
               <div className="mt-1.5 mb-1 ml-6 flex items-center gap-1.5 text-destructive">
                 <AlertTriangle className="h-3 w-3 flex-shrink-0" />
@@ -373,8 +385,8 @@ export function ModelTab() {
             )}
             <div className="space-y-2 mt-3">
               {section.fields.map((field) => (
-                <div key={field} className="flex items-center gap-2">
-                  <label className="text-xs text-muted-foreground w-16 flex-shrink-0">
+                <div key={field} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                  <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">
                     {FIELD_LABELS[field]}
                   </label>
                   <div className="flex-1 relative">
@@ -382,7 +394,7 @@ export function ModelTab() {
                       value={editDrafts[section.key]?.[field] || ""}
                       onChange={(e) => updateDraft(section.key, field, e.target.value)}
                       type={field === "api_key" && !showKeys[`${section.key}_${field}`] ? "password" : "text"}
-                      className="h-8 text-xs font-mono pr-8"
+                      className={`h-8 text-xs font-mono ${field === "api_key" ? "pr-8" : ""}`}
                       placeholder={`输入 ${FIELD_LABELS[field]}...`}
                     />
                     {field === "api_key" && (
@@ -406,12 +418,12 @@ export function ModelTab() {
                 </div>
               ))}
             </div>
-            <div className="flex justify-end gap-2 mt-3">
+            <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
               {section.key === "main" && (
                 <Button
                   size="sm"
                   variant="outline"
-                  className="h-7 text-xs gap-1"
+                  className="h-8 sm:h-7 text-xs gap-1"
                   onClick={() => handleProbeOne(section.key)}
                   disabled={probingKey === section.key}
                 >
@@ -425,7 +437,7 @@ export function ModelTab() {
               )}
               <Button
                 size="sm"
-                className="h-7 text-xs gap-1 text-white"
+                className="h-8 sm:h-7 text-xs gap-1 text-white"
                 style={{ backgroundColor: "var(--em-primary)" }}
                 onClick={() => handleSaveSection(section.key)}
                 disabled={saving === section.key}
@@ -447,8 +459,8 @@ export function ModelTab() {
         {/* Profiles section */}
         <Separator />
         <div>
-          <div className="flex items-center justify-between mb-3">
-            <div>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="min-w-0">
               <h3 className="font-semibold text-sm">多模型配置</h3>
               <p className="text-xs text-muted-foreground">
                 通过 /model 命令切换的模型档案
@@ -457,11 +469,12 @@ export function ModelTab() {
             <Button
               size="sm"
               variant="outline"
-              className="h-7 text-xs gap-1"
+              className="h-7 text-xs gap-1 flex-shrink-0"
               onClick={() => {
                 setNewProfile(true);
                 setEditingProfile(null);
                 setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "" });
+                scrollToForm();
               }}
             >
               <Plus className="h-3 w-3" />
@@ -471,14 +484,14 @@ export function ModelTab() {
 
           {/* New/Edit profile form */}
           {(newProfile || editingProfile) && (
-            <div className="rounded-lg border border-dashed border-border p-3 mb-3 space-y-2">
-              <div className="grid grid-cols-2 gap-2">
+            <div ref={formRef} className="rounded-lg border border-dashed border-border p-3 mb-3 space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-muted-foreground">名称 *</label>
                   <Input
                     value={profileDraft.name}
                     onChange={(e) => setProfileDraft((d) => ({ ...d, name: e.target.value }))}
-                    className="h-7 text-xs"
+                    className="h-8 sm:h-7 text-xs"
                     placeholder="如: gpt4"
                   />
                 </div>
@@ -487,7 +500,7 @@ export function ModelTab() {
                   <Input
                     value={profileDraft.model}
                     onChange={(e) => setProfileDraft((d) => ({ ...d, model: e.target.value }))}
-                    className="h-7 text-xs font-mono"
+                    className="h-8 sm:h-7 text-xs font-mono"
                     placeholder="如: gpt-4o"
                   />
                 </div>
@@ -497,7 +510,7 @@ export function ModelTab() {
                 <Input
                   value={profileDraft.base_url}
                   onChange={(e) => setProfileDraft((d) => ({ ...d, base_url: e.target.value }))}
-                  className="h-7 text-xs font-mono"
+                  className="h-8 sm:h-7 text-xs font-mono"
                   placeholder="https://..."
                 />
               </div>
@@ -507,7 +520,7 @@ export function ModelTab() {
                   <Input
                     value={profileDraft.api_key}
                     onChange={(e) => setProfileDraft((d) => ({ ...d, api_key: e.target.value }))}
-                    className="h-7 text-xs font-mono pr-8"
+                    className="h-8 sm:h-7 text-xs font-mono pr-8"
                     type={showKeys["profile_api_key"] ? "text" : "password"}
                     placeholder="sk-..."
                   />
@@ -529,7 +542,7 @@ export function ModelTab() {
                 <Input
                   value={profileDraft.description}
                   onChange={(e) => setProfileDraft((d) => ({ ...d, description: e.target.value }))}
-                  className="h-7 text-xs"
+                  className="h-8 sm:h-7 text-xs"
                   placeholder="简短说明"
                 />
               </div>
@@ -570,22 +583,37 @@ export function ModelTab() {
               return (
               <div
                 key={p.name}
-                className={`rounded-lg border px-3 py-2.5 text-sm transition-colors overflow-hidden ${
+                className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm transition-colors overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 ${
                   isModelUnhealthy(pCaps)
                     ? "border-destructive/40 bg-destructive/5 opacity-70"
                     : "border-border"
                 }`}
+                onClick={() => {
+                  setEditingProfile(p.name);
+                  setNewProfile(false);
+                  setProfileDraft({
+                    name: p.name,
+                    model: p.model,
+                    api_key: "",
+                    base_url: p.base_url,
+                    description: p.description,
+                  });
+                  scrollToForm();
+                }}
               >
-                {/* Row 1: name + action buttons */}
+                {/* Row 1: name + model badge + action buttons */}
                 <div className="flex items-center gap-2">
-                  <span className="font-medium truncate flex-1 min-w-0">{p.name}</span>
-                  <div className="flex gap-0.5 shrink-0">
+                  <span className="font-medium truncate min-w-0">{p.name}</span>
+                  <Badge variant="secondary" className="text-[10px] font-mono flex-shrink-0">
+                    {p.model}
+                  </Badge>
+                  <div className="flex gap-0.5 shrink-0 ml-auto">
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6"
                       title="探测能力"
-                      onClick={() => handleProbeOne(p.name)}
+                      onClick={(e) => { e.stopPropagation(); handleProbeOne(p.name); }}
                       disabled={probingKey === p.name}
                     >
                       {probingKey === p.name ? (
@@ -598,7 +626,8 @@ export function ModelTab() {
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6"
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setEditingProfile(p.name);
                         setNewProfile(false);
                         setProfileDraft({
@@ -608,6 +637,7 @@ export function ModelTab() {
                           base_url: p.base_url,
                           description: p.description,
                         });
+                        scrollToForm();
                       }}
                     >
                       <Pencil className="h-3 w-3" />
@@ -616,17 +646,14 @@ export function ModelTab() {
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6 text-destructive"
-                      onClick={() => handleDeleteProfile(p.name)}
+                      onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.name); }}
                     >
                       <Trash2 className="h-3 w-3" />
                     </Button>
                   </div>
                 </div>
-                {/* Row 2: model badge + capabilities / error */}
-                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                  <Badge variant="secondary" className="text-[10px] font-mono">
-                    {p.model}
-                  </Badge>
+                {/* Row 2: capabilities / error + description */}
+                <div className="flex items-center gap-1.5 mt-1">
                   {isModelUnhealthy(pCaps) ? (
                     <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
                       <AlertTriangle className="h-2.5 w-2.5" />
@@ -635,15 +662,16 @@ export function ModelTab() {
                   ) : (
                     <CapabilityBadges caps={pCaps ?? null} />
                   )}
+                  {!isModelUnhealthy(pCaps) && p.description && (
+                    <span className="text-[11px] text-muted-foreground truncate">· {p.description}</span>
+                  )}
                 </div>
-                {/* Row 3: description or error detail */}
-                {isModelUnhealthy(pCaps) ? (
+                {/* Error detail */}
+                {isModelUnhealthy(pCaps) && (
                   <p className="text-[10px] text-destructive truncate mt-0.5" title={getHealthError(pCaps)}>
                     {getHealthError(pCaps) || "连接失败"}
                   </p>
-                ) : p.description ? (
-                  <p className="text-[11px] text-muted-foreground truncate mt-0.5">{p.description}</p>
-                ) : null}
+                )}
               </div>
               );
             })}
@@ -658,20 +686,20 @@ export function ModelTab() {
         {/* Model Capabilities Detail */}
         <Separator />
         <div>
-          <div className="flex items-center justify-between mb-3">
-            <div>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="min-w-0">
               <h3 className="font-semibold text-sm flex items-center gap-1.5">
-                <Zap className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+                <Zap className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
                 模型能力详情
               </h3>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground truncate">
                 当前主模型: {config?.main?.model || "未配置"}
               </p>
             </div>
             <Button
               size="sm"
               variant="outline"
-              className="h-7 text-xs gap-1"
+              className="h-7 text-xs gap-1 flex-shrink-0"
               onClick={handleProbeAll}
               disabled={probingAll}
             >
@@ -853,19 +881,19 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
-        <div>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+        <div className="min-w-0">
           <h3 className="font-semibold text-sm flex items-center gap-1.5">
-            <Download className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+            <Download className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
             配置导出 / 导入
           </h3>
           <p className="text-xs text-muted-foreground">
             {isAdminScope
               ? "一键导出全局模型配置（含 Key），加密分享给他人"
-              : "导出个人 LLM 配置（API Key、Base URL、模型），加密备份或迁移"}
+              : "导出个人 LLM 配置，加密备份或迁移"}
           </p>
         </div>
-        <div className="flex gap-1.5">
+        <div className="flex gap-1.5 flex-shrink-0">
           {mode !== "export" && (
             <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => { resetState(); setMode("export"); }}>
               <Download className="h-3 w-3" /> 导出
@@ -908,7 +936,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
           </div>
           <div>
             <p className="text-xs font-medium mb-2">加密模式</p>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
               <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
                 <input type="radio" name="export-mode" checked={exportMode === "password"} onChange={() => setExportMode("password")} />
                 <Lock className="h-3 w-3" /> 口令加密（推荐）
@@ -1140,7 +1168,7 @@ function CapabilityRow({
   onToggle: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-border px-3 py-2.5">
+    <div className="flex items-center gap-2.5 sm:gap-3 rounded-lg border border-border px-3 py-3 sm:py-2.5">
       <span
         className="flex-shrink-0"
         style={{ color: value === true ? "var(--em-primary)" : value === false ? "var(--destructive, #ef4444)" : "var(--muted-foreground)" }}

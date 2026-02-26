@@ -3,6 +3,8 @@
 import { useRef, useCallback, useState, useEffect } from "react";
 import {
   FileSpreadsheet,
+  FilePlus,
+  FolderPlus,
   Plus,
   X,
   GripVertical,
@@ -18,12 +20,15 @@ import {
   ChevronDown,
   Upload,
   Download,
+  Pencil,
+  AtSign,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -38,7 +43,18 @@ import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { uploadFile, fetchExcelFiles, fetchWorkspaceFiles, downloadFile, normalizeExcelPath } from "@/lib/api";
+import {
+  uploadFile,
+  uploadFileToFolder,
+  fetchExcelFiles,
+  fetchWorkspaceFiles,
+  downloadFile,
+  normalizeExcelPath,
+  workspaceMkdir,
+  workspaceCreateFile,
+  workspaceDeleteItem,
+  workspaceRenameItem,
+} from "@/lib/api";
 import { fileItemVariants } from "@/lib/sidebar-motion";
 
 const EXCEL_EXTENSIONS = ".xlsx,.xls,.csv";
@@ -86,6 +102,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const activeFilePath = useExcelStore((s) => s.activeFilePath);
   const pendingBackups = useExcelStore((s) => s.pendingBackups);
   const applyFile = useExcelStore((s) => s.applyFile);
+  const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const currentUserId = useAuthStore((s) => s.user?.id ?? "__anonymous__");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -94,10 +111,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // View mode: flat list vs folder tree
-  const [treeView, setTreeView] = useState(false);
+  const [treeView, setTreeView] = useState(true);
 
   // All workspace files for tree view
-  const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; filename: string }[]>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; filename: string; is_dir?: boolean }[]>([]);
   const [wsFilesLoaded, setWsFilesLoaded] = useState(false);
 
   // Multi-select mode
@@ -147,15 +164,29 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       .catch(() => {});
   }, [mergeRecentFiles, currentUserId]);
 
-  useEffect(() => {
-    if (!treeView || wsFilesLoaded) return;
+  const refreshWorkspaceFiles = useCallback(() => {
     fetchWorkspaceFiles()
       .then((files) => {
-        setWorkspaceFiles(files.map((f) => ({ path: f.path, filename: f.filename })));
+        setWorkspaceFiles(files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir })));
         setWsFilesLoaded(true);
       })
       .catch(() => {});
-  }, [treeView, wsFilesLoaded]);
+  }, []);
+
+  useEffect(() => {
+    if (wsFilesLoaded) return;
+    refreshWorkspaceFiles();
+  }, [wsFilesLoaded, refreshWorkspaceFiles]);
+
+  // Auto-refresh tree when agent creates/modifies files (files_changed SSE events)
+  const prevVersionRef = useRef(workspaceFilesVersion);
+  useEffect(() => {
+    if (workspaceFilesVersion === prevVersionRef.current) return;
+    prevVersionRef.current = workspaceFilesVersion;
+    // Small delay to batch rapid successive events
+    const timer = setTimeout(() => refreshWorkspaceFiles(), 500);
+    return () => clearTimeout(timer);
+  }, [workspaceFilesVersion, refreshWorkspaceFiles]);
 
   const handleUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -170,8 +201,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         }
       }
       e.target.value = "";
+      refreshWorkspaceFiles();
     },
-    [addRecentFile]
+    [addRecentFile, refreshWorkspaceFiles]
   );
 
   const handleClick = useCallback(
@@ -414,7 +446,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
       {treeView ? (
         <FileTreeView
-          files={workspaceFiles.length > 0 ? workspaceFiles : recentFiles}
+          files={workspaceFiles}
           sessionId={activeSessionId ?? undefined}
           panelOpen={panelOpen}
           activeFilePath={activeFilePath}
@@ -426,6 +458,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           onClick={handleClick}
           onDoubleClick={handleDoubleClick}
           onRemove={(path) => requestRemove([path])}
+          onRefresh={refreshWorkspaceFiles}
+          onAddRecentFile={addRecentFile}
         />
       ) : (
         <div className="space-y-0.5">
@@ -495,64 +529,83 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                     />
                   )}
 
-                  {/* Three-dot menu — hidden in select mode */}
+                  {/* Quick-add @ button + Three-dot menu — hidden in select mode */}
                   {!selectMode && (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button
-                          className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
-                            isFileActive
-                              ? "opacity-100"
-                              : "opacity-0 group-hover:opacity-100 touch-show"
-                          }`}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <Ellipsis className="h-3.5 w-3.5" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent
-                        side="right"
-                        align="start"
-                        className="w-36"
+                    <>
+                      <button
+                        className="flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)] opacity-0 group-hover:opacity-100 touch-show"
+                        onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}
+                        title="添加到输入框"
                       >
-                        {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
+                        <AtSign className="h-3 w-3" />
+                      </button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
+                              isFileActive
+                                ? "opacity-100"
+                                : "opacity-0 group-hover:opacity-100 touch-show"
+                            }`}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Ellipsis className="h-3.5 w-3.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          side="right"
+                          align="start"
+                          className="w-36"
+                        >
                           <DropdownMenuItem
-                            onClick={async (e) => {
+                            onClick={(e) => {
                               e.stopPropagation();
-                              if (activeSessionId) {
-                                await applyFile(activeSessionId, file.path);
-                              }
+                              useExcelStore.getState().mentionFileToInput(file);
                             }}
                           >
-                            <Upload className="h-4 w-4" />
-                            Apply 到原文件
+                            <AtSign className="h-4 w-4" />
+                            添加到输入框
                           </DropdownMenuItem>
-                        )}
-                        <DropdownMenuItem
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            downloadFile(
-                              file.path,
-                              file.filename,
-                              activeSessionId ?? undefined
-                            ).catch(() => {});
-                          }}
-                        >
-                          <Download className="h-4 w-4" />
-                          下载
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            requestRemove([file.path]);
-                          }}
-                        >
-                          <X className="h-4 w-4" />
-                          移除
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                          {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
+                            <DropdownMenuItem
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (activeSessionId) {
+                                  await applyFile(activeSessionId, file.path);
+                                }
+                              }}
+                            >
+                              <Upload className="h-4 w-4" />
+                              Apply 到原文件
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              downloadFile(
+                                file.path,
+                                file.filename,
+                                activeSessionId ?? undefined
+                              ).catch(() => {});
+                            }}
+                          >
+                            <Download className="h-4 w-4" />
+                            下载
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              requestRemove([file.path]);
+                            }}
+                          >
+                            <X className="h-4 w-4" />
+                            移除
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </>
                   )}
                 </motion.div>
               );
@@ -610,35 +663,42 @@ function normalizePath(p: string): string {
   return n.startsWith("./") ? n.slice(2) : n;
 }
 
-function buildTree(files: { path: string; filename: string }[]): TreeNode {
+function buildTree(files: { path: string; filename: string; is_dir?: boolean }[]): TreeNode {
   const root: TreeNode = { name: "", fullPath: "", children: [] };
 
+  const ensureFolder = (parent: TreeNode, name: string, fullPath: string): TreeNode => {
+    let existing = parent.children.find((c) => !c.file && c.name === name);
+    if (!existing) {
+      existing = { name, fullPath, children: [] };
+      parent.children.push(existing);
+    }
+    return existing;
+  };
+
   for (const file of files) {
-    const parts = normalizePath(file.path).split("/").filter(Boolean);
-    let current = root;
+    const normalized = normalizePath(file.path);
+    const parts = normalized.split("/").filter(Boolean);
+    if (parts.length === 0) continue;
 
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      const isLast = i === parts.length - 1;
-      const segmentPath = parts.slice(0, i + 1).join("/");
-
-      if (isLast) {
-        current.children.push({
-          name: part,
-          fullPath: segmentPath,
-          children: [],
-          file,
-        });
-      } else {
-        let existing = current.children.find(
-          (c) => !c.file && c.name === part
-        );
-        if (!existing) {
-          existing = { name: part, fullPath: segmentPath, children: [] };
-          current.children.push(existing);
-        }
-        current = existing;
+    if (file.is_dir) {
+      // Create folder node (and intermediate folders)
+      let current = root;
+      for (let i = 0; i < parts.length; i++) {
+        current = ensureFolder(current, parts[i], parts.slice(0, i + 1).join("/"));
       }
+    } else {
+      // Create file node with intermediate folders
+      let current = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        current = ensureFolder(current, parts[i], parts.slice(0, i + 1).join("/"));
+      }
+      const leafName = parts[parts.length - 1];
+      current.children.push({
+        name: leafName,
+        fullPath: normalized,
+        children: [],
+        file,
+      });
     }
   }
 
@@ -671,21 +731,8 @@ function collapseTree(node: TreeNode): TreeNode {
 
 /* ── FileTreeView ── */
 
-function FileTreeView({
-  files,
-  sessionId,
-  panelOpen,
-  activeFilePath,
-  draggingPath,
-  selectMode,
-  selectedPaths,
-  onDragStart,
-  onDragEnd,
-  onClick,
-  onDoubleClick,
-  onRemove,
-}: {
-  files: { path: string; filename: string }[];
+interface TreeViewProps {
+  files: { path: string; filename: string; is_dir?: boolean }[];
   sessionId?: string;
   panelOpen: boolean;
   activeFilePath: string | null;
@@ -697,50 +744,164 @@ function FileTreeView({
   onClick: (path: string) => void;
   onDoubleClick: (path: string) => void;
   onRemove: (path: string) => void;
-}) {
-  const tree = buildTree(files);
+  onRefresh: () => void;
+  onAddRecentFile: (file: { path: string; filename: string }) => void;
+}
+
+function FileTreeView(props: TreeViewProps) {
+  const tree = buildTree(props.files);
+  const folderUploadRef = useRef<HTMLInputElement>(null);
+  const [uploadTargetFolder, setUploadTargetFolder] = useState("");
+
+  const handleFolderUpload = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files) return;
+      for (const file of Array.from(files)) {
+        try {
+          const result = await uploadFileToFolder(file, uploadTargetFolder);
+          props.onAddRecentFile({ path: result.path, filename: result.filename });
+        } catch {
+          // silent
+        }
+      }
+      e.target.value = "";
+      props.onRefresh();
+    },
+    [uploadTargetFolder, props]
+  );
 
   return (
     <div className="space-y-0">
+      {tree.children.length === 0 && (
+        <div className="px-2 py-3 text-[11px] text-muted-foreground/60 text-center">
+          暂无文件，点击上方 + 上传
+        </div>
+      )}
       {tree.children.map((node) => (
         <TreeNodeItem
           key={node.fullPath}
           node={node}
-          sessionId={sessionId}
+          sessionId={props.sessionId}
           depth={0}
-          panelOpen={panelOpen}
-          activeFilePath={activeFilePath}
-          draggingPath={draggingPath}
-          selectMode={selectMode}
-          selectedPaths={selectedPaths}
-          onDragStart={onDragStart}
-          onDragEnd={onDragEnd}
-          onClick={onClick}
-          onDoubleClick={onDoubleClick}
-          onRemove={onRemove}
+          panelOpen={props.panelOpen}
+          activeFilePath={props.activeFilePath}
+          draggingPath={props.draggingPath}
+          selectMode={props.selectMode}
+          selectedPaths={props.selectedPaths}
+          onDragStart={props.onDragStart}
+          onDragEnd={props.onDragEnd}
+          onClick={props.onClick}
+          onDoubleClick={props.onDoubleClick}
+          onRemove={props.onRemove}
+          onRefresh={props.onRefresh}
+          onUploadToFolder={(folder) => {
+            setUploadTargetFolder(folder);
+            setTimeout(() => folderUploadRef.current?.click(), 0);
+          }}
         />
       ))}
+      <input
+        ref={folderUploadRef}
+        type="file"
+        className="hidden"
+        multiple
+        onChange={handleFolderUpload}
+      />
     </div>
+  );
+}
+
+/* ── InlineRenameInput ── */
+
+function InlineRenameInput({
+  defaultValue,
+  onConfirm,
+  onCancel,
+}: {
+  defaultValue: string;
+  onConfirm: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(defaultValue);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    // Select the name part without extension
+    const dotIdx = defaultValue.lastIndexOf(".");
+    inputRef.current?.setSelectionRange(0, dotIdx > 0 ? dotIdx : defaultValue.length);
+  }, [defaultValue]);
+
+  return (
+    <input
+      ref={inputRef}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const trimmed = value.trim();
+          if (trimmed && trimmed !== defaultValue) onConfirm(trimmed);
+          else onCancel();
+        }
+        if (e.key === "Escape") onCancel();
+      }}
+      onBlur={() => {
+        const trimmed = value.trim();
+        if (trimmed && trimmed !== defaultValue) onConfirm(trimmed);
+        else onCancel();
+      }}
+      className="flex-1 min-w-0 bg-accent/60 text-xs text-foreground rounded px-1 py-0.5 outline-none ring-1 ring-[var(--em-primary)]"
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
+}
+
+/* ── InlineCreateInput (for new file/folder creation) ── */
+
+function InlineCreateInput({
+  placeholder,
+  onConfirm,
+  onCancel,
+}: {
+  placeholder: string;
+  onConfirm: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  return (
+    <input
+      ref={inputRef}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const trimmed = value.trim();
+          if (trimmed) onConfirm(trimmed);
+          else onCancel();
+        }
+        if (e.key === "Escape") onCancel();
+      }}
+      onBlur={() => {
+        const trimmed = value.trim();
+        if (trimmed) onConfirm(trimmed);
+        else onCancel();
+      }}
+      placeholder={placeholder}
+      className="w-full bg-accent/60 text-xs text-foreground rounded px-1 py-0.5 outline-none ring-1 ring-[var(--em-primary)] placeholder:text-muted-foreground/50"
+      onClick={(e) => e.stopPropagation()}
+    />
   );
 }
 
 /* ── TreeNodeItem (recursive) ── */
 
-function TreeNodeItem({
-  node,
-  sessionId,
-  depth,
-  panelOpen,
-  activeFilePath,
-  draggingPath,
-  selectMode,
-  selectedPaths,
-  onDragStart,
-  onDragEnd,
-  onClick,
-  onDoubleClick,
-  onRemove,
-}: {
+interface TreeNodeProps {
   node: TreeNode;
   sessionId?: string;
   depth: number;
@@ -754,50 +915,116 @@ function TreeNodeItem({
   onClick: (path: string) => void;
   onDoubleClick: (path: string) => void;
   onRemove: (path: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(true);
+  onRefresh: () => void;
+  onUploadToFolder: (folder: string) => void;
+}
+
+function TreeNodeItem(props: TreeNodeProps) {
+  const { node, sessionId, depth, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
+  const [expanded, setExpanded] = useState(depth < 2);
+  const [renaming, setRenaming] = useState(false);
+  const [creating, setCreating] = useState<"file" | "folder" | null>(null);
   const isFolder = !node.file;
   const indent = depth * 12;
 
+  // ── Folder node ──
   if (isFolder) {
+    const handleRename = async (newName: string) => {
+      const parentPath = node.fullPath.includes("/") ? node.fullPath.slice(0, node.fullPath.lastIndexOf("/")) : "";
+      const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+      try {
+        await workspaceRenameItem(node.fullPath, newPath);
+        useExcelStore.getState().bumpWorkspaceFilesVersion();
+        onRefresh();
+      } catch { /* silent */ }
+      setRenaming(false);
+    };
+
+    const handleDelete = async () => {
+      if (!window.confirm(`确定删除文件夹 "${node.name}" 及其所有内容？`)) return;
+      try {
+        await workspaceDeleteItem(node.fullPath);
+        // W8: 同步清理 recentFiles 中属于该文件夹的条目
+        const excelStore = useExcelStore.getState();
+        const prefix = node.fullPath + "/";
+        const toRemove = excelStore.recentFiles
+          .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
+          .map((f) => f.path);
+        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove);
+        excelStore.bumpWorkspaceFilesVersion();
+        onRefresh();
+      } catch { /* silent */ }
+    };
+
+    const handleCreate = async (name: string) => {
+      const fullPath = node.fullPath ? `${node.fullPath}/${name}` : name;
+      try {
+        if (creating === "folder") {
+          await workspaceMkdir(fullPath);
+        } else {
+          await workspaceCreateFile(fullPath);
+        }
+        useExcelStore.getState().bumpWorkspaceFilesVersion();
+        onRefresh();
+      } catch { /* silent */ }
+      setCreating(null);
+    };
+
     return (
       <div>
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          className="w-full flex items-center gap-1 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 rounded transition-colors duration-100"
-          style={{ paddingLeft: `${indent + 4}px` }}
-        >
-          {expanded ? (
-            <ChevronDown className="h-3 w-3 flex-shrink-0" />
-          ) : (
-            <ChevronRight className="h-3 w-3 flex-shrink-0" />
+        <div className="group flex items-center gap-0 py-0.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 rounded transition-colors duration-100" style={{ paddingLeft: `${indent + 4}px` }}>
+          <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1 flex-1 min-w-0 py-0.5">
+            {expanded ? <ChevronDown className="h-3 w-3 flex-shrink-0" /> : <ChevronRight className="h-3 w-3 flex-shrink-0" />}
+            {expanded ? <FolderOpen className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary-light)]" /> : <Folder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary-light)]" />}
+            {renaming ? (
+              <InlineRenameInput defaultValue={node.name} onConfirm={handleRename} onCancel={() => setRenaming(false)} />
+            ) : (
+              <span className="truncate">{node.name}</span>
+            )}
+          </button>
+          {!selectMode && !renaming && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground opacity-0 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                  <Ellipsis className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="right" align="start" className="w-36">
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setCreating("file"); setExpanded(true); }}>
+                  <FilePlus className="h-4 w-4" />
+                  新建文件
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setCreating("folder"); setExpanded(true); }}>
+                  <FolderPlus className="h-4 w-4" />
+                  新建文件夹
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onUploadToFolder(node.fullPath); }}>
+                  <Upload className="h-4 w-4" />
+                  上传到此处
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setRenaming(true); }}>
+                  <Pencil className="h-4 w-4" />
+                  重命名
+                </DropdownMenuItem>
+                <DropdownMenuItem variant="destructive" onClick={(e) => { e.stopPropagation(); handleDelete(); }}>
+                  <Trash2 className="h-4 w-4" />
+                  删除
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
-          {expanded ? (
-            <FolderOpen className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary-light)]" />
-          ) : (
-            <Folder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary-light)]" />
-          )}
-          <span className="truncate">{node.name}</span>
-        </button>
+        </div>
         {expanded && (
           <div>
+            {creating && (
+              <div className="flex items-center gap-1 py-0.5" style={{ paddingLeft: `${(depth + 1) * 12 + 4 + 16}px` }}>
+                {creating === "folder" ? <Folder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary-light)]" /> : <FileTypeIcon filename="new.txt" className="h-3.5 w-3.5 flex-shrink-0" />}
+                <InlineCreateInput placeholder={creating === "folder" ? "文件夹名称" : "文件名称"} onConfirm={handleCreate} onCancel={() => setCreating(null)} />
+              </div>
+            )}
             {node.children.map((child) => (
-              <TreeNodeItem
-                key={child.fullPath}
-                node={child}
-                sessionId={sessionId}
-                depth={depth + 1}
-                panelOpen={panelOpen}
-                activeFilePath={activeFilePath}
-                draggingPath={draggingPath}
-                selectMode={selectMode}
-                selectedPaths={selectedPaths}
-                onDragStart={onDragStart}
-                onDragEnd={onDragEnd}
-                onClick={onClick}
-                onDoubleClick={onDoubleClick}
-                onRemove={onRemove}
-              />
+              <TreeNodeItem key={child.fullPath} {...props} node={child} depth={depth + 1} />
             ))}
           </div>
         )}
@@ -805,6 +1032,7 @@ function TreeNodeItem({
     );
   }
 
+  // ── File node ──
   const file = node.file!;
   const excel = isExcelFile(file.filename);
   const isFileActive = excel && panelOpen && activeFilePath === file.path;
@@ -812,36 +1040,52 @@ function TreeNodeItem({
   const isSelected = selectedPaths.has(file.path);
 
   const handleFileClick = () => {
+    if (selectMode) { /* toggle handled by parent */ return; }
     if (excel) onClick(file.path);
   };
   const handleFileDblClick = () => {
+    if (selectMode) return;
     if (excel) onDoubleClick(file.path);
+  };
+
+  const handleRenameFile = async (newName: string) => {
+    const parentPath = node.fullPath.includes("/") ? node.fullPath.slice(0, node.fullPath.lastIndexOf("/")) : "";
+    const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+    try {
+      await workspaceRenameItem(node.fullPath, newPath);
+      // W8: 从 recentFiles 移除旧路径（新路径会在下次扫描时加入）
+      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      useExcelStore.getState().bumpWorkspaceFilesVersion();
+      onRefresh();
+    } catch { /* silent */ }
+    setRenaming(false);
+  };
+
+  const handleDeleteFile = async () => {
+    if (!window.confirm(`确定删除文件 "${node.name}"？`)) return;
+    try {
+      await workspaceDeleteItem(node.fullPath);
+      // W8: 同步从 recentFiles 移除
+      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      useExcelStore.getState().bumpWorkspaceFilesVersion();
+      onRefresh();
+    } catch { /* silent */ }
   };
 
   return (
     <div
-      draggable={!selectMode}
+      draggable={!selectMode && !renaming}
       onDragStart={(e) => onDragStart(e, file)}
       onDragEnd={onDragEnd}
       onClick={handleFileClick}
       onDoubleClick={handleFileDblClick}
-      className={`group relative flex items-center gap-1 py-1 pr-1 rounded transition-colors duration-100 text-xs ${
-        excel ? "cursor-pointer" : "cursor-grab"
+      className={`group relative flex items-center gap-1 py-0.5 pr-1 rounded transition-colors duration-100 text-xs ${
+        excel ? "cursor-pointer" : "cursor-default"
       } ${
-        isSelected
-          ? "bg-accent/80"
-          : isFileActive
-            ? "bg-accent/60"
-            : "hover:bg-accent/40"
+        isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
       } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
       style={{ paddingLeft: `${indent + 4 + 16}px` }}
-      title={
-        selectMode
-          ? "点击选择"
-          : excel
-            ? `单击: 侧边面板 | 双击: 全屏 | 拖拽: @引用\n${file.path}`
-            : `拖拽到聊天框 @引用\n${file.path}`
-      }
+      title={selectMode ? "点击选择" : excel ? `单击: 侧边面板 | 双击: 全屏\n${file.path}` : file.path}
     >
       {selectMode ? (
         isSelected ? (
@@ -850,61 +1094,62 @@ function TreeNodeItem({
           <Square className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
         )
       ) : excel ? (
-        <FileSpreadsheet
-          className="h-3.5 w-3.5 flex-shrink-0"
-          style={{
-            color: isFileActive
-              ? "var(--em-primary)"
-              : "var(--em-primary-light)",
-          }}
-        />
+        <FileSpreadsheet className="h-3.5 w-3.5 flex-shrink-0" style={{ color: isFileActive ? "var(--em-primary)" : "var(--em-primary-light)" }} />
       ) : (
         <FileTypeIcon filename={file.filename} className="h-3.5 w-3.5 flex-shrink-0" />
       )}
-      <span
-        className={`flex-1 min-w-0 truncate ${
-          isFileActive ? "font-medium text-foreground" : "text-foreground/80"
-        }`}
-      >
-        {node.name}
-      </span>
 
-      {!selectMode && excel && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
-                isFileActive
-                  ? "opacity-100"
-                  : "opacity-0 group-hover:opacity-100 touch-show"
-              }`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <Ellipsis className="h-3.5 w-3.5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent side="right" align="start" className="w-32">
-            <DropdownMenuItem
-              onClick={(e) => {
-                e.stopPropagation();
-                downloadFile(file.path, file.filename, sessionId).catch(() => {});
-              }}
-            >
-              <Download className="h-4 w-4" />
-              下载
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              variant="destructive"
-              onClick={(e) => {
-                e.stopPropagation();
-                onRemove(file.path);
-              }}
-            >
-              <X className="h-4 w-4" />
-              移除
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+      {renaming ? (
+        <InlineRenameInput defaultValue={node.name} onConfirm={handleRenameFile} onCancel={() => setRenaming(false)} />
+      ) : (
+        <span className={`flex-1 min-w-0 truncate ${isFileActive ? "font-medium text-foreground" : "text-foreground/80"}`}>
+          {node.name}
+        </span>
+      )}
+
+      {!selectMode && !renaming && (
+        <>
+          <button
+            className="flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)] opacity-0 group-hover:opacity-100 touch-show"
+            onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}
+            title="添加到输入框"
+          >
+            <AtSign className="h-3 w-3" />
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className={`flex-shrink-0 h-5 w-5 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
+                  isFileActive ? "opacity-100" : "opacity-0 group-hover:opacity-100 touch-show"
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Ellipsis className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="right" align="start" className="w-36">
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}>
+                <AtSign className="h-4 w-4" />
+                添加到输入框
+              </DropdownMenuItem>
+              {excel && (
+                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); downloadFile(file.path, file.filename, sessionId).catch(() => {}); }}>
+                  <Download className="h-4 w-4" />
+                  下载
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setRenaming(true); }}>
+                <Pencil className="h-4 w-4" />
+                重命名
+              </DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onClick={(e) => { e.stopPropagation(); handleDeleteFile(); }}>
+                <Trash2 className="h-4 w-4" />
+                删除
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
       )}
     </div>
   );

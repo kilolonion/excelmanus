@@ -91,8 +91,22 @@ export function SessionList() {
     } catch {
       // Backend 404 is fine — session may only exist locally
     }
+    const isDeletingActive = sessionId === activeSessionId;
     removeSessionCache(sessionId);
     removeSession(sessionId);
+
+    // Auto-switch to next available session when deleting the active one,
+    // mirroring handleArchiveToggle behavior to avoid activeSessionId=null
+    // which causes model config to temporarily show empty.
+    if (isDeletingActive) {
+      const nextActive = sessions.find(
+        (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
+      );
+      if (nextActive) {
+        setActiveSession(nextActive.id);
+        switchSession(nextActive.id);
+      }
+    }
     setBusySessionId((cur) => (cur === sessionId ? null : cur));
   };
 
@@ -198,9 +212,10 @@ export function SessionList() {
                   layout
                   className={`group relative flex items-center gap-2 rounded-lg px-2.5 py-2 min-h-[2.25rem] text-sm cursor-pointer transition-colors duration-150 ease-out ${
                     isActive
-                      ? "bg-accent/60"
+                      ? "bg-accent/60 ring-1 ring-[var(--em-primary)]/25"
                       : "hover:bg-accent/40"
                   }`}
+                  style={isActive ? { borderLeft: "2.5px solid var(--em-primary)" } : undefined}
                   tabIndex={0}
                   role="button"
                   onClick={() => {
