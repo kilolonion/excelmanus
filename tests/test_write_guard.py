@@ -531,6 +531,96 @@ class TestGuardMode:
         assert result.iterations == 1
 
 
+class TestGuardModeFinishTask:
+    """guard_mode=off 时 finish_task 首次即接受，不产生额外迭代。"""
+
+    @pytest.mark.asyncio
+    async def test_guard_off_finish_task_accepted_without_write(self):
+        """guard_mode=off + may_write + 无写入 → finish_task 首次接受，仅 1 迭代。"""
+        engine = _make_engine(max_iterations=3, guard_mode="off")
+        engine._has_write_tool_call = False
+        route_result = _make_route_result(write_hint="may_write")
+
+        finish_tc = types.SimpleNamespace(
+            id="tc_1",
+            type="function",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary": "图片上传失败，已告知用户"}',
+            ),
+        )
+        resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(
+                    content="图片上传失败，请重新上传图片。",
+                    tool_calls=[finish_tc],
+                )
+            )]
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[resp] * 4
+        )
+        # guard_mode=off → FinishTaskHandler 应首次接受
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="finish_task",
+                arguments={"summary": "图片上传失败，已告知用户"},
+                result="✅ 任务完成\n\n图片上传失败，已告知用户",
+                success=True,
+                finish_accepted=True,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        # finish_task 应首次接受 → 1 迭代退出，无额外迭代
+        assert result.iterations == 1
+        assert "任务完成" in result.reply
+
+    @pytest.mark.asyncio
+    async def test_guard_soft_finish_task_still_warns(self):
+        """guard_mode=soft + may_write + 无写入 → finish_task 首次被警告。"""
+        engine = _make_engine(max_iterations=3, guard_mode="soft")
+        engine._has_write_tool_call = False
+        route_result = _make_route_result(write_hint="may_write")
+
+        finish_tc = types.SimpleNamespace(
+            id="call_finish",
+            function=types.SimpleNamespace(
+                name="finish_task",
+                arguments='{"summary": "done"}',
+            ),
+        )
+        finish_resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="", tool_calls=[finish_tc])
+            )]
+        )
+        text_resp = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="已完成", tool_calls=None)
+            )]
+        )
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[finish_resp] * 4 + [text_resp] * 4
+        )
+        # soft 模式下首次拒绝
+        engine._execute_tool_call = AsyncMock(
+            return_value=ToolCallResult(
+                tool_name="finish_task",
+                arguments={"summary": "done"},
+                result="⚠️ 未检测到写入类工具的成功调用。",
+                success=True,
+                finish_accepted=False,
+            )
+        )
+
+        result = await engine._tool_calling_loop(route_result, on_event=None)
+
+        # soft 模式下首次仍被拒绝 → 应有 >1 迭代
+        assert result.iterations > 1 or "已完成" in result.reply or "已达到最大迭代次数" in result.reply
+
+
 class TestWriteHintSyncOnWriteCall:
     @pytest.mark.asyncio
     async def test_write_hint_upgrades_after_successful_write_tool_call(self):

@@ -49,7 +49,7 @@ class BaseToolHandler:
 
 
 # ---------------------------------------------------------------------------
-# SkillActivationHandler
+# 技能激活处理器（SkillActivationHandler）
 # ---------------------------------------------------------------------------
 
 class SkillActivationHandler(BaseToolHandler):
@@ -76,7 +76,7 @@ class SkillActivationHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# DelegationHandler
+# 委托处理器（DelegationHandler）
 # ---------------------------------------------------------------------------
 
 class DelegationHandler(BaseToolHandler):
@@ -237,7 +237,7 @@ class DelegationHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# FinishTaskHandler
+# 完成任务处理器（FinishTaskHandler）
 # ---------------------------------------------------------------------------
 
 class FinishTaskHandler(BaseToolHandler):
@@ -255,10 +255,16 @@ class FinishTaskHandler(BaseToolHandler):
         rendered = _render_finish_task_report(report, summary)
         _has_write = getattr(e, "_has_write_tool_call", False)
         _hint = getattr(e, "_current_write_hint", "unknown")
+        _guard_mode = getattr(getattr(e, "_config", None), "guard_mode", "off")
         finish_accepted = False
 
         if _has_write:
             result_str = f"✅ 任务完成\n\n{rendered}" if rendered else "✓ 任务完成。"
+            success = True
+            finish_accepted = True
+        elif _guard_mode == "off" or _hint in ("read_only", "unknown"):
+            _no_write_suffix = "（无写入）" if _hint != "unknown" else ""
+            result_str = f"✅ 任务完成{_no_write_suffix}\n\n{rendered}" if rendered else f"✓ 任务完成{_no_write_suffix}。"
             success = True
             finish_accepted = True
         elif getattr(e, "_finish_task_warned", False):
@@ -287,7 +293,7 @@ class FinishTaskHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# AskUserHandler
+# 询问用户处理器（AskUserHandler）
 # ---------------------------------------------------------------------------
 
 class AskUserHandler(BaseToolHandler):
@@ -314,7 +320,7 @@ class AskUserHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# SuggestModeSwitchHandler
+# 建议模式切换处理器（SuggestModeSwitchHandler）
 # ---------------------------------------------------------------------------
 
 class SuggestModeSwitchHandler(BaseToolHandler):
@@ -376,7 +382,7 @@ class SuggestModeSwitchHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# PlanInterceptHandler
+# 计划拦截处理器（PlanInterceptHandler）
 # ---------------------------------------------------------------------------
 
 class PlanInterceptHandler(BaseToolHandler):
@@ -403,7 +409,7 @@ class PlanInterceptHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# AuditOnlyHandler
+# 仅审计处理器（AuditOnlyHandler）
 # ---------------------------------------------------------------------------
 
 class AuditOnlyHandler(BaseToolHandler):
@@ -419,7 +425,7 @@ class AuditOnlyHandler(BaseToolHandler):
         result_value, audit_record = await e.execute_tool_with_audit(
             tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
             approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-            undoable=tool_name not in {"run_code", "run_shell"},
+            undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
         )
         result_str = str(result_value)
         tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
@@ -430,7 +436,7 @@ class AuditOnlyHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# HighRiskApprovalHandler
+# 高风险审批处理器（HighRiskApprovalHandler）
 # ---------------------------------------------------------------------------
 
 class HighRiskApprovalHandler(BaseToolHandler):
@@ -463,7 +469,7 @@ class HighRiskApprovalHandler(BaseToolHandler):
             result_value, audit_record = await e.execute_tool_with_audit(
                 tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
                 approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-                undoable=tool_name not in {"run_code", "run_shell"},
+                undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
             )
             result_str = str(result_value)
             tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
@@ -474,7 +480,7 @@ class HighRiskApprovalHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# DefaultToolHandler
+# 默认工具处理器（DefaultToolHandler）
 # ---------------------------------------------------------------------------
 
 class DefaultToolHandler(BaseToolHandler):
@@ -495,7 +501,7 @@ class DefaultToolHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# ExtractTableSpecHandler
+# 提取表结构处理器（ExtractTableSpecHandler）
 # ---------------------------------------------------------------------------
 
 _SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
@@ -522,8 +528,19 @@ class ExtractTableSpecHandler(BaseToolHandler):
         skip_style = arguments.get("skip_style", False)
         resume_from_spec = arguments.get("resume_from_spec")  # 断点续跑参数
 
-        # ── 校验文件 ──
-        path = Path(file_path)
+        # ── 校验文件（基于 workspace_root 解析相对路径） ──
+        from excelmanus.security import FileAccessGuard, SecurityViolationError
+        workspace_root = self._engine.config.workspace_root
+        guard = FileAccessGuard(workspace_root)
+        try:
+            path = guard.resolve_and_validate(file_path)
+        except SecurityViolationError as exc:
+            result_str = json.dumps(
+                {"status": "error", "message": f"路径校验失败: {exc}"},
+                ensure_ascii=False,
+            )
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
         if not path.is_file():
             result_str = json.dumps(
                 {"status": "error", "message": f"文件不存在: {file_path}"},
@@ -565,8 +582,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
         resume_spec_path = None
         if resume_from_spec:
             try:
-                from pathlib import Path as _P
-                rp = _P(resume_from_spec)
+                rp = guard.resolve_and_validate(resume_from_spec)
                 if rp.is_file():
                     # 从文件名推断已完成的阶段号 (e.g. replica_spec_p2.json → phase 2)
                     stem = rp.stem
@@ -597,7 +613,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# CodePolicyHandler
+# 代码策略处理器（CodePolicyHandler）
 # ---------------------------------------------------------------------------
 
 class CodePolicyHandler(BaseToolHandler):
@@ -627,7 +643,7 @@ class CodePolicyHandler(BaseToolHandler):
                 on_event=on_event, iteration=iteration,
             )
 
-        # RED 或配置不允许自动执行 → 尝试清洗降级
+        # 风险等级为 RED 或配置不允许自动执行 → 尝试清洗降级
         _sanitized_code = strip_exit_calls(_code_arg) if _analysis.tier == CodeRiskTier.RED else None
         if _sanitized_code is not None:
             _re_analysis = _cp_engine.analyze(_sanitized_code)
@@ -702,7 +718,7 @@ class CodePolicyHandler(BaseToolHandler):
         _before_snap = dispatcher._snapshot_excel_for_diff(
             _excel_targets, e.config.workspace_root,
         ) if _excel_targets else {}
-        # uploads 目录快照（检测新建/变更文件）
+        # uploads 目录快照，用于检测新建/变更文件
         _uploads_before = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
 
         result_value, audit_record = await e.execute_tool_with_audit(
