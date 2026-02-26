@@ -76,6 +76,16 @@ _TASK_TAG_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"(批量|全[部量表]|所有行|每一行|大量|bulk|batch)",
         re.IGNORECASE,
     )),
+    ("image_replica", re.compile(
+        r"(复刻|仿照|照着.{0,4}做|按.{0,2}图.{0,4}[做建创制]|按照.{0,4}图|"
+        r"还原.{0,4}表格|截图.{0,4}[做建创还]|图片.{0,4}[做建创还制复]|"
+        r"replicate|recreate.*(?:table|sheet|excel)|"
+        r"(?:table|sheet|excel).*from.*(?:image|screenshot|picture|photo)|"
+        r"reproduce.*(?:table|sheet)|"
+        r"照着这[张个份]|按这[张个份]|做成.*(?:一样|相同)|"
+        r"(?:image|screenshot|picture|photo).*(?:to|into).*(?:excel|spreadsheet))",
+        re.IGNORECASE,
+    )),
 ]
 
 class SkillRouter:
@@ -210,13 +220,14 @@ class SkillRouter:
                 task_tags=(),
             )
 
-        # ── 2. 非斜杠消息：chat_mode 直接映射 write_hint，无需 LLM 分类 ──
+        # ── 2. 非斜杠消息：chat_mode 直接映射 write_hint，词法推断 task_tags ──
         classified_hint = write_hint or self._MODE_TO_HINT.get(chat_mode, "may_write")
+        lexical_tags = tuple(self._classify_task_tags_lexical(user_message))
         return await self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
             write_hint=classified_hint,
-            task_tags=(),
+            task_tags=lexical_tags,
         )
 
     def build_skill_catalog(

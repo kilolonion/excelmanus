@@ -27,7 +27,7 @@ class ModelProfile:
     description: str = ""  # 可选描述
 
 
-# Base URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
+# 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CONTEXT_TOKENS = 128_000
 
 _MODEL_CONTEXT_WINDOW: dict[str, int] = {
-    # OpenAI
+    # OpenAI 提供商
     "gpt-5": 400_000,
     "gpt-5-pro": 400_000,
     "gpt-5-mini": 400_000,
@@ -79,7 +79,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "o4-mini": 200_000,
     "o4-mini-deep-research": 200_000,
     "codex-mini-latest": 200_000,
-    # Anthropic / Claude
+    # Anthropic（Claude）提供商
     "claude-3-opus": 200_000,
     "claude-3-sonnet": 200_000,
     "claude-3-haiku": 200_000,
@@ -97,7 +97,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "claude-opus-4.6": 200_000,
     "claude-sonnet-4.6": 200_000,
     "claude-haiku-4.5": 200_000,
-    # Google Gemini
+    # Google Gemini 提供商
     "gemini-2.5-pro": 1_048_576,
     "gemini-2.5-pro-preview": 1_048_576,
     "gemini-2.5-flash": 1_048_576,
@@ -113,7 +113,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-2.0-flash-lite-001": 1_048_576,
     "gemini-1.5-pro": 2_097_152,
     "gemini-1.5-flash": 1_048_576,
-    # Qwen
+    # 通义千问（Qwen）提供商
     "qwen-max": 262_144,
     "qwen-max-latest": 262_144,
     "qwen-plus": 1_000_000,
@@ -141,14 +141,14 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "qwen2.5-omni-7b": 32_768,
     "qwen2.5-72b": 131_072,
     "qwen2.5-32b": 131_072,
-    # DeepSeek
+    # DeepSeek 提供商
     "deepseek-chat": 128_000,
     "deepseek-reasoner": 128_000,
     "deepseek-v3": 128_000,
     "deepseek-r1": 128_000,
     "deepseek-v3.2": 131_072,
     "deepseek-v3.2-exp": 131_072,
-    # Mistral
+    # Mistral 提供商
     "mistral-large-2512": 256_000,
     "mistral-large-latest": 256_000,
     "mistral-medium-2508": 128_000,
@@ -176,11 +176,11 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "ministral-14b-2512": 256_000,
     "ministral-8b-2512": 256_000,
     "ministral-3b-2512": 256_000,
-    # AI21 Jamba
+    # AI21 Jamba 提供商
     "jamba-large": 256_000,
     "jamba-mini": 256_000,
     "jamba-3b": 256_000,
-    # Amazon Nova
+    # Amazon Nova 提供商
     "amazon.nova-premier": 1_000_000,
     "amazon.nova-pro": 300_000,
     "amazon.nova-lite": 300_000,
@@ -205,7 +205,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "amazon.nova-2-sonic": 1_000_000,
     "nova-2-lite": 1_000_000,
     "nova-2-sonic": 1_000_000,
-    # MiniMax
+    # MiniMax 提供商
     "minimax-m2.5": 204_800,
     "minimax-m2.5-highspeed": 204_800,
     "minimax-m2.1": 204_800,
@@ -213,7 +213,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "minimax-m2.1-lightning": 204_800,
     "minimax-m2": 204_800,
     "m2-her": 64_000,
-    # Moonshot / Kimi
+    # Moonshot（Kimi）提供商
     "kimi-k2": 262_144,
     "kimi-k2-thinking": 262_144,
     "kimi-k2.5": 262_144,
@@ -224,7 +224,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "moonshotai/kimi-k2": 262_144,
     "moonshotai/kimi-k2-thinking": 262_144,
     "moonshotai/kimi-k2.5": 262_144,
-    # Cohere
+    # Cohere 提供商
     "command-a": 256_000,
     "command-a-03-2025": 256_000,
     "command-a-reasoning": 256_000,
@@ -235,7 +235,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "c4ai-command-r7b-12-2024": 128_000,
     "command-r": 128_000,
     "command-r-08-2024": 128_000,
-    # xAI Grok
+    # xAI Grok 提供商
     "grok-4-fast-reasoning": 2_000_000,
     "grok-4-fast-non-reasoning": 2_000_000,
     "grok-4-1-fast-reasoning": 2_000_000,
@@ -248,7 +248,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "xai.grok-4-1-fast-non-reasoning": 2_000_000,
     "xai.grok-code-fast-1": 256_000,
     "xai.grok-4": 256_000,
-    # Meta Llama
+    # Meta Llama 提供商
     "llama-4-scout": 10_000_000,
     "llama-4-maverick": 1_000_000,
     "llama-3.3": 131_072,
@@ -365,7 +365,7 @@ class ExcelManusConfig:
     memory_auto_extract_interval: int = 15  # 每 N 轮后台静默提取记忆（0 = 禁用）
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
-    # Prompt Cache 优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
+    # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
     # 对话历史摘要：超阈值时用辅助模型压缩早期对话（需配置 aux_model）
     summarization_enabled: bool = True
@@ -418,7 +418,7 @@ class ExcelManusConfig:
     vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
     vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
     # 渐进式管线配置
-    vlm_pipeline_uncertainty_threshold: int = 5  # uncertainty 数量超过此值时暂停
+    vlm_pipeline_uncertainty_threshold: int = 5  # 不确定项数量超过此值时暂停
     vlm_pipeline_uncertainty_confidence_floor: float = 0.3  # 任一项低于此置信度时暂停
     main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本

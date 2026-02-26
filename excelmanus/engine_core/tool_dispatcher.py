@@ -80,7 +80,7 @@ def _render_finish_task_report(
     return "\n\n".join(parts)
 
 
-# JSON fence 提取正则（复用 small_model 的逻辑，避免跨模块依赖）
+# JSON 代码块提取用正则（复用 small_model 的逻辑，避免跨模块依赖）
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -489,7 +489,7 @@ class ToolDispatcher:
                 # 对于扫描件（高对比度双峰），应用轻度阈值化增强
                 if is_bimodal and stddev > 80:
                     gray_for_thresh = img.convert("L")
-                    # Otsu-like 简化：用均值作为阈值
+                    # 类 Otsu 简化：用均值作为阈值
                     threshold = int(mean_brightness * 0.85)
                     binary = gray_for_thresh.point(lambda p: 255 if p > threshold else 0, "L")
                     img = binary.convert("RGB")
@@ -1526,7 +1526,7 @@ class ToolDispatcher:
                     )
                     log_tool_call(logger, tool_name, arguments, result=result_str)
                 else:
-                    # RED 或配置不允许自动执行
+                    # 风险等级 RED 或配置不允许自动执行
                     # ── 尝试自动清洗退出调用并降级 ──
                     _sanitized_code = strip_exit_calls(_code_arg) if _analysis.tier == CodeRiskTier.RED else None
                     _downgraded = False
@@ -1677,7 +1677,7 @@ class ToolDispatcher:
                     tool_scope=tool_scope,
                     approval_id=e.approval.new_approval_id(),
                     created_at_utc=e.approval.utc_now(),
-                    undoable=tool_name not in {"run_code", "run_shell"},
+                    undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
                 )
                 result_str = str(result_value)
                 tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
@@ -1727,7 +1727,7 @@ class ToolDispatcher:
                         tool_scope=tool_scope,
                         approval_id=e.approval.new_approval_id(),
                         created_at_utc=e.approval.utc_now(),
-                        undoable=tool_name not in {"run_code", "run_shell"},
+                        undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
                     )
                     result_str = str(result_value)
                     tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
@@ -2196,6 +2196,38 @@ class ToolDispatcher:
                     download_description=dl_data.get("description", ""),
                 ),
             )
+
+    def _emit_files_changed_from_report(
+        self,
+        e: Any,
+        on_event: Any,
+        tool_call_id: str,
+        report: dict | None,
+        iteration: int,
+    ) -> None:
+        """finish_task 完成后，从 report['affected_files'] 提取受影响文件并发射 FILES_CHANGED 事件。"""
+        if not report or on_event is None:
+            return
+        from excelmanus.events import EventType, ToolCallEvent
+        from excelmanus.window_perception.extractor import is_excel_path, normalize_path
+
+        affected: set[str] = set()
+        for f in report.get("affected_files", []):
+            if isinstance(f, str) and f:
+                norm = normalize_path(f)
+                if norm and is_excel_path(norm):
+                    affected.add(norm)
+        if not affected:
+            return
+        e.emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.FILES_CHANGED,
+                tool_call_id=tool_call_id,
+                iteration=iteration,
+                changed_files=sorted(affected),
+            ),
+        )
 
     def _emit_files_changed_from_audit(
         self,
