@@ -83,15 +83,15 @@ class PrefetchOrchestrator:
         # 提取用户消息中提到的文件路径
         mentioned_paths = self._extract_excel_paths(user_message)
 
-        # 如果用户没有提到具体文件，尝试从 workspace manifest 补充
+        # 如果用户没有提到具体文件，尝试从 FileRegistry 补充
         if not mentioned_paths:
-            manifest_paths = self._get_manifest_paths()
-            if not manifest_paths:
+            registry_paths = self._get_registry_paths()
+            if not registry_paths:
                 return None
-            # 用户消息中有文件相关关键词时，预取 manifest 中的文件
+            # 用户消息中有文件相关关键词时，预取注册表中的文件
             if not self._has_file_intent(user_message, task_tags):
                 return None
-            mentioned_paths = manifest_paths[:_MAX_PREFETCH_FILES]
+            mentioned_paths = registry_paths[:_MAX_PREFETCH_FILES]
 
         # 限制预取文件数
         if len(mentioned_paths) > _MAX_PREFETCH_FILES:
@@ -202,8 +202,8 @@ class PrefetchOrchestrator:
                 paths.append(normalized)
         return paths
 
-    def _get_manifest_paths(self) -> list[str]:
-        """获取已知的 Excel 文件路径（优先 FileRegistry，回退 manifest）。"""
+    def _get_registry_paths(self) -> list[str]:
+        """获取已知的 Excel 文件路径（来自 FileRegistry）。"""
         # 优先从 FileRegistry 查询 excel 类型文件
         _reg = self._engine.file_registry
         if _reg is not None:

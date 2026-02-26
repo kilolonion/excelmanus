@@ -151,14 +151,20 @@ class SessionState:
     def get_cow_mappings(self) -> dict[str, str]:
         """返回当前 CoW 映射（仅来自 FileRegistry）。"""
         if self._file_registry is not None and self._file_registry.has_versions:
-            return self._file_registry.get_cow_mappings()
+            mappings = self._file_registry.get_cow_mappings()
+            if isinstance(mappings, dict):
+                return {
+                    str(k): str(v)
+                    for k, v in mappings.items()
+                    if isinstance(k, str) and isinstance(v, str)
+                }
         return {}
 
     def lookup_cow_redirect(self, rel_path: str) -> str | None:
         """查找相对路径是否有 CoW 副本，返回副本路径或 None。"""
         if self._file_registry is not None and self._file_registry.has_versions:
             redirect = self._file_registry.lookup_cow_redirect(rel_path)
-            if redirect is not None:
+            if isinstance(redirect, str):
                 return redirect
         return None
 
