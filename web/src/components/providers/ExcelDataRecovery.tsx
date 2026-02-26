@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useChatStore } from "@/stores/chat-store";
 
@@ -12,11 +12,16 @@ import { useChatStore } from "@/stores/chat-store";
  */
 export function ExcelDataRecovery() {
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const diffs = useExcelStore((s) => s.diffs);
+  const prevSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // 只在有会话但没有 diff 数据时触发恢复
-    if (!currentSessionId || diffs.length > 0) return;
+    if (!currentSessionId) return;
+
+    // 会话切换时先清理旧会话的瞬态数据，防止跨会话 diff 泄漏
+    if (prevSessionRef.current && prevSessionRef.current !== currentSessionId) {
+      useExcelStore.getState().clearSession();
+    }
+    prevSessionRef.current = currentSessionId;
 
     const recoverExcelData = async () => {
       try {
@@ -28,6 +33,9 @@ export function ExcelDataRecovery() {
         if (recoveredDiffs.length === 0 && recoveredPreviews.length === 0 && affected_files.length === 0) {
           return;
         }
+
+        // 恢复期间会话可能已切换
+        if (useChatStore.getState().currentSessionId !== currentSessionId) return;
 
         const excelStore = useExcelStore.getState();
 
@@ -69,7 +77,7 @@ export function ExcelDataRecovery() {
             }
             
             if (merged.length === existing.length) return {};
-            return { diffs: merged.slice(-500) }; // 保持最近 500 个 diff
+            return { diffs: merged.slice(-500) };
           });
         }
 
@@ -97,7 +105,7 @@ export function ExcelDataRecovery() {
     // 延迟执行，确保其他组件已经初始化
     const timeoutId = setTimeout(recoverExcelData, 100);
     return () => clearTimeout(timeoutId);
-  }, [currentSessionId, diffs.length]);
+  }, [currentSessionId]);
 
   return null; // 这是一个纯逻辑组件，不渲染任何内容
 }

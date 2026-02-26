@@ -93,6 +93,12 @@ const CELL_BORDER: Record<ChangeType, string> = {
   deleted: "border border-red-200 dark:border-red-800/60",
 };
 
+const CELL_RING: Record<ChangeType, string> = {
+  added: "ring-2 ring-inset ring-green-400/50 dark:ring-green-500/40",
+  modified: "ring-2 ring-inset ring-amber-400/50 dark:ring-amber-500/40",
+  deleted: "ring-2 ring-inset ring-red-400/50 dark:ring-red-500/40",
+};
+
 // ── 样式单元格渲染 ──────────────────────────────────────
 function StyledCell({
   value,
@@ -317,10 +323,13 @@ function GridHalfTable({
                 }
 
                 const css = cellStyleToCSS(style);
+                const hasBg = css.backgroundColor != null;
                 return (
                   <td
                     key={c}
-                    className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] ${CELL_BG[cell.type]} ${CELL_BORDER[cell.type]} font-medium`}
+                    className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] ${
+                      hasBg ? CELL_RING[cell.type] : `${CELL_BG[cell.type]} ${CELL_BORDER[cell.type]}`
+                    } font-medium`}
                     style={css}
                     title={formatCellValue(val) || undefined}
                     colSpan={mergeSpan?.colSpan}
@@ -409,10 +418,10 @@ function GridSingleView({
   );
 }
 
-function GridDiffView({ changes, layout, profile, mergeRanges }: { changes: ExcelCellDiff[]; layout: DiffLayout; profile: DiffProfile; mergeRanges?: MergeRange[] }) {
+function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }: { changes: ExcelCellDiff[]; layout: DiffLayout; profile: DiffProfile; mergeRanges?: MergeRange[]; oldMergeRanges?: MergeRange[] }) {
   // 全增/全删：单表展示，不浪费空间显示空表
   if (profile !== "mixed") {
-    return <GridSingleView changes={changes} profile={profile} mergeRanges={mergeRanges} />;
+    return <GridSingleView changes={changes} profile={profile} mergeRanges={profile === "all-deleted" ? oldMergeRanges : mergeRanges} />;
   }
 
   const { cols, rows, cellMap } = useMemo(() => {
@@ -444,7 +453,11 @@ function GridDiffView({ changes, layout, profile, mergeRanges }: { changes: Exce
     return { cols: colArr, rows: rowArr, cellMap: map };
   }, [changes]);
 
-  const { masterMap: mMap, hiddenSet: hSet } = useMemo(
+  const { masterMap: oldMMap, hiddenSet: oldHSet } = useMemo(
+    () => buildMergeMaps(oldMergeRanges),
+    [oldMergeRanges],
+  );
+  const { masterMap: newMMap, hiddenSet: newHSet } = useMemo(
     () => buildMergeMaps(mergeRanges),
     [mergeRanges],
   );
@@ -458,12 +471,12 @@ function GridDiffView({ changes, layout, profile, mergeRanges }: { changes: Exce
       }`}
       style={{ touchAction: "pan-x pan-y" }}
     >
-      <GridHalfTable label="Before" side="before" cols={cols} rows={rows} cellMap={cellMap} masterMap={mMap} hiddenSet={hSet} />
+      <GridHalfTable label="Before" side="before" cols={cols} rows={rows} cellMap={cellMap} masterMap={oldMMap} hiddenSet={oldHSet} />
       <div className={isVertical
         ? "h-px bg-border/60 flex-shrink-0"
         : "w-px bg-border/60 flex-shrink-0"
       } />
-      <GridHalfTable label="After" side="after" cols={cols} rows={rows} cellMap={cellMap} masterMap={mMap} hiddenSet={hSet} />
+      <GridHalfTable label="After" side="after" cols={cols} rows={rows} cellMap={cellMap} masterMap={newMMap} hiddenSet={newHSet} />
     </div>
   );
 }
@@ -579,7 +592,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
       {useInline ? (
         <InlineDiffView changes={data.changes} layout={layout} />
       ) : (
-        <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} />
+        <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} oldMergeRanges={data.oldMergeRanges} />
       )}
 
       {/* Footer */}

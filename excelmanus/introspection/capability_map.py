@@ -32,6 +32,7 @@ ICON_DEFAULT = "🟡"
 CATEGORY_DISPLAY_NAMES: dict[str, str] = {
     "data_read": "数据读取 (data_read)",
     "sheet": "工作表 (sheet)",
+    "chart": "图表 (chart)",
     "file": "文件操作 (file)",
     "code": "代码执行 (code)",
     "macro": "声明式复合操作 (macro)",
