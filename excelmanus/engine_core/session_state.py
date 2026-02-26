@@ -7,7 +7,7 @@
 - 每轮迭代诊断快照（turn_diagnostics）
 - 会话级诊断累积（session_diagnostics）
 - 执行守卫状态（execution_guard_fired, vba_exempt）
-- Stuck Detection：检测重复工具调用和冗余读取模式
+- 卡住检测：检测重复工具调用和冗余读取模式
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-# Stuck Detection 参数
+# 卡住检测参数
 _STUCK_WINDOW_SIZE = 6
 _ACTION_REPEAT_THRESHOLD = 3
 _READ_ONLY_LOOP_THRESHOLD = 5
@@ -66,7 +66,7 @@ class SessionState:
         # 提示词注入快照（每轮完整文本，供 /save 导出）
         self.prompt_injection_snapshots: list[dict[str, Any]] = []
 
-        # ── Stuck Detection ──────────────────────────────────
+        # ── 卡住检测 ──────────────────────────────────
         # 滑动窗口：记录最近 N 次工具调用的 (tool_name, args_fingerprint)
         self._recent_tool_calls: deque[tuple[str, str]] = deque(
             maxlen=_STUCK_WINDOW_SIZE,
@@ -167,7 +167,7 @@ class SessionState:
                 return redirect
         return self.cow_path_registry.get(rel_path)
 
-    # ── Stuck Detection ──────────────────────────────────────
+    # ── 卡住检测 ──────────────────────────────────────
 
     @staticmethod
     def _args_fingerprint(arguments: dict[str, Any]) -> str:
@@ -184,17 +184,17 @@ class SessionState:
     def record_tool_call_for_stuck_detection(
         self, tool_name: str, arguments: dict[str, Any],
     ) -> None:
-        """记录工具调用到滑动窗口，供 stuck detection 使用。"""
+        """记录工具调用到滑动窗口，供卡住检测使用。"""
         fp = self._args_fingerprint(arguments)
         self._recent_tool_calls.append((tool_name, fp))
 
     def detect_stuck_pattern(self) -> str | None:
         """检测退化模式，返回警告消息或 None。
 
-        灵感来源：OpenHands Stuck Detection。
+        灵感来源：OpenHands 卡住检测。
         检测两类模式：
-        1. Action Repeat：连续 N 次调用同一工具 + 相同参数指纹
-        2. Read-Only Loop：连续 N 次只读工具但 write_hint 为 may_write（应写未写）
+        1. 动作重复：连续 N 次调用同一工具且参数指纹相同
+        2. 只读循环：连续 N 次只读工具但 write_hint 为 may_write（应写未写）
         """
         if self.stuck_warning_fired:
             return None
@@ -203,7 +203,7 @@ class SessionState:
         if len(calls) < _ACTION_REPEAT_THRESHOLD:
             return None
 
-        # Pattern 1: Action Repeat（连续相同工具+相同参数）
+        # 模式 1：动作重复（连续相同工具+相同参数）
         tail = calls[-_ACTION_REPEAT_THRESHOLD:]
         if len(set(tail)) == 1:
             tool_name = tail[0][0]
@@ -215,7 +215,7 @@ class SessionState:
                 "3) 调用 ask_user 寻求用户帮助。"
             )
 
-        # Pattern 2: Read-Only Loop（write_hint=may_write 时持续只读）
+        # 模式 2：只读循环（write_hint=may_write 时持续只读）
         from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS
 
         if (
