@@ -186,8 +186,8 @@ Provides semantic search capabilities for persistent memory and file manifests. 
 | `EXCELMANUS_MEMORY_SEMANTIC_TOP_K` | Memory semantic search Top-K | `10` |
 | `EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD` | Memory semantic search threshold | `0.3` |
 | `EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT` | Fallback recent entries on semantic search failure | `5` |
-| `EXCELMANUS_MANIFEST_SEMANTIC_TOP_K` | File manifest semantic search Top-K | `5` |
-| `EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD` | File manifest semantic search threshold | `0.25` |
+| `EXCELMANUS_REGISTRY_SEMANTIC_TOP_K` | File registry semantic search Top-K | `5` |
+| `EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD` | File registry semantic search threshold | `0.25` |
 
 ## Persistent Memory
 

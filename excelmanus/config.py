@@ -31,6 +31,7 @@ class ModelProfile:
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
+_ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 _ALLOWED_WINDOW_RULE_ENGINE_VERSIONS = {"v1", "v2"}
 DEFAULT_EMBEDDING_MODEL = "text-embedding-v3"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
@@ -445,8 +446,8 @@ class ExcelManusConfig:
     memory_semantic_top_k: int = 10
     memory_semantic_threshold: float = 0.3
     memory_semantic_fallback_recent: int = 5
-    manifest_semantic_top_k: int = 5
-    manifest_semantic_threshold: float = 0.25
+    registry_semantic_top_k: int = 5
+    registry_semantic_threshold: float = 0.25
     # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
     db_path: str = "~/.excelmanus/excelmanus.db"
     # PostgreSQL 连接 URL（设置后优先使用 PG，忽略 db_path）
@@ -458,6 +459,9 @@ class ExcelManusConfig:
     cli_layout_mode: str = "dashboard"
     # 文本回复门禁模式：off（默认，完全关闭执行守卫和写入门禁）/ soft（降级为软提示后放行）
     guard_mode: str = "off"
+    # Thinking（推理深度）配置
+    thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh
+    thinking_budget: int = 0  # 精确 token 预算（>0 时覆盖 effort 换算值）
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
@@ -1287,13 +1291,13 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
         5,
     )
-    manifest_semantic_top_k = _parse_int(
-        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_TOP_K"),
-        "EXCELMANUS_MANIFEST_SEMANTIC_TOP_K",
+    registry_semantic_top_k = _parse_int(
+        os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_TOP_K"),
+        "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
         5,
     )
-    manifest_semantic_threshold = _parse_threshold(
-        os.environ.get("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD"), 0.25
+    registry_semantic_threshold = _parse_threshold(
+        os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD"), 0.25
     )
 
     # 聊天记录持久化
@@ -1320,6 +1324,20 @@ def load_config() -> ExcelManusConfig:
     if guard_mode not in ("off", "soft"):
         logger.warning("EXCELMANUS_GUARD_MODE=%r 无效，回退到 'off'", guard_mode)
         guard_mode = "off"
+
+    # Thinking（推理深度）配置
+    thinking_effort_raw = (os.environ.get("EXCELMANUS_THINKING_EFFORT", "medium").strip().lower())
+    if thinking_effort_raw not in _ALLOWED_THINKING_EFFORTS:
+        logger.warning(
+            "EXCELMANUS_THINKING_EFFORT=%r 无效，回退到 'medium'",
+            thinking_effort_raw,
+        )
+        thinking_effort_raw = "medium"
+    thinking_budget = _parse_int_allow_zero(
+        os.environ.get("EXCELMANUS_THINKING_BUDGET"),
+        "EXCELMANUS_THINKING_BUDGET",
+        0,
+    )
 
     # 多模型配置档案
     models = _parse_models(
@@ -1429,13 +1447,15 @@ def load_config() -> ExcelManusConfig:
         memory_semantic_top_k=memory_semantic_top_k,
         memory_semantic_threshold=memory_semantic_threshold,
         memory_semantic_fallback_recent=memory_semantic_fallback_recent,
-        manifest_semantic_top_k=manifest_semantic_top_k,
-        manifest_semantic_threshold=manifest_semantic_threshold,
+        registry_semantic_top_k=registry_semantic_top_k,
+        registry_semantic_threshold=registry_semantic_threshold,
         db_path=db_path,
         database_url=database_url,
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,
         guard_mode=guard_mode,
+        thinking_effort=thinking_effort_raw,
+        thinking_budget=thinking_budget,
         models=models,
     )
