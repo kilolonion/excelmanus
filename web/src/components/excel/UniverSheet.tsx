@@ -3,7 +3,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { useTouchGesture, type GestureState } from "@/hooks/use-touch-gesture";
 import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
 
 interface UniverSheetProps {
@@ -160,10 +159,6 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   const [error, setError] = useState<string | null>(null);
 
   const isMobile = useIsMobile();
-  // Mobile gesture state: tracks whether user is in long-press selection mode
-  const [mobileSelectActive, setMobileSelectActive] = useState(false);
-  // Visual feedback: shows ripple at long-press point
-  const [longPressPoint, setLongPressPoint] = useState<{ x: number; y: number } | null>(null);
   // Auto-hide hint pill after 4 seconds
   const [hintVisible, setHintVisible] = useState(true);
   useEffect(() => {
@@ -172,74 +167,137 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     return () => clearTimeout(t);
   }, [isMobile]);
 
-  // Helper: extract current selection range from Univer API
-  const extractAndReportSelection = useCallback(() => {
-    const api = univerRef.current;
-    if (!api || !onRangeSelected) return;
-    try {
-      const wb = api.getActiveWorkbook();
-      if (!wb) return;
-      const sheet = wb.getActiveSheet();
-      if (!sheet) return;
-      const sel = sheet.getSelection();
-      if (!sel) return;
-      const range = sel.getActiveRange();
-      if (!range) return;
+  // ── Mobile pointer-to-wheel adapter ────────────────────────────────────
+  // Univer scrolls by WheelEvent; touch drag on canvas is interpreted as selection.
+  // On mobile & non-selection-mode we intercept touch pointer events (capture phase),
+  // convert movement to synthetic wheel events, and block pointer propagation.
+  useEffect(() => {
+    if (!isMobile || selectionMode) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-      const startRow = range.getRow();
-      const startCol = range.getColumn();
-      const numRows = range.getNumRows?.() ?? 1;
-      const numCols = range.getNumColumns?.() ?? 1;
+    let activeTouchPointerId: number | null = null;
+    let lastX = 0;
+    let lastY = 0;
 
-      const startLetter = colIndexToLetter(startCol);
-      const endLetter = colIndexToLetter(startCol + numCols - 1);
-      const startRowNum = startRow + 1;
-      const endRowNum = startRow + numRows;
+    const getCanvas = () =>
+      (container.querySelector('canvas[data-u-comp="render-canvas"]') as HTMLCanvasElement | null) ??
+      (container.querySelector("canvas") as HTMLCanvasElement | null);
 
-      const rangeStr = `${startLetter}${startRowNum}:${endLetter}${endRowNum}`;
-      const sheetName = sheet.getName?.() || "Sheet1";
-      onRangeSelected(rangeStr, sheetName);
-    } catch {
-      // ignore selection read errors
+    const dispatchWheel = (
+      deltaX: number,
+      deltaY: number,
+      clientX: number,
+      clientY: number,
+      sourceTarget?: EventTarget | null
+    ) => {
+      if (Math.abs(deltaX) <= 0.5 && Math.abs(deltaY) <= 0.5) return;
+      const canvas = getCanvas();
+      const wheelTarget = sourceTarget instanceof HTMLCanvasElement ? sourceTarget : canvas;
+      if (!wheelTarget) return;
+      wheelTarget.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaX,
+          deltaY,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+          clientX,
+          clientY,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    };
+
+    const supportsPointer = typeof window !== "undefined" && "PointerEvent" in window;
+
+    if (supportsPointer) {
+      const onPointerDownCapture = (e: PointerEvent) => {
+        if (e.pointerType !== "touch") return;
+        activeTouchPointerId = e.pointerId;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        e.preventDefault();
+        e.stopPropagation();
+      };
+
+      const onPointerMoveCapture = (e: PointerEvent) => {
+        if (e.pointerType !== "touch" || activeTouchPointerId !== e.pointerId) return;
+
+        const deltaX = lastX - e.clientX;
+        const deltaY = lastY - e.clientY;
+        lastX = e.clientX;
+        lastY = e.clientY;
+
+        dispatchWheel(deltaX, deltaY, e.clientX, e.clientY, e.target);
+
+        e.preventDefault();
+        e.stopPropagation();
+      };
+
+      const onPointerEndCapture = (e: PointerEvent) => {
+        if (e.pointerType !== "touch" || activeTouchPointerId !== e.pointerId) return;
+        activeTouchPointerId = null;
+        e.preventDefault();
+        e.stopPropagation();
+      };
+
+      container.addEventListener("pointerdown", onPointerDownCapture, { capture: true, passive: false });
+      container.addEventListener("pointermove", onPointerMoveCapture, { capture: true, passive: false });
+      container.addEventListener("pointerup", onPointerEndCapture, { capture: true, passive: false });
+      container.addEventListener("pointercancel", onPointerEndCapture, { capture: true, passive: false });
+
+      return () => {
+        container.removeEventListener("pointerdown", onPointerDownCapture, true);
+        container.removeEventListener("pointermove", onPointerMoveCapture, true);
+        container.removeEventListener("pointerup", onPointerEndCapture, true);
+        container.removeEventListener("pointercancel", onPointerEndCapture, true);
+      };
     }
-  }, [onRangeSelected]);
 
-  // Mobile touch gesture hook
-  const { gestureState, handlers: touchHandlers } = useTouchGesture({
-    longPressMs: 400,
-    moveThreshold: 10,
-    onLongPress: (point) => {
-      // Long press detected → enable selection in Univer
-      const api = univerRef.current;
-      if (!api) return;
-      try {
-        const wb = api.getActiveWorkbook();
-        wb?.enableSelection();
-      } catch { /* ignore */ }
-      setMobileSelectActive(true);
-      setLongPressPoint(point);
-      // Clear ripple after animation
-      setTimeout(() => setLongPressPoint(null), 600);
-    },
-    onSelectionEnd: () => {
-      // Selection gesture finished → extract range, then disable selection
-      setTimeout(() => {
-        extractAndReportSelection();
-        const api = univerRef.current;
-        if (api) {
-          try {
-            const wb = api.getActiveWorkbook();
-            wb?.disableSelection();
-          } catch { /* ignore */ }
-        }
-        setMobileSelectActive(false);
-      }, 80); // small delay for Univer to update internal state
-    },
-    onTap: () => {
-      // Quick tap on mobile — optionally select single cell
-      // For now, no-op (scroll mode stays active)
-    },
-  });
+    // Fallback for legacy iOS/WebView without PointerEvent
+    let trackingTouch = false;
+
+    const onTouchStartCapture = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      trackingTouch = true;
+      lastX = e.touches[0].clientX;
+      lastY = e.touches[0].clientY;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onTouchMoveCapture = (e: TouchEvent) => {
+      if (!trackingTouch || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const deltaX = lastX - touch.clientX;
+      const deltaY = lastY - touch.clientY;
+      lastX = touch.clientX;
+      lastY = touch.clientY;
+
+      dispatchWheel(deltaX, deltaY, touch.clientX, touch.clientY, e.target);
+
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onTouchEndCapture = (e: TouchEvent) => {
+      trackingTouch = false;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    container.addEventListener("touchstart", onTouchStartCapture, { capture: true, passive: false });
+    container.addEventListener("touchmove", onTouchMoveCapture, { capture: true, passive: false });
+    container.addEventListener("touchend", onTouchEndCapture, { capture: true, passive: false });
+    container.addEventListener("touchcancel", onTouchEndCapture, { capture: true, passive: false });
+
+    return () => {
+      container.removeEventListener("touchstart", onTouchStartCapture, true);
+      container.removeEventListener("touchmove", onTouchMoveCapture, true);
+      container.removeEventListener("touchend", onTouchEndCapture, true);
+      container.removeEventListener("touchcancel", onTouchEndCapture, true);
+    };
+  }, [isMobile, selectionMode]);
 
   const filePath = extractPathFromUrl(fileUrl);
 
@@ -312,14 +370,6 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         if (loadVersion !== loadVersionRef.current) return;
 
-        // 移动端：数据 workbook 创建后立即禁用选区，确保触摸 = 滚动
-        if (isMobile && !selectionMode) {
-          try {
-            const wb = api.getActiveWorkbook();
-            wb?.disableSelection();
-          } catch { /* ignore */ }
-        }
-
         setLoading(false);
       } catch (err: any) {
         if (loadVersion !== loadVersionRef.current) return;
@@ -374,8 +424,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         api = univerAPI;
         univerRef.current = univerAPI;
 
-        // 注意：此处不调用 disableSelection()，因为数据 workbook 尚未创建。
-        // 会在 createWorkbook() 成功后、以及 loadData() 结束后统一处理。
+        // 注意：此处只初始化 Univer 实例；工作簿创建与交互策略在后续流程处理。
 
         // Use prefetched data if available, otherwise loadData will fetch again
         const prefetchedData = await dataPromise;
@@ -406,14 +455,6 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
                 }
               } catch { /* ignore */ }
             }
-            // 移动端：prefetch 路径创建的 workbook 也需禁用选区
-            if (isMobile && !selectionMode) {
-              try {
-                const wb = univerAPI.getActiveWorkbook();
-                wb?.disableSelection();
-              } catch { /* ignore */ }
-            }
-
             if (loadVersion === loadVersionRef.current) setLoading(false);
           } catch {
             // Prefetch path failed, fall back to normal loadData
@@ -458,25 +499,17 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     // Highlighting logic via Univer API would go here
   }, [highlightCells]);
 
-  // Sync Univer selection state when selectionMode prop or mobile state changes
+  // Sync Univer selection state
   useEffect(() => {
     const api = univerRef.current;
     if (!api) return;
     try {
       const wb = api.getActiveWorkbook();
       if (!wb) return;
-      if (selectionMode) {
-        // Explicit selection mode (button toggle) — always enable
-        wb.enableSelection();
-      } else if (isMobile && !mobileSelectActive) {
-        // Mobile default: disable selection so touch = scroll
-        wb.disableSelection();
-      } else if (!isMobile) {
-        // Desktop: always enable selection
-        wb.enableSelection();
-      }
+      // Keep enabled; mobile non-selection-mode is controlled by pointer adapter above.
+      wb.enableSelection();
     } catch { /* ignore */ }
-  }, [selectionMode, isMobile, mobileSelectActive, loading]);
+  }, [selectionMode, loading]);
 
   // Selection mode: listen for selection changes in Univer and report back
   useEffect(() => {
@@ -544,55 +577,30 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   }, [selectionMode, onRangeSelected]);
 
   // Determine if we should show selection indicator
-  const showSelectionIndicator = selectionMode || (isMobile && mobileSelectActive);
+  const showSelectionIndicator = selectionMode;
 
-  // Mobile touch handlers: only attach on mobile when NOT in explicit selection mode
-  // (when selectionMode is on, Univer handles everything directly)
-  const mobileTouchProps = isMobile && !selectionMode ? touchHandlers : {};
 
   return (
     <div className="relative w-full h-full min-h-[400px] bg-white dark:bg-gray-800">
       <div
         ref={containerRef}
         className="w-full h-full bg-white dark:bg-gray-800"
+        data-univer-container
         style={{ position: "relative" }}
-        {...mobileTouchProps}
       />
       {/* Selection mode indicator (explicit button or mobile long-press) */}
       {showSelectionIndicator && (
         <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center gap-2 py-1.5 text-xs font-medium text-white pointer-events-none" style={{ backgroundColor: "var(--em-primary)" }}>
-          <span>{mobileSelectActive ? "拖动选择区域，松手完成" : "请在表格中选择一个区域"}</span>
-        </div>
-      )}
-      {/* Mobile long-press ripple feedback */}
-      {longPressPoint && (
-        <div
-          className="absolute z-30 pointer-events-none"
-          style={{
-            left: longPressPoint.x - (containerRef.current?.getBoundingClientRect().left ?? 0),
-            top: longPressPoint.y - (containerRef.current?.getBoundingClientRect().top ?? 0),
-            transform: "translate(-50%, -50%)",
-          }}
-        >
-          <div
-            className="rounded-full"
-            style={{
-              width: 40,
-              height: 40,
-              backgroundColor: "var(--em-primary)",
-              opacity: 0.3,
-              animation: "mobile-select-ripple 0.6s ease-out forwards",
-            }}
-          />
+          <span>请在表格中选择一个区域</span>
         </div>
       )}
       {/* Mobile hint: show on first load, auto-fade after 4s */}
-      {isMobile && hintVisible && !selectionMode && !loading && !error && !mobileSelectActive && (
+      {isMobile && hintVisible && !selectionMode && !loading && !error && (
         <div
           className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-black/60 text-white text-[10px] pointer-events-none"
           style={{ animation: "mobile-hint-fade 4s ease-in-out forwards" }}
         >
-          滑动浏览 · 长按选区
+          滑动浏览 · 点击「选区引用」按钮选取
         </div>
       )}
       {loading && (
@@ -607,16 +615,6 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
       )}
       {/* CSS animation for ripple */}
       <style jsx>{`
-        @keyframes mobile-select-ripple {
-          0% {
-            transform: scale(0.5);
-            opacity: 0.4;
-          }
-          100% {
-            transform: scale(2.5);
-            opacity: 0;
-          }
-        }
         @keyframes mobile-hint-fade {
           0% { opacity: 0; }
           10% { opacity: 0.7; }

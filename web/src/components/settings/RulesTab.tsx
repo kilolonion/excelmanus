@@ -30,9 +30,9 @@ function RuleRow({
   updating: string | null;
 }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2">
+    <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5 sm:py-2">
       <div className="flex-1 min-w-0">
-        <p className="text-sm truncate">{rule.content}</p>
+        <p className="text-sm break-words">{rule.content}</p>
       </div>
       <div className="flex items-center gap-1.5 flex-shrink-0">
         <Switch
@@ -227,16 +227,16 @@ export function RulesTab({ sessionId }: RulesTabProps) {
           )}
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row gap-2">
           <Input
             value={globalInput}
             onChange={(e) => setGlobalInput(e.target.value)}
-            className="h-7 text-xs"
+            className="h-8 sm:h-7 text-xs flex-1"
             placeholder="输入新规则内容..."
           />
           <Button
             size="sm"
-            className="h-7 text-xs gap-1 text-white"
+            className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
             style={{ backgroundColor: "var(--em-primary)" }}
             disabled={addingGlobal || !globalInput.trim()}
             onClick={handleAddGlobalRule}
@@ -277,16 +277,16 @@ export function RulesTab({ sessionId }: RulesTabProps) {
             )}
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <Input
               value={sessionInput}
               onChange={(e) => setSessionInput(e.target.value)}
-              className="h-7 text-xs"
+              className="h-8 sm:h-7 text-xs flex-1"
               placeholder="输入会话规则内容..."
             />
             <Button
               size="sm"
-              className="h-7 text-xs gap-1 text-white"
+              className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
               style={{ backgroundColor: "var(--em-primary)" }}
               disabled={addingSession || !sessionInput.trim()}
               onClick={handleAddSessionRule}

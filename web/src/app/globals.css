@@ -488,6 +488,13 @@ button:active:not(:disabled),
     min-width: auto;
   }
 
+  /* Exception: compact overlay buttons (e.g. image thumbnail close) */
+  button.touch-compact,
+  [role="button"].touch-compact {
+    min-height: 0;
+    min-width: 0;
+  }
+
   /* Dropdown menu items need adequate touch height */
   [role="menuitem"],
   [role="option"] {

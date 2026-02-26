@@ -70,7 +70,7 @@ const GRID_DENSITY_THRESHOLD = 10;
 function InlineDiffView({ changes }: { changes: ExcelCellDiff[] }) {
   const sorted = useMemo(() => [...changes].sort(excelCellCompare), [changes]);
   return (
-    <div className="overflow-x-auto max-h-[320px] overflow-y-auto font-mono text-[11px] leading-[1.6]">
+    <div className="overflow-x-auto max-h-[320px] overflow-y-auto font-mono text-[11px] leading-[1.6]" style={{ touchAction: "pan-x pan-y" }}>
       {sorted.map((change, i) => {
         const type = classifyChange(change);
         const isFormula = typeof change.new === "string" && change.new.startsWith("=");
@@ -160,7 +160,7 @@ function GridDiffView({ changes }: { changes: ExcelCellDiff[] }) {
   };
 
   return (
-    <div className="overflow-x-auto max-h-[320px] overflow-y-auto">
+    <div className="overflow-x-auto max-h-[320px] overflow-y-auto" style={{ touchAction: "pan-x pan-y" }}>
       <table className="border-collapse text-[11px]">
         <thead>
           <tr>

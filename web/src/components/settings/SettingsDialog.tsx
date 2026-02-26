@@ -11,7 +11,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { ModelTab } from "./ModelTab";
 import { RulesTab } from "./RulesTab";
 import { SkillsTab } from "./SkillsTab";
@@ -122,8 +122,8 @@ export function SettingsDialog() {
           <Settings className="h-4 w-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="!grid-none !flex !flex-col max-w-[calc(100vw-1rem)] sm:max-w-2xl max-h-[85dvh] sm:max-h-[85vh] p-0 overflow-hidden">
-        <DialogHeader className="px-6 pt-6 pb-0 flex-shrink-0">
+      <DialogContent className="!grid-none !flex !flex-col max-w-none sm:max-w-2xl h-[100dvh] sm:h-auto sm:max-h-[85vh] p-0 overflow-hidden rounded-none sm:rounded-lg inset-0 sm:inset-auto sm:top-[50%] sm:left-[50%] translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
+        <DialogHeader className="px-4 pt-4 pb-0 sm:px-6 sm:pt-6 flex-shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <Settings className="h-5 w-5" />
             设置
@@ -133,41 +133,54 @@ export function SettingsDialog() {
         <Tabs
           value={settingsTab}
           onValueChange={(v) => openSettings(v)}
-          className="px-6 pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
+          className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
         >
-          <div className="relative mb-4 flex-shrink-0">
-            {/* Left fade */}
+          {/* Custom tab bar */}
+          <div className="relative flex-shrink-0 px-4 sm:px-6">
             <div
-              className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 z-10 rounded-l-lg transition-opacity duration-200"
-              style={{
-                opacity: tabs.canScrollLeft ? 1 : 0,
-                background: "linear-gradient(to right, var(--color-muted), transparent)",
-              }}
-            />
-            {/* Right fade */}
-            <div
-              className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 z-10 rounded-r-lg transition-opacity duration-200"
-              style={{
-                opacity: tabs.canScrollRight ? 1 : 0,
-                background: "linear-gradient(to left, var(--color-muted), transparent)",
-              }}
-            />
-            <TabsList
               ref={tabs.ref}
               onPointerDown={tabs.onPointerDown}
               onPointerMove={tabs.onPointerMove}
               onPointerUp={tabs.onPointerUp}
               onPointerCancel={tabs.onPointerUp}
-              className="w-full justify-evenly flex-shrink-0 overflow-x-auto scrollbar-none touch-pan-x cursor-grab flex-nowrap"
+              className="flex gap-0.5 overflow-x-auto scrollbar-none touch-pan-x cursor-grab border-b border-border"
             >
-              {TAB_META.map((tab) => (
-                <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5 text-xs select-none flex-none">
-                  {tab.icon}
-                  {tab.label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
+              {TAB_META.map((tab) => {
+                const isActive = settingsTab === tab.value;
+                return (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`relative flex items-center gap-1.5 px-3 sm:px-4 py-2.5 text-[11px] sm:text-xs font-medium select-none flex-none whitespace-nowrap transition-colors outline-none
+                      ${isActive
+                        ? "text-foreground"
+                        : "text-muted-foreground hover:text-foreground/80"}
+                    `}
+                    onClick={() => openSettings(tab.value)}
+                  >
+                    <span
+                      className="transition-colors"
+                      style={{ color: isActive ? "var(--em-primary)" : undefined }}
+                    >
+                      {tab.icon}
+                    </span>
+                    {tab.label}
+                    {isActive && (
+                      <motion.div
+                        layoutId="settings-tab-indicator"
+                        className="absolute bottom-0 left-1.5 right-1.5 h-[2px] rounded-full"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
+          <div className="h-3 flex-shrink-0" />
 
           <AnimatePresence mode="wait">
             <motion.div
@@ -176,7 +189,7 @@ export function SettingsDialog() {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -8 }}
               transition={{ duration: 0.15 }}
-              className="overflow-y-auto min-h-0 flex-1"
+              className="overflow-y-auto min-h-0 flex-1 px-4 sm:px-6"
             >
               <TabsContent value="model" className="mt-0" forceMount={settingsTab === "model" ? true : undefined}>
                 {settingsTab === "model" && <ModelTab />}

@@ -18,6 +18,7 @@ import {
   ListChecks,
   Search,
   FileText,
+  Timer,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -43,6 +44,7 @@ const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   run_code: Code,
   finish_task: ListChecks,
   read_text_file: FileText,
+  sleep: Timer,
 };
 
 function getToolIcon(name: string): LucideIcon {
@@ -74,6 +76,10 @@ function argsSummary(name: string, args: Record<string, unknown>): string | null
   if (name === "run_code" && typeof args.code === "string") {
     const firstLine = args.code.split("\n")[0].slice(0, 50);
     parts.push(firstLine + (args.code.length > 50 ? "…" : ""));
+  }
+  if (name === "sleep") {
+    if (args.seconds) parts.push(`${args.seconds}s`);
+    if (args.reason) parts.push(String(args.reason).slice(0, 40));
   }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
@@ -136,6 +142,17 @@ const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
     border: "border-green-300/40 dark:border-green-500/20",
     label: "完成",
   },
+  sleep: {
+    bar: "#6366f1",
+    iconBg: "bg-indigo-500/10 dark:bg-indigo-400/15",
+    iconColor: "text-indigo-600 dark:text-indigo-400",
+    pillBg: "bg-indigo-500/8 dark:bg-indigo-400/10",
+    pillText: "text-indigo-700 dark:text-indigo-300",
+    cardBg: "bg-indigo-500/[0.02] dark:bg-indigo-500/[0.03]",
+    cardHover: "hover:bg-indigo-500/[0.05] dark:hover:bg-indigo-400/[0.06]",
+    border: "border-indigo-300/40 dark:border-indigo-500/20",
+    label: "等待",
+  },
   default: {
     bar: "#6b7280",
     iconBg: "bg-slate-500/8 dark:bg-slate-400/10",
@@ -154,6 +171,7 @@ function getToolCategory(name: string): string {
   if (["write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"].includes(name)) return "write";
   if (name === "run_code") return "code";
   if (name === "finish_task") return "finish";
+  if (name === "sleep") return "sleep";
   return "default";
 }
 
@@ -313,7 +331,20 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
               {isPending && (
                 <span className="text-[10px] font-medium px-1.5 py-px rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">待审批</span>
               )}
-              {isRunning && elapsed > 0 && (
+              {isRunning && name === "sleep" && typeof args.seconds === "number" && (
+                <span className="flex items-center gap-1.5">
+                  <span className="relative h-1 w-16 rounded-full bg-indigo-200/40 dark:bg-indigo-500/20 overflow-hidden">
+                    <span
+                      className="absolute inset-y-0 left-0 rounded-full bg-indigo-500 dark:bg-indigo-400 transition-all duration-1000 ease-linear"
+                      style={{ width: `${Math.min((elapsed / (args.seconds as number)) * 100, 100)}%` }}
+                    />
+                  </span>
+                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400 tabular-nums font-medium">
+                    {Math.max(Math.round((args.seconds as number) - elapsed), 0)}s
+                  </span>
+                </span>
+              )}
+              {isRunning && !(name === "sleep" && typeof args.seconds === "number") && elapsed > 0 && (
                 <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
               )}
               <span className="transition-transform duration-300" style={{ transform: isSuccess ? "scale(1.2)" : "scale(1)" }}>

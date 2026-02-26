@@ -190,8 +190,8 @@ export function Sidebar() {
 
       {/* Two-section scrollable area */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* Section 1: Chat History — always gets remaining space */}
-        <Collapsible open={chatOpen} onOpenChange={setChatOpen} className="flex flex-col min-h-0 flex-1">
+        {/* Section 1: Chat History */}
+        <Collapsible open={chatOpen} onOpenChange={setChatOpen} className={`flex flex-col min-h-0 ${chatOpen ? "flex-1" : "flex-shrink-0"}`}>
           <CollapsibleTrigger asChild>
             <div className="flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors cursor-pointer select-none group/collapse">
               <span>对话历史</span>
@@ -233,35 +233,28 @@ export function Sidebar() {
         </Collapsible>
 
         {/* Divider between sections */}
-        {hasExcelFiles && (
-          <div className="mx-3 my-2 flex-shrink-0 flex items-center gap-2">
-            <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to right, transparent, var(--em-primary))" }} />
-            <div className="h-1 w-1 rounded-full opacity-40" style={{ backgroundColor: "var(--em-primary)" }} />
-            <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to left, transparent, var(--em-primary))" }} />
-          </div>
-        )}
+        <div className="mx-3 my-2 flex-shrink-0 flex items-center gap-2">
+          <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to right, transparent, var(--em-primary))" }} />
+          <div className="h-1 w-1 rounded-full opacity-40" style={{ backgroundColor: "var(--em-primary)" }} />
+          <div className="flex-1 h-px opacity-25" style={{ background: "linear-gradient(to left, transparent, var(--em-primary))" }} />
+        </div>
 
-        {/* Section 2: Excel Files — collapsible, own scroll */}
-        {hasExcelFiles && (
-          <Collapsible open={excelOpen} onOpenChange={setExcelOpen} className="flex flex-col min-h-0 flex-shrink-0" style={{ maxHeight: "40%" }}>
-            <CollapsibleTrigger className="flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors cursor-pointer select-none">
-              <span>工作区文件</span>
-              <ChevronDown
-                className={`h-3 w-3 transition-transform duration-200 ${
-                  excelOpen ? "" : "-rotate-90"
-                }`}
-              />
-            </CollapsibleTrigger>
-            <CollapsibleContent className="flex-1 min-h-0 overflow-hidden">
-              <ScrollArea className="h-full">
-                <ExcelFilesBar embedded />
-              </ScrollArea>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-
-        {/* Upload prompt when no files */}
-        {!hasExcelFiles && <ExcelFilesBar />}
+        {/* Section 2: Workspace Files — expands when chat is collapsed */}
+        <Collapsible open={excelOpen} onOpenChange={setExcelOpen} className={`flex flex-col min-h-0 ${chatOpen ? "flex-shrink-0" : "flex-1"}`} style={chatOpen ? { maxHeight: "40%" } : undefined}>
+          <CollapsibleTrigger className="flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider hover:text-foreground transition-colors cursor-pointer select-none">
+            <span>工作区文件</span>
+            <ChevronDown
+              className={`h-3 w-3 transition-transform duration-200 ${
+                excelOpen ? "" : "-rotate-90"
+              }`}
+            />
+          </CollapsibleTrigger>
+          <CollapsibleContent className="flex-1 min-h-0 overflow-hidden">
+            <ScrollArea className="h-full">
+              <ExcelFilesBar embedded />
+            </ScrollArea>
+          </CollapsibleContent>
+        </Collapsible>
       </div>
 
         {/* Footer */}
