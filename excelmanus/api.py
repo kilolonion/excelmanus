@@ -1644,6 +1644,32 @@ async def checkpoint_rollback(
     })
 
 
+class RollbackPreviewRequest(BaseModel):
+    """回滚预览请求体。"""
+    model_config = ConfigDict(extra="forbid")
+    session_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+    turn_index: int = Field(..., ge=0, description="目标用户轮次索引（0-indexed）")
+
+
+@_router.post("/api/v1/chat/rollback/preview")
+async def chat_rollback_preview(
+    request: RollbackPreviewRequest, raw_request: Request,
+) -> JSONResponse:
+    """预览回滚到指定用户轮次后会影响的文件变更（不实际执行）。"""
+    assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(raw_request)
+    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    try:
+        preview = engine.rollback_preview(request.turn_index)
+    except IndexError as exc:
+        return _error_json_response(400, str(exc))
+    return JSONResponse(status_code=200, content=preview)
+
+
 @_router.post("/api/v1/chat/rollback")
 async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONResponse:
     """回退对话到指定用户轮次，可选回滚文件变更。"""
@@ -2557,7 +2583,7 @@ async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
     if not await _has_session_access(session_id, request):
         return _error_json_response(404, "会话不存在。")
     user_id = _get_isolation_user_id(request)
-    engine = _session_manager.get_engine(session_id, user_id=user_id)
+    engine = await _session_manager.get_or_restore_engine(session_id, user_id=user_id)
 
     if engine is None:
         return _error_json_response(404, "没有活跃会话。")
@@ -3580,12 +3606,12 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
 
 @_router.get("/api/v1/sessions/{session_id}/status")
 async def get_session_status(session_id: str, request: Request) -> JSONResponse:
-    """获取会话运行时状态（上下文压缩 + 工作区清单）。"""
+    """获取会话运行时状态（上下文压缩 + 文件注册表）。"""
     assert _session_manager is not None, "服务未初始化"
     user_id = _get_isolation_user_id(request)
 
-    def _normalize_manifest_status(manifest: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(manifest)
+    def _normalize_registry_status(registry_payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(registry_payload)
         state = str(normalized.get("state") or "idle").lower()
         if state == "ready":
             state = "built"
@@ -3611,12 +3637,11 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
 
     if engine is None:
         if can_restore:
-            _idle = _normalize_manifest_status({"state": "idle"})
+            _idle = _normalize_registry_status({"state": "idle"})
             return JSONResponse(content={
                 "session_id": session_id,
                 "compaction": {"enabled": False},
                 "registry": _idle,
-                "manifest": _idle,
             })
         return _error_json_response(404, f"会话不存在: {session_id}")
 
@@ -3633,13 +3658,12 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
         registry = engine.registry_scan_status()
     except Exception:
         pass
-    registry = _normalize_manifest_status(registry)
+    registry = _normalize_registry_status(registry)
 
     return JSONResponse(content={
         "session_id": session_id,
         "compaction": compaction,
         "registry": registry,
-        "manifest": registry,
     })
 
 
@@ -3698,9 +3722,8 @@ async def extract_session_memory(session_id: str, request: Request) -> JSONRespo
     })
 
 
-@_router.post("/api/v1/sessions/{session_id}/manifest/rebuild")
 @_router.post("/api/v1/sessions/{session_id}/registry/scan")
-async def rebuild_session_manifest(session_id: str, request: Request) -> JSONResponse:
+async def scan_session_registry(session_id: str, request: Request) -> JSONResponse:
     """触发指定会话的 FileRegistry 后台扫描（force=True）。"""
     assert _session_manager is not None, "服务未初始化"
     user_id = _get_isolation_user_id(request)
@@ -3851,6 +3874,70 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
             logger.debug("模型切换后加载能力缓存失败", exc_info=True)
 
     return JSONResponse(content={"message": result_msg})
+
+
+# ── Thinking 配置 API ──────────────────────────────────
+
+
+class ThinkingConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    effort: str | None = None  # none|minimal|low|medium|high|xhigh
+    budget: int | None = None  # 精确 token 预算（0 = 使用 effort 换算）
+
+
+@_router.get("/api/v1/thinking")
+async def get_thinking_config(raw_request: Request) -> JSONResponse:
+    """获取当前 thinking 配置（等级 + 预算）。"""
+    assert _session_manager is not None, "服务未初始化"
+    user_id = _get_isolation_user_id(raw_request)
+    sessions = await _session_manager.list_sessions(user_id=user_id)
+    # 取第一个活跃 session 的 thinking_config
+    for s in sessions:
+        engine = _session_manager.get_engine(s["id"], user_id=user_id)
+        if engine is not None:
+            tc = engine.thinking_config
+            return JSONResponse(content={
+                "effort": tc.effort,
+                "budget": tc.budget_tokens,
+                "effective_budget": tc.effective_budget(),
+            })
+    # 回退到全局配置
+    assert _config is not None
+    return JSONResponse(content={
+        "effort": _config.thinking_effort,
+        "budget": _config.thinking_budget,
+        "effective_budget": 0,
+    })
+
+
+@_router.put("/api/v1/thinking")
+async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Request) -> JSONResponse:
+    """设置 thinking 等级和/或预算，同步到所有活跃会话。"""
+    assert _session_manager is not None, "服务未初始化"
+    from excelmanus.engine import _EFFORT_RATIOS
+    if request.effort is not None and request.effort not in _EFFORT_RATIOS:
+        return _error_json_response(400, f"无效的 effort 值: {request.effort!r}。可选: {', '.join(sorted(_EFFORT_RATIOS))}")
+
+    user_id = _get_isolation_user_id(raw_request)
+    sessions = await _session_manager.list_sessions(user_id=user_id)
+    updated = 0
+    result_tc = None
+    for s in sessions:
+        engine = _session_manager.get_engine(s["id"], user_id=user_id)
+        if engine is not None:
+            engine.set_thinking_config(effort=request.effort, budget=request.budget)
+            result_tc = engine.thinking_config
+            updated += 1
+
+    if result_tc is None:
+        return _error_json_response(404, "无活跃会话。")
+
+    return JSONResponse(content={
+        "effort": result_tc.effort,
+        "budget": result_tc.budget_tokens,
+        "effective_budget": result_tc.effective_budget(),
+        "sessions_updated": updated,
+    })
 
 
 # ── 模型配置管理 API（.env 持久化） ──────────────────────
@@ -5203,8 +5290,8 @@ async def execute_command(request: Request) -> JSONResponse:
         hint = "计划模式: **关闭**（默认）\n\n使用 `/plan on` 开启，开启后 Agent 会先输出计划再执行"
         return JSONResponse(content={"result": hint, "format": "markdown"})
 
-    # /manifest status | /registry status
-    if command in ("/manifest status", "/registry status"):
+    # /registry status
+    if command == "/registry status":
         return JSONResponse(content={"result": "文件注册表: 请通过 `/registry scan` 触发扫描\n\n注册表会在会话首轮自动扫描构建", "format": "markdown"})
 
     # /save

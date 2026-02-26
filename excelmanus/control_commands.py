@@ -72,11 +72,6 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         arguments=("status", "scan"),
     ),
     ControlCommandSpec(
-        command="/manifest",
-        description="文件注册表（/registry 别名）",
-        arguments=("status", "build"),
-    ),
-    ControlCommandSpec(
         command="/accept",
         description="确认操作",
         help_label="/accept <id>",
