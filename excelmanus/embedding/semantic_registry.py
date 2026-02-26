@@ -1,6 +1,6 @@
-"""语义 Manifest：为 FileRegistry 提供 embedding 语义搜索能力。
+"""语义注册表：为 FileRegistry 提供 embedding 语义搜索能力。
 
-根据用户查询语义匹配最相关的 Excel 文件，替代全量注入 manifest。
+根据用户查询语义匹配最相关的 Excel 文件，替代全量注入文件列表。
 
 .. versionchanged::
     数据源统一由 FileRegistry 提供。
@@ -35,8 +35,8 @@ def _entry_to_text(entry: "FileEntry") -> str:
     return " | ".join(parts)
 
 
-class SemanticManifest:
-    """语义 Manifest 增强层。
+class SemanticRegistry:
+    """语义注册表增强层。
 
     在 FileRegistry 之上叠加 embedding 索引，
     支持按用户查询语义搜索最相关的文件。
@@ -73,7 +73,7 @@ class SemanticManifest:
 
         if not entries:
             self._store = VectorStore(
-                store_dir="/tmp/excelmanus_manifest_vectors",
+                store_dir="/tmp/excelmanus_registry_vectors",
                 dimensions=self._client.dimensions,
             )
             self._file_entries = []
@@ -100,7 +100,7 @@ class SemanticManifest:
             return 0
 
         self._store = VectorStore(
-            store_dir="/tmp/excelmanus_manifest_vectors",
+            store_dir="/tmp/excelmanus_registry_vectors",
             dimensions=self._client.dimensions,
         )
         self._store.clear()
