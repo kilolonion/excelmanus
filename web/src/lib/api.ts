@@ -537,6 +537,56 @@ export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   return data.files ?? [];
 }
 
+// ── FileRegistry API ─────────────────────────────────────
+
+export interface FileRegistryEntry {
+  id: string;
+  workspace: string;
+  canonical_path: string;
+  original_name: string;
+  file_type: string;
+  size_bytes: number;
+  origin: string;
+  origin_session_id: string | null;
+  origin_turn: number | null;
+  origin_tool: string | null;
+  parent_file_id: string | null;
+  sheet_meta: Record<string, unknown>[];
+  content_hash: string;
+  staging_path: string | null;
+  is_active_cow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  events?: FileRegistryEvent[];
+  children?: FileRegistryEntry[];
+  lineage?: FileRegistryEntry[];
+}
+
+export interface FileRegistryEvent {
+  id: string;
+  file_id: string;
+  event_type: string;
+  session_id: string | null;
+  turn: number | null;
+  tool_name: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function fetchFileRegistry(opts?: {
+  includeDeleted?: boolean;
+  includeEvents?: boolean;
+  fileId?: string;
+}): Promise<{ files: FileRegistryEntry[]; total: number } | { file: FileRegistryEntry }> {
+  const params = new URLSearchParams();
+  if (opts?.includeDeleted) params.set("include_deleted", "true");
+  if (opts?.includeEvents) params.set("include_events", "true");
+  if (opts?.fileId) params.set("file_id", opts.fileId);
+  const qs = params.toString();
+  return apiGet(`/files/registry${qs ? `?${qs}` : ""}`);
+}
+
 // ── Workspace file management APIs ───────────────────────
 
 export async function workspaceMkdir(path: string): Promise<void> {

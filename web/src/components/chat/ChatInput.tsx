@@ -80,7 +80,7 @@ const SLASH_COMMANDS: { command: string; description: string; icon: React.ReactN
   { command: "/backup", description: "备份沙盒控制", icon: <Layers className="h-3.5 w-3.5" />, args: ["status", "on", "off", "apply", "list"] },
   { command: "/compact", description: "上下文压缩", icon: <RotateCcw className="h-3.5 w-3.5" />, args: ["status", "on", "off"] },
   { command: "/plan", description: "计划模式", icon: <ClipboardList className="h-3.5 w-3.5" />, args: ["status", "on", "off", "approve", "reject"] },
-  { command: "/manifest", description: "工作区清单", icon: <FolderOpen className="h-3.5 w-3.5" />, args: ["status", "build"] },
+  { command: "/registry", description: "文件注册表", icon: <FolderOpen className="h-3.5 w-3.5" />, args: ["status", "scan"] },
   { command: "/accept", description: "确认操作", icon: <CheckCircle2 className="h-3.5 w-3.5" /> },
   { command: "/reject", description: "拒绝操作", icon: <XCircle className="h-3.5 w-3.5" /> },
   { command: "/undo", description: "回滚操作", icon: <Undo2 className="h-3.5 w-3.5" /> },
@@ -112,7 +112,7 @@ const DISPLAY_COMMANDS = new Set([
   "/backup list", "/backup status",
   "/compact status",
   "/plan status",
-  "/manifest status",
+  "/registry status",
 ]);
 
 // 直接执行前端操作的命令（不会发送到聊天）

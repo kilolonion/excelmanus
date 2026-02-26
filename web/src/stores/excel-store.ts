@@ -33,6 +33,16 @@ export interface ExcelPreviewData {
   truncated: boolean;
 }
 
+export interface TextDiffEntry {
+  toolCallId: string;
+  filePath: string;
+  hunks: string[];
+  additions: number;
+  deletions: number;
+  truncated: boolean;
+  timestamp: number;
+}
+
 export interface ExcelFileRef {
   path: string;
   filename: string;
@@ -50,6 +60,9 @@ interface ExcelState {
 
   // Diff 历史（当前会话内累积）
   diffs: ExcelDiffEntry[];
+
+  // 文本 Diff 历史
+  textDiffs: TextDiffEntry[];
 
   // 聊天内嵌预览数据（按 toolCallId 索引）
   previews: Record<string, ExcelPreviewData>;
@@ -77,6 +90,9 @@ interface ExcelState {
   // 工作区文件树刷新信号（在 files_changed 事件时递增）
   workspaceFilesVersion: number;
 
+  // 流式工具调用参数累积（用于实时预览文本写入内容）
+  streamingToolContent: Record<string, string>;
+
   // 备份应用
   pendingBackups: BackupFile[];
   backupEnabled: boolean;
@@ -88,6 +104,9 @@ interface ExcelState {
   closePanel: () => void;
   setActiveSheet: (sheet: string) => void;
   addDiff: (diff: ExcelDiffEntry) => void;
+  addTextDiff: (diff: TextDiffEntry) => void;
+  appendStreamingArgs: (toolCallId: string, delta: string) => void;
+  clearStreamingArgs: (toolCallId: string) => void;
   addPreview: (preview: ExcelPreviewData) => void;
   /** Add a file explicitly opened/uploaded by the user (clears dismissal). */
   addRecentFile: (file: { path: string; filename: string }) => void;
@@ -123,6 +142,7 @@ export const useExcelStore = create<ExcelState>()(
   activeFilePath: null,
   activeSheet: null,
   diffs: [],
+  textDiffs: [],
   previews: {},
   refreshCounter: 0,
   recentFiles: [],
@@ -133,6 +153,7 @@ export const useExcelStore = create<ExcelState>()(
   pendingFileMention: null,
   dismissedPaths: new Set<string>(),
   workspaceFilesVersion: 0,
+  streamingToolContent: {},
   pendingBackups: [],
   backupEnabled: false,
   backupLoading: false,
@@ -158,6 +179,26 @@ export const useExcelStore = create<ExcelState>()(
           ? state.refreshCounter + 1
           : state.refreshCounter,
     })),
+
+  addTextDiff: (diff) =>
+    set((state) => ({
+      textDiffs: [...state.textDiffs, diff],
+    })),
+
+  appendStreamingArgs: (toolCallId, delta) =>
+    set((state) => ({
+      streamingToolContent: {
+        ...state.streamingToolContent,
+        [toolCallId]: (state.streamingToolContent[toolCallId] || "") + delta,
+      },
+    })),
+
+  clearStreamingArgs: (toolCallId) =>
+    set((state) => {
+      const next = { ...state.streamingToolContent };
+      delete next[toolCallId];
+      return { streamingToolContent: next };
+    }),
 
   addPreview: (preview) =>
     set((state) => ({
@@ -361,7 +402,9 @@ export const useExcelStore = create<ExcelState>()(
   clearSession: () =>
     set({
       diffs: [],
+      textDiffs: [],
       previews: {},
+      streamingToolContent: {},
       refreshCounter: 0,
       fullViewPath: null,
       fullViewSheet: null,

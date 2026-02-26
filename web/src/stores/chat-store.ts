@@ -823,7 +823,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: state.messages.map((m) => {
         if (m.id !== messageId || m.role !== "assistant") return m;
         const blocks = [...m.blocks];
-        const isActive = (s: string) => s === "running" || s === "pending";
+        const isActive = (s: string) => s === "running" || s === "pending" || s === "streaming";
 
         let targetIndex = -1;
         if (toolCallId) {
