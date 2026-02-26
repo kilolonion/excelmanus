@@ -10,7 +10,7 @@
   中文 · <a href="README_EN.md">English</a>
 </p>
 
-LLM 驱动的 Excel Agent —— 读数据、写公式、跑分析、画图表。支持 OpenAI / Claude / Gemini 等 Provider，从 URL 自动识别。
+LLM 驱动的 Excel Agent —— 读数据、写公式、跑分析、画图表。支持 OpenAI / Claude / Gemini 等 Provider。
 
 <p align="center">
   <img src="docs/images/webui-desktop.png" width="800" alt="Web UI 桌面端" />
