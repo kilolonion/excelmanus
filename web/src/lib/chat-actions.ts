@@ -488,6 +488,33 @@ export async function sendMessage(
             break;
           }
 
+          // ── 流式工具参数 delta ────────────────────
+          case "tool_call_args_delta": {
+            const adToolCallId = (data.tool_call_id as string) || "";
+            const adToolName = (data.tool_name as string) || "";
+            const adDelta = (data.args_delta as string) || "";
+            if (adToolCallId && adDelta) {
+              useExcelStore.getState().appendStreamingArgs(adToolCallId, adDelta);
+              // 如果还没有对应的 tool_call block，提前创建 streaming block
+              const msg = getLastAssistantMessage(S().messages, assistantMsgId);
+              const hasBlock = msg?.blocks.some(
+                (b) => b.type === "tool_call" && b.toolCallId === adToolCallId,
+              );
+              if (!hasBlock && adToolName) {
+                S().setPipelineStatus(null);
+                S().appendBlock(assistantMsgId, {
+                  type: "tool_call",
+                  toolCallId: adToolCallId,
+                  name: adToolName,
+                  args: {},
+                  status: "streaming" as "running",
+                  iteration: undefined,
+                });
+              }
+            }
+            break;
+          }
+
           // ── 工具调用 ─────────────────────────────
           case "tool_call_start": {
             S().setPipelineStatus(null);
@@ -495,20 +522,43 @@ export async function sendMessage(
             const toolCallId = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
               ? toolCallIdRaw
               : undefined;
-            S().appendBlock(assistantMsgId, {
-              type: "tool_call",
-              toolCallId,
-              name: (data.tool_name as string) || "",
-              args: (data.arguments as Record<string, unknown>) || {},
-              status: "running",
-              iteration: (data.iteration as number) || undefined,
-            });
+            // 如果 streaming block 已存在，升级为 running
+            const msgForStart = getLastAssistantMessage(S().messages, assistantMsgId);
+            const streamingExists = toolCallId && msgForStart?.blocks.some(
+              (b) => b.type === "tool_call" && b.toolCallId === toolCallId && b.status === ("streaming" as "running"),
+            );
+            if (streamingExists) {
+              S().updateToolCallBlock(assistantMsgId, toolCallId!, (b) => {
+                if (b.type === "tool_call") {
+                  return {
+                    ...b,
+                    args: (data.arguments as Record<string, unknown>) || b.args,
+                    status: "running",
+                    iteration: (data.iteration as number) || undefined,
+                  } as AssistantBlock;
+                }
+                return b;
+              });
+            } else {
+              S().appendBlock(assistantMsgId, {
+                type: "tool_call",
+                toolCallId,
+                name: (data.tool_name as string) || "",
+                args: (data.arguments as Record<string, unknown>) || {},
+                status: "running",
+                iteration: (data.iteration as number) || undefined,
+              });
+            }
             break;
           }
 
           case "tool_call_end": {
             const toolCallIdRaw = data.tool_call_id;
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
+            // 清理流式参数缓存
+            if (toolCallId) {
+              useExcelStore.getState().clearStreamingArgs(toolCallId);
+            }
             S().updateToolCallBlock(assistantMsgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
                 // 如果已为 pending（来自 pending_approval 事件），保持 pending 状态但更新结果
@@ -518,7 +568,7 @@ export async function sendMessage(
                     result: (data.result as string) || undefined,
                   } as AssistantBlock;
                 }
-                if (b.status === "running") {
+                if (b.status === "running" || (b.status as string) === "streaming") {
                   return {
                     ...b,
                     status: data.success ? "success" : "error",
@@ -541,6 +591,8 @@ export async function sendMessage(
               iterations: 0,
               toolCalls: 0,
               status: "running",
+              conversationId: (data.conversation_id as string) || "",
+              tools: [],
             });
             break;
           }
@@ -555,6 +607,50 @@ export async function sendMessage(
                 };
               }
               return b;
+            });
+            break;
+          }
+
+          case "subagent_tool_start": {
+            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+              if (b.type !== "subagent" || b.status !== "running") return b;
+              const args = (data.arguments as Record<string, unknown>) || {};
+              const parts: string[] = [];
+              if (args.sheet) parts.push(String(args.sheet));
+              if (args.range) parts.push(String(args.range));
+              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
+              if (args.code_preview) parts.push(String(args.code_preview));
+              return {
+                ...b,
+                tools: [...(b.tools || []), {
+                  index: (data.tool_index as number) || 0,
+                  name: (data.tool_name as string) || "",
+                  argsSummary: parts.join(" \u00b7 "),
+                  status: "running" as const,
+                  args,
+                }],
+              };
+            });
+            break;
+          }
+
+          case "subagent_tool_end": {
+            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+              if (b.type !== "subagent") return b;
+              const tools = [...(b.tools || [])];
+              const toolName = (data.tool_name as string) || "";
+              const idx = tools.findLastIndex(
+                (t) => t.name === toolName && t.status === "running"
+              );
+              if (idx >= 0) {
+                tools[idx] = {
+                  ...tools[idx],
+                  status: (data.success as boolean) ? "success" : "error",
+                  result: (data.result as string) || undefined,
+                  error: (data.error as string) || undefined,
+                };
+              }
+              return { ...b, tools };
             });
             break;
           }
@@ -580,6 +676,7 @@ export async function sendMessage(
                 return {
                   ...b,
                   status: "done",
+                  success: (data.success as boolean) ?? true,
                   iterations: (data.iterations as number) || b.iterations,
                   toolCalls: (data.tool_calls as number) || b.toolCalls,
                 };
@@ -711,6 +808,23 @@ export async function sendMessage(
               const edFilename = edFilePath.split("/").pop() || edFilePath;
               useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: edFilename });
               S().addAffectedFiles(assistantMsgId, [edFilePath]);
+            }
+            break;
+          }
+
+          case "text_diff": {
+            const tdFilePath = (data.file_path as string) || "";
+            useExcelStore.getState().addTextDiff({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: tdFilePath,
+              hunks: (data.hunks as string[]) || [],
+              additions: (data.additions as number) || 0,
+              deletions: (data.deletions as number) || 0,
+              truncated: !!data.truncated,
+              timestamp: Date.now(),
+            });
+            if (tdFilePath) {
+              S().addAffectedFiles(assistantMsgId, [tdFilePath]);
             }
             break;
           }
@@ -1123,32 +1237,78 @@ export async function sendContinuation(
             break;
           }
 
+          case "tool_call_args_delta": {
+            const _adId = (data.tool_call_id as string) || "";
+            const _adName = (data.tool_name as string) || "";
+            const _adDelta = (data.args_delta as string) || "";
+            if (_adId && _adDelta) {
+              useExcelStore.getState().appendStreamingArgs(_adId, _adDelta);
+              const _adMsg = getLastAssistantMessage(S().messages, msgId);
+              const _adHas = _adMsg?.blocks.some(
+                (b) => b.type === "tool_call" && b.toolCallId === _adId,
+              );
+              if (!_adHas && _adName) {
+                S().setPipelineStatus(null);
+                S().appendBlock(msgId, {
+                  type: "tool_call",
+                  toolCallId: _adId,
+                  name: _adName,
+                  args: {},
+                  status: "streaming" as "running",
+                  iteration: undefined,
+                });
+              }
+            }
+            break;
+          }
+
           case "tool_call_start": {
             S().setPipelineStatus(null);
             const toolCallIdRaw = data.tool_call_id;
             const toolCallIdVal = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
               ? toolCallIdRaw
               : undefined;
-            S().appendBlock(msgId, {
-              type: "tool_call",
-              toolCallId: toolCallIdVal,
-              name: (data.tool_name as string) || "",
-              args: (data.arguments as Record<string, unknown>) || {},
-              status: "running",
-              iteration: (data.iteration as number) || undefined,
-            });
+            const _sMsg = getLastAssistantMessage(S().messages, msgId);
+            const _sExists = toolCallIdVal && _sMsg?.blocks.some(
+              (b) => b.type === "tool_call" && b.toolCallId === toolCallIdVal && (b.status as string) === "streaming",
+            );
+            if (_sExists) {
+              S().updateToolCallBlock(msgId, toolCallIdVal!, (b) => {
+                if (b.type === "tool_call") {
+                  return {
+                    ...b,
+                    args: (data.arguments as Record<string, unknown>) || b.args,
+                    status: "running",
+                    iteration: (data.iteration as number) || undefined,
+                  } as AssistantBlock;
+                }
+                return b;
+              });
+            } else {
+              S().appendBlock(msgId, {
+                type: "tool_call",
+                toolCallId: toolCallIdVal,
+                name: (data.tool_name as string) || "",
+                args: (data.arguments as Record<string, unknown>) || {},
+                status: "running",
+                iteration: (data.iteration as number) || undefined,
+              });
+            }
             break;
           }
 
           case "tool_call_end": {
             const toolCallIdRaw = data.tool_call_id;
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
+            if (toolCallId) {
+              useExcelStore.getState().clearStreamingArgs(toolCallId);
+            }
             S().updateToolCallBlock(msgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
                 if (b.status === "pending") {
                   return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
                 }
-                if (b.status === "running") {
+                if (b.status === "running" || (b.status as string) === "streaming") {
                   return {
                     ...b,
                     status: data.success ? "success" : "error",
@@ -1170,6 +1330,8 @@ export async function sendContinuation(
               iterations: 0,
               toolCalls: 0,
               status: "running",
+              conversationId: (data.conversation_id as string) || "",
+              tools: [],
             });
             break;
           }
@@ -1184,6 +1346,50 @@ export async function sendContinuation(
                 };
               }
               return b;
+            });
+            break;
+          }
+
+          case "subagent_tool_start": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type !== "subagent" || b.status !== "running") return b;
+              const args = (data.arguments as Record<string, unknown>) || {};
+              const parts: string[] = [];
+              if (args.sheet) parts.push(String(args.sheet));
+              if (args.range) parts.push(String(args.range));
+              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
+              if (args.code_preview) parts.push(String(args.code_preview));
+              return {
+                ...b,
+                tools: [...(b.tools || []), {
+                  index: (data.tool_index as number) || 0,
+                  name: (data.tool_name as string) || "",
+                  argsSummary: parts.join(" \u00b7 "),
+                  status: "running" as const,
+                  args,
+                }],
+              };
+            });
+            break;
+          }
+
+          case "subagent_tool_end": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type !== "subagent") return b;
+              const tools = [...(b.tools || [])];
+              const toolName = (data.tool_name as string) || "";
+              const idx = tools.findLastIndex(
+                (t) => t.name === toolName && t.status === "running"
+              );
+              if (idx >= 0) {
+                tools[idx] = {
+                  ...tools[idx],
+                  status: (data.success as boolean) ? "success" : "error",
+                  result: (data.result as string) || undefined,
+                  error: (data.error as string) || undefined,
+                };
+              }
+              return { ...b, tools };
             });
             break;
           }
@@ -1209,6 +1415,7 @@ export async function sendContinuation(
                 return {
                   ...b,
                   status: "done",
+                  success: (data.success as boolean) ?? true,
                   iterations: (data.iterations as number) || b.iterations,
                   toolCalls: (data.tool_calls as number) || b.toolCalls,
                 };
@@ -1331,6 +1538,23 @@ export async function sendContinuation(
               const fn = edFilePath2.split("/").pop() || edFilePath2;
               useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath2, filename: fn });
               S().addAffectedFiles(msgId, [edFilePath2]);
+            }
+            break;
+          }
+
+          case "text_diff": {
+            const tdFilePath2 = (data.file_path as string) || "";
+            useExcelStore.getState().addTextDiff({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: tdFilePath2,
+              hunks: (data.hunks as string[]) || [],
+              additions: (data.additions as number) || 0,
+              deletions: (data.deletions as number) || 0,
+              truncated: !!data.truncated,
+              timestamp: Date.now(),
+            });
+            if (tdFilePath2) {
+              S().addAffectedFiles(msgId, [tdFilePath2]);
             }
             break;
           }
@@ -1960,32 +2184,78 @@ export async function subscribeToSession(sessionId: string) {
             break;
           }
 
+          case "tool_call_args_delta": {
+            const _adId = (data.tool_call_id as string) || "";
+            const _adName = (data.tool_name as string) || "";
+            const _adDelta = (data.args_delta as string) || "";
+            if (_adId && _adDelta) {
+              useExcelStore.getState().appendStreamingArgs(_adId, _adDelta);
+              const _adMsg = getLastAssistantMessage(S().messages, msgId);
+              const _adHas = _adMsg?.blocks.some(
+                (b) => b.type === "tool_call" && b.toolCallId === _adId,
+              );
+              if (!_adHas && _adName) {
+                S().setPipelineStatus(null);
+                S().appendBlock(msgId, {
+                  type: "tool_call",
+                  toolCallId: _adId,
+                  name: _adName,
+                  args: {},
+                  status: "streaming" as "running",
+                  iteration: undefined,
+                });
+              }
+            }
+            break;
+          }
+
           case "tool_call_start": {
             S().setPipelineStatus(null);
             const toolCallIdRaw = data.tool_call_id;
             const toolCallIdVal = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
               ? toolCallIdRaw
               : undefined;
-            S().appendBlock(msgId, {
-              type: "tool_call",
-              toolCallId: toolCallIdVal,
-              name: (data.tool_name as string) || "",
-              args: (data.arguments as Record<string, unknown>) || {},
-              status: "running",
-              iteration: (data.iteration as number) || undefined,
-            });
+            const _sMsg = getLastAssistantMessage(S().messages, msgId);
+            const _sExists = toolCallIdVal && _sMsg?.blocks.some(
+              (b) => b.type === "tool_call" && b.toolCallId === toolCallIdVal && (b.status as string) === "streaming",
+            );
+            if (_sExists) {
+              S().updateToolCallBlock(msgId, toolCallIdVal!, (b) => {
+                if (b.type === "tool_call") {
+                  return {
+                    ...b,
+                    args: (data.arguments as Record<string, unknown>) || b.args,
+                    status: "running",
+                    iteration: (data.iteration as number) || undefined,
+                  } as AssistantBlock;
+                }
+                return b;
+              });
+            } else {
+              S().appendBlock(msgId, {
+                type: "tool_call",
+                toolCallId: toolCallIdVal,
+                name: (data.tool_name as string) || "",
+                args: (data.arguments as Record<string, unknown>) || {},
+                status: "running",
+                iteration: (data.iteration as number) || undefined,
+              });
+            }
             break;
           }
 
           case "tool_call_end": {
             const toolCallIdRaw = data.tool_call_id;
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
+            if (toolCallId) {
+              useExcelStore.getState().clearStreamingArgs(toolCallId);
+            }
             S().updateToolCallBlock(msgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
                 if (b.status === "pending") {
                   return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
                 }
-                if (b.status === "running") {
+                if (b.status === "running" || (b.status as string) === "streaming") {
                   return {
                     ...b,
                     status: data.success ? "success" : "error",
@@ -2007,6 +2277,8 @@ export async function subscribeToSession(sessionId: string) {
               iterations: 0,
               toolCalls: 0,
               status: "running",
+              conversationId: (data.conversation_id as string) || "",
+              tools: [],
             });
             break;
           }
@@ -2021,6 +2293,50 @@ export async function subscribeToSession(sessionId: string) {
                 };
               }
               return b;
+            });
+            break;
+          }
+
+          case "subagent_tool_start": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type !== "subagent" || b.status !== "running") return b;
+              const args = (data.arguments as Record<string, unknown>) || {};
+              const parts: string[] = [];
+              if (args.sheet) parts.push(String(args.sheet));
+              if (args.range) parts.push(String(args.range));
+              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
+              if (args.code_preview) parts.push(String(args.code_preview));
+              return {
+                ...b,
+                tools: [...(b.tools || []), {
+                  index: (data.tool_index as number) || 0,
+                  name: (data.tool_name as string) || "",
+                  argsSummary: parts.join(" \u00b7 "),
+                  status: "running" as const,
+                  args,
+                }],
+              };
+            });
+            break;
+          }
+
+          case "subagent_tool_end": {
+            S().updateBlockByType(msgId, "subagent", (b) => {
+              if (b.type !== "subagent") return b;
+              const tools = [...(b.tools || [])];
+              const toolName = (data.tool_name as string) || "";
+              const idx = tools.findLastIndex(
+                (t) => t.name === toolName && t.status === "running"
+              );
+              if (idx >= 0) {
+                tools[idx] = {
+                  ...tools[idx],
+                  status: (data.success as boolean) ? "success" : "error",
+                  result: (data.result as string) || undefined,
+                  error: (data.error as string) || undefined,
+                };
+              }
+              return { ...b, tools };
             });
             break;
           }
@@ -2046,6 +2362,7 @@ export async function subscribeToSession(sessionId: string) {
                 return {
                   ...b,
                   status: "done",
+                  success: (data.success as boolean) ?? true,
                   iterations: (data.iterations as number) || b.iterations,
                   toolCalls: (data.tool_calls as number) || b.toolCalls,
                 };
@@ -2167,6 +2484,23 @@ export async function subscribeToSession(sessionId: string) {
               const fn = edFilePath.split("/").pop() || edFilePath;
               useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
               S().addAffectedFiles(msgId, [edFilePath]);
+            }
+            break;
+          }
+
+          case "text_diff": {
+            const tdFilePath3 = (data.file_path as string) || "";
+            useExcelStore.getState().addTextDiff({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: tdFilePath3,
+              hunks: (data.hunks as string[]) || [],
+              additions: (data.additions as number) || 0,
+              deletions: (data.deletions as number) || 0,
+              truncated: !!data.truncated,
+              timestamp: Date.now(),
+            });
+            if (tdFilePath3) {
+              S().addAffectedFiles(msgId, [tdFilePath3]);
             }
             break;
           }

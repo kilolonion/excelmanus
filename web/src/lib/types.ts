@@ -39,6 +39,16 @@ export interface SessionDetail {
   lastRoute: { routeMode: string; skillsUsed: string[]; toolScope: string[] } | null;
 }
 
+export interface SubagentToolCall {
+  index: number;
+  name: string;
+  argsSummary: string;
+  status: "running" | "success" | "error";
+  result?: string;
+  error?: string;
+  args?: Record<string, unknown>;
+}
+
 export type AssistantBlock =
   | { type: "thinking"; content: string; duration?: number; startedAt?: number }
   | { type: "text"; content: string }
@@ -47,7 +57,7 @@ export type AssistantBlock =
       toolCallId?: string;
       name: string;
       args: Record<string, unknown>;
-      status: "running" | "success" | "error" | "pending";
+      status: "running" | "success" | "error" | "pending" | "streaming";
       result?: string;
       error?: string;
       iteration?: number;
@@ -60,6 +70,9 @@ export type AssistantBlock =
       toolCalls: number;
       status: "running" | "done";
       summary?: string;
+      conversationId?: string;
+      success?: boolean;
+      tools: SubagentToolCall[];
     }
   | { type: "task_list"; items: TaskItem[] }
   | { type: "iteration"; iteration: number }

@@ -38,9 +38,10 @@ interface CompactionStatus {
   message_count: number;
 }
 
-interface ManifestStatus {
+interface RegistryStatus {
   state: "idle" | "building" | "built" | "ready" | "error";
   sheet_count?: number;
+  total_files?: number;
   cached?: boolean;
   error?: string | null;
 }
@@ -48,7 +49,8 @@ interface ManifestStatus {
 interface SessionStatus {
   session_id: string;
   compaction: CompactionStatus;
-  manifest: ManifestStatus;
+  registry: RegistryStatus;
+  manifest?: RegistryStatus;
 }
 
 function formatTokens(n: number): string {
@@ -62,8 +64,8 @@ export function SessionStatusBar() {
   const [compacting, setCompacting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastCompactResult, setLastCompactResult] = useState<string | null>(null);
-  const [rebuilding, setRebuilding] = useState(false);
-  const [rebuildConfirmOpen, setRebuildConfirmOpen] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanConfirmOpen, setScanConfirmOpen] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [lastExtractResult, setLastExtractResult] = useState<string | null>(null);
 
@@ -119,22 +121,22 @@ export function SessionStatusBar() {
     void handleManualCompact();
   };
 
-  const handleManifestRebuild = async () => {
+  const handleRegistryScan = async () => {
     if (!activeSessionId) return;
-    setRebuilding(true);
+    setScanning(true);
     try {
-      await apiPost(`/sessions/${activeSessionId}/manifest/rebuild`, {});
+      await apiPost(`/sessions/${activeSessionId}/registry/scan`, {});
       await poll();
     } catch {
       // 忽略，下次轮询会显示真实状态
     } finally {
-      setRebuilding(false);
+      setScanning(false);
     }
   };
 
-  const handleConfirmRebuild = () => {
-    setRebuildConfirmOpen(false);
-    void handleManifestRebuild();
+  const handleConfirmScan = () => {
+    setScanConfirmOpen(false);
+    void handleRegistryScan();
   };
 
   const handleMemoryExtract = async () => {
@@ -159,8 +161,8 @@ export function SessionStatusBar() {
 
   if (!status) return null;
 
-  const { compaction: c, manifest: m } = status;
-  const isManifestReady = m.state === "built" || m.state === "ready";
+  const { compaction: c, registry: r } = status;
+  const isRegistryReady = r.state === "built" || r.state === "ready";
 
   return (
     <>
@@ -252,7 +254,7 @@ export function SessionStatusBar() {
             );
           })()}
 
-          {/* ── Manifest Badge ── */}
+          {/* ── Registry Badge ── */}
           <Tooltip>
             <TooltipTrigger asChild>
               <span
@@ -260,27 +262,27 @@ export function SessionStatusBar() {
                 role="button"
                 tabIndex={0}
                 onClick={() => {
-                  if (rebuilding || m.state === "building") return;
-                  setRebuildConfirmOpen(true);
+                  if (scanning || r.state === "building") return;
+                  setScanConfirmOpen(true);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    if (!rebuilding && m.state !== "building") setRebuildConfirmOpen(true);
+                    if (!scanning && r.state !== "building") setScanConfirmOpen(true);
                   }
                 }}
               >
-                {m.state === "building" || rebuilding ? (
+                {r.state === "building" || scanning ? (
                   <Badge variant="secondary" className="h-4 px-1 text-[10px]">
                     <Loader2 className="h-2.5 w-2.5 mr-0.5 animate-spin" />
-                    构建
+                    扫描
                   </Badge>
-                ) : isManifestReady ? (
+                ) : isRegistryReady ? (
                   <Badge variant="outline" className="h-4 px-1 text-[10px]">
                     <CheckCircle2 className="h-2.5 w-2.5 text-green-500 mr-0.5" />
-                    {m.sheet_count != null ? `${m.sheet_count}` : "✓"}
+                    {r.total_files != null ? `${r.total_files}` : r.sheet_count != null ? `${r.sheet_count}` : "✓"}
                   </Badge>
-                ) : m.state === "error" ? (
+                ) : r.state === "error" ? (
                   <Badge variant="destructive" className="h-4 px-1 text-[10px]">
                     <AlertCircle className="h-2.5 w-2.5 mr-0.5" />
                     !
@@ -291,13 +293,13 @@ export function SessionStatusBar() {
               </span>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
-              {m.state === "building" || rebuilding
-                ? "工作区清单正在构建…"
-                : isManifestReady
-                  ? `清单已就绪${m.cached ? "（缓存）" : ""} — 点击重新构建`
-                  : m.state === "error"
-                    ? `清单构建失败: ${m.error || "未知错误"} — 点击重试`
-                    : "清单未构建 — 点击构建"}
+              {r.state === "building" || scanning
+                ? "文件注册表扫描中…"
+                : isRegistryReady
+                  ? `注册表已就绪${r.cached ? "（缓存）" : ""} — 点击重新扫描`
+                  : r.state === "error"
+                    ? `扫描失败: ${r.error || "未知错误"} — 点击重试`
+                    : "注册表未构建 — 点击扫描"}
             </TooltipContent>
           </Tooltip>
 
@@ -357,23 +359,23 @@ export function SessionStatusBar() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={rebuildConfirmOpen} onOpenChange={setRebuildConfirmOpen}>
+      <Dialog open={scanConfirmOpen} onOpenChange={setScanConfirmOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>重新构建工作区清单</DialogTitle>
+            <DialogTitle>重新扫描文件注册表</DialogTitle>
             <DialogDescription>
-              将重新扫描工作区文件并构建清单索引。构建过程在后台执行，不会中断当前对话。
+              将重新扫描工作区文件并更新注册表索引。扫描过程在后台执行，不会中断当前对话。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRebuildConfirmOpen(false)}>
+            <Button variant="outline" onClick={() => setScanConfirmOpen(false)}>
               取消
             </Button>
             <Button
-              onClick={handleConfirmRebuild}
-              disabled={rebuilding || !activeSessionId}
+              onClick={handleConfirmScan}
+              disabled={scanning || !activeSessionId}
             >
-              {rebuilding ? "构建中..." : "确认构建"}
+              {scanning ? "扫描中..." : "确认扫描"}
             </Button>
           </DialogFooter>
         </DialogContent>

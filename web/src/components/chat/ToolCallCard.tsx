@@ -30,6 +30,8 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
+import { TextDiffView } from "./TextDiffView";
+import StreamingTextPreview from "./StreamingTextPreview";
 import { CodeBlock } from "./CodeBlock";
 
 // 工具分类 → 图标映射
@@ -44,6 +46,8 @@ const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   run_code: Code,
   finish_task: ListChecks,
   read_text_file: FileText,
+  write_text_file: PenLine,
+  edit_text_file: PenLine,
   sleep: Timer,
 };
 
@@ -188,12 +192,15 @@ const EXCEL_DIFF_TOOLS = new Set([
   ...EXCEL_WRITE_TOOLS,
   "run_code", "finish_task",
 ]);
+const TEXT_DIFF_TOOLS = new Set([
+  "write_text_file", "edit_text_file", "run_code", "write_plan",
+]);
 
 interface ToolCallCardProps {
   toolCallId?: string;
   name: string;
   args: Record<string, unknown>;
-  status: "running" | "success" | "error" | "pending";
+  status: "running" | "success" | "error" | "pending" | "streaming";
   result?: string;
   error?: string;
 }
@@ -217,8 +224,16 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   // 运行中工具的已用时间
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  // 流式工具参数预览
+  const isStreaming = (status as string) === "streaming";
+  const streamingRawArgs = useExcelStore((s) =>
+    toolCallId && (isStreaming || status === "running") && TEXT_DIFF_TOOLS.has(name)
+      ? s.streamingToolContent[toolCallId] ?? null
+      : null
+  );
+
   useEffect(() => {
-    if (status !== "running") {
+    if (status !== "running" && !isStreaming) {
       startRef.current = null;
       return;
     }
@@ -242,6 +257,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     toolCallId && isExcelRead ? s.previews[toolCallId] : undefined
   );
   const canHaveDiff = EXCEL_DIFF_TOOLS.has(name);
+  const canHaveTextDiff = TEXT_DIFF_TOOLS.has(name);
   
   // 使用 useMemo 缓存 diffs 计算结果，避免无限循环
   const allDiffs = useExcelStore((s) => s.diffs);
@@ -249,6 +265,12 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     if (!toolCallId || !canHaveDiff) return [];
     return allDiffs.filter((d) => d.toolCallId === toolCallId);
   }, [toolCallId, canHaveDiff, allDiffs]);
+
+  const allTextDiffs = useExcelStore((s) => s.textDiffs);
+  const textDiffs = useMemo(() => {
+    if (!toolCallId || !canHaveTextDiff) return [];
+    return allTextDiffs.filter((d) => d.toolCallId === toolCallId);
+  }, [toolCallId, canHaveTextDiff, allTextDiffs]);
 
   // 按文件去重获取涉及的文件路径
   const diffFilePaths = Array.from(new Set(diffs.map((d) => d.filePath).filter(Boolean)));
@@ -268,12 +290,14 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     if (anyOk) setAppliedInline(true);
   }, [activeSessionId, diffFilePaths, applyFile]);
 
-  const StatusIcon = {
+  const statusIconMap: Record<string, React.ReactNode> = {
+    streaming: <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--em-cyan)" }} />,
     running: <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--em-cyan)" }} />,
     success: <CheckCircle2 className="h-3 w-3" style={{ color: "var(--em-primary)" }} />,
     error: <XCircle className="h-3 w-3" style={{ color: "var(--em-error)" }} />,
     pending: <ShieldAlert className="h-3 w-3" style={{ color: "var(--em-gold)" }} />,
-  }[status];
+  };
+  const StatusIcon = statusIconMap[status];
 
   const ToolIcon = getToolIcon(name);
   const summary = !open ? argsSummary(name, args) : null;
@@ -281,7 +305,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
 
   const isError = status === "error";
   const isPending = status === "pending";
-  const isRunning = status === "running";
+  const isRunning = status === "running" || isStreaming;
   const isSuccess = status === "success";
 
   const borderCls = isPending
@@ -396,6 +420,20 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
           </div>
         </CollapsibleContent>
       </Collapsible>
+
+      {/* 流式内容预览 — 在工具参数生成期间显示 */}
+      {streamingRawArgs && textDiffs.length === 0 && (
+        <StreamingTextPreview toolName={name} rawArgs={streamingRawArgs} />
+      )}
+
+      {/* 文本文件 diff — 有数据时始终显示 */}
+      {textDiffs.length > 0 && (
+        <div>
+          {textDiffs.map((d, i) => (
+            <TextDiffView key={`${d.toolCallId}-${d.filePath}-${i}`} data={d} />
+          ))}
+        </div>
+      )}
 
       {/* Excel 内联预览/差异 — 有数据时始终显示 */}
       {preview && <ExcelPreviewTable data={preview} />}

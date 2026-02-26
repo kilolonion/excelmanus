@@ -547,6 +547,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
           toolCalls={block.toolCalls}
           status={block.status}
           summary={block.summary}
+          success={block.success}
+          tools={block.tools}
         />
       );
     case "task_list":
