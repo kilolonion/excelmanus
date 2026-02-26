@@ -354,9 +354,10 @@ class ExcelManusConfig:
     subagent_enabled: bool = True
     subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 6
+    subagent_timeout_seconds: int = 600  # 单个子代理执行超时（秒）
+    parallel_subagent_max: int = 3  # 并行子代理最大并发数
     # 同一轮次中相邻只读工具并发执行（asyncio.gather）
     parallel_readonly_tools: bool = True
-    prefetch_explorer: bool = True
     subagent_user_dir: str = "~/.excelmanus/agents"
     subagent_project_dir: str = ".excelmanus/agents"
     # 跨会话持久记忆配置
@@ -999,11 +1000,6 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_PARALLEL_READONLY_TOOLS",
         True,
     )
-    prefetch_explorer = _parse_bool(
-        os.environ.get("EXCELMANUS_PREFETCH_EXPLORER"),
-        "EXCELMANUS_PREFETCH_EXPLORER",
-        True,
-    )
     subagent_max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
@@ -1013,6 +1009,16 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
         "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
         6,
+    )
+    subagent_timeout_seconds = _parse_int(
+        os.environ.get("EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS"),
+        "EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS",
+        600,
+    )
+    parallel_subagent_max = _parse_int(
+        os.environ.get("EXCELMANUS_PARALLEL_SUBAGENT_MAX"),
+        "EXCELMANUS_PARALLEL_SUBAGENT_MAX",
+        3,
     )
     subagent_user_dir = os.environ.get(
         "EXCELMANUS_SUBAGENT_USER_DIR",
@@ -1376,9 +1382,10 @@ def load_config() -> ExcelManusConfig:
         aux_model=aux_model,
         subagent_enabled=subagent_enabled,
         parallel_readonly_tools=parallel_readonly_tools,
-        prefetch_explorer=prefetch_explorer,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
+        subagent_timeout_seconds=subagent_timeout_seconds,
+        parallel_subagent_max=parallel_subagent_max,
         subagent_user_dir=subagent_user_dir,
         subagent_project_dir=subagent_project_dir,
         memory_enabled=memory_enabled,

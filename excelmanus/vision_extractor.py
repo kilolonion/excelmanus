@@ -166,6 +166,7 @@ _EXTRACT_DATA_PROMPT = """\
       ],
       "merges": ["A1:E1", "A10:C10"],
       "col_widths": [15, 10, 12],
+      "col_alignments": ["left", "left", "right", "right", "center"],
       "uncertainties": [
         {"addr": "C5", "reason": "数字模糊", "candidates": ["350", "850"]}
       ]
@@ -181,6 +182,7 @@ _EXTRACT_DATA_PROMPT = """\
 - display: 可选，单元格的显示文本（如带货币符号、千分位的数字）
 - merges: 合并单元格范围列表
 - col_widths: 各列的估计宽度（Excel 字符单位，通常 8-25）
+- col_alignments: 各列数据区的水平对齐方式（"left" | "center" | "right"），根据图中观察到的实际对齐填写。典型规律：文本列 left、数字/金额列 right、日期列 center
 - header_rows: 表头行号列表（1-based）
 - total_rows: 合计行号列表（1-based）
 - uncertainties: 不确定项（看不清的内容）
@@ -360,6 +362,22 @@ def postprocess_extraction_to_spec(
         name = table.get("name") or table.get("title") or f"Table{idx + 1}"
         dims = table.get("dimensions") or {"rows": 0, "cols": 0}
 
+        # ── Phase 1 col_alignments 兜底：当 Phase 2 样式缺失时生成默认对齐样式 ──
+        col_alignments: list[str] = table.get("col_alignments") or []
+        col_align_style_map: dict[int, str] = {}  # col_index(0-based) → style_id
+        if col_alignments and not style_json:
+            # Phase 2 失败，用 Phase 1 的列对齐信息生成样式
+            for ci, align_val in enumerate(col_alignments):
+                if align_val in ("left", "right", "center"):
+                    sid = f"_align_{align_val}"
+                    if sid not in compiled_styles:
+                        compiled_styles[sid] = StyleClass(
+                            alignment=AlignmentSpec(
+                                horizontal=align_val, vertical="center",
+                            ),
+                        )
+                    col_align_style_map[ci] = sid
+
         # 转换 cells
         cells: list[CellSpec] = []
         for raw_cell in table.get("cells") or []:
@@ -377,13 +395,19 @@ def postprocess_extraction_to_spec(
             nf = None
             if display and vtype == "number" and val is not None:
                 nf = _infer_number_format_from_display(display)
+            # 确定 style_id：优先 Phase 2 映射，其次 col_alignments 兜底
+            sid = cell_to_style.get(addr.upper())
+            if not sid and col_align_style_map:
+                col_idx = _col_index_from_addr(addr)
+                if col_idx is not None and col_idx in col_align_style_map:
+                    sid = col_align_style_map[col_idx]
             cells.append(CellSpec(
                 address=addr,
                 value=val,
                 value_type=vtype,
                 display_text=display,
                 number_format=nf,
-                style_id=cell_to_style.get(addr.upper()),
+                style_id=sid,
                 confidence=1.0,
             ))
 
@@ -456,6 +480,19 @@ def _expand_range(range_str: str) -> list[str]:
         return addrs
     except Exception:
         return [range_str]
+
+
+def _col_index_from_addr(addr: str) -> int | None:
+    """从单元格地址（如 'B3'）提取 0-based 列索引。"""
+    from openpyxl.utils import column_index_from_string
+
+    col_str = re.match(r'^([A-Z]+)', addr.upper())
+    if not col_str:
+        return None
+    try:
+        return column_index_from_string(col_str.group(1)) - 1
+    except Exception:
+        return None
 
 
 def _infer_number_format_from_display(display_text: str) -> str | None:

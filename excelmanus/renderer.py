@@ -107,6 +107,7 @@ class StreamRenderer:
             EventType.PIPELINE_PROGRESS: self._render_pipeline_progress,
             EventType.MEMORY_EXTRACTED: self._render_memory_extracted,
             EventType.FILE_DOWNLOAD: self._render_file_download,
+            EventType.RETRACT_THINKING: lambda _evt: None,
         }
         handler = handlers.get(event.event_type)
         if handler:

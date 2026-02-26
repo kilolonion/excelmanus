@@ -31,7 +31,6 @@ _PATH_LIKE_FIELD_NAMES: frozenset[str] = frozenset(
         "target_path",
         "source_file",
         "target_file",
-        "resume_from_spec",
     }
 )
 
