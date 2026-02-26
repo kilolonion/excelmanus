@@ -345,6 +345,7 @@ class ChatHistoryStore:
         rows: list[list],
         total_rows: int,
         truncated: bool,
+        cell_styles: list[list] | None = None,
     ) -> None:
         if not self._has_excel_tables():
             return
