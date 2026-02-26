@@ -19,3 +19,5 @@ conditions: {}
 5. **验证**：格式化后用 `read_excel(include=["styles"])` 确认样式已按预期变更。
 
 6. **输出格式校准**：写入缺失值/空值前，先观察目标区域已有数据的表示方式（空单元格、空字符串、N/A 等），保持一致。当用户提示中出现"output may be empty string"或类似表述时，缺失值用空字符串或空单元格输出，保持与原数据一致。
+
+7. **收尾动作**：格式化任务结束时，执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 自动调整列宽和行高，确保表格布局美观。参考 table_layout 策略的相关配置（数字右对齐、文本左对齐、标题居中等）。

@@ -103,3 +103,34 @@ dv.add("B2:B100")
 ws.add_data_validation(dv)
 wb.save("file.xlsx")
 ```
+
+## 专业对齐（按列数据类型）
+
+```python
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment
+wb = load_workbook("file.xlsx")
+ws = wb["Sheet1"]
+max_row = ws.max_row
+# 表头居中
+for cell in ws[1]:
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+# 文本列左对齐（A、B列）
+for row in ws.iter_rows(min_row=2, max_row=max_row, min_col=1, max_col=2):
+    for cell in row:
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+# 数字列右对齐（C、D列）
+for row in ws.iter_rows(min_row=2, max_row=max_row, min_col=3, max_col=4):
+    for cell in row:
+        cell.alignment = Alignment(horizontal="right", vertical="center")
+wb.save("file.xlsx")
+```
+
+## auto_fit 收尾（写入/格式化后必做）
+
+```python
+# 写入或格式化完成后，调用 adjust_column_width 和 adjust_row_height 自动适配
+# 这两个工具会智能估算 CJK 宽度、number_format 显示文本、wrap_text 多行等
+adjust_column_width(file_path="file.xlsx", auto_fit=True, sheet_name="Sheet1")
+adjust_row_height(file_path="file.xlsx", auto_fit=True, sheet_name="Sheet1")
+```

@@ -18,6 +18,7 @@ from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools._helpers import get_worksheet
+from excelmanus.tools._style_extract import extract_cell_style
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.cell")
@@ -110,11 +111,16 @@ def _capture_range_snapshot(
     min_col: int,
     max_row: int,
     max_col: int,
+    *,
+    with_styles: bool = False,
 ) -> list[dict[str, Any]]:
     """捕获指定范围内所有非空单元格的值快照。
 
+    Args:
+        with_styles: 为 True 时同时提取单元格样式。
+
     Returns:
-        列表，每项为 {"cell": "A1", "value": ...}
+        列表，每项为 {"cell": "A1", "value": ..., "style": {...} | None}
     """
     snapshot: list[dict[str, Any]] = []
     for r in range(min_row, max_row + 1):
@@ -122,7 +128,10 @@ def _capture_range_snapshot(
             cell_obj = ws.cell(row=r, column=c)
             ref = f"{get_column_letter(c)}{r}"
             val = cell_obj.value
-            snapshot.append({"cell": ref, "value": val})
+            entry: dict[str, Any] = {"cell": ref, "value": val}
+            if with_styles:
+                entry["style"] = extract_cell_style(cell_obj)
+            snapshot.append(entry)
     return snapshot
 
 
@@ -132,22 +141,34 @@ def _compute_cell_diff(
 ) -> list[dict[str, Any]]:
     """对比写入前后快照，返回变化的单元格列表。
 
+    快照项可以包含 "style" 键（由 _capture_range_snapshot(with_styles=True) 产生），
+    此时 diff 结果会附带 old_style / new_style。
+
     Returns:
-        列表，每项为 {"cell": "A1", "old": ..., "new": ...}
+        列表，每项为 {"cell": "A1", "old": ..., "new": ..., "old_style": ..., "new_style": ...}
     """
     before_map = {item["cell"]: item["value"] for item in before}
     after_map = {item["cell"]: item["value"] for item in after}
+    before_style_map = {item["cell"]: item.get("style") for item in before}
+    after_style_map = {item["cell"]: item.get("style") for item in after}
     all_cells = sorted(set(before_map) | set(after_map))
     changes: list[dict[str, Any]] = []
     for cell_ref in all_cells:
         old_val = before_map.get(cell_ref)
         new_val = after_map.get(cell_ref)
         if old_val != new_val:
-            changes.append({
+            entry: dict[str, Any] = {
                 "cell": cell_ref,
                 "old": _serialize_cell_value(old_val),
                 "new": _serialize_cell_value(new_val),
-            })
+            }
+            old_s = before_style_map.get(cell_ref)
+            new_s = after_style_map.get(cell_ref)
+            if old_s is not None:
+                entry["old_style"] = old_s
+            if new_s is not None:
+                entry["new_style"] = new_s
+            changes.append(entry)
     return changes
 
 
@@ -238,6 +259,7 @@ def write_cells(
         # 写入前快照
         before_snapshot = _capture_range_snapshot(
             ws, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
+            with_styles=True,
         )
     except Exception:
         before_snapshot = []
@@ -316,6 +338,7 @@ def write_cells(
         ws_after = get_worksheet(wb_after, sheet_name)
         after_snapshot = _capture_range_snapshot(
             ws_after, _snap_min_row, _snap_min_col, _snap_max_row, _snap_max_col,
+            with_styles=True,
         )
         wb_after.close()
         excel_diff = _compute_cell_diff(before_snapshot, after_snapshot)
