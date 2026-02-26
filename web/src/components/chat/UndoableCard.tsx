@@ -3,13 +3,16 @@
 import { useState } from "react";
 import { Undo2, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { apiPost } from "@/lib/api";
+import { undoApproval } from "@/lib/api";
+import { useSessionStore } from "@/stores/session-store";
 
 interface UndoableCardProps {
   approvalId: string;
   toolName: string;
   success: boolean;
   undoable: boolean;
+  hasChanges?: boolean;
+  sessionId?: string;
   undone?: boolean;
   undoError?: string;
   onUndone?: (approvalId: string, error?: string) => void;
@@ -20,20 +23,22 @@ export function UndoableCard({
   toolName,
   success,
   undoable,
+  hasChanges,
+  sessionId,
   undone,
   undoError,
   onUndone,
 }: UndoableCardProps) {
   const [loading, setLoading] = useState(false);
 
+  const storeSessionId = useSessionStore((s) => s.activeSessionId);
+  const effectiveSessionId = sessionId || storeSessionId;
+
   const handleUndo = async () => {
-    if (loading || undone) return;
+    if (loading || undone || !effectiveSessionId) return;
     setLoading(true);
     try {
-      const res = await apiPost<{ status: string; message: string }>(
-        `/approvals/${approvalId}/undo`,
-        {}
-      );
+      const res = await undoApproval(approvalId, effectiveSessionId);
       onUndone?.(approvalId, res.status === "ok" ? undefined : res.message);
     } catch (err) {
       onUndone?.(approvalId, (err as Error).message);
@@ -81,7 +86,7 @@ export function UndoableCard({
         )}
       </div>
 
-      {undoable && !undone && success && (
+      {undoable && !undone && success && (hasChanges !== false) && (
         <Button
           size="sm"
           variant="outline"

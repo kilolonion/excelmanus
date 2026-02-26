@@ -1,13 +1,15 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus } from "lucide-react";
+import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { MentionHighlighter } from "./MentionHighlighter";
-import { downloadFile } from "@/lib/api";
+import { downloadFile, buildApiUrl } from "@/lib/api";
 import type { FileAttachment } from "@/lib/types";
+
+const MAX_COLLAPSED_HEIGHT = 200; // px
 
 const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
 function isExcelFile(filename: string): boolean {
@@ -34,9 +36,22 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
   const [editFiles, setEditFiles] = useState<File[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [needsExpand, setNeedsExpand] = useState(false);
+  const [wsPickerOpen, setWsPickerOpen] = useState(false);
+  const [wsFiles, setWsFiles] = useState<string[]>([]);
+  const [wsFilter, setWsFilter] = useState("");
+  const contentRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
+  const wsPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (contentRef.current) {
+      setNeedsExpand(contentRef.current.scrollHeight > MAX_COLLAPSED_HEIGHT);
+    }
+  }, [content]);
 
   useEffect(() => {
     if (editing && textareaRef.current) {
@@ -55,7 +70,54 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     setEditing(false);
     setEditText(content);
     setEditFiles([]);
+    setWsPickerOpen(false);
+    setWsFiles([]);
+    setWsFilter("");
   }, [content]);
+
+  const fetchWorkspaceFiles = useCallback(async () => {
+    try {
+      const res = await fetch(buildApiUrl("/mentions"));
+      if (res.ok) {
+        const data = await res.json();
+        setWsFiles((data.files as string[]) || []);
+      }
+    } catch { /* 后端不可用 */ }
+  }, []);
+
+  const toggleWsPicker = useCallback(() => {
+    if (!wsPickerOpen) {
+      fetchWorkspaceFiles();
+    }
+    setWsPickerOpen((v) => !v);
+    setWsFilter("");
+  }, [wsPickerOpen, fetchWorkspaceFiles]);
+
+  const selectWsFile = useCallback((filename: string) => {
+    const mention = `@file:${filename}`;
+    const textarea = textareaRef.current;
+    const cursorPos = textarea?.selectionStart ?? editText.length;
+    const before = editText.slice(0, cursorPos);
+    const after = editText.slice(cursorPos);
+    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
+    const prefix = needsSpace ? " " : "";
+    setEditText(before + prefix + mention + " " + after);
+    setWsPickerOpen(false);
+    setWsFilter("");
+    requestAnimationFrame(() => textarea?.focus());
+  }, [editText]);
+
+  // 点击外部时关闭工作区选择器
+  useEffect(() => {
+    if (!wsPickerOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (wsPickerRef.current && !wsPickerRef.current.contains(e.target as Node)) {
+        setWsPickerOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [wsPickerOpen]);
 
   const confirmEdit = useCallback(() => {
     const trimmed = editText.trim();
@@ -128,7 +190,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 e.target.value = "";
               }}
             />
-            <div className="flex gap-1.5">
+            <div className="flex gap-1.5 relative">
               <button
                 onClick={() => editFileInputRef.current?.click()}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
@@ -137,6 +199,58 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 <Plus className="h-3 w-3" />
                 附件
               </button>
+              <button
+                onClick={toggleWsPicker}
+                className={`inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                  wsPickerOpen
+                    ? "bg-[var(--em-primary-alpha-15)] text-[var(--em-primary)]"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80"
+                }`}
+                title="从工作区选取文件"
+              >
+                <FolderOpen className="h-3 w-3" />
+                工作区
+              </button>
+              {wsPickerOpen && (
+                <div
+                  ref={wsPickerRef}
+                  className="absolute bottom-full left-0 mb-1 w-64 max-h-48 overflow-y-auto rounded-lg border bg-popover shadow-lg z-50"
+                >
+                  <div className="sticky top-0 bg-popover border-b px-2 py-1.5">
+                    <input
+                      type="text"
+                      placeholder="搜索文件..."
+                      value={wsFilter}
+                      onChange={(e) => setWsFilter(e.target.value)}
+                      className="w-full text-xs bg-transparent outline-none placeholder:text-muted-foreground/50"
+                      autoFocus
+                    />
+                  </div>
+                  {wsFiles
+                    .filter((f) => !wsFilter || f.toLowerCase().includes(wsFilter.toLowerCase()))
+                    .map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => selectWsFile(f)}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-left hover:bg-accent transition-colors"
+                      >
+                        <FileSpreadsheet className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
+                        <span className="truncate">{f}</span>
+                      </button>
+                    ))}
+                  {wsFiles.length === 0 && (
+                    <div className="px-2 py-3 text-xs text-muted-foreground text-center">
+                      加载中...
+                    </div>
+                  )}
+                  {wsFiles.length > 0 && wsFiles.filter((f) => !wsFilter || f.toLowerCase().includes(wsFilter.toLowerCase())).length === 0 && (
+                    <div className="px-2 py-3 text-xs text-muted-foreground text-center">
+                      无匹配文件
+                    </div>
+                  )}
+                </div>
+              )}
               <button
                 onClick={confirmEdit}
                 className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
@@ -162,10 +276,40 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
             }`}
             onClick={onEditAndResend && !isStreaming ? startEdit : undefined}
           >
-            <MentionHighlighter
-              text={content}
-              className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
-            />
+            <div
+              ref={contentRef}
+              className="overflow-hidden transition-[max-height] duration-300"
+              style={{
+                maxHeight: needsExpand && !expanded ? `${MAX_COLLAPSED_HEIGHT}px` : undefined,
+              }}
+            >
+              <MentionHighlighter
+                text={content}
+                className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
+              />
+            </div>
+            {needsExpand && !expanded && (
+              <div className="relative -mt-6 pt-6 bg-gradient-to-t from-[var(--em-primary-alpha-10)] to-transparent">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+                  className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+                >
+                  <ChevronDown className="h-3 w-3" />
+                  展开全部
+                </button>
+              </div>
+            )}
+            {needsExpand && expanded && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
+                className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+              >
+                <ChevronUp className="h-3 w-3" />
+                收起
+              </button>
+            )}
             {onEditAndResend && !isStreaming && (
               <span
                 className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show transition-opacity"

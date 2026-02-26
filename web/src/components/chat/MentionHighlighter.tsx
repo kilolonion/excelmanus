@@ -37,15 +37,15 @@ interface MentionToken {
   end: number;
   raw: string;
   kind: string;       // "file" | "folder" | "skill" | "mcp" | "tool" | "bare-file"
-  value: string;       // filename / skill name etc.
-  rangeSpec?: string;  // e.g. "Sheet1!A1:C10"
+  value: string;       // 文件名 / 技能名等
+  rangeSpec?: string;  // 例如 "Sheet1!A1:C10"
 }
 
 function extractMentions(text: string): MentionToken[] {
   const tokens: MentionToken[] = [];
-  const seen = new Set<string>(); // dedup by start position
+  const seen = new Set<string>(); // 按起始位置去重
 
-  // Typed mentions: @file:xxx, @skill:xxx, etc.
+  // 类型化提及：@file:xxx、@skill:xxx 等
   MENTION_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = MENTION_RE.exec(text)) !== null) {
@@ -62,7 +62,7 @@ function extractMentions(text: string): MentionToken[] {
     });
   }
 
-  // Bare @filename.ext mentions
+  // 裸 @文件名.扩展名 提及
   BARE_FILE_RE.lastIndex = 0;
   while ((m = BARE_FILE_RE.exec(text)) !== null) {
     const key = `${m.index}`;
@@ -94,7 +94,7 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
       const normalized = normalizeExcelPath(value);
       const filename = normalized.split("/").pop() || normalized;
 
-      // Look up existing file by normalized path to avoid creating duplicates
+      // 按规范化路径查找已有文件，避免重复创建
       const recentFiles = useExcelStore.getState().recentFiles;
       const existing = recentFiles.find(
         (f) => normalizeExcelPath(f.path) === normalized,
@@ -118,7 +118,7 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
   let cursor = 0;
 
   for (const token of tokens) {
-    // Text before this token
+    // 该 token 之前的文本
     if (token.start > cursor) {
       parts.push(
         <span key={`t-${cursor}`}>{text.slice(cursor, token.start)}</span>
@@ -149,7 +149,7 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
     cursor = token.end;
   }
 
-  // Remaining text after last token
+  // 最后一个 token 之后的剩余文本
   if (cursor < text.length) {
     parts.push(<span key={`t-${cursor}`}>{text.slice(cursor)}</span>);
   }

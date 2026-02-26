@@ -24,7 +24,7 @@ import type { ModelInfo } from "@/lib/types";
 function extractProvider(baseUrl: string | undefined): string {
   if (!baseUrl) return "unknown";
   try {
-    const hostname = new URL(baseUrl).hostname; // e.g. "api.deepseek.com"
+    const hostname = new URL(baseUrl).hostname; // 例如 "api.deepseek.com"
     const parts = hostname.split(".");
     // 取倒数第二段作为二级域名
     if (parts.length >= 2) {

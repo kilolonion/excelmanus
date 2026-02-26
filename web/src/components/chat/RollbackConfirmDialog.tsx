@@ -65,7 +65,7 @@ export function RollbackConfirmDialog({
     [dontAskAgain, onConfirm]
   );
 
-  // Keyboard shortcuts: Enter = revert, Shift+Enter = no revert, Esc = cancel
+  // 快捷键：Enter = 回滚，Shift+Enter = 不回滚，Esc = 取消
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
