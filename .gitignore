@@ -6,6 +6,9 @@
 !.env.example
 mcp.json
 *.pem
+server.crt
+server.key
+id_new_server.pem.pub
 
 # ==============================
 # Python
