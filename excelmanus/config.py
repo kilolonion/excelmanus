@@ -347,6 +347,7 @@ class ExcelManusConfig:
     )
     mcp_shared_manager: bool = False
     # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
+    aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
     aux_api_key: str | None = None
     aux_base_url: str | None = None
     aux_model: str | None = None
@@ -410,12 +411,14 @@ class ExcelManusConfig:
     window_intent_repeat_trip_threshold: int = 3
     window_rule_engine_version: str = "v1"
     # VLM（视觉语言模型）独立模型配置（可选，未配置时回退到主模型）
+    vlm_enabled: bool = True  # 开关：False 时即使配置了 VLM 也回退到主模型
     vlm_api_key: str | None = None
     vlm_base_url: str | None = None
     vlm_model: str | None = None
     vlm_timeout_seconds: int = 300
     vlm_max_retries: int = 1
     vlm_retry_base_delay_seconds: float = 5.0
+    vlm_max_tokens: int = 16384  # VLM 最大输出 token 数（结构化提取需要较大空间）
     vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
     vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
     vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
@@ -983,6 +986,11 @@ def load_config() -> ExcelManusConfig:
     )
 
     # AUX 配置（统一配置）
+    aux_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_AUX_ENABLED"),
+        "EXCELMANUS_AUX_ENABLED",
+        True,
+    )
     aux_api_key = os.environ.get("EXCELMANUS_AUX_API_KEY") or None
     aux_base_url = os.environ.get("EXCELMANUS_AUX_BASE_URL") or None
     if aux_base_url:
@@ -1184,11 +1192,21 @@ def load_config() -> ExcelManusConfig:
     )
 
     # VLM 独立模型配置（可选）
+    vlm_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_VLM_ENABLED"),
+        "EXCELMANUS_VLM_ENABLED",
+        True,
+    )
     vlm_api_key = os.environ.get("EXCELMANUS_VLM_API_KEY") or None
     vlm_base_url = os.environ.get("EXCELMANUS_VLM_BASE_URL") or None
     if vlm_base_url:
         _validate_base_url(vlm_base_url)
     vlm_model = os.environ.get("EXCELMANUS_VLM_MODEL") or None
+    vlm_max_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_VLM_MAX_TOKENS"),
+        "EXCELMANUS_VLM_MAX_TOKENS",
+        16384,
+    )
     vlm_enhance = _parse_bool(
         os.environ.get("EXCELMANUS_VLM_ENHANCE"),
         "EXCELMANUS_VLM_ENHANCE",
@@ -1377,6 +1395,7 @@ def load_config() -> ExcelManusConfig:
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
+        aux_enabled=aux_enabled,
         aux_api_key=aux_api_key,
         aux_base_url=aux_base_url,
         aux_model=aux_model,
@@ -1430,9 +1449,11 @@ def load_config() -> ExcelManusConfig:
         window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
         window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
         window_rule_engine_version=window_rule_engine_version,
+        vlm_enabled=vlm_enabled,
         vlm_api_key=vlm_api_key,
         vlm_base_url=vlm_base_url,
         vlm_model=vlm_model,
+        vlm_max_tokens=vlm_max_tokens,
         vlm_enhance=vlm_enhance,
         main_model_vision=main_model_vision,
         backup_enabled=backup_enabled,
