@@ -829,11 +829,12 @@ class AgentEngine:
             api_key=config.api_key,
             base_url=config.base_url,
         )
-        # AUX：统一用于路由小模型 + 窗口感知顾问（未配置 aux_model 时回退主模型）
+        # AUX：统一用于路由小模型 + 窗口感知顾问（未配置 aux_model 或 aux_enabled=False 时回退主模型）
+        _aux_effective = config.aux_enabled and bool(config.aux_model)
         _aux_api_key = config.aux_api_key or config.api_key
         _aux_base_url = config.aux_base_url or config.base_url
-        # 路由子代理：aux_model 已配置则固定 aux；否则跟随主模型
-        if config.aux_model:
+        # 路由子代理：aux_model 已配置且启用则固定 aux；否则跟随主模型
+        if _aux_effective:
             self._router_client = create_client(
                 api_key=_aux_api_key,
                 base_url=_aux_base_url,
@@ -844,10 +845,10 @@ class AgentEngine:
             self._router_client = self._client
             self._router_model = config.model
             self._router_follow_active_model = True
-        # 窗口感知顾问小模型：aux_* + aux_model → 主模型
-        _adv_api_key = _aux_api_key
-        _adv_base_url = _aux_base_url
-        _adv_model = config.aux_model or config.model
+        # 窗口感知顾问小模型：aux 启用时用 aux_*，否则回退主模型
+        _adv_api_key = _aux_api_key if _aux_effective else config.api_key
+        _adv_base_url = _aux_base_url if _aux_effective else config.base_url
+        _adv_model = (config.aux_model if _aux_effective else None) or config.model
         # 始终创建独立 client，避免与 _client 共享对象导致测试 mock 互相干扰
         self._advisor_client = create_client(
             api_key=_adv_api_key,
@@ -855,12 +856,13 @@ class AgentEngine:
         )
         self._advisor_model = _adv_model
         # adviser 是否跟随主模型切换：仅当未配置辅助模型时
-        self._advisor_follow_active_model = not config.aux_model
-        # VLM 独立客户端：vlm_* → 主模型
-        _vlm_api_key = config.vlm_api_key or config.api_key
-        _vlm_base_url = config.vlm_base_url or config.base_url
-        _vlm_model = config.vlm_model or config.model
-        if config.vlm_base_url:
+        self._advisor_follow_active_model = not _aux_effective
+        # VLM 独立客户端：vlm_enabled=False 时回退到主模型
+        _vlm_effective = config.vlm_enabled
+        _vlm_api_key = (config.vlm_api_key if _vlm_effective else None) or config.api_key
+        _vlm_base_url = (config.vlm_base_url if _vlm_effective else None) or config.base_url
+        _vlm_model = (config.vlm_model if _vlm_effective else None) or config.model
+        if _vlm_effective and config.vlm_base_url:
             self._vlm_client = create_client(
                 api_key=_vlm_api_key,
                 base_url=_vlm_base_url,
@@ -873,8 +875,8 @@ class AgentEngine:
         self._is_vision_capable = self._infer_vision_capable(config)
         # B 通道可用条件：
         #   1. vlm_enhance 总开关开启
-        #   2. 有独立 VLM 端点（vlm_base_url），或主模型本身有视觉能力可兼作 VLM
-        _has_independent_vlm = bool(config.vlm_base_url)
+        #   2. 有独立 VLM 端点（vlm_base_url 且 vlm_enabled），或主模型本身有视觉能力可兼作 VLM
+        _has_independent_vlm = bool(_vlm_effective and config.vlm_base_url)
         self._vlm_enhance_available = (
             config.vlm_enhance
             and (_has_independent_vlm or self._is_vision_capable)
@@ -1822,6 +1824,7 @@ class AgentEngine:
     def update_aux_config(
         self,
         *,
+        aux_enabled: bool = True,
         aux_model: str | None = None,
         aux_api_key: str | None = None,
         aux_base_url: str | None = None,
@@ -1831,15 +1834,21 @@ class AgentEngine:
         当前端通过 API 修改 AUX 配置时，由 SessionManager 广播调用，
         确保已存活的引擎实例不会使用过时的 AUX 快照。
         """
-        # 更新 frozen dataclass 上的 aux 字段
-        object.__setattr__(self._config, "aux_model", aux_model)
-        object.__setattr__(self._config, "aux_api_key", aux_api_key)
-        object.__setattr__(self._config, "aux_base_url", aux_base_url)
+        # 使用 replace 创建新 config 实例，保持 frozen 语义
+        from dataclasses import replace as _dc_replace
+        self._config = _dc_replace(
+            self._config,
+            aux_enabled=aux_enabled,
+            aux_model=aux_model,
+            aux_api_key=aux_api_key,
+            aux_base_url=aux_base_url,
+        )
 
         # 重建路由 / 窗口感知顾问的 client 与 model
+        _aux_effective = aux_enabled and bool(aux_model)
         _aux_api_key = aux_api_key or self._config.api_key
         _aux_base_url = aux_base_url or self._config.base_url
-        if aux_model:
+        if _aux_effective:
             self._router_client = create_client(
                 api_key=_aux_api_key,
                 base_url=_aux_base_url,
@@ -1851,15 +1860,18 @@ class AgentEngine:
             self._router_model = self._active_model
             self._router_follow_active_model = True
 
-        _adv_model = aux_model or self._active_model
+        _adv_api_key = _aux_api_key if _aux_effective else self._config.api_key
+        _adv_base_url = _aux_base_url if _aux_effective else self._config.base_url
+        _adv_model = (aux_model if _aux_effective else None) or self._active_model
         self._advisor_client = create_client(
-            api_key=_aux_api_key,
-            base_url=_aux_base_url,
+            api_key=_adv_api_key,
+            base_url=_adv_base_url,
         )
         self._advisor_model = _adv_model
-        self._advisor_follow_active_model = not aux_model
+        self._advisor_follow_active_model = not _aux_effective
         logger.info(
-            "AUX 配置热更新: model=%s, base_url=%s",
+            "AUX 配置热更新: enabled=%s, model=%s, base_url=%s",
+            aux_enabled,
             aux_model or "(跟随主模型)",
             aux_base_url or "(跟随主模型)",
         )
@@ -1887,16 +1899,6 @@ class AgentEngine:
     def full_access_enabled(self) -> bool:
         """当前会话是否启用 fullaccess。"""
         return self._full_access_enabled
-
-    @property
-    def is_vision_capable(self) -> bool:
-        """主模型是否支持视觉输入（只读）。"""
-        return self._is_vision_capable
-
-    @property
-    def vlm_enhance_available(self) -> bool:
-        """VLM 增强通道是否可用（只读）。"""
-        return self._vlm_enhance_available
 
     @property
     def subagent_enabled(self) -> bool:
@@ -3894,20 +3896,18 @@ class AgentEngine:
             return None
 
         # 解析 verdict
-        import json as _json
-
         verdict_text = result.summary.strip()
         verdict = "unknown"
         issues: list[str] = []
         checks: list[str] = []
 
         try:
-            parsed = _json.loads(verdict_text)
+            parsed = json.loads(verdict_text)
             if isinstance(parsed, dict):
                 verdict = str(parsed.get("verdict", "unknown")).lower()
                 issues = parsed.get("issues", [])
                 checks = parsed.get("checks", [])
-        except (_json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError):
             # verifier 未按格式输出，视为 unknown
             pass
 
@@ -4659,6 +4659,43 @@ class AgentEngine:
             })
             return ChatResult(**kwargs)
 
+        def _handle_finish_exit(
+            tc_result: "ToolCallResult",
+            tool_call_id: str,
+            iteration: int,
+        ) -> "ChatResult | None":
+            """finish_task 成功接受时的统一退出处理，返回 ChatResult 或 None。"""
+            if not (
+                tc_result.tool_name == "finish_task"
+                and tc_result.success
+                and tc_result.finish_accepted
+            ):
+                return None
+            if tool_call_id:
+                self._memory.add_tool_result(tool_call_id, tc_result.result)
+            self._last_iteration_count = iteration
+            self._last_tool_call_count += 1
+            self._last_success_count += 1
+            reply = tc_result.result
+            self._memory.add_assistant_message(reply)
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.RETRACT_THINKING,
+                    iteration=iteration,
+                ),
+            )
+            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
+            return _finalize_result(
+                reply=reply,
+                tool_calls=list(all_tool_results),
+                iterations=iteration,
+                truncated=False,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
+
         max_iter = self._config.max_iterations
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
@@ -5084,35 +5121,9 @@ class AgentEngine:
                         self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
 
                         # finish_task 成功接受时退出循环
-                        if (
-                            tc_result.tool_name == "finish_task"
-                            and tc_result.success
-                            and tc_result.finish_accepted
-                        ):
-                            if tool_call_id:
-                                self._memory.add_tool_result(tool_call_id, tc_result.result)
-                            self._last_iteration_count = iteration
-                            self._last_tool_call_count += 1
-                            self._last_success_count += 1
-                            reply = tc_result.result
-                            self._memory.add_assistant_message(reply)
-                            self._emit(
-                                on_event,
-                                ToolCallEvent(
-                                    event_type=EventType.RETRACT_THINKING,
-                                    iteration=iteration,
-                                ),
-                            )
-                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
-                            return _finalize_result(
-                                reply=reply,
-                                tool_calls=list(all_tool_results),
-                                iterations=iteration,
-                                truncated=False,
-                                prompt_tokens=total_prompt_tokens,
-                                completion_tokens=total_completion_tokens,
-                                total_tokens=total_prompt_tokens + total_completion_tokens,
-                            )
+                        _finish_result = _handle_finish_exit(tc_result, tool_call_id, iteration)
+                        if _finish_result is not None:
+                            return _finish_result
 
                         # 按序写入 memory
                         if not tc_result.defer_tool_result and tool_call_id:
@@ -5178,35 +5189,9 @@ class AgentEngine:
                         self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
 
                         # finish_task 成功接受时退出循环
-                        if (
-                            tc_result.tool_name == "finish_task"
-                            and tc_result.success
-                            and tc_result.finish_accepted
-                        ):
-                            if tool_call_id:
-                                self._memory.add_tool_result(tool_call_id, tc_result.result)
-                            self._last_iteration_count = iteration
-                            self._last_tool_call_count += 1
-                            self._last_success_count += 1
-                            reply = tc_result.result
-                            self._memory.add_assistant_message(reply)
-                            self._emit(
-                                on_event,
-                                ToolCallEvent(
-                                    event_type=EventType.RETRACT_THINKING,
-                                    iteration=iteration,
-                                ),
-                            )
-                            logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
-                            return _finalize_result(
-                                reply=reply,
-                                tool_calls=list(all_tool_results),
-                                iterations=iteration,
-                                truncated=False,
-                                prompt_tokens=total_prompt_tokens,
-                                completion_tokens=total_completion_tokens,
-                                total_tokens=total_prompt_tokens + total_completion_tokens,
-                            )
+                        _finish_result = _handle_finish_exit(tc_result, tool_call_id, iteration)
+                        if _finish_result is not None:
+                            return _finish_result
 
                         if not tc_result.defer_tool_result and tool_call_id:
                             self._memory.add_tool_result(tool_call_id, tc_result.result)
@@ -5439,6 +5424,11 @@ class AgentEngine:
             # 说明：旧的 ask_user 退出路径已移除。
             # 阻塞式 ask_user 在 AskUserHandler 内 await Future，
             # 返回用户回答作为 tool result，循环不中断。
+
+            # ── 延迟图片注入：所有 tool_result 写入 memory 后再注入 user 图片消息 ──
+            # 如果在 tool_result 之前注入，会破坏 assistant(tool_calls) → tool(responses)
+            # 的消息序列，导致 OpenAI 兼容 API 返回 400 错误。
+            self._tool_dispatcher.flush_deferred_images()
 
             # ── Stuck Detection：检测重复/冗余工具调用模式 ──
             stuck_warning = self._state.detect_stuck_pattern()
@@ -6954,8 +6944,9 @@ class AgentEngine:
                 retry_kwargs = {k: v for k, v in kwargs.items() if k != "prompt_cache_key"}
                 try:
                     return await self._client.chat.completions.create(**retry_kwargs)
-                except Exception:
-                    pass  # 回退失败，走下方原有逻辑
+                except Exception as retry_exc:
+                    logger.debug("移除 prompt_cache_key 重试仍失败: %s", retry_exc)
+                    exc = retry_exc  # 用重试异常替换原始异常，避免误导
 
             if (
                 self._config.system_message_mode == "auto"
