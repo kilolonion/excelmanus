@@ -8,6 +8,7 @@ import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
 import { RollbackConfirmDialog, getRollbackFilePreference } from "./RollbackConfirmDialog";
 import { messageEnterVariants } from "@/lib/sidebar-motion";
+import { useChatStore } from "@/stores/chat-store";
 import type { Message } from "@/lib/types";
 
 interface MessageStreamProps {
@@ -71,12 +72,15 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   // 定位期间屏蔽 handleScroll，防止 scroll 事件触发 setState 风暴
   const positioningRef = useRef(false);
 
+  const currentSessionId = useChatStore((s) => s.currentSessionId);
+
   const [rollbackDialog, setRollbackDialog] = useState<{
     open: boolean;
     messageId: string;
     newContent: string;
+    turnIndex: number;
     files?: File[];
-  }>({ open: false, messageId: "", newContent: "" });
+  }>({ open: false, messageId: "", newContent: "", turnIndex: 0 });
 
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -228,7 +232,12 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
         return;
       }
 
-      setRollbackDialog({ open: true, messageId, newContent, files });
+      // 计算 turnIndex（第几个 user 消息）
+      let turnIdx = 0;
+      for (let i = 0; i < msgIndex; i++) {
+        if (messages[i].role === "user") turnIdx++;
+      }
+      setRollbackDialog({ open: true, messageId, newContent, turnIndex: turnIdx, files });
     },
     [onEditAndResend, messages]
   );
@@ -236,7 +245,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   const handleRollbackConfirm = useCallback(
     (rollbackFiles: boolean) => {
       const pendingFiles = rollbackDialog.files;
-      setRollbackDialog({ open: false, messageId: "", newContent: "" });
+      setRollbackDialog({ open: false, messageId: "", newContent: "", turnIndex: 0 });
       if (onEditAndResend) {
         onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles, pendingFiles);
       }
@@ -245,7 +254,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   );
 
   const handleRollbackCancel = useCallback(() => {
-    setRollbackDialog({ open: false, messageId: "", newContent: "" });
+    setRollbackDialog({ open: false, messageId: "", newContent: "", turnIndex: 0 });
   }, []);
 
   const timestampIndices = useMemo(
@@ -334,6 +343,8 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
       <RollbackConfirmDialog
         open={rollbackDialog.open}
+        sessionId={currentSessionId}
+        turnIndex={rollbackDialog.turnIndex}
         onConfirm={handleRollbackConfirm}
         onCancel={handleRollbackCancel}
       />

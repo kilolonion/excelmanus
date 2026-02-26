@@ -19,8 +19,6 @@ import {
   ImageIcon,
   Brain,
   Check,
-  Minus,
-  CircleHelp,
   AlertTriangle,
   Download,
   Upload,
@@ -152,6 +150,13 @@ export function ModelTab() {
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
 
+  // Thinking 配置
+  const [thinkingEffort, setThinkingEffort] = useState<string>("medium");
+  const [thinkingBudget, setThinkingBudget] = useState<string>("");
+  const [thinkingEffectiveBudget, setThinkingEffectiveBudget] = useState<number>(0);
+  const [thinkingSaving, setThinkingSaving] = useState(false);
+  const [thinkingSaved, setThinkingSaved] = useState(false);
+
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
   const isAdmin = !authEnabled || !user || user.role === "admin";
@@ -166,6 +171,40 @@ export function ModelTab() {
       formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   }, [pendingScrollToForm]);
+
+  const fetchThinkingConfig = useCallback(async () => {
+    try {
+      const data = await apiGet<{ effort: string; budget: number; effective_budget: number }>("/thinking");
+      setThinkingEffort(data.effort);
+      setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
+      setThinkingEffectiveBudget(data.effective_budget);
+    } catch {
+      // 后端未就绪
+    }
+  }, []);
+
+  const handleSaveThinking = useCallback(async (effort: string, budgetStr: string) => {
+    setThinkingSaving(true);
+    try {
+      const body: Record<string, unknown> = { effort };
+      const budgetNum = parseInt(budgetStr, 10);
+      if (!isNaN(budgetNum) && budgetNum >= 0) {
+        body.budget = budgetNum;
+      } else {
+        body.budget = 0;
+      }
+      const data = await apiPut<{ effort: string; budget: number; effective_budget: number }>("/thinking", body);
+      setThinkingEffort(data.effort);
+      setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
+      setThinkingEffectiveBudget(data.effective_budget);
+      setThinkingSaved(true);
+      setTimeout(() => setThinkingSaved(false), 2000);
+    } catch {
+      // 忽略
+    } finally {
+      setThinkingSaving(false);
+    }
+  }, []);
 
   const fetchAllCapabilities = useCallback(async () => {
     try {
@@ -253,8 +292,9 @@ export function ModelTab() {
     if (isAdmin) {
       fetchConfig();
       fetchAllCapabilities();
+      fetchThinkingConfig();
     }
-  }, [fetchConfig, fetchAllCapabilities, isAdmin]);
+  }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig, isAdmin]);
 
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);
@@ -604,7 +644,7 @@ export function ModelTab() {
                 {/* Row 1: name + model badge + action buttons */}
                 <div className="flex items-center gap-2">
                   <span className="font-medium truncate min-w-0">{p.name}</span>
-                  <Badge variant="secondary" className="text-[10px] font-mono flex-shrink-0">
+                  <Badge variant="secondary" className="text-[10px] font-mono min-w-0 max-w-[40%] truncate">
                     {p.model}
                   </Badge>
                   <div className="flex gap-0.5 shrink-0 ml-auto">
@@ -653,7 +693,7 @@ export function ModelTab() {
                   </div>
                 </div>
                 {/* Row 2: capabilities / error + description */}
-                <div className="flex items-center gap-1.5 mt-1">
+                <div className="flex items-center gap-1.5 mt-1 flex-nowrap">
                   {isModelUnhealthy(pCaps) ? (
                     <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
                       <AlertTriangle className="h-2.5 w-2.5" />
@@ -764,6 +804,93 @@ export function ModelTab() {
               </Button>
             </div>
           )}
+        </div>
+
+        {/* Thinking 配置 */}
+        <Separator />
+        <div>
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="min-w-0">
+              <h3 className="font-semibold text-sm flex items-center gap-1.5">
+                <Brain className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+                推理深度 (Thinking)
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                控制模型思考链的深度，影响推理质量和 token 消耗
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {/* Effort 等级选择器 */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1.5 block">思考等级</label>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 sm:gap-1">
+                {(["none", "minimal", "low", "medium", "high", "xhigh"] as const).map((level) => {
+                  const labels: Record<string, string> = {
+                    none: "关闭", minimal: "极简", low: "低",
+                    medium: "中", high: "高", xhigh: "极高",
+                  };
+                  const isActive = thinkingEffort === level;
+                  return (
+                    <button
+                      key={level}
+                      className={`px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border ${
+                        isActive
+                          ? "text-white border-transparent"
+                          : "border-border text-muted-foreground hover:bg-muted/60"
+                      }`}
+                      style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
+                      onClick={() => {
+                        setThinkingEffort(level);
+                        handleSaveThinking(level, thinkingBudget);
+                      }}
+                      disabled={thinkingSaving}
+                    >
+                      {labels[level]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Budget 精确预算 */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1.5 block">
+                Token 预算（可选，留空则按等级自动换算）
+              </label>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <Input
+                  value={thinkingBudget}
+                  onChange={(e) => setThinkingBudget(e.target.value.replace(/\D/g, ""))}
+                  className="h-8 text-xs font-mono w-full sm:w-32"
+                  placeholder="自动"
+                  inputMode="numeric"
+                />
+                <Button
+                  size="sm"
+                  className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
+                  style={{ backgroundColor: "var(--em-primary)" }}
+                  onClick={() => handleSaveThinking(thinkingEffort, thinkingBudget)}
+                  disabled={thinkingSaving}
+                >
+                  {thinkingSaving ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : thinkingSaved ? (
+                    <CheckCircle2 className="h-3 w-3" />
+                  ) : (
+                    <Save className="h-3 w-3" />
+                  )}
+                  {thinkingSaved ? "已保存" : "保存"}
+                </Button>
+              </div>
+              {thinkingEffectiveBudget > 0 && (
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  当前生效预算: {thinkingEffectiveBudget.toLocaleString()} tokens
+                </p>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Config Export / Import */}
@@ -1116,23 +1243,19 @@ function CapabilityBadges({ caps }: { caps: ModelCapabilities | null }) {
   ];
 
   return (
-    <span className="inline-flex items-center gap-1">
+    <span className="inline-flex items-center gap-1 shrink-0 whitespace-nowrap">
       {items.map((item) => {
         let cls: string;
-        let statusIcon: React.ReactNode;
         let tip: string;
 
         if (item.value === true) {
           cls = "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
-          statusIcon = <Check className="h-2 w-2" />;
           tip = `${item.label}: 支持`;
         } else if (item.value === false) {
           cls = "bg-rose-500/10 text-rose-400/80 dark:text-rose-400/70";
-          statusIcon = <Minus className="h-2 w-2" />;
           tip = `${item.label}: 不支持`;
         } else {
           cls = "bg-muted/60 text-muted-foreground/50";
-          statusIcon = <CircleHelp className="h-2 w-2" />;
           tip = `${item.label}: 未探测`;
         }
 
@@ -1144,7 +1267,6 @@ function CapabilityBadges({ caps }: { caps: ModelCapabilities | null }) {
           >
             {item.icon}
             <span>{item.label}</span>
-            {statusIcon}
           </span>
         );
       })}

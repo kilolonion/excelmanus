@@ -50,7 +50,6 @@ interface SessionStatus {
   session_id: string;
   compaction: CompactionStatus;
   registry: RegistryStatus;
-  manifest?: RegistryStatus;
 }
 
 function formatTokens(n: number): string {

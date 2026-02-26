@@ -453,6 +453,37 @@ export async function rollbackChat(opts: {
   return res.json();
 }
 
+// ── 回滚预览 API ─────────────────────────────────────────
+
+export interface RollbackFileChange {
+  path: string;
+  change_type: "added" | "modified" | "deleted";
+  before_size: number | null;
+  after_size: number | null;
+  is_binary: boolean;
+  diff: string | null;
+  tool_name: string;
+}
+
+export interface RollbackPreviewResult {
+  turn_index: number;
+  removed_messages: number;
+  file_changes: RollbackFileChange[];
+}
+
+export async function rollbackPreview(
+  sessionId: string,
+  turnIndex: number,
+): Promise<RollbackPreviewResult> {
+  const res = await fetch(buildApiUrl("/chat/rollback/preview", { direct: true }), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ session_id: sessionId, turn_index: turnIndex }),
+  });
+  if (!res.ok) return handleAuthError(res);
+  return res.json();
+}
+
 // ── Excel 预览 API ────────────────────────────────────────
 
 export interface ExcelSnapshot {
