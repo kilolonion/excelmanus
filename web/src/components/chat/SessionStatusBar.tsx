@@ -78,9 +78,7 @@ export function SessionStatusBar() {
       );
       setStatus(data);
     } catch {
-      // Session may not exist on backend yet (optimistic local-first
-      // creation). Silently ignore — the next poll will succeed once
-      // the first chat message has been processed.
+      // 会话可能尚未在后端创建（乐观本地优先创建），静默忽略，首条聊天消息处理成功后下次轮询即可。
     }
   }, [activeSessionId]);
 
@@ -128,7 +126,7 @@ export function SessionStatusBar() {
       await apiPost(`/sessions/${activeSessionId}/manifest/rebuild`, {});
       await poll();
     } catch {
-      // ignore — next poll will show the real state
+      // 忽略，下次轮询会显示真实状态
     } finally {
       setRebuilding(false);
     }

@@ -29,6 +29,8 @@ import {
   Check,
   Cpu,
   X,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,9 +45,9 @@ import { useDropzone } from "react-dropzone";
 import { useChatStore } from "@/stores/chat-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { buildApiUrl, apiGet, apiPut } from "@/lib/api";
+import { buildApiUrl, apiGet, apiPut, uploadFile } from "@/lib/api";
 import { UndoPanel } from "@/components/modals/UndoPanel";
-import type { ModelInfo } from "@/lib/types";
+import type { ModelInfo, AttachedFile } from "@/lib/types";
 
 const ACCEPTED_EXTENSIONS = {
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
@@ -61,9 +63,9 @@ function isImageFile(name: string): boolean {
   return IMAGE_EXTS.has(ext);
 }
 
-// Slash commands (mirrors CLI _STATIC_SLASH_COMMANDS + control_commands)
+// 斜杠命令（对应 CLI _STATIC_SLASH_COMMANDS + control_commands）
 const SLASH_COMMANDS: { command: string; description: string; icon: React.ReactNode; args?: string[] }[] = [
-  // Base commands
+  // 基础命令
   { command: "/help", description: "显示帮助", icon: <HelpCircle className="h-3.5 w-3.5" /> },
   { command: "/skills", description: "查看技能包", icon: <Sparkles className="h-3.5 w-3.5" /> },
   { command: "/history", description: "对话历史摘要", icon: <HistoryIcon className="h-3.5 w-3.5" /> },
@@ -71,7 +73,7 @@ const SLASH_COMMANDS: { command: string; description: string; icon: React.ReactN
   { command: "/mcp", description: "MCP Server 状态", icon: <Terminal className="h-3.5 w-3.5" /> },
   { command: "/save", description: "保存对话记录", icon: <Save className="h-3.5 w-3.5" /> },
   { command: "/config", description: "环境变量配置", icon: <Settings className="h-3.5 w-3.5" />, args: ["list", "set", "get", "delete"] },
-  // Control commands
+  // 控制命令
   { command: "/model", description: "查看/切换模型", icon: <Sparkles className="h-3.5 w-3.5" />, args: ["list"] },
   { command: "/subagent", description: "子代理控制", icon: <Bot className="h-3.5 w-3.5" />, args: ["status", "on", "off", "list", "run"] },
   { command: "/fullaccess", description: "权限控制", icon: <ShieldCheck className="h-3.5 w-3.5" />, args: ["status", "on", "off"] },
@@ -99,8 +101,8 @@ const AT_TOP_LEVEL: MentionCategory[] = [
   { key: "skill", label: "技能", icon: <Sparkles className="h-3.5 w-3.5" />, description: "调用技能包" },
 ];
 
-// Commands that show results in a dialog instead of sending as chat
-// NOTE: Only exact matches are checked. /model alone is display, but /model <name> is action.
+// 在对话框中展示结果而非作为聊天发送的命令
+// 注意：仅检查精确匹配。/model 单独使用是展示，但 /model <name> 是操作。
 const DISPLAY_COMMANDS = new Set([
   "/help", "/skills", "/mcp", "/history",
   "/model", "/model list",
@@ -113,7 +115,7 @@ const DISPLAY_COMMANDS = new Set([
   "/manifest status",
 ]);
 
-// Commands that execute a frontend action directly (never sent to chat)
+// 直接执行前端操作的命令（不会发送到聊天）
 const FRONTEND_ACTIONS: Record<string, string> = {
   "/stop": "stop",
   "/clear": "clear",
@@ -121,8 +123,18 @@ const FRONTEND_ACTIONS: Record<string, string> = {
   "/reject": "reject",
 };
 
+function friendlyUploadError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/413|too large|过大/i.test(msg)) return "文件过大，请压缩后重试";
+  if (/extension|格式|不支持|unsupported/i.test(msg)) return "不支持该文件格式";
+  if (/quota|配额|空间/i.test(msg)) return "存储空间不足";
+  if (/401|403|权限/i.test(msg)) return "没有上传权限";
+  if (/network|fetch|连接/i.test(msg)) return "网络连接失败，请检查网络后重试";
+  return "上传失败，请重试";
+}
+
 interface ChatInputProps {
-  onSend: (text: string, files?: File[]) => void;
+  onSend: (text: string, files?: AttachedFile[]) => void;
   onCommandResult?: (command: string, result: string, format: "markdown" | "text") => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -131,7 +143,7 @@ interface ChatInputProps {
 
 type PopoverMode = null | "slash" | "slash-args" | "slash-skills" | "slash-model" | "at" | "at-sub";
 
-// Commands whose args, once selected, should auto-execute (no extra Enter needed)
+// 参数选择后自动执行的命令（无需额外按 Enter）
 const AUTO_EXEC_ARGS = new Set(["on", "off", "status", "build", "approve", "reject", "apply", "list"]);
 
 interface MentionData {
@@ -182,7 +194,7 @@ function ChatModeTabs() {
 
 export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onStop }: ChatInputProps) {
   const [text, setText] = useState("");
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<AttachedFile[]>([]);
   const [popover, setPopover] = useState<PopoverMode>(null);
   const [popoverFilter, setPopoverFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -192,6 +204,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const [modelList, setModelList] = useState<ModelInfo[]>([]);
   const currentModel = useUIStore((s) => s.currentModel);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
+  const visionCapable = useUIStore((s) => s.visionCapable);
   const [confirmedTokens, setConfirmedTokens] = useState<Set<string>>(new Set());
   const [undoPanelOpen, setUndoPanelOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -200,9 +213,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const backdropRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
 
-  // Stable preview URLs for image thumbnails — avoids creating a new
-  // blob URL on every re-render and prevents mobile browsers from GC-ing
-  // the preview while the user is still composing.
+  // 图片缩略图的稳定预览 URL — 避免每次重渲染都创建新的
+  // blob URL，防止移动浏览器在用户编辑时回收预览。
   const previewUrlCache = useRef(new Map<File, string>());
 
   const getPreviewUrl = useCallback((file: File): string => {
@@ -214,9 +226,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     return url;
   }, []);
 
-  // Revoke URLs for files that have been removed
+  // 撤销已移除文件的 URL
   useEffect(() => {
-    const currentFiles = new Set(files);
+    const currentFiles = new Set(files.map((af) => af.file));
     previewUrlCache.current.forEach((url, file) => {
       if (!currentFiles.has(file)) {
         URL.revokeObjectURL(url);
@@ -225,7 +237,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     });
   }, [files]);
 
-  // Revoke all preview URLs on unmount
+  // 卸载时撤销所有预览 URL
   useEffect(() => {
     const cache = previewUrlCache.current;
     return () => {
@@ -234,22 +246,22 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     };
   }, []);
 
-  // Build a Set of known slash command names for quick lookup
+  // 构建已知斜杠命令名称的 Set 用于快速查找
   const slashCommandNames = useMemo(
     () => new Set(SLASH_COMMANDS.map((c) => c.command)),
     []
   );
 
-  // Render text with blue-highlighted chips for confirmed @mentions and /commands
+  // 为已确认的 @提及和 /命令渲染蓝色高亮标签
   const renderHighlightedText = useCallback(
     (raw: string): React.ReactNode => {
-      if (!raw) return "\u200B"; // zero-width space keeps height
-      // Build regex from confirmed tokens + known slash commands
+      if (!raw) return "\u200B"; // 零宽空格保持高度
+      // 从已确认的 token 和已知斜杠命令构建正则
       const escaped: string[] = [];
       confirmedTokens.forEach((t) => escaped.push(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       slashCommandNames.forEach((c) => escaped.push(c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-      if (escaped.length === 0) return raw + "\n"; // trailing \n keeps backdrop height in sync
-      // Sort longest first to avoid partial matches
+      if (escaped.length === 0) return raw + "\n"; // 尾部 \n 使背景与高度同步
+      // 最长优先排序以避免部分匹配
       escaped.sort((a, b) => b.length - a.length);
       const pattern = new RegExp(`(${escaped.join("|")})`, "g");
       const parts = raw.split(pattern);
@@ -279,7 +291,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     [confirmedTokens, slashCommandNames]
   );
 
-  // Sync textarea scroll to backdrop
+  // 同步文本区滚动到背景层
   const syncScroll = useCallback(() => {
     if (textareaRef.current && backdropRef.current) {
       backdropRef.current.scrollTop = textareaRef.current.scrollTop;
@@ -287,7 +299,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
   }, []);
 
-  // Auto-resize textarea height based on content
+  // 根据内容自动调整输入框高度
   const autoResize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -298,7 +310,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     syncScroll();
   }, [syncScroll]);
 
-  // Fetch mention data from backend, supports path param for subfolder
+  // 从后端获取提及数据，支持 path 参数用于子目录
   const fetchMentionData = useCallback(async (subpath?: string) => {
     try {
       const params = subpath ? `?path=${encodeURIComponent(subpath)}` : "";
@@ -308,26 +320,72 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         setMentionData(data);
       }
     } catch {
-      // Backend not available
+      // 后端不可用
     }
   }, []);
 
-  // Fetch model list for /model inline picker
+  // 获取模型列表用于 /model 内联选择器
   const fetchModelList = useCallback(async () => {
     try {
       const data = await apiGet<{ models: ModelInfo[] }>("/models");
       setModelList(data.models);
     } catch {
-      // Backend not available
+      // 后端不可用
     }
   }, []);
 
-  // Insert @filename mentions at current cursor position for given files.
-  // Image files are added as attachments only (no text mention) to avoid
-  // bloating the input area on mobile.
+  // 预先上传单个附件。成功/失败时更新状态。
+  const triggerUpload = useCallback(async (id: string, file: File) => {
+    try {
+      const result = await uploadFile(file);
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
+        )
+      );
+    } catch (err) {
+      const error = friendlyUploadError(err);
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === id ? { ...f, status: "failed" as const, error } : f
+        )
+      );
+    }
+  }, []);
+
+  // 重试失败的上传
+  const retryUpload = useCallback(
+    (id: string, file: File) => {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === id ? { ...f, status: "uploading" as const, error: undefined } : f
+        )
+      );
+      triggerUpload(id, file);
+    },
+    [triggerUpload]
+  );
+
+  // 按 id 移除附件
+  const removeFile = useCallback((id: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id));
+  }, []);
+
+  // 在当前光标位置插入 @文件名 提及。
+  // 图片文件仅作为附件添加（无文本提及），避免在移动端擑大输入区。
+  // 文件在附加时预先上传；错误内联显示。
   const insertFileMentions = useCallback((newFiles: File[]) => {
-    setFiles((prev) => [...prev, ...newFiles]);
-    // Only insert text mentions for non-image files (Excel/CSV)
+    const attached: AttachedFile[] = newFiles.map((f) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file: f,
+      status: "uploading" as const,
+    }));
+    setFiles((prev) => [...prev, ...attached]);
+    // 为每个文件触发预上传
+    for (const af of attached) {
+      triggerUpload(af.id, af.file);
+    }
+    // 仅为非图片文件（Excel/CSV）插入文本提及
     const docFiles = newFiles.filter((f) => !isImageFile(f.name));
     if (docFiles.length > 0) {
       setConfirmedTokens((prev) => {
@@ -350,9 +408,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         textarea?.setSelectionRange(newCursorPos, newCursorPos);
       });
     }
-  }, [text]);
+  }, [text, triggerUpload]);
 
-  // Watch for confirmed Excel range selections from the excel-store
+  // 监听来自 excel-store 的已确认 Excel 范围选择
   const pendingSelection = useExcelStore((s) => s.pendingSelection);
   const clearPendingSelection = useExcelStore((s) => s.clearPendingSelection);
 
@@ -377,7 +435,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       textarea?.setSelectionRange(newCursorPos, newCursorPos);
     });
 
-    // Track in recent files
+    // 加入最近文件列表
     const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
     if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
       useExcelStore.getState().addRecentFile({
@@ -389,7 +447,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     clearPendingSelection();
   }, [pendingSelection, clearPendingSelection, text]);
 
-  // Watch for quick-add file mentions from the sidebar @ button
+  // 监听侧边栏 @ 按钮的快捷添加文件提及
   const pendingFileMention = useExcelStore((s) => s.pendingFileMention);
   const clearPendingFileMention = useExcelStore((s) => s.clearPendingFileMention);
 
@@ -414,7 +472,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       autoResize();
     });
 
-    // Track in recent files
+    // 记录到最近文件
     const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
     if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
       useExcelStore.getState().addRecentFile({ path, filename });
@@ -434,11 +492,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     noKeyboard: true,
   });
 
-  // Handle drag from ExcelFilesBar (custom data format, not native files)
+  // 处理来自 ExcelFilesBar 的拖拽（自定义数据格式，非原生文件）
   const handleExcelDrop = useCallback(
     (e: React.DragEvent) => {
       const excelData = e.dataTransfer.getData("application/x-excel-file");
-      if (!excelData) return; // not from our sidebar, let dropzone handle it
+      if (!excelData) return; // 非来自侧边栏，交给 dropzone 处理
       e.preventDefault();
       e.stopPropagation();
       try {
@@ -459,13 +517,13 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           textarea?.setSelectionRange(newCursorPos, newCursorPos);
         });
       } catch {
-        // invalid data, ignore
+        // 无效数据，忽略
       }
     },
     [text]
   );
 
-  // Filtered items for the popover
+  // 弹出层的过滤项
   const popoverItems = useMemo(() => {
     if (popover === "slash") {
       const filter = popoverFilter.toLowerCase();
@@ -518,11 +576,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       return items;
     }
     if (popover === "at") {
-      // Top-level categories + direct search across all items
+      // 顶级分类 + 跨所有项目的直接搜索
       const filter = popoverFilter.toLowerCase();
       const items: { command: string; description: string; icon: React.ReactNode; hasChildren?: boolean }[] = [];
 
-      // Show categories first
+      // 先显示分类
       for (const cat of AT_TOP_LEVEL) {
         if (!filter || cat.key.includes(filter) || cat.label.includes(filter)) {
           items.push({
@@ -534,7 +592,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         }
       }
 
-      // If there's a filter, also search sub-items directly
+      // 如果有过滤条件，也直接搜索子项
       if (filter && mentionData) {
         for (const f of mentionData.files) {
           if (f.toLowerCase().includes(filter)) {
@@ -588,7 +646,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     return [];
   }, [popover, popoverFilter, activeSlashCmd, atCategory, mentionData, modelList, currentModel]);
 
-  // Reset selected index when items change
+  // 项目变化时重置选中索引
   useEffect(() => {
     setSelectedIndex(0);
   }, [popoverItems.length]);
@@ -604,7 +662,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     setText(value);
     requestAnimationFrame(autoResize);
 
-    // Detect / at start of input
+    // 检测输入开头的 /
     if (value === "/") {
       setPopover("slash");
       setPopoverFilter("");
@@ -616,7 +674,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       return;
     }
 
-    // Detect space after a slash command → show args
+    // 检测斜杠命令后的空格 → 显示参数
     if (popover === "slash" && value.includes(" ")) {
       const cmd = value.split(" ")[0];
       const matched = SLASH_COMMANDS.find((c) => c.command === cmd);
@@ -636,13 +694,13 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       return;
     }
 
-    // In skill/model sub-pickers, treat any text as filter
+    // 在技能/模型子选择器中，将任何文本视为过滤条件
     if (popover === "slash-skills" || popover === "slash-model") {
       setPopoverFilter(value);
       return;
     }
 
-    // Detect @ anywhere
+    // 检测任意位置的 @
     const lastAtIdx = value.lastIndexOf("@");
     if (lastAtIdx >= 0 && (lastAtIdx === 0 || value[lastAtIdx - 1] === " ")) {
       const afterAt = value.slice(lastAtIdx + 1);
@@ -659,14 +717,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
   const selectPopoverItem = (item: { command: string; hasChildren?: boolean }) => {
     if (popover === "slash") {
-      // Special: /undo → open UndoPanel
+      // 特殊处理：/undo → 打开撤销面板
       if (item.command === "/undo") {
         closePopover();
         setText("");
         setUndoPanelOpen(true);
         return;
       }
-      // Special: /skills → drill into skill picker
+      // 特殊处理：/skills → 进入技能选择器
       if (item.command === "/skills") {
         fetchMentionData();
         setPopover("slash-skills");
@@ -675,7 +733,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         textareaRef.current?.focus();
         return;
       }
-      // Special: /model → drill into model picker
+      // 特殊处理：/model → 进入模型选择器
       if (item.command === "/model") {
         fetchModelList();
         setPopover("slash-model");
@@ -684,7 +742,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         textareaRef.current?.focus();
         return;
       }
-      // If command has args, drill into args sub-menu
+      // 如果命令有参数，进入参数子菜单
       const cmd = SLASH_COMMANDS.find((c) => c.command === item.command);
       if (cmd?.args) {
         setActiveSlashCmd(item.command);
@@ -694,16 +752,16 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         textareaRef.current?.focus();
         return;
       }
-      // No args → fill text and close
+      // 无参数 → 填充文本并关闭
       setText(item.command + " ");
       closePopover();
     } else if (popover === "slash-args") {
-      // Auto-execute toggle args (on/off/status etc) immediately
+      // 立即自动执行开关参数（on/off/status 等）
       const argPart = item.command.split(" ").slice(1).join(" ");
       if (AUTO_EXEC_ARGS.has(argPart)) {
         closePopover();
         setText("");
-        // Fire the command
+        // 触发命令
         handleSendCommand(item.command);
         return;
       }
@@ -711,41 +769,41 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       closePopover();
     } else if (popover === "slash-skills") {
       if (!item.command) return;
-      // Insert skill command and close
+      // 插入技能命令并关闭
       setText(item.command + " ");
       closePopover();
       textareaRef.current?.focus();
       return;
     } else if (popover === "slash-model") {
       if (!item.command) return;
-      // Switch model directly via API
+      // 通过 API 直接切换模型
       handleModelSwitch(item.command);
       return;
     } else if (popover === "at" && item.hasChildren) {
-      // Drill into sub-level (e.g. @file → show file list)
+      // 进入子级别（如 @file → 显示文件列表）
       const category = item.command.replace("@", "");
       setAtCategory(category);
       setPopover("at-sub");
       setPopoverFilter("");
-      fetchMentionData(); // refresh root
+      fetchMentionData(); // 刷新根目录
       textareaRef.current?.focus();
       return;
     } else if (popover === "at" || popover === "at-sub") {
-      if (!item.command) return; // placeholder "no matches"
-      // If item is a folder, drill into it
+      if (!item.command) return; // 占位符"无匹配"
+      // 如果是文件夹，进入其中
       if (item.command.endsWith("/")) {
         const folderPath = item.command.replace(/^@(?:file:)?/, "");
-        fetchMentionData(folderPath); // fetch subfolder contents
+        fetchMentionData(folderPath); // 获取子文件夹内容
         setPopoverFilter("");
         textareaRef.current?.focus();
         return;
       }
-      // Track confirmed @mention for highlighting
+      // 跟踪已确认的 @提及用于高亮
       setConfirmedTokens((prev) => new Set(prev).add(item.command));
       const lastAtIdx = text.lastIndexOf("@");
       const before = text.slice(0, lastAtIdx);
       setText(before + item.command + " ");
-      // Track Excel files in recent files bar
+      // 在最近文件栏中跟踪 Excel 文件
       const mentionName = item.command.replace(/^@(?:file:|folder:|skill:|mcp:|tool:)?/, "");
       const extLower = mentionName.slice(mentionName.lastIndexOf(".")).toLowerCase();
       if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
@@ -759,7 +817,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     textareaRef.current?.focus();
   };
 
-  // Handle model switch from inline picker
+  // 处理内联选择器的模型切换
   const handleModelSwitch = async (name: string) => {
     if (name === currentModel) {
       closePopover();
@@ -786,10 +844,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
   };
 
-  // Send a slash command programmatically (used for auto-exec args)
+  // 程序化发送斜杠命令（用于自动执行参数）
   const handleSendCommand = async (command: string) => {
     const trimmed = command.trim();
-    // Check frontend actions first
+    // 先检查前端操作
     const action = FRONTEND_ACTIONS[trimmed.split(" ")[0]];
     if (action === "stop") { onStop?.(); return; }
     if (action === "clear") {
@@ -801,7 +859,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (onCommandResult) onCommandResult("/clear", "对话历史已清除", "text");
       return;
     }
-    // Display commands → show in dialog
+    // 展示命令 → 在对话框中显示
     if (onCommandResult && DISPLAY_COMMANDS.has(trimmed)) {
       try {
         const res = await fetch(buildApiUrl("/command"), {
@@ -814,9 +872,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           onCommandResult(trimmed, data.result, data.format || "text");
           return;
         }
-      } catch { /* fall through */ }
+      } catch { /* 继续向下执行 */ }
     }
-    // Everything else → send as chat
+    // 其他全部 → 作为聊天发送
     onSend(trimmed);
   };
 
@@ -826,7 +884,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     closePopover();
 
     if (trimmed.startsWith("/")) {
-      // 0) /undo (bare) → open UndoPanel
+      // 0) /undo（无参数）→ 打开撤销面板
       if (trimmed === "/undo") {
         setText("");
         requestAnimationFrame(autoResize);
@@ -834,7 +892,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         return;
       }
 
-      // 1) Frontend-only actions (/stop, /clear)
+      // 1) 仅前端操作（/stop, /clear）
       const action = FRONTEND_ACTIONS[trimmed.split(" ")[0]];
       if (action === "stop") {
         onStop?.();
@@ -856,11 +914,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         return;
       }
       if ((action === "accept" || action === "reject") && trimmed.split(" ").length === 1) {
-        // Bare /accept or /reject without explicit ID → auto-fill from pending approval
+        // 无显式 ID 的 /accept 或 /reject → 从待审批中自动填充
         const state = useChatStore.getState();
         const pending = state.pendingApproval;
         if (pending) {
-          state.setPendingApproval(null);
+          state.dismissApproval(pending.id);
           const cmd = `/${action} ${pending.id}`;
           onSend(cmd);
           setText("");
@@ -874,7 +932,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         return;
       }
 
-      // 2) /model <name> → switch model directly
+      // 2) /model <name> → 直接切换模型
       if (trimmed.startsWith("/model ") && !DISPLAY_COMMANDS.has(trimmed)) {
         const modelName = trimmed.slice("/model ".length).trim();
         if (modelName) {
@@ -884,7 +942,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         }
       }
 
-      // 3) Display-type commands → show in dialog (exact match only)
+      // 3) 展示类命令 → 在对话框中显示（仅精确匹配）
       if (onCommandResult && DISPLAY_COMMANDS.has(trimmed)) {
         try {
           const res = await fetch(buildApiUrl("/command"), {
@@ -899,25 +957,25 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             return;
           }
         } catch {
-          // Fall through to send as chat
+          // 回退到作为聊天发送
         }
       }
     }
 
-    // 3) Everything else → send as chat message
+    // 3) 其他全部 → 作为聊天消息发送
     onSend(trimmed, files.length > 0 ? files : undefined);
     setText("");
     setFiles([]);
     setConfirmedTokens(new Set());
-    // Reset textarea height after clearing text
+    // 清空文本后重置文本区高度
     requestAnimationFrame(autoResize);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Ignore Enter during IME composition (e.g. Chinese pinyin input)
+    // IME 组合期间忽略 Enter（如中文拼音输入）
     if (isComposingRef.current) return;
 
-    // Popover navigation
+    // 弹出层导航
     if (popover && popoverItems.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -948,20 +1006,16 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   };
 
 
-  const removeFile = useCallback((index: number) => {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
-  }, []);
-
   return (
     <div
       {...getRootProps()}
       onDrop={(e) => {
-        // Intercept Excel sidebar drags before dropzone
+        // 在 dropzone 之前拦截 Excel 侧边栏拖拽
         if (e.dataTransfer.types.includes("application/x-excel-file")) {
           handleExcelDrop(e);
           return;
         }
-        // Let dropzone handle native file drops
+        // 让 dropzone 处理原生文件拖放
         getRootProps().onDrop?.(e as any);
       }}
       onDragOver={(e) => {
@@ -1048,7 +1102,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             {popoverItems.map((item, i) => {
               const isActive = "isActive" in item && (item as { isActive?: boolean }).isActive;
               const hasChildren = "hasChildren" in item && (item as { hasChildren?: boolean }).hasChildren;
-              // Show drill-down arrow for /skills and /model in main slash menu
+              // 主斜杠菜单中为 /skills 和 /model 显示下钻箭头
               const isDrillable = popover === "slash" && (item.command === "/skills" || item.command === "/model");
               return (
                 <button
@@ -1089,44 +1143,107 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
       {/* File attachment chips */}
       {files.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-4 sm:px-14 pt-2.5 pb-0">
-          {files.map((f, i) =>
-            isImageFile(f.name) ? (
-              /* Image thumbnail chip */
-              <span
-                key={`${f.name}-${i}`}
-                className="relative inline-flex items-end rounded-lg overflow-hidden bg-muted/40 border border-border/40"
-                style={{ maxWidth: "80px" }}
-              >
-                <img
-                  src={getPreviewUrl(f)}
-                  alt={f.name}
-                  className="h-14 w-full object-cover"
-                />
-                <button
-                  type="button"
-                  className="touch-compact absolute top-0.5 right-0.5 h-5 w-5 flex items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors shadow-sm"
-                  onClick={() => removeFile(i)}
+        <div className="flex flex-col gap-1 px-4 sm:px-14 pt-2.5 pb-0">
+          {/* 视觉能力不可用警告 */}
+          {files.some((af) => isImageFile(af.file.name)) && !visionCapable && (
+            <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-md px-2 py-1">
+              <AlertCircle className="h-3 w-3 flex-shrink-0" />
+              <span>当前模型不支持图片识别，图片将无法被分析</span>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-1.5">
+            {files.map((af) =>
+              isImageFile(af.file.name) ? (
+                /* Image thumbnail chip */
+                <span
+                  key={af.id}
+                  className={`relative inline-flex items-end rounded-lg overflow-hidden bg-muted/40 border ${
+                    af.status === "failed"
+                      ? "border-2 border-destructive/60"
+                      : "border-border/40"
+                  }`}
+                  style={{ maxWidth: "80px" }}
                 >
-                  <X className="h-2.5 w-2.5" />
-                </button>
-              </span>
-            ) : (
-              /* Document file chip */
-              <span
-                key={`${f.name}-${i}`}
-                className="inline-flex items-center gap-1 rounded-full bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] text-xs font-medium pl-2.5 pr-1 py-0.5 max-w-[200px]"
-              >
-                <span className="truncate">{f.name}</span>
-                <button
-                  type="button"
-                  className="rounded-full p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors flex-shrink-0"
-                  onClick={() => removeFile(i)}
+                  <img
+                    src={getPreviewUrl(af.file)}
+                    alt={af.file.name}
+                    className={`h-14 w-full object-cover ${af.status === "failed" ? "opacity-50" : ""}`}
+                  />
+                  {af.status === "uploading" && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                      <Loader2 className="h-4 w-4 text-white animate-spin" />
+                    </div>
+                  )}
+                  {af.status === "failed" && (
+                    <div
+                      className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 cursor-pointer"
+                      onClick={() => retryUpload(af.id, af.file)}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5 text-white" />
+                      <span className="text-[8px] text-white mt-0.5">重试</span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="touch-compact absolute top-0.5 right-0.5 h-5 w-5 flex items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors shadow-sm"
+                    onClick={() => removeFile(af.id)}
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ) : (
+                /* Document file chip */
+                <span
+                  key={af.id}
+                  className={`inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 max-w-[200px] ${
+                    af.status === "failed"
+                      ? "bg-destructive/10 text-destructive"
+                      : "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
+                  }`}
+                  title={af.error}
                 >
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            )
+                  {af.status === "uploading" && (
+                    <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                  )}
+                  {af.status === "failed" && (
+                    <AlertCircle className="h-3 w-3 flex-shrink-0" />
+                  )}
+                  <span className="truncate">{af.file.name}</span>
+                  {af.status === "failed" && (
+                    <button
+                      type="button"
+                      className="rounded-full p-0.5 hover:bg-destructive/20 transition-colors flex-shrink-0"
+                      onClick={() => retryUpload(af.id, af.file)}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={`rounded-full p-0.5 transition-colors flex-shrink-0 ${
+                      af.status === "failed"
+                        ? "hover:bg-destructive/20"
+                        : "hover:bg-[var(--em-primary-alpha-20)]"
+                    }`}
+                    onClick={() => removeFile(af.id)}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              )
+            )}
+          </div>
+          {/* Inline error messages for failed uploads */}
+          {files.some((af) => af.status === "failed") && (
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-destructive">
+              {files
+                .filter((af) => af.status === "failed")
+                .map((af) => (
+                  <span key={af.id}>
+                    {af.file.name}: {af.error}
+                  </span>
+                ))}
+            </div>
           )}
         </div>
       )}
@@ -1211,7 +1328,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               className="h-8 w-8 rounded-full text-white transition-opacity"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleSend}
-              disabled={disabled || (!text.trim() && files.length === 0)}
+              disabled={disabled || (!text.trim() && files.length === 0) || files.some((af) => af.status === "uploading")}
             >
               <ArrowUp className="h-3.5 w-3.5" />
             </Button>

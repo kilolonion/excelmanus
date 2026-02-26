@@ -60,7 +60,7 @@ function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>
         return;
       }
     }
-    break; // only check the last assistant message
+    break; // 只检查最后一条 assistant 消息
   }
 }
 
@@ -72,6 +72,7 @@ export function SessionSync() {
   const switchSession = useChatStore((s) => s.switchSession);
   const setStreaming = useChatStore((s) => s.setStreaming);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
+  const setVisionCapable = useUIStore((s) => s.setVisionCapable);
   const setChatMode = useUIStore((s) => s.setChatMode);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
 
@@ -96,10 +97,8 @@ export function SessionSync() {
         }));
         mergeSessions(mapped);
 
-        // If activeSessionId (restored from localStorage) doesn't match
-        // any known backend session, clear it to avoid stale 404 polling
-        // storms.  Skip if there's an active SSE stream (optimistic create
-        // that hasn't reached the server yet).
+        // 若 activeSessionId（从 localStorage 恢复）与后端已知会话都不匹配，则清空以避免陈旧 404 轮询风暴。
+        // 若有活跃 SSE 流（乐观创建尚未到达服务端）则跳过。
         const currentActive = useSessionStore.getState().activeSessionId;
         if (currentActive && !mapped.some((s) => s.id === currentActive)) {
           const hasActiveStream = useChatStore.getState().abortController !== null;
@@ -108,7 +107,7 @@ export function SessionSync() {
           }
         }
       } catch {
-        // ignore
+        // 忽略
       }
     };
 
@@ -124,8 +123,7 @@ export function SessionSync() {
   }, [mergeSessions, setActiveSession]);
 
   useEffect(() => {
-    // Never auto-switch while a local SSE stream is active; let the stream
-    // settle first to avoid wiping optimistic in-flight messages.
+    // 本地 SSE 流活跃时不自动切换会话；等流结束再切换，避免清掉乐观进行中的消息。
     if (abortController) return;
 
     if (!activeSessionId) {
@@ -142,15 +140,9 @@ export function SessionSync() {
   useEffect(() => {
     if (!activeSessionId) {
       setFullAccessEnabled(false);
-      // Don't reset chatMode here — it's user-driven state (ChatModeTabs).
-      // Resetting it causes the mode to snap back to "write" a few seconds
-      // after the user switches to "read" or "plan" while idle.
-      // Don't reset currentModel here — TopModelSelector independently
-      // manages the global active model name via /models API.  Clearing
-      // it causes a visual flash where the toolbar briefly shows "模型"
-      // before TopModelSelector re-fetches the value.
-      // Only kill streaming state if there is no active SSE connection.
-      // Otherwise the stream callback will keep writing to a "stopped" store.
+      // 此处不重置 chatMode，其为用户驱动状态（ChatModeTabs）；重置会导致用户切到 read/plan 后几秒又弹回 write。
+      // 此处不重置 currentModel；TopModelSelector 通过 /models API 独立管理全局模型名，清空会导致工具栏短暂显示「模型」再被重新拉取。
+      // 仅在没有活跃 SSE 连接时清除流式状态，否则流回调会继续写入已「停止」的 store。
       if (!useChatStore.getState().abortController) {
         setStreaming(false);
       }
@@ -170,9 +162,7 @@ export function SessionSync() {
         }
 
         if (!detail) {
-          // Session not yet known to backend (created locally, first message
-          // hasn't reached the server). Silently skip — do NOT remove the
-          // session or it will break the optimistic-create flow.
+          // 会话尚未被后端知晓（本地创建，首条消息未到服务端）。静默跳过，不要移除会话，否则会破坏乐观创建流程。
           // 但如果连续多次 404，说明会话确实不存在（如后端重启），清理 activeSessionId。
           // 如果存在活跃的 SSE 流（abortController !== null），说明消息正在发送中，
           // 后端可能还未来得及注册该会话，不要重置。
@@ -188,6 +178,7 @@ export function SessionSync() {
         notFoundCount = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
+        setVisionCapable(detail.visionCapable);
         // NOTE: 不要在轮询中用后端 chatMode 覆盖前端状态。
         // chatMode 的权威来源是前端用户操作（ChatModeTabs 点击），
         // 后端 _current_chat_mode 只在 engine.chat() 调用时更新，
@@ -196,10 +187,8 @@ export function SessionSync() {
         const modelName = detail.currentModelName || detail.currentModel;
         setCurrentModel(modelName ?? "");
 
-        // IMPORTANT:
-        // pollDetail is async and can race with optimistic local sendMessage().
-        // Always re-read latest chat state before any destructive refresh to
-        // avoid wiping freshly appended local user/assistant bubbles.
+        // 重要：pollDetail 为异步，可能与乐观本地 sendMessage() 竞态。
+        // 在任何会覆盖消息的刷新前，务必重新读取最新 chat 状态，避免擦除刚追加的本地 user/assistant 气泡。
         const chat = useChatStore.getState();
         const hasLocalLiveStream = chat.abortController !== null;
 
@@ -255,10 +244,17 @@ export function SessionSync() {
           }
 
           // 恢复待处理审批弹窗（刷新后丢失的瞬态状态）
+          // 注意：用户点击允许/拒绝后会记录 _lastDismissedApprovalId，
+          // 防止 SessionSync 轮询在后端尚未处理完审批时把弹窗重新拉回来
           if (detail.pendingApproval && !freshChat.pendingApproval) {
-            freshChat.setPendingApproval(detail.pendingApproval);
-            // 同时将最后一个匹配的 tool_call block 标记为 pending
-            _markLastToolCallPending(useChatStore.getState());
+            const dismissed = freshChat._lastDismissedApprovalId;
+            const incomingId = (detail.pendingApproval as { id?: string })?.id
+              ?? (detail.pendingApproval as { approval_id?: string })?.approval_id;
+            if (!dismissed || dismissed !== incomingId) {
+              freshChat.setPendingApproval(detail.pendingApproval);
+              // 同时将最后一个匹配的 tool_call block 标记为 pending
+              _markLastToolCallPending(useChatStore.getState());
+            }
           } else if (!detail.pendingApproval && freshChat.pendingApproval) {
             freshChat.setPendingApproval(null);
           }
@@ -274,10 +270,7 @@ export function SessionSync() {
         if (cancelled) {
           return;
         }
-        // Network error or non-404 server error — reset UI toggles but
-        // keep the session entry intact.  Don't reset currentModel —
-        // it is managed independently by TopModelSelector.
-        // Don't reset chatMode either — it's user-driven state.
+        // 网络错误或非 404 服务端错误：重置 UI 开关但保留会话项。不重置 currentModel（由 TopModelSelector 独立管理），也不重置 chatMode（用户驱动状态）。
         setFullAccessEnabled(false);
       }
     };
@@ -308,6 +301,7 @@ export function SessionSync() {
     setStreaming,
     setCurrentModel,
     setFullAccessEnabled,
+    setVisionCapable,
     setChatMode,
   ]);
 

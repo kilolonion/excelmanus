@@ -32,7 +32,7 @@ import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
 import { CodeBlock } from "./CodeBlock";
 
-// Tool category → icon mapping
+// 工具分类 → 图标映射
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   read_excel: BookOpen,
   list_sheets: Search,
@@ -51,7 +51,7 @@ function getToolIcon(name: string): LucideIcon {
   return TOOL_ICON_MAP[name] || Wrench;
 }
 
-/** Detect language for syntax highlighting of tool results. */
+/** 检测工具结果的语法高亮语言。 */
 function detectResultLanguage(toolName: string, text: string): string | undefined {
   if (toolName === "run_code") return "python";
   const trimmed = text.trimStart();
@@ -59,12 +59,12 @@ function detectResultLanguage(toolName: string, text: string): string | undefine
     try {
       JSON.parse(trimmed);
       return "json";
-    } catch { /* not json */ }
+    } catch { /* 非 JSON */ }
   }
   return undefined;
 }
 
-// Build a short summary of tool args for collapsed preview
+// 为折叠预览构建工具参数简短摘要
 function argsSummary(name: string, args: Record<string, unknown>): string | null {
   const parts: string[] = [];
   if (args.sheet) parts.push(`sheet: ${args.sheet}`);
@@ -84,17 +84,17 @@ function argsSummary(name: string, args: Record<string, unknown>): string | null
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-// Tool category → green-family color theme
+// 工具分类 → 绿色系主题
 type ToolCategoryTheme = {
-  bar: string;          // left accent bar
-  iconBg: string;       // circular icon background
-  iconColor: string;    // icon foreground
-  pillBg: string;       // tool-name pill background
-  pillText: string;     // tool-name pill text
-  cardBg: string;       // card background
-  cardHover: string;    // card hover background
-  border: string;       // card border
-  label: string;        // human-readable category label
+  bar: string;          // 左侧强调条
+  iconBg: string;       // 圆形图标背景
+  iconColor: string;    // 图标前景色
+  pillBg: string;       // 工具名胶囊背景
+  pillText: string;     // 工具名胶囊文字
+  cardBg: string;       // 卡片背景
+  cardHover: string;    // 卡片悬停背景
+  border: string;       // 卡片边框
+  label: string;        // 人类可读的分类标签
 };
 
 const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
@@ -204,17 +204,17 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   const [appliedInline, setAppliedInline] = useState(false);
   const [chevronClass, setChevronClass] = useState("");
 
-  // Handle chevron animation
+  // 处理展开/收起箭头动画
   const handleOpenChange = useCallback((newOpen: boolean) => {
     setOpen(newOpen);
-    // Trigger animation class
+    // 触发动画类名
     const animationClass = newOpen ? "tool-chevron-expand" : "tool-chevron-collapse";
     setChevronClass(animationClass);
-    // Clear animation class after animation completes (longer timeout for collapse)
+    // 动画结束后清除动画类（收起时超时稍长）
     setTimeout(() => setChevronClass(""), newOpen ? 250 : 350);
   }, []);
 
-  // Elapsed timer for running tools
+  // 运行中工具的已用时间
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {

@@ -16,7 +16,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { archiveSession, deleteSession, buildApiUrl } from "@/lib/api";
+import { archiveSession, deleteSession, abortChat } from "@/lib/api";
 import { stopGeneration } from "@/lib/chat-actions";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
@@ -74,30 +74,24 @@ export function SessionList() {
     const chatState = useChatStore.getState();
     const isDeletingCurrent = chatState.currentSessionId === sessionId;
 
-    // If deleting the currently streaming session, abort the frontend SSE too
+    // 若删除的是当前正在流式输出的会话，则同时中止前端 SSE
     if (isDeletingCurrent && chatState.abortController) {
       stopGeneration();
     } else {
-      // For non-current sessions, still tell the backend to cancel any task
-      fetch(buildApiUrl("/chat/abort", { direct: true }), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId }),
-      }).catch(() => {});
+      // 对非当前会话，仍通知后端取消任务
+      abortChat(sessionId).catch(() => {});
     }
 
     try {
       await deleteSession(sessionId);
     } catch {
-      // Backend 404 is fine — session may only exist locally
+      // 后端 404 可接受，会话可能仅存在于本地
     }
     const isDeletingActive = sessionId === activeSessionId;
     removeSessionCache(sessionId);
     removeSession(sessionId);
 
-    // Auto-switch to next available session when deleting the active one,
-    // mirroring handleArchiveToggle behavior to avoid activeSessionId=null
-    // which causes model config to temporarily show empty.
+    // 删除当前会话时自动切换到下一个可用会话，与 handleArchiveToggle 行为一致，避免 activeSessionId=null 导致模型配置暂时为空。
     if (isDeletingActive) {
       const nextActive = sessions.find(
         (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
@@ -120,7 +114,7 @@ export function SessionList() {
     try {
       await archiveSession(sessionId, newArchived);
     } catch {
-      // Backend 404 is fine — update local state regardless
+      // 后端 404 可接受，仍更新本地状态
     }
     const newStatus = newArchived ? "archived" : "active";
     updateSessionStatus(sessionId, newStatus);

@@ -17,19 +17,24 @@ function trimTrailingSlash(value: string): string {
  *
  * 优先级：
  * 1. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联）
- * 2. 空字符串 — 走同源 Nginx 代理（生产环境推荐，/api/ 已配置 proxy_buffering off）
- * 3. 回退：window.location.hostname:8000（仅适用于前后端同机开发）
+ *    - 设为具体地址（如 http://backend:8000）→ 直连该地址
+ *    - 设为 "same-origin" → 走同源（适用于 Nginx 已配置 proxy_buffering off）
+ * 2. 未配置时回退 → http://{当前主机名}:8000（开发/默认 docker-compose 场景）
  *
  * 生产环境如果 Nginx 已配置 /api/ 反向代理且关闭了 buffering，
- * 留空 NEXT_PUBLIC_BACKEND_ORIGIN 即可，所有请求走同源，无 CORS 问题。
+ * 设置 NEXT_PUBLIC_BACKEND_ORIGIN=same-origin 即可，所有请求走同源，无 CORS 问题。
  */
 function resolveDirectBackendOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
   if (configured) {
+    // "same-origin" 显式表示走同源（Nginx 场景），返回空字符串
+    if (configured.toLowerCase() === "same-origin") return "";
     return trimTrailingSlash(configured);
   }
-  // 未配置时走同源（Nginx 反向代理 /api/ → 后端，buffering 已关闭）
-  // 返回空字符串，让请求路径保持 /api/v1/... 同源访问
+  // 未配置时回退到同主机 :8000 — 避免 SSE 流走 Next.js rewrite 被缓冲
+  if (typeof window !== "undefined") {
+    return `http://${window.location.hostname}:8000`;
+  }
   return "";
 }
 
@@ -42,13 +47,11 @@ function resolveDirectBackendOrigin(): string {
  * 普通 REST 请求一律走代理，只有 SSE/abort 等实时性要求高的请求才用 direct。
  */
 function resolveApiBase(opts?: { direct?: boolean }): string {
-  // Most browser requests route through the Next.js rewrite proxy so that
-  // requests stay same-origin (avoids CORS when accessed from LAN devices).
+  // 大多数浏览器请求通过 Next.js rewrite 代理，保持同源（避免局域网设备访问时的 CORS 问题）。
   //
-  // However, SSE (Server-Sent Events) streams MUST bypass the proxy because
-  // Next.js rewrites buffer the entire response before forwarding it to the
-  // client, which completely breaks real-time streaming.  Callers that need
-  // a live stream pass `direct: true` to connect straight to the backend.
+  // 但 SSE（Server-Sent Events）流必须绕过代理，因为 Next.js rewrite 会缓冲整个
+  // 响应后才转发给客户端，这会完全破坏实时流式传输。需要实时流的调用方
+  // 传入 `direct: true` 直连后端。
   if (typeof window !== "undefined") {
     if (opts?.direct) {
       return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
@@ -64,6 +67,43 @@ function resolveApiBase(opts?: { direct?: boolean }): string {
 export function buildApiUrl(path: string, opts?: { direct?: boolean }): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${resolveApiBase(opts)}${normalizedPath}`;
+}
+
+/**
+ * 带 auth token 刷新重试的 fetch 包装（用于直连调用）。
+ * 遇到 401 时自动刷新 token 并重试一次。
+ */
+export async function directFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const doFetch = async () => {
+    const headers = new Headers(init?.headers);
+    const token = useAuthStore.getState().accessToken;
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    return fetch(input, { ...init, headers });
+  };
+
+  let res = await doFetch();
+  if (res.status === 401) {
+    const { refreshToken } = useAuthStore.getState();
+    if (refreshToken) {
+      const { refreshAccessToken } = await import("./auth-api");
+      const ok = await refreshAccessToken();
+      if (ok) {
+        res = await doFetch();
+      } else {
+        useAuthStore.getState().logout();
+        if (typeof window !== "undefined") window.location.href = "/login";
+      }
+    } else {
+      useAuthStore.getState().logout();
+      if (typeof window !== "undefined") window.location.href = "/login";
+    }
+  }
+  return res;
 }
 
 async function handleAuthError(res: Response): Promise<never> {
@@ -204,6 +244,7 @@ export async function fetchSessionDetail(
     chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
     currentModel: (data.current_model as string | null) ?? null,
     currentModelName: (data.current_model_name as string | null) ?? null,
+    visionCapable: (data.vision_capable as boolean) ?? false,
     messages: Array.isArray(data.messages) ? (data.messages as unknown[]) : [],
     pendingApproval,
     pendingQuestion,
@@ -397,7 +438,7 @@ export async function rollbackChat(opts: {
   file_rollback_results: string[];
   turn_index: number;
 }> {
-  const res = await fetch(buildApiUrl("/chat/rollback"), {
+  const res = await fetch(buildApiUrl("/chat/rollback", { direct: true }), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -443,7 +484,7 @@ export function normalizeExcelPath(path: string): string {
     return basename ? `./${basename}` : "";
   }
   let p = raw.replace(/\/\/+/g, "/");
-  // Keep absolute paths intact so backend can validate them against workspace.
+  // 保留绝对路径不变，以便后端可根据工作区进行校验。
   if (p.startsWith("/")) return p;
   if (!p.startsWith("./")) p = `./${p}`;
   return p;
@@ -557,7 +598,7 @@ export async function uploadFileToFolder(
   const formData = new FormData();
   formData.append("file", file);
   formData.append("folder", folder);
-  const res = await fetch(buildApiUrl("/upload"), {
+  const res = await fetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
     headers: { ...getAuthHeaders() },
     body: formData,
@@ -647,7 +688,7 @@ export async function writeExcelCells(opts: {
 export async function downloadFile(path: string, filename?: string, sessionId?: string): Promise<void> {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (sessionId) params.set("session_id", sessionId);
-  const url = buildApiUrl(`/files/download?${params.toString()}`);
+  const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
   const res = await fetch(url, {
     headers: { ...getAuthHeaders() },
   });
@@ -674,7 +715,7 @@ export async function uploadFile(file: File): Promise<{
 }> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(buildApiUrl("/upload"), {
+  const res = await fetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
     headers: { ...getAuthHeaders() },
     body: formData,
@@ -686,7 +727,7 @@ export async function uploadFile(file: File): Promise<{
   return res.json();
 }
 
-// ── Workspace Transaction API (formerly Backup Apply) ────
+// ── 工作区事务 API（原备份应用）────
 
 export interface BackupFile {
   original_path: string;

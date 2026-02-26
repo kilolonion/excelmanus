@@ -72,14 +72,11 @@ export const useSessionStore = create<SessionState>()(
             });
           }
 
-          // Remove local-only sessions not present in the backend response.
-          // Keep the active session to protect optimistic creates that haven't
-          // reached the server yet.
-          // F3: Also keep sessions created locally within the last 30s (grace period)
-          // to prevent premature pruning of optimistic creates before the first
-          // message reaches the backend.
-          // F7: Skip pruning entirely when the backend returns an empty list
-          // (likely a transient error) to prevent session list flickering.
+          // 移除仅存在于本地、后端未返回的会话。
+          // 保留当前活跃会话，以保护尚未到达服务端的乐观创建。
+          // F3：最近 30 秒内本地创建的会话也保留（宽限期），避免首条消息
+          // 到达后端前过早裁剪乐观创建。
+          // F7：当后端返回空列表时跳过裁剪（可能是瞬时错误），避免会话列表闪烁。
           const remoteIds = new Set(remote.map((s) => s.id));
           const GRACE_PERIOD_MS = 30_000;
           const now = Date.now();
