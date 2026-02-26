@@ -1422,13 +1422,13 @@ class ApproveRequest(BaseModel):
 
 
 class BackupApplyRequest(BaseModel):
-    """Apply backup files back to originals."""
+    """将备份文件应用回原文件。"""
     session_id: str
     files: list[str] | None = Field(default=None, description="要应用的原始文件路径列表。为空或 null 时应用全部。")
 
 
 class BackupDiscardRequest(BaseModel):
-    """Discard backup files."""
+    """丢弃备份文件。"""
     session_id: str
     files: list[str] | None = Field(default=None, description="要丢弃的原始文件路径列表。为空或 null 时丢弃全部。")
 
@@ -3127,7 +3127,7 @@ _ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
 
 
 def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
-    """Resolve *relative* under *uploads_dir* and ensure it stays within bounds."""
+    """在 uploads_dir 下解析 relative 路径并确保不越界。"""
     from pathlib import Path as _Path
     cleaned = relative.replace("\\", "/").strip("/")
     if ".." in cleaned.split("/"):

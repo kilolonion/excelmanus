@@ -49,7 +49,7 @@ class SemanticManifest:
         self._top_k = top_k
         self._threshold = threshold
         self._store: VectorStore | None = None
-        self._file_indices: list[int] = []  # store index → manifest file index
+        self._file_indices: list[int] = []  # 存储索引 → manifest 文件索引
         self._indexed_manifest_id: int | None = None
 
     async def index_manifest(self, manifest: "WorkspaceManifest") -> int:
