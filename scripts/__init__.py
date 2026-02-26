@@ -1,2 +1,2 @@
-"""Repository scripts package."""
+"""仓库脚本包。"""
 

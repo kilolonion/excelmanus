@@ -55,7 +55,7 @@ class TestApplyPromptCommandSync:
 
 class TestComputeInlineSuggestion:
     def setup_method(self):
-        # Set up test slash commands
+        # 设置测试用斜杠命令
         prompt_mod._SLASH_COMMAND_SUGGESTIONS = (
             "/help", "/history", "/clear", "/save", "/skills",
             "/model", "/fullaccess", "/subagent",
