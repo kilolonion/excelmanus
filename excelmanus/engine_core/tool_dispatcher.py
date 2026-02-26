@@ -83,9 +83,33 @@ def _render_finish_task_report(
 # JSON 代码块提取用正则（复用 small_model 的逻辑，避免跨模块依赖）
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
+# 被视为"输出被截断"的 finish_reason 集合（覆盖不同 VLM 提供商的命名差异）
+_TRUNCATION_FINISH_REASONS = {"length", "max_tokens"}
 
-def _parse_vlm_json(text: str) -> dict[str, Any] | None:
-    """从 VLM 输出中提取 JSON dict，支持 fence 包裹和前后缀污染。"""
+
+def _is_likely_truncated(raw_text: str, finish_reason: str | None) -> bool:
+    """启发式检测 VLM 输出是否被截断。
+
+    检测信号：
+    1. finish_reason 明确指示截断
+    2. 文本包含 JSON 开头 '{' 但不以 '}' 结尾（启发式）
+    """
+    if finish_reason and finish_reason.lower() in _TRUNCATION_FINISH_REASONS:
+        return True
+    stripped = (raw_text or "").rstrip()
+    if stripped and '{' in stripped and not stripped.endswith('}'):
+        return True
+    return False
+
+
+def _parse_vlm_json(text: str, *, try_repair: bool = False) -> dict[str, Any] | None:
+    """从 VLM 输出中提取 JSON dict，支持 fence 包裹、前后缀污染和截断修复。
+
+    Args:
+        text: VLM 原始输出文本。
+        try_repair: 为 True 时表示已知输出可能被截断（如 finish_reason=length），
+                    用于日志提示。无论此参数为何值，解析失败时都会尝试修复。
+    """
     content = (text or "").strip()
     if not content:
         return None
@@ -105,6 +129,91 @@ def _parse_vlm_json(text: str) -> dict[str, Any] | None:
             continue
         if isinstance(data, dict):
             return data
+    # ── 截断修复：始终尝试补全未闭合的括号（不再仅限 try_repair=True）──
+    if left >= 0:
+        if not try_repair:
+            logger.info(
+                "JSON 直接解析失败（%d 字符），尝试截断修复",
+                len(content),
+            )
+        return _repair_truncated_json(content[left:])
+    return None
+
+
+def _repair_truncated_json(fragment: str) -> dict[str, Any] | None:
+    """尝试修复被截断的 JSON（如 VLM 输出因 max_tokens 被截断）。
+
+    策略：
+    1. 收集所有可能的回退切点（逆序扫描，跳过字符串内部）
+    2. 从最靠近末尾的切点开始尝试：截断 → 补全未闭合括号 → json.loads
+    3. 某个切点修复成功则返回，全部失败返回 None
+    """
+    if not fragment or fragment[0] != '{':
+        return None
+
+    # ── 收集候选切点（从后往前，字符串外的分隔符位置）──
+    cut_points: list[int] = []
+    in_str = False
+    esc = False
+    for i, ch in enumerate(fragment):
+        if esc:
+            esc = False
+            continue
+        if ch == '\\' and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in (',', '[', '{', '}', ']'):
+            # , → 截到它之前（移除尾部不完整元素）
+            # 其它 → 截到它之后（保留该括号）
+            cut_points.append(i if ch == ',' else i + 1)
+
+    # 从最靠近末尾的切点开始尝试（优先保留更多数据）
+    for cut in reversed(cut_points):
+        trimmed = fragment[:cut]
+        # 统计未闭合括号
+        stack: list[str] = []
+        s_in_str = False
+        s_esc = False
+        for ch in trimmed:
+            if s_esc:
+                s_esc = False
+                continue
+            if ch == '\\' and s_in_str:
+                s_esc = True
+                continue
+            if ch == '"':
+                s_in_str = not s_in_str
+                continue
+            if s_in_str:
+                continue
+            if ch in ('{', '['):
+                stack.append(ch)
+            elif ch == '}' and stack and stack[-1] == '{':
+                stack.pop()
+            elif ch == ']' and stack and stack[-1] == '[':
+                stack.pop()
+        # 如果仍在字符串内，说明切点在引号中间——跳过
+        if s_in_str:
+            continue
+        closers = {'[': ']', '{': '}'}
+        suffix = ''.join(closers.get(b, '') for b in reversed(stack))
+        repaired = trimmed + suffix
+        try:
+            data = json.loads(repaired)
+            if isinstance(data, dict):
+                lost = len(fragment) - cut
+                logger.info(
+                    "截断 JSON 修复成功（回退 %d 字符，补全 %d 个括号）",
+                    lost, len(stack),
+                )
+                return data
+        except json.JSONDecodeError:
+            continue
     return None
 
 
@@ -114,6 +223,7 @@ class ToolDispatcher:
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
         self._pending_vlm_image: dict | None = None
+        self._deferred_image_injections: list[dict[str, Any]] = []
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
         if db is not None:
@@ -248,20 +358,22 @@ class ToolDispatcher:
             if tx is not None:
                 tx.register_cow_mappings(cow_mapping)
 
-        # ── 图片注入提取 ──
+        # ── 图片注入提取（延迟注入，避免破坏 tool_calls→tool_responses 序列） ──
         if "__tool_result_image__" in parsed:
             injection = parsed.pop("__tool_result_image__")
             mutated = True
             e = self._engine
 
-            # C 通道：主模型支持视觉 → 注入图片到对话 memory
+            # C 通道：主模型支持视觉 → 延迟注入图片到对话 memory
+            # 不能在此处直接调用 add_image_message，否则会在 assistant(tool_calls)
+            # 和 tool(responses) 之间插入 user 消息，导致 API 400 错误。
             if e.is_vision_capable:
-                e.memory.add_image_message(
-                    base64_data=injection["base64"],
-                    mime_type=injection.get("mime_type", "image/png"),
-                    detail=injection.get("detail", "auto"),
-                )
-                logger.info("C 通道: 图片已注入 memory (mime=%s)", injection.get("mime_type"))
+                self._deferred_image_injections.append({
+                    "base64": injection["base64"],
+                    "mime_type": injection.get("mime_type", "image/png"),
+                    "detail": injection.get("detail", "auto"),
+                })
+                logger.info("C 通道: 图片已缓存待注入 (mime=%s)", injection.get("mime_type"))
                 parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
             else:
                 logger.info("主模型无视觉能力，跳过图片注入")
@@ -276,6 +388,31 @@ class ToolDispatcher:
 
         cleaned = json.dumps(parsed, ensure_ascii=False) if mutated else result_str
         return cleaned, cow_mapping
+
+    def flush_deferred_images(self) -> int:
+        """将延迟的图片注入实际写入 memory。
+
+        必须在当前 assistant tool_calls 对应的所有 tool result 写入 memory 之后调用，
+        否则 user 角色的图片消息会破坏 tool_calls → tool_responses 的消息序列，
+        导致 OpenAI 兼容 API 返回 400 错误。
+
+        Returns:
+            注入的图片数量。
+        """
+        if not self._deferred_image_injections:
+            return 0
+        e = self._engine
+        count = 0
+        for inj in self._deferred_image_injections:
+            e.memory.add_image_message(
+                base64_data=inj["base64"],
+                mime_type=inj.get("mime_type", "image/png"),
+                detail=inj.get("detail", "auto"),
+            )
+            count += 1
+        logger.info("C 通道: 已注入 %d 张延迟图片到 memory", count)
+        self._deferred_image_injections.clear()
+        return count
 
     # 向后兼容别名（测试中可能直接调用）
     def _try_inject_image(self, result_str: str) -> str:
@@ -329,7 +466,7 @@ class ToolDispatcher:
             ]},
         ]
 
-        raw_text, last_error = await self._call_vlm_with_retry(
+        raw_text, last_error, _fr = await self._call_vlm_with_retry(
             messages=messages,
             vlm_client=vlm_client,
             vlm_model=vlm_model,
@@ -358,15 +495,17 @@ class ToolDispatcher:
         vlm_base_delay: float,
         phase_label: str = "",
         response_format: dict | None = None,
-    ) -> tuple[str | None, Exception | None]:
+        max_tokens: int | None = None,
+    ) -> tuple[str | None, Exception | None, str | None]:
         """共享的 VLM 调用逻辑（带超时+网络错误重试）。
 
-        返回 (raw_text, last_error)。raw_text 为 None 表示全部失败。
+        返回 (raw_text, last_error, finish_reason)。raw_text 为 None 表示全部失败。
         """
         import asyncio
 
         raw_text: str | None = None
         last_error: Exception | None = None
+        finish_reason: str | None = None
         label = f" [{phase_label}]" if phase_label else ""
 
         create_kwargs: dict[str, Any] = {
@@ -376,6 +515,8 @@ class ToolDispatcher:
         }
         if response_format is not None:
             create_kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            create_kwargs["max_tokens"] = max_tokens
 
         for attempt in range(vlm_max_retries + 1):
             try:
@@ -384,6 +525,13 @@ class ToolDispatcher:
                     timeout=vlm_timeout,
                 )
                 raw_text = response.choices[0].message.content or ""
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                if finish_reason == "length":
+                    logger.warning(
+                        "VLM%s 输出被截断（finish_reason=length），"
+                        "输出长度 %d 字符，考虑增大 EXCELMANUS_VLM_MAX_TOKENS",
+                        label, len(raw_text),
+                    )
                 break
             except asyncio.TimeoutError:
                 last_error = TimeoutError(f"VLM 调用超时（{vlm_timeout}s）")
@@ -400,7 +548,7 @@ class ToolDispatcher:
                     delay = vlm_base_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
 
-        return raw_text, last_error
+        return raw_text, last_error, finish_reason
 
     @staticmethod
     def _prepare_image_for_vlm(
@@ -619,7 +767,7 @@ class ToolDispatcher:
             {"type": "text", "text": build_extract_data_prompt()},
         ]}]
 
-        raw_p1, err_p1 = await self._call_vlm_with_retry(
+        raw_p1, err_p1, fr_p1 = await self._call_vlm_with_retry(
             messages=messages_p1,
             vlm_client=vlm_client,
             vlm_model=vlm_model,
@@ -628,17 +776,24 @@ class ToolDispatcher:
             vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
             phase_label="结构化提取Phase1",
             response_format={"type": "json_object"},
+            max_tokens=e.config.vlm_max_tokens,
         )
 
         if raw_p1 is None:
             return self._build_vlm_failure_result(err_p1, e.config.vlm_max_retries + 1, file_path)
 
-        data_json = _parse_vlm_json(raw_p1)
+        likely_truncated = _is_likely_truncated(raw_p1, fr_p1)
+        data_json = _parse_vlm_json(raw_p1, try_repair=likely_truncated)
         if data_json is None:
+            hint = ""
+            if likely_truncated:
+                hint = "（输出可能被截断，建议增大 EXCELMANUS_VLM_MAX_TOKENS）"
             return json.dumps({
                 "status": "error",
-                "message": "Phase 1 VLM 返回内容无法解析为 JSON",
+                "message": f"Phase 1 VLM 返回内容无法解析为 JSON{hint}",
                 "raw_preview": raw_p1[:500],
+                "raw_length": len(raw_p1),
+                "finish_reason": fr_p1,
             }, ensure_ascii=False)
 
         logger.info("Phase 1 提取完成: %d 表格", len(data_json.get("tables") or []))
@@ -662,7 +817,7 @@ class ToolDispatcher:
                     {"type": "text", "text": build_extract_style_prompt(summary)},
                 ]}]
 
-                raw_p2, err_p2 = await self._call_vlm_with_retry(
+                raw_p2, err_p2, fr_p2 = await self._call_vlm_with_retry(
                     messages=messages_p2,
                     vlm_client=vlm_client,
                     vlm_model=vlm_model,
@@ -671,10 +826,11 @@ class ToolDispatcher:
                     vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
                     phase_label="结构化提取Phase2",
                     response_format={"type": "json_object"},
+                    max_tokens=e.config.vlm_max_tokens,
                 )
 
                 if raw_p2:
-                    style_json = _parse_vlm_json(raw_p2)
+                    style_json = _parse_vlm_json(raw_p2, try_repair=_is_likely_truncated(raw_p2, fr_p2))
                     if style_json:
                         logger.info("Phase 2 样式提取完成")
                     else:
@@ -701,8 +857,15 @@ class ToolDispatcher:
                 "message": f"ReplicaSpec 后处理失败: {exc}",
             }, ensure_ascii=False)
 
-        # ── 写入文件 ──
-        out = Path(output_path)
+        # ── 写入文件（通过 FileAccessGuard 解析，与 rebuild_excel_from_spec 一致）──
+        from excelmanus.security import FileAccessGuard, SecurityViolationError
+        _ws_root = e.config.workspace_root
+        _out_guard = FileAccessGuard(_ws_root) if _ws_root else None
+        try:
+            out = _out_guard.resolve_and_validate(output_path) if _out_guard else Path(output_path)
+        except SecurityViolationError:
+            # 回退：直接基于 workspace_root 拼接
+            out = Path(_ws_root) / output_path if _ws_root else Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         spec_text = spec.model_dump_json(indent=2, exclude_none=True)
         out.write_text(spec_text, encoding="utf-8")
@@ -1662,6 +1825,15 @@ class ToolDispatcher:
                                     )
                                     from excelmanus.events import EventType, ToolCallEvent
                                     for _rd_s in _rc_diffs_s:
+                                        _rc_merges_s: list[dict[str, int]] = []
+                                        _rc_hints_s: list[str] = []
+                                        try:
+                                            _rc_merges_s, _rc_hints_s = self._extract_sheet_metadata(
+                                                _rd_s["file_path"], _rd_s["sheet"] or None,
+                                                e.config.workspace_root,
+                                            )
+                                        except Exception:
+                                            pass
                                         e.emit(
                                             on_event,
                                             ToolCallEvent(
@@ -1671,6 +1843,8 @@ class ToolDispatcher:
                                                 excel_sheet=_rd_s["sheet"],
                                                 excel_affected_range=_rd_s["affected_range"],
                                                 excel_changes=_rd_s["changes"],
+                                                excel_merge_ranges=_rc_merges_s,
+                                                excel_metadata_hints=_rc_hints_s,
                                             ),
                                         )
                                 except Exception:
@@ -2219,13 +2393,13 @@ class ToolDispatcher:
     @staticmethod
     def _snapshot_excel_for_diff(
         file_paths: list[str], workspace_root: str,
-    ) -> dict[str, list[tuple[str, list[dict]]]]:
-        """对指定 Excel 文件做轻量快照，返回 {file_path: [(sheet, snapshot)]}。
+    ) -> dict[str, list[tuple[str, list[dict], list[dict]]]]:
+        """对指定 Excel 文件做轻量快照，返回 {file_path: [(sheet, cells, merges)]}。
 
         文件不存在时记录空列表（tombstone），以便 diff 能检测"从无到有"的新建场景。
         """
         from pathlib import Path
-        snapshots: dict[str, list[tuple[str, list[dict]]]] = {}
+        snapshots: dict[str, list[tuple[str, list[dict], list[dict]]]] = {}
         for fp in file_paths:
             try:
                 abs_path = Path(fp) if Path(fp).is_absolute() else Path(workspace_root) / fp
@@ -2236,9 +2410,9 @@ class ToolDispatcher:
                     continue
                 from openpyxl import load_workbook
                 from openpyxl.utils import get_column_letter
-                from excelmanus.tools._style_extract import extract_cell_style
+                from excelmanus.tools._style_extract import extract_cell_style, extract_merge_ranges
                 wb = load_workbook(str(abs_path), data_only=False, read_only=False)
-                file_snaps: list[tuple[str, list[dict]]] = []
+                file_snaps: list[tuple[str, list[dict], list[dict]]] = []
                 for sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     cells: list[dict] = []
@@ -2256,7 +2430,8 @@ class ToolDispatcher:
                                 if style:
                                     entry["style"] = style
                                 cells.append(entry)
-                    file_snaps.append((sheet_name, cells))
+                    merges = extract_merge_ranges(ws)
+                    file_snaps.append((sheet_name, cells, merges))
                 wb.close()
                 snapshots[fp] = file_snaps
             except Exception:
@@ -2265,21 +2440,33 @@ class ToolDispatcher:
 
     @staticmethod
     def _compute_snapshot_diffs(
-        before: dict[str, list[tuple[str, list[dict]]]],
-        after: dict[str, list[tuple[str, list[dict]]]],
+        before: dict[str, list[tuple[str, list[dict], list[dict]]]],
+        after: dict[str, list[tuple[str, list[dict], list[dict]]]],
     ) -> list[dict]:
-        """对比前后快照，返回 [{file_path, sheet, affected_range, changes}]。"""
+        """对比前后快照，返回 [{file_path, sheet, affected_range, changes, old_merge_ranges, new_merge_ranges}]。"""
         results: list[dict] = []
         all_files = set(before) | set(after)
         for fp in sorted(all_files):
-            before_sheets = {s: cells for s, cells in before.get(fp, [])}
-            after_sheets = {s: cells for s, cells in after.get(fp, [])}
+            # 兼容 2-tuple (旧格式) 和 3-tuple (新格式含 merges)
+            def _unpack(items: list) -> dict[str, tuple[list[dict], list[dict]]]:
+                out: dict[str, tuple[list[dict], list[dict]]] = {}
+                for item in items:
+                    if len(item) >= 3:
+                        out[item[0]] = (item[1], item[2])
+                    else:
+                        out[item[0]] = (item[1], [])
+                return out
+
+            before_sheets = _unpack(before.get(fp, []))
+            after_sheets = _unpack(after.get(fp, []))
             all_sheets = set(before_sheets) | set(after_sheets)
             for sheet in sorted(all_sheets):
-                b_cells = {c["cell"]: c["value"] for c in before_sheets.get(sheet, [])}
-                a_cells = {c["cell"]: c["value"] for c in after_sheets.get(sheet, [])}
-                b_styles = {c["cell"]: c.get("style") for c in before_sheets.get(sheet, [])}
-                a_styles = {c["cell"]: c.get("style") for c in after_sheets.get(sheet, [])}
+                b_data, b_merges = before_sheets.get(sheet, ([], []))
+                a_data, a_merges = after_sheets.get(sheet, ([], []))
+                b_cells = {c["cell"]: c["value"] for c in b_data}
+                a_cells = {c["cell"]: c["value"] for c in a_data}
+                b_styles = {c["cell"]: c.get("style") for c in b_data}
+                a_styles = {c["cell"]: c.get("style") for c in a_data}
                 changes: list[dict] = []
                 for ref in sorted(set(b_cells) | set(a_cells)):
                     old_val = b_cells.get(ref)
@@ -2302,6 +2489,8 @@ class ToolDispatcher:
                         "sheet": sheet,
                         "affected_range": f"{first}:{last}" if first != last else first,
                         "changes": changes[:200],
+                        "old_merge_ranges": b_merges,
+                        "new_merge_ranges": a_merges,
                     })
         return results
 
@@ -2382,16 +2571,28 @@ class ToolDispatcher:
         if isinstance(diff_data, dict):
             changes = diff_data.get("changes", [])
             if changes:
-                diff_merges: list[dict[str, int]] = []
+                # 优先使用 diff_data 自带的 merge ranges（写入前后各自捕获）
+                diff_old_merges: list[dict[str, int]] = diff_data.get("old_merge_ranges", [])
+                diff_new_merges: list[dict[str, int]] = diff_data.get("new_merge_ranges", [])
                 diff_hints: list[str] = []
-                try:
-                    diff_merges, diff_hints = self._extract_sheet_metadata(
-                        diff_data.get("file_path", ""),
-                        diff_data.get("sheet") or None,
-                        e.config.workspace_root,
-                    )
-                except Exception:
-                    logger.debug("提取 diff 工作表元数据失败", exc_info=True)
+                if not diff_new_merges:
+                    try:
+                        diff_new_merges, diff_hints = self._extract_sheet_metadata(
+                            diff_data.get("file_path", ""),
+                            diff_data.get("sheet") or None,
+                            e.config.workspace_root,
+                        )
+                    except Exception:
+                        logger.debug("提取 diff 工作表元数据失败", exc_info=True)
+                else:
+                    try:
+                        _, diff_hints = self._extract_sheet_metadata(
+                            diff_data.get("file_path", ""),
+                            diff_data.get("sheet") or None,
+                            e.config.workspace_root,
+                        )
+                    except Exception:
+                        pass
                 e.emit(
                     on_event,
                     ToolCallEvent(
@@ -2401,7 +2602,8 @@ class ToolDispatcher:
                         excel_sheet=diff_data.get("sheet", ""),
                         excel_affected_range=diff_data.get("affected_range", ""),
                         excel_changes=changes[:200],
-                        excel_merge_ranges=diff_merges,
+                        excel_merge_ranges=diff_new_merges,
+                        excel_old_merge_ranges=diff_old_merges,
                         excel_metadata_hints=diff_hints,
                     ),
                 )

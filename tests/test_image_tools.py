@@ -119,12 +119,13 @@ class TestTryInjectImage:
         dispatcher = ToolDispatcher.__new__(ToolDispatcher)
         dispatcher._engine = engine
         dispatcher._pending_vlm_image = None
+        dispatcher._deferred_image_injections = []
         dispatcher._tool_call_store = None
         dispatcher._handlers = []
         return dispatcher, engine
 
     def test_inject_image_from_result(self) -> None:
-        """含 __tool_result_image__ 的结果触发 memory 注入并移除字段。"""
+        """含 __tool_result_image__ 的结果应延迟注入并移除字段。"""
         dispatcher, engine = self._make_dispatcher()
         result = json.dumps({
             "status": "ok",
@@ -135,9 +136,16 @@ class TestTryInjectImage:
         parsed = json.loads(cleaned)
         assert "__tool_result_image__" not in parsed
         assert parsed["status"] == "ok"
+        # 图片不再立即注入 memory，而是延迟到所有 tool result 写入后
+        engine.memory.add_image_message.assert_not_called()
+        assert len(dispatcher._deferred_image_injections) == 1
+        assert dispatcher._deferred_image_injections[0]["base64"] == "abc"
+        # flush 后才真正注入
+        dispatcher.flush_deferred_images()
         engine.memory.add_image_message.assert_called_once_with(
             base64_data="abc", mime_type="image/png", detail="auto",
         )
+        assert len(dispatcher._deferred_image_injections) == 0
 
     def test_no_injection_without_marker(self) -> None:
         """无 __tool_result_image__ 时不触发注入。"""
@@ -203,6 +211,11 @@ class TestTryInjectImage:
         parsed = json.loads(out)
         assert parsed["status"] == "ok"
         assert "__tool_result_image__" not in parsed
+        # 图片延迟注入：call_registry_tool 期间不直接调用 add_image_message
+        engine.memory.add_image_message.assert_not_called()
+        assert len(dispatcher._deferred_image_injections) == 1
+        # flush 后才真正注入
+        dispatcher.flush_deferred_images()
         engine.memory.add_image_message.assert_called_once()
 
 
