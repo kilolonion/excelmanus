@@ -54,11 +54,11 @@ class SessionState:
 
         # CoW 路径映射注册表（会话级累积）
         # key: 原始相对路径, value: outputs/ 下的副本相对路径
-        # 注意：当 _fvm 可用时，cow_path_registry 从 _fvm 的 staging 索引派生
+        # 注意：当 _file_registry 可用时，cow_path_registry 从 registry 的 staging 索引派生
         self.cow_path_registry: dict[str, str] = {}
 
-        # 统一文件版本管理器引用（由 engine 注入，可选）
-        self._fvm: Any = None
+        # FileRegistry 引用（由 engine 注入，唯一接口）
+        self._file_registry: Any = None
 
         # 备份沙盒：首次写入工具成功后是否已注入备份路径提示
         self.backup_write_notice_shown: bool = False
@@ -149,20 +149,19 @@ class SessionState:
     def register_cow_mappings(self, mapping: dict[str, str]) -> None:
         """合并新的 CoW 路径映射到会话级注册表。
 
-        当 _fvm 可用时，同时委托给 FileVersionManager 记录版本。
+        委托 FileRegistry，同时保留本地 dict 用于 system prompt 注入。
         """
         if not mapping:
             return
         self.cow_path_registry.update(mapping)
-        if self._fvm is not None:
+        if self._file_registry is not None and self._file_registry.has_versions:
             for src_rel, dst_rel in mapping.items():
-                self._fvm.register_cow_mapping(src_rel, dst_rel)
+                self._file_registry.register_cow_mapping(src_rel, dst_rel)
 
     def lookup_cow_redirect(self, rel_path: str) -> str | None:
         """查找相对路径是否有 CoW 副本，返回副本路径或 None。"""
-        # 优先从 _fvm 查询（统一来源）
-        if self._fvm is not None:
-            redirect = self._fvm.lookup_cow_redirect(rel_path)
+        if self._file_registry is not None and self._file_registry.has_versions:
+            redirect = self._file_registry.lookup_cow_redirect(rel_path)
             if redirect is not None:
                 return redirect
         return self.cow_path_registry.get(rel_path)

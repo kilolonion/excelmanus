@@ -1,7 +1,7 @@
 """CommandHandler — 从 AgentEngine 解耦的控制命令处理组件。
 
 负责管理：
-- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /backup, /compact, /manifest 命令
+- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /backup, /compact, /registry 命令
 """
 
 from __future__ import annotations
@@ -186,8 +186,8 @@ class CommandHandler:
         if command == "/compact":
             return await self._handle_compact_command(parts)
 
-        if command == "/manifest":
-            return self._handle_manifest_command(parts)
+        if command in ("/manifest", "/registry"):
+            return self._handle_registry_command(parts)
 
         if command == "/accept":
             return await self._handle_accept_command(parts, on_event=on_event)
@@ -292,48 +292,48 @@ class CommandHandler:
             f"- 累计压缩次数: {compaction_mgr.stats.compaction_count}"
         )
 
-    def _handle_manifest_command(self, parts: list[str]) -> str:
-        """处理 /manifest 命令。"""
+    def _handle_registry_command(self, parts: list[str]) -> str:
+        """处理 /registry (或兼容的 /manifest) 命令。"""
         e = self._engine
         action = parts[1].strip().lower() if len(parts) >= 2 else "status"
 
         if len(parts) > 2:
-            return "无效参数。用法：/manifest [status|build]。"
+            return "无效参数。用法：/registry [status|scan]。"
 
         if action in {"status", ""}:
-            status = e.workspace_manifest_build_status()
+            status = e.registry_scan_status()
             state = status.get("state")
             if state == "ready":
                 total_files = int(status.get("total_files") or 0)
                 scan_duration_ms = int(status.get("scan_duration_ms") or 0)
                 return (
-                    "Workspace manifest：已就绪。\n"
+                    "FileRegistry：已就绪。\n"
                     f"- 文件数: {total_files}\n"
                     f"- 扫描耗时: {scan_duration_ms}ms"
                 )
             if state == "building":
-                return "Workspace manifest：后台构建中。你可以继续对话，完成后会自动生效。"
+                return "FileRegistry：后台扫描中。你可以继续对话，完成后会自动生效。"
             if state == "error":
                 error = str(status.get("error") or "unknown")
                 return (
-                    "Workspace manifest：尚未就绪（最近一次构建失败）。\n"
+                    "FileRegistry：尚未就绪（最近一次扫描失败）。\n"
                     f"- 错误: {error}\n"
-                    "可执行 `/manifest build` 重试。"
+                    "可执行 `/registry scan` 重试。"
                 )
-            return "Workspace manifest：尚未开始。可执行 `/manifest build` 开始后台构建。"
+            return "FileRegistry：尚未开始。可执行 `/registry scan` 开始后台扫描。"
 
-        if action == "build":
-            started = e.start_workspace_manifest_prewarm(force=False)
+        if action in {"build", "scan"}:
+            started = e.start_registry_scan(force=False)
             if started:
-                return "已在后台开始构建 Workspace manifest。你可以继续当前对话。"
+                return "已在后台开始 FileRegistry 扫描。你可以继续当前对话。"
 
-            status = e.workspace_manifest_build_status()
+            status = e.registry_scan_status()
             state = status.get("state")
             if state == "ready":
                 total_files = int(status.get("total_files") or 0)
-                return f"Workspace manifest 已就绪（{total_files} 文件），无需重复构建。"
+                return f"FileRegistry 已就绪（{total_files} 文件），无需重复扫描。"
             if state == "building":
-                return "Workspace manifest 已在后台构建中，请稍候。"
+                return "FileRegistry 已在后台扫描中，请稍候。"
             if state == "error":
                 error = str(status.get("error") or "unknown")
                 return (
@@ -341,9 +341,9 @@ class CommandHandler:
                     f"- 最近错误: {error}\n"
                     "请稍后重试。"
                 )
-            return "当前环境无法启动后台构建，请稍后重试。"
+            return "当前环境无法启动后台扫描，请稍后重试。"
 
-        return "无效参数。用法：/manifest [status|build]。"
+        return "无效参数。用法：/registry [status|scan]。"
 
     def _handle_backup_command(self, parts: list[str]) -> str:
         """处理 /backup 会话控制命令。"""
@@ -369,7 +369,9 @@ class CommandHandler:
                 scope = "excel_only"
             e.workspace.transaction_enabled = True
             e.workspace.transaction_scope = scope
-            e.transaction = e.workspace.create_transaction(fvm=e._fvm)
+            e.transaction = e.workspace.create_transaction(
+                registry=e.file_registry,
+            )
             e.sandbox_env = e.workspace.create_sandbox_env(transaction=e.transaction)
             return f"已开启备份沙盒模式（scope={scope}）。所有文件操作将重定向到副本。"
 

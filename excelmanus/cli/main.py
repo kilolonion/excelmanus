@@ -141,7 +141,7 @@ async def _async_main() -> None:
         memory_extractor=memory_extractor,
         database=_database,
     )
-    engine.start_workspace_manifest_prewarm()
+    engine.start_registry_scan()
 
     # ── 6. MCP 连接 ──
     mcp_count = 0

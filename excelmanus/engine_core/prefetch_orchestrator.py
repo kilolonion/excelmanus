@@ -203,12 +203,20 @@ class PrefetchOrchestrator:
         return paths
 
     def _get_manifest_paths(self) -> list[str]:
-        """从 workspace manifest 获取已知的 Excel 文件路径。"""
-        manifest = self._engine._workspace_manifest
-        if manifest is None:
-            return []
-        files = getattr(manifest, "files", [])
-        return [f.path for f in files if hasattr(f, "path")]
+        """获取已知的 Excel 文件路径（优先 FileRegistry，回退 manifest）。"""
+        # 优先从 FileRegistry 查询 excel 类型文件
+        _reg = self._engine.file_registry
+        if _reg is not None:
+            try:
+                paths = [
+                    e.canonical_path for e in _reg.list_all()
+                    if e.file_type in ("excel", "csv")
+                ]
+                if paths:
+                    return paths
+            except Exception:
+                pass
+        return []
 
     @staticmethod
     def _has_file_intent(

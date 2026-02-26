@@ -1,6 +1,9 @@
-"""语义 Manifest：为 WorkspaceManifest 提供 embedding 语义搜索能力。
+"""语义 Manifest：为 FileRegistry 提供 embedding 语义搜索能力。
 
 根据用户查询语义匹配最相关的 Excel 文件，替代全量注入 manifest。
+
+.. versionchanged::
+    数据源统一由 FileRegistry 提供。
 """
 
 from __future__ import annotations
@@ -15,18 +18,19 @@ from excelmanus.embedding.store import VectorStore
 
 if TYPE_CHECKING:
     from excelmanus.embedding.client import EmbeddingClient
-    from excelmanus.workspace_manifest import ExcelFileMeta, WorkspaceManifest
+    from excelmanus.file_registry import FileEntry, FileRegistry
 
 logger = logging.getLogger(__name__)
 
 
-def _file_to_text(fm: "ExcelFileMeta") -> str:
-    """将文件元数据转换为用于 embedding 的文本描述。"""
-    parts = [fm.name, fm.path]
-    for sm in fm.sheets:
-        sheet_desc = f"sheet:{sm.name}"
-        if sm.headers:
-            sheet_desc += f" columns:{','.join(sm.headers[:10])}"
+def _entry_to_text(entry: "FileEntry") -> str:
+    """将 FileEntry 元数据转换为用于 embedding 的文本描述。"""
+    parts = [entry.original_name, entry.canonical_path]
+    for sm in entry.sheet_meta:
+        sheet_desc = f"sheet:{sm.get('name', '')}"
+        headers = sm.get("headers", [])
+        if headers:
+            sheet_desc += f" columns:{','.join(headers[:10])}"
         parts.append(sheet_desc)
     return " | ".join(parts)
 
@@ -34,8 +38,8 @@ def _file_to_text(fm: "ExcelFileMeta") -> str:
 class SemanticManifest:
     """语义 Manifest 增强层。
 
-    在 WorkspaceManifest 之上叠加 embedding 索引，
-    支持按用户查询语义搜索最相关的 Excel 文件。
+    在 FileRegistry 之上叠加 embedding 索引，
+    支持按用户查询语义搜索最相关的文件。
     """
 
     def __init__(
@@ -49,69 +53,73 @@ class SemanticManifest:
         self._top_k = top_k
         self._threshold = threshold
         self._store: VectorStore | None = None
-        self._file_indices: list[int] = []  # 存储索引 → manifest 文件索引
-        self._indexed_manifest_id: int | None = None
+        self._file_entries: list["FileEntry"] = []
+        self._indexed_registry_id: int | None = None
 
-    async def index_manifest(self, manifest: "WorkspaceManifest") -> int:
-        """为 manifest 中的所有文件建立向量索引。
+    async def index_registry(self, registry: "FileRegistry") -> int:
+        """为 registry 中的所有文件建立向量索引。
 
-        使用 manifest 的 id() 作为缓存键，避免重复索引。
+        使用 registry 的 id() 作为缓存键，避免重复索引。
         返回新增的向量数量。
         """
-        manifest_id = id(manifest)
-        if self._indexed_manifest_id == manifest_id and self._store is not None:
+        registry_id = id(registry)
+        if self._indexed_registry_id == registry_id and self._store is not None:
             return 0
 
-        if not manifest.files:
+        entries = [
+            e for e in registry.list_all()
+            if e.file_type in ("excel", "csv") and e.deleted_at is None
+        ]
+
+        if not entries:
             self._store = VectorStore(
                 store_dir="/tmp/excelmanus_manifest_vectors",
                 dimensions=self._client.dimensions,
             )
-            self._file_indices = []
-            self._indexed_manifest_id = manifest_id
+            self._file_entries = []
+            self._indexed_registry_id = registry_id
             return 0
 
         texts: list[str] = []
-        file_indices: list[int] = []
-        for i, fm in enumerate(manifest.files):
-            text = _file_to_text(fm)
+        kept_entries: list["FileEntry"] = []
+        for entry in entries:
+            text = _entry_to_text(entry)
             if text.strip():
                 texts.append(text)
-                file_indices.append(i)
+                kept_entries.append(entry)
 
         if not texts:
-            self._indexed_manifest_id = manifest_id
+            self._indexed_registry_id = registry_id
             return 0
 
         try:
             vectors = await self._client.embed(texts)
         except Exception:
-            logger.warning("Manifest 向量化失败", exc_info=True)
-            self._indexed_manifest_id = manifest_id
+            logger.warning("Registry 向量化失败", exc_info=True)
+            self._indexed_registry_id = registry_id
             return 0
 
-        # 创建临时内存级 store（manifest 是会话级的，不需要持久化）
         self._store = VectorStore(
             store_dir="/tmp/excelmanus_manifest_vectors",
             dimensions=self._client.dimensions,
         )
         self._store.clear()
         added = self._store.add_batch(texts, vectors)
-        self._file_indices = file_indices
-        self._indexed_manifest_id = manifest_id
+        self._file_entries = kept_entries
+        self._indexed_registry_id = registry_id
 
-        logger.debug("Manifest 语义索引完成: %d 文件", added)
+        logger.debug("Registry 语义索引完成: %d 文件", added)
         return added
 
     async def search(
         self,
         query: str,
-        manifest: "WorkspaceManifest",
+        registry: "FileRegistry",
         k: int | None = None,
         threshold: float | None = None,
-    ) -> list[tuple["ExcelFileMeta", float]]:
-        """语义搜索，返回 (ExcelFileMeta, score) 列表。"""
-        await self.index_manifest(manifest)
+    ) -> list[tuple["FileEntry", float]]:
+        """语义搜索，返回 (FileEntry, score) 列表。"""
+        await self.index_registry(registry)
 
         if self._store is None or self._store.size == 0:
             return []
@@ -129,22 +137,20 @@ class SemanticManifest:
             threshold=threshold or self._threshold,
         )
 
-        output: list[tuple["ExcelFileMeta", float]] = []
+        output: list[tuple["FileEntry", float]] = []
         for r in results:
-            if r.index < len(self._file_indices):
-                file_idx = self._file_indices[r.index]
-                if file_idx < len(manifest.files):
-                    output.append((manifest.files[file_idx], r.score))
+            if r.index < len(self._file_entries):
+                output.append((self._file_entries[r.index], r.score))
 
         return output
 
     async def get_relevant_summary(
         self,
         query: str,
-        manifest: "WorkspaceManifest",
+        registry: "FileRegistry",
     ) -> str:
         """返回与查询最相关的文件摘要文本，用于注入 system prompt。"""
-        results = await self.search(query, manifest)
+        results = await self.search(query, registry)
 
         if not results:
             return ""
@@ -153,19 +159,21 @@ class SemanticManifest:
             "## 工作区相关文件（语义匹配）",
             f"与当前请求最相关的 {len(results)} 个文件：",
         ]
-        for fm, score in results:
+        for entry, score in results:
             sheet_parts: list[str] = []
-            for sm in fm.sheets:
+            for sm in entry.sheet_meta:
+                name = sm.get("name", "")
+                rows = sm.get("rows", 0)
+                cols = sm.get("columns", 0)
+                headers = sm.get("headers", [])
                 header_hint = ""
-                if sm.headers:
-                    cols_str = ", ".join(sm.headers[:6])
-                    if len(sm.headers) > 6:
-                        cols_str += f" +{len(sm.headers) - 6}列"
+                if headers:
+                    cols_str = ", ".join(headers[:6])
+                    if len(headers) > 6:
+                        cols_str += f" +{len(headers) - 6}列"
                     header_hint = f" [{cols_str}]"
-                sheet_parts.append(
-                    f"{sm.name}({sm.rows}×{sm.columns}){header_hint}"
-                )
+                sheet_parts.append(f"{name}({rows}×{cols}){header_hint}")
             sheets_str = " | ".join(sheet_parts) if sheet_parts else "(空)"
-            lines.append(f"- `{fm.path}` → {sheets_str}")
+            lines.append(f"- `{entry.canonical_path}` → {sheets_str}")
 
         return "\n".join(lines)

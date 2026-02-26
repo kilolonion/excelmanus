@@ -266,8 +266,12 @@ class ContextBuilder:
             f"chat_mode={getattr(e, '_current_chat_mode', 'write')}",
             f"skills={len(e._active_skills)}",
         ]
-        if e.workspace_manifest is not None:
-            parts.append(f"files={e.workspace_manifest.total_files}")
+        _reg = e.file_registry
+        if _reg is not None:
+            try:
+                parts.append(f"files={len(_reg.list_all())}")
+            except Exception:
+                pass
         _route = getattr(e, '_last_route_result', None)
         parts.append(f"reasoning={self._compute_reasoning_level_static(_route)}")
         return "Runtime: " + " | ".join(parts)
@@ -316,21 +320,14 @@ class ContextBuilder:
         if backup_notice:
             base_prompt = base_prompt + "\n\n" + backup_notice
 
-        cow_path_notice = self._build_cow_path_notice()  # 不缓存：turn 内可增长
-        if cow_path_notice:
-            base_prompt = base_prompt + "\n\n" + cow_path_notice
-
         mcp_context = _cached_notice("mcp", self._build_mcp_context_notice)
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        workspace_manifest_notice = _cached_notice("manifest", self._build_workspace_manifest_notice)
-        if workspace_manifest_notice:
-            base_prompt = base_prompt + "\n\n" + workspace_manifest_notice
-
-        uploads_notice = _cached_notice("uploads", self._build_uploads_notice)
-        if uploads_notice:
-            base_prompt = base_prompt + "\n\n" + uploads_notice
+        # 统一文件全景 + CoW 路径映射（不缓存：CoW 映射 turn 内可增长）
+        file_registry_notice = self._build_file_registry_notice()
+        if file_registry_notice:
+            base_prompt = base_prompt + "\n\n" + file_registry_notice
 
         # 注入预取上下文（explorer 子代理预取的文件摘要）
         prefetch_context = getattr(e, "_prefetch_context", "") or ""
@@ -373,6 +370,11 @@ class ContextBuilder:
         runtime_line = self._build_runtime_metadata_line()
         base_prompt = base_prompt + "\n\n" + runtime_line
 
+        # 注入任务清单状态 + 计划文档引用（每迭代重建，不缓存）
+        task_plan_notice = self._build_task_plan_notice()
+        if task_plan_notice:
+            base_prompt = base_prompt + "\n\n" + task_plan_notice
+
         # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
         meta_cognition = self._build_meta_cognition_notice()
         if meta_cognition:
@@ -392,14 +394,10 @@ class ContextBuilder:
             _snapshot_components["access_notice"] = access_notice
         if backup_notice:
             _snapshot_components["backup_notice"] = backup_notice
-        if cow_path_notice:
-            _snapshot_components["cow_path_notice"] = cow_path_notice
+        if file_registry_notice:
+            _snapshot_components["file_registry_notice"] = file_registry_notice
         if mcp_context:
             _snapshot_components["mcp_context"] = mcp_context
-        if workspace_manifest_notice:
-            _snapshot_components["workspace_manifest"] = workspace_manifest_notice
-        if uploads_notice:
-            _snapshot_components["uploads_notice"] = uploads_notice
         if prefetch_context:
             _snapshot_components["prefetch_context"] = prefetch_context
         if runtime_line:
@@ -408,6 +406,8 @@ class ContextBuilder:
             _snapshot_components["prompt_strategies"] = _strategy_text_captured
         if _hook_context_captured:
             _snapshot_components["hook_context"] = _hook_context_captured
+        if task_plan_notice:
+            _snapshot_components["task_plan_notice"] = task_plan_notice
         if window_perception_context:
             _snapshot_components["window_perception_context"] = window_perception_context
         for idx, ctx in enumerate(current_skill_contexts):
@@ -511,6 +511,29 @@ class ContextBuilder:
             )
         return prompts, None
 
+
+    def _build_task_plan_notice(self) -> str:
+        """构建计划文档引用 + 任务清单状态，注入主 system prompt 动态区域。
+
+        仅当存在活跃 TaskList 时生成（零开销原则）。
+        每迭代重建，不缓存（task_update 会改变状态）。
+        """
+        e = self._engine
+        task_list = e._task_store.current
+        if task_list is None:
+            return ""
+
+        parts: list[str] = ["## 当前计划与任务清单"]
+
+        # 计划文档路径引用
+        plan_path = e._task_store.plan_file_path
+        if plan_path:
+            parts.append(f"📄 计划文档: `{plan_path}`")
+
+        # 任务清单状态（复用 _build_task_list_status_notice 的逻辑）
+        parts.append(self._build_task_list_status_notice())
+
+        return "\n".join(parts)
 
     def _build_task_list_status_notice(self) -> str:
         """构建当前任务清单状态摘要，用于注入 system prompt。"""
@@ -704,12 +727,18 @@ class ContextBuilder:
             "- `/backup rollback` — 丢弃所有修改，恢复原始文件",
             "- `/backup list` — 查看当前暂存的文件列表",
         ]
-        # 统一版本管理器可用时，追加版本追踪信息
-        fvm = getattr(e, "_fvm", None)
-        if fvm is not None:
-            tracked = fvm.list_all_tracked()
+        # 优先从 FileRegistry 获取版本追踪信息
+        _reg = getattr(e, "_file_registry", None)
+        if _reg is not None and getattr(_reg, "has_versions", False):
+            tracked = _reg.list_all_tracked()
             if tracked:
                 lines.append(f"\n当前有 {len(tracked)} 个文件受版本追踪保护。")
+        else:
+            fvm = getattr(e, "_fvm", None)
+            if fvm is not None:
+                tracked = fvm.list_all_tracked()
+                if tracked:
+                    lines.append(f"\n当前有 {len(tracked)} 个文件受版本追踪保护。")
         return "\n".join(lines)
 
     def _build_mcp_context_notice(self) -> str:
@@ -733,131 +762,43 @@ class ContextBuilder:
         )
         return "\n".join(lines)
 
-    def _build_cow_path_notice(self) -> str:
-        """生成 CoW 路径映射清单，注入 system prompt。
+    def _build_file_registry_notice(self) -> str:
+        """统一文件全景 + CoW 路径映射注入。
 
-        当会话中存在受保护文件的 CoW 副本时，每轮都将映射清单注入系统提示词，
-        确保 agent 始终知道应使用副本路径而非原始路径。
+        使用 FileRegistry.build_panorama() 作为唯一数据源。
+        CoW 映射始终追加（不缓存，turn 内可增长）。
         """
         e = self._engine
-        registry = e.state.cow_path_registry
-        if not registry:
-            return ""
-        lines = [
-            "## ⚠️ 文件保护路径映射（CoW）",
-            "以下原始文件受保护，已自动复制到 outputs/ 目录。",
-            "**你必须使用副本路径进行所有后续读取和写入操作，严禁访问原始路径。**",
-            "",
-            "| 原始路径（禁止访问） | 副本路径（请使用） |",
-            "|---|---|",
-        ]
-        for src, dst in registry.items():
-            lines.append(f"| `{src}` | `{dst}` |")
-        lines.append("")
-        lines.append(
-            "如果你在工具参数中使用了原始路径，系统会自动重定向到副本，"
-            "但请主动记住并使用副本路径以避免混淆。"
-        )
-        return "\n".join(lines)
+        parts: list[str] = []
 
-    def _build_workspace_manifest_notice(self) -> str:
-        """懒加载构建工作区 Manifest 并生成 system prompt 注入文本。
+        # ── 文件全景：FileRegistry ──
+        _reg = e.file_registry
+        if _reg is not None:
+            panorama = _reg.build_panorama()
+            if panorama:
+                parts.append(panorama)
 
-        优先使用后台预热：若尚未完成则不阻塞当前轮次，直接继续对话。
-        注入文本根据文件数量自动选择详细度。
-        """
-        e = self._engine
-        if e.workspace_manifest is None:
-            e.start_workspace_manifest_prewarm()
-        if e.workspace_manifest is None:
-            return ""
-        return e.workspace_manifest.get_system_prompt_summary()
+        # ── CoW 路径映射（始终追加，不缓存） ──
+        cow_registry = e.state.cow_path_registry
+        if cow_registry:
+            cow_lines = [
+                "## ⚠️ 文件保护路径映射（CoW）",
+                "以下原始文件受保护，已自动复制到 outputs/ 目录。",
+                "**你必须使用副本路径进行所有后续读取和写入操作，严禁访问原始路径。**",
+                "",
+                "| 原始路径（禁止访问） | 副本路径（请使用） |",
+                "|---|---|",
+            ]
+            for src, dst in cow_registry.items():
+                cow_lines.append(f"| `{src}` | `{dst}` |")
+            cow_lines.append("")
+            cow_lines.append(
+                "如果你在工具参数中使用了原始路径，系统会自动重定向到副本，"
+                "但请主动记住并使用副本路径以避免混淆。"
+            )
+            parts.append("\n".join(cow_lines))
 
-    def _build_uploads_notice(self) -> str:
-        """扫描 uploads/ 目录，生成 system prompt 注入文本。
-
-        列出所有上传附件（非 Excel 文件 + Excel 文件统计），帮助 agent
-        理解 uploads/ 目录的存储语义和文件来源。
-        限制最多列出 20 个非 Excel 文件，避免占用过多 token。
-        """
-        import os
-        import re
-        from pathlib import Path as _P
-
-        from excelmanus.excel_extensions import EXCEL_EXTENSIONS
-
-        _IMAGE_EXTENSIONS = frozenset({
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
-            ".svg", ".tiff", ".ico", ".heic", ".heif",
-        })
-
-        e = self._engine
-        uploads_dir = _P(e._config.workspace_root) / "uploads"
-        if not uploads_dir.is_dir():
-            return ""
-
-        _upload_prefix_re = re.compile(r"^[0-9a-f]{8}_")
-        _MAX_FILES = 20
-        non_excel_entries: list[str] = []
-        excel_count = 0
-        image_count = 0
-        other_count = 0
-        try:
-            for root, dirs, files in os.walk(uploads_dir):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for fname in sorted(files):
-                    if fname.startswith("."):
-                        continue
-                    ext = os.path.splitext(fname)[1].lower()
-                    if ext in EXCEL_EXTENSIONS:
-                        excel_count += 1
-                        continue
-                    full = os.path.join(root, fname)
-                    rel = os.path.relpath(full, e._config.workspace_root)
-                    display_name = _upload_prefix_re.sub("", fname)
-                    if ext in _IMAGE_EXTENSIONS:
-                        image_count += 1
-                        tag = "图片"
-                    else:
-                        other_count += 1
-                        tag = ext.lstrip(".").upper() if ext else "文件"
-                    if len(non_excel_entries) < _MAX_FILES:
-                        non_excel_entries.append(f"- `./{rel}` ({display_name}) [{tag}]")
-        except OSError:
-            return ""
-
-        total = excel_count + image_count + other_count
-        if total == 0 and not non_excel_entries:
-            return ""
-
-        lines = [
-            "## 用户上传的附件",
-            "uploads/ 目录存放用户通过前端上传的文件，文件名格式 `{8位hex}_{原始名}`。",
-        ]
-        # 分类统计
-        stats_parts: list[str] = []
-        if excel_count:
-            stats_parts.append(f"{excel_count} 个 Excel（已含在工作区文件概览中）")
-        if image_count:
-            stats_parts.append(f"{image_count} 个图片")
-        if other_count:
-            stats_parts.append(f"{other_count} 个其他文件")
-        if stats_parts:
-            lines.append(f"共 {total + excel_count} 个上传文件：{'、'.join(stats_parts)}。")
-
-        if non_excel_entries:
-            lines.append("")
-            lines.append("非 Excel 附件：")
-            lines.extend(non_excel_entries)
-            if (image_count + other_count) > _MAX_FILES:
-                lines.append(f"  ...（共 {image_count + other_count} 个，已截断）")
-
-        lines.append("")
-        lines.append(
-            "引用上传文件时使用相对路径（如 `./uploads/a1b2c3d4_文件名.png`），"
-            "向用户展示时使用去掉 hex 前缀的原始文件名。"
-        )
-        return "\n".join(lines)
+        return "\n\n".join(parts)
 
     def mark_window_notice_dirty(self) -> None:
         """标记窗口感知 notice 缓存为脏，下次构建时重新渲染。
@@ -870,19 +811,16 @@ class ContextBuilder:
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。
 
-        W1: 使用脏标记缓存——窗口状态未变时复用上次渲染结果。
+        注意：build_system_notice 内部会推进窗口生命周期（idle 计数器、
+        BG/IDLE 转换），属于有副作用的方法，不能缓存。
+        mark_window_notice_dirty 基础设施保留，待未来 lifecycle 与 render 解耦后启用。
         """
-        if not self._window_notice_dirty and self._window_notice_cache is not None:
-            return self._window_notice_cache
         e = self._engine
         requested_mode = e._requested_window_return_mode()
-        result = e._window_perception.build_system_notice(
+        return e._window_perception.build_system_notice(
             mode=requested_mode,
             model_id=e.active_model,
         )
-        self._window_notice_cache = result
-        self._window_notice_dirty = False
-        return result
     def _build_tool_index_notice(
         self,
         *,

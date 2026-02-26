@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # 由于 server_name 中的 `-` 被替换为 `_`，而 tool_name 本身也可能包含 `_`，
 # 仅凭字符串切分无法可靠地还原 server_name 和 tool_name。
 # 因此使用模块级注册表记录 prefixed_name → (server_name, tool_name) 的映射，
-# 在 add_tool_prefix 时写入，在 parse_tool_prefix 时查找，保证 round-trip 精确。
+# 在 add_tool_prefix 时写入，在 parse_tool_prefix 时查找，保证往返精确。
 # ---------------------------------------------------------------------------
 
 _PREFIX = "mcp_"

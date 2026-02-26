@@ -1,7 +1,7 @@
-"""属性测试：Excel 扩展名扫描一致性。
+"""属性测试：Excel 扩展名扫描一致性（FileRegistry 版本）。
 
 Feature: excel-extension-inconsistency
-- Property 1 (fault condition): .xls/.xlsb 也应被 manifest 扫描
+- Property 1 (fault condition): .xls/.xlsb 也应被 FileRegistry 扫描
 - Property 2 (preservation): .xlsx/.xlsm 原有行为保持不变
 """
 
@@ -12,7 +12,8 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from excelmanus.workspace_manifest import build_manifest, refresh_manifest
+from excelmanus.database import Database
+from excelmanus.file_registry import FileRegistry
 
 
 def _write_valid_workbook(path: Path, sheet_name: str, headers: list[str]) -> None:
@@ -25,57 +26,58 @@ def _write_valid_workbook(path: Path, sheet_name: str, headers: list[str]) -> No
 
 
 def test_fault_condition(tmp_path: Path) -> None:
-    """Property 1: 触发 bug 的输入（.xls/.xlsb）应被 build/refresh 扫描到。"""
-    # 先放置两个历史扩展文件（内容无需可读，目标是验证扫描范围）
+    """Property 1: .xls/.xlsb 应被 FileRegistry scan 扫描到。"""
     (tmp_path / "report.xls").write_bytes(b"dummy-xls")
     (tmp_path / "data.xlsb").write_bytes(b"dummy-xlsb")
     _write_valid_workbook(tmp_path / "baseline.xlsx", "Base", ["A", "B"])
 
-    manifest = build_manifest(str(tmp_path))
-    built_names = {f.name for f in manifest.files}
-    assert "report.xls" in built_names
-    assert "data.xlsb" in built_names
+    db = Database(str(tmp_path / "test.db"))
+    reg = FileRegistry(db, tmp_path)
+    reg.scan_workspace(excel_only=True)
+    names = {e.original_name for e in reg.list_all()}
+    assert "report.xls" in names
+    assert "data.xlsb" in names
 
-    # refresh 路径：新增一个 .xls 文件后，增量更新也应能检测到
+    # 增量扫描：新增 .xls 文件也应被检测
     (tmp_path / "newly_added.xls").write_bytes(b"dummy-new-xls")
-    refreshed = refresh_manifest(manifest)
-    refreshed_names = {f.name for f in refreshed.files}
-    assert "newly_added.xls" in refreshed_names
+    reg.scan_workspace(excel_only=True)
+    names2 = {e.original_name for e in reg.list_all()}
+    assert "newly_added.xls" in names2
 
 
 def test_preservation(tmp_path: Path) -> None:
-    """Property 2: .xlsx/.xlsm 的扫描与增量缓存行为保持不变。"""
+    """Property 2: .xlsx/.xlsm 扫描 + 增量缓存行为保持不变。"""
     xlsx = tmp_path / "sales.xlsx"
     xlsm = tmp_path / "macro.xlsm"
     _write_valid_workbook(xlsx, "Sales", ["name", "amount"])
     _write_valid_workbook(xlsm, "Macro", ["k", "v"])
 
-    manifest = build_manifest(str(tmp_path))
-    names = {f.name for f in manifest.files}
+    db = Database(str(tmp_path / "test.db"))
+    reg = FileRegistry(db, tmp_path)
+    reg.scan_workspace(excel_only=True)
+    names = {e.original_name for e in reg.list_all()}
     assert names == {"sales.xlsx", "macro.xlsm"}
 
-    sales_before = next(f for f in manifest.files if f.name == "sales.xlsx")
-    macro_before = next(f for f in manifest.files if f.name == "macro.xlsm")
-    assert sales_before.sheets and sales_before.sheets[0].name == "Sales"
-    assert macro_before.sheets and macro_before.sheets[0].name == "Macro"
+    sales = reg.get_by_path("sales.xlsx")
+    macro = reg.get_by_path("macro.xlsm")
+    assert sales is not None and sales.sheet_meta and sales.sheet_meta[0]["name"] == "Sales"
+    assert macro is not None and macro.sheet_meta and macro.sheet_meta[0]["name"] == "Macro"
+    sales_mtime = sales.mtime_ns
+    macro_mtime = macro.mtime_ns
 
-    # 无文件变化时 refresh 应复用缓存元数据
-    refreshed_no_change = refresh_manifest(manifest)
-    sales_no_change = next(f for f in refreshed_no_change.files if f.name == "sales.xlsx")
-    macro_no_change = next(f for f in refreshed_no_change.files if f.name == "macro.xlsm")
-    assert sales_no_change.modified_ts == sales_before.modified_ts
-    assert macro_no_change.modified_ts == macro_before.modified_ts
-    assert sales_no_change.sheets[0].name == "Sales"
-    assert macro_no_change.sheets[0].name == "Macro"
+    # 无变化时增量扫描应缓存命中
+    r2 = reg.scan_workspace(excel_only=True)
+    assert r2.cache_hits >= 2
+    sales2 = reg.get_by_path("sales.xlsx")
+    assert sales2 is not None and sales2.mtime_ns == sales_mtime
 
-    # 修改 .xlsx，验证增量更新逻辑仍生效（仅变化文件会重新扫描）
+    # 修改 .xlsx，验证增量更新
     time.sleep(0.05)
     _write_valid_workbook(xlsx, "SalesV2", ["name", "amount", "region"])
 
-    refreshed_changed = refresh_manifest(refreshed_no_change)
-    sales_changed = next(f for f in refreshed_changed.files if f.name == "sales.xlsx")
-    macro_unchanged = next(f for f in refreshed_changed.files if f.name == "macro.xlsm")
-
-    assert sales_changed.sheets and sales_changed.sheets[0].name == "SalesV2"
-    assert sales_changed.modified_ts > sales_before.modified_ts
-    assert macro_unchanged.modified_ts == macro_before.modified_ts
+    reg.scan_workspace(excel_only=True)
+    sales3 = reg.get_by_path("sales.xlsx")
+    macro3 = reg.get_by_path("macro.xlsm")
+    assert sales3 is not None and sales3.sheet_meta[0]["name"] == "SalesV2"
+    assert sales3.mtime_ns > sales_mtime
+    assert macro3 is not None and macro3.mtime_ns == macro_mtime
