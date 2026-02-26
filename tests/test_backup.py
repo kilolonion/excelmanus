@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from excelmanus.database import Database
+from excelmanus.file_registry import FileRegistry
 from excelmanus.workspace import WorkspaceTransaction
 
 
@@ -19,12 +21,25 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def tx(workspace: Path) -> WorkspaceTransaction:
+def tmp_db(workspace: Path) -> Database:
+    """临时 SQLite 数据库。"""
+    return Database(str(workspace / "test.db"))
+
+
+@pytest.fixture
+def registry(tmp_db: Database, workspace: Path) -> FileRegistry:
+    """基于当前工作区的 FileRegistry（启用版本/暂存）。"""
+    return FileRegistry(tmp_db, workspace, enable_versions=True)
+
+
+@pytest.fixture
+def tx(workspace: Path, registry: FileRegistry) -> WorkspaceTransaction:
     staging = workspace / "outputs" / "backups"
     return WorkspaceTransaction(
         workspace_root=workspace,
         staging_dir=staging,
         tx_id="test-tx",
+        registry=registry,
     )
 
 
@@ -96,7 +111,7 @@ class TestListStaged:
 
 
 class TestScope:
-    def test_excel_only_skips_txt(self, workspace: Path):
+    def test_excel_only_skips_txt(self, workspace: Path, registry: FileRegistry):
         txt = workspace / "notes.txt"
         txt.write_text("hello")
         staging = workspace / "outputs" / "backups"
@@ -105,17 +120,19 @@ class TestScope:
             staging_dir=staging,
             tx_id="scope-test",
             scope="excel_only",
+            registry=registry,
         )
         result = tx.stage_for_write(str(txt))
         assert result == str(txt.resolve())
 
-    def test_excel_only_stages_xlsx(self, workspace: Path):
+    def test_excel_only_stages_xlsx(self, workspace: Path, registry: FileRegistry):
         staging = workspace / "outputs" / "backups"
         tx = WorkspaceTransaction(
             workspace_root=workspace,
             staging_dir=staging,
             tx_id="scope-test",
             scope="excel_only",
+            registry=registry,
         )
         result = tx.stage_for_write(str(workspace / "data" / "销售.xlsx"))
         assert "outputs/backups/" in result

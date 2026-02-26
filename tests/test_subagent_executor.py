@@ -703,7 +703,7 @@ async def test_circuit_breaker_on_consecutive_failures(tmp_path: Path) -> None:
         result = await executor.run(config=sub_cfg, prompt="失败测试")
 
     assert result.success is False
-    assert "连续 2 次工具调用失败" in result.summary
+    assert "同一失败重复 2 次" in result.summary
 
 
 @pytest.mark.asyncio

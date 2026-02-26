@@ -671,9 +671,9 @@ class TestWriteHintSyncOnWriteCall:
         assert engine._current_write_hint == "may_write"
 
 
-class TestManifestRefreshOnRecordedWrite:
+class TestRegistryRefreshOnRecordedWrite:
     @pytest.mark.asyncio
-    async def test_manifest_refresh_triggered_by_record_write_action(self):
+    async def test_registry_refresh_triggered_by_record_write_action(self):
         """写入标记来自 record_write_action 时，应触发 FileRegistry 增量刷新。"""
         engine = _make_engine(max_iterations=1)
         route_result = _make_route_result(write_hint="read_only")
@@ -729,23 +729,23 @@ class TestManifestRefreshOnRecordedWrite:
 
 
 class TestWriteTrackingApis:
-    def test_record_workspace_write_action_marks_manifest_refresh(self):
+    def test_record_workspace_write_action_marks_registry_refresh(self):
         engine = _make_engine()
-        engine._manifest_refresh_needed = False
+        engine._registry_refresh_needed = False
 
         engine._record_workspace_write_action()
 
         assert engine._has_write_tool_call is True
-        assert engine._manifest_refresh_needed is True
+        assert engine._registry_refresh_needed is True
 
-    def test_record_external_write_action_does_not_mark_manifest_refresh(self):
+    def test_record_external_write_action_does_not_mark_registry_refresh(self):
         engine = _make_engine()
-        engine._manifest_refresh_needed = False
+        engine._registry_refresh_needed = False
 
         engine._record_external_write_action()
 
         assert engine._has_write_tool_call is True
-        assert engine._manifest_refresh_needed is False
+        assert engine._registry_refresh_needed is False
 
 
 class TestWaitingForUserActionPassthrough:

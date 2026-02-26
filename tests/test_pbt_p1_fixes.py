@@ -2,7 +2,7 @@
 
 覆盖 B1 / B3 / B4 / U1 四个修复点的 Fix Checking 和 Preservation Checking。
 
-Property 1: B1 所有退出路径调用 manifest 刷新
+Property 1: B1 所有退出路径调用 registry 刷新
 Property 2: B1 run_code 成功后置位刷新标记
 Property 3: B3 构建失败后 _registry_scan_done 保持 False
 Property 4: B4 非法阈值使用默认值
@@ -22,7 +22,7 @@ from hypothesis import given, assume, settings
 from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
-# B3 测试 — context_builder.py manifest 构建失败可恢复
+# B3 测试 — context_builder.py FileRegistry 构建失败可恢复
 # ---------------------------------------------------------------------------
 
 
@@ -192,41 +192,41 @@ class TestB4ThresholdParsing:
     def test_property8_config_integration(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """集成验证：通过环境变量设置合法值，config 正确加载。"""
         monkeypatch.setenv("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "0.5")
-        monkeypatch.setenv("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD", "0.6")
+        monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "0.6")
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
         monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
 
         from excelmanus.config import load_config
         config = load_config()
         assert config.memory_semantic_threshold == 0.5
-        assert config.manifest_semantic_threshold == 0.6
+        assert config.registry_semantic_threshold == 0.6
 
     def test_property4_config_invalid_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """集成验证：非法值回退到默认值，不抛出异常。"""
         monkeypatch.setenv("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "not_a_number")
-        monkeypatch.setenv("EXCELMANUS_MANIFEST_SEMANTIC_THRESHOLD", "2.0")
+        monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "2.0")
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
         monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
 
         from excelmanus.config import load_config
         config = load_config()
         assert config.memory_semantic_threshold == 0.3   # 默认值
-        assert config.manifest_semantic_threshold == 0.25  # 默认值
+        assert config.registry_semantic_threshold == 0.25  # 默认值
 
 
 # ---------------------------------------------------------------------------
-# B1 测试 — _tool_calling_loop 退出路径调用 manifest 刷新
+# B1 测试 — _tool_calling_loop 退出路径调用 registry 刷新
 # ---------------------------------------------------------------------------
 
 
-class TestB1ManifestRefreshOnExit:
-    """Property 1 & 2: 所有退出路径调用 _try_refresh_manifest。"""
+class TestB1RegistryRefreshOnExit:
+    """Property 1 & 2: 所有退出路径调用 _try_refresh_registry。"""
 
     def test_property1_text_reply_exit_calls_refresh(self) -> None:
-        """文本回复退出路径调用 _try_refresh_manifest。
+        """文本回复退出路径调用 _try_refresh_registry。
 
         LLM 返回纯文本（无 tool_calls）时经 _handle_text_reply 退出，
-        统一走 _finalize_result → _try_refresh_manifest。
+        统一走 _finalize_result → _try_refresh_registry。
         """
         from excelmanus.engine import AgentEngine
 
@@ -235,7 +235,7 @@ class TestB1ManifestRefreshOnExit:
 
         # 统一出口 helper 中应有 refresh
         helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
-        assert "_try_refresh_manifest()" in helper_block
+        assert "_try_refresh_registry()" in helper_block
 
         # 文本回复退出路径走统一出口
         text_reply_source = inspect.getsource(AgentEngine._handle_text_reply)
@@ -261,7 +261,7 @@ class TestB1ManifestRefreshOnExit:
         assert "旧的 ask_user 退出路径已移除" in source
 
     def test_property1_breaker_calls_refresh(self) -> None:
-        """breaker_triggered 退出路径调用 _try_refresh_manifest。"""
+        """breaker_triggered 退出路径调用 _try_refresh_registry。"""
         from excelmanus.engine import AgentEngine
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
@@ -278,16 +278,16 @@ class TestB1ManifestRefreshOnExit:
         source_engine = inspect.getsource(AgentEngine)
         source_dispatcher = inspect.getsource(ToolDispatcher._dispatch_tool_execution)
 
-        # _record_workspace_write_action 负责置位 _manifest_refresh_needed
+        # _record_workspace_write_action 负责置位 _registry_refresh_needed
         record_block = source_engine[source_engine.find("def _record_workspace_write_action"):]
-        assert "_manifest_refresh_needed = True" in record_block
+        assert "_registry_refresh_needed = True" in record_block
         # 循环内写入工具走统一写入记录（_record_workspace_write_action / _record_external_write_action）
         assert "_record_workspace_write_action()" in source or "_record_external_write_action()" in source
         # run_code 路径在 dispatcher 的 _dispatch_tool_execution 中同样走统一写入记录
         assert "e.record_write_action()" in source_dispatcher
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:
-        """Preservation: max_iter 路径仍然调用 _try_refresh_manifest（原有行为不变）。"""
+        """Preservation: max_iter 路径仍然调用 _try_refresh_registry（原有行为不变）。"""
         from excelmanus.engine import AgentEngine
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
@@ -296,7 +296,7 @@ class TestB1ManifestRefreshOnExit:
         max_iter_block = source[source.rfind("达到迭代上限"):]
         assert "return _finalize_result(" in max_iter_block
         helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
-        assert "_try_refresh_manifest()" in helper_block
+        assert "_try_refresh_registry()" in helper_block
 
 
 # ---------------------------------------------------------------------------

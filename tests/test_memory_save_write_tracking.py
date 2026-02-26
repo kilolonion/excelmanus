@@ -23,12 +23,12 @@ class TestMemorySaveWriteEffect:
 
 
 class TestMemorySaveWriteDetection:
-    """external_write 工具触发写入检测但不触发 manifest 刷新。"""
+    """external_write 工具触发写入检测但不触发 registry 刷新。"""
 
     def test_external_write_triggers_write_flag(self):
         state = SessionState()
         assert not state.has_write_tool_call
-        # external_write 语义：记录写入但不刷新 manifest
+        # external_write 语义：记录写入但不刷新 registry
         effect = _get_memory_tool_effect("memory_save")
         assert effect == "external_write"
         state.record_write_action()

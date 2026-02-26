@@ -683,6 +683,74 @@ class TestSkillRouter:
         assert result.skills_used == []
 
     @pytest.mark.asyncio
+    async def test_plan_mode_greeting_marks_plan_not_needed(self, tmp_path: Path) -> None:
+        """plan 模式下问候语应走轻量路径，不触发完整规划。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(system_dir, "data_basic", description="分析")
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("你好", chat_mode="plan")
+
+        assert result.route_mode == "all_tools"
+        assert result.write_hint == "read_only"
+        assert "plan_not_needed" in result.task_tags
+        assert "plan_worthy" not in result.task_tags
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_complex_request_marks_plan_worthy(self, tmp_path: Path) -> None:
+        """plan 模式下复杂多步请求应标记 plan_worthy。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(system_dir, "data_basic", description="分析")
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        message = "请先梳理现状，再给出分阶段实施方案和验收标准。"
+        result = await router.route(message, chat_mode="plan")
+
+        assert result.route_mode == "all_tools"
+        assert "plan_worthy" in result.task_tags
+        assert "plan_not_needed" not in result.task_tags
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_single_step_query_marks_plan_not_needed(self, tmp_path: Path) -> None:
+        """plan 模式下单步查询应标记 plan_not_needed。"""
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "project"
+        for d in (system_dir, user_dir, project_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        _write_skillpack(system_dir, "data_basic", description="分析")
+
+        config = _make_config(system_dir, user_dir, project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        loader.load_all()
+        router = SkillRouter(config, loader)
+
+        result = await router.route("读取 Sheet1 前 10 行并告诉我是否有空值", chat_mode="plan")
+
+        assert result.route_mode == "all_tools"
+        assert "plan_not_needed" in result.task_tags
+        assert "plan_worthy" not in result.task_tags
+
+    @pytest.mark.asyncio
     async def test_classify_write_hint_uses_lexical_fallback_without_aux_model(
         self,
         tmp_path: Path,

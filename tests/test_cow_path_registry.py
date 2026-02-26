@@ -1,11 +1,4 @@
-"""CoW 路径注册表功能测试。
-
-覆盖：
-- SessionState 的 cow_path_registry 累积/查找/重置
-- ToolDispatcher 的 cow_mapping 提取与注册
-- ToolDispatcher 的 CoW 路径拦截重定向
-- ContextBuilder 的 CoW 路径清单系统提示词注入
-"""
+"""CoW 路径映射功能测试（FileRegistry 单一数据源）。"""
 
 from __future__ import annotations
 
@@ -17,74 +10,84 @@ import pytest
 from excelmanus.engine_core.session_state import SessionState
 
 
-# ── SessionState CoW 注册表 ─────────────────────────────────
+class _FakeFileRegistry:
+    """最小 FileRegistry 测试桩。"""
+
+    def __init__(
+        self,
+        mapping: dict[str, str] | None = None,
+        *,
+        panorama: str = "",
+    ) -> None:
+        self.has_versions = True
+        self._mapping = dict(mapping or {})
+        self._panorama = panorama
+
+    def register_cow_mapping(self, src_rel: str, dst_rel: str) -> None:
+        self._mapping[src_rel] = dst_rel
+
+    def lookup_cow_redirect(self, rel_path: str) -> str | None:
+        return self._mapping.get(rel_path)
+
+    def get_cow_mappings(self) -> dict[str, str]:
+        return dict(self._mapping)
+
+    def build_panorama(self) -> str:
+        return self._panorama
+
+
+# ── SessionState CoW 统一入口 ───────────────────────────────
 
 
 class TestCowPathRegistry:
-    """cow_path_registry 累积、查找、重置。"""
+    """SessionState 仅透传 FileRegistry，不再维护本地 dict。"""
 
     def test_default_empty(self):
         state = SessionState()
-        assert state.cow_path_registry == {}
+        assert state.get_cow_mappings() == {}
+        assert state.lookup_cow_redirect("bench/external/data.xlsx") is None
 
-    def test_register_single_mapping(self):
+    def test_register_without_registry_noop(self):
         state = SessionState()
         state.register_cow_mappings({"bench/external/data.xlsx": "outputs/data.xlsx"})
-        assert state.cow_path_registry == {"bench/external/data.xlsx": "outputs/data.xlsx"}
-
-    def test_register_multiple_mappings(self):
-        state = SessionState()
-        state.register_cow_mappings({
-            "bench/external/a.xlsx": "outputs/a.xlsx",
-            "bench/external/b.xlsx": "outputs/b.xlsx",
-        })
-        assert len(state.cow_path_registry) == 2
-
-    def test_register_accumulates_across_calls(self):
-        state = SessionState()
-        state.register_cow_mappings({"bench/external/a.xlsx": "outputs/a.xlsx"})
-        state.register_cow_mappings({"bench/external/b.xlsx": "outputs/b.xlsx"})
-        assert len(state.cow_path_registry) == 2
-        assert state.cow_path_registry["bench/external/a.xlsx"] == "outputs/a.xlsx"
-        assert state.cow_path_registry["bench/external/b.xlsx"] == "outputs/b.xlsx"
-
-    def test_register_overwrites_existing(self):
-        state = SessionState()
-        state.register_cow_mappings({"bench/external/a.xlsx": "outputs/a.xlsx"})
-        state.register_cow_mappings({"bench/external/a.xlsx": "outputs/a_1.xlsx"})
-        assert state.cow_path_registry["bench/external/a.xlsx"] == "outputs/a_1.xlsx"
+        assert state.get_cow_mappings() == {}
+        assert state.lookup_cow_redirect("bench/external/data.xlsx") is None
 
     def test_register_empty_mapping_noop(self):
         state = SessionState()
         state.register_cow_mappings({})
-        assert state.cow_path_registry == {}
+        assert state.get_cow_mappings() == {}
 
     def test_register_none_like_noop(self):
         state = SessionState()
         state.register_cow_mappings(None)  # type: ignore
-        assert state.cow_path_registry == {}
+        assert state.get_cow_mappings() == {}
 
-    def test_lookup_cow_redirect_found(self):
+    def test_register_and_lookup_via_file_registry(self):
         state = SessionState()
+        state._file_registry = _FakeFileRegistry()
         state.register_cow_mappings({"bench/external/data.xlsx": "outputs/data.xlsx"})
         assert state.lookup_cow_redirect("bench/external/data.xlsx") == "outputs/data.xlsx"
+        assert state.get_cow_mappings() == {"bench/external/data.xlsx": "outputs/data.xlsx"}
 
     def test_lookup_cow_redirect_not_found(self):
         state = SessionState()
+        state._file_registry = _FakeFileRegistry({"a.xlsx": "outputs/a.xlsx"})
         assert state.lookup_cow_redirect("bench/external/data.xlsx") is None
 
-    def test_reset_session_clears_registry(self):
+    def test_reset_session_does_not_crash_with_registry(self):
         state = SessionState()
+        state._file_registry = _FakeFileRegistry()
         state.register_cow_mappings({"bench/external/data.xlsx": "outputs/data.xlsx"})
         state.reset_session()
-        assert state.cow_path_registry == {}
+        assert state.lookup_cow_redirect("bench/external/data.xlsx") == "outputs/data.xlsx"
 
-    def test_reset_loop_stats_preserves_registry(self):
-        """cow_path_registry 是会话级的，reset_loop_stats 不应清除。"""
+    def test_reset_loop_stats_keeps_registry_mapping(self):
         state = SessionState()
+        state._file_registry = _FakeFileRegistry()
         state.register_cow_mappings({"bench/external/data.xlsx": "outputs/data.xlsx"})
         state.reset_loop_stats()
-        assert len(state.cow_path_registry) == 1
+        assert state.lookup_cow_redirect("bench/external/data.xlsx") == "outputs/data.xlsx"
 
 
 # ── ToolDispatcher CoW 映射提取 ─────────────────────────────
@@ -98,9 +101,12 @@ class TestExtractAndRegisterCowMapping:
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 
         engine = MagicMock()
+        file_registry = _FakeFileRegistry()
         _state = SessionState()
+        _state._file_registry = file_registry
         engine._state = _state
         engine.state = _state
+        engine.file_registry = file_registry
         engine.transaction = None
         dispatcher = ToolDispatcher(engine)
         return dispatcher, engine
@@ -113,7 +119,7 @@ class TestExtractAndRegisterCowMapping:
         })
         extracted = dispatcher._extract_and_register_cow_mapping(result)
         assert extracted == {"bench/external/data.xlsx": "outputs/data.xlsx"}
-        assert engine._state.cow_path_registry == {"bench/external/data.xlsx": "outputs/data.xlsx"}
+        assert engine._state.get_cow_mappings() == {"bench/external/data.xlsx": "outputs/data.xlsx"}
 
     def test_extract_from_macro_tool_result(self):
         dispatcher, engine = self._make_dispatcher()
@@ -130,7 +136,7 @@ class TestExtractAndRegisterCowMapping:
         result = json.dumps({"status": "success"})
         extracted = dispatcher._extract_and_register_cow_mapping(result)
         assert extracted is None
-        assert engine._state.cow_path_registry == {}
+        assert engine._state.get_cow_mappings() == {}
 
     def test_empty_cow_mapping_returns_none(self):
         dispatcher, engine = self._make_dispatcher()
@@ -152,7 +158,7 @@ class TestExtractAndRegisterCowMapping:
         r2 = json.dumps({"cow_mapping": {"b.xlsx": "outputs/b.xlsx"}})
         dispatcher._extract_and_register_cow_mapping(r1)
         dispatcher._extract_and_register_cow_mapping(r2)
-        assert len(engine._state.cow_path_registry) == 2
+        assert len(engine._state.get_cow_mappings()) == 2
 
 
 # ── ToolDispatcher CoW 路径拦截 ──────────────────────────────
@@ -168,10 +174,11 @@ class TestRedirectCowPaths:
         _state = SessionState()
         engine._state = _state
         engine.state = _state
-        # file_registry 默认不可用，避免 MagicMock 自动创建导致误匹配
-        engine.file_registry = None
-        if registry:
-            _state.register_cow_mappings(registry)
+        file_registry = None
+        if registry is not None:
+            file_registry = _FakeFileRegistry(registry)
+            _state._file_registry = file_registry
+        engine.file_registry = file_registry
         engine.config.workspace_root = workspace_root
         dispatcher = ToolDispatcher(engine)
         return dispatcher
@@ -238,17 +245,21 @@ class TestRedirectCowPaths:
 class TestBuildCowPathNotice:
     """ContextBuilder._build_file_registry_notice CoW 部分测试（统一接口）。"""
 
-    def _make_builder(self, registry: dict[str, str] | None = None):
+    def _make_builder(
+        self,
+        registry: dict[str, str] | None = None,
+        *,
+        panorama: str = "",
+    ):
         from excelmanus.engine_core.context_builder import ContextBuilder
 
         engine = MagicMock()
         _state = SessionState()
+        file_registry = _FakeFileRegistry(registry, panorama=panorama) if registry is not None else None
+        _state._file_registry = file_registry
         engine._state = _state
         engine.state = _state
-        # 禁用 FileRegistry，只测试 CoW 映射注入
-        engine.file_registry = None
-        if registry:
-            _state.register_cow_mappings(registry)
+        engine.file_registry = file_registry
         builder = ContextBuilder(engine)
         return builder
 
@@ -286,3 +297,12 @@ class TestBuildCowPathNotice:
         notice = builder._build_file_registry_notice()
         assert "| 原始路径（禁止访问） | 副本路径（请使用） |" in notice
         assert "| `src.xlsx` | `outputs/src.xlsx` |" in notice
+
+    def test_panorama_and_cow_can_coexist(self):
+        builder = self._make_builder(
+            registry={"src.xlsx": "outputs/src.xlsx"},
+            panorama="## 工作区文件全景\n- src.xlsx",
+        )
+        notice = builder._build_file_registry_notice()
+        assert "工作区文件全景" in notice
+        assert "文件保护路径映射（CoW）" in notice

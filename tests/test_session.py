@@ -91,10 +91,10 @@ class TestGetOrCreate:
         assert await manager.get_active_count() == 1
 
     @pytest.mark.asyncio
-    async def test_create_new_session_starts_manifest_prewarm(
+    async def test_create_new_session_starts_registry_scan(
         self, manager: SessionManager
     ) -> None:
-        """创建新会话时应触发 engine 的后台 manifest 预热。"""
+        """创建新会话时应触发 engine 的后台 registry 扫描。"""
         with patch(
             "excelmanus.session.AgentEngine.start_registry_scan",
             return_value=True,
@@ -599,7 +599,7 @@ class TestProperty18SessionTTLCleanup:
                     registry=registry,
                 )
 
-                # 创建 n 个会话（mock 掉 MCP 初始化和 manifest 预热避免 hang）
+                # 创建 n 个会话（mock 掉 MCP 初始化和 registry 扫描避免 hang）
                 with patch.object(AgentEngine, "initialize_mcp", new_callable=AsyncMock), \
                      patch.object(AgentEngine, "start_registry_scan", return_value=False):
                     for _ in range(n_sessions):

@@ -52,6 +52,23 @@ class TestListSheets:
         result = json.loads(sheet_tools.list_sheets("multi.xlsx", offset=0, limit=0))
         assert "error" in result
 
+    def test_file_not_found_returns_structured_error_with_suggestions(self, workspace: Path) -> None:
+        """文件不存在时应返回结构化错误 JSON 并列出可用 Excel 文件。"""
+        result = json.loads(sheet_tools.list_sheets("nonexistent.xlsx"))
+        assert "error" in result
+        assert "nonexistent.xlsx" in result["error"]
+        assert "hint" in result
+        assert "available_excel_files" in result
+        assert "multi.xlsx" in result["available_excel_files"]
+
+    def test_file_not_found_in_subdir(self, workspace: Path) -> None:
+        """子目录下不存在的文件也应返回结构化错误。"""
+        (workspace / "outputs").mkdir(exist_ok=True)
+        result = json.loads(sheet_tools.list_sheets("outputs/missing.xlsx"))
+        assert "error" in result
+        assert "missing.xlsx" in result["error"]
+        assert "hint" in result
+
     def test_tool_def_disables_global_truncation(self, workspace: Path) -> None:
         tools = {tool.name: tool for tool in sheet_tools.get_tools()}
         assert tools["list_sheets"].max_result_chars == 0

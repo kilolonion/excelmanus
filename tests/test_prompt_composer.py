@@ -450,6 +450,50 @@ class TestErrorRecoveryStrategy:
             assert "错误恢复策略内容。" in text, f"write_hint={hint} 时未注入 error_recovery"
 
 
+class TestPlanModeStrategyRouting:
+    """plan 模式策略分流测试。"""
+
+    def test_plan_strategy_only_applies_for_plan_worthy(self) -> None:
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not prompts_dir.is_dir():
+            pytest.skip("prompts/ 目录不存在")
+
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+
+        worthy_ctx = PromptContext(
+            chat_mode="plan",
+            write_hint="read_only",
+            task_tags=["plan_worthy"],
+        )
+        worthy_text = composer.compose_strategies_text(worthy_ctx)
+        assert "## 规划模式策略" in worthy_text
+
+        not_needed_ctx = PromptContext(
+            chat_mode="plan",
+            write_hint="read_only",
+            task_tags=["plan_not_needed"],
+        )
+        not_needed_text = composer.compose_strategies_text(not_needed_ctx)
+        assert "## 规划模式策略" not in not_needed_text
+
+    def test_plan_mode_fallback_strategy_applies_for_plan_not_needed(self) -> None:
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not prompts_dir.is_dir():
+            pytest.skip("prompts/ 目录不存在")
+
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+
+        ctx = PromptContext(
+            chat_mode="plan",
+            write_hint="read_only",
+            task_tags=["plan_not_needed"],
+        )
+        text = composer.compose_strategies_text(ctx)
+        assert "## 规划模式轻量分流" in text
+
+
 class TestCoreSegmentsMatchLegacy:
     def test_exact_match(self) -> None:
         from excelmanus.memory import _DEFAULT_SYSTEM_PROMPT

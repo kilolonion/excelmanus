@@ -69,14 +69,14 @@ class TestConstants:
         assert COMMAND_ARGUMENTS_BY_ALIAS["/subagent"] == ("status", "on", "off", "list", "run")
         assert COMMAND_ARGUMENTS_BY_ALIAS["/sub_agent"] == ("status", "on", "off", "list", "run")
         assert COMMAND_ARGUMENTS_BY_ALIAS["/compact"] == ("status", "on", "off")
-        assert COMMAND_ARGUMENTS_BY_ALIAS["/manifest"] == ("status", "build")
+        assert COMMAND_ARGUMENTS_BY_ALIAS["/registry"] == ("status", "scan")
 
     def test_session_control_aliases(self):
         assert "/fullaccess" in SESSION_CONTROL_ALIASES
         assert "/subagent" in SESSION_CONTROL_ALIASES
         assert "/accept" in SESSION_CONTROL_ALIASES
         assert "/compact" in SESSION_CONTROL_ALIASES
-        assert "/manifest" in SESSION_CONTROL_ALIASES
+        assert "/registry" in SESSION_CONTROL_ALIASES
 
     def test_session_control_aliases_match_shared_registry(self):
         expected_aliases = {

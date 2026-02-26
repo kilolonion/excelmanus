@@ -289,7 +289,7 @@ def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
     loaded = registry.load_all()
     # v6: 唯一的内置 subagent 保持自身声明的阈值
     assert loaded["subagent"].max_iterations == 120
-    assert loaded["subagent"].max_consecutive_failures == 2
+    assert loaded["subagent"].max_consecutive_failures == 3
 
 
 def test_memory_scope_field_is_loaded_from_memory_scope_key(tmp_path: Path) -> None:
