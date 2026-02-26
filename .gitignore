@@ -79,6 +79,7 @@ tasks/
 dev-docs/
 docs/plans/
 docs/audit_*.md
+RELEASE_*.md
 !README.md
 !README_EN.md
 
