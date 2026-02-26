@@ -52,7 +52,6 @@ from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
-from excelmanus.engine_core.prefetch_orchestrator import PrefetchOrchestrator
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
@@ -119,13 +118,19 @@ class ThinkingConfig:
         return _EFFORT_TO_GEMINI_LEVEL.get(self.effort, "high")
 
 
-_ALWAYS_AVAILABLE_TOOLS = (
-    "task_create", "task_update", "write_plan", "edit_text_file",
-    "ask_user", "delegate",
-    "delegate_to_subagent", "parallel_delegate",
+_ALWAYS_AVAILABLE_TOOLS_READONLY = (
+    "task_create", "task_update",
+    "ask_user",
     "memory_save", "memory_read_topic",
 )
-_ALWAYS_AVAILABLE_TOOLS_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS)
+_ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY = (
+    "write_plan", "edit_text_file",
+    "delegate", "delegate_to_subagent", "parallel_delegate",
+)
+_ALWAYS_AVAILABLE_TOOLS_SET = frozenset(
+    _ALWAYS_AVAILABLE_TOOLS_READONLY + _ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY
+)
+_ALWAYS_AVAILABLE_TOOLS_READONLY_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS_READONLY)
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
@@ -1168,9 +1173,6 @@ class AgentEngine:
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
-        self._prefetch_orchestrator: PrefetchOrchestrator | None = None  # 延迟初始化
-        self._prefetch_context: str = ""  # 当前轮预取结果注入文本
-        self._prefetch_task: asyncio.Task[Any] | None = None  # 后台预取任务
         self._pending_classify_task: asyncio.Task[Any] | None = None  # 后台 LLM 分类任务
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
@@ -1437,8 +1439,10 @@ class AgentEngine:
         else:
             removed_count = 0
 
-        # 收集该轮次之后的 approval 文件变更
-        applied = self._approval.list_applied(limit=100)
+        # 收集该轮次之后的 approval 文件变更（仅限当前会话）
+        applied = self._approval.list_applied(
+            limit=100, session_id=self._session_id,
+        )
         file_changes: list[dict] = []
         seen_paths: set[str] = set()
         for record in applied:
@@ -1528,8 +1532,10 @@ class AgentEngine:
 
         file_results: list[str] = []
         if rollback_files:
-            # 逆序回滚该轮次之后产生的审批记录（newest-first）
-            applied = self._approval.list_applied(limit=100)
+            # 逆序回滚该轮次之后产生的审批记录（newest-first，仅限当前会话）
+            applied = self._approval.list_applied(
+                limit=100, session_id=self._session_id,
+            )
             for record in applied:
                 if not record.undoable:
                     continue
@@ -2647,27 +2653,6 @@ class AgentEngine:
         # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
         self._mention_contexts = mention_contexts
 
-        # ── 预取：启动后台 task，不阻塞主 LLM 调用 ──
-        self._prefetch_context = ""
-        self._prefetch_task: asyncio.Task[Any] | None = None
-        if self._prefetch_orchestrator is None:
-            self._prefetch_orchestrator = PrefetchOrchestrator(self)
-        self._prefetch_task = asyncio.create_task(
-            self._prefetch_orchestrator.maybe_prefetch(
-                user_message=user_message,
-                write_hint=route_result.write_hint or "unknown",
-                task_tags=route_result.task_tags,
-                on_event=on_event,
-            )
-        )
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.PIPELINE_PROGRESS,
-                pipeline_stage="prefetching",
-                pipeline_message="正在预取文件上下文...",
-            ),
-        )
 
         # ── 异步 LLM 分类：已内化到 router._classify_task 同步流程 ──
         self._pending_classify_task = None
@@ -2679,11 +2664,7 @@ class AgentEngine:
                 question_resolver=question_resolver,
             )
         finally:
-            # 清理后台 task，避免悬挂
-            if self._prefetch_task is not None:
-                if not self._prefetch_task.done():
-                    self._prefetch_task.cancel()
-                self._prefetch_task = None
+            pass
 
         # 注入路由诊断信息到 ChatResult
         chat_result.write_hint = self._current_write_hint
@@ -3518,11 +3499,22 @@ class AgentEngine:
         filtered_domain = [s for s in domain_schemas if s.get("function", {}).get("name") not in meta_names]
 
         # 窄路由：read_only 任务只暴露读工具 + run_code（用于复杂分析）
+        # 注意：edit_text_file / delegate 等写工具在只读模式下不暴露
+        # plan 模式例外：write_plan 是其核心功能，需额外放行
         if write_hint == "read_only":
-            _allowed = READ_ONLY_SAFE_TOOLS | CODE_POLICY_DYNAMIC_TOOLS | _ALWAYS_AVAILABLE_TOOLS_SET
+            _allowed = READ_ONLY_SAFE_TOOLS | CODE_POLICY_DYNAMIC_TOOLS | _ALWAYS_AVAILABLE_TOOLS_READONLY_SET
+            _chat_mode = getattr(self, "_current_chat_mode", "write")
+            if _chat_mode == "plan":
+                _allowed = _allowed | {"write_plan"}
             filtered_domain = [
                 s for s in filtered_domain
                 if s.get("function", {}).get("name", "") in _allowed
+            ]
+            # 元工具也需过滤：delegate 系列在只读/plan 模式下不暴露
+            _meta_blocked = {"delegate", "delegate_to_subagent", "parallel_delegate"}
+            meta_schemas = [
+                s for s in meta_schemas
+                if s.get("function", {}).get("name", "") not in _meta_blocked
             ]
 
         return meta_schemas + filtered_domain
@@ -4697,17 +4689,6 @@ class AgentEngine:
                 ),
             )
 
-            # ── 收割后台 prefetch 结果（非阻塞） ──
-            if self._prefetch_task is not None and self._prefetch_task.done():
-                try:
-                    prefetch_result = self._prefetch_task.result()
-                    if prefetch_result is not None and prefetch_result.success:
-                        self._prefetch_context = self._prefetch_orchestrator.build_system_context(
-                            prefetch_result,
-                        )
-                except Exception:
-                    logger.debug("prefetch task 异常", exc_info=True)
-                self._prefetch_task = None
 
             # ── 后台 LLM 分类已内化到 router 同步流程，无需收割 ──
 
@@ -5115,6 +5096,13 @@ class AgentEngine:
                             self._last_success_count += 1
                             reply = tc_result.result
                             self._memory.add_assistant_message(reply)
+                            self._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.RETRACT_THINKING,
+                                    iteration=iteration,
+                                ),
+                            )
                             logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
                             return _finalize_result(
                                 reply=reply,
@@ -5202,6 +5190,13 @@ class AgentEngine:
                             self._last_success_count += 1
                             reply = tc_result.result
                             self._memory.add_assistant_message(reply)
+                            self._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.RETRACT_THINKING,
+                                    iteration=iteration,
+                                ),
+                            )
                             logger.info("finish_task 接受，退出循环: %s", _summarize_text(reply))
                             return _finalize_result(
                                 reply=reply,
@@ -5885,6 +5880,7 @@ class AgentEngine:
                 undoable=undoable,
                 created_at_utc=created_at_utc,
                 session_turn=self._state.session_turn,
+                session_id=self._session_id,
             )
         except Exception as exc:  # noqa: BLE001
             # execute_and_audit 在失败时会先写入 manifest 与 _applied，再抛异常。
