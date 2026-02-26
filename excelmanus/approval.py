@@ -86,6 +86,7 @@ class AppliedApprovalRecord:
     binary_snapshots: list[BinarySnapshotRecord] = field(default_factory=list)
     repo_diff_before_file: str | None = None
     repo_diff_after_file: str | None = None
+    session_turn: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -325,6 +326,7 @@ class ApprovalManager:
         undoable: bool,
         created_at_utc: str | None = None,
         code_policy_info: dict[str, Any] | None = None,
+        session_turn: int | None = None,
     ) -> tuple[str, AppliedApprovalRecord]:
         audit_dir = self.audit_root / approval_id
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -429,6 +431,7 @@ class ApprovalManager:
             binary_snapshots=binary_snapshots,
             repo_diff_before_file=str(repo_before_file.relative_to(self.workspace_root)),
             repo_diff_after_file=str(repo_after_file.relative_to(self.workspace_root)),
+            session_turn=session_turn,
         )
 
         manifest = self._build_manifest_v2(record, code_policy_info=code_policy_info)
@@ -464,11 +467,28 @@ class ApprovalManager:
                 continue
             if any(change.path in rel_paths for change in record.changes):
                 record.undoable = False
+                self._persist_undoable_flag(record)
                 count += 1
         # 同步失效版本链
         if self._file_registry is not None and self._file_registry.has_versions:
             self._file_registry.invalidate_undo(rel_paths)
         return count
+
+    def _persist_undoable_flag(self, record: AppliedApprovalRecord) -> None:
+        """将 record.undoable 同步写回磁盘 manifest.json（best-effort）。"""
+        manifest_path = self.workspace_root / record.manifest_file
+        if not manifest_path.exists():
+            return
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(raw.get("approval"), dict):
+                raw["approval"]["undoable"] = record.undoable
+                manifest_path.write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
 
     def undo(self, approval_id: str) -> str:
         record = self.get_applied(approval_id)
@@ -504,6 +524,8 @@ class ApprovalManager:
                     if path.exists():
                         path.unlink()
                         restored += 1
+            record.undoable = False
+            self._persist_undoable_flag(record)
             if failed:
                 return f"回滚 `{approval_id}` 部分失败：{', '.join(failed)}"
             return f"已回滚 `{approval_id}`：恢复 {restored} 个文件。"
@@ -540,6 +562,8 @@ class ApprovalManager:
             elif path.exists():
                 path.unlink()
                 deleted += 1
+        record.undoable = False
+        self._persist_undoable_flag(record)
         return f"已回滚 `{approval_id}`：恢复 {restored} 个文件，删除 {deleted} 个新增文件。"
 
     def _legacy_restore_change(self, change: FileChangeRecord) -> bool:
@@ -802,6 +826,7 @@ class ApprovalManager:
                 "created_at_utc": record.created_at_utc,
                 "applied_at_utc": record.applied_at_utc,
                 "undoable": record.undoable,
+                "session_turn": record.session_turn,
             },
             "execution": {
                 "status": record.execution_status,
@@ -924,6 +949,7 @@ class ApprovalManager:
             created_at_utc=str(approval.get("created_at_utc", "")),
             applied_at_utc=str(approval.get("applied_at_utc", "")),
             undoable=bool(approval.get("undoable", False)),
+            session_turn=approval.get("session_turn"),
             manifest_file=str(manifest_path.relative_to(self.workspace_root)),
             audit_dir=str(audit_dir.relative_to(self.workspace_root)),
             result_preview=str(execution.get("result_preview", "")),
@@ -1011,6 +1037,7 @@ class ApprovalManager:
                 binary_snapshots=binary_snapshots,
                 repo_diff_before_file=d.get("repo_diff_before"),
                 repo_diff_after_file=d.get("repo_diff_after"),
+                session_turn=d.get("session_turn"),
             )
         except Exception:
             logger.debug("DB 审批记录转换失败", exc_info=True)
