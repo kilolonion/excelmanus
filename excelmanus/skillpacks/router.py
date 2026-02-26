@@ -38,6 +38,16 @@ _READ_ONLY_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# plan 模式下是否值得产出完整计划文档（write_plan）的启发式检测。
+# 命中后打 tag=plan_worthy；否则打 tag=plan_not_needed。
+_PLAN_WORTHY_RE = re.compile(
+    r"(计划|规划|方案|roadmap|实施路径|实施方案|分阶段|阶段性|里程碑|phase|"
+    r"步骤|step\s*\d|任务清单|拆解任务|行动计划|执行计划|"
+    r"迁移方案|上线方案|改造方案|架构方案|风险评估|验收标准|"
+    r"先.*再.*最后|先.*后.*|how\s+to\s+plan|implementation\s+plan)",
+    re.IGNORECASE,
+)
+
 # 纯问候/闲聊/身份问答检测：短消息且仅含问候词或元问题时跳过 LLM 分类
 _CHITCHAT_RE = re.compile(
     r"^\s*(?:"
@@ -213,22 +223,62 @@ class SkillRouter:
         # ── 1. 纯问候/闲聊短路：跳过 LLM 分类，零延迟返回 ──
         if _CHITCHAT_RE.match(user_message.strip()) and not candidate_file_paths:
             logger.debug("chitchat 短路: %s", user_message[:30])
+            _plan_tags: tuple[str, ...] = ("plan_not_needed",) if chat_mode == "plan" else ()
             return await self._build_all_tools_result(
                 user_message=user_message,
                 candidate_file_paths=candidate_file_paths,
                 write_hint="read_only",
-                task_tags=(),
+                task_tags=_plan_tags,
             )
 
         # ── 2. 非斜杠消息：chat_mode 直接映射 write_hint，词法推断 task_tags ──
         classified_hint = write_hint or self._MODE_TO_HINT.get(chat_mode, "may_write")
-        lexical_tags = tuple(self._classify_task_tags_lexical(user_message))
+        lexical_tags = list(self._classify_task_tags_lexical(user_message))
+        if chat_mode == "plan":
+            if self._is_plan_worthy(
+                user_message=user_message,
+                candidate_file_paths=candidate_file_paths,
+                lexical_tags=tuple(lexical_tags),
+            ):
+                lexical_tags.append("plan_worthy")
+            else:
+                lexical_tags.append("plan_not_needed")
+        deduped_tags = tuple(dict.fromkeys(lexical_tags))
         return await self._build_all_tools_result(
             user_message=user_message,
             candidate_file_paths=candidate_file_paths,
             write_hint=classified_hint,
-            task_tags=lexical_tags,
+            task_tags=deduped_tags,
         )
+
+    @staticmethod
+    def _is_plan_worthy(
+        *,
+        user_message: str,
+        candidate_file_paths: list[str] | None,
+        lexical_tags: tuple[str, ...],
+    ) -> bool:
+        """判断 plan 模式下本轮请求是否值得输出完整计划文档。"""
+        text = str(user_message or "").strip()
+        if not text:
+            return False
+        if _CHITCHAT_RE.match(text):
+            return False
+        if _PLAN_WORTHY_RE.search(text):
+            return True
+
+        # 多文件协同/复杂标签默认具备规划价值。
+        if candidate_file_paths and len(candidate_file_paths) >= 2:
+            return True
+        if set(lexical_tags) & {"cross_sheet", "large_data", "image_replica"}:
+            return True
+
+        # 文本中出现多阶段连接词，倾向认定为可规划任务。
+        staged_markers = ("然后", "再", "接着", "最后", "并且", "同时", "分别")
+        marker_hits = sum(1 for marker in staged_markers if marker in text)
+        if marker_hits >= 2 and len(text) >= 20:
+            return True
+        return False
 
     def build_skill_catalog(
         self,
