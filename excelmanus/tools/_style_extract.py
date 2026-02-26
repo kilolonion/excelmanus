@@ -120,3 +120,75 @@ def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
     except Exception:
         pass
     return style if style else None
+
+
+def extract_merge_ranges(ws: Any) -> list[dict[str, int]]:
+    """提取工作表中的合并单元格区域。
+
+    Returns:
+        列表，每项为 {"min_row", "min_col", "max_row", "max_col"}（1-based）。
+    """
+    merges: list[dict[str, int]] = []
+    try:
+        for mr in ws.merged_cells.ranges:
+            merges.append({
+                "min_row": mr.min_row,
+                "min_col": mr.min_col,
+                "max_row": mr.max_row,
+                "max_col": mr.max_col,
+            })
+    except Exception:
+        pass
+    return merges
+
+
+def extract_worksheet_hints(ws: Any) -> list[str]:
+    """提取工作表中不可在 diff 预览中展示的元数据特征，返回人类可读的提示列表。"""
+    hints: list[str] = []
+    try:
+        tables = getattr(ws, "_tables", None) or getattr(ws, "tables", None)
+        if tables:
+            tbl_list = list(tables)
+            for tbl in tbl_list[:3]:
+                name = getattr(tbl, "displayName", None) or getattr(tbl, "name", "")
+                ref = getattr(tbl, "ref", "")
+                hints.append(f"表格: {name} ({ref})" if ref else f"表格: {name}")
+            if len(tbl_list) > 3:
+                hints.append(f"…及另外 {len(tbl_list) - 3} 个表格")
+    except Exception:
+        pass
+    try:
+        af = getattr(ws, "auto_filter", None)
+        if af and af.ref:
+            hints.append(f"自动筛选: {af.ref}")
+    except Exception:
+        pass
+    try:
+        cf = getattr(ws, "conditional_formatting", None)
+        if cf:
+            cf_list = list(cf)
+            if cf_list:
+                hints.append(f"条件格式: {len(cf_list)} 条规则")
+    except Exception:
+        pass
+    try:
+        dv = getattr(ws, "data_validations", None)
+        if dv:
+            dv_list = getattr(dv, "dataValidation", None) or []
+            if dv_list:
+                hints.append(f"数据验证: {len(dv_list)} 条规则")
+    except Exception:
+        pass
+    try:
+        charts = getattr(ws, "_charts", None)
+        if charts:
+            hints.append(f"图表: {len(charts)} 个")
+    except Exception:
+        pass
+    try:
+        images = getattr(ws, "_images", None)
+        if images:
+            hints.append(f"图片: {len(images)} 张")
+    except Exception:
+        pass
+    return hints

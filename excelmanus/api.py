@@ -2254,6 +2254,8 @@ def _sse_event_to_sse(
             "total_rows": event.excel_total_rows,
             "truncated": event.excel_truncated,
             "cell_styles": event.excel_cell_styles[:51] if event.excel_cell_styles else [],
+            "merge_ranges": event.excel_merge_ranges[:200] if event.excel_merge_ranges else [],
+            "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
         }
     elif event.event_type == EventType.EXCEL_DIFF:
         data = {
@@ -2262,6 +2264,8 @@ def _sse_event_to_sse(
             "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
             "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
             "changes": event.excel_changes[:200],
+            "merge_ranges": event.excel_merge_ranges[:200] if event.excel_merge_ranges else [],
+            "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
         }
     elif event.event_type == EventType.TEXT_DIFF:
         data = {

@@ -1,9 +1,11 @@
 "use client";
 
+import { useMemo } from "react";
 import { ExternalLink, Table2 } from "lucide-react";
 import type { ExcelPreviewData, CellStyle } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS } from "./cell-style-utils";
+import { buildMergeMaps } from "./merge-utils";
 
 interface ExcelPreviewTableProps {
   data: ExcelPreviewData;
@@ -19,6 +21,11 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
   // cellStyles[0] = header row styles, cellStyles[1..] = data row styles
   const headerStyles = data.cellStyles?.[0];
   const hasStyles = Boolean(data.cellStyles && data.cellStyles.length > 0);
+
+  const { masterMap, hiddenSet } = useMemo(
+    () => buildMergeMaps(data.mergeRanges),
+    [data.mergeRanges],
+  );
 
   return (
     <div className="my-2 rounded-lg border border-border/80 overflow-hidden text-xs shadow-sm">
@@ -54,6 +61,9 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                 #
               </th>
               {data.columns.map((col, i) => {
+                const colNum = i + 1; // 1-based
+                const mergeInfo = masterMap.get(`1,${colNum}`);
+                if (hiddenSet.has(`1,${colNum}`)) return null;
                 const hStyle = headerStyles?.[i];
                 const css = hStyle ? cellStyleToCSS(hStyle as CellStyle) : {};
                 return (
@@ -61,6 +71,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                     key={i}
                     className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-2 py-1 text-left font-semibold whitespace-nowrap text-muted-foreground/90 min-w-[56px]"
                     style={css}
+                    colSpan={mergeInfo?.colSpan}
+                    rowSpan={mergeInfo?.rowSpan}
                   >
                     {col}
                   </th>
@@ -78,6 +90,10 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                     {rowIdx + 1}
                   </td>
                   {row.map((cell, colIdx) => {
+                    const excelRow = rowIdx + 2; // 1-based, offset by header row
+                    const excelCol = colIdx + 1; // 1-based
+                    if (hiddenSet.has(`${excelRow},${excelCol}`)) return null;
+                    const mergeInfo = masterMap.get(`${excelRow},${excelCol}`);
                     const cStyle = rowStyles?.[colIdx];
                     const css = cStyle ? cellStyleToCSS(cStyle as CellStyle) : {};
                     return (
@@ -88,6 +104,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                         }`}
                         style={hasStyles ? css : undefined}
                         title={cell != null ? String(cell) : ""}
+                        colSpan={mergeInfo?.colSpan}
+                        rowSpan={mergeInfo?.rowSpan}
                       >
                         {cell != null ? String(cell) : <span className="text-muted-foreground/20">—</span>}
                       </td>
@@ -105,6 +123,18 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
         {data.totalRows.toLocaleString()} 行 × {data.columns.length} 列
         {data.truncated && `，显示前 ${data.rows.length} 行`}
       </div>
+      {/* 元数据提示 — 预览中无法展示的工作表特征 */}
+      {data.metadataHints && data.metadataHints.length > 0 && (
+        <div className="px-3 py-1 bg-blue-50/50 dark:bg-blue-950/20 border-t border-blue-100/60 dark:border-blue-900/30 text-[10px] text-blue-600/80 dark:text-blue-400/80 flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+          <span className="font-medium text-blue-500/70 dark:text-blue-400/60 select-none">ℹ</span>
+          {data.metadataHints.map((hint, i) => (
+            <span key={i} className="inline-flex items-center gap-0.5 bg-blue-100/60 dark:bg-blue-900/30 rounded px-1.5 py-px">
+              {hint}
+            </span>
+          ))}
+          <span className="text-blue-400/50 dark:text-blue-500/40 ml-auto">打开文件查看完整效果</span>
+        </div>
+      )}
     </div>
   );
 }

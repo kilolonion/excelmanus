@@ -1536,6 +1536,15 @@ class ToolDispatcher:
                             )
                             from excelmanus.events import EventType, ToolCallEvent
                             for _rd in _rc_diffs:
+                                _rc_merges: list[dict[str, int]] = []
+                                _rc_hints: list[str] = []
+                                try:
+                                    _rc_merges, _rc_hints = self._extract_sheet_metadata(
+                                        _rd["file_path"], _rd["sheet"] or None,
+                                        e.config.workspace_root,
+                                    )
+                                except Exception:
+                                    pass
                                 e.emit(
                                     on_event,
                                     ToolCallEvent(
@@ -1545,6 +1554,8 @@ class ToolDispatcher:
                                         excel_sheet=_rd["sheet"],
                                         excel_affected_range=_rd["affected_range"],
                                         excel_changes=_rd["changes"],
+                                        excel_merge_ranges=_rc_merges,
+                                        excel_metadata_hints=_rc_hints,
                                     ),
                                 )
                         except Exception:
@@ -2175,6 +2186,37 @@ class ToolDispatcher:
             wb.close()
 
     @staticmethod
+    def _extract_file_merge_ranges(
+        file_path: str, sheet_name: str | None, workspace_root: str,
+    ) -> list[dict[str, int]]:
+        """Best-effort: 提取指定工作表的合并单元格区域。"""
+        merges, _ = ToolDispatcher._extract_sheet_metadata(file_path, sheet_name, workspace_root)
+        return merges
+
+    @staticmethod
+    def _extract_sheet_metadata(
+        file_path: str, sheet_name: str | None, workspace_root: str,
+    ) -> tuple[list[dict[str, int]], list[str]]:
+        """Best-effort: 一次打开文件，提取合并区域 + 元数据提示。"""
+        from pathlib import Path
+        from excelmanus.tools._style_extract import extract_merge_ranges, extract_worksheet_hints
+        import openpyxl
+
+        abs_path = Path(file_path) if Path(file_path).is_absolute() else Path(workspace_root) / file_path
+        abs_path = abs_path.resolve()
+        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm"):
+            return [], []
+
+        wb = openpyxl.load_workbook(str(abs_path), read_only=False, data_only=False)
+        try:
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+            if ws is None:
+                return [], []
+            return extract_merge_ranges(ws), extract_worksheet_hints(ws)
+        finally:
+            wb.close()
+
+    @staticmethod
     def _snapshot_excel_for_diff(
         file_paths: list[str], workspace_root: str,
     ) -> dict[str, list[tuple[str, list[dict]]]]:
@@ -2308,6 +2350,16 @@ class ToolDispatcher:
                     )
                 except Exception:
                     logger.debug("提取预览单元格样式失败", exc_info=True)
+                merge_ranges: list[dict[str, int]] = []
+                metadata_hints: list[str] = []
+                try:
+                    merge_ranges, metadata_hints = self._extract_sheet_metadata(
+                        arguments.get("file_path", ""),
+                        arguments.get("sheet_name") or None,
+                        e.config.workspace_root,
+                    )
+                except Exception:
+                    logger.debug("提取工作表元数据失败", exc_info=True)
                 e.emit(
                     on_event,
                     ToolCallEvent(
@@ -2320,6 +2372,8 @@ class ToolDispatcher:
                         excel_total_rows=int(total_rows) if total_rows else 0,
                         excel_truncated=bool(parsed.get("is_truncated", False)),
                         excel_cell_styles=cell_styles,
+                        excel_merge_ranges=merge_ranges,
+                        excel_metadata_hints=metadata_hints,
                     ),
                 )
 
@@ -2328,6 +2382,16 @@ class ToolDispatcher:
         if isinstance(diff_data, dict):
             changes = diff_data.get("changes", [])
             if changes:
+                diff_merges: list[dict[str, int]] = []
+                diff_hints: list[str] = []
+                try:
+                    diff_merges, diff_hints = self._extract_sheet_metadata(
+                        diff_data.get("file_path", ""),
+                        diff_data.get("sheet") or None,
+                        e.config.workspace_root,
+                    )
+                except Exception:
+                    logger.debug("提取 diff 工作表元数据失败", exc_info=True)
                 e.emit(
                     on_event,
                     ToolCallEvent(
@@ -2337,6 +2401,8 @@ class ToolDispatcher:
                         excel_sheet=diff_data.get("sheet", ""),
                         excel_affected_range=diff_data.get("affected_range", ""),
                         excel_changes=changes[:200],
+                        excel_merge_ranges=diff_merges,
+                        excel_metadata_hints=diff_hints,
                     ),
                 )
 

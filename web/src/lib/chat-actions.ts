@@ -5,7 +5,7 @@ import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
-import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData } from "@/stores/excel-store";
+import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile } from "@/lib/types";
 
 /** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
@@ -812,6 +812,8 @@ export async function sendMessage(
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
               cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
             });
             if (epFilePath) {
               const epFilename = epFilePath.split("/").pop() || epFilePath;
@@ -828,6 +830,8 @@ export async function sendMessage(
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });
             if (edFilePath) {
@@ -1543,6 +1547,8 @@ export async function sendContinuation(
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
               cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
             });
             if (epFilePath2) {
               const fn = epFilePath2.split("/").pop() || epFilePath2;
@@ -1559,6 +1565,8 @@ export async function sendContinuation(
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });
             if (edFilePath2) {
@@ -2490,6 +2498,8 @@ export async function subscribeToSession(sessionId: string) {
               totalRows: (data.total_rows as number) || 0,
               truncated: Boolean(data.truncated),
               cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
             });
             if (epFilePath) {
               const fn = epFilePath.split("/").pop() || epFilePath;
@@ -2506,6 +2516,8 @@ export async function subscribeToSession(sessionId: string) {
               sheet: (data.sheet as string) || "",
               affectedRange: (data.affected_range as string) || "",
               changes: _mapDiffChanges(data.changes as unknown[]),
+              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
+              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
               timestamp: Date.now(),
             });
             if (edFilePath) {
