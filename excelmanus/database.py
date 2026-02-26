@@ -284,6 +284,10 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_fre_session ON file_registry_events(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_fre_turn ON file_registry_events(session_id, turn)",
     ],
+    13: [
+        "ALTER TABLE approvals ADD COLUMN session_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -548,6 +552,10 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_fre_file ON file_registry_events(file_id)",
         "CREATE INDEX IF NOT EXISTS idx_fre_session ON file_registry_events(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_fre_turn ON file_registry_events(session_id, turn)",
+    ],
+    13: [
+        "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS session_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
     ],
 }
 

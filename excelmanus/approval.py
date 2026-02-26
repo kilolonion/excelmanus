@@ -87,6 +87,7 @@ class AppliedApprovalRecord:
     repo_diff_before_file: str | None = None
     repo_diff_after_file: str | None = None
     session_turn: int | None = None
+    session_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -125,6 +126,7 @@ class ApprovalManager:
         audit_root: str = "outputs/approvals",
         *,
         database: "Database | None" = None,
+        session_id: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.audit_root = (self.workspace_root / audit_root).resolve()
@@ -133,6 +135,7 @@ class ApprovalManager:
         self._applied: dict[str, AppliedApprovalRecord] = {}
         self._mcp_auto_approved: set[str] = set()
         self._db_store: "ApprovalStore | None" = None
+        self._session_id: str | None = session_id
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
         if database is not None:
@@ -259,17 +262,21 @@ class ApprovalManager:
         *,
         limit: int = 50,
         undoable_only: bool = False,
+        session_id: str | None = None,
     ) -> list[AppliedApprovalRecord]:
         """列出已执行的审批记录（最近在前）。
 
         优先从 DB 查询；无 DB 时回退到内存缓存 + 文件系统扫描。
+        当 session_id 不为 None 时，仅返回该会话产生的记录。
         """
         records: dict[str, AppliedApprovalRecord] = {}
 
         # 1) DB 查询
         if self._db_store is not None:
             try:
-                rows = self._db_store.list_approvals(limit=limit)
+                rows = self._db_store.list_approvals(
+                    limit=limit, session_id=session_id,
+                )
                 for row in rows:
                     rec = self._dict_to_applied_record(row)
                     if rec is not None:
@@ -280,6 +287,8 @@ class ApprovalManager:
         # 2) 内存缓存补充
         for aid, rec in self._applied.items():
             if aid not in records:
+                if session_id is not None and rec.session_id != session_id:
+                    continue
                 records[aid] = rec
 
         # 3) 文件系统扫描（audit_root 下每个子目录即一个 approval_id）
@@ -292,6 +301,8 @@ class ApprovalManager:
                     continue
                 loaded = self._load_applied_from_manifest(aid)
                 if loaded is not None:
+                    if session_id is not None and loaded.session_id != session_id:
+                        continue
                     records[aid] = loaded
                 if len(records) >= limit:
                     break
@@ -315,6 +326,10 @@ class ApprovalManager:
             "请先执行 `/accept <id>` 或 `/reject <id>`。"
         )
 
+    def set_session_id(self, session_id: str | None) -> None:
+        """更新当前关联的会话 ID（由 engine 在 session_id 确定后调用）。"""
+        self._session_id = session_id
+
     def execute_and_audit(
         self,
         *,
@@ -327,6 +342,7 @@ class ApprovalManager:
         created_at_utc: str | None = None,
         code_policy_info: dict[str, Any] | None = None,
         session_turn: int | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, AppliedApprovalRecord]:
         audit_dir = self.audit_root / approval_id
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -411,6 +427,7 @@ class ApprovalManager:
         if execute_error is not None:
             preview_src = f"{error_type}: {error_message}" if error_type else (error_message or "")
 
+        _effective_session_id = session_id or self._session_id
         record = AppliedApprovalRecord(
             approval_id=approval_id,
             tool_name=tool_name,
@@ -432,6 +449,7 @@ class ApprovalManager:
             repo_diff_before_file=str(repo_before_file.relative_to(self.workspace_root)),
             repo_diff_after_file=str(repo_after_file.relative_to(self.workspace_root)),
             session_turn=session_turn,
+            session_id=_effective_session_id,
         )
 
         manifest = self._build_manifest_v2(record, code_policy_info=code_policy_info)
@@ -827,6 +845,7 @@ class ApprovalManager:
                 "applied_at_utc": record.applied_at_utc,
                 "undoable": record.undoable,
                 "session_turn": record.session_turn,
+                "session_id": record.session_id,
             },
             "execution": {
                 "status": record.execution_status,
@@ -950,6 +969,7 @@ class ApprovalManager:
             applied_at_utc=str(approval.get("applied_at_utc", "")),
             undoable=bool(approval.get("undoable", False)),
             session_turn=approval.get("session_turn"),
+            session_id=approval.get("session_id"),
             manifest_file=str(manifest_path.relative_to(self.workspace_root)),
             audit_dir=str(audit_dir.relative_to(self.workspace_root)),
             result_preview=str(execution.get("result_preview", "")),
@@ -1038,6 +1058,7 @@ class ApprovalManager:
                 repo_diff_before_file=d.get("repo_diff_before"),
                 repo_diff_after_file=d.get("repo_diff_after"),
                 session_turn=d.get("session_turn"),
+                session_id=d.get("session_id"),
             )
         except Exception:
             logger.debug("DB 审批记录转换失败", exc_info=True)

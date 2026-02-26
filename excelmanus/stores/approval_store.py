@@ -42,8 +42,8 @@ class ApprovalStore:
             "  result_preview, error_type, error_message, partial_scan,"
             "  audit_dir, manifest_file, patch_file,"
             "  repo_diff_before, repo_diff_after,"
-            "  changes, binary_snapshots, user_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  changes, binary_snapshots, user_id, session_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record["id"],
                 record.get("tool_name", ""),
@@ -65,6 +65,7 @@ class ApprovalStore:
                 json.dumps(record.get("changes", []), ensure_ascii=False),
                 json.dumps(record.get("binary_snapshots", []), ensure_ascii=False),
                 self._user_id,
+                record.get("session_id"),
             ),
         )
         self._conn.commit()
@@ -84,20 +85,23 @@ class ApprovalStore:
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """列出审批记录，可按状态过滤。"""
+        """列出审批记录，可按状态和 session_id 过滤。"""
+        conditions = [self._uid_clause]
+        params: list[Any] = list(self._uid_params)
         if status:
-            rows = self._conn.execute(
-                f"SELECT * FROM approvals WHERE execution_status = ? AND {self._uid_clause} "
-                "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
-                (status, *self._uid_params, limit, offset),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"SELECT * FROM approvals WHERE {self._uid_clause} "
-                "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
-                (*self._uid_params, limit, offset),
-            ).fetchall()
+            conditions.append("execution_status = ?")
+            params.append(status)
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(conditions)
+        rows = self._conn.execute(
+            f"SELECT * FROM approvals WHERE {where} "
+            "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def delete(self, approval_id: str) -> bool:
@@ -135,4 +139,9 @@ class ApprovalStore:
         d["patch_file"] = row["patch_file"]  # type: ignore[index]
         d["repo_diff_before"] = row["repo_diff_before"]  # type: ignore[index]
         d["repo_diff_after"] = row["repo_diff_after"]  # type: ignore[index]
+        # session_id 可能不存在（旧 schema），使用安全读取
+        try:
+            d["session_id"] = row["session_id"]  # type: ignore[index]
+        except (KeyError, IndexError):
+            d["session_id"] = None
         return d
