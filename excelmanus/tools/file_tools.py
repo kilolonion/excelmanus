@@ -905,8 +905,11 @@ def get_tools() -> list[ToolDef]:
             name="list_directory",
             description=(
                 "列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式。"
-                "适用场景：浏览工作区文件结构、确认文件是否存在。"
+                "适用场景：浏览工作区文件结构、确认文件是否存在、了解目录布局。"
                 "不适用：已知确切文件路径时直接操作，无需先浏览目录。"
+                "工作区特殊目录：uploads/（用户上传的附件）、outputs/（agent 产出物）、"
+                "outputs/backups/（备份工作副本）。"
+                "浏览子目录时指定 directory 参数（如 directory=\"uploads\"）。"
             ),
             input_schema={
                 "type": "object",

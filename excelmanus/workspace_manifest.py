@@ -39,6 +39,22 @@ _INJECT_FULL_THRESHOLD = 20      # ≤20 文件：完整注入
 _INJECT_COMPACT_THRESHOLD = 100  # 20-100 文件：紧凑注入
 # >100 文件：仅注入统计摘要
 
+# 目录语义标签映射（帮助 agent 理解特殊目录的用途）
+_DIR_LABELS: dict[str, str] = {
+    "uploads": "用户上传",
+    "outputs": "产出物",
+    "outputs/backups": "备份副本",
+}
+
+
+def _dir_label(parent: str) -> str:
+    """根据目录路径返回语义标签。"""
+    normalized = parent.replace("\\", "/").strip("/")
+    for prefix, label in _DIR_LABELS.items():
+        if normalized == prefix or normalized.startswith(prefix + "/"):
+            return label
+    return ""
+
 
 @dataclass
 class SheetMeta:
@@ -75,9 +91,9 @@ class WorkspaceManifest:
         """生成用于注入 system prompt 的工作区概览文本。
 
         根据文件数量自动选择详细度：
-        - ≤20 文件：完整列出每个文件的 sheet 名 + 行列数 + 列头
-        - 20-100 文件：仅列出文件路径 + sheet 名列表
-        - >100 文件：仅统计摘要
+        - ≤20 文件：完整列出每个文件的 sheet 名 + 行列数 + 列头（按目录分组）
+        - 20-100 文件：仅列出文件路径 + sheet 名列表（按目录分组）
+        - >100 文件：仅统计摘要（含目录语义标签）
         """
         if not self.files:
             return ""
@@ -89,26 +105,42 @@ class WorkspaceManifest:
         ]
 
         if self.total_files <= _INJECT_FULL_THRESHOLD:
-            # 完整模式
-            for fm in self.files:
-                sheet_parts: list[str] = []
-                for sm in fm.sheets:
-                    header_hint = ""
-                    if sm.headers:
-                        cols_str = ", ".join(sm.headers[:6])
-                        if len(sm.headers) > 6:
-                            cols_str += f" +{len(sm.headers) - 6}列"
-                        header_hint = f" [{cols_str}]"
-                    sheet_parts.append(f"{sm.name}({sm.rows}×{sm.columns}){header_hint}")
-                sheets_str = " | ".join(sheet_parts) if sheet_parts else "(空)"
-                lines.append(f"- `{fm.path}` → {sheets_str}")
+            # 完整模式：按目录分组
+            grouped = self._group_by_dir()
+            for dir_key, dir_files in grouped:
+                if len(grouped) > 1:
+                    label = _dir_label(dir_key) if dir_key != "." else ""
+                    heading = f"**{dir_key}/**" if dir_key != "." else "**根目录**"
+                    if label:
+                        heading += f"（{label}）"
+                    lines.append(f"\n{heading}：")
+                for fm in dir_files:
+                    sheet_parts: list[str] = []
+                    for sm in fm.sheets:
+                        header_hint = ""
+                        if sm.headers:
+                            cols_str = ", ".join(sm.headers[:6])
+                            if len(sm.headers) > 6:
+                                cols_str += f" +{len(sm.headers) - 6}列"
+                            header_hint = f" [{cols_str}]"
+                        sheet_parts.append(f"{sm.name}({sm.rows}×{sm.columns}){header_hint}")
+                    sheets_str = " | ".join(sheet_parts) if sheet_parts else "(空)"
+                    lines.append(f"- `{fm.path}` → {sheets_str}")
 
         elif self.total_files <= _INJECT_COMPACT_THRESHOLD:
-            # 紧凑模式：文件路径 + sheet 名列表
-            for fm in self.files:
-                sheet_names = [sm.name for sm in fm.sheets]
-                sheets_str = ", ".join(sheet_names) if sheet_names else "(空)"
-                lines.append(f"- `{fm.path}` → [{sheets_str}]")
+            # 紧凑模式：按目录分组 + sheet 名列表
+            grouped = self._group_by_dir()
+            for dir_key, dir_files in grouped:
+                if len(grouped) > 1:
+                    label = _dir_label(dir_key) if dir_key != "." else ""
+                    heading = f"**{dir_key}/**" if dir_key != "." else "**根目录**"
+                    if label:
+                        heading += f"（{label}）"
+                    lines.append(f"\n{heading}：")
+                for fm in dir_files:
+                    sheet_names = [sm.name for sm in fm.sheets]
+                    sheets_str = ", ".join(sheet_names) if sheet_names else "(空)"
+                    lines.append(f"- `{fm.path}` → [{sheets_str}]")
 
         else:
             # 统计摘要模式
@@ -124,12 +156,31 @@ class WorkspaceManifest:
             lines.append(f"共 {total_sheets} 个工作表")
             lines.append("热点目录：")
             for d, count in top_dirs:
-                lines.append(f"  - `{d}/` ({count} 个文件)")
+                label = _dir_label(d) if d != "(根目录)" else ""
+                suffix = f"（{label}）" if label else ""
+                lines.append(f"  - `{d}/` ({count} 个文件){suffix}")
             lines.append(
                 "使用 `inspect_excel_files(search=\"关键词\")` 可按文件名或 sheet 名快速定位。"
             )
 
         return "\n".join(lines)
+
+    def _group_by_dir(self) -> list[tuple[str, list["ExcelFileMeta"]]]:
+        """按父目录分组文件，保持目录排序（根目录优先）。"""
+        from collections import OrderedDict
+        groups: OrderedDict[str, list[ExcelFileMeta]] = OrderedDict()
+        for fm in self.files:
+            parent = str(Path(fm.path).parent)
+            if parent == ".":
+                parent = "."
+            groups.setdefault(parent, []).append(fm)
+        # 根目录排最前
+        result: list[tuple[str, list[ExcelFileMeta]]] = []
+        if "." in groups:
+            result.append((".", groups.pop(".")))
+        for k, v in groups.items():
+            result.append((k, v))
+        return result
 
 
 def _sheets_to_json(sheets: list[SheetMeta]) -> str:
