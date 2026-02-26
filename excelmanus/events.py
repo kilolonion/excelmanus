@@ -41,6 +41,7 @@ class EventType(Enum):
     MEMORY_EXTRACTED = "memory_extracted"
     FILE_DOWNLOAD = "file_download"
     PLAN_CREATED = "plan_created"
+    RETRACT_THINKING = "retract_thinking"
 
 
 @dataclass
@@ -120,6 +121,7 @@ class ToolCallEvent:
     excel_rows: List[List[Any]] = field(default_factory=list)
     excel_total_rows: int = 0
     excel_truncated: bool = False
+    excel_cell_styles: List[List[Any]] = field(default_factory=list)
     excel_affected_range: str = ""
     excel_changes: List[Dict[str, Any]] = field(default_factory=list)
     # text_diff 事件字段
