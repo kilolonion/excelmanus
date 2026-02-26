@@ -367,7 +367,8 @@ def _resolve_workspace_root(request: Request) -> str:
 
 async def _has_session_access(session_id: str, request: Request) -> bool:
     """会话存在且属于当前用户时返回 True（不存在/无权均返回 False）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     try:
         await _session_manager.get_session_detail(session_id, user_id=user_id)
@@ -826,7 +827,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.session_isolation_enabled = auth_enabled
             # 将 UserStore 注入 SessionManager，使其能读取用户自定义 LLM 配置
             if _session_manager is not None:
-                _session_manager._user_store = _user_store
+                _session_manager.set_user_store(_user_store)
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -1086,7 +1087,8 @@ async def _resolve_mentions(
 @_router.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
 async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
 
     from excelmanus.auth.dependencies import extract_user_id
     auth_user_id = extract_user_id(raw_request)
@@ -1159,7 +1161,8 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
 @_router.post("/api/v1/chat/stream", responses=_error_responses)
 async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingResponse:
     """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
 
     from excelmanus.auth.dependencies import extract_user_id
     auth_user_id = extract_user_id(raw_request)
@@ -1473,7 +1476,8 @@ class RollbackRequest(BaseModel):
 @_router.get("/api/v1/backup/list")
 async def backup_list(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的待应用备份文件。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
@@ -1497,13 +1501,14 @@ async def backup_list(session_id: str, request: Request) -> JSONResponse:
 @_router.post("/api/v1/backup/apply")
 async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSONResponse:
     """将备份副本应用回原始文件。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
     # W10: 防止在 agent 活跃写入期间 apply，避免文件竞态
-    if _session_manager.is_session_in_flight(request.session_id):
+    if await _session_manager.is_session_in_flight(request.session_id):
         return _error_json_response(409, "会话正在处理中，请等待完成后再应用备份。")
     tx = engine.transaction
     if tx is None:
@@ -1540,13 +1545,14 @@ async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSO
 @_router.post("/api/v1/backup/discard")
 async def backup_discard(request: BackupDiscardRequest, raw_request: Request) -> JSONResponse:
     """丢弃备份映射。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
     # R3: 防止在 agent 活跃写入期间 discard，避免删除正在被写入的 staged 文件
-    if _session_manager.is_session_in_flight(request.session_id):
+    if await _session_manager.is_session_in_flight(request.session_id):
         return _error_json_response(409, "会话正在处理中，请等待完成后再丢弃备份。")
     tx = engine.transaction
     if tx is None:
@@ -1587,7 +1593,8 @@ async def workspace_rollback(request: BackupDiscardRequest, raw_request: Request
 @_router.get("/api/v1/checkpoint/list")
 async def checkpoint_list(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的轮次 checkpoint 时间线。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
@@ -1628,14 +1635,15 @@ async def checkpoint_rollback(
     request: CheckpointRollbackRequest, raw_request: Request,
 ) -> JSONResponse:
     """回退到指定轮次之前的文件状态。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
     if not engine.checkpoint_enabled:
         return _error_json_response(400, "该会话未启用 checkpoint 模式。")
-    if _session_manager.is_session_in_flight(request.session_id):
+    if await _session_manager.is_session_in_flight(request.session_id):
         return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
     _reg = engine.file_registry
     if _reg is None or not getattr(_reg, 'has_versions', False):
@@ -1663,7 +1671,8 @@ async def chat_rollback_preview(
     request: RollbackPreviewRequest, raw_request: Request,
 ) -> JSONResponse:
     """预览回滚到指定用户轮次后会影响的文件变更（不实际执行）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
@@ -1678,7 +1687,8 @@ async def chat_rollback_preview(
 @_router.post("/api/v1/chat/rollback")
 async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONResponse:
     """回退对话到指定用户轮次，可选回滚文件变更。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
 
     try:
@@ -1709,7 +1719,8 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
 @_router.get("/api/v1/chat/turns")
 async def chat_turns(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的用户轮次摘要。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
@@ -1851,7 +1862,8 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             if not chat_task.cancelled():
                 try:
                     chat_result = chat_task.result()
-                    assert _session_manager is not None
+                    if _session_manager is None:
+                        return  # 服务未初始化，静默退出
                     engine = _session_manager.get_engine(session_id)
                     if engine is not None:
                         normalized_reply = guard_public_reply((chat_result.reply or "").strip())
@@ -1934,7 +1946,8 @@ async def chat_answer(
     raw_request: Request,
 ) -> JSONResponse:
     """提交 ask_user 问题的回答，resolve 阻塞中的 Future。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
@@ -1972,7 +1985,8 @@ async def chat_approve(
     raw_request: Request,
 ) -> JSONResponse:
     """提交审批决策，resolve 阻塞中的 Future。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
@@ -2265,6 +2279,7 @@ def _sse_event_to_sse(
             "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
             "changes": event.excel_changes[:200],
             "merge_ranges": event.excel_merge_ranges[:200] if event.excel_merge_ranges else [],
+            "old_merge_ranges": event.excel_old_merge_ranges[:200] if event.excel_old_merge_ranges else [],
             "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
         }
     elif event.event_type == EventType.TEXT_DIFF:
@@ -2511,7 +2526,8 @@ async def import_skill(
 })
 async def delete_session(session_id: str, request: Request) -> dict:
     """删除指定会话并释放资源。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     deleted = await _session_manager.delete(session_id, user_id=user_id)
@@ -2530,7 +2546,8 @@ async def archive_session(session_id: str, request: Request) -> dict:
     请求体: {"archive": true}  归档
     请求体: {"archive": false} 取消归档
     """
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
 
     body = await request.json()
     archive = body.get("archive", True)
@@ -2554,7 +2571,8 @@ async def archive_session(session_id: str, request: Request) -> dict:
 @_router.get("/api/v1/approvals")
 async def list_approvals(request: Request) -> JSONResponse:
     """列出已执行的审批记录（支持分页与筛选）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
 
     limit = int(request.query_params.get("limit", "50"))
     undoable_only = request.query_params.get("undoable_only", "false").lower() == "true"
@@ -2594,7 +2612,8 @@ async def list_approvals(request: Request) -> JSONResponse:
 @_router.post("/api/v1/approvals/{approval_id}/undo")
 async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
     """回滚指定审批操作。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
 
     session_id = request.query_params.get("session_id")
     if not session_id:
@@ -3414,6 +3433,11 @@ async def reveal_file(request: Request) -> JSONResponse:
         return _error_json_response(400, "缺少 path 参数")
 
     target = os.path.abspath(file_path)
+    # 安全校验：限制在工作区范围内，防止路径遍历
+    if _config is not None:
+        ws_root = os.path.abspath(_config.workspace_root)
+        if not (target == ws_root or target.startswith(ws_root + os.sep)):
+            return _error_json_response(403, "路径不在工作区范围内")
     if not os.path.exists(target):
         return _error_json_response(404, f"路径不存在: {target}")
 
@@ -3436,7 +3460,8 @@ async def reveal_file(request: Request) -> JSONResponse:
 @_router.get("/api/v1/sessions")
 async def list_sessions(request: Request) -> JSONResponse:
     """列出所有会话（含历史）。认证启用时仅返回当前用户的会话。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     include_archived = request.query_params.get("include_archived", "false").lower() == "true"
     sessions = await _session_manager.list_sessions(
@@ -3448,7 +3473,8 @@ async def list_sessions(request: Request) -> JSONResponse:
 @_router.delete("/api/v1/sessions", responses={409: _error_responses[409]})
 async def clear_all_sessions(request: Request) -> JSONResponse:
     """清空当前用户的会话历史。认证启用时仅删除当前用户的会话。若有会话正在处理中则返回 409。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     sess_count, msg_count = await _session_manager.clear_all_sessions(user_id=user_id)
     return JSONResponse(content={
@@ -3461,10 +3487,14 @@ async def clear_all_sessions(request: Request) -> JSONResponse:
 @_router.get("/api/v1/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, request: Request) -> JSONResponse:
     """分页获取会话消息。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
-    limit = int(request.query_params.get("limit", "50"))
-    offset = int(request.query_params.get("offset", "0"))
+    try:
+        limit = max(1, min(500, int(request.query_params.get("limit", "50"))))
+        offset = max(0, int(request.query_params.get("offset", "0")))
+    except (ValueError, TypeError):
+        return JSONResponse(status_code=400, content={"detail": "limit/offset 必须为整数"})
     messages = await _session_manager.get_session_messages(
         session_id, limit=limit, offset=offset, user_id=user_id
     )
@@ -3474,7 +3504,8 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
 @_router.get("/api/v1/sessions/{session_id}/excel-events")
 async def get_session_excel_events(session_id: str, request: Request) -> JSONResponse:
     """返回持久化的 Excel diff 和改动文件列表，供前端重启后恢复。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     ch = _session_manager.chat_history
     if ch is None:
@@ -3520,7 +3551,8 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
 @_router.get("/api/v1/sessions/{session_id}/status")
 async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     """获取会话运行时状态（上下文压缩 + 文件注册表）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     def _normalize_registry_status(registry_payload: dict[str, Any]) -> dict[str, Any]:
@@ -3583,7 +3615,8 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
 @_router.post("/api/v1/sessions/{session_id}/compact")
 async def compact_session_context(session_id: str, request: Request) -> JSONResponse:
     """在指定会话内执行 /compact，并返回执行结果。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -3610,7 +3643,8 @@ async def compact_session_context(session_id: str, request: Request) -> JSONResp
 @_router.post("/api/v1/sessions/{session_id}/memory/extract")
 async def extract_session_memory(session_id: str, request: Request) -> JSONResponse:
     """手动触发指定会话的记忆提取。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -3638,7 +3672,8 @@ async def extract_session_memory(session_id: str, request: Request) -> JSONRespo
 @_router.post("/api/v1/sessions/{session_id}/registry/scan")
 async def scan_session_registry(session_id: str, request: Request) -> JSONResponse:
     """触发指定会话的 FileRegistry 后台扫描（force=True）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -3663,7 +3698,8 @@ async def scan_session_registry(session_id: str, request: Request) -> JSONRespon
 @_router.get("/api/v1/sessions/{session_id}")
 async def get_session(session_id: str, request: Request) -> JSONResponse:
     """获取会话详情含消息历史。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
     detail = await _session_manager.get_session_detail(session_id, user_id=user_id)
     return JSONResponse(content=detail)
@@ -3726,7 +3762,8 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
     所有已认证用户均可切换模型（不再要求管理员权限）。
     如果用户配置了 allowed_models，则只能切换到允许的模型。
     """
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     assert _config is not None, "服务未初始化"
 
     name = request.name.strip()
@@ -3801,7 +3838,8 @@ class ThinkingConfigRequest(BaseModel):
 @_router.get("/api/v1/thinking")
 async def get_thinking_config(raw_request: Request) -> JSONResponse:
     """获取当前 thinking 配置（等级 + 预算）。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     sessions = await _session_manager.list_sessions(user_id=user_id)
     # 取第一个活跃 session 的 thinking_config
@@ -3826,7 +3864,8 @@ async def get_thinking_config(raw_request: Request) -> JSONResponse:
 @_router.put("/api/v1/thinking")
 async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Request) -> JSONResponse:
     """设置 thinking 等级和/或预算，同步到所有活跃会话。"""
-    assert _session_manager is not None, "服务未初始化"
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
     from excelmanus.engine import _EFFORT_RATIOS
     if request.effort is not None and request.effort not in _EFFORT_RATIOS:
         return _error_json_response(400, f"无效的 effort 值: {request.effort!r}。可选: {', '.join(sorted(_EFFORT_RATIOS))}")
@@ -3857,8 +3896,8 @@ async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Reque
 
 _MODEL_ENV_KEYS = {
     "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL"},
-    "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL"},
-    "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL"},
+    "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "enabled": "EXCELMANUS_AUX_ENABLED"},
+    "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL", "enabled": "EXCELMANUS_VLM_ENABLED"},
 }
 
 
@@ -3913,6 +3952,7 @@ class ModelConfigUpdate(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
+    enabled: bool | None = None
 
 
 class ModelProfileCreate(BaseModel):
@@ -3941,11 +3981,13 @@ async def get_model_config(request: Request) -> JSONResponse:
             "api_key": _mask_key(_config.aux_api_key or ""),
             "base_url": _config.aux_base_url or "",
             "model": _config.aux_model or "",
+            "enabled": _config.aux_enabled,
         },
         "vlm": {
             "api_key": _mask_key(_config.vlm_api_key or ""),
             "base_url": _config.vlm_base_url or "",
             "model": _config.vlm_model or "",
+            "enabled": _config.vlm_enabled,
         },
         "profiles": [
             {
@@ -4011,6 +4053,8 @@ async def update_model_config(
         updates[key_map["base_url"]] = request.base_url
     if request.model is not None and "model" in key_map:
         updates[key_map["model"]] = request.model
+    if request.enabled is not None and "enabled" in key_map:
+        updates[key_map["enabled"]] = "true" if request.enabled else "false"
 
     if not updates:
         return _error_json_response(400, "无有效更新字段")
@@ -4031,8 +4075,8 @@ async def update_model_config(
     if _config is not None:
         _SECTION_CONFIG_FIELDS = {
             "main": {"api_key": "api_key", "base_url": "base_url", "model": "model"},
-            "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model"},
-            "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model"},
+            "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "enabled": "aux_enabled"},
+            "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model", "enabled": "vlm_enabled"},
         }
         field_map = _SECTION_CONFIG_FIELDS.get(section, {})
         for req_field, config_attr in field_map.items():
@@ -4043,6 +4087,7 @@ async def update_model_config(
     # AUX 变更需广播到所有活跃 engine，避免子代理/路由/顾问使用过时快照
     if section == "aux" and _session_manager is not None:
         await _session_manager.broadcast_aux_config(
+            aux_enabled=_config.aux_enabled if _config else True,
             aux_model=_config.aux_model if _config else None,
             aux_api_key=_config.aux_api_key if _config else None,
             aux_base_url=_config.aux_base_url if _config else None,

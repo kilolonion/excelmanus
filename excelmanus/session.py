@@ -107,7 +107,7 @@ class SessionManager:
         self._database = database
         self._config_store = config_store
         self._user_store = user_store
-        self._mcp_initialized = False
+        self._mcp_initialized: bool = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
         self._lock = asyncio.Lock()
@@ -131,6 +131,10 @@ class SessionManager:
         """底层 ChatHistoryStore 实例（只读）。"""
         return self._chat_history
 
+    def set_user_store(self, user_store: Any) -> None:
+        """注入 UserStore 实例（用于延迟初始化场景）。"""
+        self._user_store = user_store
+
     def reset_mcp_initialized(self) -> None:
         """MCP 热重载后重置初始化标志。"""
         self._mcp_initialized = False
@@ -147,6 +151,7 @@ class SessionManager:
     async def broadcast_aux_config(
         self,
         *,
+        aux_enabled: bool = True,
         aux_model: str | None = None,
         aux_api_key: str | None = None,
         aux_base_url: str | None = None,
@@ -155,6 +160,7 @@ class SessionManager:
         async with self._lock:
             for entry in self._sessions.values():
                 entry.engine.update_aux_config(
+                    aux_enabled=aux_enabled,
                     aux_model=aux_model,
                     aux_api_key=aux_api_key,
                     aux_base_url=aux_base_url,
@@ -644,6 +650,7 @@ class SessionManager:
             self._chat_history.delete_session(session_id)
             return True
         return False
+
     async def clear_session(self, session_id: str) -> bool:
         """清除会话的对话历史，但保留会话本身。
 
@@ -742,25 +749,22 @@ class SessionManager:
         """
         new_status = "archived" if archive else "active"
 
-        # R2: 在锁内捕获 entry 引用，避免锁释放后并发删除导致 None
-        entry: _SessionEntry | None = None
+        # R2: 在锁内完成活跃会话的持久化，避免锁释放后并发删除导致幽灵记录
         async with self._lock:
             in_memory = session_id in self._sessions
             if in_memory:
                 entry = self._sessions[session_id]
                 if user_id is not None and entry.user_id != user_id:
                     return False  # 不属于当前用户
-
-        if in_memory and entry is not None:
-            # 活跃会话：先持久化到 SQLite（确保记录存在），再更新状态
-            if self._chat_history is not None:
-                if self._conv_persistence is not None:
-                    self._conv_persistence.sync_new_messages(
-                        session_id, entry.engine, user_id=entry.user_id
-                    )
-                self._chat_history.update_session(session_id, status=new_status)
-                return True
-            return False
+                # 活跃会话：在锁内持久化到 SQLite，再更新状态
+                if self._chat_history is not None:
+                    if self._conv_persistence is not None:
+                        self._conv_persistence.sync_new_messages(
+                            session_id, entry.engine, user_id=entry.user_id
+                        )
+                    self._chat_history.update_session(session_id, status=new_status)
+                    return True
+                return False
 
         # 仅存在于 SQLite 中的历史会话（需校验归属）
         if self._chat_history is not None:
@@ -862,10 +866,11 @@ class SessionManager:
             return None
         return entry.engine
 
-    def is_session_in_flight(self, session_id: str) -> bool:
+    async def is_session_in_flight(self, session_id: str) -> bool:
         """W10: 检查会话是否正在处理中（用于防止 backup apply 竞态）。"""
-        entry = self._sessions.get(session_id)
-        return entry.in_flight if entry is not None else False
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            return entry.in_flight if entry is not None else False
 
     def session_exists(self, session_id: str) -> bool:
         """检查会话是否存在（内存或 SQLite 历史）。"""
