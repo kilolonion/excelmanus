@@ -5,17 +5,17 @@ interface FileTypeIconProps extends SVGProps<SVGSVGElement> {
 }
 
 const EXT_MAP: Record<string, { color: string; label: string }> = {
-  // Spreadsheet
+  // 电子表格
   xlsx: { color: "#21a366", label: "XL" },
   xls:  { color: "#21a366", label: "XL" },
   csv:  { color: "#21a366", label: "CV" },
 
-  // Python
+  // Python 相关
   py:   { color: "#3572a5", label: "PY" },
   pyi:  { color: "#3572a5", label: "PY" },
   ipynb:{ color: "#f37626", label: "NB" },
 
-  // JavaScript / TypeScript
+  // JavaScript / TypeScript 相关
   js:   { color: "#f1e05a", label: "JS" },
   jsx:  { color: "#61dafb", label: "JX" },
   ts:   { color: "#3178c6", label: "TS" },
@@ -23,14 +23,14 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   mjs:  { color: "#f1e05a", label: "MJ" },
   cjs:  { color: "#f1e05a", label: "CJ" },
 
-  // Web
+  // 前端 / Web
   html: { color: "#e34c26", label: "HT" },
   css:  { color: "#563d7c", label: "CS" },
   scss: { color: "#c6538c", label: "SC" },
   less: { color: "#1d365d", label: "LE" },
   svg:  { color: "#ffb13b", label: "SV" },
 
-  // Data / Config
+  // 数据 / 配置
   json: { color: "#a4cc82", label: "{}" },
   yaml: { color: "#cb171e", label: "YA" },
   yml:  { color: "#cb171e", label: "YM" },
@@ -39,7 +39,7 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   ini:  { color: "#8b8b8b", label: "IN" },
   env:  { color: "#ecd53f", label: ".E" },
 
-  // Docs
+  // 文档
   md:   { color: "#519aba", label: "MD" },
   mdx:  { color: "#519aba", label: "MX" },
   txt:  { color: "#8b8b8b", label: "TX" },
@@ -48,7 +48,7 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   doc:  { color: "#2b579a", label: "DC" },
   docx: { color: "#2b579a", label: "DC" },
 
-  // Images
+  // 图片
   png:  { color: "#a074c4", label: "PN" },
   jpg:  { color: "#a074c4", label: "JP" },
   jpeg: { color: "#a074c4", label: "JP" },
@@ -56,7 +56,7 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   webp: { color: "#a074c4", label: "WP" },
   ico:  { color: "#a074c4", label: "IC" },
 
-  // Shell / Systems
+  // Shell / 系统
   sh:   { color: "#89e051", label: "SH" },
   bash: { color: "#89e051", label: "SH" },
   zsh:  { color: "#89e051", label: "SH" },
@@ -64,7 +64,7 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   ps1:  { color: "#012456", label: "PS" },
   dockerfile: { color: "#384d54", label: "DK" },
 
-  // Rust / Go / C / C++ / Java
+  // Rust / Go / C / C++ / Java 等
   rs:   { color: "#dea584", label: "RS" },
   go:   { color: "#00add8", label: "GO" },
   c:    { color: "#555555", label: "C" },
@@ -78,7 +78,7 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   lua:  { color: "#000080", label: "LU" },
   sql:  { color: "#e38c00", label: "SQ" },
 
-  // Lock / Config Files
+  // 锁文件 / 配置
   lock: { color: "#8b8b8b", label: "LK" },
   cfg:  { color: "#8b8b8b", label: "CF" },
 };

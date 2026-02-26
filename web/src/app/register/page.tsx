@@ -129,7 +129,7 @@ function VerifyStep({ email, onBack }: { email: string; onBack: () => void }) {
     }
   }, [code, email, router]);
 
-  // Auto-submit when 6 digits entered
+  // 输入 6 位验证码时自动提交
   useEffect(() => {
     if (code.length === 6 && !loading) {
       const timer = setTimeout(() => {
@@ -307,7 +307,7 @@ export default function RegisterPage() {
     }
   }, []);
 
-  // Verification step
+  // 验证步骤
   if (pendingEmail) {
     return (
       <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto">

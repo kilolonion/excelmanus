@@ -108,7 +108,7 @@ export function MCPTab() {
       setServers(data.servers);
       setConfigPath(data.config_path);
     } catch {
-      // Backend not ready
+      // 后端未就绪
     } finally {
       setLoading(false);
     }
@@ -217,7 +217,7 @@ export function MCPTab() {
     try {
       if (createMode === "json") {
         const parsed = JSON.parse(jsonDraft);
-        // Expect: { "name": "...", ...config }
+        // 期望格式：{ "name": "...", ...config }
         const name = parsed.name;
         if (!name) throw new Error("JSON 中缺少 name 字段");
         delete parsed.name;

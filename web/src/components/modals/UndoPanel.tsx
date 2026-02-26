@@ -28,7 +28,7 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
       });
       setRecords(data);
     } catch {
-      // silently ignore
+      // 静默忽略
     } finally {
       setLoading(false);
     }
@@ -54,7 +54,7 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
       const ok = res.status === "ok";
       setUndoResults((prev) => ({ ...prev, [id]: { ok, msg: res.message } }));
       if (ok) {
-        // Refresh list
+        // 刷新列表
         await loadRecords();
       }
     } catch (err) {

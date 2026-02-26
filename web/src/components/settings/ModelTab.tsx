@@ -147,7 +147,7 @@ export function ModelTab() {
     base_url: "",
     description: "",
   });
-  // Per-model capabilities keyed by "model|base_url" or profile name
+  // 按 "model|base_url" 或 profile 名索引的每模型能力
   const [capsMap, setCapsMap] = useState<Record<string, ModelCapabilities>>({});
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
@@ -161,7 +161,7 @@ export function ModelTab() {
   const scrollToForm = useCallback(() => setPendingScrollToForm((n) => n + 1), []);
   useEffect(() => {
     if (!pendingScrollToForm) return;
-    // Wait for form to mount after state change, then scroll
+    // 状态变更后等待表单挂载再滚动
     requestAnimationFrame(() => {
       formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
@@ -178,7 +178,7 @@ export function ModelTab() {
       }
       setCapsMap(map);
     } catch {
-      // Backend not ready
+      // 后端未就绪
     }
   }, []);
 
@@ -189,7 +189,7 @@ export function ModelTab() {
       const data = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", body);
       setCapsMap((prev) => ({ ...prev, [profileName]: data.capabilities }));
     } catch {
-      // ignore
+      // 忽略
     } finally {
       setProbingKey(null);
     }
@@ -207,7 +207,7 @@ export function ModelTab() {
         return next;
       });
     } catch {
-      // ignore
+      // 忽略
     } finally {
       setProbingAll(false);
     }
@@ -224,7 +224,7 @@ export function ModelTab() {
         setCapsMap((prev) => ({ ...prev, [profileName]: data.capabilities! }));
       }
     } catch {
-      // ignore
+      // 忽略
     }
   }, []);
 
@@ -243,7 +243,7 @@ export function ModelTab() {
       }
       setEditDrafts(drafts);
     } catch {
-      // Backend not ready
+      // 后端未就绪
     } finally {
       setLoading(false);
     }
@@ -270,7 +270,7 @@ export function ModelTab() {
       setTimeout(() => setSaved(null), 2000);
       fetchConfig();
     } catch {
-      // ignore
+      // 忽略
     } finally {
       setSaving(null);
     }
@@ -283,7 +283,7 @@ export function ModelTab() {
       setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "" });
       fetchConfig();
     } catch {
-      // ignore
+      // 忽略
     }
   };
 
@@ -294,7 +294,7 @@ export function ModelTab() {
       setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "" });
       fetchConfig();
     } catch {
-      // ignore
+      // 忽略
     }
   };
 
@@ -303,7 +303,7 @@ export function ModelTab() {
       await apiDelete(`/config/models/profiles/${name}`);
       fetchConfig();
     } catch {
-      // ignore
+      // 忽略
     }
   };
 
