@@ -208,18 +208,18 @@
 
 .dark [data-u-comp="workbench-layout"] {
   background-color: #1f2937 !important;
-  /* gray-800 */
+  /* 灰色 gray-800 */
 }
 
-/* Hide Univer row header resize handle (narrow vertical strip in sheet header) */
+/* 隐藏 Univer 行表头拖拽手柄（表头内窄竖条） */
 header .univer-box-border .univer-w-5.univer-cursor-pointer {
   display: none !important;
 }
 
-/* Fix Univer.js button sizes on mobile devices */
+/* 移动端 Univer.js 按钮尺寸修正 */
 @media (pointer: coarse) {
 
-  /* Target the specific "开始" button with simplified selector */
+  /* 针对“开始”按钮的简化选择器 */
   a.univer-h-7.univer-rounded-full {
     height: 20px !important;
     min-height: 20px !important;
@@ -230,13 +230,13 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
     line-height: 1.2 !important;
   }
 
-  /* Also target the parent container to ensure it has enough space */
+  /* 父容器预留足够空间 */
   .univer-h-10 {
     height: 32px !important;
     min-height: 32px !important;
   }
 
-  /* General Univer.js buttons and toolbar elements */
+  /* Univer.js 通用按钮与工具栏元素 */
   [data-u-comp] button,
   [class*="univer"] button,
   [class*="univerjs"] button,
@@ -320,13 +320,13 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
   }
 }
 
-/* Inline code inside prose should wrap to avoid horizontal overflow */
+/* 正文内联代码自动换行，避免横向溢出 */
 .prose code {
   word-break: break-all;
   overflow-wrap: anywhere;
 }
 
-/* Compact prose typography for chat messages */
+/* 聊天消息紧凑排版 */
 .prose.prose-sm {
   font-size: 13px;
   line-height: 1.625;
