@@ -307,6 +307,10 @@ class ContextBuilder:
         if workspace_manifest_notice:
             base_prompt = base_prompt + "\n\n" + workspace_manifest_notice
 
+        uploads_notice = self._build_uploads_notice()
+        if uploads_notice:
+            base_prompt = base_prompt + "\n\n" + uploads_notice
+
         # 注入预取上下文（explorer 子代理预取的文件摘要）
         prefetch_context = getattr(e, "_prefetch_context", "") or ""
         if prefetch_context:
@@ -373,6 +377,8 @@ class ContextBuilder:
             _snapshot_components["mcp_context"] = mcp_context
         if workspace_manifest_notice:
             _snapshot_components["workspace_manifest"] = workspace_manifest_notice
+        if uploads_notice:
+            _snapshot_components["uploads_notice"] = uploads_notice
         if prefetch_context:
             _snapshot_components["prefetch_context"] = prefetch_context
         if runtime_line:
@@ -666,15 +672,23 @@ class ContextBuilder:
             return ""
         lines = [
             "## ⚠️ 工作区事务模式已启用",
-            "所有文件读写操作已自动重定向到 `outputs/backups/` 下的工作副本。",
-            "原始文件不会被修改。操作完成后用户可通过 `/backup apply` 将修改应用到原文件。",
+            "所有文件写入操作已自动重定向到 `outputs/backups/` 下的工作副本，原始文件不会被修改。",
+            "",
+            "**存储结构**：",
+            "- `outputs/backups/` — 当前会话的工作副本（staged files），读写操作透明重定向",
+            "- `outputs/.versions/` — 文件版本快照（自动管理，支持精确回滚）",
+            "",
+            "**用户可用命令**：",
+            "- `/backup apply` — 将工作副本应用到原文件",
+            "- `/backup rollback` — 丢弃所有修改，恢复原始文件",
+            "- `/backup list` — 查看当前暂存的文件列表",
         ]
         # 统一版本管理器可用时，追加版本追踪信息
         fvm = getattr(e, "_fvm", None)
         if fvm is not None:
             tracked = fvm.list_all_tracked()
             if tracked:
-                lines.append(f"当前有 {len(tracked)} 个文件受版本追踪保护，支持精确回滚到原始版本。")
+                lines.append(f"\n当前有 {len(tracked)} 个文件受版本追踪保护。")
         return "\n".join(lines)
 
     def _build_mcp_context_notice(self) -> str:
@@ -735,6 +749,92 @@ class ContextBuilder:
         if e.workspace_manifest is None:
             return ""
         return e.workspace_manifest.get_system_prompt_summary()
+
+    def _build_uploads_notice(self) -> str:
+        """扫描 uploads/ 目录，生成 system prompt 注入文本。
+
+        列出所有上传附件（非 Excel 文件 + Excel 文件统计），帮助 agent
+        理解 uploads/ 目录的存储语义和文件来源。
+        限制最多列出 20 个非 Excel 文件，避免占用过多 token。
+        """
+        import os
+        import re
+        from pathlib import Path as _P
+
+        from excelmanus.excel_extensions import EXCEL_EXTENSIONS
+
+        _IMAGE_EXTENSIONS = frozenset({
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+            ".svg", ".tiff", ".ico", ".heic", ".heif",
+        })
+
+        e = self._engine
+        uploads_dir = _P(e._config.workspace_root) / "uploads"
+        if not uploads_dir.is_dir():
+            return ""
+
+        _upload_prefix_re = re.compile(r"^[0-9a-f]{8}_")
+        _MAX_FILES = 20
+        non_excel_entries: list[str] = []
+        excel_count = 0
+        image_count = 0
+        other_count = 0
+        try:
+            for root, dirs, files in os.walk(uploads_dir):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for fname in sorted(files):
+                    if fname.startswith("."):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext in EXCEL_EXTENSIONS:
+                        excel_count += 1
+                        continue
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, e._config.workspace_root)
+                    display_name = _upload_prefix_re.sub("", fname)
+                    if ext in _IMAGE_EXTENSIONS:
+                        image_count += 1
+                        tag = "图片"
+                    else:
+                        other_count += 1
+                        tag = ext.lstrip(".").upper() if ext else "文件"
+                    if len(non_excel_entries) < _MAX_FILES:
+                        non_excel_entries.append(f"- `./{rel}` ({display_name}) [{tag}]")
+        except OSError:
+            return ""
+
+        total = excel_count + image_count + other_count
+        if total == 0 and not non_excel_entries:
+            return ""
+
+        lines = [
+            "## 用户上传的附件",
+            "uploads/ 目录存放用户通过前端上传的文件，文件名格式 `{8位hex}_{原始名}`。",
+        ]
+        # 分类统计
+        stats_parts: list[str] = []
+        if excel_count:
+            stats_parts.append(f"{excel_count} 个 Excel（已含在工作区文件概览中）")
+        if image_count:
+            stats_parts.append(f"{image_count} 个图片")
+        if other_count:
+            stats_parts.append(f"{other_count} 个其他文件")
+        if stats_parts:
+            lines.append(f"共 {total + excel_count} 个上传文件：{'、'.join(stats_parts)}。")
+
+        if non_excel_entries:
+            lines.append("")
+            lines.append("非 Excel 附件：")
+            lines.extend(non_excel_entries)
+            if (image_count + other_count) > _MAX_FILES:
+                lines.append(f"  ...（共 {image_count + other_count} 个，已截断）")
+
+        lines.append("")
+        lines.append(
+            "引用上传文件时使用相对路径（如 `./uploads/a1b2c3d4_文件名.png`），"
+            "向用户展示时使用去掉 hex 前缀的原始文件名。"
+        )
+        return "\n".join(lines)
 
     def _build_window_perception_notice(self) -> str:
         """渲染窗口感知系统注入文本。"""
