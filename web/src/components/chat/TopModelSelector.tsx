@@ -109,7 +109,7 @@ export function TopModelSelector() {
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-72 max-h-[50vh] overflow-y-auto">
+      <DropdownMenuContent align="start" className="w-72 max-w-[calc(100vw-2rem)] max-h-[50vh] overflow-y-auto">
         {groups.map((group, gi) => (
           <div key={group.provider}>
             {gi > 0 && <DropdownMenuSeparator />}
