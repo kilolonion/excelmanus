@@ -4,7 +4,7 @@
 
 使用 hypothesis 验证 MentionParser 的类型提取正确性和往返一致性。
 
-**Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.9, 8.1**
+**验证：需求 1.1, 1.2, 1.3, 1.4, 1.5, 1.9, 8.1**
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def _input_with_img_mention(draw: st.DrawFn) -> tuple[str, str, str]:
 # ---------------------------------------------------------------------------
 # Property 1: Mention 类型提取正确性
 # Feature: mention-system, Property 1: 类型提取正确性
-# **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5**
+# **验证：需求 1.1, 1.2, 1.3, 1.4, 1.5**
 # ---------------------------------------------------------------------------
 
 
@@ -138,7 +138,7 @@ def test_pbt_property_1_typed_mention_extraction(
     MentionParser.parse() 返回的每个 Mention 的 kind 应与标记中的类型一致，
     value 应与标记中的值一致。
 
-    **Validates: Requirements 1.1, 1.2, 1.3, 1.4**
+    **验证：需求 1.1, 1.2, 1.3, 1.4**
     """
     text, expected = data
     result = MentionParser.parse(text)
@@ -163,7 +163,7 @@ def test_pbt_property_1_img_mention_extraction(
     MentionParser.parse() 返回的 Mention 的 kind 应为 'img'，
     value 应与图片文件名一致。
 
-    **Validates: Requirements 1.5, 8.1**
+    **验证：需求 1.5, 8.1**
     """
     text, filename, raw = data
     result = MentionParser.parse(text)
@@ -186,7 +186,7 @@ def test_pbt_property_1_img_mention_extraction(
 # ---------------------------------------------------------------------------
 # Property 2: 解析往返一致性（Round-Trip）
 # Feature: mention-system, Property 2: 往返一致性
-# **Validates: Requirements 1.9**
+# **验证：需求 1.9**
 # ---------------------------------------------------------------------------
 
 
@@ -217,7 +217,7 @@ def test_pbt_property_2_roundtrip_consistency(text: str) -> None:
     与各 Mention 的 raw 文本按原始位置重新拼接后，再次调用 parse()
     应产生等价的 Mention 列表（kind、value 均相同）。
 
-    **Validates: Requirements 1.9**
+    **验证：需求 1.9**
     """
     result1 = MentionParser.parse(text)
 
@@ -248,7 +248,7 @@ def test_pbt_property_2_roundtrip_consistency(text: str) -> None:
 # ══════════════════════════════════════════════════════════
 # Property 3–7: MentionResolver 属性测试
 # Feature: mention-system, Property 3-7
-# **Validates: Requirements 2.2, 2.3, 2.5, 2.6, 3.2, 3.3, 3.5, 7.7, 7.8, 9.1–9.3**
+# **验证：需求 2.2, 2.3, 2.5, 2.6, 3.2, 3.3, 3.5, 7.7, 7.8, 9.1–9.3**
 # ══════════════════════════════════════════════════════════
 
 import os
@@ -292,7 +292,7 @@ def _make_resolver(
 # ---------------------------------------------------------------------------
 # Property 3: 文件 Token 预算不变量
 # Feature: mention-system, Property 3: 文件 Token 预算不变量
-# **Validates: Requirements 2.3**
+# **验证：需求 2.3**
 # ---------------------------------------------------------------------------
 
 # 生成随机文本内容（多行，不同大小）
@@ -309,7 +309,7 @@ def test_pbt_property_3_file_token_budget(content: str) -> None:
     """Property 3：对于任意成功解析的 file 类型 ResolvedMention，
     其 context_block 的 token 数不应超过配置的上限（默认 2000 tokens）。
 
-    **Validates: Requirements 2.3**
+    **验证：需求 2.3**
     """
     max_tokens = 200  # 使用较小值加速测试
 
@@ -332,7 +332,7 @@ def test_pbt_property_3_file_token_budget(content: str) -> None:
 # ---------------------------------------------------------------------------
 # Property 4: 文本文件摘要包含首 N 行
 # Feature: mention-system, Property 4: 文本文件摘要包含首 N 行
-# **Validates: Requirements 2.2**
+# **验证：需求 2.2**
 # ---------------------------------------------------------------------------
 
 # 生成多行文本（每行较短，确保前几行在 token 预算内）
@@ -350,7 +350,7 @@ def test_pbt_property_4_text_file_first_n_lines(lines: list[str]) -> None:
     """Property 4：对于任意文本文件，context_block 应包含该文件的前 N 行内容，
     且这些行的内容与原始文件一致。
 
-    **Validates: Requirements 2.2**
+    **验证：需求 2.2**
     """
     content = "\n".join(lines)
 
@@ -376,7 +376,7 @@ def test_pbt_property_4_text_file_first_n_lines(lines: list[str]) -> None:
 # ---------------------------------------------------------------------------
 # Property 5: 安全路径拒绝
 # Feature: mention-system, Property 5: 安全路径拒绝
-# **Validates: Requirements 2.5, 2.6, 3.5, 9.1, 9.2, 9.3**
+# **验证：需求 2.5, 2.6, 3.5, 9.1, 9.2, 9.3**
 # ---------------------------------------------------------------------------
 
 # 恶意路径策略
@@ -404,7 +404,7 @@ def test_pbt_property_5_security_path_rejection(
     """Property 5：对于任意包含路径穿越特征或位于 WORKSPACE_ROOT 之外的
     file/folder Mention，error 应非空且 context_block 应为空。
 
-    **Validates: Requirements 2.5, 2.6, 3.5, 9.1, 9.2, 9.3**
+    **验证：需求 2.5, 2.6, 3.5, 9.1, 9.2, 9.3**
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         resolver = _make_resolver(tmp_dir)
@@ -426,7 +426,7 @@ def test_pbt_property_5_security_path_rejection(
 # ---------------------------------------------------------------------------
 # Property 6: 目录树深度限制
 # Feature: mention-system, Property 6: 目录树深度限制
-# **Validates: Requirements 3.2, 7.8**
+# **验证：需求 3.2, 7.8**
 # ---------------------------------------------------------------------------
 
 # 生成嵌套深度（3-6 层，确保超过限制）
@@ -438,7 +438,7 @@ _depth_strategy = st.integers(min_value=3, max_value=6)
 def test_pbt_property_6_directory_tree_depth_limit(depth: int) -> None:
     """Property 6：对于任意目录结构，目录树输出不应包含深度超过 2 层的条目。
 
-    **Validates: Requirements 3.2, 7.8**
+    **验证：需求 3.2, 7.8**
     """
     max_folder_depth = 2
 
@@ -482,7 +482,7 @@ def test_pbt_property_6_directory_tree_depth_limit(depth: int) -> None:
 # ---------------------------------------------------------------------------
 # Property 7: 隐藏/排除条目过滤
 # Feature: mention-system, Property 7: 隐藏/排除条目过滤
-# **Validates: Requirements 3.3, 7.7**
+# **验证：需求 3.3, 7.7**
 # ---------------------------------------------------------------------------
 
 # 排除项名称策略
@@ -503,7 +503,7 @@ def test_pbt_property_7_hidden_excluded_filtering(excluded_names: list[str]) -> 
     """Property 7：对于任意包含隐藏文件、.venv 或 node_modules 的目录，
     目录树输出不应包含这些被排除的条目。
 
-    **Validates: Requirements 3.3, 7.7**
+    **验证：需求 3.3, 7.7**
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir) / "project"
@@ -582,7 +582,7 @@ def test_pbt_property_8_skill_raw_args_extraction(
 
     具体来说：MentionParser.parse() 的 clean_text 就是 raw_args。
 
-    **Validates: Requirements 4.3**
+    **验证：需求 4.3**
     """
     full_input, skill_name, expected_args = data
 
@@ -664,7 +664,7 @@ def test_pbt_property_9_context_xml_assembly_completeness(
     - 包含解析失败的 Mention 的 <error> 标签及错误信息
     - 不包含 img 类型的条目
 
-    **Validates: Requirements 6.1, 6.3, 6.4**
+    **验证：需求 6.1, 6.3, 6.4**
     """
     xml_block = build_mention_context_block(mentions)
 

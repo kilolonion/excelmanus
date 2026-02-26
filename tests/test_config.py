@@ -47,7 +47,7 @@ _pos_int_st = st.integers(min_value=1, max_value=100000)
 # ══════════════════════════════════════════════════════════
 # Property 16：环境变量加载
 # 通过环境变量设置的值必须在 load_config() 输出中精确反映。
-# **Validates: Requirements 6.1**
+# **验证：需求 6.1**
 # ══════════════════════════════════════════════════════════
 
 
@@ -71,7 +71,7 @@ def test_property16_env_vars_reflected(
 ) -> None:
     """Property 16：环境变量设置的值必须在 load_config() 输出中精确反映。
 
-    **Validates: Requirements 6.1**
+    **验证：需求 6.1**
     """
     env_vars = {
         "EXCELMANUS_API_KEY": api_key,
@@ -106,7 +106,7 @@ def test_property16_env_vars_reflected(
 # ══════════════════════════════════════════════════════════
 # Property 17：Base URL 验证
 # 仅接受合法 HTTP/HTTPS URL。
-# **Validates: Requirements 6.5**
+# **验证：需求 6.5**
 # ══════════════════════════════════════════════════════════
 
 # 非法 URL 策略：各种不合法的 URL 格式
@@ -130,7 +130,7 @@ def test_property17_invalid_base_url_rejected(
 ) -> None:
     """Property 17：非法 URL 必须被拒绝。
 
-    **Validates: Requirements 6.5**
+    **验证：需求 6.5**
     """
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")
@@ -166,7 +166,7 @@ def test_property17_valid_base_url_accepted(
 ) -> None:
     """Property 17：合法 HTTP/HTTPS URL 必须被接受。
 
-    **Validates: Requirements 6.5**
+    **验证：需求 6.5**
     """
     old_key = os.environ.get("EXCELMANUS_API_KEY")
     old_url = os.environ.get("EXCELMANUS_BASE_URL")

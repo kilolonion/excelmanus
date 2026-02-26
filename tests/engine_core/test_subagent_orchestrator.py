@@ -27,6 +27,9 @@ def _make_orchestrator(
     engine_mock.run_subagent = AsyncMock()
     engine_mock._window_perception = MagicMock()
     engine_mock._normalize_subagent_file_paths = MagicMock(return_value=[])
+    # E4: orchestrator 现在直接访问 _subagent_registry
+    engine_mock._subagent_registry = MagicMock()
+    engine_mock._subagent_registry.build_catalog = MagicMock(return_value=("", ["subagent"]))
     return SubagentOrchestrator(engine_mock)
 
 

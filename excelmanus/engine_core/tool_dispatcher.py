@@ -736,11 +736,10 @@ class ToolDispatcher:
             READ_ONLY_SAFE_TOOLS,
         )
 
-        # 优先从 FileRegistry 查询 CoW 重定向，回退到 state.cow_path_registry
+        # 仅从 FileRegistry 查询 CoW 重定向
         _file_reg = self._engine.file_registry
         _use_file_reg = _file_reg is not None and _file_reg.has_versions
-        registry = self._engine.state.cow_path_registry
-        if not registry and not _use_file_reg:
+        if not _use_file_reg:
             return arguments, []
 
         path_fields: list[str] = []
@@ -775,12 +774,7 @@ class ToolDispatcher:
             rel_path = raw_str
             if workspace_root and raw_str.startswith(workspace_root):
                 rel_path = raw_str[len(workspace_root):].lstrip("/")
-            # 优先从 FileRegistry 查询，回退到 state dict
-            redirect = None
-            if _use_file_reg:
-                redirect = _file_reg.lookup_cow_redirect(rel_path)
-            if redirect is None:
-                redirect = registry.get(rel_path)
+            redirect = _file_reg.lookup_cow_redirect(rel_path)
             if redirect is not None:
                 # 保持原始路径格式（绝对/相对）
                 if raw_str.startswith(workspace_root):

@@ -52,11 +52,6 @@ class SessionState:
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
 
-        # CoW 路径映射注册表（会话级累积）
-        # key: 原始相对路径, value: outputs/ 下的副本相对路径
-        # 注意：当 _file_registry 可用时，cow_path_registry 从 registry 的 staging 索引派生
-        self.cow_path_registry: dict[str, str] = {}
-
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
 
@@ -113,7 +108,6 @@ class SessionState:
         self.last_failure_count = 0
         self.turn_diagnostics = []
         self.session_diagnostics = []
-        self.cow_path_registry = {}
         self.backup_write_notice_shown = False
         self.prompt_injection_snapshots = []
         self._recent_tool_calls.clear()
@@ -147,16 +141,18 @@ class SessionState:
     # ── CoW 路径注册表 ──────────────────────────────────────
 
     def register_cow_mappings(self, mapping: dict[str, str]) -> None:
-        """合并新的 CoW 路径映射到会话级注册表。
-
-        委托 FileRegistry，同时保留本地 dict 用于 system prompt 注入。
-        """
+        """合并新的 CoW 路径映射到 FileRegistry。"""
         if not mapping:
             return
-        self.cow_path_registry.update(mapping)
         if self._file_registry is not None and self._file_registry.has_versions:
             for src_rel, dst_rel in mapping.items():
                 self._file_registry.register_cow_mapping(src_rel, dst_rel)
+        
+    def get_cow_mappings(self) -> dict[str, str]:
+        """返回当前 CoW 映射（仅来自 FileRegistry）。"""
+        if self._file_registry is not None and self._file_registry.has_versions:
+            return self._file_registry.get_cow_mappings()
+        return {}
 
     def lookup_cow_redirect(self, rel_path: str) -> str | None:
         """查找相对路径是否有 CoW 副本，返回副本路径或 None。"""
@@ -164,7 +160,7 @@ class SessionState:
             redirect = self._file_registry.lookup_cow_redirect(rel_path)
             if redirect is not None:
                 return redirect
-        return self.cow_path_registry.get(rel_path)
+        return None
 
     # ── 卡住检测 ──────────────────────────────────────
 

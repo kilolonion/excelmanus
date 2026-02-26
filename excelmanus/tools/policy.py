@@ -62,6 +62,7 @@ if not PARALLELIZABLE_READONLY_TOOLS <= READ_ONLY_SAFE_TOOLS:
 MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
     {
         "write_text_file",
+        "edit_text_file",
         "run_shell",
         "delete_file",
         "rename_file",
@@ -96,6 +97,7 @@ if READ_ONLY_SAFE_TOOLS & MUTATING_ALL_TOOLS:
 # mode=all：提取所有非空字段作为目标文件
 AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "write_text_file": ("file_path",),
+    "edit_text_file": ("file_path",),
     "copy_file": ("destination",),
     "rename_file": ("source", "destination"),
     "delete_file": ("file_path",),
@@ -158,7 +160,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "list_directory", "copy_file", "rename_file", "delete_file",
         # get_file_info, find_files, read_text_file: Batch 5 精简
     ),
-    "code": ("write_text_file", "run_code", "run_shell"),
+    "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
     "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica", "extract_table_spec"),
 }
 
@@ -185,6 +187,7 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",
     # 代码执行
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
+    "edit_text_file": "精准编辑文本文件：查找替换指定片段，无需重写整个文件",
     "run_code": "执行 Python 代码或脚本，适用于批量数据处理、复杂变换、跨表操作等场景（已配备安全沙盒）",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
     # 视觉工具

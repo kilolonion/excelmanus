@@ -779,7 +779,7 @@ class ContextBuilder:
                 parts.append(panorama)
 
         # ── CoW 路径映射（始终追加，不缓存） ──
-        cow_registry = e.state.cow_path_registry
+        cow_registry = e.state.get_cow_mappings()
         if cow_registry:
             cow_lines = [
                 "## ⚠️ 文件保护路径映射（CoW）",

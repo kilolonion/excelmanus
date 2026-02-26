@@ -118,7 +118,7 @@ class TestConfigParseRoundTrip:
         suppress_health_check=[HealthCheck.too_slow],
     )
     def test_property_1_config_parse_round_trip(self, config: dict) -> None:
-        """**Validates: Requirements 1.1, 1.3, 1.4, 1.5**
+        """**验证：需求 1.1, 1.3, 1.4, 1.5**
 
         对于任何合法的 MCP 配置字典，解析为 MCPServerConfig 列表后，
         每个配置项的字段应与原始 JSON 中的对应值一致。
@@ -319,7 +319,7 @@ class TestInvalidConfigFiltering:
     def test_property_2_invalid_config_filtering(
         self, data: tuple[dict, int]
     ) -> None:
-        """**Validates: Requirements 1.6, 3.4**
+        """**验证：需求 1.6, 3.4**
 
         对于任何包含合法和非法条目的混合 MCP 配置列表，
         解析结果应只包含合法条目，且合法条目的数量等于输入中合法条目的数量。
@@ -418,7 +418,7 @@ class TestToolDefConversion:
         input_schema: dict,
         timeout: int,
     ) -> None:
-        """**Validates: Requirements 3.2, 3.3, 4.1**
+        """**验证：需求 3.2, 3.3, 4.1**
 
         对于任何合法的 MCP 工具定义（包含 name、description、inputSchema）
         和任何合法的 server_name，转换后的 ToolDef 应满足：
@@ -490,7 +490,7 @@ class TestToolPrefixRoundTrip:
         server_name: str,
         tool_name: str,
     ) -> None:
-        """**Validates: Requirements 5.2**
+        """**验证：需求 5.2**
 
         对于任何合法的 server_name 和 tool_name，
         添加前缀后再还原应得到原始的 (normalized_server_name, tool_name)。
@@ -571,7 +571,7 @@ class TestToolResultConversion:
         self,
         data: tuple[list, list[str]],
     ) -> None:
-        """**Validates: Requirements 5.3**
+        """**验证：需求 5.3**
 
         对于任何 MCP 工具调用返回的结果（包含 content 列表），
         转换为字符串后应包含所有 text 类型 content 的文本内容。
@@ -721,7 +721,7 @@ class TestConnectionFaultIsolation:
             list[list[SimpleNamespace]],
         ],
     ) -> None:
-        """**Validates: Requirements 2.4**
+        """**验证：需求 2.4**
 
         对于任何 N 个 MCP Server 配置（其中 M 个连接成功、N-M 个连接失败），
         初始化完成后成功连接的 Server 数量应等于 M，

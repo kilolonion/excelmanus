@@ -1,4 +1,4 @@
-"""Test-only migration helpers for the new Window union model."""
+"""仅用于测试的 Window 联合模型迁移辅助函数。"""
 
 from __future__ import annotations
 

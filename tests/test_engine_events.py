@@ -150,7 +150,7 @@ class EventCollector:
 # ══════════════════════════════════════════════════════════
 # Property 2: 工具调用开始事件包含正确数据
 # **Feature: cli-beautify, Property 2: 工具调用开始事件包含正确数据**
-# **Validates: Requirements 1.1**
+# **验证：需求 1.1**
 # ══════════════════════════════════════════════════════════
 
 
@@ -168,7 +168,7 @@ async def test_property_2_tool_call_start_event_data(
     event_type 应为 TOOL_CALL_START。
 
     **Feature: cli-beautify, Property 2: 工具调用开始事件包含正确数据**
-    **Validates: Requirements 1.1**
+    **验证：需求 1.1**
     """
     # 使用固定工具名，因为 ToolRegistry 需要注册真实工具
     fixed_tool_name = "echo_tool"
@@ -210,7 +210,7 @@ async def test_property_2_tool_call_start_event_data(
 # ══════════════════════════════════════════════════════════
 # Property 3: 工具调用结束事件包含正确状态
 # **Feature: cli-beautify, Property 3: 工具调用结束事件包含正确状态**
-# **Validates: Requirements 1.2**
+# **验证：需求 1.2**
 # ══════════════════════════════════════════════════════════
 
 
@@ -229,7 +229,7 @@ async def test_property_3_tool_call_end_event_status(
     事件的 success 字段应与实际执行结果一致，且失败时 error 字段非空。
 
     **Feature: cli-beautify, Property 3: 工具调用结束事件包含正确状态**
-    **Validates: Requirements 1.2**
+    **验证：需求 1.2**
     """
     error_msg = "模拟工具执行失败"
 
@@ -296,7 +296,7 @@ async def test_property_3_tool_call_end_event_status(
 # ══════════════════════════════════════════════════════════
 # Property 4: 迭代事件轮次编号递增
 # **Feature: cli-beautify, Property 4: 迭代事件轮次编号递增**
-# **Validates: Requirements 1.5**
+# **验证：需求 1.5**
 # ══════════════════════════════════════════════════════════
 
 
@@ -313,7 +313,7 @@ async def test_property_4_iteration_numbers_strictly_increasing(
     轮次编号应从 1 开始严格递增。
 
     **Feature: cli-beautify, Property 4: 迭代事件轮次编号递增**
-    **Validates: Requirements 1.5**
+    **验证：需求 1.5**
     """
     registry = _make_registry_with_echo_tool()
     config = _make_config(max_iterations=n_iterations + 5)

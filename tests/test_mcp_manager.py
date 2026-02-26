@@ -80,21 +80,21 @@ class TestParseToolPrefix:
     """测试工具名前缀还原。"""
 
     def test_round_trip_simple(self):
-        """简单 server_name 的 round-trip。"""
+        """简单 server_name 的往返一致性。"""
         prefixed = add_tool_prefix("filesystem", "read_file")
         server, tool = parse_tool_prefix(prefixed)
         assert server == "filesystem"
         assert tool == "read_file"
 
     def test_round_trip_with_dash(self):
-        """含 `-` 的 server_name 的 round-trip（通过注册表精确还原）。"""
+        """含 `-` 的 server_name 的往返一致性（通过注册表精确还原）。"""
         prefixed = add_tool_prefix("web-search", "search")
         server, tool = parse_tool_prefix(prefixed)
         assert server == "web_search"
         assert tool == "search"
 
     def test_round_trip_complex_tool_name(self):
-        """tool_name 包含多个 `_` 的 round-trip。"""
+        """tool_name 包含多个 `_` 的往返一致性。"""
         prefixed = add_tool_prefix("db-server", "get_user_by_id")
         server, tool = parse_tool_prefix(prefixed)
         assert server == "db_server"

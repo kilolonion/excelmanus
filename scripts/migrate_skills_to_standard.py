@@ -23,7 +23,7 @@ _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 @dataclass
 class MigrationReport:
-    """Migration result summary."""
+    """迁移结果摘要。"""
 
     migrated_files: list[str] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
@@ -32,7 +32,7 @@ class MigrationReport:
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    """Split SKILL.md into frontmatter dict and body."""
+    """将 SKILL.md 拆分为 frontmatter 字典与正文。"""
     matched = _FRONTMATTER_PATTERN.match(text)
     if not matched:
         return {}, text
@@ -188,9 +188,9 @@ def _extract_skillpack(frontmatter: dict[str, Any], body: str, skill_file: Path)
 
 
 def _build_frontmatter(skill: Skillpack, inject_defaults: bool) -> dict[str, Any]:
-    """Build normalized frontmatter.
+    """构建规范化 frontmatter。
 
-    `context`/`agent` are intentionally excluded because they are removed fields.
+    `context`/`agent` 已废弃，故意不包含。
     """
     payload: dict[str, Any] = {
         "name": skill.name,
@@ -257,7 +257,7 @@ def migrate_skills(
     dry_run: bool = False,
     extra_dirs: tuple[str, ...] = (),
 ) -> MigrationReport:
-    """Migrate discoverable SKILL.md files to normalized frontmatter."""
+    """将可发现的 SKILL.md 文件迁移为规范化 frontmatter。"""
     report = MigrationReport()
     workspace = Path(workspace_root).expanduser().resolve()
     for root in _iter_roots(workspace, extra_dirs):

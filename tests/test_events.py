@@ -57,14 +57,14 @@ tool_call_event_st = st.builds(
 
 
 # ---------------------------------------------------------------------------
-# Property 1: ToolCallEvent round-trip 序列化
+# Property 1: ToolCallEvent 往返序列化
 # ---------------------------------------------------------------------------
 
 
 class TestToolCallEventRoundTrip:
-    """**Feature: cli-beautify, Property 1: ToolCallEvent round-trip 序列化**
+    """**Feature: cli-beautify, Property 1: ToolCallEvent 往返序列化**
 
-    **Validates: Requirements 5.3**
+    **验证：需求 5.3**
     """
 
     @given(event=tool_call_event_st)
@@ -112,6 +112,8 @@ class TestEventTypeEnum:
             "SUBAGENT_END",
             "SUBAGENT_ITERATION",
             "SUBAGENT_SUMMARY",
+            "SUBAGENT_TOOL_START",
+            "SUBAGENT_TOOL_END",
             "TASK_LIST_CREATED",
             "TASK_ITEM_UPDATED",
             "USER_QUESTION",
@@ -124,6 +126,8 @@ class TestEventTypeEnum:
             "MEMORY_EXTRACTED",
             "PIPELINE_PROGRESS",
             "FILE_DOWNLOAD",
+            "PLAN_CREATED",
+            "TEXT_DIFF",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -151,6 +155,8 @@ class TestEventTypeEnum:
             ("SUBAGENT_END", "subagent_end"),
             ("SUBAGENT_ITERATION", "subagent_iteration"),
             ("SUBAGENT_SUMMARY", "subagent_summary"),
+            ("SUBAGENT_TOOL_START", "subagent_tool_start"),
+            ("SUBAGENT_TOOL_END", "subagent_tool_end"),
             ("CHAT_SUMMARY", "chat_summary"),
             ("TASK_LIST_CREATED", "task_list_created"),
             ("TASK_ITEM_UPDATED", "task_item_updated"),
@@ -162,10 +168,12 @@ class TestEventTypeEnum:
             ("MODE_CHANGED", "mode_changed"),
             ("EXCEL_PREVIEW", "excel_preview"),
             ("EXCEL_DIFF", "excel_diff"),
+            ("TEXT_DIFF", "text_diff"),
             ("FILES_CHANGED", "files_changed"),
             ("PIPELINE_PROGRESS", "pipeline_progress"),
             ("MEMORY_EXTRACTED", "memory_extracted"),
             ("FILE_DOWNLOAD", "file_download"),
+            ("PLAN_CREATED", "plan_created"),
         ]
 
 
@@ -269,6 +277,7 @@ class TestToolCallEventFields:
             "subagent_conversation_id",
             "subagent_iterations",
             "subagent_tool_calls",
+            "subagent_tool_index",
             "task_list_data",
             "task_index",
             "task_status",
@@ -311,5 +320,13 @@ class TestToolCallEventFields:
             "download_file_path",
             "download_filename",
             "download_description",
+            "plan_file_path",
+            "plan_title",
+            "plan_task_count",
+            "text_diff_file_path",
+            "text_diff_hunks",
+            "text_diff_additions",
+            "text_diff_deletions",
+            "text_diff_truncated",
         }
         assert set(annotations.keys()) == expected_fields

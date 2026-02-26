@@ -96,7 +96,7 @@ class TestGetOrCreate:
     ) -> None:
         """创建新会话时应触发 engine 的后台 manifest 预热。"""
         with patch(
-            "excelmanus.session.AgentEngine.start_workspace_manifest_prewarm",
+            "excelmanus.session.AgentEngine.start_registry_scan",
             return_value=True,
         ) as prewarm_mock:
             sid, _engine = await manager.acquire_for_chat(None)
@@ -572,7 +572,7 @@ from hypothesis import given, strategies as st
 class TestProperty18SessionTTLCleanup:
     """Property 18：超过 session_ttl_seconds 的空闲会话必须被清理。
 
-    **Validates: Requirements 5.8, 5.10, 6.7**
+    **验证：需求 5.8, 5.10, 6.7**
     """
 
     @given(
@@ -601,7 +601,7 @@ class TestProperty18SessionTTLCleanup:
 
                 # 创建 n 个会话（mock 掉 MCP 初始化和 manifest 预热避免 hang）
                 with patch.object(AgentEngine, "initialize_mcp", new_callable=AsyncMock), \
-                     patch.object(AgentEngine, "start_workspace_manifest_prewarm", return_value=False):
+                     patch.object(AgentEngine, "start_registry_scan", return_value=False):
                     for _ in range(n_sessions):
                         sid, _ = await mgr.acquire_for_chat(None)
                         await mgr.release_for_chat(sid)
@@ -646,7 +646,7 @@ class TestProperty18SessionTTLCleanup:
                 )
 
                 with patch.object(AgentEngine, "initialize_mcp", new_callable=AsyncMock), \
-                     patch.object(AgentEngine, "start_workspace_manifest_prewarm", return_value=False):
+                     patch.object(AgentEngine, "start_registry_scan", return_value=False):
                     for _ in range(n_sessions):
                         sid, _ = await mgr.acquire_for_chat(None)
                         await mgr.release_for_chat(sid)

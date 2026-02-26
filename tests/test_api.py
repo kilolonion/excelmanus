@@ -191,7 +191,7 @@ def client(setup_api_state):
 class TestProperty12ChatResponseFormat:
     """Property 12：任意合法 chat 请求应返回 200，且响应包含非空 session_id/reply。
 
-    **Validates: Requirements 5.2**
+    **验证：需求 5.2**
     """
 
     @pytest.mark.asyncio
@@ -331,7 +331,7 @@ class TestMemoryIsolation:
 class TestProperty13SessionReuse:
     """Property 13：同一 session_id 的连续请求应复用同一上下文。
 
-    **Validates: Requirements 5.3**
+    **验证：需求 5.3**
     """
 
     @pytest.mark.asyncio
@@ -436,7 +436,7 @@ class TestProperty13SessionReuse:
 class TestProperty14SessionDeletion:
     """Property 14：删除会话后，同 ID 后续请求必须创建新会话。
 
-    **Validates: Requirements 5.4**
+    **验证：需求 5.4**
     """
 
     @pytest.mark.asyncio
@@ -639,7 +639,7 @@ class TestProperty14SessionDeletion:
         sid = create_resp.json()["session_id"]
 
         with patch(
-            "excelmanus.engine.AgentEngine.workspace_manifest_build_status",
+            "excelmanus.engine.AgentEngine.registry_scan_status",
             return_value={
                 "state": "ready",
                 "total_files": 7,
@@ -663,7 +663,7 @@ class TestProperty14SessionDeletion:
         manager: SessionManager = setup_api_state["manager"]
         restored_engine = MagicMock()
         restored_engine.get_compaction_status.return_value = {"enabled": False}
-        restored_engine.workspace_manifest_build_status.return_value = {
+        restored_engine.registry_scan_status.return_value = {
             "state": "building",
             "total_files": None,
             "scan_duration_ms": None,
@@ -838,7 +838,7 @@ class TestSessionCompactAPI:
 class TestProperty15ErrorNoLeak:
     """Property 15：500 响应必须包含 error_id 且不得泄露 traceback 或内部路径。
 
-    **Validates: Requirements 5.6**
+    **验证：需求 5.6**
     """
 
     @pytest.mark.asyncio
@@ -928,16 +928,16 @@ class TestExternalSafeMode:
         assert data["tool_scope"] == []
 
     @pytest.mark.asyncio
-    async def test_manifest_command_keep_safe_mode_hidden(
+    async def test_registry_command_keep_safe_mode_hidden(
         self, client: AsyncClient
     ) -> None:
-        """默认安全模式下，/manifest 命令可执行且路由元信息仍隐藏。"""
+        """默认安全模式下，/registry 命令可执行且路由元信息仍隐藏。"""
         resp = await client.post(
-            "/api/v1/chat", json={"message": "/manifest status"},
+            "/api/v1/chat", json={"message": "/registry status"},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "Workspace manifest" in data["reply"]
+        assert "FileRegistry" in data["reply"]
         assert data["route_mode"] == "hidden"
         assert data["skills_used"] == []
         assert data["tool_scope"] == []
@@ -1874,7 +1874,7 @@ class TestOpenAPIContract:
 class TestProperty18TTLCleanupAPI:
     """Property 18：超过 session_ttl_seconds 的空闲会话必须被清理。
 
-    **Validates: Requirements 5.8, 5.10, 6.7**
+    **验证：需求 5.8, 5.10, 6.7**
     """
 
     @pytest.mark.asyncio
@@ -1905,7 +1905,7 @@ class TestProperty18TTLCleanupAPI:
 class TestProperty20AsyncNonBlockingAPI:
     """Property 20：并发请求场景下，阻塞工具执行不得阻塞主事件循环。
 
-    **Validates: Requirements 1.10, 5.7**
+    **验证：需求 1.10, 5.7**
     """
 
     @pytest.mark.asyncio
@@ -1959,14 +1959,14 @@ session_id_st = st.from_regex(r"[a-z0-9\-]{4,36}", fullmatch=True)
 
 # ---------------------------------------------------------------------------
 # Property 12：API Chat 响应格式（属性测试）
-# **Validates: Requirements 5.2**
+# **验证：需求 5.2**
 # ---------------------------------------------------------------------------
 
 
 class TestPBTProperty12ChatResponseFormat:
     """Property 12：任意合法 chat 请求应返回 200，且响应包含非空 session_id/reply。
 
-    **Validates: Requirements 5.2**
+    **验证：需求 5.2**
     """
 
     @given(message=message_st)
@@ -2000,14 +2000,14 @@ class TestPBTProperty12ChatResponseFormat:
 
 # ---------------------------------------------------------------------------
 # Property 13：API 会话复用（属性测试）
-# **Validates: Requirements 5.3**
+# **验证：需求 5.3**
 # ---------------------------------------------------------------------------
 
 
 class TestPBTProperty13SessionReuse:
     """Property 13：同一 session_id 的连续请求应复用同一上下文。
 
-    **Validates: Requirements 5.3**
+    **验证：需求 5.3**
     """
 
     @given(
@@ -2052,14 +2052,14 @@ class TestPBTProperty13SessionReuse:
 
 # ---------------------------------------------------------------------------
 # Property 14：API 会话删除（属性测试）
-# **Validates: Requirements 5.4**
+# **验证：需求 5.4**
 # ---------------------------------------------------------------------------
 
 
 class TestPBTProperty14SessionDeletion:
     """Property 14：删除会话后，同 ID 后续请求必须创建新会话。
 
-    **Validates: Requirements 5.4**
+    **验证：需求 5.4**
     """
 
     @given(session_id=session_id_st)
@@ -2113,7 +2113,7 @@ class TestPBTProperty14SessionDeletion:
 
 # ---------------------------------------------------------------------------
 # Property 15：API 异常不泄露（属性测试）
-# **Validates: Requirements 5.6**
+# **验证：需求 5.6**
 # ---------------------------------------------------------------------------
 
 # 生成可能包含敏感信息的错误消息
@@ -2130,7 +2130,7 @@ sensitive_error_st = st.one_of(
 class TestPBTProperty15ErrorNoLeak:
     """Property 15：500 响应必须包含 error_id 且不得泄露 traceback 或内部路径。
 
-    **Validates: Requirements 5.6**
+    **验证：需求 5.6**
     """
 
     @given(error_msg=sensitive_error_st)
@@ -2172,14 +2172,14 @@ class TestPBTProperty15ErrorNoLeak:
 
 # ---------------------------------------------------------------------------
 # Property 18：会话 TTL 清理（API 层属性测试）
-# **Validates: Requirements 5.8, 5.10, 6.7**
+# **验证：需求 5.8, 5.10, 6.7**
 # ---------------------------------------------------------------------------
 
 
 class TestPBTProperty18TTLCleanupAPI:
     """Property 18：超过 session_ttl_seconds 的空闲会话必须被清理。
 
-    **Validates: Requirements 5.8, 5.10, 6.7**
+    **验证：需求 5.8, 5.10, 6.7**
     """
 
     @given(
@@ -2220,14 +2220,14 @@ class TestPBTProperty18TTLCleanupAPI:
 
 # ---------------------------------------------------------------------------
 # Property 20：异步不阻塞（API 层属性测试）
-# **Validates: Requirements 1.10, 5.7**
+# **验证：需求 1.10, 5.7**
 # ---------------------------------------------------------------------------
 
 
 class TestPBTProperty20AsyncNonBlockingAPI:
     """Property 20：并发请求场景下，阻塞工具执行不得阻塞主事件循环。
 
-    **Validates: Requirements 1.10, 5.7**
+    **验证：需求 1.10, 5.7**
     """
 
     @given(n_concurrent=st.integers(min_value=2, max_value=4))

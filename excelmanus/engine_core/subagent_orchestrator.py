@@ -22,6 +22,21 @@ if TYPE_CHECKING:
 
 logger = get_logger("subagent_orchestrator")
 
+# ── 子代理自动选择：关键词规则 ──────────────────────────────
+_WRITE_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "写入", "修改", "删除", "创建", "生成", "新增", "插入", "替换", "更新",
+    "保存", "导出", "输出", "覆盖", "追加", "合并", "拆分", "格式化",
+    "画图", "图表", "公式", "计算列", "vlookup", "运行", "执行",
+    "write", "create", "delete", "update", "save", "export", "run",
+})
+_READ_INTENT_KEYWORDS: frozenset[str] = frozenset({
+    "查看", "分析", "读取", "统计", "定位", "检查", "预览", "概况",
+    "列出", "搜索", "查找", "对比", "比较", "探索", "浏览", "扫描",
+    "有哪些", "多少", "几个", "什么结构", "哪些列", "哪些sheet",
+    "read", "analyze", "inspect", "list", "search", "find", "explore",
+    "preview", "scan", "count", "structure",
+})
+
 
 @dataclass
 class ParallelDelegateTask:
@@ -79,11 +94,11 @@ class SubagentOrchestrator:
                 success=False,
             )
 
-        normalized_paths = engine._normalize_subagent_file_paths(file_paths)
+        normalized_paths = self.normalize_file_paths(file_paths)
 
         picked_agent = (agent_name or "").strip()
         if not picked_agent:
-            picked_agent = await engine._auto_select_subagent(
+            picked_agent = await self.auto_select_subagent(
                 task=task_text,
                 file_paths=normalized_paths,
             )
@@ -271,23 +286,9 @@ class SubagentOrchestrator:
                 f"{status} 任务 {i + 1}「{task_label}」：{outcome.reply}"
             )
 
-        # 写入传播：将所有成功子代理的 structured_changes 传播到 window perception
-        for outcome in outcomes:
-            sub = outcome.subagent_result
-            if outcome.success and sub is not None:
-                all_paths = [*outcome.normalized_paths, *sub.observed_files]
-                engine._window_perception.observe_subagent_context(
-                    candidate_paths=all_paths,
-                    subagent_name=outcome.picked_agent or "subagent",
-                    task=outcome.task_text,
-                )
-                if sub.structured_changes:
-                    engine._window_perception.observe_subagent_writes(
-                        structured_changes=sub.structured_changes,
-                        subagent_name=outcome.picked_agent or "subagent",
-                        task=outcome.task_text,
-                    )
-                engine._context_builder.mark_window_notice_dirty()
+        # 注意：窗口感知传播（observe_subagent_context / observe_subagent_writes /
+        # mark_window_notice_dirty）已在 self.delegate() 内部对每个成功结果执行，
+        # 此处无需重复调用。
 
         summary = "\n\n".join(reply_parts)
         return ParallelDelegateOutcome(
@@ -295,6 +296,48 @@ class SubagentOrchestrator:
             success=all_success,
             outcomes=outcomes,
         )
+
+    @staticmethod
+    def normalize_file_paths(file_paths: list[Any] | None) -> list[str]:
+        """规范化 subagent 输入文件路径。"""
+        if not file_paths:
+            return []
+        normalized: list[str] = []
+        for item in file_paths:
+            if not isinstance(item, str):
+                continue
+            path = item.strip()
+            if path:
+                normalized.append(path)
+        return normalized
+
+    async def auto_select_subagent(
+        self,
+        *,
+        task: str,
+        file_paths: list[str],
+    ) -> str:
+        """基于关键词规则选择子代理（不调用 LLM）。
+
+        规则优先级：
+        1. 任务文本含写入意图关键词 → subagent（通用全能力）
+        2. 任务文本含只读意图关键词且 explorer 可用 → explorer
+        3. 以上均未命中 → subagent（安全回退）
+        """
+        _, candidates = self._engine._subagent_registry.build_catalog()
+        if not candidates:
+            return "subagent"
+
+        candidate_set = set(candidates)
+        task_lower = task.lower()
+
+        if any(kw in task_lower for kw in _WRITE_INTENT_KEYWORDS):
+            return "subagent"
+
+        if any(kw in task_lower for kw in _READ_INTENT_KEYWORDS) and "explorer" in candidate_set:
+            return "explorer"
+
+        return "subagent"
 
     @staticmethod
     def _detect_file_conflicts(

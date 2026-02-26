@@ -109,7 +109,7 @@ class TestProperty5ToolCardContainsNameAndArgs:
     对于任意工具名称和参数字典，StreamRenderer 渲染 tool_call_start 事件后
     的输出文本应包含工具名称，且参数字典中的每个键都应出现在输出中。
 
-    **Validates: Requirements 2.1**
+    **验证：需求 2.1**
     """
 
     @given(name=tool_name_st, args=nonempty_arguments_st)
@@ -163,7 +163,7 @@ class TestProperty6ToolEndCardStatus:
     对于任意 tool_call_end 事件，当 success=True 时输出应包含 ✅ 和结果文本；
     当 success=False 时输出应包含 ❌ 和错误信息。
 
-    **Validates: Requirements 2.3, 2.4**
+    **验证：需求 2.3, 2.4**
     """
 
     @given(name=tool_name_st, result=thinking_text_st)
@@ -222,7 +222,7 @@ class TestProperty7LongResultTruncation:
     对于任意长度超过 200 字符的结果文本，渲染后的结果摘要不应超过 203 字符
     （200 + "..."），且应以 "..." 结尾。
 
-    **Validates: Requirements 2.5**
+    **验证：需求 2.5**
     """
 
     @given(long_text=long_result_st)
@@ -276,7 +276,7 @@ class TestProperty8MultiToolCallOrder:
     对于任意包含 N 个工具调用的事件序列（N >= 2），StreamRenderer 的渲染
     调用顺序应与事件序列顺序一致。
 
-    **Validates: Requirements 2.6**
+    **验证：需求 2.6**
     """
 
     @given(
@@ -326,7 +326,7 @@ class TestProperty9ThinkingBlockRendering:
     对于任意非空思考文本，StreamRenderer 应渲染思考块且输出包含思考内容的摘要。
     当思考文本超过 500 字符时，摘要部分不应超过 80 字符 + "..."。
 
-    **Validates: Requirements 3.1, 3.3**
+    **验证：需求 3.1, 3.3**
     """
 
     @given(text=thinking_text_st)
@@ -406,7 +406,7 @@ class TestProperty10NarrowTerminalAdaptive:
     对于任意终端宽度（20 到 200）和任意工具调用事件，StreamRenderer 应能
     无错误渲染。当宽度 < 60 时，输出不应包含面板边框字符。
 
-    **Validates: Requirements 4.5**
+    **验证：需求 4.5**
     """
 
     @given(width=terminal_width_st, name=tool_name_st, args=arguments_st)
@@ -509,7 +509,7 @@ class TestStreamRendererUnit:
     def test_none_thinking_skipped(self) -> None:
         """thinking 字段为默认空字符串时，不应产生任何输出。
 
-        **Validates: Requirements 3.2**
+        **验证：需求 3.2**
 
         注：Property 9 已覆盖 thinking="" 的情况，此处额外验证
         通过 handle_event 分发后同样跳过渲染。
@@ -527,7 +527,7 @@ class TestStreamRendererUnit:
     def test_whitespace_thinking_skipped(self) -> None:
         """thinking 字段为纯空白字符串时，应跳过渲染。
 
-        **Validates: Requirements 3.2**
+        **验证：需求 3.2**
         """
         console = _make_console(width=80)
         renderer = StreamRenderer(console)
@@ -548,7 +548,7 @@ class TestStreamRendererUnit:
     def test_file_path_in_arguments_rendered(self) -> None:
         """工具参数包含文件路径时，路径字符串应出现在渲染输出中。
 
-        **Validates: Requirements 2.2**
+        **验证：需求 2.2**
         """
         console = _make_console(width=120)
         renderer = StreamRenderer(console)
@@ -569,7 +569,7 @@ class TestStreamRendererUnit:
     def test_multiple_path_arguments_rendered(self) -> None:
         """多个文件路径参数都应出现在渲染输出中。
 
-        **Validates: Requirements 2.2**
+        **验证：需求 2.2**
         """
         console = _make_console(width=120)
         renderer = StreamRenderer(console)
@@ -689,7 +689,7 @@ class TestStreamRendererUnit:
     def test_render_exception_fallback_to_plain_text(self) -> None:
         """当渲染方法抛出异常时，应降级为纯文本输出。
 
-        **Validates: Requirements 2.1**
+        **验证：需求 2.1**
         """
         console = _make_console(width=80)
         renderer = StreamRenderer(console)
@@ -700,7 +700,7 @@ class TestStreamRendererUnit:
             arguments={"file_path": "output.xlsx"},
         )
 
-        # Mock _render_tool_start 抛出异常，触发降级逻辑
+        # 模拟 _render_tool_start 抛出异常，触发降级逻辑
         with patch.object(
             renderer, "_render_tool_start", side_effect=Exception("渲染失败")
         ):
@@ -718,7 +718,7 @@ class TestStreamRendererUnit:
     def test_render_exception_fallback_tool_end(self) -> None:
         """tool_call_end 渲染异常时，降级输出应包含状态标记。
 
-        **Validates: Requirements 2.3, 2.4**
+        **验证：需求 2.3, 2.4**
         """
         console = _make_console(width=80)
         renderer = StreamRenderer(console)
@@ -730,7 +730,7 @@ class TestStreamRendererUnit:
             result="读取完成",
         )
 
-        # Mock _render_tool_end 抛出异常
+        # 模拟 _render_tool_end 抛出异常
         with patch.object(
             renderer, "_render_tool_end", side_effect=Exception("渲染失败")
         ):
@@ -740,3 +740,300 @@ class TestStreamRendererUnit:
 
         # 降级后应包含成功标记
         assert "✓" in output, f"降级后应包含成功标记 ✓: {output!r}"
+
+
+# ---------------------------------------------------------------------------
+# 新增事件渲染器测试（借鉴前端补齐 CLI 缺失事件）
+# ---------------------------------------------------------------------------
+
+
+class TestExcelPreviewRenderer:
+    """EXCEL_PREVIEW 事件渲染测试。"""
+
+    def test_basic_preview(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_PREVIEW,
+            excel_file_path="/tmp/sales.xlsx",
+            excel_sheet="Sheet1",
+            excel_columns=["Name", "Amount"],
+            excel_rows=[["Alice", 100], ["Bob", 200]],
+            excel_total_rows=2,
+            excel_truncated=False,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "sales.xlsx" in output
+        assert "Sheet1" in output
+        assert "Name" in output
+        assert "Alice" in output
+        assert "2 行 × 2 列" in output
+
+    def test_truncated_preview(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+        rows = [[f"row{i}", i] for i in range(20)]
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_PREVIEW,
+            excel_file_path="data.xlsx",
+            excel_columns=["Key", "Val"],
+            excel_rows=rows,
+            excel_total_rows=100,
+            excel_truncated=True,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "100 行" in output
+        assert "显示前 15 行" in output
+
+    def test_empty_preview_no_output(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_PREVIEW,
+            excel_columns=[],
+            excel_rows=[],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console).strip()
+        assert output == ""
+
+
+class TestExcelDiffRenderer:
+    """EXCEL_DIFF 事件渲染测试。"""
+
+    def test_added_modified_deleted(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_DIFF,
+            excel_file_path="report.xlsx",
+            excel_sheet="Summary",
+            excel_affected_range="A1:C3",
+            excel_changes=[
+                {"cell": "A1", "old": None, "new": "Hello"},     # added
+                {"cell": "B2", "old": "100", "new": "200"},       # modified
+                {"cell": "C3", "old": "Deleted", "new": None},    # deleted
+            ],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "Diff" in output
+        assert "report.xlsx" in output
+        assert "+" in output   # added marker
+        assert "~" in output   # modified marker
+        assert "-" in output   # deleted marker
+        assert "3 处变更" in output
+
+    def test_empty_changes_no_output(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_DIFF,
+            excel_changes=[],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console).strip()
+        assert output == ""
+
+    def test_many_changes_truncated(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+        changes = [{"cell": f"A{i}", "old": str(i), "new": str(i + 1)} for i in range(25)]
+        event = ToolCallEvent(
+            event_type=EventType.EXCEL_DIFF,
+            excel_file_path="big.xlsx",
+            excel_changes=changes,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "另外 5 处变更" in output
+
+
+class TestFilesChangedRenderer:
+    """FILES_CHANGED 事件渲染测试。"""
+
+    def test_single_file(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.FILES_CHANGED,
+            changed_files=["/tmp/output.xlsx"],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "output.xlsx" in output
+        assert "文件变更" in output
+
+    def test_many_files_truncated(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.FILES_CHANGED,
+            changed_files=[f"/tmp/file{i}.xlsx" for i in range(8)],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "(+3)" in output
+
+    def test_empty_files_no_output(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.FILES_CHANGED,
+            changed_files=[],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console).strip()
+        assert output == ""
+
+
+class TestPipelineProgressRenderer:
+    """PIPELINE_PROGRESS 事件渲染测试。"""
+
+    def test_with_phase(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.PIPELINE_PROGRESS,
+            pipeline_stage="数据清洗",
+            pipeline_message="正在清洗数据…",
+            pipeline_phase_index=1,
+            pipeline_total_phases=4,
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "正在清洗数据" in output
+        assert "(2/4)" in output
+
+    def test_without_phase(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.PIPELINE_PROGRESS,
+            pipeline_stage="初始化",
+            pipeline_message="初始化中",
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "初始化中" in output
+
+
+class TestMemoryExtractedRenderer:
+    """MEMORY_EXTRACTED 事件渲染测试。"""
+
+    def test_basic_extraction(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.MEMORY_EXTRACTED,
+            memory_entries=[
+                {"content": "用户偏好使用中文", "category": "preference"},
+                {"content": "项目使用 Python 3.12", "category": "tech_stack"},
+            ],
+            memory_trigger="session_end",
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "2 条记忆" in output
+        assert "会话结束提取" in output
+        assert "preference" in output
+
+    def test_empty_entries_no_output(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.MEMORY_EXTRACTED,
+            memory_entries=[],
+        )
+        renderer.handle_event(event)
+        output = _get_output(console).strip()
+        assert output == ""
+
+
+class TestFileDownloadRenderer:
+    """FILE_DOWNLOAD 事件渲染测试。"""
+
+    def test_with_path_and_desc(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.FILE_DOWNLOAD,
+            download_file_path="/tmp/exports/report.pdf",
+            download_filename="report.pdf",
+            download_description="月度汇总报告",
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "report.pdf" in output
+        assert "月度汇总报告" in output
+        assert "/tmp/exports/report.pdf" in output
+
+    def test_filename_only(self) -> None:
+        console = _make_console()
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.FILE_DOWNLOAD,
+            download_file_path="output.csv",
+            download_filename="output.csv",
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "output.csv" in output
+
+
+class TestTaskListProgressBar:
+    """任务清单进度条渲染测试。"""
+
+    def test_progress_bar_format(self) -> None:
+        bar = StreamRenderer._render_progress_bar(50, width=10)
+        assert bar == "█████░░░░░"
+
+    def test_progress_bar_zero(self) -> None:
+        bar = StreamRenderer._render_progress_bar(0, width=10)
+        assert bar == "░░░░░░░░░░"
+
+    def test_progress_bar_full(self) -> None:
+        bar = StreamRenderer._render_progress_bar(100, width=10)
+        assert bar == "██████████"
+
+    def test_format_task_progress_with_done(self) -> None:
+        items = [
+            {"status": "completed"},
+            {"status": "completed"},
+            {"status": "in_progress"},
+            {"status": "pending"},
+        ]
+        result = StreamRenderer._format_task_progress(items)
+        assert "2/4" in result
+        assert "50%" in result
+
+    def test_format_task_progress_empty(self) -> None:
+        result = StreamRenderer._format_task_progress([])
+        assert result == ""
+
+    def test_format_task_progress_none_done(self) -> None:
+        items = [{"status": "pending"}, {"status": "pending"}]
+        result = StreamRenderer._format_task_progress(items)
+        assert "2 项" in result
+
+    def test_task_list_shows_verification(self) -> None:
+        console = _make_console(width=120)
+        renderer = StreamRenderer(console)
+        event = ToolCallEvent(
+            event_type=EventType.TASK_LIST_CREATED,
+            task_list_data={
+                "title": "测试计划",
+                "items": [
+                    {"title": "步骤1", "status": "pending", "verification": "检查输出文件存在"},
+                    {"title": "步骤2", "status": "completed"},
+                ],
+            },
+        )
+        renderer.handle_event(event)
+        output = _get_output(console)
+        assert "测试计划" in output
+        assert "检查输出文件存在" in output
+        assert "1/2" in output
+        assert "50%" in output

@@ -102,6 +102,7 @@ class StreamRenderer:
             EventType.MODE_CHANGED: self._render_mode_changed,
             EventType.EXCEL_PREVIEW: self._render_excel_preview,
             EventType.EXCEL_DIFF: self._render_excel_diff,
+            EventType.TEXT_DIFF: self._render_text_diff,
             EventType.FILES_CHANGED: self._render_files_changed,
             EventType.PIPELINE_PROGRESS: self._render_pipeline_progress,
             EventType.MEMORY_EXTRACTED: self._render_memory_extracted,
@@ -727,6 +728,69 @@ class StreamRenderer:
         else:
             self._console.print(
                 f"  {THEME.TREE_END} [{THEME.DIM}]共 {len(changes)} 处变更[/{THEME.DIM}] {stats}"
+            )
+
+    def _render_text_diff(self, event: ToolCallEvent) -> None:
+        """渲染文本文件 unified diff（绿增红删）。"""
+        hunks = event.text_diff_hunks or []
+        if not hunks:
+            return
+
+        filename = (event.text_diff_file_path or "").split("/")[-1] or event.text_diff_file_path
+        adds = event.text_diff_additions
+        dels = event.text_diff_deletions
+
+        stats_parts = []
+        if adds > 0:
+            stats_parts.append(f"[green]+{adds}[/green]")
+        if dels > 0:
+            stats_parts.append(f"[{THEME.RED}]-{dels}[/{THEME.RED}]")
+        stats = " ".join(stats_parts)
+
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]TextDiff[/{THEME.BOLD}]"
+            f" [{THEME.DIM}]{rich_escape(filename)}[/{THEME.DIM}]"
+            f" {stats}"
+        )
+
+        # 渲染 diff 行（最多 30 行）
+        display_lines = hunks[:30]
+        for line in display_lines:
+            if line.startswith("+++") or line.startswith("---"):
+                self._console.print(
+                    f"  {THEME.TREE_MID} [{THEME.BOLD}]{rich_escape(truncate(line, 80))}[/{THEME.BOLD}]"
+                )
+            elif line.startswith("@@"):
+                self._console.print(
+                    f"  {THEME.TREE_MID} [cyan]{rich_escape(truncate(line, 80))}[/cyan]"
+                )
+            elif line.startswith("+"):
+                self._console.print(
+                    f"  {THEME.TREE_MID} [green]{rich_escape(truncate(line, 80))}[/green]"
+                )
+            elif line.startswith("-"):
+                self._console.print(
+                    f"  {THEME.TREE_MID} [{THEME.RED}]{rich_escape(truncate(line, 80))}[/{THEME.RED}]"
+                )
+            else:
+                self._console.print(
+                    f"  {THEME.TREE_MID} [{THEME.DIM}]{rich_escape(truncate(line, 80))}[/{THEME.DIM}]"
+                )
+
+        remaining = len(hunks) - 30
+        if remaining > 0:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]…及另外 {remaining} 行[/{THEME.DIM}]"
+            )
+        elif event.text_diff_truncated:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]（diff 已截断）[/{THEME.DIM}]"
+            )
+        else:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]共 {len(hunks)} 行[/{THEME.DIM}]"
             )
 
     # ------------------------------------------------------------------
