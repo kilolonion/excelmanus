@@ -624,7 +624,7 @@ class TestProperty14SessionDeletion:
         assert pq["multi_select"] is False
 
     @pytest.mark.asyncio
-    async def test_session_status_manifest_ready_is_normalized_to_built(
+    async def test_session_status_registry_ready_is_normalized_to_built(
         self, client: AsyncClient
     ) -> None:
         """会话状态端点应将内部 ready 态标准化为前端契约 built 态。"""
@@ -650,10 +650,10 @@ class TestProperty14SessionDeletion:
             status_resp = await client.get(f"/api/v1/sessions/{sid}/status")
 
         assert status_resp.status_code == 200
-        manifest = status_resp.json()["manifest"]
-        assert manifest["state"] == "built"
-        assert manifest["sheet_count"] == 7
-        assert manifest["total_files"] == 7
+        registry = status_resp.json()["registry"]
+        assert registry["state"] == "built"
+        assert registry["sheet_count"] == 7
+        assert registry["total_files"] == 7
 
     @pytest.mark.asyncio
     async def test_session_status_lazily_restores_history_session(
@@ -681,8 +681,8 @@ class TestProperty14SessionDeletion:
             status_resp = await client.get("/api/v1/sessions/history-only/status")
 
         assert status_resp.status_code == 200
-        manifest = status_resp.json()["manifest"]
-        assert manifest["state"] == "building"
+        registry = status_resp.json()["registry"]
+        assert registry["state"] == "building"
         restore_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1069,10 +1069,10 @@ class TestExternalSafeMode:
         assert data["tool_scope"] == []
 
     @pytest.mark.asyncio
-    async def test_manifest_route_mode_control_command_when_safe_mode_disabled(
+    async def test_registry_route_mode_control_command_when_safe_mode_disabled(
         self,
     ) -> None:
-        """关闭安全模式后，/manifest 请求应返回 control_command 路由模式。"""
+        """关闭安全模式后，/registry 请求应返回 control_command 路由模式。"""
         config = _test_config(external_safe_mode=False)
         with _setup_api_globals(config=config):
             transport = _make_transport()
@@ -1080,7 +1080,7 @@ class TestExternalSafeMode:
                 transport=transport, base_url="http://test"
             ) as c:
                 resp = await c.post(
-                    "/api/v1/chat", json={"message": "/manifest status"},
+                    "/api/v1/chat", json={"message": "/registry status"},
                 )
         assert resp.status_code == 200
         data = resp.json()

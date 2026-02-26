@@ -1,6 +1,6 @@
 """测试辅助配置的 workspace_root 默认值约束。
 
-这些 helper 若默认指向仓库根目录，会触发 workspace manifest 大规模扫描，
+这些 helper 若默认指向仓库根目录，会触发 FileRegistry 大规模扫描，
 导致属性测试和 engine 相关全量测试显著变慢。
 """
 

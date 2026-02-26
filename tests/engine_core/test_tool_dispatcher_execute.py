@@ -244,7 +244,7 @@ class TestToolDispatcherExecute:
         engine = _make_engine(workspace_root=str(tmp_path))
         dispatcher = engine._tool_dispatcher
         engine._has_write_tool_call = False
-        engine._manifest_refresh_needed = False
+        engine._registry_refresh_needed = False
 
         def unknown_writer(path: str) -> str:
             target = tmp_path / path
@@ -285,4 +285,4 @@ class TestToolDispatcherExecute:
 
         assert result.success is True
         assert engine._has_write_tool_call is True
-        assert engine._manifest_refresh_needed is True
+        assert engine._registry_refresh_needed is True

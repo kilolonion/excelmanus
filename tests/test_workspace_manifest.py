@@ -1,4 +1,4 @@
-"""FileRegistry 扫描功能测试（替代旧 WorkspaceManifest 测试）。"""
+"""FileRegistry 扫描功能测试。"""
 
 from __future__ import annotations
 

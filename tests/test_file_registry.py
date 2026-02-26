@@ -1154,7 +1154,7 @@ class TestBuildFileRegistryNotice:
         assert "outputs/a.xlsx" in notice
 
     def test_no_registry_returns_empty(self):
-        """无 FileRegistry 时返回空（不再回退 manifest）。"""
+        """无 FileRegistry 时返回空。"""
         builder = self._make_builder()
         notice = builder._build_file_registry_notice()
         assert notice == ""

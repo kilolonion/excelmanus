@@ -355,7 +355,7 @@ class TestControlCommandSubagent:
 
 
 class TestRegistryScan:
-    """FileRegistry 后台扫描（替代旧 manifest prewarm）。"""
+    """FileRegistry 后台扫描。"""
 
     @pytest.mark.asyncio
     async def test_first_notice_does_not_block_when_scan_running(self) -> None:
@@ -389,7 +389,7 @@ class TestRegistryScan:
             await engine._registry_scan_task
 
     @pytest.mark.asyncio
-    async def test_manifest_control_command_build_and_status(self) -> None:
+    async def test_registry_control_command_scan_and_status(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -405,17 +405,17 @@ class TestRegistryScan:
             return ScanResult(total_files=3)
 
         with patch.object(engine._file_registry, "scan_workspace", side_effect=_slow_scan):
-            build_reply = await engine.chat("/manifest build")
-            assert "后台开始构建" in build_reply.reply
+            build_reply = await engine.chat("/registry scan")
+            assert "后台开始 FileRegistry 扫描" in build_reply.reply
 
-            status_reply = await engine.chat("/manifest status")
-            assert "后台构建中" in status_reply.reply
+            status_reply = await engine.chat("/registry status")
+            assert "后台扫描中" in status_reply.reply
 
             gate.set()
             assert engine._registry_scan_task is not None
             await engine._registry_scan_task
 
-            final_status = await engine.chat("/manifest status")
+            final_status = await engine.chat("/registry status")
             assert "已就绪" in final_status.reply
 
 
