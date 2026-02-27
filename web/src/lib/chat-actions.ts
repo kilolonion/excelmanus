@@ -19,6 +19,7 @@ function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
       new: c.new as string | number | boolean | null,
       oldStyle: (c.old_style ?? c.oldStyle ?? null) as ExcelCellDiff["oldStyle"],
       newStyle: (c.new_style ?? c.newStyle ?? null) as ExcelCellDiff["newStyle"],
+      styleOnly: Boolean(c.style_only ?? c.styleOnly),
     };
   });
 }
@@ -142,6 +143,9 @@ export async function sendMessage(
   const sessionStore = useSessionStore.getState();
 
   if (store.isStreaming) return;
+
+  // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
+  _deferredTokenStats = null;
 
   // 尽早创建 AbortController 并设置流式状态 - 在任何异步操作（base64 编码）之前。
   // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
@@ -862,6 +866,18 @@ export async function sendMessage(
             if (tdFilePath) {
               S().addAffectedFiles(assistantMsgId, [tdFilePath]);
             }
+            break;
+          }
+
+          case "verification_report": {
+            S().appendBlock(assistantMsgId, {
+              type: "verification_report",
+              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
+              confidence: (data.confidence as "high" | "medium" | "low") || "low",
+              checks: (data.checks as string[]) || [],
+              issues: (data.issues as string[]) || [],
+              mode: (data.mode as "advisory" | "blocking") || "advisory",
+            });
             break;
           }
 
@@ -1606,6 +1622,18 @@ export async function sendContinuation(
             break;
           }
 
+          case "verification_report": {
+            S().appendBlock(msgId, {
+              type: "verification_report",
+              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
+              confidence: (data.confidence as "high" | "medium" | "low") || "low",
+              checks: (data.checks as string[]) || [],
+              issues: (data.issues as string[]) || [],
+              mode: (data.mode as "advisory" | "blocking") || "advisory",
+            });
+            break;
+          }
+
           case "files_changed": {
             const changedFiles2 = (data.files as string[]) || [];
             const excelStore2 = useExcelStore.getState();
@@ -1677,8 +1705,8 @@ export async function sendContinuation(
               S().pendingApproval !== null || S().pendingQuestion !== null;
             if (content && !hasPendingInteraction) {
               const msg = getLastAssistantMessage(S().messages, msgId);
-              const lastBlock = msg?.blocks[msg.blocks.length - 1];
-              if (!lastBlock || lastBlock.type !== "text") {
+              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
+              if (!hasTextBlock) {
                 S().appendBlock(msgId, { type: "text", content });
               }
             }
@@ -2571,6 +2599,18 @@ export async function subscribeToSession(sessionId: string) {
             if (tdFilePath3) {
               S().addAffectedFiles(msgId, [tdFilePath3]);
             }
+            break;
+          }
+
+          case "verification_report": {
+            S().appendBlock(msgId, {
+              type: "verification_report",
+              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
+              confidence: (data.confidence as "high" | "medium" | "low") || "low",
+              checks: (data.checks as string[]) || [],
+              issues: (data.issues as string[]) || [],
+              mode: (data.mode as "advisory" | "blocking") || "advisory",
+            });
             break;
           }
 

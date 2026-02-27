@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -76,6 +77,11 @@ export function ThinkingBlock({
               {durationStr}
             </span>
           )}
+          {!isActive && !expanded && content && (
+            <span className="ml-1.5 font-normal opacity-40 text-xs">
+              {content.replace(/\n/g, " ").slice(0, 60)}{content.length > 60 ? "…" : ""}
+            </span>
+          )}
         </span>
 
         {isActive ? (
@@ -94,28 +100,39 @@ export function ThinkingBlock({
         )}
       </button>
 
-      {showContent && content && (
-        <div
-          ref={contentRef}
-          className={cn(
-            "mt-1.5 text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed",
-            "rounded-lg bg-muted/20 dark:bg-muted/10 px-3 py-2",
-            "scrollbar-none",
-            isActive && "overflow-y-auto",
-          )}
-          style={
-            isActive
-              ? {
-                  maxHeight: PREVIEW_MAX_H,
-                  maskImage: FADE_MASK,
-                  WebkitMaskImage: FADE_MASK,
-                }
-              : undefined
-          }
-        >
-          {content}
-        </div>
-      )}
+      <AnimatePresence initial={false}>
+        {showContent && content && (
+          <motion.div
+            key="thinking-content"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+            className="overflow-hidden"
+          >
+            <div
+              ref={contentRef}
+              className={cn(
+                "mt-1.5 text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed",
+                "rounded-lg bg-muted/20 dark:bg-muted/10 px-3 py-2",
+                "scrollbar-none",
+                isActive && "overflow-y-auto",
+              )}
+              style={
+                isActive
+                  ? {
+                      maxHeight: PREVIEW_MAX_H,
+                      maskImage: FADE_MASK,
+                      WebkitMaskImage: FADE_MASK,
+                    }
+                  : undefined
+              }
+            >
+              {content}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

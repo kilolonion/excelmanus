@@ -111,6 +111,14 @@ export type AssistantBlock =
       filePath: string;
       filename: string;
       description: string;
+    }
+  | {
+      type: "verification_report";
+      verdict: "pass" | "fail" | "unknown";
+      confidence: "high" | "medium" | "low";
+      checks: string[];
+      issues: string[];
+      mode: "advisory" | "blocking";
     };
 
 export interface TaskItem {

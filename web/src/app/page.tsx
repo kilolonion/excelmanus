@@ -1,5 +1,6 @@
 "use client";
 
+import { motion, AnimatePresence } from "framer-motion";
 import { WelcomePage } from "@/components/welcome/WelcomePage";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageStream } from "@/components/chat/MessageStream";
@@ -12,6 +13,8 @@ import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
+
+const viewTransition = { duration: 0.2, ease: "easeOut" as const };
 
 export default function Home() {
   const messages = useChatStore((s) => s.messages);
@@ -47,27 +50,35 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-full">
-      {fullViewPath ? (
-        <ExcelFullView />
-      ) : hasMessages ? (
-        <MessageStream
-          messages={messages}
-          isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);
-          }}
-          onRetry={(assistantMessageId: string) => {
-            retryAssistantMessage(assistantMessageId, activeSessionId);
-          }}
-          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-            retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
-          }}
-        />
-      ) : isRestoringSession ? (
-        <div className="flex-1" />
-      ) : (
-        <WelcomePage onSuggestionClick={handleSend} />
-      )}
+      <AnimatePresence mode="wait" initial={false}>
+        {fullViewPath ? (
+          <motion.div key="excel" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <ExcelFullView />
+          </motion.div>
+        ) : hasMessages ? (
+          <motion.div key="chat" className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <MessageStream
+              messages={messages}
+              isStreaming={isStreaming}
+              onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
+                rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);
+              }}
+              onRetry={(assistantMessageId: string) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId);
+              }}
+              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
+              }}
+            />
+          </motion.div>
+        ) : isRestoringSession ? (
+          <div key="restoring" className="flex-1" />
+        ) : (
+          <motion.div key="welcome" className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, y: -10 }} transition={viewTransition}>
+            <WelcomePage onSuggestionClick={handleSend} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">

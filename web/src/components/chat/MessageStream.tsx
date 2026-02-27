@@ -2,7 +2,8 @@
 
 import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
+import { ArrowDown } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
@@ -268,7 +269,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   const lastMsgIndex = messages.length - 1;
 
   return (
-    <>
+    <div className="relative flex-1 min-h-0 flex flex-col">
       <ScrollArea
         className="flex-1 min-h-0"
         viewportRef={viewportRef}
@@ -302,11 +303,16 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
               >
                 {/* Smart timestamp separator */}
                 {message.timestamp && timestampIndices.has(virtualRow.index) && (
-                  <div className="flex items-center justify-center py-1 max-w-3xl mx-auto px-3 sm:px-4">
+                  <motion.div
+                    className="flex items-center justify-center py-1 max-w-3xl mx-auto px-3 sm:px-4"
+                    initial={isNew ? { opacity: 0, scale: 0.95 } : false}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.2, ease: "easeOut" }}
+                  >
                     <span className="text-[10px] text-muted-foreground/60 select-none">
                       {formatTimestamp(message.timestamp)}
                     </span>
-                  </div>
+                  </motion.div>
                 )}
 
                 <motion.div
@@ -343,6 +349,28 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
         </div>
       </ScrollArea>
 
+      {/* Scroll-to-bottom FAB */}
+      <AnimatePresence>
+        {!autoScroll && messages.length > 0 && (
+          <motion.button
+            key="scroll-fab"
+            type="button"
+            initial={{ opacity: 0, y: 10, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.9 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+            onClick={() => {
+              setAutoScroll(true);
+              forceScrollToEnd();
+            }}
+            className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 flex items-center justify-center gap-1.5 rounded-full border border-border/60 bg-background/90 backdrop-blur-sm px-4 py-2 min-h-[44px] text-xs text-muted-foreground shadow-lg hover:text-foreground hover:border-[var(--em-primary-alpha-20)] hover:shadow-xl transition-[color,border-color,box-shadow] cursor-pointer"
+          >
+            <ArrowDown className="h-3 w-3" />
+            <span>回到底部</span>
+          </motion.button>
+        )}
+      </AnimatePresence>
+
       <RollbackConfirmDialog
         open={rollbackDialog.open}
         sessionId={currentSessionId}
@@ -350,7 +378,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
         onConfirm={handleRollbackConfirm}
         onCancel={handleRollbackCancel}
       />
-    </>
+    </div>
   );
 }
 

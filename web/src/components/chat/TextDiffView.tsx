@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { FileCode2 } from "lucide-react";
 import type { TextDiffEntry } from "@/stores/excel-store";
 
@@ -53,9 +53,10 @@ const MAX_DISPLAY_LINES = 80;
 export function TextDiffView({ data }: TextDiffViewProps) {
   const diffLines = useMemo(() => parseDiffLines(data.hunks), [data.hunks]);
   const filename = data.filePath.split("/").pop() || data.filePath;
+  const [expanded, setExpanded] = useState(false);
 
-  const displayLines = diffLines.slice(0, MAX_DISPLAY_LINES);
   const hasMore = diffLines.length > MAX_DISPLAY_LINES;
+  const displayLines = expanded ? diffLines : diffLines.slice(0, MAX_DISPLAY_LINES);
 
   return (
     <div className="mt-2 rounded-lg border border-border/60 bg-muted/30 overflow-hidden text-xs">
@@ -141,10 +142,23 @@ export function TextDiffView({ data }: TextDiffViewProps) {
 
       {/* Footer */}
       {(hasMore || data.truncated) && (
-        <div className="px-3 py-1 text-[10px] text-muted-foreground border-t border-border/30 bg-muted/30">
-          {hasMore
-            ? `显示前 ${MAX_DISPLAY_LINES} 行，共 ${diffLines.length} 行差异`
-            : "差异内容已截断"}
+        <div className="flex items-center justify-between px-3 py-1 text-[10px] text-muted-foreground border-t border-border/30 bg-muted/30">
+          <span>
+            {hasMore && !expanded
+              ? `显示前 ${MAX_DISPLAY_LINES} 行，共 ${diffLines.length} 行差异`
+              : hasMore && expanded
+                ? `共 ${diffLines.length} 行差异`
+                : "差异内容已截断"}
+          </span>
+          {hasMore && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer font-medium"
+            >
+              {expanded ? "收起" : "展开全部"}
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -167,7 +167,7 @@ export function SessionList() {
     return (
       <div className="flex flex-col items-center gap-2 px-2 py-6 text-muted-foreground">
         <MessageSquare
-          className="h-8 w-8"
+          className="h-8 w-8 animate-empty-float"
           style={{ color: "var(--em-primary)" }}
         />
         <p className="text-xs">暂无对话</p>
@@ -255,7 +255,7 @@ export function SessionList() {
       {filteredSessions.length === 0 ? (
         <div className="flex flex-col items-center gap-2 px-2 py-6 text-muted-foreground">
           <MessageSquare
-            className="h-6 w-6"
+            className="h-6 w-6 animate-empty-float"
             style={{ color: "var(--em-primary)" }}
           />
           <p className="text-xs">

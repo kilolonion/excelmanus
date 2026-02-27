@@ -39,6 +39,7 @@ export interface ExcelCellDiff {
   new: string | number | boolean | null;
   oldStyle?: CellStyle | null;
   newStyle?: CellStyle | null;
+  styleOnly?: boolean;
 }
 
 export interface ExcelDiffEntry {
@@ -211,8 +212,9 @@ export const useExcelStore = create<ExcelState>()(
         (d) => `${d.toolCallId}|${d.filePath}|${d.sheet}` === dupKey,
       );
       if (isDup) return state;
+      const newDiffs = [...state.diffs, diff].slice(-MAX_PERSISTED_DIFFS);
       return {
-        diffs: [...state.diffs, diff],
+        diffs: newDiffs,
         // 如果面板打开且是同一文件 → 触发刷新
         refreshCounter:
           state.panelOpen && state.activeFilePath === diff.filePath
@@ -228,7 +230,8 @@ export const useExcelStore = create<ExcelState>()(
         (d) => `${d.toolCallId}|${d.filePath}` === dupKey,
       );
       if (isDup) return state;
-      return { textDiffs: [...state.textDiffs, diff] };
+      const newTextDiffs = [...state.textDiffs, diff].slice(-MAX_PERSISTED_DIFFS);
+      return { textDiffs: newTextDiffs };
     }),
 
   appendStreamingArgs: (toolCallId, delta) =>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { useParams } from "next/navigation";
 import { MessageStream } from "@/components/chat/MessageStream";
 import { ChatInput } from "@/components/chat/ChatInput";
@@ -12,6 +13,8 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
+
+const viewTransition = { duration: 0.2, ease: "easeOut" as const };
 
 function ChatPage() {
   const params = useParams();
@@ -33,25 +36,29 @@ function ChatPage() {
 
   return (
     <div className="flex flex-col h-full">
-      {fullViewPath ? (
-        <ExcelFullView />
-      ) : (
-        <MessageStream
-          messages={messages}
-          isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
-          }}
-          onRetry={(assistantMessageId: string) => {
-            retryAssistantMessage(assistantMessageId, sessionId);
-          }}
-          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-            retryAssistantMessage(assistantMessageId, sessionId, modelName);
-          }}
-          // 传递sessionId作为key，确保会话切换时重新创建组件
-          key={sessionId}
-        />
-      )}
+      <AnimatePresence mode="wait" initial={false}>
+        {fullViewPath ? (
+          <motion.div key="excel" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <ExcelFullView />
+          </motion.div>
+        ) : (
+          <motion.div key={`chat-${sessionId}`} className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <MessageStream
+              messages={messages}
+              isStreaming={isStreaming}
+              onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
+                rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
+              }}
+              onRetry={(assistantMessageId: string) => {
+                retryAssistantMessage(assistantMessageId, sessionId);
+              }}
+              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+                retryAssistantMessage(assistantMessageId, sessionId, modelName);
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">
