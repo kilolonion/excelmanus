@@ -34,6 +34,29 @@ _BORDER_STYLE_MAP = {
 }
 
 
+def _apply_tint(hex_color: str, tint: float) -> str:
+    """对 #RRGGBB 颜色应用 Excel tint/shade 修饰。
+
+    tint > 0 → 向白色靠近（变亮），tint < 0 → 向黑色靠近（变暗）。
+    """
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    if tint > 0:
+        r = int(r + (255 - r) * tint)
+        g = int(g + (255 - g) * tint)
+        b = int(b + (255 - b) * tint)
+    elif tint < 0:
+        factor = 1 + tint
+        r = int(r * factor)
+        g = int(g * factor)
+        b = int(b * factor)
+    r = max(0, min(255, r))
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
 def resolve_color(color_obj: Any) -> str | None:
     """将 openpyxl Color 对象转为 #RRGGBB 字符串。"""
     if color_obj is None:
@@ -42,13 +65,21 @@ def resolve_color(color_obj: Any) -> str | None:
         if color_obj.type == "rgb" and color_obj.rgb and color_obj.rgb != "00000000":
             rgb = str(color_obj.rgb)
             if len(rgb) == 8:
-                return f"#{rgb[2:]}"
+                hex_val = f"#{rgb[2:]}"
             elif len(rgb) == 6:
-                return f"#{rgb}"
+                hex_val = f"#{rgb}"
+            else:
+                return None
+            tint = getattr(color_obj, "tint", 0.0) or 0.0
+            return _apply_tint(hex_val, tint) if tint else hex_val
         if color_obj.type == "indexed" and color_obj.indexed is not None:
             return _IDX_COLORS.get(color_obj.indexed)
         if color_obj.type == "theme" and color_obj.theme is not None:
-            return _THEME_COLORS.get(color_obj.theme)
+            base = _THEME_COLORS.get(color_obj.theme)
+            if base is None:
+                return None
+            tint = getattr(color_obj, "tint", 0.0) or 0.0
+            return _apply_tint(base, tint) if tint else base
     except Exception:
         pass
     return None
@@ -98,6 +129,10 @@ def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
                 style["tb"] = 1
             if alignment.textRotation:
                 style["tr"] = {"a": alignment.textRotation}
+            if alignment.indent and alignment.indent > 0:
+                style["pd"] = {"l": alignment.indent}
+            if alignment.shrinkToFit:
+                style["sk"] = 1
     except Exception:
         pass
     try:

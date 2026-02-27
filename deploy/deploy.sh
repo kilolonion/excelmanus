@@ -274,8 +274,7 @@ _load_config() {
     [[ -z "$SSH_KEY_PATH" && -n "${SSH_KEY_NAME:-}" ]]       && SSH_KEY_PATH="${PROJECT_ROOT}/${SSH_KEY_NAME}" || true
     [[ -z "$BACKEND_SSH_KEY_PATH" && -n "${BACKEND_SSH_KEY_NAME:-}" ]] && BACKEND_SSH_KEY_PATH="${PROJECT_ROOT}/${BACKEND_SSH_KEY_NAME}" || true
     [[ -z "$FRONTEND_SSH_KEY_PATH" && -n "${FRONTEND_SSH_KEY_NAME:-}" ]] && FRONTEND_SSH_KEY_PATH="${PROJECT_ROOT}/${FRONTEND_SSH_KEY_NAME}" || true
-    [[ -z "$REPO_URL" && -n "${REPO_URL:-}" ]]               || true
-    [[ -z "$REPO_BRANCH" && -n "${REPO_BRANCH:-}" ]]         || true
+    # REPO_URL / REPO_BRANCH are set directly by `source` above — no extra mapping needed
   else
     debug "未找到配置文件: $config_file（使用默认值）"
   fi
@@ -792,6 +791,9 @@ _sync_code() {
       '${PROJECT_ROOT}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
     info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
+    local key_for_host="$SSH_KEY_PATH"
+    [[ "$host" == "$BACKEND_HOST" ]] && key_for_host="$BACKEND_SSH_KEY_PATH" || true
+    [[ "$host" == "$FRONTEND_HOST" ]] && key_for_host="$FRONTEND_SSH_KEY_PATH" || true
     local git_cmd="
       set -e
       cd '${remote_dir}'
@@ -808,7 +810,7 @@ _sync_code() {
     if [[ "$TOPOLOGY" == "local" ]]; then
       run "bash -c \"$git_cmd\""
     else
-      _remote "$host" "$git_cmd"
+      _remote "$host" "$key_for_host" "$git_cmd"
     fi
   fi
   log "${label} 代码同步完成"

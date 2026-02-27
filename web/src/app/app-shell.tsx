@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { ClientLayout } from "./client-layout";
 import { AuthProvider } from "@/components/providers/AuthProvider";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { LoadingScreen } from "@/components/ui/LoadingScreen";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback"];
 const STANDALONE_PATHS = ["/admin"];
@@ -19,16 +20,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     checkAuthEnabled().finally(() => setReady(true));
   }, [checkAuthEnabled]);
 
-  if (!ready) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="h-7 w-7 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-      </div>
-    );
-  }
-
+  // bypass 路径（login/register/callback）立即渲染，不等 /health
   if (isBypass) {
     return <>{children}</>;
+  }
+
+  if (!ready) {
+    return <LoadingScreen />;
   }
 
   const isStandalone = STANDALONE_PATHS.some((p) => pathname.startsWith(p));

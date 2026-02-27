@@ -61,6 +61,32 @@ export function cellStyleToCSS(style: CellStyle | null | undefined): CSSProperti
   if (style.tb) {
     css.whiteSpace = "pre-wrap";
     css.wordBreak = "break-word";
+    css.overflow = "visible";
+  }
+
+  // text rotation
+  if (style.tr?.a) {
+    const deg = style.tr.a;
+    if (deg === 255) {
+      // 255 = vertical stacked text in Excel
+      css.writingMode = "vertical-lr";
+      css.textOrientation = "upright";
+    } else if (deg <= 90) {
+      css.transform = `rotate(-${deg}deg)`;
+    } else if (deg <= 180) {
+      css.transform = `rotate(${180 - deg}deg)`;
+    }
+  }
+
+  // indent (padding)
+  if (style.pd?.l && style.pd.l > 0) {
+    css.paddingLeft = `${style.pd.l * 12}px`;
+  }
+
+  // shrink to fit
+  if (style.sk) {
+    css.overflow = "hidden";
+    css.textOverflow = "ellipsis";
   }
 
   // borders
@@ -77,4 +103,55 @@ export function cellStyleToCSS(style: CellStyle | null | undefined): CSSProperti
   }
 
   return css;
+}
+
+/**
+ * 检查 CellStyle 是否启用了自动换行。
+ * 供组件决定是否移除 truncate / whitespace-nowrap 类。
+ */
+export function hasWrapText(style: CellStyle | null | undefined): boolean {
+  return !!style?.tb;
+}
+
+/**
+ * 根据 Excel 数字格式模式对原始值进行简易格式化。
+ * 仅处理最常见的模式（百分比、千分位、货币、固定小数）。
+ * 不匹配时返回 null，由调用方 fallback 到默认 String(value)。
+ */
+export function formatCellByPattern(
+  value: string | number | null,
+  style: CellStyle | null | undefined,
+): string | null {
+  if (value == null || style?.n?.pattern == null) return null;
+  const pattern = style.n.pattern;
+  const num = typeof value === "number" ? value : parseFloat(value);
+  if (isNaN(num)) return null;
+
+  // 百分比: 0%, 0.0%, 0.00% 等
+  if (pattern.includes("%")) {
+    const decimals = (pattern.match(/0\.(0+)%/) || [])[1]?.length ?? 0;
+    return `${(num * 100).toFixed(decimals)}%`;
+  }
+
+  // 货币: ¥#,##0.00 / $#,##0.00 / €#,##0.00 等
+  const currencyMatch = pattern.match(/^([¥$€£₩])\s*#/);
+  if (currencyMatch) {
+    const symbol = currencyMatch[1];
+    const decimals = (pattern.match(/\.(0+)/) || [])[1]?.length ?? 0;
+    return `${symbol}${num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+  }
+
+  // 千分位: #,##0 / #,##0.00
+  if (pattern.includes("#,##0")) {
+    const decimals = (pattern.match(/\.(0+)/) || [])[1]?.length ?? 0;
+    return num.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  }
+
+  // 固定小数: 0.00 / 0.0
+  const fixedMatch = pattern.match(/^0\.(0+)$/);
+  if (fixedMatch) {
+    return num.toFixed(fixedMatch[1].length);
+  }
+
+  return null;
 }

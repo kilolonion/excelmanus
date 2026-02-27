@@ -8,7 +8,7 @@ import {
 } from "@/stores/chat-store";
 import { subscribeToSession } from "@/lib/chat-actions";
 import { useUIStore } from "@/stores/ui-store";
-import { fetchSessionDetail, fetchSessions } from "@/lib/api";
+import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
 import type { Session, AssistantBlock } from "@/lib/types";
 
@@ -75,8 +75,18 @@ export function SessionSync() {
   const setVisionCapable = useUIStore((s) => s.setVisionCapable);
   const setChatMode = useUIStore((s) => s.setChatMode);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
+  const setThinkingEffort = useUIStore((s) => s.setThinkingEffort);
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
+
+  // 启动时拉取 thinking config 同步到 store
+  useEffect(() => {
+    apiGet<{ effort: string }>("/thinking")
+      .then((data) => {
+        if (data.effort) setThinkingEffort(data.effort);
+      })
+      .catch(() => {});
+  }, [setThinkingEffort]);
 
   useEffect(() => {
     let cancelled = false;

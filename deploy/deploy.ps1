@@ -463,6 +463,41 @@ function Apply-Defaults {
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  Local shell 检测（Windows 上 bash 可能不存在）
+# ═══════════════════════════════════════════════════════════════
+
+$Script:LocalShellCmd = $null
+
+function Get-LocalShell {
+    if ($Script:LocalShellCmd) { return $Script:LocalShellCmd }
+    # 1) bash (Git Bash / MSYS2 / native)
+    if (Get-Command bash -ErrorAction SilentlyContinue) {
+        $Script:LocalShellCmd = "bash"
+        return $Script:LocalShellCmd
+    }
+    # 2) WSL
+    if (Get-Command wsl -ErrorAction SilentlyContinue) {
+        $Script:LocalShellCmd = "wsl bash"
+        return $Script:LocalShellCmd
+    }
+    # 3) sh (rare on Windows but possible)
+    if (Get-Command sh -ErrorAction SilentlyContinue) {
+        $Script:LocalShellCmd = "sh"
+        return $Script:LocalShellCmd
+    }
+    return $null
+}
+
+function Assert-LocalShell {
+    $shell = Get-LocalShell
+    if (-not $shell) {
+        Write-Err "local topology requires bash (install Git Bash, WSL, or MSYS2)"
+        exit 1
+    }
+    return $shell
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  SSH 执行封装
 # ═══════════════════════════════════════════════════════════════
 
@@ -478,7 +513,8 @@ function Get-SshOpts {
 function Invoke-Remote {
     param([string]$TargetHost, [string]$RemoteCmd, [string]$KeyPath = "")
     if ($Script:CFG.Topology -eq "local") {
-        return Invoke-Run "bash -c '$RemoteCmd'"
+        $shell = Assert-LocalShell
+        return Invoke-Run "$shell -c '$RemoteCmd'"
     }
     $sshOpts = (Get-SshOpts -KeyOverride $KeyPath) -join " "
     $target = "$($Script:CFG.SshUser)@$TargetHost"
@@ -553,12 +589,11 @@ else
 fi
 "@
         if ($Script:CFG.Topology -eq "local") {
-            return Invoke-Run "bash -c `"$gitCmd`""
+            $shell = Assert-LocalShell
+            return Invoke-Run "$shell -c `"$gitCmd`""
         }
         return Invoke-Remote -TargetHost $TargetHost -RemoteCmd $gitCmd -KeyPath $KeyPath
     }
-    Write-Log "$Label code sync complete"
-    return $true
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -614,11 +649,11 @@ fi
 function Restart-FrontendService {
     $cfg = $Script:CFG
     if ($cfg.ServiceManager -eq "systemd") {
-        Invoke-RemoteFrontend "sudo systemctl restart '$($cfg.Pm2Frontend)' 2>/dev/null || sudo systemctl start '$($cfg.Pm2Frontend)'" | Out-Null
+        return (Invoke-RemoteFrontend "sudo systemctl restart '$($cfg.Pm2Frontend)' 2>/dev/null || sudo systemctl start '$($cfg.Pm2Frontend)'")
     } elseif ($cfg.ServiceManager -eq "nssm") {
         # NSSM: Windows 原生服务管理
         Write-Info "restart frontend via NSSM..."
-        Invoke-Run "nssm restart $($cfg.Pm2Frontend)" | Out-Null
+        return (Invoke-Run "nssm restart $($cfg.Pm2Frontend)")
     } else {
         $cmd = @"
 export PATH=$($cfg.NodeBin):`$PATH && \
@@ -627,7 +662,7 @@ pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true && \
 pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web' && \
 pm2 save
 "@
-        Invoke-RemoteFrontend $cmd | Out-Null
+        return (Invoke-RemoteFrontend $cmd)
     }
 }
 
@@ -884,7 +919,8 @@ function Deploy-Docker {
     $dockerCmd = "cd '$($cfg.BackendDir)' && $composeCmd pull 2>/dev/null || true && $composeCmd up -d --build --remove-orphans"
 
     if ($cfg.Topology -eq "local" -or -not $cfg.BackendHost) {
-        Invoke-Run "bash -c `"$dockerCmd`"" | Out-Null
+        $shell = Assert-LocalShell
+        Invoke-Run "$shell -c `"$dockerCmd`"" | Out-Null
     } else {
         Invoke-RemoteBackend $dockerCmd | Out-Null
     }
@@ -987,7 +1023,8 @@ function Invoke-Hook {
     if ($HookScript -match '\.ps1$') {
         & $HookScript
     } else {
-        Invoke-Run "bash '$HookScript'"
+        $shell = Assert-LocalShell
+        Invoke-Run "$shell '$HookScript'"
     }
 }
 
@@ -1097,6 +1134,10 @@ function Invoke-CmdCheck {
 
     # Windows 特定检查
     Write-Host "`nWindows tools:" -ForegroundColor White
+    $localShell = Get-LocalShell
+    if ($localShell) { Write-Log "Bash: available ($localShell)" }
+    else { Write-Warn "Bash: not found (required for local topology; install Git Bash, WSL, or MSYS2)" }
+
     $rsyncFound = Get-Command "rsync" -ErrorAction SilentlyContinue
     if ($rsyncFound) { Write-Log "rsync: available" }
     else { Write-Warn "rsync: not found (install via Git Bash, MSYS2, or WSL)" }

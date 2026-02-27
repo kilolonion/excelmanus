@@ -4,7 +4,7 @@ import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { ExternalLink, Plus, Minus, RefreshCw } from "lucide-react";
 import type { ExcelDiffEntry, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { cellStyleToCSS } from "./cell-style-utils";
+import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, type MergeSpan } from "./merge-utils";
 
 // ── 阈值 ────────────────────────────────────────────────
@@ -331,10 +331,13 @@ function GridHalfTable({
 
                 const css = cellStyleToCSS(style);
                 const hasBg = css.backgroundColor != null;
+                const wrap = hasWrapText(style);
                 return (
                   <td
                     key={c}
-                    className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] diff-cell-animate ${
+                    className={`border-r border-b border-border/15 px-2 py-1 ${
+                      wrap ? "max-w-[200px] break-words" : "truncate max-w-[120px]"
+                    } diff-cell-animate ${
                       hasBg ? CELL_RING[cell.type] : `${CELL_BG[cell.type]} ${CELL_BORDER[cell.type]}`
                     } font-medium`}
                     style={css}

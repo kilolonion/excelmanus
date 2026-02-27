@@ -7,6 +7,7 @@ interface UIState {
   fullAccessEnabled: boolean;
   visionCapable: boolean;
   chatMode: "write" | "read" | "plan";
+  thinkingEffort: string;
   settingsOpen: boolean;
   settingsTab: string;
   toggleSidebar: () => void;
@@ -15,6 +16,7 @@ interface UIState {
   setFullAccessEnabled: (enabled: boolean) => void;
   setVisionCapable: (capable: boolean) => void;
   setChatMode: (mode: "write" | "read" | "plan") => void;
+  setThinkingEffort: (effort: string) => void;
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
 }
@@ -26,6 +28,7 @@ export const useUIStore = create<UIState>((set) => ({
   fullAccessEnabled: false,
   visionCapable: false,
   chatMode: "write" as const,
+  thinkingEffort: "medium",
   settingsOpen: false,
   settingsTab: "model",
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
@@ -34,6 +37,7 @@ export const useUIStore = create<UIState>((set) => ({
   setFullAccessEnabled: (enabled) => set({ fullAccessEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
   setChatMode: (mode) => set({ chatMode: mode }),
+  setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab || "model" }),
   closeSettings: () => set({ settingsOpen: false }),
 }));
