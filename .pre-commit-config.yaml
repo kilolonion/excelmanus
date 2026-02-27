@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: excelmanus-secret-scan
+        name: excelmanus secret scan
+        entry: scripts/security/scan_secrets.sh
+        language: system
+        pass_filenames: false
+        files: '^(mcp\.json|\.env(\..*)?|.*\.toml)$'
