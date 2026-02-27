@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" width="280" alt="ExcelManus" />
+  <img src="assets/logo.png" width="380" alt="ExcelManus" />
 </p>
 
 <h3 align="center">用自然语言驱动 Excel 的 AI Agent</h3>
@@ -85,6 +85,21 @@ excelmanus            # CLI 模式
 excelmanus-api        # Web UI + REST API
 ```
 
+或使用一键启动脚本（同时启动后端 + 前端）：
+
+```bash
+./deploy/start.sh                    # macOS / Linux 开发模式
+./deploy/start.sh --prod             # 生产模式
+./deploy/start.sh --backend-port 9000  # 自定义端口
+```
+
+Windows 用户：
+
+```powershell
+.\deploy\start.ps1                   # PowerShell
+deploy\start.bat                     # CMD
+```
+
 **试一试：**
 
 ```
@@ -125,6 +140,10 @@ excelmanus-api        # Web UI + REST API
 基于 Next.js + Univer.js，提供完整的可视化操作体验。
 
 ```bash
+# 方式一：一键启动（推荐）
+./deploy/start.sh
+
+# 方式二：分别启动
 excelmanus-api                          # 后端
 cd web && npm install && npm run dev    # 前端
 ```
@@ -221,15 +240,56 @@ docker compose -f deploy/docker-compose.yml up -d   # 后端 + 前端 + PostgreS
 
 适用于宝塔面板 / 裸机等不使用 Docker 的场景，详见 [运维手册](docs/ops-manual.md)。
 
-### 远程更新
+### 一键启动（本地开发）
 
 ```bash
-./deploy/deploy.sh                  # 完整部署
-./deploy/deploy.sh --backend-only   # 只更新后端
-./deploy/deploy.sh --frontend-only  # 只更新前端
+# macOS / Linux
+./deploy/start.sh              # 开发模式
+./deploy/start.sh --prod       # 生产模式（npm run start）
+./deploy/start.sh --workers 4  # 多 worker
+
+# Windows PowerShell
+.\deploy\start.ps1 -Production
+
+# Windows CMD
+deploy\start.bat --prod
 ```
 
-> 自动排除 `.env`、`data/`、`workspace/`，不覆盖线上数据。
+支持 `--backend-port`、`--frontend-port`、`--log-dir`、`--backend-only`、`--frontend-only` 等选项，详见 `./deploy/start.sh --help`。
+
+脚本自动检测操作系统（macOS / Linux / Windows），在 Linux 上自动识别 apt / dnf / yum / pacman 等包管理器并给出安装提示。
+
+### 远程部署 (deploy.sh / deploy.ps1)
+
+部署脚本在本地运行，通过 SSH 操作远程服务器。支持单机、前后端分离、Docker、本地四种拓扑。
+
+```bash
+# 基本部署
+./deploy/deploy.sh                         # 完整部署
+./deploy/deploy.sh --backend-only          # 只更新后端
+./deploy/deploy.sh --frontend-only         # 只更新前端
+
+# 首次部署：推送 .env 模板到远程服务器
+./deploy/deploy.sh init-env
+
+# 运维命令
+./deploy/deploy.sh check                   # 环境检查 + 前后端互联检测
+./deploy/deploy.sh status                  # 查看运行状态
+./deploy/deploy.sh rollback                # 回滚上一版本
+./deploy/deploy.sh history                 # 部署历史
+./deploy/deploy.sh logs                    # 部署日志
+```
+
+Windows PowerShell：
+
+```powershell
+.\deploy\deploy.ps1                        # 完整部署
+.\deploy\deploy.ps1 init-env               # 推送 .env 模板
+.\deploy\deploy.ps1 check                  # 环境检查
+.\deploy\deploy.ps1 rollback -Force        # 回滚（跳过确认）
+```
+
+> 自动排除 `.env`、`data/`、`workspace/`，不覆盖线上数据。部署后自动检测前后端互联、CORS 配置和健康检查。
 
 ## 👥 多用户
 
@@ -255,6 +315,16 @@ python -m excelmanus.bench --message "读取前10行"          # 单条
 ## 📖 配置参考
 
 快速开始只需 3 个环境变量。完整配置（窗口感知、安全策略、Subagent、MCP、VLM、Embedding 等）见 [配置文档](docs/configuration.md)。
+
+## 🖥️ 平台支持
+
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| **macOS** | ✅ 完整支持 | 开发主平台 |
+| **Linux** | ✅ 完整支持 | Ubuntu / Debian / CentOS / Fedora / Arch 等 |
+| **Windows** | ✅ 完整支持 | PowerShell 5.1+ 或 CMD，需安装 Python + Node.js |
+
+启动脚本自动检测 OS 和包管理器，缺少依赖时给出精确的安装命令。
 
 ## 🛠️ 开发
 
