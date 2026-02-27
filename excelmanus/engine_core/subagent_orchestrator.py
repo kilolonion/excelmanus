@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -122,7 +123,7 @@ class SubagentOrchestrator:
                 task=task_text,
                 file_paths=normalized_paths,
             )
-        picked_agent = engine._normalize_skill_agent_name(picked_agent) or "subagent"
+        picked_agent = engine._skill_resolver.normalize_skill_agent_name(picked_agent) or "subagent"
 
         if picked_agent == "explorer" and self._should_fast_exit_explorer(
             task=task_text,
@@ -142,7 +143,7 @@ class SubagentOrchestrator:
         # ── Pre-subagent Hook（A1: 无激活技能时跳过，避免冗余 async 开销） ──
         hook_skill = engine._active_skills[-1] if engine._active_skills else None
         if hook_skill is not None:
-            pre_hook_raw = engine._run_skill_hook(
+            pre_hook_raw = engine._skill_resolver.run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.SUBAGENT_START,
                 payload={
@@ -151,7 +152,7 @@ class SubagentOrchestrator:
                     "file_paths": normalized_paths,
                 },
             )
-            pre_hook = await engine._resolve_hook_result(
+            pre_hook = await engine._skill_resolver.resolve_hook_result(
                 event=HookEvent.SUBAGENT_START,
                 hook_result=pre_hook_raw,
                 on_event=on_event,
@@ -170,6 +171,20 @@ class SubagentOrchestrator:
         prompt = task_text
         if normalized_paths:
             prompt += f"\n\n相关文件：{', '.join(normalized_paths)}"
+
+        # R5: explorer 探索深度提示注入
+        if picked_agent == "explorer":
+            depth = self._estimate_exploration_depth(
+                task=task_text, file_paths=normalized_paths,
+            )
+            _DEPTH_LABELS = {
+                1: "快扫（inspect_excel_files 获取全貌即可）",
+                2: "Schema（read_excel header + 前几行，识别列结构）",
+                3: "Profile（run_code 做统计分析：dtypes/nulls/describe）",
+                4: "深挖（数据质量检测、跨表关系、公式依赖等深度分析）",
+            }
+            if depth in _DEPTH_LABELS:
+                prompt += f"\n\n建议探索深度：{_DEPTH_LABELS[depth]}"
 
         timeout = engine._config.subagent_timeout_seconds
         try:
@@ -193,7 +208,7 @@ class SubagentOrchestrator:
 
         # ── Post-subagent Hook（A1: 无激活技能时跳过） ──
         if hook_skill is not None:
-            post_hook_raw = engine._run_skill_hook(
+            post_hook_raw = engine._skill_resolver.run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.SUBAGENT_STOP,
                 payload={
@@ -203,7 +218,7 @@ class SubagentOrchestrator:
                     "summary": result.summary,
                 },
             )
-            post_hook = await engine._resolve_hook_result(
+            post_hook = await engine._skill_resolver.resolve_hook_result(
                 event=HookEvent.SUBAGENT_STOP,
                 hook_result=post_hook_raw,
                 on_event=on_event,
@@ -227,6 +242,9 @@ class SubagentOrchestrator:
                 observed_files=result.observed_files,
                 structured_changes=result.structured_changes,
             )
+            # R3: explorer 结构化报告解析与缓存
+            if picked_agent == "explorer":
+                self._parse_and_cache_explorer_report(result.summary)
             return DelegateSubagentOutcome(
                 reply=result.summary,
                 success=True,
@@ -454,6 +472,113 @@ class SubagentOrchestrator:
                     )
                 seen[normalized_lower] = i
         return None
+
+    # ── Explorer 结构化报告解析 ────────────────────────────────
+
+    _REPORT_START = "<!-- EXPLORER_REPORT_START -->"
+    _REPORT_END = "<!-- EXPLORER_REPORT_END -->"
+
+    def _parse_and_cache_explorer_report(self, summary: str) -> dict[str, Any] | None:
+        """从 explorer 摘要中提取 EXPLORER_REPORT JSON 并缓存到 session_state。
+
+        解析失败时静默降级（explorer 仍可作为纯文本摘要使用）。
+        """
+        report = self._extract_explorer_report(summary)
+        if report is None:
+            return None
+        try:
+            engine = self._engine
+            # 缓存到 session_state，供 context_builder 和后续轮次引用
+            if hasattr(engine, "_state"):
+                existing = getattr(engine._state, "explorer_reports", None)
+                if existing is None:
+                    engine._state.explorer_reports = []  # type: ignore[attr-defined]
+                engine._state.explorer_reports.append(report)  # type: ignore[attr-defined]
+                # 保留最近 5 份报告，避免累积过多
+                if len(engine._state.explorer_reports) > 5:  # type: ignore[attr-defined]
+                    engine._state.explorer_reports = engine._state.explorer_reports[-5:]  # type: ignore[attr-defined]
+            logger.info(
+                "explorer 结构化报告已缓存: files=%d, findings=%d",
+                len(report.get("files", [])),
+                len(report.get("findings", [])),
+            )
+        except Exception:
+            logger.debug("explorer 报告缓存失败", exc_info=True)
+        return report
+
+    @staticmethod
+    def _extract_explorer_report(summary: str) -> dict[str, Any] | None:
+        """从摘要文本中提取 EXPLORER_REPORT JSON 块。
+
+        查找 ``<!-- EXPLORER_REPORT_START -->`` 与
+        ``<!-- EXPLORER_REPORT_END -->`` 之间的 JSON。
+        """
+        start_marker = SubagentOrchestrator._REPORT_START
+        end_marker = SubagentOrchestrator._REPORT_END
+        start_idx = summary.find(start_marker)
+        if start_idx < 0:
+            return None
+        json_start = start_idx + len(start_marker)
+        end_idx = summary.find(end_marker, json_start)
+        if end_idx < 0:
+            return None
+        raw_json = summary[json_start:end_idx].strip()
+        if not raw_json:
+            return None
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("explorer 报告 JSON 解析失败: %s", raw_json[:200])
+        return None
+
+    # ── R5: 探索深度估算 ──────────────────────────────────────
+
+    def _estimate_exploration_depth(self, *, task: str, file_paths: list[str]) -> int:
+        """根据任务复杂度估算探索深度（0-4）。
+
+        返回值对应探索策略中的四阶段：
+        0 = 无需探索（FileRegistry 已有缓存）
+        1 = 快扫（inspect_excel_files）
+        2 = Schema（read_excel header）
+        3 = Profile（run_code 统计分析）
+        4 = 深挖（按需深入特定区域）
+        """
+        lowered = task.lower()
+
+        # 深度 4：复杂分析关键词
+        _DEEP_KEYWORDS = {
+            "质量", "异常", "清洗", "重复", "校验", "分布", "相关",
+            "关联", "依赖", "公式", "跨表", "合并", "profiling",
+            "quality", "anomaly", "duplicate", "correlation", "formula",
+        }
+        if any(kw in lowered for kw in _DEEP_KEYWORDS):
+            return 4
+
+        # 深度 3：需要统计分析
+        _PROFILE_KEYWORDS = {
+            "统计", "概况", "describe", "分析", "汇总", "频次",
+            "空值", "类型", "数据类型", "dtypes", "null",
+            "analyze", "profile", "summary", "statistics",
+        }
+        if any(kw in lowered for kw in _PROFILE_KEYWORDS):
+            return 3
+
+        # 深度 2：需要看 schema / 列信息
+        _SCHEMA_KEYWORDS = {
+            "列", "字段", "header", "schema", "结构", "列名",
+            "column", "哪些列", "什么列",
+        }
+        if any(kw in lowered for kw in _SCHEMA_KEYWORDS):
+            return 2
+
+        # 深度 1：有文件路径或基本概览
+        if file_paths or _EXCEL_FILE_PATTERN.search(task):
+            return 1
+
+        # 默认深度 2（能看到 schema）
+        return 2
 
     @staticmethod
     def _should_fast_exit_explorer(*, task: str, file_paths: list[str]) -> bool:

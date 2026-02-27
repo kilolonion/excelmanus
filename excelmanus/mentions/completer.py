@@ -246,7 +246,7 @@ class MentionCompleter(Completer):
         if self._engine is None:
             return
         try:
-            names = self._engine._list_manual_invocable_skill_names()
+            names = self._engine._skill_resolver.list_manual_invocable_skill_names()
         except Exception:
             return
         lower_partial = partial.lower()

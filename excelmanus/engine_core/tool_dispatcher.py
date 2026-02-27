@@ -1548,7 +1548,7 @@ class ToolDispatcher:
                     question_payload=question_payload,
                     tool_call_id=tool_call_id,
                 )
-                e._emit_user_question_event(
+                e._interaction_handler.emit_user_question_event(
                     question=pending_q,
                     on_event=on_event,
                     iteration=iteration,
@@ -2131,7 +2131,7 @@ class ToolDispatcher:
                     ),
                 )
 
-        # ── 自动追踪 affected_files（供 _finalize_result 统一发射 FILES_CHANGED）──
+        # ── 自动追踪 affected_files + write_operations_log ──
         if success:
             _state = getattr(e, "_state", None)
             if _state is not None:
@@ -2139,6 +2139,14 @@ class ToolDispatcher:
                     _afp = (arguments.get("file_path") or "").strip()
                     if _afp:
                         _state.record_affected_file(_afp)
+                    # 写入操作日志（供 verifier delta 注入）
+                    _state.record_write_operation(
+                        tool_name=tool_name,
+                        file_path=_afp,
+                        sheet=(arguments.get("sheet") or "").strip(),
+                        cell_range=(arguments.get("range") or "").strip(),
+                        summary=self._extract_write_summary(tool_name, arguments, result_str),
+                    )
                 elif tool_name == "run_code" and _raw_result_for_excel_events:
                     try:
                         import json as _json
@@ -2149,6 +2157,12 @@ class ToolDispatcher:
                                 for _v in _cow.values():
                                     if isinstance(_v, str) and _v.strip():
                                         _state.record_affected_file(_v)
+                                # run_code 写入日志
+                                _state.record_write_operation(
+                                    tool_name="run_code",
+                                    file_path=", ".join(str(v) for v in _cow.values() if isinstance(v, str)),
+                                    summary=self._extract_run_code_write_summary(result_str),
+                                )
                     except Exception:
                         pass
                 elif e.get_tool_write_effect(tool_name) == "workspace_write":
@@ -2156,6 +2170,16 @@ class ToolDispatcher:
                         _pv = (arguments.get(_pk) or "").strip()
                         if _pv:
                             _state.record_affected_file(_pv)
+                    # 通用写入工具日志
+                    _first_path = next(
+                        ((arguments.get(k) or "").strip() for k in ("file_path", "output_path", "path", "target_path")
+                         if (arguments.get(k) or "").strip()),
+                        "",
+                    )
+                    _state.record_write_operation(
+                        tool_name=tool_name,
+                        file_path=_first_path,
+                    )
 
         # 写后事件记录到 FileRegistry
         if success:
@@ -2291,6 +2315,43 @@ class ToolDispatcher:
             if rel_path not in before or before[rel_path] != mtime:
                 changed.append(rel_path)
         return changed
+
+    # ── 写入操作日志辅助（供 verifier delta 注入）────────────
+
+    @staticmethod
+    def _extract_write_summary(tool_name: str, arguments: dict, result_str: str) -> str:
+        """从 Excel 写入工具的参数/结果中提取简洁摘要。"""
+        if tool_name == "write_cells":
+            values = arguments.get("values")
+            if isinstance(values, list):
+                row_count = len(values)
+                col_count = len(values[0]) if values and isinstance(values[0], list) else 1
+                return f"写入 {row_count} 行 × {col_count} 列"
+            return "写入数据"
+        elif tool_name == "create_sheet":
+            name = arguments.get("sheet_name") or arguments.get("name", "")
+            return f"创建 sheet「{name}」" if name else "创建 sheet"
+        elif tool_name == "delete_sheet":
+            name = arguments.get("sheet_name") or arguments.get("name", "")
+            return f"删除 sheet「{name}」" if name else "删除 sheet"
+        elif tool_name == "insert_rows":
+            count = arguments.get("count", 1)
+            return f"插入 {count} 行"
+        elif tool_name == "insert_columns":
+            count = arguments.get("count", 1)
+            return f"插入 {count} 列"
+        return ""
+
+    @staticmethod
+    def _extract_run_code_write_summary(result_str: str) -> str:
+        """从 run_code 的 stdout 中提取写入摘要（取首行非空输出）。"""
+        if not result_str:
+            return "run_code 写入"
+        for line in result_str.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("{") and not stripped.startswith("["):
+                return stripped[:120]
+        return "run_code 写入"
 
     # ── Excel 预览/Diff 事件辅助 ────────────────────────────
 

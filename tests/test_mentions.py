@@ -1223,7 +1223,7 @@ class TestCompleterSkillCompletions:
     def test_skill_lists_names(self, tmp_path: Path) -> None:
         """@skill: 列出 user_invocable 的技能名称。"""
         mock_engine = MagicMock()
-        mock_engine._list_manual_invocable_skill_names.return_value = [
+        mock_engine._skill_resolver.list_manual_invocable_skill_names.return_value = [
             "data_basic",
             "chart_basic",
             "format_basic",
@@ -1240,7 +1240,7 @@ class TestCompleterSkillCompletions:
     def test_skill_prefix_filter(self, tmp_path: Path) -> None:
         """@skill:da 过滤以 da 开头的技能。"""
         mock_engine = MagicMock()
-        mock_engine._list_manual_invocable_skill_names.return_value = [
+        mock_engine._skill_resolver.list_manual_invocable_skill_names.return_value = [
             "data_basic",
             "chart_basic",
         ]
