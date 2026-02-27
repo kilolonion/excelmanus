@@ -5622,6 +5622,7 @@ async def health(request: Request) -> dict:
     login_methods = {
         "github_enabled": True,
         "google_enabled": True,
+        "qq_enabled": False,
         "email_verify_required": False,
     }
     if auth_enabled:
@@ -5630,6 +5631,7 @@ async def health(request: Request) -> dict:
             lc = get_login_config(request)
             login_methods["github_enabled"] = lc.get("login_github_enabled", True)
             login_methods["google_enabled"] = lc.get("login_google_enabled", True)
+            login_methods["qq_enabled"] = lc.get("login_qq_enabled", False)
             login_methods["email_verify_required"] = lc.get("email_verify_required", False)
         except Exception:
             pass

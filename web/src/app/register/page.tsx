@@ -259,7 +259,8 @@ export default function RegisterPage() {
   const loginMethods = useAuthConfigStore((s) => s.loginMethods);
   const githubEnabled = loginMethods.github_enabled;
   const googleEnabled = loginMethods.google_enabled;
-  const showOAuthSection = githubEnabled || googleEnabled;
+  const qqEnabled = loginMethods.qq_enabled;
+  const showOAuthSection = githubEnabled || googleEnabled || qqEnabled;
 
   const strength = useMemo(() => getPasswordStrength(password), [password]);
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -300,14 +301,15 @@ export default function RegisterPage() {
     }
   }, [email, password, confirmPassword, displayName, router]);
 
-  const handleOAuth = useCallback(async (provider: "github" | "google") => {
+  const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
     setOauthLoading(provider);
     setError("");
     try {
       const url = await getOAuthUrl(provider);
       window.location.href = url;
     } catch {
-      setError(`${provider === "github" ? "GitHub" : "Google"} 登录暂不可用`);
+      const names = { github: "GitHub", google: "Google", qq: "QQ" };
+      setError(`${names[provider]} 登录暂不可用`);
       setOauthLoading(null);
     }
   }, []);
@@ -518,7 +520,7 @@ export default function RegisterPage() {
 
         {/* OAuth */}
         {showOAuthSection && (
-          <div className={`grid gap-3 ${githubEnabled && googleEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
+          <div className={`grid gap-3 ${[githubEnabled, googleEnabled, qqEnabled].filter(Boolean).length >= 2 ? "grid-cols-2" : "grid-cols-1"}`}>
             {githubEnabled && (
               <Button
                 variant="outline"
@@ -549,6 +551,23 @@ export default function RegisterPage() {
                   <>
                     <Mail className="h-4 w-4 mr-2" />
                     Google
+                  </>
+                )}
+              </Button>
+            )}
+            {qqEnabled && (
+              <Button
+                variant="outline"
+                className="h-11 font-normal"
+                disabled={oauthLoading !== null}
+                onClick={() => handleOAuth("qq")}
+              >
+                {oauthLoading === "qq" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 13.19c-.17.45-.63.84-1.33 1.15.06.22.1.49.1.68 0 .84-.96 1.53-2.14 1.53-.56 0-1.07-.15-1.45-.41-.38.26-.89.41-1.45.41-1.18 0-2.14-.69-2.14-1.53 0-.19.04-.46.1-.68-.7-.31-1.16-.7-1.33-1.15-.07-.19 0-.29.09-.29.14 0 .38.24.62.49.04-.63.22-1.56.68-2.47C9.02 10.78 10.08 8 12 8s2.98 2.78 3.31 4.92c.46.91.64 1.84.68 2.47.24-.25.48-.49.62-.49.09 0 .16.1.03.29z"/></svg>
+                    QQ
                   </>
                 )}
               </Button>

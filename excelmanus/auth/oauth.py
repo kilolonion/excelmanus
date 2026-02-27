@@ -202,3 +202,118 @@ async def google_exchange_code(code: str, config_store=None) -> OAuthUserInfo | 
             display_name=info.get("name", ""),
             avatar_url=info.get("picture"),
         )
+
+
+# ── QQ OAuth （QQ 互联） ─────────────────────────────────
+
+QQ_AUTHORIZE_URL = "https://graph.qq.com/oauth2.0/authorize"
+QQ_TOKEN_URL = "https://graph.qq.com/oauth2.0/token"
+QQ_OPENID_URL = "https://graph.qq.com/oauth2.0/me"
+QQ_USERINFO_URL = "https://graph.qq.com/user/get_user_info"
+
+
+def get_qq_config(config_store=None) -> tuple[str, str, str]:
+    def _val(kv_key: str, env_key: str) -> str:
+        if config_store is not None:
+            v = config_store.get(kv_key, "")
+            if v:
+                return v
+        return os.environ.get(env_key, "")
+
+    client_id = _val("qq_client_id", "EXCELMANUS_QQ_CLIENT_ID")
+    client_secret = _val("qq_client_secret", "EXCELMANUS_QQ_CLIENT_SECRET")
+    redirect_uri = _val("qq_redirect_uri", "EXCELMANUS_QQ_REDIRECT_URI")
+    return client_id, client_secret, redirect_uri
+
+
+def qq_authorize_url(state: str | None = None, config_store=None) -> str:
+    client_id, _, redirect_uri = get_qq_config(config_store)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "get_user_info",
+    }
+    if state:
+        params["state"] = state
+    from urllib.parse import urlencode
+    return f"{QQ_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+async def qq_exchange_code(code: str, config_store=None) -> OAuthUserInfo | None:
+    """QQ OAuth 流程：授权码 → access_token → openid → 用户资料。"""
+    client_id, client_secret, redirect_uri = get_qq_config(config_store)
+    if not client_id or not client_secret:
+        logger.warning("QQ OAuth not configured")
+        return None
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # 1) 用授权码换取 access_token
+        resp = await client.get(
+            QQ_TOKEN_URL,
+            params={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "fmt": "json",
+            },
+        )
+        if resp.status_code != 200:
+            logger.warning("QQ token exchange failed: %s", resp.text)
+            return None
+
+        token_data = resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            logger.warning("QQ token missing: %s", token_data)
+            return None
+
+        # 2) 获取 openid
+        me_resp = await client.get(
+            QQ_OPENID_URL,
+            params={"access_token": access_token, "fmt": "json"},
+        )
+        if me_resp.status_code != 200:
+            logger.warning("QQ openid request failed: %s", me_resp.text)
+            return None
+
+        me_data = me_resp.json()
+        openid = me_data.get("openid")
+        if not openid:
+            logger.warning("QQ openid missing: %s", me_data)
+            return None
+
+        # 3) 获取用户资料
+        info_resp = await client.get(
+            QQ_USERINFO_URL,
+            params={
+                "access_token": access_token,
+                "oauth_consumer_key": client_id,
+                "openid": openid,
+            },
+        )
+        if info_resp.status_code != 200:
+            logger.warning("QQ userinfo request failed: %s", info_resp.text)
+            return None
+
+        info = info_resp.json()
+        if info.get("ret") != 0:
+            logger.warning("QQ userinfo error: %s", info.get("msg"))
+            return None
+
+        nickname = info.get("nickname", "")
+        # QQ 头像：优先 100px，回退 40px
+        avatar = info.get("figureurl_qq_2") or info.get("figureurl_qq_1") or None
+
+        # QQ 不提供邮箱，使用占位邮箱（用户可后续绑定真实邮箱）
+        placeholder_email = f"qq_{openid}@placeholder.invalid"
+
+        return OAuthUserInfo(
+            provider="qq",
+            oauth_id=openid,
+            email=placeholder_email,
+            display_name=nickname,
+            avatar_url=avatar,
+        )

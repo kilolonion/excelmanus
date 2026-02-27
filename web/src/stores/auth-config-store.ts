@@ -4,6 +4,7 @@ import { buildApiUrl } from "@/lib/api";
 interface LoginMethods {
   github_enabled: boolean;
   google_enabled: boolean;
+  qq_enabled: boolean;
   email_verify_required: boolean;
 }
 
@@ -17,6 +18,7 @@ interface AuthConfigState {
 const DEFAULT_LOGIN_METHODS: LoginMethods = {
   github_enabled: true,
   google_enabled: true,
+  qq_enabled: false,
   email_verify_required: false,
 };
 
@@ -37,6 +39,7 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
           ? {
               github_enabled: lm.github_enabled ?? true,
               google_enabled: lm.google_enabled ?? true,
+              qq_enabled: lm.qq_enabled ?? false,
               email_verify_required: lm.email_verify_required ?? false,
             }
           : { ...DEFAULT_LOGIN_METHODS };
