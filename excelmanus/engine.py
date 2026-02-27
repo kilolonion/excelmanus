@@ -64,6 +64,68 @@ from excelmanus.window_perception import (
 )
 from excelmanus.window_perception.domain import Window
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
+from excelmanus.engine_types import (  # noqa: F401 — re-export for backwards compat
+    ThinkingConfig,
+    ToolCallResult,
+    TurnDiagnostic,
+    ChatResult,
+    DelegateSubagentOutcome,
+    _AuditedExecutionError,
+    _ToolCallBatch,
+    ApprovalResolver,
+    QuestionResolver,
+    _EFFORT_RATIOS,
+    _EFFORT_TO_GEMINI_LEVEL,
+    _EFFORT_TO_OPENAI,
+)
+from excelmanus.engine_utils import (  # noqa: F401 — re-export for backwards compat
+    _ALWAYS_AVAILABLE_TOOLS_READONLY,
+    _ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY,
+    _ALWAYS_AVAILABLE_TOOLS_SET,
+    _ALWAYS_AVAILABLE_TOOLS_READONLY_SET,
+    _SYSTEM_Q_SUBAGENT_APPROVAL,
+    _SUBAGENT_APPROVAL_OPTION_ACCEPT,
+    _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
+    _SUBAGENT_APPROVAL_OPTION_REJECT,
+    _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
+    _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
+    _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS,
+    _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS,
+    _VALID_WRITE_HINTS,
+    _MID_DISCUSSION_MAX_LEN,
+    _SKILL_AGENT_ALIASES,
+    _WRITE_EFFECT_VALUES,
+    _MENTION_XML_TAG_MAP,
+    _normalize_write_hint,
+    _merge_write_hint,
+    _merge_write_hint_with_override,
+    build_mention_context_block,
+    _message_content_to_text,
+    _normalize_tool_calls,
+    _coerce_completion_message,
+    _extract_completion_message,
+    _usage_token,
+    _extract_cached_tokens,
+    _extract_anthropic_cache_tokens,
+    _extract_ttft_ms,
+    _looks_like_html_document,
+    _CLARIFICATION_PATTERNS,
+    _MIN_QUESTION_MARKS_FOR_CLARIFICATION,
+    _looks_like_clarification,
+    _WAITING_FOR_USER_ACTION_PATTERNS,
+    _looks_like_waiting_for_user_action,
+    _FORMULA_ADVICE_PATTERN,
+    _FORMULA_ADVICE_FALLBACK_PATTERN,
+    _VBA_MACRO_ADVICE_PATTERN,
+    _USER_VBA_REQUEST_PATTERN,
+    _user_requests_vba,
+    _contains_formula_advice,
+    _WRITE_ACTION_VERBS,
+    _FILE_REFERENCE_PATTERN,
+    _detect_write_intent,
+    _summarize_text,
+    _split_tool_call_batches,
+)
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -72,733 +134,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 
-# ── Thinking 配置 ──────────────────────────────────────────────
-_EFFORT_RATIOS: dict[str, float] = {
-    "none": 0.0, "minimal": 0.10, "low": 0.20,
-    "medium": 0.50, "high": 0.80, "xhigh": 0.95,
-}
-
-# effort → Gemini thinkingLevel 映射
-_EFFORT_TO_GEMINI_LEVEL: dict[str, str] = {
-    "none": "minimal", "minimal": "minimal", "low": "low",
-    "medium": "medium", "high": "high", "xhigh": "high",
-}
-
-# effort → OpenAI reasoning_effort 映射
-_EFFORT_TO_OPENAI: dict[str, str] = {
-    "none": "none", "minimal": "minimal", "low": "low",
-    "medium": "medium", "high": "high", "xhigh": "high",
-}
-
-
-@dataclass
-class ThinkingConfig:
-    """Thinking（推理深度）统一配置，支持等级制和预算制。"""
-
-    effort: str = "medium"  # none|minimal|low|medium|high|xhigh
-    budget_tokens: int = 0  # >0 时覆盖 effort 换算值
-
-    @property
-    def is_disabled(self) -> bool:
-        return self.effort == "none" and self.budget_tokens <= 0
-
-    def effective_budget(self, max_tokens: int = 16384) -> int:
-        """计算有效 token 预算。budget_tokens > 0 直接返回，否则按 effort 比例换算。"""
-        if self.budget_tokens > 0:
-            return self.budget_tokens
-        ratio = _EFFORT_RATIOS.get(self.effort, 0.5)
-        return max(1024, int(max_tokens * ratio)) if ratio > 0 else 0
-
-    @property
-    def openai_effort(self) -> str:
-        return _EFFORT_TO_OPENAI.get(self.effort, "medium")
-
-    @property
-    def gemini_level(self) -> str:
-        return _EFFORT_TO_GEMINI_LEVEL.get(self.effort, "high")
-
-
-_ALWAYS_AVAILABLE_TOOLS_READONLY = (
-    "task_create", "task_update",
-    "ask_user",
-    "memory_save", "memory_read_topic",
-)
-_ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY = (
-    "write_plan", "edit_text_file",
-    "delegate", "delegate_to_subagent", "parallel_delegate",
-)
-_ALWAYS_AVAILABLE_TOOLS_SET = frozenset(
-    _ALWAYS_AVAILABLE_TOOLS_READONLY + _ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY
-)
-_ALWAYS_AVAILABLE_TOOLS_READONLY_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS_READONLY)
-_SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
-_SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
-_SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
-_SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
-
-
-_WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
-_WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
-_WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
-_WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
-_VALID_WRITE_HINTS = {"may_write", "read_only", "unknown"}
-_MID_DISCUSSION_MAX_LEN = 2000  # 中间讨论放行阈值（字符数）
-_SKILL_AGENT_ALIASES = {
-    "explore": "explorer",
-    "plan": "subagent",
-    "planner": "subagent",
-    "general-purpose": "subagent",
-    "generalpurpose": "subagent",
-    "analyst": "subagent",
-}
-
-# ── 审批解析器回调类型 ──────────────────────────────────────
-# 返回值为 "accept" / "reject" / "fullaccess" / None（None 等同 reject）。
-# CLI 传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
-ApprovalResolver = Callable[[PendingApproval], Awaitable[str | None]]
-
-# ── 问题解析器回调类型 ──────────────────────────────────────
-# CLI/bench 传入交互式问答实现；Web API 不传则使用 InteractionRegistry Future。
-# 回调接收 PendingQuestion，返回用户原始回答文本。
-QuestionResolver = Callable[[PendingQuestion], Awaitable[str]]
-
-
-def _normalize_write_hint(value: Any) -> str:
-    """规范化 write_hint，仅返回 may_write/read_only/unknown。"""
-    if not isinstance(value, str):
-        return "unknown"
-    normalized = value.strip().lower()
-    if normalized in _VALID_WRITE_HINTS:
-        return normalized
-    return "unknown"
-
-
-def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
-    """优先使用路由 write_hint；无效时回退到当前状态。"""
-    normalized_route = _normalize_write_hint(route_hint)
-    if normalized_route != "unknown":
-        return normalized_route
-    return _normalize_write_hint(fallback_hint)
-
-
-def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
-    """合并 write_hint，但 override_hint == 'may_write' 时强制覆盖 route_hint。
-
-    用于写入工具成功后的场景：当 override_hint == 'may_write' 时
-    强制覆盖，不应被原始 route_hint（如 'read_only'）压制。
-    """
-    normalized_override = _normalize_write_hint(override_hint)
-    if normalized_override == "may_write":
-        return "may_write"
-    return _merge_write_hint(route_hint, override_hint)
-
-
-# ── Mention 上下文 XML 组装 ──────────────────────────────
-
-# 各 mention 类型对应的 XML 标签名和属性名
-_MENTION_XML_TAG_MAP: dict[str, tuple[str, str]] = {
-    "file": ("file", "path"),
-    "folder": ("folder", "path"),
-    "skill": ("skill", "name"),
-    "mcp": ("mcp", "server"),
-}
-
-
-def build_mention_context_block(
-    mention_contexts: list[ResolvedMention],
-) -> str:
-    """将 ResolvedMention 列表组装为 <mention_context> XML 块。
-
-    规则：
-    - 成功解析的 mention 用类型对应的 XML 标签包裹 context_block
-    - 解析失败的 mention 用 <error> 标签包裹错误信息
-    - img 类型跳过（不生成 context block）
-    - 列表为空时返回空字符串
-    """
-    if not mention_contexts:
-        return ""
-
-    parts: list[str] = []
-    for rm in mention_contexts:
-        # img 类型不生成 context block
-        if rm.mention.kind == "img":
-            continue
-
-        if rm.error:
-            parts.append(
-                f'<error ref="{rm.mention.raw}">\n  {rm.error}\n</error>'
-            )
-        elif rm.context_block:
-            tag_info = _MENTION_XML_TAG_MAP.get(rm.mention.kind)
-            if tag_info:
-                tag, attr = tag_info
-                # 为带 range_spec 的文件引用添加 range 属性
-                range_attr = ""
-                if rm.mention.range_spec:
-                    range_attr = f' range="{rm.mention.range_spec}"'
-                parts.append(
-                    f'<{tag} {attr}="{rm.mention.value}"{range_attr}>\n'
-                    f"{rm.context_block}\n"
-                    f"</{tag}>"
-                )
-
-    if not parts:
-        return ""
-
-    inner = "\n".join(parts)
-    return f"<mention_context>\n{inner}\n</mention_context>"
-
-
 from excelmanus.message_serialization import to_plain as _to_plain, assistant_message_to_dict as _assistant_message_to_dict  # noqa: E402
-
-
-
-
-def _message_content_to_text(content: Any) -> str:
-    """将供应商差异化 content 统一为文本。"""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-            else:
-                text = getattr(item, "text", None)
-                if isinstance(text, str):
-                    parts.append(text)
-        if parts:
-            return "".join(parts)
-    return str(content)
-
-
-def _normalize_tool_calls(raw_tool_calls: Any) -> list[Any]:
-    """兼容 dict/object 两种 tool_call 结构。"""
-    if raw_tool_calls is None:
-        return []
-    if isinstance(raw_tool_calls, tuple):
-        raw_tool_calls = list(raw_tool_calls)
-    if not isinstance(raw_tool_calls, list):
-        return []
-
-    normalized: list[Any] = []
-    for item in raw_tool_calls:
-        if isinstance(item, dict):
-            raw_function = item.get("function")
-            if isinstance(raw_function, dict):
-                function_obj = SimpleNamespace(
-                    name=str(raw_function.get("name", "") or ""),
-                    arguments=raw_function.get("arguments"),
-                )
-            else:
-                function_obj = SimpleNamespace(
-                    name=str(getattr(raw_function, "name", "") or ""),
-                    arguments=getattr(raw_function, "arguments", None),
-                )
-            normalized.append(
-                SimpleNamespace(
-                    id=str(item.get("id", "") or ""),
-                    type=item.get("type", "function"),
-                    function=function_obj,
-                )
-            )
-        else:
-            normalized.append(item)
-    return normalized
-
-
-def _coerce_completion_message(message: Any) -> Any:
-    """将消息对象标准化为包含 content/tool_calls 的结构。"""
-    if message is None:
-        return SimpleNamespace(content="", tool_calls=[])
-    if isinstance(message, str):
-        return SimpleNamespace(content=message, tool_calls=[])
-    if isinstance(message, dict):
-        return SimpleNamespace(
-            content=message.get("content"),
-            tool_calls=_normalize_tool_calls(message.get("tool_calls")),
-            thinking=message.get("thinking"),
-            reasoning=message.get("reasoning"),
-            reasoning_content=message.get("reasoning_content"),
-        )
-    return message
-
-
-def _extract_completion_message(response: Any) -> tuple[Any, Any]:
-    """从 provider 响应中提取首个 message，并兼容字符串响应。"""
-    usage = getattr(response, "usage", None)
-
-    if isinstance(response, str):
-        return SimpleNamespace(content=response, tool_calls=[]), usage
-
-    choices = getattr(response, "choices", None)
-    if isinstance(choices, list) and choices:
-        message = getattr(choices[0], "message", None)
-        if message is not None:
-            return _coerce_completion_message(message), usage
-
-    payload = _to_plain(response)
-    if isinstance(payload, dict):
-        if usage is None:
-            usage = payload.get("usage")
-        choices_payload = payload.get("choices")
-        if isinstance(choices_payload, list) and choices_payload:
-            first = choices_payload[0]
-            if isinstance(first, dict):
-                message_payload = first.get("message")
-            else:
-                message_payload = getattr(first, "message", None)
-            if message_payload is not None:
-                return _coerce_completion_message(message_payload), usage
-        for key in ("output_text", "content", "text"):
-            candidate = payload.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return SimpleNamespace(content=candidate, tool_calls=[]), usage
-
-    return SimpleNamespace(content=str(response), tool_calls=[]), usage
-
-
-def _usage_token(usage: Any, key: str) -> int:
-    """读取 usage 中 token 计数，兼容 dict/object。"""
-    if usage is None:
-        return 0
-    value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, 0)
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _extract_cached_tokens(usage: Any) -> int:
-    """从 usage.prompt_tokens_details.cached_tokens 提取缓存命中 token 数。
-
-    兼容 OpenAI SDK 对象和 dict 两种格式。非 OpenAI provider 无此字段时返回 0。
-    """
-    if usage is None:
-        return 0
-    details = (
-        usage.get("prompt_tokens_details")
-        if isinstance(usage, dict)
-        else getattr(usage, "prompt_tokens_details", None)
-    )
-    if details is None:
-        return 0
-    raw = (
-        details.get("cached_tokens")
-        if isinstance(details, dict)
-        else getattr(details, "cached_tokens", 0)
-    )
-    try:
-        return int(raw or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _extract_anthropic_cache_tokens(usage: Any) -> tuple[int, int]:
-    """从 Anthropic usage 提取 cache_creation_input_tokens 和 cache_read_input_tokens。
-
-    返回 (cache_creation, cache_read)。非 Anthropic provider 返回 (0, 0)。
-    """
-    if usage is None:
-        return 0, 0
-    if isinstance(usage, dict):
-        creation = usage.get("cache_creation_input_tokens", 0)
-        read = usage.get("cache_read_input_tokens", 0)
-    else:
-        creation = getattr(usage, "cache_creation_input_tokens", 0)
-        read = getattr(usage, "cache_read_input_tokens", 0)
-    try:
-        return int(creation or 0), int(read or 0)
-    except (TypeError, ValueError):
-        return 0, 0
-
-
-def _extract_ttft_ms(usage: Any) -> float:
-    """从 usage 提取 TTFT（由 _consume_stream 附加）。"""
-    if usage is None:
-        return 0.0
-    if isinstance(usage, dict):
-        return float(usage.get("_ttft_ms", 0.0))
-    return float(getattr(usage, "_ttft_ms", 0.0))
-
-
-def _looks_like_html_document(text: str) -> bool:
-    """判断文本是否像整页 HTML 文档（常见于 base_url 配置错误）。"""
-    stripped = text.lstrip()
-    if not stripped:
-        return False
-    lowered = stripped.lower()
-    if lowered.startswith("<!doctype html") or lowered.startswith("<html"):
-        return True
-    return "<html" in lowered and "</html>" in lowered and "<head" in lowered
-
-
-# ── 澄清检测：判断文本是否为向用户反问/澄清 ──────────────────
-
-_CLARIFICATION_PATTERNS = _re.compile(
-    r"(?:"
-    # 中文澄清信号
-    r"请(?:问|告诉|提供|确认|说明|指定|明确)"
-    r"|(?:哪个|哪些|哪一个|哪一些)(?:文件|表格|sheet|工作表|工作簿)"
-    r"|需要(?:你|您)(?:提供|确认|说明|指定|补充)"
-    r"|(?:你|您)(?:想|希望|需要|打算)(?:对|用|在|把)"
-    r"|(?:你|您)(?:指的是|说的是|想要的是)"
-    r"|(?:能否|可以|可否|是否能)(?:告诉|说明|提供|确认)"
-    r"|以下(?:信息|内容|参数|细节)(?:需要|还需)"
-    r"|为了(?:更好地|准确地|正确地)(?:完成|执行|处理)"
-    # 英文澄清信号
-    r"|(?:which|what|could you|can you|please (?:specify|provide|confirm|clarify))"
-    r"|(?:I need (?:to know|more info|clarification))"
-    r"|(?:before I (?:proceed|start|begin|continue))"
-    r")",
-    _re.IGNORECASE,
-)
-
-# 问号密度阈值：短文本中问号占比高说明是在提问
-_MIN_QUESTION_MARKS_FOR_CLARIFICATION = 1
-
-
-def _looks_like_clarification(text: str) -> bool:
-    """判断文本是否为 agent 向用户的澄清/反问。
-
-    用于在首轮无工具调用时放行澄清性文本回复，
-    避免被执行守卫或写入门禁误拦截。
-    """
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    # 条件 1：包含问号（中文或英文）
-    question_marks = stripped.count("？") + stripped.count("?")
-    if question_marks < _MIN_QUESTION_MARKS_FOR_CLARIFICATION:
-        return False
-    # 条件 2：匹配澄清模式关键词
-    if _CLARIFICATION_PATTERNS.search(stripped):
-        return True
-    # 条件 3：短文本（< 500 字符）且问号密度高（>= 2 个问号）
-    if len(stripped) < 500 and question_marks >= 2:
-        return True
-    return False
-
-
-# ── 等待用户操作检测：agent 正在等待用户上传/提供素材 ────────
-
-_WAITING_FOR_USER_ACTION_PATTERNS = _re.compile(
-    r"(?:"
-    # 中文：请求用户上传/发送/提供文件/图片
-    r"请(?:直接)?(?:上传|发送|提供|附上|拖入|粘贴)(?:.*?(?:图片|文件|截图|附件|素材|源文件|原始文件|照片|图像|表格))"
-    r"|(?:上传|发送|提供|附上)(?:到|至|后|完成后|之后)(?:.*?(?:我|就|即可|立刻|马上))"
-    r"|(?:等待|等你|等您|待你|待您)(?:上传|提供|发送|附上)"
-    r"|(?:需要|还需|缺少)(?:.*?(?:上传|提供|发送))(?:.*?(?:图片|文件|截图|附件|素材|源))"
-    r"|(?:尚未|还没有?|未)(?:收到|检测到|发现|看到)(?:.*?(?:图片|文件|截图|附件|上传))"
-    # 英文
-    r"|please\s+(?:upload|send|provide|attach|drag)\s+(?:the\s+)?(?:image|file|screenshot|attachment)"
-    r"|(?:waiting|wait)\s+(?:for\s+)?(?:you|your)\s+(?:upload|file|image|input)"
-    r"|(?:once|after)\s+(?:you\s+)?(?:upload|provide|send|attach)"
-    r")",
-    _re.IGNORECASE,
-)
-
-
-def _looks_like_waiting_for_user_action(text: str) -> bool:
-    """检测文本是否表示 agent 正在等待用户执行操作（上传文件等）。
-
-    用于在写入门禁/执行守卫触发前放行，避免 agent 被迫空转。
-    """
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    return bool(_WAITING_FOR_USER_ACTION_PATTERNS.search(stripped))
-
-
-# ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
-
-_FORMULA_ADVICE_PATTERN = _re.compile(
-    r"=(?:IF|DATE|VLOOKUP|HLOOKUP|INDEX|MATCH|SUMIF|COUNTIF|CONCATENATE|LEFT|RIGHT|MID|"
-    r"AVERAGE|MAX|MIN|SUM|TRIM|LEN|FIND|SEARCH|IFERROR|AND|OR|NOT|TEXT|VALUE|ROUND|"
-    r"SUMPRODUCT|OFFSET|INDIRECT|SUBSTITUTE|UPPER|LOWER|PROPER|DATEDIF|YEARFRAC|"
-    r"NETWORKDAYS|WORKDAY|EOMONTH|EDATE|DAYS|DATEVALUE|TIMEVALUE|NOW|TODAY|"
-    r"LARGE|TEXTJOIN|LET|TEXTSPLIT|XMATCH|VSTACK|SEQUENCE|FILTER|SORT|UNIQUE|"
-    r"LAMBDA|CHOOSECOLS|CHOOSEROWS|HSTACK)\s*\(",
-    _re.IGNORECASE,
-)
-
-_FORMULA_ADVICE_FALLBACK_PATTERN = _re.compile(
-    r"(?<![<>=!])=(?![<>=])\s*[A-Z][A-Z0-9_]{2,}\s*\(",
-)
-
-_VBA_MACRO_ADVICE_PATTERN = _re.compile(
-    r"(```\s*vb|Sub\s+\w+\s*\(|End\s+Sub\b|\.Range\s*\(|\.Cells\s*\("
-    r"|Application\.\w+|Dim\s+\w+\s+As\s)",
-    _re.IGNORECASE,
-)
-
-# 用户主动请求 VBA 相关帮助的检测模式
-_USER_VBA_REQUEST_PATTERN = _re.compile(
-    r"(VBA|宏|macro|vbaProject"
-    r"|查看.*(?:宏|VBA|macro)|(?:宏|VBA|macro).*(?:代码|源码|内容|逻辑|模块)"
-    r"|解[释读析].*(?:宏|VBA|macro)|(?:宏|VBA|macro).*(?:什么|哪些|有没有|是否)"
-    r"|inspect.*vba|include.*vba"
-    r"|提取.*(?:宏|VBA)|(?:宏|VBA).*提取)",
-    _re.IGNORECASE,
-)
-
-
-def _user_requests_vba(text: str) -> bool:
-    """检测用户消息是否主动请求 VBA/宏相关帮助（查看、解释、提取等）。"""
-    if not text:
-        return False
-    return bool(_USER_VBA_REQUEST_PATTERN.search(text))
-
-
-def _contains_formula_advice(text: str, *, vba_exempt: bool = False) -> bool:
-    """检测回复文本中是否包含 Excel 公式或 VBA/宏代码建议（而非实际执行）。
-
-    Args:
-        text: 回复文本。
-        vba_exempt: 若为 True，跳过 VBA 宏模式检测（用户主动请求 VBA 时）。
-    """
-    if not text:
-        return False
-    if _FORMULA_ADVICE_PATTERN.search(text) or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text):
-        return True
-    if not vba_exempt and _VBA_MACRO_ADVICE_PATTERN.search(text):
-        return True
-    return False
-
-
-_WRITE_ACTION_VERBS = _re.compile(
-    r"(删除|替换|写入|创建|修改|格式化|转置|排序|过滤|合并|计算|填充|插入|移动|复制到|粘贴|更新|设置|调整|添加|生成"
-    r"|delete|remove|replace|write|create|modify|format|transpose|merge"
-    r"|fill|insert|move|paste|update|generate"
-    r"|find\s+and\s+(?:replace|delete)|put\s+in|place\s+in|enter\s+in|apply)",
-    _re.IGNORECASE,
-)
-
-_FILE_REFERENCE_PATTERN = _re.compile(
-    r"(\.\s*xlsx\b|\.\s*xls\b|\.\s*csv\b|[A-Za-z0-9_\-/\\]+\.(?:xlsx|xls|csv))",
-    _re.IGNORECASE,
-)
-
-
-def _detect_write_intent(text: str) -> bool:
-    """检测用户消息是否同时包含文件引用和写入动作动词。"""
-    if not text:
-        return False
-    has_file = bool(_FILE_REFERENCE_PATTERN.search(text))
-    has_action = bool(_WRITE_ACTION_VERBS.search(text))
-    return has_file and has_action
-
-
-# 写入语义枚举：工具通过 ToolDef.write_effect 声明副作用类型。
-_WRITE_EFFECT_VALUES: frozenset[str] = frozenset(
-    {"none", "workspace_write", "external_write", "dynamic", "unknown"}
-)
-
-
-def _summarize_text(text: str, max_len: int = 120) -> str:
-    """将文本压缩为单行摘要，避免日志过长。"""
-    compact = " ".join(text.split())
-    if not compact:
-        return "(空)"
-    if len(compact) <= max_len:
-        return compact
-    return f"{compact[: max_len - 3]}..."
-
-
-@dataclass
-class ToolCallResult:
-    """单次工具调用的结果记录。"""
-
-    tool_name: str
-    arguments: dict
-    result: str
-    success: bool
-    error: str | None = None
-    error_kind: str | None = None  # ToolErrorKind.value: retryable/permanent/needs_human/overflow
-    pending_approval: bool = False
-    approval_id: str | None = None
-    audit_record: AppliedApprovalRecord | None = None
-    pending_question: bool = False
-    question_id: str | None = None
-    # pending_plan 和 plan_id 已废弃（Chat Mode Tabs 重构）
-    defer_tool_result: bool = False
-    finish_accepted: bool = False
-
-
-class _AuditedExecutionError(Exception):
-    """携带审计记录的工具执行异常。"""
-
-    def __init__(self, *, cause: Exception, record: AppliedApprovalRecord) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
-        self.record = record
-
-
-@dataclass
-class _ToolCallBatch:
-    """一组连续的工具调用，标记是否可并行执行。"""
-
-    tool_calls: list[Any]
-    parallel: bool
-
-
-def _split_tool_call_batches(
-    tool_calls: list[Any],
-    parallelizable_names: frozenset[str],
-) -> list[_ToolCallBatch]:
-    """将 tool_calls 拆分为连续的并行/串行批次。
-
-    相邻的可并行工具合并为一个 parallel batch（≥2 个时标记 parallel=True），
-    非并行工具各自独立为 sequential batch。
-    """
-    batches: list[_ToolCallBatch] = []
-    current_parallel: list[Any] = []
-    for tc in tool_calls:
-        name = getattr(getattr(tc, "function", None), "name", "")
-        if name in parallelizable_names:
-            current_parallel.append(tc)
-        else:
-            if current_parallel:
-                batches.append(_ToolCallBatch(current_parallel, len(current_parallel) > 1))
-                current_parallel = []
-            batches.append(_ToolCallBatch([tc], False))
-    if current_parallel:
-        batches.append(_ToolCallBatch(current_parallel, len(current_parallel) > 1))
-    return batches
-
-
-@dataclass
-class TurnDiagnostic:
-    """单次 LLM 迭代的诊断快照，用于事后分析。"""
-
-    iteration: int
-    # token 使用
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    # provider 缓存命中的 token 数（OpenAI prompt_tokens_details.cached_tokens）
-    cached_tokens: int = 0
-    # Anthropic 提示词缓存专用字段
-    cache_creation_input_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    # TTFT（Time To First Token）毫秒
-    ttft_ms: float = 0.0
-    # 模型 thinking/reasoning 内容
-    thinking_content: str = ""
-    # 该迭代暴露给模型的工具名列表
-    tool_names: list[str] = field(default_factory=list)
-    # 门禁事件
-    guard_events: list[str] = field(default_factory=list)
-    # Think-Act 推理检测
-    has_reasoning: bool = True
-    reasoning_chars: int = 0
-    silent_tool_call_count: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "iteration": self.iteration,
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-        }
-        if self.cached_tokens:
-            d["cached_tokens"] = self.cached_tokens
-        if self.cache_creation_input_tokens:
-            d["cache_creation_input_tokens"] = self.cache_creation_input_tokens
-        if self.cache_read_input_tokens:
-            d["cache_read_input_tokens"] = self.cache_read_input_tokens
-        if self.ttft_ms:
-            d["ttft_ms"] = self.ttft_ms
-        if self.thinking_content:
-            d["thinking_content"] = self.thinking_content
-        if self.tool_names:
-            d["tool_names"] = self.tool_names
-        if self.guard_events:
-            d["guard_events"] = self.guard_events
-        if not self.has_reasoning:
-            d["has_reasoning"] = False
-        if self.reasoning_chars:
-            d["reasoning_chars"] = self.reasoning_chars
-        if self.silent_tool_call_count:
-            d["silent_tool_call_count"] = self.silent_tool_call_count
-        return d
-
-
-@dataclass
-class ChatResult:
-    """一次 chat 调用的完整结果。"""
-
-    reply: str
-    tool_calls: list[ToolCallResult] = field(default_factory=list)
-    iterations: int = 0
-    truncated: bool = False
-    # token 使用统计（来自 LLM API 的 usage 字段）
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    write_guard_triggered: bool = False
-    # 诊断数据：每轮迭代的快照
-    turn_diagnostics: list[TurnDiagnostic] = field(default_factory=list)
-    # 路由诊断
-    write_hint: str = ""
-    route_mode: str = ""
-    skills_used: list[str] = field(default_factory=list)
-    task_tags: tuple[str, ...] = ()
-    # Think-Act 推理质量指标
-    reasoning_metrics: dict[str, Any] = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        """兼容旧调用方将 chat 结果当作字符串直接使用。"""
-        return self.reply
-
-    def __hash__(self) -> int:
-        """自定义 __eq__ 后必须显式定义 __hash__，否则实例不可哈希。"""
-        return hash(self.reply)
-
-    def __eq__(self, other: object) -> bool:
-        """兼容与 str 比较，同时保留 ChatResult 间的结构化比较。"""
-        if isinstance(other, str):
-            return self.reply == other
-        if isinstance(other, ChatResult):
-            return (
-                self.reply == other.reply
-                and self.tool_calls == other.tool_calls
-                and self.iterations == other.iterations
-                and self.truncated == other.truncated
-            )
-        return NotImplemented
-
-    def __contains__(self, item: str) -> bool:
-        """兼容 `'xx' in result` 形式。"""
-        return item in self.reply
-
-    def __getattr__(self, name: str) -> Any:
-        """兼容 result.strip()/startswith() 等字符串方法。
-
-        使用 object.__getattribute__ 避免 self.reply 未初始化时无限递归。
-        """
-        try:
-            reply = object.__getattribute__(self, "reply")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(reply, name)
-
-
-@dataclass
-class DelegateSubagentOutcome:
-    """委派子代理的结构化返回。"""
-
-    reply: str
-    success: bool
-    picked_agent: str | None = None
-    task_text: str = ""
-    normalized_paths: list[str] = field(default_factory=list)
-    subagent_result: SubagentResult | None = None
-
 
 
 class AgentEngine:
@@ -1072,7 +408,7 @@ class AgentEngine:
         )
         focus_tools.init_focus_manager(
             manager=self._window_perception,
-            refill_reader=self._focus_window_refill_reader,
+            refill_reader=lambda **kw: self._context_builder._focus_window_refill_reader(**kw),
         )
 
         # ── 上下文自动压缩（Compaction）──────────────────────
@@ -2096,7 +1432,7 @@ class AgentEngine:
 
     def redirect_backup_paths(self, tool_name: str, arguments: dict) -> dict:
         """重定向备份路径（Protocol: ToolExecutionContext）。"""
-        return self._redirect_backup_paths(tool_name, arguments)
+        return self._context_builder._redirect_backup_paths(tool_name, arguments)
 
     def pick_route_skill(self, route_result: Any) -> Any:
         """选择路由技能（Protocol: ToolExecutionContext）。"""
@@ -2431,7 +1767,7 @@ class AgentEngine:
                     )
                 return pending_result
 
-        control_reply = await self._handle_control_command(user_message, on_event=on_event)
+        control_reply = await self._command_handler.handle(user_message, on_event=on_event)
         if control_reply is not None:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
             return ChatResult(reply=control_reply)
@@ -2710,7 +2046,7 @@ class AgentEngine:
             route_result.skills_used,
         )
 
-        self._set_window_perception_turn_hints(
+        self._context_builder._set_window_perception_turn_hints(
             user_message=user_message,
             is_new_task=True,
             task_tags=route_result.task_tags,
@@ -3684,7 +3020,7 @@ class AgentEngine:
 
     def _available_mcp_tool_pairs(self) -> set[tuple[str, str]]:
         pairs: set[tuple[str, str]] = set()
-        for tool_name in self._all_tool_names():
+        for tool_name in self._context_builder._all_tool_names():
             if not tool_name.startswith("mcp_"):
                 continue
             try:
@@ -3830,7 +3166,7 @@ class AgentEngine:
         parent_summary = self._build_parent_context_summary()
         if parent_summary:
             parent_context_parts.append(parent_summary)
-        window_context = self._build_window_perception_notice()
+        window_context = self._context_builder._build_window_perception_notice()
         if window_context:
             parent_context_parts.append(window_context)
         # full 模式：构建主代理级别的丰富上下文
@@ -4029,22 +3365,22 @@ class AgentEngine:
         contexts: list[str] = []
 
         # 1. MCP 扩展能力概要
-        mcp_notice = self._build_mcp_context_notice()
+        mcp_notice = self._context_builder._build_mcp_context_notice()
         if mcp_notice:
             contexts.append(mcp_notice)
 
         # 2. 工具分类索引
-        tool_index = self._build_tool_index_notice()
+        tool_index = self._context_builder._build_tool_index_notice()
         if tool_index:
             contexts.append(tool_index)
 
         # 3. 权限状态说明
-        access_notice = self._build_access_notice()
+        access_notice = self._context_builder._build_access_notice()
         if access_notice:
             contexts.append(access_notice)
 
         # 4. 备份模式说明
-        backup_notice = self._build_backup_notice()
+        backup_notice = self._context_builder._build_backup_notice()
         if backup_notice:
             contexts.append(backup_notice)
 
@@ -4717,7 +4053,7 @@ class AgentEngine:
             return ChatResult(reply="已记录你的回答。")
         # 从上次中断的轮次之后继续执行
         resume_iteration = self._last_iteration_count + 1
-        self._set_window_perception_turn_hints(
+        self._context_builder._set_window_perception_turn_hints(
             user_message=user_message,
             is_new_task=False,
         )
@@ -4848,7 +4184,7 @@ class AgentEngine:
                     ),
                 )
 
-            system_prompts, context_error = self._prepare_system_prompts_for_request(
+            system_prompts, context_error = self._context_builder._prepare_system_prompts_for_request(
                 current_route_result.system_contexts,
                 route_result=current_route_result,
             )
@@ -6527,122 +5863,6 @@ class AgentEngine:
             tool_calls=[tc_result],
             iterations=1,
             truncated=False,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    async def _handle_control_command(
-        self,
-        user_message: str,
-        *,
-        on_event: EventCallback | None = None,
-    ) -> str | None:
-        """处理会话级控制命令：委托给 CommandHandler。"""
-        return await self._command_handler.handle(
-            user_message, on_event=on_event,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    async def _handle_accept_command(
-        self, parts: list[str], *, on_event: EventCallback | None = None,
-    ) -> str:
-        return await self._command_handler._handle_accept_command(parts, on_event=on_event)
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _handle_reject_command(self, parts: list[str], *, on_event: EventCallback | None = None) -> str:
-        return self._command_handler._handle_reject_command(parts, on_event=on_event)
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    async def _handle_plan_approve(
-        self, *, parts: list[str], on_event: EventCallback | None = None,
-    ) -> str:
-        return await self._command_handler._handle_plan_approve(parts=parts, on_event=on_event)
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _handle_plan_reject(self, *, parts: list[str]) -> str:
-        return self._command_handler._handle_plan_reject(parts=parts)
-
-    # ── Context Builder 委托方法 ──────────────────────────────
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _all_tool_names(self) -> list[str]:
-        return self._context_builder._all_tool_names()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _focus_window_refill_reader(
-        self, *, file_path: str, sheet_name: str, range_ref: str,
-    ) -> dict[str, Any]:
-        return self._context_builder._focus_window_refill_reader(
-            file_path=file_path, sheet_name=sheet_name, range_ref=range_ref,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _prepare_system_prompts_for_request(
-        self,
-        skill_contexts: list[str],
-        *,
-        route_result: SkillMatchResult | None = None,
-    ) -> tuple[list[str], str | None]:
-        return self._context_builder._prepare_system_prompts_for_request(
-            skill_contexts, route_result=route_result,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _build_access_notice(self) -> str:
-        return self._context_builder._build_access_notice()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _build_backup_notice(self) -> str:
-        return self._context_builder._build_backup_notice()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _build_mcp_context_notice(self) -> str:
-        return self._context_builder._build_mcp_context_notice()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _build_window_perception_notice(self) -> str:
-        return self._context_builder._build_window_perception_notice()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _build_tool_index_notice(
-        self, *, compact: bool = False, max_tools_per_category: int = 8,
-    ) -> str:
-        return self._context_builder._build_tool_index_notice(
-            compact=compact, max_tools_per_category=max_tools_per_category,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _set_window_perception_turn_hints(
-        self,
-        *,
-        user_message: str,
-        is_new_task: bool,
-        task_tags: tuple[str, ...] | None = None,
-    ) -> None:
-        self._context_builder._set_window_perception_turn_hints(
-            user_message=user_message,
-            is_new_task=is_new_task,
-            task_tags=task_tags,
-        )
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _redirect_backup_paths(
-        self, tool_name: str, arguments: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._context_builder._redirect_backup_paths(tool_name, arguments)
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    def _has_incomplete_tasks(self) -> bool:
-        return self._context_builder._has_incomplete_tasks()
-
-    # 已弃用：转发 wrapper，待测试迁移后删除
-    async def _auto_continue_task_loop(
-        self,
-        route_result: SkillMatchResult,
-        on_event: EventCallback | None,
-        initial_result: "ChatResult",
-    ) -> "ChatResult":
-        return await self._context_builder._auto_continue_task_loop(
-            route_result, on_event, initial_result,
         )
 
 
