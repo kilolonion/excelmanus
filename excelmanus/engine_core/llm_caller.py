@@ -40,6 +40,18 @@ if TYPE_CHECKING:
 logger = get_logger("llm_caller")
 
 
+def _patch_reasoning_content(messages: list[dict]) -> list[dict]:
+    """为所有 assistant 消息补充 reasoning_content 字段（DeepSeek thinking mode 兼容）。"""
+    patched = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            if "reasoning_content" not in msg:
+                msg = dict(msg)
+                msg["reasoning_content"] = ""
+        patched.append(msg)
+    return patched
+
+
 # ── 纯函数 / 静态工具 ──────────────────────────────────────
 
 
@@ -515,6 +527,17 @@ class LLMCaller:
                 except Exception as retry_exc:
                     logger.debug("移除 prompt_cache_key 重试仍失败: %s", retry_exc)
                     exc = retry_exc  # 用重试异常替换原始异常，避免误导
+
+            # DeepSeek thinking mode: assistant 消息必须包含 reasoning_content 字段
+            if "reasoning_content" in str(exc).lower():
+                source_messages = kwargs.get("messages")
+                if isinstance(source_messages, list):
+                    logger.warning("检测到 reasoning_content 缺失，自动补全后重试")
+                    patched = _patch_reasoning_content(source_messages)
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["messages"] = patched
+                    retry_kwargs.pop("prompt_cache_key", None)
+                    return await e._client.chat.completions.create(**retry_kwargs)
 
             if (
                 e._config.system_message_mode == "auto"
