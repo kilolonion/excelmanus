@@ -136,6 +136,21 @@ function getHealthError(caps: ModelCapabilities | null | undefined): string {
   return caps.health_error || caps.probe_errors?.health || "";
 }
 
+function normalizeFetchedCapabilities(caps: ModelCapabilities): ModelCapabilities {
+  // 仅在重新进入页面时清除上次探测的健康失败提示，避免红色告警残留
+  if (caps.healthy !== false && !caps.probe_errors?.health) return caps;
+
+  const nextProbeErrors = { ...(caps.probe_errors || {}) };
+  delete nextProbeErrors.health;
+
+  return {
+    ...caps,
+    healthy: null,
+    health_error: "",
+    probe_errors: nextProbeErrors,
+  };
+}
+
 // ── 普通用户自定义 API 配置面板 ─────────────────────────────
 
 function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
@@ -426,14 +441,21 @@ export function ModelTab() {
   const fetchAllCapabilities = useCallback(async (force = false) => {
     if (!force) {
       const cached = settingsCache.get<Record<string, ModelCapabilities>>("_capsMap");
-      if (cached) { setCapsMap(cached); return; }
+      if (cached) {
+        const normalized: Record<string, ModelCapabilities> = {};
+        for (const [name, caps] of Object.entries(cached)) {
+          normalized[name] = normalizeFetchedCapabilities(caps);
+        }
+        setCapsMap(normalized);
+        return;
+      }
     }
     try {
       const data = await apiGet<{ items: { name: string; model: string; base_url: string; capabilities: ModelCapabilities | null }[] }>("/config/models/capabilities/all");
       const map: Record<string, ModelCapabilities> = {};
       for (const item of data.items) {
         if (item.capabilities) {
-          map[item.name] = item.capabilities;
+          map[item.name] = normalizeFetchedCapabilities(item.capabilities);
         }
       }
       settingsCache.set("_capsMap", map);
@@ -549,7 +571,8 @@ export function ModelTab() {
   useEffect(() => {
     if (isAdmin) {
       fetchConfig();
-      fetchAllCapabilities();
+      // 强制刷新能力探测结果，避免 Tab 切换/重进设置页时沿用旧的失败提示
+      fetchAllCapabilities(true);
       fetchThinkingConfig();
     }
   }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig, isAdmin]);

@@ -60,9 +60,9 @@ Staging / Audit / CoW 版本链，`/undo` 精确回滚到任意操作
 
 ## 🚀 快速开始
 
-### 方式一：一键启动脚本（推荐）
+### 方式一：一键启动（推荐）
 
-最简单的方式，脚本会自动安装依赖、启动后端和前端。
+最简单的方式，自动安装依赖、启动后端和前端。
 
 **第一步：克隆项目**
 
@@ -71,55 +71,48 @@ git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
 ```
 
-**第二步：运行启动脚本**
+**第二步：启动**
 
-```bash
-# macOS / Linux
-./deploy/start.sh
+<details open>
+<summary><b>Windows — 图形化部署工具</b></summary>
 
-# Windows PowerShell
-.\deploy\start.ps1
+双击项目根目录的 `ExcelManusDeployTool.exe` 即可，无需安装任何环境。
 
-# Windows CMD
-deploy\start.bat
-```
+工具会自动打开浏览器，在可视化界面中：
+1. **自动检测环境** — Python、Node.js、npm、Git，缺失时通过 winget 自动安装
+2. **填写 LLM 配置** — API Key、Base URL、模型名称
+3. **点击「启动部署」** — 自动创建虚拟环境、安装依赖、启动前后端服务
 
-脚本会自动完成以下工作：
-- 检测并安装 Python、Node.js 等依赖
-- 安装项目所需的 Python 包和前端模块
+部署完成后浏览器会自动打开 **http://localhost:3000**。
 
-**第三步：按提示填写 API Key**
+> 该工具为零依赖单文件 exe，基于 .NET Framework 4.0（Windows 内置）。源码：`deploy/ExcelManusSetup.cs`。
 
-首次启动时，脚本会交互式提示你填写大模型配置（共 3 项）：
-
-```
-  ========================================
-    首次启动 - 配置 ExcelManus
-  ========================================
-
-  API Key: sk-xxxxxxxxxxxxx
-  Base URL (例: https://api.openai.com/v1): https://your-llm-endpoint/v1
-  Model (例: gpt-4o): gpt-4o
-```
-
-填完后脚本自动创建 `.env` 配置文件并启动服务。**之后再启动无需重复配置。**
-
-启动成功后浏览器会自动打开 **http://localhost:3000**，即可使用 Web UI。
+</details>
 
 <details>
-<summary>常用启动选项</summary>
+<summary><b>macOS / Linux — 启动脚本</b></summary>
+
+```bash
+./deploy/start.sh
+```
+
+首次启动时脚本会交互式提示填写大模型配置（API Key、Base URL、模型名称），之后再启动无需重复配置。
+
+启动成功后浏览器会自动打开 **http://localhost:3000**。
+
+**常用选项：**
 
 ```bash
 ./deploy/start.sh --prod             # 生产模式（性能更好）
 ./deploy/start.sh --backend-port 9000  # 自定义后端端口
 ./deploy/start.sh --workers 4         # 多 worker
-./deploy/start.sh --backend-only      # 只启动后端（不需要前端时）
+./deploy/start.sh --backend-only      # 只启动后端
 ./deploy/start.sh --help              # 查看全部选项
 ```
 
 </details>
 
-**第四步：开始对话**
+**第三步：开始对话**
 
 在 Web UI 或 CLI 中输入自然语言指令：
 
@@ -293,6 +286,23 @@ cd web && npm install && npm run dev    # 前端
 协议详见 [`docs/skillpack_protocol.md`](docs/skillpack_protocol.md)。
 
 ## 🏗️ 部署
+
+### Windows 图形化部署工具
+
+Windows 用户可直接双击运行 `ExcelManusDeployTool.exe`，无需安装任何依赖。
+
+```text
+ExcelManusDeployTool.exe    ← 双击即可
+```
+
+工具会自动打开浏览器，在可视化界面中完成所有部署操作：
+
+- **环境检测** — 自动检查 Python、Node.js、npm、Git，缺失时通过 winget 自动安装
+- **LLM 配置** — 在界面中填写 API Key、Base URL、模型名称
+- **一键部署** — 自动创建虚拟环境、安装后端/前端依赖、启动服务
+- **实时日志** — 所有步骤的输出实时显示在界面中
+
+> 该工具为纯 C# 编译的单文件 exe，基于 .NET Framework 4.0（Windows 内置），零外部依赖。源码位于 `deploy/ExcelManusSetup.cs`，可通过 `deploy/build_exe.bat` 重新编译。
 
 ### Docker Compose（推荐）
 
