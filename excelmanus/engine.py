@@ -1861,13 +1861,22 @@ class AgentEngine:
             parts: list[dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
-            for image in normalized_images:
+
+            if self._is_vision_capable:
+                # 主模型支持视觉：直接注入 image_url
+                for image in normalized_images:
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{image['media_type']};base64,{image['data']}",
+                            "detail": image["detail"],
+                        },
+                    })
+            else:
+                # 主模型不支持视觉：用文本占位，VLM B 通道会单独处理图片描述
                 parts.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{image['media_type']};base64,{image['data']}",
-                        "detail": image["detail"],
-                    },
+                    "type": "text",
+                    "text": f"[已上传 {len(normalized_images)} 张图片，将由视觉模型分析]",
                 })
 
             self._memory.add_user_message(parts if parts else text)
