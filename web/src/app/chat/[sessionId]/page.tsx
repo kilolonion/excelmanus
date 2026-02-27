@@ -11,7 +11,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
-import type { AttachedFile } from "@/lib/types";
+import type { AttachedFile, FileAttachment } from "@/lib/types";
 
 function ChatPage() {
   const params = useParams();
@@ -39,8 +39,8 @@ function ChatPage() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files);
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
+            rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
           }}
           onRetry={(assistantMessageId: string) => {
             retryAssistantMessage(assistantMessageId, sessionId);

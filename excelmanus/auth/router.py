@@ -72,9 +72,17 @@ def _build_token_response(user: UserRecord) -> TokenResponse:
     )
 
 
-def _is_verify_required() -> bool:
-    """当环境变量标志已设置且邮件后端已配置时，需要邮箱验证。"""
+def _is_verify_required(request: Request | None = None) -> bool:
+    """当管理员开关或环境变量标志已设置且邮件后端已配置时，需要邮箱验证。"""
     import os
+    # 优先检查 config_kv（管理员在 UI 中设置的值）
+    if request is not None:
+        store = getattr(request.app.state, "config_store", None)
+        if store is not None:
+            raw = store.get("email_verify_required", "")
+            if raw:
+                return raw.lower() in ("1", "true", "yes") and is_email_configured(store)
+    # 回退到环境变量
     flag = os.environ.get("EXCELMANUS_EMAIL_VERIFY_REQUIRED", "").strip().lower()
     return flag in ("1", "true", "yes") and is_email_configured()
 
@@ -93,13 +101,13 @@ async def register(body: RegisterRequest, request: Request) -> Any:
     existing = store.get_by_email(body.email)
     if existing is not None:
         # 如果已注册但未激活（待验证），允许重新发送
-        if not existing.is_active and _is_verify_required():
+        if not existing.is_active and _is_verify_required(request):
             rate_limiter = _get_rate_limiter(request)
             if rate_limiter:
                 rate_limiter.check_send_code(body.email)
             store.invalidate_verifications(body.email, "register")
             _, code = store.create_verification(body.email, "register")
-            await send_verification_email(body.email, code, "register")
+            await send_verification_email(body.email, code, "register", _get_config_store(request))
             return RegisterPendingResponse(
                 message=f"验证码已重新发送至 {body.email}",
                 email=body.email,
@@ -111,7 +119,7 @@ async def register(body: RegisterRequest, request: Request) -> Any:
 
     # 第一个用户成为管理员
     role = UserRole.ADMIN if store.count_users() == 0 else UserRole.USER
-    verify_required = _is_verify_required()
+    verify_required = _is_verify_required(request)
 
     user = UserRecord(
         email=body.email,
@@ -128,7 +136,7 @@ async def register(body: RegisterRequest, request: Request) -> Any:
         if rate_limiter:
             rate_limiter.check_send_code(body.email)
         _, code = store.create_verification(body.email, "register")
-        await send_verification_email(body.email, code, "register")
+        await send_verification_email(body.email, code, "register", _get_config_store(request))
         return RegisterPendingResponse(
             message=f"验证码已发送至 {body.email}，请在 10 分钟内完成验证",
             email=body.email,
@@ -184,7 +192,7 @@ async def resend_code(body: ResendCodeRequest, request: Request) -> Any:
 
     store.invalidate_verifications(body.email, body.purpose)
     _, code = store.create_verification(body.email, body.purpose)
-    await send_verification_email(body.email, code, body.purpose)  # type: ignore[arg-type]
+    await send_verification_email(body.email, code, body.purpose, _get_config_store(request))  # type: ignore[arg-type]
     return {"message": "验证码已重新发送，请检查邮箱"}
 
 
@@ -200,7 +208,7 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request) -> Any:
     if user is not None and user.is_active and user.password_hash is not None:
         store.invalidate_verifications(body.email, "reset_password")
         _, code = store.create_verification(body.email, "reset_password")
-        await send_verification_email(body.email, code, "reset_password")
+        await send_verification_email(body.email, code, "reset_password", _get_config_store(request))
         logger.info("密码重置验证码已发送: %s", body.email)
 
     # 始终返回相同消息，防止邮箱枚举
@@ -344,9 +352,9 @@ async def get_my_workspace_usage(
 
 
 @router.get("/oauth/github")
-async def oauth_github_redirect() -> Any:
-    state = secrets.token_urlsafe(32)
-    url = github_authorize_url(state=state)
+async def oauth_github_redirect(request: Request) -> Any:
+    state = f"github:{secrets.token_urlsafe(32)}"
+    url = github_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
 
@@ -356,21 +364,22 @@ async def oauth_github_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    info = await github_exchange_code(code)
+    want_json = _wants_json(request)
+    info = await github_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_redirect("GitHub 认证失败")
+        return _oauth_error_response("GitHub 认证失败", want_json)
 
     store = _get_store(request)
-    return _oauth_success_redirect(store, info)
+    return _oauth_success_response(store, info, want_json)
 
 
 # ── OAuth: Google ─────────────────────────────────────────
 
 
 @router.get("/oauth/google")
-async def oauth_google_redirect() -> Any:
-    state = secrets.token_urlsafe(32)
-    url = google_authorize_url(state=state)
+async def oauth_google_redirect(request: Request) -> Any:
+    state = f"google:{secrets.token_urlsafe(32)}"
+    url = google_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
 
@@ -380,26 +389,44 @@ async def oauth_google_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    info = await google_exchange_code(code)
+    want_json = _wants_json(request)
+    info = await google_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_redirect("Google 认证失败")
+        return _oauth_error_response("Google 认证失败", want_json)
 
     store = _get_store(request)
-    return _oauth_success_redirect(store, info)
+    return _oauth_success_response(store, info, want_json)
 
 
-def _oauth_error_redirect(message: str) -> RedirectResponse:
-    """将浏览器重定向到前端回调页面并携带错误信息。"""
+def _wants_json(request: Request) -> bool:
+    """判断客户端是否期望 JSON（API 调用）而非浏览器重定向。"""
+    accept = request.headers.get("accept", "")
+    return "application/json" in accept
+
+
+def _oauth_error_response(message: str, want_json: bool = False):
+    """OAuth 失败：JSON 或重定向。"""
+    if want_json:
+        raise HTTPException(status_code=401, detail=message)
     from urllib.parse import quote
     return RedirectResponse(f"/auth/callback?error={quote(message)}")
 
 
-def _oauth_success_redirect(store: UserStore, info: Any) -> RedirectResponse:
-    """将 OAuth 信息换取 JWT 令牌，然后重定向到前端。"""
+def _oauth_success_response(store: UserStore, info: Any, want_json: bool = False):
+    """将 OAuth 信息换取 JWT 令牌，返回 JSON 或重定向到前端。"""
     try:
         token_resp = _handle_oauth_user(store, info)
     except HTTPException as exc:
-        return _oauth_error_redirect(exc.detail or "认证失败")
+        return _oauth_error_response(exc.detail or "认证失败", want_json)
+
+    if want_json:
+        return JSONResponse({
+            "access_token": token_resp.access_token,
+            "refresh_token": token_resp.refresh_token,
+            "token_type": "bearer",
+            "expires_in": token_resp.expires_in,
+            "user": token_resp.user.model_dump(),
+        })
 
     from urllib.parse import urlencode
     params = urlencode({
@@ -561,3 +588,133 @@ async def admin_enforce_user_quota(
     deleted = ws.enforce_quota()
     usage = ws.get_usage()
     return {"status": "ok", "deleted": deleted, "workspace": usage.to_dict()}
+
+
+# ── 管理员：登录配置 ────────────────────────────────
+
+
+# 布尔开关 key → 默认值
+_LOGIN_TOGGLE_KEYS: dict[str, bool] = {
+    "login_github_enabled": True,
+    "login_google_enabled": True,
+    "email_verify_required": False,
+}
+
+# 字符串凭据 key → 对应环境变量名
+_LOGIN_CREDENTIAL_KEYS: dict[str, str] = {
+    "github_client_id":     "EXCELMANUS_GITHUB_CLIENT_ID",
+    "github_client_secret": "EXCELMANUS_GITHUB_CLIENT_SECRET",
+    "github_redirect_uri":  "EXCELMANUS_GITHUB_REDIRECT_URI",
+    "google_client_id":     "EXCELMANUS_GOOGLE_CLIENT_ID",
+    "google_client_secret": "EXCELMANUS_GOOGLE_CLIENT_SECRET",
+    "google_redirect_uri":  "EXCELMANUS_GOOGLE_REDIRECT_URI",
+    "email_resend_api_key": "EXCELMANUS_RESEND_API_KEY",
+    "email_smtp_host":      "EXCELMANUS_SMTP_HOST",
+    "email_smtp_port":      "EXCELMANUS_SMTP_PORT",
+    "email_smtp_user":      "EXCELMANUS_SMTP_USER",
+    "email_smtp_password":  "EXCELMANUS_SMTP_PASSWORD",
+    "email_from":           "EXCELMANUS_EMAIL_FROM",
+}
+
+# 需要脱敏的 key（GET 时只返回 ****xxxx 格式）
+_SECRET_KEYS = {"github_client_secret", "google_client_secret", "email_resend_api_key", "email_smtp_password"}
+
+
+def _mask_secret(value: str) -> str:
+    """将敏感值脱敏：保留最后 4 位，其余用 * 替代。"""
+    if not value or len(value) <= 4:
+        return "*" * len(value) if value else ""
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+def _get_config_store(request: Request):
+    return getattr(request.app.state, "config_store", None)
+
+
+def get_login_config(request: Request) -> dict[str, Any]:
+    """读取登录配置（开关 + 凭据），config_kv 优先，否则回退环境变量。"""
+    import os
+    store = _get_config_store(request)
+    result: dict[str, Any] = {}
+
+    # 布尔开关
+    for key, default_val in _LOGIN_TOGGLE_KEYS.items():
+        if store is not None:
+            raw = store.get(key, "")
+            if raw:
+                result[key] = raw.lower() in ("1", "true", "yes")
+                continue
+        if key == "email_verify_required":
+            env = os.environ.get("EXCELMANUS_EMAIL_VERIFY_REQUIRED", "").strip().lower()
+            result[key] = env in ("1", "true", "yes") and is_email_configured(store)
+        else:
+            result[key] = default_val
+
+    # 字符串凭据
+    for key, env_name in _LOGIN_CREDENTIAL_KEYS.items():
+        val = ""
+        if store is not None:
+            val = store.get(key, "")
+        if not val:
+            val = os.environ.get(env_name, "").strip()
+        # GET 时脱敏
+        result[key] = _mask_secret(val) if key in _SECRET_KEYS else val
+
+    return result
+
+
+def _get_credential_raw(request: Request, key: str) -> str:
+    """读取凭据原始值（不脱敏），供内部逻辑使用。"""
+    import os
+    store = _get_config_store(request)
+    if store is not None:
+        val = store.get(key, "")
+        if val:
+            return val
+    env_name = _LOGIN_CREDENTIAL_KEYS.get(key, "")
+    return os.environ.get(env_name, "").strip() if env_name else ""
+
+
+@router.get("/admin/login-config")
+async def admin_get_login_config(
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """获取登录方式配置（GitHub/Google/邮箱验证 + 凭据）。"""
+    return get_login_config(request)
+
+
+@router.put("/admin/login-config")
+async def admin_update_login_config(
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """更新登录方式配置。"""
+    store = _get_config_store(request)
+    if store is None:
+        raise HTTPException(503, "配置存储未初始化")
+
+    body = await request.json()
+    updated: dict[str, Any] = {}
+
+    # 布尔开关
+    for key in _LOGIN_TOGGLE_KEYS:
+        if key in body:
+            val = bool(body[key])
+            store.set(key, "true" if val else "false")
+            updated[key] = val
+
+    # 字符串凭据（跳过脱敏占位值，即全是 * 的值）
+    for key in _LOGIN_CREDENTIAL_KEYS:
+        if key in body:
+            val = str(body[key]).strip()
+            # 如果前端回传的是脱敏值，跳过不写入
+            if val and not all(c == "*" for c in val):
+                store.set(key, val)
+                updated[key] = _mask_secret(val) if key in _SECRET_KEYS else val
+
+    if not updated:
+        raise HTTPException(400, "无有效更新字段")
+
+    logger.info("管理员更新登录配置: %s", {k: v for k, v in updated.items() if k not in _SECRET_KEYS})
+    return {"status": "ok", **get_login_config(request)}

@@ -198,23 +198,30 @@ async def _send_via_smtp(
 # ── 公开 API ─────────────────────────────────────────────
 
 
-async def send_verification_email(to: str, code: str, purpose: PurposeType) -> bool:
+def _cfg(key: str, env_key: str, config_store=None, default: str = "") -> str:
+    """从 config_kv 或环境变量读取配置值。"""
+    if config_store is not None:
+        val = config_store.get(key, "")
+        if val:
+            return val
+    return os.environ.get(env_key, default).strip()
+
+
+async def send_verification_email(to: str, code: str, purpose: PurposeType, config_store=None) -> bool:
     """发送验证码邮件。
 
     成功返回 True，失败返回 False（由调用方决定是否抛出异常）。
     """
-    resend_key = os.environ.get("EXCELMANUS_RESEND_API_KEY", "").strip()
-    smtp_host = os.environ.get("EXCELMANUS_SMTP_HOST", "").strip()
+    resend_key = _cfg("email_resend_api_key", "EXCELMANUS_RESEND_API_KEY", config_store)
+    smtp_host = _cfg("email_smtp_host", "EXCELMANUS_SMTP_HOST", config_store)
 
     subject = _PURPOSE_SUBJECTS.get(purpose, "ExcelManus 验证码")
     html = _make_html(code, purpose)
     text = _make_text(code, purpose)
 
     if resend_key:
-        from_addr = os.environ.get(
-            "EXCELMANUS_EMAIL_FROM",
-            "ExcelManus <onboarding@resend.dev>",
-        )
+        from_addr = _cfg("email_from", "EXCELMANUS_EMAIL_FROM", config_store,
+                         "ExcelManus <onboarding@resend.dev>")
         try:
             await _send_via_resend(resend_key, from_addr, to, subject, html, text)
             return True
@@ -224,13 +231,11 @@ async def send_verification_email(to: str, code: str, purpose: PurposeType) -> b
                 return False
 
     if smtp_host:
-        port = int(os.environ.get("EXCELMANUS_SMTP_PORT", "465"))
-        user = os.environ.get("EXCELMANUS_SMTP_USER", "")
-        password = os.environ.get("EXCELMANUS_SMTP_PASSWORD", "")
-        from_addr = os.environ.get(
-            "EXCELMANUS_EMAIL_FROM",
-            f"ExcelManus <{user}>",
-        )
+        port = int(_cfg("email_smtp_port", "EXCELMANUS_SMTP_PORT", config_store, "465"))
+        user = _cfg("email_smtp_user", "EXCELMANUS_SMTP_USER", config_store)
+        password = _cfg("email_smtp_password", "EXCELMANUS_SMTP_PASSWORD", config_store)
+        from_addr = _cfg("email_from", "EXCELMANUS_EMAIL_FROM", config_store,
+                         f"ExcelManus <{user}>")
         try:
             await _send_via_smtp(smtp_host, port, user, password, from_addr,
                                   to, subject, html, text)
@@ -248,9 +253,9 @@ async def send_verification_email(to: str, code: str, purpose: PurposeType) -> b
     return False
 
 
-def is_email_configured() -> bool:
+def is_email_configured(config_store=None) -> bool:
     """如果至少配置了一个邮件后端，返回 True。"""
     return bool(
-        os.environ.get("EXCELMANUS_RESEND_API_KEY", "").strip()
-        or os.environ.get("EXCELMANUS_SMTP_HOST", "").strip()
+        _cfg("email_resend_api_key", "EXCELMANUS_RESEND_API_KEY", config_store)
+        or _cfg("email_smtp_host", "EXCELMANUS_SMTP_HOST", config_store)
     )

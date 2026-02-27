@@ -34,15 +34,22 @@ GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 
 
-def get_github_config() -> tuple[str, str, str]:
-    client_id = os.environ.get("EXCELMANUS_GITHUB_CLIENT_ID", "")
-    client_secret = os.environ.get("EXCELMANUS_GITHUB_CLIENT_SECRET", "")
-    redirect_uri = os.environ.get("EXCELMANUS_GITHUB_REDIRECT_URI", "")
+def get_github_config(config_store=None) -> tuple[str, str, str]:
+    def _val(kv_key: str, env_key: str) -> str:
+        if config_store is not None:
+            v = config_store.get(kv_key, "")
+            if v:
+                return v
+        return os.environ.get(env_key, "")
+
+    client_id = _val("github_client_id", "EXCELMANUS_GITHUB_CLIENT_ID")
+    client_secret = _val("github_client_secret", "EXCELMANUS_GITHUB_CLIENT_SECRET")
+    redirect_uri = _val("github_redirect_uri", "EXCELMANUS_GITHUB_REDIRECT_URI")
     return client_id, client_secret, redirect_uri
 
 
-def github_authorize_url(state: str | None = None) -> str:
-    client_id, _, redirect_uri = get_github_config()
+def github_authorize_url(state: str | None = None, config_store=None) -> str:
+    client_id, _, redirect_uri = get_github_config(config_store)
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -50,12 +57,12 @@ def github_authorize_url(state: str | None = None) -> str:
     }
     if state:
         params["state"] = state
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{GITHUB_AUTHORIZE_URL}?{qs}"
+    from urllib.parse import urlencode
+    return f"{GITHUB_AUTHORIZE_URL}?{urlencode(params)}"
 
 
-async def github_exchange_code(code: str) -> OAuthUserInfo | None:
-    client_id, client_secret, redirect_uri = get_github_config()
+async def github_exchange_code(code: str, config_store=None) -> OAuthUserInfo | None:
+    client_id, client_secret, redirect_uri = get_github_config(config_store)
     if not client_id or not client_secret:
         logger.warning("GitHub OAuth not configured")
         return None
@@ -120,15 +127,22 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
-def get_google_config() -> tuple[str, str, str]:
-    client_id = os.environ.get("EXCELMANUS_GOOGLE_CLIENT_ID", "")
-    client_secret = os.environ.get("EXCELMANUS_GOOGLE_CLIENT_SECRET", "")
-    redirect_uri = os.environ.get("EXCELMANUS_GOOGLE_REDIRECT_URI", "")
+def get_google_config(config_store=None) -> tuple[str, str, str]:
+    def _val(kv_key: str, env_key: str) -> str:
+        if config_store is not None:
+            v = config_store.get(kv_key, "")
+            if v:
+                return v
+        return os.environ.get(env_key, "")
+
+    client_id = _val("google_client_id", "EXCELMANUS_GOOGLE_CLIENT_ID")
+    client_secret = _val("google_client_secret", "EXCELMANUS_GOOGLE_CLIENT_SECRET")
+    redirect_uri = _val("google_redirect_uri", "EXCELMANUS_GOOGLE_REDIRECT_URI")
     return client_id, client_secret, redirect_uri
 
 
-def google_authorize_url(state: str | None = None) -> str:
-    client_id, _, redirect_uri = get_google_config()
+def google_authorize_url(state: str | None = None, config_store=None) -> str:
+    client_id, _, redirect_uri = get_google_config(config_store)
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -138,12 +152,12 @@ def google_authorize_url(state: str | None = None) -> str:
     }
     if state:
         params["state"] = state
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{GOOGLE_AUTHORIZE_URL}?{qs}"
+    from urllib.parse import urlencode
+    return f"{GOOGLE_AUTHORIZE_URL}?{urlencode(params)}"
 
 
-async def google_exchange_code(code: str) -> OAuthUserInfo | None:
-    client_id, client_secret, redirect_uri = get_google_config()
+async def google_exchange_code(code: str, config_store=None) -> OAuthUserInfo | None:
+    client_id, client_secret, redirect_uri = get_google_config(config_store)
     if not client_id or not client_secret:
         logger.warning("Google OAuth not configured")
         return None

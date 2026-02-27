@@ -101,61 +101,10 @@ def read_image(*, file_path: str, detail: str = "auto") -> str:
 def _infer_number_format(display_text: str) -> str | None:
     """从 display_text 推断 Excel number_format。
 
-    示例:
-        "12.50"    → "#,##0.00"
-        "85%"      → "0%"
-        "12.5%"    → "0.0%"
-        "$1,200"   → "$#,##0"
-        "¥1,200.00" → "¥#,##0.00"
-        "1,200"    → "#,##0"
+    委托给共享模块 ``excelmanus.format_utils``。
     """
-    import re as _re
-
-    text = display_text.strip()
-    if not text:
-        return None
-
-    # 百分数
-    pct_match = _re.match(r'^-?[\d,]+(\.\d+)?%$', text)
-    if pct_match:
-        decimals = len(pct_match.group(1)[1:]) if pct_match.group(1) else 0
-        return f"0.{'0' * decimals}%" if decimals else "0%"
-
-    # 货币前缀
-    currency_prefix = ""
-    for sym in ("$", "¥", "€", "£", "₩"):
-        if text.startswith(sym):
-            currency_prefix = sym
-            text = text[len(sym):].strip()
-            break
-        # 也处理尾缀（如 "1,200 元"）— 暂不处理
-
-    # 负号
-    text = text.lstrip("-").strip()
-
-    # 千分位 + 小数
-    num_match = _re.match(r'^[\d,]+(\.\d+)?$', text)
-    if num_match:
-        has_comma = "," in text
-        decimal_part = num_match.group(1)
-        decimals = len(decimal_part[1:]) if decimal_part else 0
-
-        if has_comma and decimals > 0:
-            fmt = f"#,##0.{'0' * decimals}"
-        elif has_comma:
-            fmt = "#,##0"
-        elif decimals > 0:
-            fmt = f"0.{'0' * decimals}"
-        else:
-            return None  # 纯整数不需要特殊格式
-
-        return f"{currency_prefix}{fmt}" if currency_prefix else fmt
-
-    # 仅货币前缀 + 纯数字（无千分位）
-    if currency_prefix:
-        return f"{currency_prefix}#,##0"
-
-    return None
+    from excelmanus.format_utils import infer_number_format
+    return infer_number_format(display_text)
 
 
 def rebuild_excel_from_spec(*, spec_path: str, output_path: str = "outputs/draft.xlsx") -> str:
@@ -713,7 +662,12 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_image",
-            description="读取本地图片文件并加载到视觉上下文（png/jpg/gif/bmp/webp）",
+            description=(
+                "读取本地图片文件并加载到视觉上下文（png/jpg/gif/bmp/webp）。"
+                "适用场景：查看图片内容、分析截图中的文字或数据、确认图表样式。"
+                "不适用：需要将图片中的表格还原为 Excel（改用 extract_table_spec → rebuild_excel_from_spec 工具链）。"
+                "相关工具：extract_table_spec（从图片提取表格结构）、rebuild_excel_from_spec（编译为 Excel）。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -737,7 +691,12 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="rebuild_excel_from_spec",
-            description="从 ReplicaSpec JSON 编译为 Excel 文件",
+            description=(
+                "从 ReplicaSpec JSON 确定性编译为 Excel 文件。"
+                "适用场景：将 extract_table_spec 提取的表格规格编译为真实 Excel 文件。"
+                "不适用：从零创建 Excel（改用 run_code + openpyxl）。"
+                "工具链：read_image → extract_table_spec → rebuild_excel_from_spec → verify_excel_replica。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -759,7 +718,12 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="verify_excel_replica",
-            description="验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
+            description=(
+                "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告。"
+                "适用场景：rebuild_excel_from_spec 后校验产出物是否与规格一致。"
+                "不适用：普通数据校验（改用 run_code + pandas 比较）。"
+                "工具链：rebuild_excel_from_spec 之后调用本工具验证。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -787,7 +751,7 @@ def get_tools() -> list[ToolDef]:
             name="extract_table_spec",
             description=(
                 "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON。"
-                "支持多表格检测，采用两阶段 VLM 提取（数据 + 样式）。"
+                "支持多表格检测，采用 4 阶段渐进式 VLM 提取（骨架 → 数据 → 样式 → 校验）。"
             ),
             input_schema={
                 "type": "object",

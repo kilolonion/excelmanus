@@ -295,17 +295,27 @@ _file_registries: dict[str, Any] = {}  # workspace_root → FileRegistry（上�
 _router = APIRouter()
 
 
-def _get_file_registry(workspace_root: str) -> Any:
-    """获取或懒创建指定工作区的 FileRegistry 实例。"""
+def _get_file_registry(workspace_root: str, *, user_id: str | None = None) -> Any:
+    """获取或懒创建指定工作区的 FileRegistry 实例。
+
+    ISO-3: 当 user_id 非空时使用 ScopedDatabase 创建 FileRegistry，
+    确保 SQLite 模式下读写用户独立的 data.db。
+    """
     if _database is None:
         return None
-    reg = _file_registries.get(workspace_root)
+    cache_key = f"{workspace_root}:{user_id or ''}"
+    reg = _file_registries.get(cache_key)
     if reg is not None:
         return reg
     try:
         from excelmanus.file_registry import FileRegistry
-        reg = FileRegistry(_database, workspace_root)
-        _file_registries[workspace_root] = reg
+        db_conn = _database
+        if user_id is not None and _config is not None:
+            from excelmanus.user_scope import UserScope
+            scope = UserScope.create(user_id, _database, _config.workspace_root)
+            db_conn = scope.scoped_db
+        reg = FileRegistry(db_conn, workspace_root)
+        _file_registries[cache_key] = reg
         return reg
     except Exception:
         logger.debug("FileRegistry 创建失败 (%s)", workspace_root, exc_info=True)
@@ -752,6 +762,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         logger.debug("清除 .env 中 EXCELMANUS_MODELS 失败", exc_info=True)
                     os.environ.pop("EXCELMANUS_MODELS", None)
         _sync_config_profiles_from_db()
+        app.state.config_store = _config_store
         logger.info("ConfigStore 已初始化")
 
     # 初始化会话管理器
@@ -2643,6 +2654,7 @@ def _resolve_excel_path(
     session_id: str | None = None,
     *,
     workspace_root: str | None = None,
+    user_id: str | None = None,
 ) -> str | None:
     """将相对/绝对路径解析为安全的绝对路径。
 
@@ -2677,7 +2689,7 @@ def _resolve_excel_path(
         return None
 
     if session_id and _session_manager is not None:
-        engine = _session_manager.get_engine(session_id)
+        engine = _session_manager.get_engine(session_id, user_id=user_id)
         if engine is not None and engine.backup_enabled:
             tx = engine.transaction
             if tx is not None:
@@ -2807,7 +2819,8 @@ async def get_file_registry(request: Request) -> JSONResponse:
     assert _config is not None, "服务未初始化"
 
     ws_root = _resolve_workspace_root(request)
-    registry = _get_file_registry(ws_root)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
     if registry is None:
         return JSONResponse(content={"files": [], "total": 0})
 
@@ -2867,7 +2880,8 @@ async def get_excel_file(request: Request) -> StreamingResponse:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
     ws_root = _resolve_workspace_root(request)
-    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
+    _iso_uid = _get_isolation_user_id(request)
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")  # type: ignore[return-value]
 
@@ -2973,7 +2987,8 @@ async def download_file(request: Request) -> StreamingResponse:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
     ws_root = _resolve_workspace_root(request)
-    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
+    _iso_uid = _get_isolation_user_id(request)
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")  # type: ignore[return-value]
 
@@ -3019,7 +3034,8 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         return _error_json_response(400, "缺少 path 参数")
 
     ws_root = _resolve_workspace_root(request)
-    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
+    _iso_uid = _get_isolation_user_id(request)
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")
 
@@ -3173,14 +3189,15 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
     ws_root = _resolve_workspace_root(raw_request)
 
     # 先解析原始路径（不经过 backup 重定向），用于 ensure_backup
-    resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root)
+    _iso_uid = _get_isolation_user_id(raw_request)
+    resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
 
     # 备份模式下，写操作需要 ensure_backup（创建备份副本如果尚不存在），
     # 然后写入备份副本而非原始文件
     if request.session_id and _session_manager is not None:
-        engine = _session_manager.get_engine(request.session_id)
+        engine = _session_manager.get_engine(request.session_id, user_id=_iso_uid)
         if engine is not None and engine.backup_enabled:
             tx = engine.transaction
             if tx is not None:
@@ -3300,7 +3317,7 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
 
     # 注册到 FileRegistry
-    registry = _get_file_registry(str(ws.root_dir))
+    registry = _get_file_registry(str(ws.root_dir), user_id=user_id)
     if registry is not None:
         try:
             registry.register_upload(
@@ -5300,9 +5317,12 @@ async def list_global_rules() -> list[dict]:
 
 
 @_router.post("/api/v1/rules")
-async def create_global_rule(req: RuleCreateRequest) -> dict:
+async def create_global_rule(req: RuleCreateRequest, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error  # type: ignore[return-value]
     if not req.content.strip():
         return JSONResponse(status_code=400, content={"detail": "规则内容不能为空"})  # type: ignore[return-value]
     r = _rules_manager.add_global_rule(req.content)
@@ -5310,9 +5330,12 @@ async def create_global_rule(req: RuleCreateRequest) -> dict:
 
 
 @_router.patch("/api/v1/rules/{rule_id}")
-async def update_global_rule(rule_id: str, req: RuleUpdateRequest) -> dict:
+async def update_global_rule(rule_id: str, req: RuleUpdateRequest, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error  # type: ignore[return-value]
     r = _rules_manager.update_global_rule(rule_id, content=req.content, enabled=req.enabled)
     if r is None:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -5320,9 +5343,12 @@ async def update_global_rule(rule_id: str, req: RuleUpdateRequest) -> dict:
 
 
 @_router.delete("/api/v1/rules/{rule_id}")
-async def delete_global_rule(rule_id: str) -> dict:
+async def delete_global_rule(rule_id: str, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error  # type: ignore[return-value]
     ok = _rules_manager.delete_global_rule(rule_id)
     if not ok:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -5333,8 +5359,10 @@ async def delete_global_rule(rule_id: str) -> dict:
 
 
 @_router.get("/api/v1/sessions/{session_id}/rules")
-async def list_session_rules(session_id: str) -> list[dict]:
+async def list_session_rules(session_id: str, request: Request) -> list[dict]:
     if _rules_manager is None:
+        return []
+    if not await _has_session_access(session_id, request):
         return []
     return [
         {"id": r.id, "content": r.content, "enabled": r.enabled, "created_at": r.created_at}
@@ -5343,9 +5371,11 @@ async def list_session_rules(session_id: str) -> list[dict]:
 
 
 @_router.post("/api/v1/sessions/{session_id}/rules")
-async def create_session_rule(session_id: str, req: RuleCreateRequest) -> dict:
+async def create_session_rule(session_id: str, req: RuleCreateRequest, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    if not await _has_session_access(session_id, request):
+        return JSONResponse(status_code=404, content={"detail": "会话不存在"})  # type: ignore[return-value]
     if not req.content.strip():
         return JSONResponse(status_code=400, content={"detail": "规则内容不能为空"})  # type: ignore[return-value]
     r = _rules_manager.add_session_rule(session_id, req.content)
@@ -5355,9 +5385,11 @@ async def create_session_rule(session_id: str, req: RuleCreateRequest) -> dict:
 
 
 @_router.patch("/api/v1/sessions/{session_id}/rules/{rule_id}")
-async def update_session_rule(session_id: str, rule_id: str, req: RuleUpdateRequest) -> dict:
+async def update_session_rule(session_id: str, rule_id: str, req: RuleUpdateRequest, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    if not await _has_session_access(session_id, request):
+        return JSONResponse(status_code=404, content={"detail": "会话不存在"})  # type: ignore[return-value]
     r = _rules_manager.update_session_rule(session_id, rule_id, content=req.content, enabled=req.enabled)
     if r is None:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -5365,9 +5397,11 @@ async def update_session_rule(session_id: str, rule_id: str, req: RuleUpdateRequ
 
 
 @_router.delete("/api/v1/sessions/{session_id}/rules/{rule_id}")
-async def delete_session_rule(session_id: str, rule_id: str) -> dict:
+async def delete_session_rule(session_id: str, rule_id: str, request: Request) -> dict:
     if _rules_manager is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
+    if not await _has_session_access(session_id, request):
+        return JSONResponse(status_code=404, content={"detail": "会话不存在"})  # type: ignore[return-value]
     ok = _rules_manager.delete_session_rule(session_id, rule_id)
     if not ok:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -5417,9 +5451,11 @@ async def list_memory_entries(request: Request, category: str | None = None) -> 
                 for e in entries
             ]
         except Exception:
-            logger.debug("从用户隔离数据库读取记忆失败，回退到全局", exc_info=True)
+            logger.debug("从用户隔离数据库读取记忆失败", exc_info=True)
+            # ISO-6: 多租户模式下不回退到全局共享实例，防止跨用户泄露
+            return []
 
-    # 回退到全局 FileMemoryBackend
+    # 仅在匿名模式（单用户）下回退到全局 FileMemoryBackend
     if _api_persistent_memory is None:
         return []
     entries = _api_persistent_memory.list_entries(cat)
@@ -5449,9 +5485,11 @@ async def delete_memory_entry(entry_id: str, request: Request) -> dict:
                 return JSONResponse(status_code=404, content={"detail": "记忆条目不存在"})  # type: ignore[return-value]
             return {"status": "deleted"}
         except Exception:
-            logger.debug("从用户隔离数据库删除记忆失败，回退到全局", exc_info=True)
+            logger.debug("从用户隔离数据库删除记忆失败", exc_info=True)
+            # ISO-6: 多租户模式下不回退到全局共享实例
+            return JSONResponse(status_code=500, content={"detail": "记忆删除失败"})  # type: ignore[return-value]
 
-    # 回退到全局
+    # 仅在匿名模式下回退到全局
     if _api_persistent_memory is None:
         return JSONResponse(status_code=503, content={"detail": "记忆功能未启用"})  # type: ignore[return-value]
     ok = _api_persistent_memory.delete_entry(entry_id)
@@ -5485,6 +5523,22 @@ async def health(request: Request) -> dict:
 
     auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
+    # 登录方式配置（供前端登录/注册页动态渲染）
+    login_methods = {
+        "github_enabled": True,
+        "google_enabled": True,
+        "email_verify_required": False,
+    }
+    if auth_enabled:
+        try:
+            from excelmanus.auth.router import get_login_config
+            lc = get_login_config(request)
+            login_methods["github_enabled"] = lc.get("login_github_enabled", True)
+            login_methods["google_enabled"] = lc.get("login_google_enabled", True)
+            login_methods["email_verify_required"] = lc.get("email_verify_required", False)
+        except Exception:
+            pass
+
     return {
         "status": "ok",
         "version": excelmanus.__version__,
@@ -5493,6 +5547,7 @@ async def health(request: Request) -> dict:
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
         "auth_enabled": auth_enabled,
+        "login_methods": login_methods,
         "session_isolation_enabled": getattr(request.app.state, "session_isolation_enabled", False),
         "docker_sandbox_enabled": getattr(request.app.state, "docker_sandbox_enabled", False),
     }

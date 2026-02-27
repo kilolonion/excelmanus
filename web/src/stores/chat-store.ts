@@ -748,6 +748,11 @@ interface ChatState {
   appendBlock: (messageId: string, block: AssistantBlock) => void;
   updateLastBlock: (messageId: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
   updateBlockByType: (messageId: string, blockType: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
+  updateSubagentBlock: (
+    messageId: string,
+    conversationId: string | null,
+    updater: (block: AssistantBlock) => AssistantBlock,
+  ) => void;
   updateToolCallBlock: (
     messageId: string,
     toolCallId: string | null,
@@ -818,6 +823,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const realIdx = m.blocks.length - 1 - idx;
         const blocks = [...m.blocks];
         blocks[realIdx] = updater(blocks[realIdx]);
+        return { ...m, blocks };
+      }),
+    })),
+  updateSubagentBlock: (messageId, conversationId, updater) =>
+    set((state) => ({
+      messages: state.messages.map((m) => {
+        if (m.id !== messageId || m.role !== "assistant") return m;
+        // 按 conversationId 精准匹配；无 id 时回退到最后一个 running subagent block
+        let targetIdx = -1;
+        if (conversationId) {
+          for (let i = m.blocks.length - 1; i >= 0; i--) {
+            const b = m.blocks[i];
+            if (b.type === "subagent" && b.conversationId === conversationId) {
+              targetIdx = i;
+              break;
+            }
+          }
+        }
+        if (targetIdx === -1) {
+          for (let i = m.blocks.length - 1; i >= 0; i--) {
+            const b = m.blocks[i];
+            if (b.type === "subagent" && b.status === "running") {
+              targetIdx = i;
+              break;
+            }
+          }
+        }
+        if (targetIdx === -1) {
+          // 最终回退：最后一个 subagent block
+          for (let i = m.blocks.length - 1; i >= 0; i--) {
+            if (m.blocks[i].type === "subagent") { targetIdx = i; break; }
+          }
+        }
+        if (targetIdx === -1) return m;
+        const blocks = [...m.blocks];
+        blocks[targetIdx] = updater(blocks[targetIdx]);
         return { ...m, blocks };
       }),
     })),

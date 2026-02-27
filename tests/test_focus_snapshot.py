@@ -1,4 +1,4 @@
-"""focus_window 方案 B 回归测试：预览快照 + enrich 管道对齐。"""
+"""focus_window 回归测试：预览快照 + enrich 管道对齐。"""
 
 from __future__ import annotations
 

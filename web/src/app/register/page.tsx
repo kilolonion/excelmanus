@@ -7,6 +7,7 @@ import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X, MailCheck } 
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { register, verifyEmail, resendCode, getOAuthUrl } from "@/lib/auth-api";
+import { useAuthConfigStore } from "@/stores/auth-config-store";
 
 const cardVariants = {
   hidden: { opacity: 0, y: 24 },
@@ -255,6 +256,10 @@ export default function RegisterPage() {
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [agreed, setAgreed] = useState(false);
   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const loginMethods = useAuthConfigStore((s) => s.loginMethods);
+  const githubEnabled = loginMethods.github_enabled;
+  const googleEnabled = loginMethods.google_enabled;
+  const showOAuthSection = githubEnabled || googleEnabled;
 
   const strength = useMemo(() => getPasswordStrength(password), [password]);
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -498,50 +503,58 @@ export default function RegisterPage() {
         </form>
 
         {/* Divider */}
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-border" />
+        {showOAuthSection && (
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-border" />
+            </div>
+            <div className="relative flex justify-center text-xs">
+              <span className="bg-gradient-to-b from-background to-muted/30 px-3 text-muted-foreground">
+                或使用第三方账号
+              </span>
+            </div>
           </div>
-          <div className="relative flex justify-center text-xs">
-            <span className="bg-gradient-to-b from-background to-muted/30 px-3 text-muted-foreground">
-              或使用第三方账号
-            </span>
-          </div>
-        </div>
+        )}
 
         {/* OAuth */}
-        <div className="grid grid-cols-2 gap-3">
-          <Button
-            variant="outline"
-            className="h-11 font-normal"
-            disabled={oauthLoading !== null}
-            onClick={() => handleOAuth("github")}
-          >
-            {oauthLoading === "github" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                <Github className="h-4 w-4 mr-2" />
-                GitHub
-              </>
+        {showOAuthSection && (
+          <div className={`grid gap-3 ${githubEnabled && googleEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
+            {githubEnabled && (
+              <Button
+                variant="outline"
+                className="h-11 font-normal"
+                disabled={oauthLoading !== null}
+                onClick={() => handleOAuth("github")}
+              >
+                {oauthLoading === "github" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Github className="h-4 w-4 mr-2" />
+                    GitHub
+                  </>
+                )}
+              </Button>
             )}
-          </Button>
-          <Button
-            variant="outline"
-            className="h-11 font-normal"
-            disabled={oauthLoading !== null}
-            onClick={() => handleOAuth("google")}
-          >
-            {oauthLoading === "google" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                <Mail className="h-4 w-4 mr-2" />
-                Google
-              </>
+            {googleEnabled && (
+              <Button
+                variant="outline"
+                className="h-11 font-normal"
+                disabled={oauthLoading !== null}
+                onClick={() => handleOAuth("google")}
+              >
+                {oauthLoading === "google" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Mail className="h-4 w-4 mr-2" />
+                    Google
+                  </>
+                )}
+              </Button>
             )}
-          </Button>
-        </div>
+          </div>
+        )}
 
         {/* Footer */}
         <p className="text-center text-sm text-muted-foreground">

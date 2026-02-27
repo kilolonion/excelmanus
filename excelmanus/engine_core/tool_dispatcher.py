@@ -17,6 +17,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.engine_core.tool_errors import (
+    DEFAULT_RETRY_POLICY,
+    ToolErrorKind,
+    classify_tool_error,
+    compact_error,
+)
 from excelmanus.engine_core.workspace_probe import (
     collect_workspace_mtime_index,
     has_workspace_mtime_changes,
@@ -33,6 +39,7 @@ class _ToolExecOutcome:
     result_str: str
     success: bool
     error: str | None = None
+    error_kind: str | None = None  # ToolErrorKind.value: retryable/permanent/needs_human/overflow
     pending_approval: bool = False
     approval_id: str | None = None
     audit_record: Any = None
@@ -129,13 +136,12 @@ def _parse_vlm_json(text: str, *, try_repair: bool = False) -> dict[str, Any] | 
             continue
         if isinstance(data, dict):
             return data
-    # ── 截断修复：始终尝试补全未闭合的括号（不再仅限 try_repair=True）──
-    if left >= 0:
-        if not try_repair:
-            logger.info(
-                "JSON 直接解析失败（%d 字符），尝试截断修复",
-                len(content),
-            )
+    # ── 截断修复：仅当 try_repair=True 时补全未闭合的括号 ──
+    if try_repair and left >= 0:
+        logger.info(
+            "JSON 直接解析失败（%d 字符），尝试截断修复",
+            len(content),
+        )
         return _repair_truncated_json(content[left:])
     return None
 
@@ -217,6 +223,30 @@ def _repair_truncated_json(fragment: str) -> dict[str, Any] | None:
     return None
 
 
+def _image_content_hash(raw_bytes: bytes) -> str:
+    """计算图片内容的稳定 hash（全文 sha256，截取前 16 hex）。
+
+    所有图片去重 / B 通道缓存 / provenance 均应使用此函数，
+    确保同一张图片在不同代码路径产生相同 hash。
+    """
+    import hashlib
+    return hashlib.sha256(raw_bytes).hexdigest()[:16]
+
+
+def _image_content_hash_b64(b64_str: str) -> str:
+    """从 base64 编码字符串计算图片内容 hash（先解码为原始字节）。
+
+    如果 base64 解码失败（如数据不完整），回退到直接 hash 字符串字节。
+    """
+    import base64 as _b64
+    try:
+        raw = _b64.b64decode(b64_str, validate=True)
+    except Exception:
+        # 容错：无法解码时直接 hash 原始字符串
+        raw = b64_str.encode("utf-8") if isinstance(b64_str, str) else b64_str
+    return _image_content_hash(raw)
+
+
 class ToolDispatcher:
     """工具调度器：参数解析、分支路由、执行、审计。"""
 
@@ -224,6 +254,11 @@ class ToolDispatcher:
         self._engine = engine
         self._pending_vlm_image: dict | None = None
         self._deferred_image_injections: list[dict[str, Any]] = []
+        # 已注入图片的 hash 集合（用于去重）
+        self._injected_image_hashes: set[str] = set()
+        # B 通道最后一次 VLM 描述缓存（供 Pipeline 结构阶段复用）
+        self._last_vlm_description: str | None = None
+        self._last_vlm_description_image_hash: str | None = None
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
         if db is not None:
@@ -233,7 +268,7 @@ class ToolDispatcher:
             except Exception:
                 logger.debug("工具调用审计日志初始化失败", exc_info=True)
 
-        # ── 策略处理器表（Phase 4d）──
+        # ── 策略处理器表 ──
         from excelmanus.engine_core.tool_handlers import (
             AskUserHandler,
             AuditOnlyHandler,
@@ -368,13 +403,20 @@ class ToolDispatcher:
             # 不能在此处直接调用 add_image_message，否则会在 assistant(tool_calls)
             # 和 tool(responses) 之间插入 user 消息，导致 API 400 错误。
             if e.is_vision_capable:
-                self._deferred_image_injections.append({
-                    "base64": injection["base64"],
-                    "mime_type": injection.get("mime_type", "image/png"),
-                    "detail": injection.get("detail", "auto"),
-                })
-                logger.info("C 通道: 图片已缓存待注入 (mime=%s)", injection.get("mime_type"))
-                parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
+                # 图片去重：检测同一图片是否已注入过
+                _img_hash = _image_content_hash_b64(injection["base64"])
+                if _img_hash in self._injected_image_hashes:
+                    logger.info("C 通道: 图片已在上下文中 (hash=%s)，跳过重复注入", _img_hash)
+                    parsed["hint"] = "图片已在视觉上下文中，无需重复注入。"
+                else:
+                    self._deferred_image_injections.append({
+                        "base64": injection["base64"],
+                        "mime_type": injection.get("mime_type", "image/png"),
+                        "detail": injection.get("detail", "auto"),
+                    })
+                    self._injected_image_hashes.add(_img_hash)
+                    logger.info("C 通道: 图片已缓存待注入 (hash=%s, mime=%s)", _img_hash, injection.get("mime_type"))
+                    parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
             else:
                 logger.info("主模型无视觉能力，跳过图片注入")
                 parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
@@ -482,6 +524,12 @@ class ToolDispatcher:
             return None
 
         logger.info("B 通道 VLM 描述完成: %d 字符", len(raw_text))
+        # 缓存 B 通道描述，供 Pipeline 结构阶段复用
+        self._last_vlm_description = raw_text
+        _b64_str = injection.get("base64", "")
+        self._last_vlm_description_image_hash = (
+            _image_content_hash_b64(_b64_str) if _b64_str else None
+        )
         return raw_text
 
     async def _call_vlm_with_retry(
@@ -721,169 +769,6 @@ class ToolDispatcher:
             "file_path": file_path,
         }, ensure_ascii=False)
 
-    async def _run_vlm_extract_spec(
-        self,
-        *,
-        image_b64: str,
-        mime: str,
-        file_path: str,
-        output_path: str,
-        skip_style: bool = False,
-    ) -> str:
-        """两阶段 VLM 结构化提取：image → ReplicaSpec JSON 文件。
-
-        Phase 1 (data mode): 提取表格结构和数据
-        Phase 2 (style mode): 提取样式信息（可选，失败时优雅降级）
-        """
-        import base64
-        import hashlib
-        from datetime import datetime, timezone
-        from pathlib import Path
-
-        from excelmanus.vision_extractor import (
-            build_extract_data_prompt,
-            build_extract_style_prompt,
-            build_table_summary,
-            postprocess_extraction_to_spec,
-        )
-
-        e = self._engine
-        vlm_client = e.vlm_client
-        vlm_model = e.vlm_model
-        raw_bytes = base64.b64decode(image_b64)
-
-        # ── Phase 1: 数据提取 ──
-        compressed_data, mime_data = self._prepare_image_for_vlm(
-            raw_bytes,
-            max_long_edge=e.config.vlm_image_max_long_edge,
-            jpeg_quality=e.config.vlm_image_jpeg_quality,
-            mode="data",
-        )
-        b64_data = base64.b64encode(compressed_data).decode("ascii")
-        messages_p1 = [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {
-                "url": f"data:{mime_data};base64,{b64_data}", "detail": "high",
-            }},
-            {"type": "text", "text": build_extract_data_prompt()},
-        ]}]
-
-        raw_p1, err_p1, fr_p1 = await self._call_vlm_with_retry(
-            messages=messages_p1,
-            vlm_client=vlm_client,
-            vlm_model=vlm_model,
-            vlm_timeout=e.config.vlm_timeout_seconds,
-            vlm_max_retries=e.config.vlm_max_retries,
-            vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
-            phase_label="结构化提取Phase1",
-            response_format={"type": "json_object"},
-            max_tokens=e.config.vlm_max_tokens,
-        )
-
-        if raw_p1 is None:
-            return self._build_vlm_failure_result(err_p1, e.config.vlm_max_retries + 1, file_path)
-
-        likely_truncated = _is_likely_truncated(raw_p1, fr_p1)
-        data_json = _parse_vlm_json(raw_p1, try_repair=likely_truncated)
-        if data_json is None:
-            hint = ""
-            if likely_truncated:
-                hint = "（输出可能被截断，建议增大 EXCELMANUS_VLM_MAX_TOKENS）"
-            return json.dumps({
-                "status": "error",
-                "message": f"Phase 1 VLM 返回内容无法解析为 JSON{hint}",
-                "raw_preview": raw_p1[:500],
-                "raw_length": len(raw_p1),
-                "finish_reason": fr_p1,
-            }, ensure_ascii=False)
-
-        logger.info("Phase 1 提取完成: %d 表格", len(data_json.get("tables") or []))
-
-        # ── Phase 2: 样式提取（可选）──
-        style_json: dict | None = None
-        if not skip_style:
-            try:
-                summary = build_table_summary(data_json)
-                compressed_style, mime_style = self._prepare_image_for_vlm(
-                    raw_bytes,
-                    max_long_edge=e.config.vlm_image_max_long_edge,
-                    jpeg_quality=e.config.vlm_image_jpeg_quality,
-                    mode="style",
-                )
-                b64_style = base64.b64encode(compressed_style).decode("ascii")
-                messages_p2 = [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:{mime_style};base64,{b64_style}", "detail": "high",
-                    }},
-                    {"type": "text", "text": build_extract_style_prompt(summary)},
-                ]}]
-
-                raw_p2, err_p2, fr_p2 = await self._call_vlm_with_retry(
-                    messages=messages_p2,
-                    vlm_client=vlm_client,
-                    vlm_model=vlm_model,
-                    vlm_timeout=e.config.vlm_timeout_seconds,
-                    vlm_max_retries=e.config.vlm_max_retries,
-                    vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
-                    phase_label="结构化提取Phase2",
-                    response_format={"type": "json_object"},
-                    max_tokens=e.config.vlm_max_tokens,
-                )
-
-                if raw_p2:
-                    style_json = _parse_vlm_json(raw_p2, try_repair=_is_likely_truncated(raw_p2, fr_p2))
-                    if style_json:
-                        logger.info("Phase 2 样式提取完成")
-                    else:
-                        logger.warning("Phase 2 返回内容无法解析为 JSON，跳过样式")
-                else:
-                    logger.warning("Phase 2 VLM 调用失败，跳过样式: %s",
-                                   self._sanitize_vlm_error(err_p2) if err_p2 else "未知")
-            except Exception:
-                logger.warning("Phase 2 样式提取异常，跳过", exc_info=True)
-
-        # ── 后处理 → ReplicaSpec ──
-        image_hash = f"sha256:{hashlib.sha256(raw_bytes).hexdigest()[:16]}"
-        provenance = {
-            "source_image_hash": image_hash,
-            "model": vlm_model,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-        try:
-            spec = postprocess_extraction_to_spec(data_json, style_json, provenance)
-        except Exception as exc:
-            return json.dumps({
-                "status": "error",
-                "message": f"ReplicaSpec 后处理失败: {exc}",
-            }, ensure_ascii=False)
-
-        # ── 写入文件（通过 FileAccessGuard 解析，与 rebuild_excel_from_spec 一致）──
-        from excelmanus.security import FileAccessGuard, SecurityViolationError
-        _ws_root = e.config.workspace_root
-        _out_guard = FileAccessGuard(_ws_root) if _ws_root else None
-        try:
-            out = _out_guard.resolve_and_validate(output_path) if _out_guard else Path(output_path)
-        except SecurityViolationError:
-            # 回退：直接基于 workspace_root 拼接
-            out = Path(_ws_root) / output_path if _ws_root else Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        spec_text = spec.model_dump_json(indent=2, exclude_none=True)
-        out.write_text(spec_text, encoding="utf-8")
-
-        total_cells = sum(len(s.cells) for s in spec.sheets)
-        return json.dumps({
-            "status": "ok",
-            "output_path": str(out),
-            "table_count": len(spec.sheets),
-            "cell_count": total_cells,
-            "uncertainties_count": len(spec.uncertainties),
-            "has_styles": style_json is not None,
-            "hint": (
-                f"已生成 ReplicaSpec ({len(spec.sheets)} 个表格, {total_cells} 个单元格)。"
-                "下一步请调用 rebuild_excel_from_spec 编译为 Excel 文件。"
-            ),
-        }, ensure_ascii=False)
-
     def _redirect_cow_paths(
         self,
         tool_name: str,
@@ -1094,6 +979,7 @@ class ToolDispatcher:
         question_id: str | None = None
         defer_tool_result = False
         finish_accepted = False
+        error_kind: str | None = None
         _cow_reminders: list[str] = []
 
         # 执行工具调用
@@ -1184,6 +1070,7 @@ class ToolDispatcher:
                 result_str = outcome.result_str
                 success = outcome.success
                 error = outcome.error
+                error_kind = outcome.error_kind
                 pending_approval = outcome.pending_approval
                 approval_id = outcome.approval_id
                 audit_record = outcome.audit_record
@@ -1248,6 +1135,7 @@ class ToolDispatcher:
             result=result_str,
             success=success,
             error=error,
+            error_kind=error_kind,
             pending_approval=pending_approval,
             approval_id=approval_id,
             audit_record=audit_record,
@@ -1273,7 +1161,88 @@ class ToolDispatcher:
 
         遍历 self._handlers，第一个 can_handle 返回 True 的 handler 负责执行。
         并保留旧 _dispatch_tool_execution 的统一异常语义。
+        对 RETRYABLE 错误自动重试（指数退避，不消耗 Agent 迭代预算）。
         """
+        policy = DEFAULT_RETRY_POLICY
+        last_outcome: _ToolExecOutcome | None = None
+
+        for attempt in range(policy.max_retries + 1):
+            outcome = await self._dispatch_single_attempt(
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                arguments=arguments,
+                tool_scope=tool_scope,
+                on_event=on_event,
+                iteration=iteration,
+                route_result=route_result,
+                skip_high_risk_approval_by_hook=skip_high_risk_approval_by_hook,
+            )
+            # 成功或非错误结果直接返回
+            if outcome.success:
+                return outcome
+
+            # 对失败结果做错误分类
+            tool_error = classify_tool_error(
+                outcome.error or outcome.result_str,
+                tool_name=tool_name,
+            )
+
+            # 非可重试错误：压缩后直接返回
+            if not tool_error.retryable:
+                compacted = compact_error(outcome.error, tool_error=tool_error)
+                return _ToolExecOutcome(
+                    result_str=compacted,
+                    success=False,
+                    error=compacted,
+                    error_kind=tool_error.kind.value,
+                    audit_record=outcome.audit_record,
+                )
+
+            last_outcome = outcome
+            # 最后一次重试也失败了
+            if attempt >= policy.max_retries:
+                break
+
+            # 可重试：等待后重试
+            delay = policy.delay_for_attempt(attempt)
+            logger.info(
+                "工具 %s 可重试错误（%s），第 %d/%d 次重试，等待 %.1fs",
+                tool_name, tool_error.summary[:80],
+                attempt + 1, policy.max_retries, delay,
+            )
+            await asyncio.sleep(delay)
+
+        # 所有重试均失败
+        final_error = classify_tool_error(
+            last_outcome.error or last_outcome.result_str if last_outcome else "unknown",
+            tool_name=tool_name,
+        )
+        compacted = compact_error(
+            last_outcome.error if last_outcome else "unknown",
+            tool_error=final_error,
+        )
+        retried_msg = f"{compacted}\n[已自动重试 {policy.max_retries} 次仍失败]"
+        return _ToolExecOutcome(
+            result_str=retried_msg,
+            success=False,
+            error=retried_msg,
+            error_kind=final_error.kind.value,
+            audit_record=last_outcome.audit_record if last_outcome else None,
+        )
+
+    async def _dispatch_single_attempt(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        *,
+        tool_scope: Sequence[str] | None = None,
+        on_event: "EventCallback | None" = None,
+        iteration: int = 0,
+        route_result: Any = None,
+        skip_high_risk_approval_by_hook: bool = False,
+    ) -> "_ToolExecOutcome":
+        """单次工具执行尝试（从 _dispatch_via_handlers 提取）。"""
         from excelmanus.engine import _AuditedExecutionError
 
         try:

@@ -12,17 +12,20 @@ from typing import Any, Callable, Awaitable
 from excelmanus.pipeline.models import (
     PipelineConfig,
     PipelinePhase,
-    PhaseResult,
 )
 from excelmanus.pipeline.patch import apply_patches
+from excelmanus.pipeline.formula_detector import detect_formulas
 from excelmanus.pipeline.phases import (
     apply_styles_to_spec,
     build_data_summary,
     build_full_summary,
+    build_partial_summary,
     build_phase1_prompt,
     build_phase2_prompt,
+    build_phase2_chunked_prompt,
     build_phase3_prompt,
     build_phase4_prompt,
+    build_phase4_chunked_prompt,
     build_skeleton_spec,
     build_structure_summary,
     fill_data_into_spec,
@@ -206,6 +209,10 @@ class ProgressivePipeline:
         self._prev_spec: ReplicaSpec | None = None
         self._resume_from_phase = resume_from_phase
         self._resume_spec_path = resume_spec_path
+        # Multi-turn VLM 对话历史
+        self._conversation: list[dict] = []
+        # B 通道描述缓存，由 ExtractTableSpecHandler 注入
+        self._b_channel_description: str | None = None
 
     async def run(self) -> tuple[ReplicaSpec, str]:
         """执行全部阶段，返回 (final_spec, final_spec_path)。
@@ -222,13 +229,30 @@ class ProgressivePipeline:
         else:
             loaded_spec = None
 
-        # ── Phase 1: Structure ──
+        # ── Phase 1: Structure（传图，B 通道描述作为先验） ──
         if self._should_run_phase(1):
+            p1_prompt = build_phase1_prompt()
+            if self._b_channel_description:
+                p1_prompt = (
+                    f"以下是对该表格的初步描述（供参考）：\n"
+                    f"{self._b_channel_description}\n\n---\n\n{p1_prompt}"
+                )
             p1_json = await self._call_vlm_phase(
                 PipelinePhase.STRUCTURE,
-                build_phase1_prompt(),
+                p1_prompt,
                 image_mode="data",
+                include_image=True,
             )
+            # Fallback：首次失败后清空对话重试一次
+            if p1_json is None:
+                logger.info("Phase 1 首次调用失败，清空对话重试")
+                self._conversation.clear()
+                p1_json = await self._call_vlm_phase(
+                    PipelinePhase.STRUCTURE,
+                    p1_prompt,
+                    image_mode="data",
+                    include_image=True,
+                )
             if p1_json is None:
                 raise RuntimeError("Phase 1 (Structure) VLM 调用失败")
             skeleton = build_skeleton_spec(p1_json, self._provenance)
@@ -241,17 +265,42 @@ class ProgressivePipeline:
             skeleton = loaded_spec  # type: ignore[assignment]
             self._prev_spec = skeleton
 
-        # ── Phase 2: Data ──
+        # ── Phase 2: Data（支持大表格分区提取）──
         if self._should_run_phase(2):
             structure_summary = build_structure_summary(skeleton)
-            p2_json = await self._call_vlm_phase(
-                PipelinePhase.DATA,
-                build_phase2_prompt(structure_summary),
-                image_mode="data",
-            )
+            estimated_cells = self._estimate_total_cells(skeleton)
+            threshold = self.config.chunk_cell_threshold
+
+            if estimated_cells > threshold:
+                logger.info(
+                    "大表格检测: 预估 %d cells > 阈值 %d，启用分区提取",
+                    estimated_cells, threshold,
+                )
+                p2_json = await self._run_chunked_phase2(skeleton, structure_summary)
+            else:
+                # Multi-turn：Phase 2 不传图片，复用 Phase 1 的视觉上下文
+                p2_json = await self._call_vlm_phase(
+                    PipelinePhase.DATA,
+                    build_phase2_prompt(structure_summary),
+                    image_mode="data",
+                    include_image=False,
+                )
+                # Fallback：如果 multi-turn 失败，回退到独立调用（带图）
+                if p2_json is None:
+                    logger.info("Phase 2 multi-turn 失败，回退到独立调用")
+                    self._conversation.clear()
+                    p2_json = await self._call_vlm_phase(
+                        PipelinePhase.DATA,
+                        build_phase2_prompt(structure_summary),
+                        image_mode="data",
+                        include_image=True,
+                    )
+
             if p2_json is None:
                 raise RuntimeError("Phase 2 (Data) VLM 调用失败")
             data_spec = fill_data_into_spec(skeleton, p2_json)
+            # D4: 独立公式模式检测——在数据填充后自动推断 SUM / 列间算术
+            detect_formulas(data_spec)
             self._save_spec(data_spec, phase=2)
             diff = compute_phase_diff(self._prev_spec, data_spec)
             cell_count = sum(len(s.cells) for s in data_spec.sheets)
@@ -262,20 +311,31 @@ class ProgressivePipeline:
             data_spec = loaded_spec  # type: ignore[assignment]
             self._prev_spec = data_spec
 
-        # ── Phase 3: Style (可选) ──
+        # ── Phase 3: Style (可选，传图——样式需要观察颜色) ──
         if not self.config.skip_style and self._should_run_phase(3):
             data_summary = build_data_summary(data_spec)
             p3_json = await self._call_vlm_phase(
                 PipelinePhase.STYLE,
                 build_phase3_prompt(data_summary),
                 image_mode="style",
+                include_image=True,
             )
+            # Fallback：失败后清空对话 + 重传图片重试一次
+            if p3_json is None:
+                logger.info("Phase 3 首次调用失败，清空对话重试")
+                self._conversation.clear()
+                p3_json = await self._call_vlm_phase(
+                    PipelinePhase.STYLE,
+                    build_phase3_prompt(data_summary),
+                    image_mode="style",
+                    include_image=True,
+                )
             if p3_json is not None:
                 styled_spec = apply_styles_to_spec(data_spec, p3_json)
                 logger.info("Phase 3 样式提取完成")
             else:
                 styled_spec = data_spec
-                logger.warning("Phase 3 样式提取失败，降级跳过")
+                logger.warning("Phase 3 样式提取失败（含重试），降级跳过")
             self._save_spec(styled_spec, phase=3)
             diff = compute_phase_diff(self._prev_spec, styled_spec)
             self._emit_progress(PipelinePhase.STYLE, "样式提取完成", styled_spec, diff)
@@ -286,14 +346,35 @@ class ProgressivePipeline:
             styled_spec = loaded_spec  # type: ignore[assignment]
             self._prev_spec = styled_spec
 
-        # ── Phase 4: Verification ──
+        # ── Phase 4: Verification（支持大表格分区校验）──
         if self._should_run_phase(4):
-            full_summary = build_full_summary(styled_spec)
-            p4_json = await self._call_vlm_phase(
-                PipelinePhase.VERIFICATION,
-                build_phase4_prompt(full_summary),
-                image_mode="data",
-            )
+            cell_count = sum(len(s.cells) for s in styled_spec.sheets)
+            threshold = self.config.chunk_cell_threshold
+
+            if cell_count > threshold:
+                logger.info(
+                    "大表格检测: %d cells > 阈值 %d，启用分区校验",
+                    cell_count, threshold,
+                )
+                p4_json = await self._run_chunked_phase4(styled_spec)
+            else:
+                full_summary = build_full_summary(styled_spec)
+                p4_json = await self._call_vlm_phase(
+                    PipelinePhase.VERIFICATION,
+                    build_phase4_prompt(full_summary),
+                    image_mode="data",
+                    include_image=False,
+                )
+                # Fallback：multi-turn 失败时回退到独立调用（带图）
+                if p4_json is None:
+                    logger.info("Phase 4 multi-turn 失败，回退到独立调用")
+                    self._conversation.clear()
+                    p4_json = await self._call_vlm_phase(
+                        PipelinePhase.VERIFICATION,
+                        build_phase4_prompt(full_summary),
+                        image_mode="data",
+                        include_image=True,
+                    )
             if p4_json is not None and p4_json.get("patches"):
                 final_spec = apply_patches(styled_spec, p4_json)
                 logger.info("Phase 4 自校验修正完成")
@@ -324,29 +405,45 @@ class ProgressivePipeline:
         phase: PipelinePhase,
         prompt: str,
         image_mode: str,
+        *,
+        include_image: bool = True,
     ) -> dict[str, Any] | None:
-        """单阶段 VLM 调用：准备图片 → 调用 → 解析 JSON。"""
-        compressed, mime = self._image_preparer(self._image_bytes, image_mode)
-        b64 = base64.b64encode(compressed).decode("ascii")
+        """单阶段 VLM 调用，支持 multi-turn 累积对话。
 
-        messages = [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {
-                "url": f"data:{mime};base64,{b64}", "detail": "high",
-            }},
-            {"type": "text", "text": prompt},
-        ]}]
+        Args:
+            include_image: 是否在本轮消息中包含图片。
+                Phase 1/3 需要传图（首次看图 / 样式需观察颜色），
+                Phase 2/4 可省略图片（复用 multi-turn 上下文）。
+        """
+        content: list[dict[str, Any]] = []
+        if include_image:
+            compressed, mime = self._image_preparer(self._image_bytes, image_mode)
+            b64 = base64.b64encode(compressed).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
+            })
+        content.append({"type": "text", "text": prompt})
+
+        # 追加到多轮对话历史
+        self._conversation.append({"role": "user", "content": content})
 
         raw_text, error = await self._vlm_caller(
-            messages,
+            self._conversation,
             f"渐进式提取-{phase.value}",
             {"type": "json_object"},
         )
 
         if raw_text is None:
             logger.warning("Phase %s VLM 调用失败: %s", phase.value, error)
+            # 失败时移除刚追加的 user 消息，保持对话历史干净
+            self._conversation.pop()
             return None
 
-        # 启发式截断检测（_vlm_caller 不返回 finish_reason）
+        # 将 VLM 回复加入对话历史，供后续阶段复用
+        self._conversation.append({"role": "assistant", "content": raw_text})
+
+        # 启发式截断检测
         from excelmanus.engine_core.tool_dispatcher import _is_likely_truncated
         likely_trunc = _is_likely_truncated(raw_text, None)
         parsed = _parse_vlm_json(raw_text, try_repair=likely_trunc)
@@ -356,6 +453,149 @@ class ProgressivePipeline:
                 phase.value, len(raw_text), likely_trunc,
             )
         return parsed
+
+    # ── 大表格分区提取 ──
+
+    @staticmethod
+    def _estimate_total_cells(skeleton: ReplicaSpec) -> int:
+        """从骨架 spec 预估总 cell 数（rows × cols 之和）。"""
+        total = 0
+        for sheet in skeleton.sheets:
+            dims = sheet.dimensions
+            rows = dims.get("rows", 0)
+            cols = dims.get("cols", 0)
+            total += rows * cols
+        return total
+
+    async def _run_chunked_phase2(
+        self,
+        skeleton: ReplicaSpec,
+        structure_summary: str,
+    ) -> dict[str, Any] | None:
+        """分区 Phase 2：按行范围分片调用 VLM，合并结果。
+
+        每片最多覆盖 _CHUNK_ROWS 行，各片独立调用后将 cells 合并。
+        """
+        _CHUNK_ROWS = 100  # 每片最多行数
+
+        merged_tables: list[dict[str, Any]] = []
+
+        for sheet_idx, sheet in enumerate(skeleton.sheets):
+            dims = sheet.dimensions
+            total_rows = dims.get("rows", 0)
+            total_cols = dims.get("cols", 0)
+            if total_rows == 0 or total_cols == 0:
+                merged_tables.append({
+                    "name": sheet.name,
+                    "cells": [],
+                    "uncertainties": [],
+                })
+                continue
+
+            all_cells: list[dict] = []
+            all_uncertainties: list[dict] = []
+
+            # 分片
+            row_start = 1
+            chunk_idx = 0
+            while row_start <= total_rows:
+                row_end = min(row_start + _CHUNK_ROWS - 1, total_rows)
+                chunk_idx += 1
+                logger.info(
+                    "Phase 2 分区 %d: 表 %s 行 %d-%d (共 %d 行)",
+                    chunk_idx, sheet.name, row_start, row_end, total_rows,
+                )
+
+                prompt = build_phase2_chunked_prompt(
+                    structure_summary, row_start, row_end,
+                )
+                chunk_json = await self._call_vlm_phase(
+                    PipelinePhase.DATA,
+                    prompt,
+                    image_mode="data",
+                    include_image=(chunk_idx == 1),
+                )
+
+                if chunk_json is not None:
+                    # 取第一个 table 的 cells（分片时每次只关注一个表）
+                    tables = chunk_json.get("tables") or []
+                    if tables:
+                        # 匹配 sheet：优先按名称，否则按索引
+                        target = tables[0]
+                        for t in tables:
+                            if t.get("name") == sheet.name:
+                                target = t
+                                break
+                        all_cells.extend(target.get("cells") or [])
+                        all_uncertainties.extend(target.get("uncertainties") or [])
+                else:
+                    logger.warning(
+                        "Phase 2 分区 %d 失败（表 %s 行 %d-%d），跳过该区间",
+                        chunk_idx, sheet.name, row_start, row_end,
+                    )
+
+                row_start = row_end + 1
+
+            merged_tables.append({
+                "name": sheet.name,
+                "cells": all_cells,
+                "uncertainties": all_uncertainties,
+            })
+
+        if not any(t.get("cells") for t in merged_tables):
+            return None
+
+        return {"tables": merged_tables}
+
+    async def _run_chunked_phase4(
+        self,
+        spec: ReplicaSpec,
+    ) -> dict[str, Any] | None:
+        """分区 Phase 4：按行范围分片校验，每片独立带图调用，合并 patches。"""
+        _CHUNK_ROWS = 100
+
+        all_patches: list[dict] = []
+        max_rows = max((s.dimensions.get("rows", 0) for s in spec.sheets), default=0)
+        if max_rows == 0:
+            return None
+
+        row_start = 1
+        chunk_idx = 0
+        while row_start <= max_rows:
+            row_end = min(row_start + _CHUNK_ROWS - 1, max_rows)
+            chunk_idx += 1
+            logger.info(
+                "Phase 4 分区 %d: 行 %d-%d (共 %d 行)",
+                chunk_idx, row_start, row_end, max_rows,
+            )
+
+            partial_summary = build_partial_summary(spec, row_start, row_end)
+            prompt = build_phase4_chunked_prompt(partial_summary, row_start, row_end)
+
+            # 每区独立调用（带图），不依赖 multi-turn
+            self._conversation.clear()
+            chunk_json = await self._call_vlm_phase(
+                PipelinePhase.VERIFICATION,
+                prompt,
+                image_mode="data",
+                include_image=True,
+            )
+
+            if chunk_json is not None:
+                patches = chunk_json.get("patches") or []
+                all_patches.extend(patches)
+            else:
+                logger.warning(
+                    "Phase 4 分区 %d 失败（行 %d-%d），跳过",
+                    chunk_idx, row_start, row_end,
+                )
+
+            row_start = row_end + 1
+
+        if not all_patches:
+            return None
+
+        return {"patches": all_patches, "overall_confidence": 0.9, "summary": f"分区校验合并 {len(all_patches)} 条补丁"}
 
     # ── Spec 保存/加载 ──
 

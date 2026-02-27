@@ -11,7 +11,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
-import type { AttachedFile } from "@/lib/types";
+import type { AttachedFile, FileAttachment } from "@/lib/types";
 
 export default function Home() {
   const messages = useChatStore((s) => s.messages);
@@ -53,8 +53,8 @@ export default function Home() {
         <MessageStream
           messages={messages}
           isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => {
-            rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files);
+          onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
+            rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);
           }}
           onRetry={(assistantMessageId: string) => {
             retryAssistantMessage(assistantMessageId, activeSessionId);

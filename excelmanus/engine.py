@@ -620,6 +620,7 @@ class ToolCallResult:
     result: str
     success: bool
     error: str | None = None
+    error_kind: str | None = None  # ToolErrorKind.value: retryable/permanent/needs_human/overflow
     pending_approval: bool = False
     approval_id: str | None = None
     audit_record: AppliedApprovalRecord | None = None
@@ -1091,12 +1092,18 @@ class AgentEngine:
         # ── FileRegistry（工作区文件注册表） ─────────────
         self._database = database
         self._llm_call_store: Any = None  # 类型：LLMCallStore | None
+        self._checkpoint_store: Any = None  # 类型：SessionStateStore | None
         if database is not None:
             try:
                 from excelmanus.stores.llm_call_store import LLMCallStore as _LCS
                 self._llm_call_store = _LCS(database, user_id=user_id)
             except Exception:
                 logger.debug("LLM 调用日志初始化失败", exc_info=True)
+            try:
+                from excelmanus.stores.session_state_store import SessionStateStore as _SSS
+                self._checkpoint_store = _SSS(database)
+            except Exception:
+                logger.debug("SessionStateStore 初始化失败", exc_info=True)
         # 仅保留 FileRegistry scan 相关状态
         self._registry_scan_task: asyncio.Task[Any] | None = None
         self._registry_scan_done: bool = False
@@ -1384,6 +1391,14 @@ class AgentEngine:
     @_finish_task_warned.setter
     def _finish_task_warned(self, value: bool) -> None:
         self._state.finish_task_warned = value
+
+    @property
+    def _verification_attempt_count(self) -> int:
+        return self._state.verification_attempt_count
+
+    @_verification_attempt_count.setter
+    def _verification_attempt_count(self, value: int) -> None:
+        self._state.verification_attempt_count = value
 
     @property
     def _vba_exempt(self) -> bool:
@@ -1802,6 +1817,50 @@ class AgentEngine:
     def set_message_snapshot_index(self, index: int) -> None:
         """设置已持久化的消息快照索引。"""
         self._history_snapshot_index = index
+
+    # ── Checkpoint 持久化 ──────────────────────────────────────
+
+    def save_checkpoint(self) -> None:
+        """保存当前 SessionState + TaskStore 状态到数据库。"""
+        if self._checkpoint_store is None or self._session_id is None:
+            return
+        try:
+            self._checkpoint_store.save_checkpoint(
+                session_id=self._session_id,
+                state_dict=self._state.to_dict(),
+                task_list_dict=self._task_store.to_dict(),
+                turn_number=self._state.session_turn,
+            )
+        except Exception:
+            logger.debug("save_checkpoint 失败", exc_info=True)
+
+    def restore_checkpoint(self) -> bool:
+        """从数据库恢复最新 checkpoint，返回是否成功恢复。"""
+        if self._checkpoint_store is None or self._session_id is None:
+            return False
+        try:
+            cp = self._checkpoint_store.load_latest_checkpoint(self._session_id)
+            if cp is None:
+                return False
+            from excelmanus.engine_core.session_state import SessionState
+            restored_state = SessionState.from_dict(cp["state_dict"])
+            # 保留 _file_registry 引用（不序列化）
+            restored_state._file_registry = self._state._file_registry
+            self._state = restored_state
+
+            from excelmanus.task_list import TaskStore
+            restored_store = TaskStore.from_dict(cp["task_list_dict"])
+            # 迁移任务清单到现有 _task_store（保持工具引用有效）
+            self._task_store._task_list = restored_store._task_list
+            self._task_store._plan_file_path = restored_store._plan_file_path
+            logger.info(
+                "checkpoint 恢复成功: session=%s turn=%s",
+                self._session_id, cp["turn_number"],
+            )
+            return True
+        except Exception:
+            logger.debug("restore_checkpoint 失败", exc_info=True)
+            return False
 
     def list_user_turns(self) -> list[dict]:
         """列出所有用户轮次摘要，返回 [{index, content_preview, msg_index}]。"""
@@ -2302,6 +2361,13 @@ class AgentEngine:
                 [img["media_type"] for img in normalized_images],
                 [len(img["data"]) for img in normalized_images],
             )
+            # 前端附件图片 hash 注册到 dispatcher，
+            # 后续 read_image 同一文件时可跳过 C 通道重复注入
+            from excelmanus.engine_core.tool_dispatcher import _image_content_hash_b64
+            for img in normalized_images:
+                _h = _image_content_hash_b64(img["data"])
+                self._tool_dispatcher._injected_image_hashes.add(_h)
+                logger.debug("前端附件 hash 已注册: %s", _h)
 
         # ── 视觉能力前置检查：主模型不支持视觉且无 VLM 时直接拒绝 ──
         if normalized_images and not self._is_vision_capable and not self._vlm_enhance_available:
@@ -3465,32 +3531,46 @@ class AgentEngine:
 
         return tools
 
-    def _build_v5_tools(self, *, write_hint: str = "unknown") -> list[dict[str, Any]]:
+    def _build_v5_tools(
+        self,
+        *,
+        write_hint: str = "unknown",
+        task_tags: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具（带脏标记缓存）。
 
-        同一 turn 内，如果 write_hint、_current_write_hint、active_skills 集合
-        和 _bench_mode 均未变化，直接返回缓存结果，避免重复构建 schema。
+        同一 turn 内，如果 write_hint、_current_write_hint、active_skills 集合、
+        _bench_mode 和 task_tags 均未变化，直接返回缓存结果，避免重复构建 schema。
         """
         cache_key = (
             write_hint,
             _normalize_write_hint(getattr(self, "_current_write_hint", "unknown")),
             frozenset(s.name for s in self._active_skills),
             getattr(self, "_bench_mode", False),
+            task_tags,
         )
         if self._tools_cache is not None and self._tools_cache_key == cache_key:
             return self._tools_cache
-        tools = self._build_v5_tools_impl(write_hint=write_hint)
+        tools = self._build_v5_tools_impl(write_hint=write_hint, task_tags=task_tags)
         self._tools_cache = tools
         self._tools_cache_key = cache_key
         return tools
 
-    def _build_v5_tools_impl(self, *, write_hint: str = "unknown") -> list[dict[str, Any]]:
+    def _build_v5_tools_impl(
+        self,
+        *,
+        write_hint: str = "unknown",
+        task_tags: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具。
 
         当 write_hint == "read_only" 时，仅暴露只读工具子集 + run_code + 元工具，
         减少约 40-60% 的工具 schema token 开销。
+
+        当 task_tags 包含窄标签（simple_read/formatting/chart/data_fill）时，
+        额外隐藏不相关的域工具（如 vision/chart），进一步减少 LLM 决策空间。
         """
-        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS
+        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, TAG_EXCLUDED_TOOLS
 
         domain_schemas = self._registry.get_tiered_schemas(
             mode="chat_completions",
@@ -3518,6 +3598,19 @@ class AgentEngine:
                 s for s in meta_schemas
                 if s.get("function", {}).get("name", "") not in _meta_blocked
             ]
+
+        # 基于 task_tags 的动态工具裁剪：窄标签隐藏不相关域工具
+        if task_tags:
+            excluded: set[str] = set()
+            for tag in task_tags:
+                tag_excluded = TAG_EXCLUDED_TOOLS.get(tag)
+                if tag_excluded is not None:
+                    excluded |= tag_excluded
+            if excluded:
+                filtered_domain = [
+                    s for s in filtered_domain
+                    if s.get("function", {}).get("name", "") not in excluded
+                ]
 
         return meta_schemas + filtered_domain
 
@@ -3839,11 +3932,14 @@ class AgentEngine:
         report: dict[str, Any] | None,
         summary: str,
         on_event: EventCallback | None = None,
+        blocking: bool = False,
     ) -> str | None:
-        """Advisory 模式：任务完成前运行 verifier 子代理。
+        """任务完成前运行 verifier 子代理。
 
-        返回附加提示文本（拼接到 finish 响应），或 None 表示跳过/失败（fail-open）。
-        不阻塞 finish_accepted，仅追加诊断信息。
+        blocking=False（advisory）：返回附加提示文本，不阻塞 finish_accepted。
+        blocking=True：verdict=fail + confidence=high 时返回以 "BLOCK:" 开头的字符串，
+        调用方据此翻转 finish_accepted；其余情况同 advisory。
+        任何异常 / verifier 失败均 fail-open（返回 None）。
         """
         if not self._subagent_enabled:
             return None
@@ -3911,11 +4007,19 @@ class AgentEngine:
             # verifier 未按格式输出，视为 unknown
             pass
 
+        confidence = "unknown"
+        try:
+            confidence = str(parsed.get("confidence", "unknown")).lower()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            pass
+
         if verdict == "pass":
             check_str = "、".join(str(c) for c in checks[:3]) if checks else "基本检查"
             return f"\n\n✅ **验证通过**（{check_str}）"
         elif verdict == "fail":
             issue_str = "、".join(str(i) for i in issues[:3]) if issues else "未知问题"
+            if blocking and confidence == "high":
+                return f"BLOCK:⚠️ 验证未通过：{issue_str}。请修正后再次调用 finish_task。"
             return f"\n\n⚠️ **验证发现问题**（advisory）：{issue_str}（任务仍标记完成，建议复查）"
         else:
             return f"\n\n🔍 **验证结果不确定**：{verdict_text[:200]}"
@@ -4634,8 +4738,10 @@ class AgentEngine:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
 
         def _finalize_result(**kwargs: Any) -> ChatResult:
-            """统一出口：刷新 registry + 自动发射 FILES_CHANGED 事件。"""
+            """统一出口：刷新 registry + checkpoint + 自动发射 FILES_CHANGED 事件。"""
             self._try_refresh_registry()
+            # 每轮结束保存 checkpoint（SessionState + TaskStore）
+            self.save_checkpoint()
             # 自动发射 FILES_CHANGED 事件（替代 finish_task 的 affected_files）
             if self._state.affected_files and on_event is not None:
                 from excelmanus.events import EventType, ToolCallEvent
@@ -4823,7 +4929,8 @@ class AgentEngine:
             )
 
             # 分层 schema（core=完整, extended=摘要/已展开=完整）
-            tools = self._build_v5_tools(write_hint=write_hint)
+            _task_tags = tuple(getattr(current_route_result, "task_tags", ()) or ())
+            tools = self._build_v5_tools(write_hint=write_hint, task_tags=_task_tags)
             tool_scope = None
 
             kwargs: dict[str, Any] = {
@@ -5409,12 +5516,14 @@ class AgentEngine:
                                 write_hint = "may_write"
                         else:
                             self._last_failure_count += 1
+                            # 已在 ToolDispatcher 中自动重试过的 retryable 错误
+                            # 不再计入熔断计数（重试已耗尽说明是持续性故障）
                             consecutive_failures += 1
 
                         # 熔断检测
                         if (not breaker_triggered) and consecutive_failures >= max_failures:
                             recent_errors = [
-                                f"- {r.tool_name}: {r.error}"
+                                f"- {r.tool_name}({r.error_kind or 'unknown'}): {r.error}"
                                 for r in all_tool_results[-max_failures:]
                                 if not r.success
                             ]

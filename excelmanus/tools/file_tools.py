@@ -981,7 +981,9 @@ def get_tools() -> list[ToolDef]:
             name="copy_file",
             description=(
                 "复制文件到工作区内的新位置（不覆盖已有文件）。"
-                "目标路径已存在时会报错，需先删除或使用不同名称。"
+                "适用场景：创建文件副本、备份原始文件后再修改。"
+                "目标路径已存在时会报错，需先 delete_file 或使用不同名称。"
+                "相关工具：list_directory（先确认目标路径）、rename_file（移动而非复制）。"
             ),
             input_schema={
                 "type": "object",
@@ -1005,7 +1007,9 @@ def get_tools() -> list[ToolDef]:
             name="rename_file",
             description=(
                 "重命名或移动文件到工作区内的新位置（不覆盖已有文件）。"
+                "适用场景：文件重命名、移动到子目录。"
                 "目标路径已存在时会报错。"
+                "相关工具：list_directory（先确认目标路径不冲突）、copy_file（保留原文件）。"
             ),
             input_schema={
                 "type": "object",
@@ -1029,7 +1033,9 @@ def get_tools() -> list[ToolDef]:
             name="delete_file",
             description=(
                 "安全删除文件（仅限文件，不删目录），需 confirm=true 二次确认。"
+                "适用场景：清理不需要的文件、删除后重建。"
                 "首次调用不传 confirm 时返回文件信息供确认，第二次调用传 confirm=true 才执行删除。"
+                "相关工具：list_directory（先确认文件存在）。"
             ),
             input_schema={
                 "type": "object",

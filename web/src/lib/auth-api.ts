@@ -283,7 +283,9 @@ export async function handleOAuthCallback(
 ) {
   const params = new URLSearchParams({ code });
   if (state) params.set("state", state);
-  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}/callback?${params}`));
+  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}/callback?${params}`), {
+    headers: { "Accept": "application/json" },
+  });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `OAuth 回调失败: ${res.status}`);
@@ -381,6 +383,60 @@ export async function adminEnforceQuota(userId: string): Promise<{ deleted: stri
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || data.error || `执行失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Admin Login Config API ────────────────────────────────
+
+export interface LoginConfig {
+  login_github_enabled: boolean;
+  login_google_enabled: boolean;
+  email_verify_required: boolean;
+  // GitHub OAuth
+  github_client_id: string;
+  github_client_secret: string;
+  github_redirect_uri: string;
+  // Google OAuth
+  google_client_id: string;
+  google_client_secret: string;
+  google_redirect_uri: string;
+  // Email
+  email_resend_api_key: string;
+  email_smtp_host: string;
+  email_smtp_port: string;
+  email_smtp_user: string;
+  email_smtp_password: string;
+  email_from: string;
+}
+
+export async function fetchLoginConfig(): Promise<LoginConfig> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/admin/login-config"), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `获取登录配置失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateLoginConfig(
+  updates: Partial<LoginConfig>,
+): Promise<LoginConfig> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/admin/login-config"), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `更新登录配置失败: ${res.status}`);
   }
   return res.json();
 }

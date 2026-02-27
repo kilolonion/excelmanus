@@ -29,11 +29,6 @@ def build_describe_prompt() -> str:
     return _DESCRIBE_PROMPT
 
 
-def build_extract_data_prompt() -> str:
-    """构建 Phase 1 结构化提取 prompt（数据+结构）。"""
-    return _EXTRACT_DATA_PROMPT
-
-
 def build_extract_style_prompt(table_summary: str) -> str:
     """构建 Phase 2 样式提取 prompt。
 
@@ -141,62 +136,7 @@ _DESCRIBE_PROMPT = """\
 
 
 # ════════════════════════════════════════════════════════════════
-# 阶段 1 提示 — 结构化数据提取（JSON）
-# ════════════════════════════════════════════════════════════════
-
-_EXTRACT_DATA_PROMPT = """\
-你是一个精确的表格结构提取引擎。请仔细观察图片，提取所有表格的结构和数据。
-
-**如果图片中有多个独立表格**（被空白、标题或明显间隔分隔），请分别提取为 tables 数组中的不同元素。
-
-请严格输出以下 JSON 格式（不要输出任何其他内容）：
-
-```json
-{
-  "tables": [
-    {
-      "name": "Sheet1",
-      "title": "表格标题（如果有）",
-      "dimensions": {"rows": 行数, "cols": 列数},
-      "header_rows": [1],
-      "total_rows": [],
-      "cells": [
-        {"addr": "A1", "val": "单元格值", "type": "string"},
-        {"addr": "B2", "val": 1200.50, "type": "number", "display": "$1,200.50"}
-      ],
-      "merges": ["A1:E1", "A10:C10"],
-      "col_widths": [15, 10, 12],
-      "col_alignments": ["left", "left", "right", "right", "center"],
-      "uncertainties": [
-        {"addr": "C5", "reason": "数字模糊", "candidates": ["350", "850"]}
-      ]
-    }
-  ]
-}
-```
-
-字段说明：
-- addr: Excel 单元格地址（如 A1, B2）
-- val: 单元格的实际值（数字用数字类型，文字用字符串）
-- type: "string" | "number" | "date" | "boolean" | "formula" | "empty"
-- display: 可选，单元格的显示文本（如带货币符号、千分位的数字）
-- merges: 合并单元格范围列表
-- col_widths: 各列的估计宽度（Excel 字符单位，通常 8-25）
-- col_alignments: 各列数据区的水平对齐方式（"left" | "center" | "right"），根据图中观察到的实际对齐填写。典型规律：文本列 left、数字/金额列 right、日期列 center
-- header_rows: 表头行号列表（1-based）
-- total_rows: 合计行号列表（1-based）
-- uncertainties: 不确定项（看不清的内容）
-
-**严格要求：**
-- 不要编造数据——看不清就在 uncertainties 中标注
-- 保留原始数字精度（12.50 不写成 12.5）
-- 不要遗漏任何行或列
-- 每个独立表格用单独的 tables 元素表示
-- 如果只有一个表格，tables 数组也只有一个元素"""
-
-
-# ════════════════════════════════════════════════════════════════
-# 阶段 2 提示 — 样式提取（JSON）
+# 样式提取提示（供 pipeline Phase 3 使用）
 # ════════════════════════════════════════════════════════════════
 
 _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
@@ -215,7 +155,12 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
       "font": {{"bold": true, "size": 12, "color": "white", "name": "字体名"}},
       "fill": {{"color": "dark_blue"}},
       "alignment": {{"horizontal": "center", "vertical": "center"}},
-      "border": {{"style": "thin", "color": "black"}}
+      "border": {{
+        "top": {{"style": "thin", "color": "white"}},
+        "bottom": {{"style": "medium", "color": "black"}},
+        "left": {{"style": "thin", "color": "dark_blue"}},
+        "right": {{"style": "thin", "color": "dark_blue"}}
+      }}
     }},
     "data_text": {{
       "alignment": {{"horizontal": "left", "vertical": "center"}},
@@ -228,16 +173,67 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
     "total_row": {{
       "font": {{"bold": true}},
       "alignment": {{"horizontal": "right"}},
-      "border": {{"style": "thin", "color": "black"}}
+      "border": {{
+        "top": {{"style": "medium", "color": "black"}},
+        "bottom": {{"style": "double", "color": "black"}},
+        "left": {{"style": "thin", "color": "light_gray"}},
+        "right": {{"style": "thin", "color": "light_gray"}}
+      }}
+    }},
+    "subtotal_row": {{
+      "font": {{"bold": true, "size": 11}},
+      "fill": {{"color": "pale_blue"}},
+      "border": {{
+        "top": {{"style": "thin", "color": "gray"}},
+        "bottom": {{"style": "thin", "color": "gray"}},
+        "left": {{"style": "none"}},
+        "right": {{"style": "none"}}
+      }}
+    }},
+    "outline_cell": {{
+      "border": {{
+        "top": {{"style": "medium", "color": "black"}},
+        "bottom": {{"style": "medium", "color": "black"}},
+        "left": {{"style": "medium", "color": "black"}},
+        "right": {{"style": "medium", "color": "black"}}
+      }}
     }}
   }},
   "cell_styles": {{
     "A1:E1": "header",
     "A2:B9": "data_text",
     "C2:E9": "data_number",
+    "A5:E5": "subtotal_row",
     "A10:E10": "total_row"
   }},
-  "row_heights": {{"1": 28}}
+  "row_heights": {{"1": 28}},
+  "conditional_formats": [
+    {{
+      "type": "color_scale",
+      "range": "C2:C9",
+      "min_color": "#F8696B",
+      "mid_color": "#FFEB84",
+      "max_color": "#63BE7B"
+    }},
+    {{
+      "type": "data_bar",
+      "range": "D2:D9",
+      "bar_color": "#638EC6"
+    }},
+    {{
+      "type": "icon_set",
+      "range": "E2:E9",
+      "icon_style": "3_arrows"
+    }},
+    {{
+      "type": "cell_value",
+      "range": "C2:C9",
+      "operator": "less_than",
+      "value": 0,
+      "font_color": "red",
+      "fill_color": "light_red"
+    }}
+  ]
 }}
 ```
 
@@ -246,6 +242,7 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
 - styles: 样式类定义，每个样式有唯一 ID
 - cell_styles: 单元格范围 → 样式 ID 的映射（用 Excel 范围表示，如 "A1:E1"）
 - row_heights: 行号 → 行高的映射（仅非默认行高的行）
+- conditional_formats: 条件格式列表（见下方详细说明）
 - 颜色可以用语义名（dark_blue, light_gray, white 等）或 hex 值（#1F4E79）
 
 **对齐方式（alignment）是复刻精度的关键，请仔细观察：**
@@ -255,267 +252,36 @@ _EXTRACT_STYLE_PROMPT_TEMPLATE = """\
 - 典型规律：标题行居中、文本列左对齐、数字/金额列右对齐、合计行右对齐或居中
 - **不同列的对齐方式往往不同**，请按列或区域分别定义样式，不要将整个数据区归为同一个样式
 
+**边框（border）——四边独立指定是高保真还原的关键：**
+- 统一四边相同时：{{"style": "thin", "color": "black"}}
+- 四边不同时**必须**分别指定 top/bottom/left/right：
+  {{"top": {{"style": "medium", "color": "black"}}, "bottom": {{"style": "double", "color": "black"}}, "left": {{"style": "thin", "color": "light_gray"}}, "right": {{"style": "thin", "color": "light_gray"}}}}
+- 某一边无边框时使用：{{"style": "none"}}
+- style 可选值: "thin" | "medium" | "thick" | "double" | "hair" | "none"
+- **常见四边独立场景（请务必识别）：**
+  1. 表头行：底边粗线（medium/thick）区隔数据区，其余三边细线或无线
+  2. 合计行：上方粗线 + 下方双线（financial convention），左右细线
+  3. 小计行：仅上下细线，左右无线（分组分隔）
+  4. 外框粗内框细：外边缘 medium/thick，内部 thin/hair
+  5. 右侧分隔线：某些列之间有粗竖线分隔不同数据组
+  6. 标题区底边：标题合并单元格仅底边有线，其余三边无线
+
+**条件格式（conditional_formats）说明：**
+如果你观察到单元格颜色随数值变化（渐变色、数据条、图标箭头）或特定值有特殊格式，请在 conditional_formats 中描述：
+- **color_scale**（颜色刻度/热力图）：数值从小到大对应从一种颜色渐变到另一种
+  必填: range, min_color, max_color；可选: mid_color
+- **data_bar**（数据条）：单元格内有水平条形图
+  必填: range, bar_color
+- **icon_set**（图标集）：单元格中有箭头/旗帜/交通灯等图标
+  必填: range, icon_style（"3_arrows" | "3_traffic_lights" | "3_flags" | "4_arrows" | "5_arrows"）
+- **cell_value**（基于值的格式）：特定条件下单元格有不同字体/背景色
+  必填: range, operator（"greater_than" | "less_than" | "between" | "equal" | "not_equal"）, value
+  可选: value2（仅 between 时）, font_color, fill_color, bold
+- 如果没有观察到条件格式，省略 conditional_formats 字段即可
+
 **注意：**
 - 只描述你能看到的样式，不要猜测
-- 如果所有单元格样式相同，可以只定义一个 "default" 样式"""
+- 如果所有单元格样式相同，可以只定义一个 "default" 样式
+- 四边边框差异是高保真复刻中最容易被遗漏的细节——请特别注意"""
 
 
-# ════════════════════════════════════════════════════════════════
-# 后处理：VLM 提取结果 → ReplicaSpec
-# ════════════════════════════════════════════════════════════════
-
-
-def postprocess_extraction_to_spec(
-    data_json: dict[str, Any],
-    style_json: dict[str, Any] | None,
-    provenance: dict[str, Any],
-) -> "ReplicaSpec":
-    """将 VLM 两阶段提取结果合并为完整 ReplicaSpec。
-
-    Args:
-        data_json: Phase 1 输出（tables 数组）
-        style_json: Phase 2 输出（styles + cell_styles），可为 None
-        provenance: 溯源信息 dict
-    """
-    from excelmanus.replica_spec import (
-        AlignmentSpec,
-        BorderSpec,
-        CellSpec,
-        FontSpec,
-        MergedRange,
-        Provenance,
-        ReplicaSpec,
-        SemanticHints,
-        SheetSpec,
-        StyleClass,
-        Uncertainty,
-        WorkbookSpec,
-        FillSpec,
-    )
-
-    tables = data_json.get("tables") or []
-    if not tables:
-        raise ValueError("VLM 提取结果中没有 tables 数据")
-
-    # ── 解析样式 ──
-    style_defs: dict[str, dict] = {}
-    cell_style_map: dict[str, str] = {}  # "A1:E1" → style_id
-    row_heights_global: dict[str, float] = {}
-    default_font_spec: FontSpec | None = None
-
-    if style_json:
-        style_defs = style_json.get("styles") or {}
-        cell_style_map = style_json.get("cell_styles") or {}
-        row_heights_global = style_json.get("row_heights") or {}
-        df = style_json.get("default_font")
-        if isinstance(df, dict):
-            default_font_spec = FontSpec(
-                name=df.get("name"), size=df.get("size"),
-            )
-
-    # ── 构建 StyleClass 对象 ──
-    def _build_style_class(raw: dict) -> StyleClass:
-        font = None
-        if raw_font := raw.get("font"):
-            font = FontSpec(
-                name=raw_font.get("name"),
-                size=raw_font.get("size"),
-                bold=raw_font.get("bold"),
-                italic=raw_font.get("italic"),
-                color=resolve_semantic_color(raw_font.get("color")),
-            )
-        fill = None
-        if raw_fill := raw.get("fill"):
-            color = resolve_semantic_color(raw_fill.get("color"))
-            if color:
-                fill = FillSpec(type="solid", color=color)
-        alignment = None
-        if raw_align := raw.get("alignment"):
-            alignment = AlignmentSpec(
-                horizontal=raw_align.get("horizontal"),
-                vertical=raw_align.get("vertical"),
-                wrap_text=raw_align.get("wrap_text"),
-            )
-        border = None
-        if raw_border := raw.get("border"):
-            border = BorderSpec(
-                style=raw_border.get("style"),
-                color=resolve_semantic_color(raw_border.get("color")),
-            )
-        return StyleClass(font=font, fill=fill, alignment=alignment, border=border)
-
-    compiled_styles: dict[str, StyleClass] = {
-        sid: _build_style_class(sraw) for sid, sraw in style_defs.items()
-    }
-
-    # ── 展开范围样式映射为 per-cell ──
-    cell_to_style: dict[str, str] = {}
-    for range_str, style_id in cell_style_map.items():
-        for addr in _expand_range(range_str):
-            cell_to_style[addr.upper()] = style_id
-
-    # ── 构建 SheetSpec 列表 ──
-    sheets: list[SheetSpec] = []
-    all_uncertainties: list[Uncertainty] = []
-
-    for idx, table in enumerate(tables):
-        name = table.get("name") or table.get("title") or f"Table{idx + 1}"
-        dims = table.get("dimensions") or {"rows": 0, "cols": 0}
-
-        # ── Phase 1 col_alignments 兜底：当 Phase 2 样式缺失时生成默认对齐样式 ──
-        col_alignments: list[str] = table.get("col_alignments") or []
-        col_align_style_map: dict[int, str] = {}  # col_index(0-based) → style_id
-        if col_alignments and not style_json:
-            # Phase 2 失败，用 Phase 1 的列对齐信息生成样式
-            for ci, align_val in enumerate(col_alignments):
-                if align_val in ("left", "right", "center"):
-                    sid = f"_align_{align_val}"
-                    if sid not in compiled_styles:
-                        compiled_styles[sid] = StyleClass(
-                            alignment=AlignmentSpec(
-                                horizontal=align_val, vertical="center",
-                            ),
-                        )
-                    col_align_style_map[ci] = sid
-
-        # 转换 cells
-        cells: list[CellSpec] = []
-        for raw_cell in table.get("cells") or []:
-            addr = raw_cell.get("addr", "")
-            if not _is_valid_address(addr):
-                all_uncertainties.append(Uncertainty(
-                    location=addr or "unknown",
-                    reason=f"无效的单元格地址: {addr!r}",
-                ))
-                continue
-            val = raw_cell.get("val")
-            vtype = raw_cell.get("type", "string")
-            display = raw_cell.get("display")
-            # 推断 number_format
-            nf = None
-            if display and vtype == "number" and val is not None:
-                nf = _infer_number_format_from_display(display)
-            # 确定 style_id：优先 Phase 2 映射，其次 col_alignments 兜底
-            sid = cell_to_style.get(addr.upper())
-            if not sid and col_align_style_map:
-                col_idx = _col_index_from_addr(addr)
-                if col_idx is not None and col_idx in col_align_style_map:
-                    sid = col_align_style_map[col_idx]
-            cells.append(CellSpec(
-                address=addr,
-                value=val,
-                value_type=vtype,
-                display_text=display,
-                number_format=nf,
-                style_id=sid,
-                confidence=1.0,
-            ))
-
-        # 转换 merges
-        merges = [MergedRange(range=m) for m in (table.get("merges") or [])]
-
-        # 语义提示
-        hints = SemanticHints(
-            header_rows=table.get("header_rows") or [],
-            total_rows=table.get("total_rows") or [],
-        )
-
-        # 不确定项
-        for u in table.get("uncertainties") or []:
-            all_uncertainties.append(Uncertainty(
-                location=u.get("addr", "unknown"),
-                reason=u.get("reason", ""),
-                candidate_values=u.get("candidates") or [],
-                confidence=0.5,
-            ))
-
-        sheets.append(SheetSpec(
-            name=name,
-            dimensions=dims,
-            cells=cells,
-            merged_ranges=merges,
-            styles=compiled_styles,
-            column_widths=table.get("col_widths") or [],
-            row_heights=row_heights_global,
-            semantic_hints=hints,
-        ))
-
-    workbook = WorkbookSpec(
-        name="replica",
-        default_font=default_font_spec,
-    )
-
-    return ReplicaSpec(
-        version="1.0",
-        provenance=Provenance(**provenance),
-        workbook=workbook,
-        sheets=sheets,
-        uncertainties=all_uncertainties,
-    )
-
-
-# ── 辅助函数 ──
-
-_ADDR_RE = re.compile(r'^[A-Z]{1,3}\d+$', re.IGNORECASE)
-
-
-def _is_valid_address(addr: str) -> bool:
-    """检查是否为合法的 Excel 单元格地址。"""
-    return bool(addr and _ADDR_RE.match(addr.strip()))
-
-
-def _expand_range(range_str: str) -> list[str]:
-    """将 Excel 范围（如 'A1:C3'）展开为单元格地址列表。"""
-    from openpyxl.utils import get_column_letter, range_boundaries
-
-    range_str = range_str.strip()
-    if ":" not in range_str:
-        return [range_str]
-    try:
-        min_col, min_row, max_col, max_row = range_boundaries(range_str)
-        addrs = []
-        for r in range(min_row, max_row + 1):
-            for c in range(min_col, max_col + 1):
-                addrs.append(f"{get_column_letter(c)}{r}")
-        return addrs
-    except Exception:
-        return [range_str]
-
-
-def _col_index_from_addr(addr: str) -> int | None:
-    """从单元格地址（如 'B3'）提取 0-based 列索引。"""
-    from openpyxl.utils import column_index_from_string
-
-    col_str = re.match(r'^([A-Z]+)', addr.upper())
-    if not col_str:
-        return None
-    try:
-        return column_index_from_string(col_str.group(1)) - 1
-    except Exception:
-        return None
-
-
-def _infer_number_format_from_display(display_text: str) -> str | None:
-    """从 display_text 推断 number_format（复用 image_tools 的逻辑）。"""
-    try:
-        from excelmanus.tools.image_tools import _infer_number_format
-        return _infer_number_format(display_text)
-    except ImportError:
-        return None
-
-
-def build_table_summary(data_json: dict[str, Any]) -> str:
-    """从 Phase 1 结果生成摘要文本，供 Phase 2 prompt 使用。"""
-    lines = []
-    for idx, table in enumerate(data_json.get("tables") or []):
-        name = table.get("name") or f"Table{idx + 1}"
-        dims = table.get("dimensions") or {}
-        rows = dims.get("rows", "?")
-        cols = dims.get("cols", "?")
-        cell_count = len(table.get("cells") or [])
-        merge_count = len(table.get("merges") or [])
-        lines.append(
-            f"- {name}: {rows}行×{cols}列, {cell_count}个单元格, "
-            f"{merge_count}个合并区域"
-        )
-    return "\n".join(lines) if lines else "（无表格信息）"

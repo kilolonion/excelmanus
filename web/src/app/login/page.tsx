@@ -9,6 +9,7 @@ import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { login, getOAuthUrl } from "@/lib/auth-api";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
+import { useAuthConfigStore } from "@/stores/auth-config-store";
 
 const cardVariants = {
   hidden: { opacity: 0, y: 24 },
@@ -20,6 +21,10 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const recentAccounts = useRecentAccountsStore((s) => s.accounts);
   const removeAccount = useRecentAccountsStore((s) => s.removeAccount);
+  const loginMethods = useAuthConfigStore((s) => s.loginMethods);
+  const githubEnabled = loginMethods.github_enabled;
+  const googleEnabled = loginMethods.google_enabled;
+  const showOAuthSection = githubEnabled || googleEnabled;
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -246,50 +251,58 @@ function LoginForm() {
         )}
 
         {/* Divider */}
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-border" />
+        {showOAuthSection && (
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-border" />
+            </div>
+            <div className="relative flex justify-center text-xs">
+              <span className="bg-gradient-to-b from-background to-muted/30 px-3 text-muted-foreground">
+                或使用第三方账号
+              </span>
+            </div>
           </div>
-          <div className="relative flex justify-center text-xs">
-            <span className="bg-gradient-to-b from-background to-muted/30 px-3 text-muted-foreground">
-              或使用第三方账号
-            </span>
-          </div>
-        </div>
+        )}
 
         {/* OAuth */}
-        <div className="grid grid-cols-2 gap-3">
-          <Button
-            variant="outline"
-            className="h-11 font-normal"
-            disabled={oauthLoading !== null}
-            onClick={() => handleOAuth("github")}
-          >
-            {oauthLoading === "github" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                <Github className="h-4 w-4 mr-2" />
-                GitHub
-              </>
+        {showOAuthSection && (
+          <div className={`grid gap-3 ${githubEnabled && googleEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
+            {githubEnabled && (
+              <Button
+                variant="outline"
+                className="h-11 font-normal"
+                disabled={oauthLoading !== null}
+                onClick={() => handleOAuth("github")}
+              >
+                {oauthLoading === "github" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Github className="h-4 w-4 mr-2" />
+                    GitHub
+                  </>
+                )}
+              </Button>
             )}
-          </Button>
-          <Button
-            variant="outline"
-            className="h-11 font-normal"
-            disabled={oauthLoading !== null}
-            onClick={() => handleOAuth("google")}
-          >
-            {oauthLoading === "google" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                <Mail className="h-4 w-4 mr-2" />
-                Google
-              </>
+            {googleEnabled && (
+              <Button
+                variant="outline"
+                className="h-11 font-normal"
+                disabled={oauthLoading !== null}
+                onClick={() => handleOAuth("google")}
+              >
+                {oauthLoading === "google" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Mail className="h-4 w-4 mr-2" />
+                    Google
+                  </>
+                )}
+              </Button>
             )}
-          </Button>
-        </div>
+          </div>
+        )}
 
         {/* Footer */}
         <p className="text-center text-sm text-muted-foreground">

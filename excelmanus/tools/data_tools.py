@@ -2364,7 +2364,8 @@ def get_tools() -> list[ToolDef]:
                     },
                     "range": {
                         "type": "string",
-                        "description": "Excel 坐标范围（如 'A1:F20'、'B100:D200'），指定后精确读取该区域，大文件友好。不支持 CSV",
+                        "description": "Excel 坐标范围（如 'A1:F20'、'B100:D200'），指定后精确读取该区域，大文件友好。不支持 CSV。格式：列字母+行号[:列字母+行号]",
+                        "pattern": "^[A-Za-z]{1,3}\\d{1,7}(:[A-Za-z]{1,3}\\d{1,7})?$",
                     },
                     "offset": {
                         "type": "integer",

@@ -288,6 +288,19 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE approvals ADD COLUMN session_id TEXT",
         "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
     ],
+    14: [
+        """CREATE TABLE IF NOT EXISTS session_checkpoints (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL DEFAULT 'turn',
+            state_json      TEXT NOT NULL DEFAULT '{}',
+            task_list_json   TEXT NOT NULL DEFAULT '{}',
+            turn_number     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_scp_session ON session_checkpoints(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_scp_session_turn ON session_checkpoints(session_id, turn_number)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -556,6 +569,19 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
     13: [
         "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS session_id TEXT",
         "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
+    ],
+    14: [
+        """CREATE TABLE IF NOT EXISTS session_checkpoints (
+            id              SERIAL PRIMARY KEY,
+            session_id      TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL DEFAULT 'turn',
+            state_json      TEXT NOT NULL DEFAULT '{}',
+            task_list_json   TEXT NOT NULL DEFAULT '{}',
+            turn_number     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_scp_session ON session_checkpoints(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_scp_session_turn ON session_checkpoints(session_id, turn_number)",
     ],
 }
 

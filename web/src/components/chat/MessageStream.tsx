@@ -9,12 +9,12 @@ import { AssistantMessage } from "./AssistantMessage";
 import { RollbackConfirmDialog, getRollbackFilePreference } from "./RollbackConfirmDialog";
 import { messageEnterVariants } from "@/lib/sidebar-motion";
 import { useChatStore } from "@/stores/chat-store";
-import type { Message } from "@/lib/types";
+import type { Message, FileAttachment } from "@/lib/types";
 
 interface MessageStreamProps {
   messages: Message[];
   isStreaming: boolean;
-  onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean, files?: File[]) => void;
+  onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => void;
   onRetry?: (assistantMessageId: string) => void;
   onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
 }
@@ -80,6 +80,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
     newContent: string;
     turnIndex: number;
     files?: File[];
+    retainedFiles?: FileAttachment[];
   }>({ open: false, messageId: "", newContent: "", turnIndex: 0 });
 
   const virtualizer = useVirtualizer({
@@ -206,7 +207,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   }, []);
 
   const handleEditAndResend = useCallback(
-    (messageId: string, newContent: string, files?: File[]) => {
+    (messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
       if (!onEditAndResend) return;
 
       const msgIndex = messages.findIndex((m) => m.id === messageId);
@@ -222,13 +223,13 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       }
 
       if (!hasFileChanges) {
-        onEditAndResend(messageId, newContent, false, files);
+        onEditAndResend(messageId, newContent, false, files, retainedFiles);
         return;
       }
 
       const pref = getRollbackFilePreference();
       if (pref !== null) {
-        onEditAndResend(messageId, newContent, pref === "always_rollback", files);
+        onEditAndResend(messageId, newContent, pref === "always_rollback", files, retainedFiles);
         return;
       }
 
@@ -237,7 +238,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       for (let i = 0; i < msgIndex; i++) {
         if (messages[i].role === "user") turnIdx++;
       }
-      setRollbackDialog({ open: true, messageId, newContent, turnIndex: turnIdx, files });
+      setRollbackDialog({ open: true, messageId, newContent, turnIndex: turnIdx, files, retainedFiles });
     },
     [onEditAndResend, messages]
   );
@@ -245,12 +246,13 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   const handleRollbackConfirm = useCallback(
     (rollbackFiles: boolean) => {
       const pendingFiles = rollbackDialog.files;
+      const pendingRetained = rollbackDialog.retainedFiles;
       setRollbackDialog({ open: false, messageId: "", newContent: "", turnIndex: 0 });
       if (onEditAndResend) {
-        onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles, pendingFiles);
+        onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles, pendingFiles, pendingRetained);
       }
     },
-    [onEditAndResend, rollbackDialog.messageId, rollbackDialog.newContent, rollbackDialog.files]
+    [onEditAndResend, rollbackDialog.messageId, rollbackDialog.newContent, rollbackDialog.files, rollbackDialog.retainedFiles]
   );
 
   const handleRollbackCancel = useCallback(() => {
@@ -320,7 +322,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
                       isStreaming={isStreaming}
                       onEditAndResend={
                         onEditAndResend
-                          ? (newContent: string, files?: File[]) => handleEditAndResend(message.id, newContent, files)
+                          ? (newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => handleEditAndResend(message.id, newContent, files, retainedFiles)
                           : undefined
                       }
                     />

@@ -106,6 +106,42 @@ _SUBAGENT_CAPABILITIES: dict[str, str] = {
 }
 
 
+# ── 工具常见错误与调用示例（按需查询，不注入每轮 schema） ───
+
+_TOOL_COMMON_ERRORS: dict[str, list[str]] = {
+    "read_excel": [
+        "文件不存在：确认路径拼写，用 inspect_excel_files 或 list_directory 查找可用文件",
+        "sheet_name 不存在：先用 list_sheets 确认实际 sheet 名称（注意大小写）",
+        "range 格式错误：必须为 Excel 坐标格式如 'A1:F20'，不支持 CSV",
+    ],
+    "run_code": [
+        "缺少 try/except：代码必须包含顶层 try/except，错误 print 到 stderr",
+        "超时：默认 120s，大数据操作可调大 timeout_seconds（最大 300）",
+        "ModuleNotFoundError：仅支持沙箱内的库（openpyxl/pandas/numpy 等），不支持 pip install",
+        "禁止调用：sys.exit()/exec()/eval()/os.system()",
+    ],
+    "filter_data": [
+        "单条件与多条件互斥：column/operator/value 与 conditions 二者不可同时使用",
+        "operator 拼写错误：支持 eq/ne/gt/ge/lt/le/contains/in/not_in/between/isnull/notnull/startswith/endswith",
+    ],
+    "write_text_file": [
+        "文件已存在且 overwrite=false：默认 overwrite=true，显式传 false 时文件已存在会报错",
+    ],
+    "create_excel_chart": [
+        "data_range 为空：必须指定数值数据范围（如 'B1:B20'）",
+        "图表类型不支持：仅支持 bar/line/pie/scatter/area",
+    ],
+}
+
+_TOOL_USAGE_EXAMPLES: dict[str, str] = {
+    "read_excel": '{"file_path": "data.xlsx", "sheet_name": "Sheet1", "max_rows": 50}',
+    "filter_data": '{"file_path": "data.xlsx", "column": "部门", "operator": "eq", "value": "销售部", "max_rows": 20}',
+    "run_code": '{"code": "import openpyxl\\ntry:\\n    wb = openpyxl.load_workbook(\'data.xlsx\')\\n    ws = wb.active\\n    print(f\'rows={ws.max_row}, cols={ws.max_column}\')\\nexcept Exception as e:\\n    import sys; print(e, file=sys.stderr)"}',
+    "create_excel_chart": '{"file_path": "data.xlsx", "chart_type": "bar", "data_range": "B1:B20", "categories_range": "A2:A20", "title": "销售额分布"}',
+    "focus_window": '{"window_id": "sheet_1", "action": "scroll", "range": "A50:F80"}',
+}
+
+
 # ── 辅助函数 ──────────────────────────────────────────────
 
 
@@ -164,13 +200,25 @@ def _handle_tool_detail(tool_name: str) -> str:
     desc = TOOL_SHORT_DESCRIPTIONS.get(tool_name, tool_def.description)
     schema_str = json.dumps(tool_def.input_schema, ensure_ascii=False, indent=2)
 
-    return (
-        f"工具: {tool_name}\n"
-        f"分类: {category}\n"
-        f"权限: {permission}\n"
-        f"描述: {desc}\n\n"
-        f"参数 Schema:\n{schema_str}"
-    )
+    lines = [
+        f"工具: {tool_name}",
+        f"分类: {category}",
+        f"权限: {permission}",
+        f"描述: {desc}",
+        f"\n参数 Schema:\n{schema_str}",
+    ]
+
+    errors = _TOOL_COMMON_ERRORS.get(tool_name)
+    if errors:
+        lines.append("\n常见错误:")
+        for err in errors:
+            lines.append(f"  - {err}")
+
+    example = _TOOL_USAGE_EXAMPLES.get(tool_name)
+    if example:
+        lines.append(f"\n调用示例: {example}")
+
+    return "\n".join(lines)
 
 
 def _handle_category_tools(category: str) -> str:

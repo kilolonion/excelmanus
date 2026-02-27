@@ -48,6 +48,7 @@ class SessionState:
         self.last_text_reply: str | None = None  # 上一次文本回复（用于重复检测）
         self.vba_exempt: bool = False
         self.finish_task_warned: bool = False
+        self.verification_attempt_count: int = 0
 
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
@@ -87,6 +88,7 @@ class SessionState:
         self.has_write_tool_call = False
         self.turn_diagnostics = []
         self.finish_task_warned = False
+        self.verification_attempt_count = 0
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
@@ -102,6 +104,7 @@ class SessionState:
         self.vba_exempt = False
         self.has_write_tool_call = False
         self.finish_task_warned = False
+        self.verification_attempt_count = 0
         self.last_iteration_count = 0
         self.last_tool_call_count = 0
         self.last_success_count = 0
@@ -234,3 +237,48 @@ class SessionState:
                 )
 
         return None
+
+    # ── 序列化 / 反序列化（状态持久化） ──────────────────────────
+
+    def to_dict(self) -> dict[str, Any]:
+        """将可恢复的会话状态序列化为 dict，供持久化存储。
+
+        仅保存恢复执行所需的核心状态，不保存临时性运行时数据
+        （如 _recent_tool_calls、prompt_injection_snapshots 等）。
+        """
+        return {
+            "session_turn": self.session_turn,
+            "last_iteration_count": self.last_iteration_count,
+            "last_tool_call_count": self.last_tool_call_count,
+            "last_success_count": self.last_success_count,
+            "last_failure_count": self.last_failure_count,
+            "current_write_hint": self.current_write_hint,
+            "has_write_tool_call": self.has_write_tool_call,
+            "execution_guard_fired": self.execution_guard_fired,
+            "vba_exempt": self.vba_exempt,
+            "finish_task_warned": self.finish_task_warned,
+            "verification_attempt_count": self.verification_attempt_count,
+            "affected_files": list(self.affected_files),
+            "backup_write_notice_shown": self.backup_write_notice_shown,
+            "session_diagnostics": list(self.session_diagnostics),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SessionState":
+        """从 dict 恢复会话状态。"""
+        state = cls()
+        state.session_turn = data.get("session_turn", 0)
+        state.last_iteration_count = data.get("last_iteration_count", 0)
+        state.last_tool_call_count = data.get("last_tool_call_count", 0)
+        state.last_success_count = data.get("last_success_count", 0)
+        state.last_failure_count = data.get("last_failure_count", 0)
+        state.current_write_hint = data.get("current_write_hint", "unknown")
+        state.has_write_tool_call = data.get("has_write_tool_call", False)
+        state.execution_guard_fired = data.get("execution_guard_fired", False)
+        state.vba_exempt = data.get("vba_exempt", False)
+        state.finish_task_warned = data.get("finish_task_warned", False)
+        state.verification_attempt_count = data.get("verification_attempt_count", 0)
+        state.affected_files = data.get("affected_files", [])
+        state.backup_write_notice_shown = data.get("backup_write_notice_shown", False)
+        state.session_diagnostics = data.get("session_diagnostics", [])
+        return state

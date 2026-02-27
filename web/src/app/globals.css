@@ -837,6 +837,18 @@ button:active:not(:disabled),
   animation: subagent-success-flash 0.6s ease-out forwards;
 }
 
+@keyframes indeterminate-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(200%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
 
   .animate-subagent-running-pulse,

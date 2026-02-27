@@ -28,7 +28,7 @@ const ACCEPTED_EDIT_EXTENSIONS = ".xlsx,.xls,.csv,.png,.jpg,.jpeg";
 interface UserMessageProps {
   content: string;
   files?: FileAttachment[];
-  onEditAndResend?: (newContent: string, files?: File[]) => void;
+  onEditAndResend?: (newContent: string, newFiles?: File[], retainedFiles?: FileAttachment[]) => void;
   isStreaming?: boolean;
 }
 
@@ -36,6 +36,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
   const [editFiles, setEditFiles] = useState<File[]>([]);
+  const [retainedFiles, setRetainedFiles] = useState<FileAttachment[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [needsExpand, setNeedsExpand] = useState(false);
   const [wsPickerOpen, setWsPickerOpen] = useState(false);
@@ -63,13 +64,15 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const startEdit = useCallback(() => {
     if (isStreaming) return;
     setEditText(content);
+    setRetainedFiles(files ?? []);
     setEditing(true);
-  }, [content, isStreaming]);
+  }, [content, files, isStreaming]);
 
   const cancelEdit = useCallback(() => {
     setEditing(false);
     setEditText(content);
     setEditFiles([]);
+    setRetainedFiles([]);
     setWsPickerOpen(false);
     setWsFiles([]);
     setWsFilter("");
@@ -121,11 +124,16 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   const confirmEdit = useCallback(() => {
     const trimmed = editText.trim();
-    if (!trimmed && editFiles.length === 0) return;
+    if (!trimmed && editFiles.length === 0 && retainedFiles.length === 0) return;
     setEditing(false);
-    onEditAndResend?.(trimmed, editFiles.length > 0 ? editFiles : undefined);
+    onEditAndResend?.(
+      trimmed,
+      editFiles.length > 0 ? editFiles : undefined,
+      retainedFiles.length > 0 ? retainedFiles : undefined,
+    );
     setEditFiles([]);
-  }, [editText, editFiles, onEditAndResend]);
+    setRetainedFiles([]);
+  }, [editText, editFiles, retainedFiles, onEditAndResend]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -158,10 +166,27 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               className="w-full text-[13px] leading-relaxed rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
               rows={Math.min(editText.split("\n").length + 1, 8)}
             />
-            {editFiles.length > 0 && (
+            {(retainedFiles.length > 0 || editFiles.length > 0) && (
               <div className="flex flex-wrap gap-1.5">
+                {retainedFiles.map((f, i) => {
+                  const image = isImageFile(f.filename);
+                  return (
+                    <Badge key={`retained-${i}`} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
+                      {image && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
+                      <span className="truncate">{f.filename}</span>
+                      <button
+                        type="button"
+                        className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
+                        title="移除"
+                        onClick={() => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  );
+                })}
                 {editFiles.map((f, i) => (
-                  <Badge key={i} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
+                  <Badge key={`new-${i}`} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
                     {isImageFile(f.name) && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
                     <span className="truncate">{f.name}</span>
                     <button
@@ -320,7 +345,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
             )}
           </div>
         )}
-        {files && files.length > 0 && (
+        {!editing && files && files.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mt-2">
             {files.map((f, i) => {
               const excel = isExcelFile(f.filename);

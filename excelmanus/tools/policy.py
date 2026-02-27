@@ -206,6 +206,24 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# ── 基于 task_tags 的动态工具裁剪映射 ────────────────────────
+# tag → 该任务类型下可隐藏的域工具集合（不影响元工具）。
+# 宽标签（cross_sheet、large_data、image_replica）和无标签情况不做裁剪。
+# introspect_capability 永不被裁剪，作为 LLM 发现隐藏能力的安全阀。
+
+_VISION_TOOLS: frozenset[str] = frozenset({
+    "read_image", "rebuild_excel_from_spec",
+    "verify_excel_replica", "extract_table_spec",
+})
+
+TAG_EXCLUDED_TOOLS: dict[str, frozenset[str]] = {
+    "simple_read": _VISION_TOOLS | frozenset({"create_excel_chart"}),
+    "formatting": _VISION_TOOLS | frozenset({"create_excel_chart"}),
+    "chart": _VISION_TOOLS,
+    "data_fill": _VISION_TOOLS | frozenset({"create_excel_chart"}),
+}
+
+
 # ── 审批详情辅助函数 ───────────────────────────────────────
 
 

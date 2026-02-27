@@ -2,8 +2,8 @@
 
 # Feature: capability-introspection, Property 1-3
 
-使用 hypothesis 验证能力图谱的完整性（P1）、权限一致性（P2）、
-MCP 检测双向正确性（P3）。
+使用 hypothesis 验证能力图谱的完整性（Property 1）、权限一致性（Property 2）、
+MCP 检测双向正确性（Property 3）。
 
 **验证：需求 1.1–1.6, 11.1, 11.2**
 """

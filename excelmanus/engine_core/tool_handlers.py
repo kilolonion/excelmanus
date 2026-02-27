@@ -243,6 +243,11 @@ class DelegationHandler(BaseToolHandler):
 class FinishTaskHandler(BaseToolHandler):
     """处理 finish_task 工具调用。"""
 
+    # 需要 blocking verifier 的 task_tags 集合
+    _BLOCKING_VERIFIER_TAGS: frozenset[str] = frozenset({
+        "cross_sheet", "large_data",
+    })
+
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "finish_task"
 
@@ -282,6 +287,20 @@ class FinishTaskHandler(BaseToolHandler):
             success = True
             finish_accepted = False
 
+        # ── Verifier 接线 ──────────────────────────────────
+        if finish_accepted:
+            _report_dict = report if isinstance(report, dict) else None
+            verifier_text = await self._run_verifier_if_needed(
+                e, report=_report_dict, summary=summary, on_event=on_event,
+            )
+            if verifier_text is not None:
+                if verifier_text.startswith("BLOCK:"):
+                    finish_accepted = False
+                    result_str = verifier_text[len("BLOCK:"):]
+                    success = True
+                else:
+                    result_str += verifier_text
+
         _report_for_event = report if isinstance(report, dict) else None
         if not _report_for_event:
             top_files = arguments.get("affected_files")
@@ -290,6 +309,39 @@ class FinishTaskHandler(BaseToolHandler):
         self._dispatcher._emit_files_changed_from_report(e, on_event, tool_call_id, _report_for_event, iteration)
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=success, finish_accepted=finish_accepted)
+
+    async def _run_verifier_if_needed(
+        self,
+        engine: Any,
+        *,
+        report: dict | None,
+        summary: str,
+        on_event: Any,
+    ) -> str | None:
+        """根据 task_tags 决定 verifier 模式并执行。
+
+        返回值含义：
+        - None: 跳过或 fail-open
+        - "BLOCK:..." : blocking 模式下验证失败
+        - 其他字符串: advisory 追加文本
+        """
+        last_route = getattr(engine, "_last_route_result", None)
+        task_tags: tuple[str, ...] = ()
+        if last_route is not None:
+            task_tags = tuple(getattr(last_route, "task_tags", ()) or ())
+
+        needs_blocking = bool(self._BLOCKING_VERIFIER_TAGS & set(task_tags))
+        attempt_count = getattr(engine, "_verification_attempt_count", 0)
+
+        if needs_blocking and attempt_count < 1:
+            engine._verification_attempt_count = attempt_count + 1
+            return await engine._run_finish_verifier_advisory(
+                report=report, summary=summary, on_event=on_event, blocking=True,
+            )
+        else:
+            return await engine._run_finish_verifier_advisory(
+                report=report, summary=summary, on_event=on_event, blocking=False,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +561,7 @@ _MAX_IMAGE_SIZE_BYTES = 20_000_000
 
 
 class ExtractTableSpecHandler(BaseToolHandler):
-    """处理 extract_table_spec 工具：VLM 结构化提取 → ReplicaSpec JSON。"""
+    """处理 extract_table_spec 工具：4 阶段渐进式 VLM 提取 → ReplicaSpec JSON。"""
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "extract_table_spec"
@@ -518,10 +570,11 @@ class ExtractTableSpecHandler(BaseToolHandler):
         self, tool_name, tool_call_id, arguments, *,
         tool_scope=None, on_event=None, iteration=0, route_result=None,
     ):
-        import base64
+        from datetime import datetime, timezone
         from pathlib import Path
 
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
+        from excelmanus.pipeline import PipelineConfig, PipelinePauseError, ProgressivePipeline
 
         file_path = arguments.get("file_path", "")
         output_path = arguments.get("output_path", "outputs/replica_spec.json")
@@ -566,8 +619,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         # ── 读取图片 ──
-        raw = path.read_bytes()
-        b64 = base64.b64encode(raw).decode("ascii")
+        raw_bytes = path.read_bytes()
         ext = path.suffix.lower()
         mime_map = {
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -575,20 +627,124 @@ class ExtractTableSpecHandler(BaseToolHandler):
         }
         mime = mime_map.get(ext, "image/png")
 
-        # ── 调用 VLM 提取 ──
-        result_str = await self._dispatcher._run_vlm_extract_spec(
-            image_b64=b64,
+        # ── 构建适配器回调 ──
+        e = self._engine
+        dispatcher = self._dispatcher
+
+        async def _vlm_caller(
+            messages: list[dict], phase_label: str, response_format: dict | None,
+        ) -> tuple[str | None, Exception | None]:
+            raw_text, error, _fr = await dispatcher._call_vlm_with_retry(
+                messages=messages,
+                vlm_client=e.vlm_client,
+                vlm_model=e.vlm_model,
+                vlm_timeout=e.config.vlm_timeout_seconds,
+                vlm_max_retries=e.config.vlm_max_retries,
+                vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
+                phase_label=phase_label,
+                response_format=response_format,
+                max_tokens=e.config.vlm_max_tokens,
+            )
+            return raw_text, error
+
+        def _image_preparer(raw: bytes, mode: str) -> tuple[bytes, str]:
+            return ToolDispatcher._prepare_image_for_vlm(
+                raw,
+                max_long_edge=e.config.vlm_image_max_long_edge,
+                jpeg_quality=e.config.vlm_image_jpeg_quality,
+                mode=mode,
+            )
+
+        # ── 构造管线并执行 ──
+        from excelmanus.engine_core.tool_dispatcher import _image_content_hash
+        image_hash = f"sha256:{_image_content_hash(raw_bytes)}"
+        provenance = {
+            "source_image_hash": image_hash,
+            "model": e.vlm_model,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # 输出目录：从 output_path 推导
+        out_path = Path(output_path)
+        output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
+        output_basename = out_path.stem  # e.g. "replica_spec"
+
+        pipeline_config = PipelineConfig(
+            skip_style=skip_style,
+            uncertainty_pause_threshold=e.config.vlm_pipeline_uncertainty_threshold,
+            uncertainty_confidence_floor=e.config.vlm_pipeline_uncertainty_confidence_floor,
+            chunk_cell_threshold=e.config.vlm_pipeline_chunk_cell_threshold,
+        )
+
+        pipeline = ProgressivePipeline(
+            image_bytes=raw_bytes,
             mime=mime,
             file_path=str(path),
-            output_path=output_path,
-            skip_style=skip_style,
+            output_dir=output_dir,
+            output_basename=output_basename,
+            config=pipeline_config,
+            vlm_caller=_vlm_caller,
+            image_preparer=_image_preparer,
+            provenance=provenance,
+            on_event=on_event,
         )
-        success = '"status": "ok"' in result_str or '"status": "paused"' in result_str
-        error = None if success else result_str
-        log_tool_call(logger, tool_name, arguments, result=result_str if success else None, error=error)
-        if success:
+
+        # 注入 B 通道描述缓存到 Pipeline（若图片匹配）
+        cached_desc = dispatcher._last_vlm_description
+        cached_hash = dispatcher._last_vlm_description_image_hash
+        if cached_desc and cached_hash:
+            current_hash = _image_content_hash(raw_bytes)
+            if current_hash == cached_hash:
+                pipeline._b_channel_description = cached_desc
+                logger.info("B 通道描述已注入 Pipeline 结构阶段 (hash=%s)", cached_hash)
+
+        try:
+            spec, spec_path = await pipeline.run()
+        except PipelinePauseError as pause:
+            result_str = json.dumps({
+                "status": "paused",
+                "message": f"管线在 {pause.phase.value} 阶段暂停：{len(pause.uncertainties)} 个不确定项",
+                "spec_path": pause.spec_path,
+                "checkpoint": pause.checkpoint,
+                "uncertainties": [
+                    {"location": u.location, "reason": u.reason, "confidence": u.confidence}
+                    for u in pause.uncertainties[:10]
+                ],
+                "hint": "请确认不确定项后，使用 resume_from_phase 继续管线。",
+            }, ensure_ascii=False)
+            log_tool_call(logger, tool_name, arguments, result=result_str)
             self._engine.record_write_action()
-        return _ToolExecOutcome(result_str=result_str, success=success, error=error)
+            return _ToolExecOutcome(result_str=result_str, success=True)
+        except RuntimeError as exc:
+            # VLM 调用失败等运行时错误
+            result_str = ToolDispatcher._build_vlm_failure_result(exc, 1, str(path))
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+        except Exception as exc:
+            result_str = json.dumps({
+                "status": "error",
+                "message": f"管线执行失败: {exc}",
+            }, ensure_ascii=False)
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        total_cells = sum(len(s.cells) for s in spec.sheets)
+        has_styles = any(bool(s.styles) for s in spec.sheets)
+        result_str = json.dumps({
+            "status": "ok",
+            "output_path": spec_path,
+            "table_count": len(spec.sheets),
+            "cell_count": total_cells,
+            "uncertainties_count": len(spec.uncertainties),
+            "has_styles": has_styles,
+            "hint": (
+                f"已生成 ReplicaSpec ({len(spec.sheets)} 个表格, {total_cells} 个单元格)。"
+                "下一步请调用 rebuild_excel_from_spec 编译为 Excel 文件。"
+            ),
+        }, ensure_ascii=False)
+        log_tool_call(logger, tool_name, arguments, result=result_str)
+        self._engine.record_write_action()
+        return _ToolExecOutcome(result_str=result_str, success=True)
 
 
 # ---------------------------------------------------------------------------
