@@ -117,7 +117,42 @@ firewall-cmd --reload                             # Apply
 
 ## 5. Daily Operations
 
-### 5.1 One-Click Deployment
+### 5.1 Local One-Click Start
+
+`deploy/start.sh` launches backend + frontend together, suitable for local development and single-server deployment:
+
+```bash
+# macOS / Linux
+./deploy/start.sh                          # Dev mode
+./deploy/start.sh --prod                   # Production mode (npm run start)
+./deploy/start.sh --backend-port 9000      # Custom backend port
+./deploy/start.sh --frontend-port 8080     # Custom frontend port
+./deploy/start.sh --workers 4 --prod       # Multi-worker production
+./deploy/start.sh --backend-only           # Backend only
+./deploy/start.sh --frontend-only          # Frontend only
+./deploy/start.sh --log-dir ./logs         # Log output to files
+./deploy/start.sh --no-open                # Don't auto-open browser
+./deploy/start.sh --skip-deps              # Skip dependency checks
+./deploy/start.sh --help                   # Full parameter list
+```
+
+**Windows users:**
+
+```powershell
+# PowerShell
+.\deploy\start.ps1
+.\deploy\start.ps1 -Production
+.\deploy\start.ps1 -BackendPort 9000 -Production -Workers 4
+
+# CMD
+deploy\start.bat
+deploy\start.bat --prod
+deploy\start.bat --backend-port 9000
+```
+
+> Scripts auto-detect OS (macOS / Linux / Windows) and on Linux identify apt / dnf / yum / pacman / zypper / apk package managers, providing install commands when dependencies are missing. Supports graceful shutdown (SIGTERM first, SIGKILL after 5s), .env auto-loading, and auto-opening browser.
+
+### 5.2 Remote One-Click Deployment
 
 `deploy/deploy.sh` supports separate frontend/backend deployment:
 
@@ -150,7 +185,7 @@ tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static pu
 ./deploy/deploy.sh --from-local
 ```
 
-### 5.2 Manual Operations
+### 5.3 Manual Operations
 
 **Backend (<BACKEND_IP>)**:
 
@@ -204,7 +239,7 @@ pm2 logs excelmanus-web --lines 50 --nostream
 > For low-memory machines (1~2G), prefer using `--frontend-artifact` for artifact-based releases to avoid OOM from on-site cold compilation.
 > For cross-region transfers, use rsync with resume support (the script has built-in `--partial --append-verify`).
 
-### 5.3 Health Checks
+### 5.4 Health Checks
 
 ```bash
 # Via domain (full chain)
@@ -473,7 +508,11 @@ firewall-cmd --reload
 ```
 Project Root/
 ├── deploy/
-│   ├── deploy.sh          # One-click deployment script (separate frontend/backend)
+│   ├── start.sh           # One-click start script (macOS / Linux)
+│   ├── start.ps1          # One-click start script (Windows PowerShell)
+│   ├── start.bat          # One-click start script (Windows CMD)
+│   ├── deploy.sh          # Remote deployment script (macOS / Linux)
+│   ├── deploy.ps1         # Remote deployment script (Windows PowerShell)
 │   ├── Dockerfile         # Backend Docker image
 │   ├── Dockerfile.sandbox # Code sandbox image
 │   ├── docker-compose.yml # Docker Compose orchestration

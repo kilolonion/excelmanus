@@ -27,14 +27,14 @@ found=0
 declare -a TARGETS=()
 if command -v git >/dev/null 2>&1; then
   while IFS= read -r file; do
-    [[ -n "${file}" ]] && TARGETS+=("${file}")
+    [[ -n "${file}" ]] && TARGETS+=("${file}") || true
   done < <(git ls-files -- "${GLOBS[@]}")
 fi
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   for glob in "${GLOBS[@]}"; do
     for path in ${glob}; do
-      [[ -f "${path}" ]] && TARGETS+=("${path}")
+      [[ -f "${path}" ]] && TARGETS+=("${path}") || true
     done
   done
 fi
