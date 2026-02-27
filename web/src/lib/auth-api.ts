@@ -285,7 +285,8 @@ export async function handleOAuthCallback(
 ) {
   const params = new URLSearchParams({ code });
   if (state) params.set("state", state);
-  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}/callback?${params}`), {
+  // 直连后端交换 token，绕过 CDN→Nginx→Next.js rewrite 代理链
+  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}/callback?${params}`, { direct: true }), {
     headers: { "Accept": "application/json" },
   });
   if (!res.ok) {
