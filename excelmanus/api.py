@@ -4704,12 +4704,12 @@ def _resolve_model_info(
         return (_config.aux_model or _config.model,
                 _config.aux_base_url or _config.base_url,
                 _config.aux_api_key or _config.api_key,
-                _config.aux_protocol or _default_protocol)
+                getattr(_config, 'aux_protocol', None) or _default_protocol)
     if req_name == "vlm":
         return (_config.vlm_model or _config.model,
                 _config.vlm_base_url or _config.base_url,
                 _config.vlm_api_key or _config.api_key,
-                _config.vlm_protocol or _default_protocol)
+                getattr(_config, 'vlm_protocol', None) or _default_protocol)
 
     # 2) 按 profile name 精确查找
     lookup_name = req_name or req_model
