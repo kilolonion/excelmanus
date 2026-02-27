@@ -498,7 +498,7 @@ class TestModelSwitchConsistency:
             return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
         )
 
-        _ = await engine._run_window_perception_advisor_async(
+        _ = await engine._llm_caller.run_window_perception_advisor_async(
             windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
@@ -530,7 +530,7 @@ class TestModelSwitchConsistency:
             return_value=_make_text_response('{"task_type":"GENERAL_BROWSE","advices":[]}')
         )
 
-        _ = await engine._run_window_perception_advisor_async(
+        _ = await engine._llm_caller.run_window_perception_advisor_async(
             windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
@@ -639,9 +639,9 @@ class TestModelSwitchConsistency:
         )
         engine._advisor_client.chat.completions.create = mocked_create
         mocked_sleep = AsyncMock(return_value=None)
-        monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
+        monkeypatch.setattr("excelmanus.engine_core.llm_caller.asyncio.sleep", mocked_sleep)
 
-        plan = await engine._run_window_perception_advisor_async(
+        plan = await engine._llm_caller.run_window_perception_advisor_async(
             windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
@@ -655,7 +655,8 @@ class TestModelSwitchConsistency:
     def test_is_transient_window_advisor_exception_detects_nested_connect_error(self) -> None:
         wrapped = RuntimeError("Gemini API 请求失败: ")
         wrapped.__cause__ = httpx.ConnectError("")
-        assert AgentEngine._is_transient_window_advisor_exception(wrapped) is True
+        from excelmanus.engine_core.llm_caller import is_transient_window_advisor_exception
+        assert is_transient_window_advisor_exception(wrapped) is True
 
     def test_extract_retry_after_seconds_from_nested_exception(self) -> None:
         class _RateLimitError(Exception):
@@ -666,7 +667,8 @@ class TestModelSwitchConsistency:
         wrapped = RuntimeError("Gemini API 请求失败: ")
         wrapped.__cause__ = _RateLimitError()
 
-        retry_after = AgentEngine._extract_retry_after_seconds(wrapped)
+        from excelmanus.engine_core.llm_caller import extract_retry_after_seconds
+        retry_after = extract_retry_after_seconds(wrapped)
         assert retry_after == pytest.approx(0.6)
 
     @pytest.mark.asyncio
@@ -690,9 +692,9 @@ class TestModelSwitchConsistency:
         )
         engine._advisor_client.chat.completions.create = mocked_create
         mocked_sleep = AsyncMock(return_value=None)
-        monkeypatch.setattr("excelmanus.engine.asyncio.sleep", mocked_sleep)
+        monkeypatch.setattr("excelmanus.engine_core.llm_caller.asyncio.sleep", mocked_sleep)
 
-        plan = await engine._run_window_perception_advisor_async(
+        plan = await engine._llm_caller.run_window_perception_advisor_async(
             windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
@@ -724,12 +726,11 @@ class TestModelSwitchConsistency:
             raise AssertionError("不应进入重试分支")
 
         monkeypatch.setattr(
-            AgentEngine,
-            "_window_advisor_retry_delay_seconds",
-            staticmethod(_unexpected_retry_delay),
+            "excelmanus.engine_core.llm_caller.window_advisor_retry_delay_seconds",
+            _unexpected_retry_delay,
         )
 
-        plan = await engine._run_window_perception_advisor_async(
+        plan = await engine._llm_caller.run_window_perception_advisor_async(
             windows=[make_window(id="w1", type=WindowType.SHEET, title="A")],
             active_window_id="w1",
             budget=PerceptionBudget(),
@@ -776,7 +777,7 @@ class TestSystemMessageMode:
         )
         engine._client.chat.completions.create = mocked_create
 
-        response = await engine._create_chat_completion_with_system_fallback(
+        response = await engine._llm_caller.create_chat_completion_with_system_fallback(
             {
                 "model": config.model,
                 "messages": [
