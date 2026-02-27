@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="logo.svg" width="280" alt="ExcelManus" />
+  <img src="assets/logo.svg" width="280" alt="ExcelManus" />
 </p>
 
 <h3 align="center">用自然语言驱动 Excel 的 AI Agent</h3>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/version-1.6.0-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-15-black?logo=next.js" alt="Next.js" />
@@ -211,8 +211,8 @@ cd web && npm install && npm run dev    # 前端
 ### Docker Compose（推荐）
 
 ```bash
-cp .env.example .env   # 编辑 API Key、模型等
-docker compose up -d   # 后端 + 前端 + PostgreSQL
+cp .env.example .env                      # 编辑 API Key、模型等
+docker compose -f deploy/docker-compose.yml up -d   # 后端 + 前端 + PostgreSQL
 ```
 
 访问 `http://localhost:3000`。加 `--profile production` 启用 Nginx 反向代理后访问 `http://localhost`。
@@ -224,9 +224,9 @@ docker compose up -d   # 后端 + 前端 + PostgreSQL
 ### 远程更新
 
 ```bash
-./deploy.sh                  # 完整部署
-./deploy.sh --backend-only   # 只更新后端
-./deploy.sh --frontend-only  # 只更新前端
+./deploy/deploy.sh                  # 完整部署
+./deploy/deploy.sh --backend-only   # 只更新后端
+./deploy/deploy.sh --frontend-only  # 只更新前端
 ```
 
 > 自动排除 `.env`、`data/`、`workspace/`，不覆盖线上数据。
@@ -265,4 +265,4 @@ pytest
 
 ## 📄 许可证
 
-[MIT](LICENSE) © kilolonion
+[Apache License 2.0](LICENSE) © kilolonion

@@ -119,17 +119,17 @@ firewall-cmd --reload                             # 生效
 
 ### 5.1 一键部署
 
-项目根目录的 `deploy.sh` 支持前后端分离部署：
+`deploy/deploy.sh` 支持前后端分离部署：
 
 ```bash
 # 完整部署（后端 + 前端）
-./deploy.sh
+./deploy/deploy.sh
 
 # 只更新后端
-./deploy.sh --backend-only
+./deploy/deploy.sh --backend-only
 
 # 只更新前端
-./deploy.sh --frontend-only
+./deploy/deploy.sh --frontend-only
 
 # 本地构建并打包前端制品（推荐）
 cd /path/to/excelmanus/web
@@ -138,16 +138,16 @@ mkdir -p ../web-dist
 tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
 
 # 跳过前端构建，只重启
-./deploy.sh --frontend-only --skip-build
+./deploy/deploy.sh --frontend-only --skip-build
 
 # 使用本地/CI 构建好的前端制品（推荐低内存服务器）
-./deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
+./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
 
 # 远端冷构建（仅排障，风险高）
-./deploy.sh --frontend-only --cold-build
+./deploy/deploy.sh --frontend-only --cold-build
 
 # 从本地 rsync 同步（不走 GitHub）
-./deploy.sh --from-local
+./deploy/deploy.sh --from-local
 ```
 
 ### 5.2 手动操作
@@ -472,11 +472,17 @@ firewall-cmd --reload
 
 ```
 项目根目录/
-├── deploy.sh              # 一键部署脚本（前后端分离）
-├── <SSH_KEY_FILE>      # SSH 私钥（两台服务器共用）
+├── deploy/
+│   ├── deploy.sh          # 一键部署脚本（前后端分离）
+│   ├── Dockerfile         # 后端 Docker 镜像
+│   ├── Dockerfile.sandbox # 代码沙盒镜像
+│   ├── docker-compose.yml # Docker Compose 编排
+│   ├── nginx.conf         # Nginx 反向代理配置
+│   └── certs/             # TLS 证书
+├── assets/
+│   └── logo.svg           # 品牌 Logo
 ├── .env                   # 本地开发环境变量
 ├── mcp.json               # MCP 服务器配置
-├── start.sh               # 本地开发启动脚本
 └── docs/
     └── ops-manual.md      # 本手册
 ```
