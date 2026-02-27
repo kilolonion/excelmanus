@@ -64,7 +64,13 @@
     SSH 用户名（默认 root）
 
 .PARAMETER SshKeyPath
-    SSH 私钥路径
+    SSH 私钥路径（全局，未指定独立密钥时回退使用）
+
+.PARAMETER BackendSshKeyPath
+    后端服务器 SSH 私钥路径（覆盖 SshKeyPath）
+
+.PARAMETER FrontendSshKeyPath
+    前端服务器 SSH 私钥路径（覆盖 SshKeyPath）
 
 .PARAMETER SshPort
     SSH 端口（默认 22）
@@ -141,6 +147,10 @@
     前后端分离部署
 
 .EXAMPLE
+    .\deploy\deploy.ps1 -BackendHost 10.0.0.1 -FrontendHost 10.0.0.2 -BackendSshKeyPath C:\keys\backend.pem -FrontendSshKeyPath C:\keys\frontend.pem
+    前后端分离 + 双密钥部署
+
+.EXAMPLE
     .\deploy\deploy.ps1 rollback
     回滚到上一版本
 
@@ -180,6 +190,8 @@ param(
     [string]$SingleHost = "",
     [string]$SshUser = "",
     [string]$SshKeyPath = "",
+    [string]$BackendSshKeyPath = "",
+    [string]$FrontendSshKeyPath = "",
     [int]$SshPort = 0,
 
     [string]$BackendDir = "",
@@ -320,6 +332,8 @@ $Script:CFG = @{
     FrontendHost     = $FrontendHost
     SshUser          = $SshUser
     SshKeyPath       = $SshKeyPath
+    BackendSshKeyPath = $BackendSshKeyPath
+    FrontendSshKeyPath = $FrontendSshKeyPath
     SshPort          = $SshPort
     BackendDir       = $BackendDir
     FrontendDir      = $FrontendDir
@@ -359,6 +373,8 @@ function Load-Config {
                         "FRONTEND_NODE_BIN"  { if (-not $Script:CFG.NodeBin)      { $Script:CFG.NodeBin      = $val } }
                         "BACKEND_NODE_BIN"   { if (-not $Script:CFG.NodeBin)      { $Script:CFG.NodeBin      = $val } }
                         "SSH_KEY_NAME"       { if (-not $Script:CFG.SshKeyPath)   { $Script:CFG.SshKeyPath   = Join-Path $Script:PROJECT_ROOT $val } }
+                        "BACKEND_SSH_KEY_NAME" { if (-not $Script:CFG.BackendSshKeyPath) { $Script:CFG.BackendSshKeyPath = Join-Path $Script:PROJECT_ROOT $val } }
+                        "FRONTEND_SSH_KEY_NAME" { if (-not $Script:CFG.FrontendSshKeyPath) { $Script:CFG.FrontendSshKeyPath = Join-Path $Script:PROJECT_ROOT $val } }
                         "REPO_URL"           { if (-not $Script:CFG.RepoUrl)      { $Script:CFG.RepoUrl      = $val } }
                         "REPO_BRANCH"        { if (-not $Script:CFG.Branch)       { $Script:CFG.Branch       = $val } }
                         "BACKEND_PORT"       { if ($Script:CFG.BackendPort -eq 0) { $Script:CFG.BackendPort  = [int]$val } }
@@ -409,6 +425,10 @@ function Apply-Defaults {
     if ($Script:CFG.VerifyTimeout -eq 0) { $Script:CFG.VerifyTimeout  = 30 }
     if ($Script:CFG.KeepFrontendReleases -eq 0) { $Script:CFG.KeepFrontendReleases = 3 }
 
+    # 每服务器独立密钥（未设置时回退到全局 SshKeyPath）
+    if (-not $Script:CFG.BackendSshKeyPath)  { $Script:CFG.BackendSshKeyPath  = $Script:CFG.SshKeyPath }
+    if (-not $Script:CFG.FrontendSshKeyPath) { $Script:CFG.FrontendSshKeyPath = $Script:CFG.SshKeyPath }
+
     # 自动检测拓扑
     if ($Script:CFG.Topology -eq "auto") {
         if ($Script:CFG.BackendHost -and $Script:CFG.FrontendHost -and ($Script:CFG.BackendHost -ne $Script:CFG.FrontendHost)) {
@@ -447,30 +467,32 @@ function Apply-Defaults {
 # ═══════════════════════════════════════════════════════════════
 
 function Get-SshOpts {
+    param([string]$KeyOverride = "")
     $opts = @("-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30")
-    if ($Script:CFG.SshKeyPath) { $opts += @("-i", $Script:CFG.SshKeyPath) }
+    $keyPath = if ($KeyOverride) { $KeyOverride } else { $Script:CFG.SshKeyPath }
+    if ($keyPath) { $opts += @("-i", $keyPath) }
     if ($Script:CFG.SshPort -ne 22) { $opts += @("-p", $Script:CFG.SshPort) }
     return $opts
 }
 
 function Invoke-Remote {
-    param([string]$TargetHost, [string]$RemoteCmd)
+    param([string]$TargetHost, [string]$RemoteCmd, [string]$KeyPath = "")
     if ($Script:CFG.Topology -eq "local") {
         return Invoke-Run "bash -c '$RemoteCmd'"
     }
-    $sshOpts = (Get-SshOpts) -join " "
+    $sshOpts = (Get-SshOpts -KeyOverride $KeyPath) -join " "
     $target = "$($Script:CFG.SshUser)@$TargetHost"
     return Invoke-Run "ssh $sshOpts $target `"$RemoteCmd`""
 }
 
 function Invoke-RemoteBackend {
     param([string]$Cmd)
-    return Invoke-Remote -TargetHost $Script:CFG.BackendHost -RemoteCmd $Cmd
+    return Invoke-Remote -TargetHost $Script:CFG.BackendHost -RemoteCmd $Cmd -KeyPath $Script:CFG.BackendSshKeyPath
 }
 
 function Invoke-RemoteFrontend {
     param([string]$Cmd)
-    return Invoke-Remote -TargetHost $Script:CFG.FrontendHost -RemoteCmd $Cmd
+    return Invoke-Remote -TargetHost $Script:CFG.FrontendHost -RemoteCmd $Cmd -KeyPath $Script:CFG.FrontendSshKeyPath
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -497,7 +519,7 @@ function Get-RsyncExcludeArgs {
 # ═══════════════════════════════════════════════════════════════
 
 function Sync-Code {
-    param([string]$TargetHost, [string]$RemoteDir, [string]$Label)
+    param([string]$TargetHost, [string]$RemoteDir, [string]$Label, [string]$KeyPath = "")
 
     if ($FromLocal) {
         Write-Info "rsync sync code -> $Label ($($TargetHost ?? 'localhost'))..."
@@ -505,11 +527,15 @@ function Sync-Code {
             Write-Debug2 "local mode, skip sync"
             return $true
         }
-        $sshOpts = (Get-SshOpts) -join " "
+        $sshOpts = (Get-SshOpts -KeyOverride $KeyPath) -join " "
         $excludes = Get-RsyncExcludeArgs
         $target = "$($Script:CFG.SshUser)@${TargetHost}:${RemoteDir}/"
         # Windows: 需要 rsync（通过 Git Bash/WSL/MSYS2）
-        $rsyncCmd = "rsync -az --partial --append-verify --timeout=120 $excludes --progress -e `"ssh $sshOpts`" `"$Script:PROJECT_ROOT/`" `"$target`""
+        # 自动检测 --append-verify 支持（macOS openrsync 不支持）
+        $rsyncExtra = ""
+        $rsyncHelp = & rsync --help 2>&1 | Out-String
+        if ($rsyncHelp -match '--append-verify') { $rsyncExtra = "--append-verify" }
+        $rsyncCmd = "rsync -az --partial $rsyncExtra --timeout=120 $excludes --progress -e `"ssh $sshOpts`" `"$Script:PROJECT_ROOT/`" `"$target`""
         return Invoke-Run $rsyncCmd
     } else {
         Write-Info "git pull -> $Label ($($TargetHost ?? 'localhost'))..."
@@ -529,7 +555,7 @@ fi
         if ($Script:CFG.Topology -eq "local") {
             return Invoke-Run "bash -c `"$gitCmd`""
         }
-        return Invoke-Remote -TargetHost $TargetHost -RemoteCmd $gitCmd
+        return Invoke-Remote -TargetHost $TargetHost -RemoteCmd $gitCmd -KeyPath $KeyPath
     }
     Write-Log "$Label code sync complete"
     return $true
@@ -542,13 +568,44 @@ fi
 function Ensure-FrontendStandaloneAssets {
     Write-Info "copy standalone static assets..."
     $cmd = @"
-cd '$($Script:CFG.FrontendDir)/web' && \
-if [ -d .next/standalone ]; then
-    cp -r public .next/standalone/ 2>/dev/null || true
-    cp -r .next/static .next/standalone/.next/ 2>/dev/null || true
-    echo 'standalone assets copied'
+cd '$($Script:CFG.FrontendDir)/web'
+if [ ! -d .next/standalone ]; then
+    echo '[WARN] no standalone output dir, skipped'
+    exit 0
+fi
+
+# ensure target dirs exist
+mkdir -p .next/standalone/.next
+mkdir -p .next/standalone/public
+
+# clean old assets then re-copy (avoid stale mismatch)
+rm -rf .next/standalone/.next/static
+rm -rf .next/standalone/public
+
+if [ -d .next/static ]; then
+    cp -r .next/static .next/standalone/.next/static
+fi
+if [ -d public ]; then
+    cp -r public .next/standalone/public
+fi
+
+# verify critical files
+_ok=true
+if [ ! -d .next/standalone/.next/static/chunks ]; then
+    echo '[ERROR] standalone/.next/static/chunks missing - JS will 404!'
+    _ok=false
+fi
+if [ ! -f .next/standalone/server.js ]; then
+    echo '[ERROR] standalone/server.js missing!'
+    _ok=false
+fi
+
+if [ "`$_ok" = true ]; then
+    _cnt=`$(find .next/standalone/.next/static/chunks -name '*.js' | wc -l)
+    echo "standalone assets copied (`${_cnt} JS chunks)"
 else
-    echo 'no standalone output, skipped'
+    echo '[ERROR] standalone assets incomplete - frontend will fail!'
+    exit 1
 fi
 "@
     Invoke-RemoteFrontend $cmd | Out-Null
@@ -566,10 +623,37 @@ function Restart-FrontendService {
         $cmd = @"
 export PATH=$($cfg.NodeBin):`$PATH && \
 cd '$($cfg.FrontendDir)/web' && \
-pm2 restart '$($cfg.Pm2Frontend)' 2>/dev/null || \
-pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web' 2>/dev/null
+pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true && \
+pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web' && \
+pm2 save
 "@
         Invoke-RemoteFrontend $cmd | Out-Null
+    }
+}
+
+# ── 自动修复前端 BACKEND_ORIGIN 指向旧内网 IP ──
+function Repair-FrontendBackendOrigin {
+    $cfg = $Script:CFG
+    if (-not $cfg.FrontendHost -or $cfg.Topology -eq "local") { return }
+
+    $feOrigin = Invoke-RemoteFrontend "timeout 5 grep -E '^NEXT_PUBLIC_BACKEND_ORIGIN=' '$($cfg.FrontendDir)/web/.env.local' 2>/dev/null || echo __MISSING__"
+    if (-not $feOrigin -or $feOrigin -match '__MISSING__') { return }
+
+    # 提取当前值
+    $currentVal = ""
+    if ($feOrigin -match 'NEXT_PUBLIC_BACKEND_ORIGIN=(.+)') { $currentVal = $Matches[1].Trim() }
+    if (-not $currentVal -or $currentVal -eq "same-origin") { return }
+
+    # 检测 RFC 1918 内网 IP
+    if ($currentVal -match '(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)') {
+        $correctVal = if ($Script:SITE_URL) { "same-origin" }
+                      elseif ($cfg.BackendHost) { "http://$($cfg.BackendHost):$($cfg.BackendPort)" }
+                      else { return }
+
+        Write-Warn "Frontend BACKEND_ORIGIN points to stale private IP: $currentVal"
+        Write-Info "Auto-fixing to: $correctVal"
+        Invoke-RemoteFrontend "sed -i 's|^NEXT_PUBLIC_BACKEND_ORIGIN=.*|NEXT_PUBLIC_BACKEND_ORIGIN=$correctVal|' '$($cfg.FrontendDir)/web/.env.local'" | Out-Null
+        Write-Log "Frontend BACKEND_ORIGIN auto-fixed"
     }
 }
 
@@ -582,6 +666,10 @@ function Build-FrontendRemote {
     } else {
         Write-Info "keeping .next/cache to reduce memory. Use -ColdBuild for clean build."
     }
+
+    # 自动清理干扰 Next.js 编译的旧备份目录（src.bak.* 等）
+    Write-Info "cleaning stale backup dirs that break Next.js build..."
+    Invoke-RemoteFrontend "cd '$($cfg.FrontendDir)/web' && find . -maxdepth 1 -type d \( -name 'src.bak.*' -o -name 'src.backup.*' -o -name 'src_old*' \) -exec rm -rf {} + 2>/dev/null || true" | Out-Null
 
     Write-Info "building frontend (npm run build)..."
     $cmd = "export PATH=$($cfg.NodeBin):`$PATH && cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build 2>&1 | tail -10"
@@ -605,9 +693,9 @@ function Upload-FrontendArtifact {
     if ($cfg.Topology -eq "local") {
         Copy-Item $ArtifactPath $remotePath -Force
     } else {
-        $sshOpts = (Get-SshOpts) -join " "
+        $sshOpts = (Get-SshOpts -KeyOverride $cfg.FrontendSshKeyPath) -join " "
         $target = "$($cfg.SshUser)@$($cfg.FrontendHost):$remotePath"
-        Invoke-Run "rsync -az --partial --append-verify --timeout=120 --progress -e `"ssh $sshOpts`" `"$ArtifactPath`" `"$target`""
+        Invoke-Run "rsync -az --partial --timeout=120 --progress -e `"ssh $sshOpts`" `"$ArtifactPath`" `"$target`""
     }
     return $remotePath
 }
@@ -689,7 +777,7 @@ function Deploy-Backend {
     $cfg = $Script:CFG
     Write-Step "Deploy Backend"
 
-    Sync-Code -TargetHost $cfg.BackendHost -RemoteDir $cfg.BackendDir -Label "backend" | Out-Null
+    Sync-Code -TargetHost $cfg.BackendHost -RemoteDir $cfg.BackendDir -Label "backend" -KeyPath $cfg.BackendSshKeyPath | Out-Null
 
     if (-not $SkipDeps) {
         Write-Info "installing Python deps..."
@@ -705,8 +793,10 @@ function Deploy-Backend {
         $restartCmd = @"
 export PATH=$($cfg.NodeBin):`$PATH && \
 pm2 restart '$($cfg.Pm2Backend)' --update-env 2>/dev/null || \
-pm2 start '$($cfg.BackendDir)/$($cfg.VenvDir)/bin/python -c "import uvicorn; uvicorn.run(\"excelmanus.api:app\", host=\"0.0.0.0\", port=$($cfg.BackendPort), log_level=\"info\")"' \
-    --name '$($cfg.Pm2Backend)' --cwd '$($cfg.BackendDir)' 2>/dev/null || true
+pm2 start '$($cfg.BackendDir)/$($cfg.VenvDir)/bin/python' \
+    --name '$($cfg.Pm2Backend)' --cwd '$($cfg.BackendDir)' \
+    -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port $($cfg.BackendPort) --log-level info \
+    2>/dev/null || true
 "@
         Invoke-RemoteBackend $restartCmd | Out-Null
     }
@@ -723,7 +813,7 @@ function Deploy-Frontend {
             Write-Info "artifact mode, skip repo sync"
             Invoke-RemoteFrontend "mkdir -p '$($cfg.FrontendDir)/web/.deploy/artifacts'" | Out-Null
         } else {
-            Sync-Code -TargetHost $cfg.FrontendHost -RemoteDir $cfg.FrontendDir -Label "frontend" | Out-Null
+            Sync-Code -TargetHost $cfg.FrontendHost -RemoteDir $cfg.FrontendDir -Label "frontend" -KeyPath $cfg.FrontendSshKeyPath | Out-Null
         }
     }
 
@@ -754,6 +844,9 @@ function Deploy-Frontend {
         return $true
     }
 
+    # 自动检测并修复前端 NEXT_PUBLIC_BACKEND_ORIGIN 指向旧内网 IP
+    Repair-FrontendBackendOrigin
+
     if ($SkipBuild) {
         Write-Info "skipping build, restart only..."
         Ensure-FrontendStandaloneAssets
@@ -780,7 +873,7 @@ function Deploy-Docker {
     Write-Step "Docker Compose Deploy"
 
     if (-not $FromLocal -and $cfg.Topology -ne "local") {
-        Sync-Code -TargetHost ($cfg.BackendHost ?? "localhost") -RemoteDir $cfg.BackendDir -Label "Docker" | Out-Null
+        Sync-Code -TargetHost ($cfg.BackendHost ?? "localhost") -RemoteDir $cfg.BackendDir -Label "Docker" -KeyPath $cfg.BackendSshKeyPath | Out-Null
     }
 
     $composeCmd = "docker compose"
@@ -942,16 +1035,19 @@ function Invoke-Preflight {
         exit 1
     }
 
-    if ($Script:CFG.SshKeyPath -and -not (Test-Path $Script:CFG.SshKeyPath)) {
-        Write-Err "SSH key not found: $($Script:CFG.SshKeyPath)"
-        exit 1
-    }
-
-    # SSH 连通性检查
+    # SSH 密钥检查（非本地/Docker 模式）
     if ($Script:CFG.Topology -ne "local" -and $Script:CFG.Topology -ne "docker") {
+        foreach ($keyPath in @($Script:CFG.BackendSshKeyPath, $Script:CFG.FrontendSshKeyPath)) {
+            if ($keyPath -and -not (Test-Path $keyPath)) {
+                Write-Err "SSH key not found: $keyPath"
+                exit 1
+            }
+        }
+
+        # SSH 连通性检查
         if ($Script:CFG.Mode -ne "frontend" -and $Script:CFG.BackendHost) {
             Write-Debug2 "checking backend connectivity..."
-            $sshOpts = (Get-SshOpts) -join " "
+            $sshOpts = (Get-SshOpts -KeyOverride $Script:CFG.BackendSshKeyPath) -join " "
             $test = & ssh $sshOpts.Split(" ") -o BatchMode=yes "$($Script:CFG.SshUser)@$($Script:CFG.BackendHost)" "echo ok" 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "cannot connect to backend: $($Script:CFG.SshUser)@$($Script:CFG.BackendHost)"
@@ -960,7 +1056,7 @@ function Invoke-Preflight {
         }
         if ($Script:CFG.Mode -ne "backend" -and $Script:CFG.FrontendHost -and $Script:CFG.FrontendHost -ne $Script:CFG.BackendHost) {
             Write-Debug2 "checking frontend connectivity..."
-            $sshOpts = (Get-SshOpts) -join " "
+            $sshOpts = (Get-SshOpts -KeyOverride $Script:CFG.FrontendSshKeyPath) -join " "
             $test = & ssh $sshOpts.Split(" ") -o BatchMode=yes "$($Script:CFG.SshUser)@$($Script:CFG.FrontendHost)" "echo ok" 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "cannot connect to frontend: $($Script:CFG.SshUser)@$($Script:CFG.FrontendHost)"
@@ -1151,10 +1247,10 @@ function Test-CrossConnectivity {
         }
     }
 
-    # 3) CORS check
+    # 3) CORS check（加超时防挂起）
     if ($cfg.BackendHost -and $Script:SITE_URL) {
         Write-Info "Checking backend CORS config..."
-        $corsCheck = Invoke-RemoteBackend "grep -i 'CORS_ALLOW_ORIGINS' '$($cfg.BackendDir)/.env' 2>/dev/null || echo '__NO_CORS__'"
+        $corsCheck = Invoke-RemoteBackend "timeout 5 grep -i 'CORS_ALLOW_ORIGINS' '$($cfg.BackendDir)/.env' 2>/dev/null || echo '__NO_CORS__'"
         if ($corsCheck -match '__NO_CORS__') {
             Write-Warn "Backend .env missing EXCELMANUS_CORS_ALLOW_ORIGINS"
         } elseif ($corsCheck -match [regex]::Escape($Script:SITE_URL)) {
@@ -1164,14 +1260,19 @@ function Test-CrossConnectivity {
         }
     }
 
-    # 4) Frontend BACKEND_ORIGIN check
+    # 4) Frontend BACKEND_ORIGIN check（加超时防挂起）
     if ($cfg.FrontendHost) {
         Write-Info "Checking frontend BACKEND_ORIGIN config..."
-        $feOrigin = Invoke-RemoteFrontend "grep -i 'NEXT_PUBLIC_BACKEND_ORIGIN\|BACKEND_INTERNAL_URL' '$($cfg.FrontendDir)/web/.env.local' '$($cfg.FrontendDir)/web/.env' 2>/dev/null || echo '__NO_ORIGIN__'"
+        $feOrigin = Invoke-RemoteFrontend "timeout 5 grep -iE 'NEXT_PUBLIC_BACKEND_ORIGIN|BACKEND_INTERNAL_URL' '$($cfg.FrontendDir)/web/.env.local' '$($cfg.FrontendDir)/web/.env' 2>/dev/null || echo '__NO_ORIGIN__'"
         if ($feOrigin -match '__NO_ORIGIN__') {
             Write-Info "Frontend has no BACKEND_ORIGIN set (will use default fallback)"
         } else {
             Write-Log "Frontend backend origin: $($feOrigin.Split("`n")[0])"
+            # 检测是否指向旧内网 IP
+            if ($feOrigin -match '(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)') {
+                Write-Warn "Frontend BACKEND_ORIGIN points to private IP - browsers cannot reach it!"
+                Write-Warn "  Run deploy to auto-fix, or manually set to same-origin"
+            }
         }
     }
 
@@ -1249,7 +1350,7 @@ function Push-EnvToBackend {
         (Get-Content $tmpEnv) -replace '^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*', "EXCELMANUS_CORS_ALLOW_ORIGINS=$($Script:SITE_URL),http://localhost:3000" | Set-Content $tmpEnv
     }
 
-    $sshOpts = (Get-SshOpts) -join " "
+    $sshOpts = (Get-SshOpts -KeyOverride $cfg.BackendSshKeyPath) -join " "
     Invoke-Run "rsync -az -e `"ssh $sshOpts`" `"$tmpEnv`" `"$($cfg.SshUser)@$($cfg.BackendHost):$($cfg.BackendDir)/.env`""
     Remove-Item $tmpEnv -Force -ErrorAction SilentlyContinue
     Write-Log "Backend .env pushed"
@@ -1280,7 +1381,7 @@ BACKEND_INTERNAL_URL=$backendInternal
 "@ | Set-Content $tmpEnv -Encoding UTF8
 
     Invoke-RemoteFrontend "mkdir -p '$($cfg.FrontendDir)/web'" | Out-Null
-    $sshOpts = (Get-SshOpts) -join " "
+    $sshOpts = (Get-SshOpts -KeyOverride $cfg.FrontendSshKeyPath) -join " "
     Invoke-Run "rsync -az -e `"ssh $sshOpts`" `"$tmpEnv`" `"$($cfg.SshUser)@$($cfg.FrontendHost):$($cfg.FrontendDir)/web/.env.local`""
     Remove-Item $tmpEnv -Force -ErrorAction SilentlyContinue
     Write-Log "Frontend .env.local pushed"
