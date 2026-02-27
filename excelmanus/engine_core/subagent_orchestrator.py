@@ -425,25 +425,46 @@ class SubagentOrchestrator:
         task: str,
         file_paths: list[str],
     ) -> str:
-        """基于关键词规则选择子代理（不调用 LLM）。
+        """基于信号强度选择子代理（不调用 LLM）。
 
         规则优先级：
-        1. 任务文本含写入意图关键词 → subagent（通用全能力）
-        2. 任务文本含只读意图关键词且 explorer 可用 → explorer
-        3. 以上均未命中 → subagent（安全回退）
+        1. 仅写入意图 → subagent
+        2. 仅只读意图 → explorer（若可用）
+        3. 混合意图（read+write）→ 根据信号强度和上下文决定
+        4. 无命中 → subagent（安全回退）
         """
         _, candidates = self._engine._subagent_registry.build_catalog()
         if not candidates:
             return "subagent"
 
         candidate_set = set(candidates)
+        has_explorer = "explorer" in candidate_set
         task_lower = task.lower()
 
-        if any(kw in task_lower for kw in _WRITE_INTENT_KEYWORDS):
+        write_hits = sum(1 for kw in _WRITE_INTENT_KEYWORDS if kw in task_lower)
+        read_hits = sum(1 for kw in _READ_INTENT_KEYWORDS if kw in task_lower)
+
+        # 纯写入意图
+        if write_hits > 0 and read_hits == 0:
             return "subagent"
 
-        if any(kw in task_lower for kw in _READ_INTENT_KEYWORDS) and "explorer" in candidate_set:
+        # 纯只读意图
+        if read_hits > 0 and write_hits == 0 and has_explorer:
             return "explorer"
+
+        # 混合意图（read + write 都有）
+        if read_hits > 0 and write_hits > 0 and has_explorer:
+            # 已有探索缓存 → 无需再探索，直接执行
+            has_cache = bool(
+                getattr(getattr(self._engine, "_state", None), "explorer_reports", None)
+            )
+            if has_cache:
+                return "subagent"
+            # read 信号明显强于 write → 先探索
+            if read_hits >= write_hits * 2:
+                return "explorer"
+            # 否则走全能力子代理
+            return "subagent"
 
         return "subagent"
 
