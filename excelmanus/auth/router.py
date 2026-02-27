@@ -19,6 +19,7 @@ from excelmanus.auth.models import (
     RegisterRequest,
     ResendCodeRequest,
     ResetPasswordRequest,
+    SetPasswordRequest,
     TokenResponse,
     UserPublic,
     UserRecord,
@@ -31,6 +32,8 @@ from excelmanus.auth.oauth import (
     github_exchange_code,
     google_authorize_url,
     google_exchange_code,
+    qq_authorize_url,
+    qq_exchange_code,
 )
 from excelmanus.auth.email import is_email_configured, send_verification_email
 from excelmanus.auth.security import (
@@ -398,6 +401,31 @@ async def oauth_google_callback(
     return _oauth_success_response(store, info, want_json)
 
 
+# ── OAuth: QQ ─────────────────────────────────────────────
+
+
+@router.get("/oauth/qq")
+async def oauth_qq_redirect(request: Request) -> Any:
+    state = f"qq:{secrets.token_urlsafe(32)}"
+    url = qq_authorize_url(state=state, config_store=_get_config_store(request))
+    return JSONResponse({"authorize_url": url, "state": state})
+
+
+@router.get("/oauth/qq/callback")
+async def oauth_qq_callback(
+    code: str,
+    state: str | None = None,
+    request: Request = ...,  # type: ignore[assignment]
+) -> Any:
+    want_json = _wants_json(request)
+    info = await qq_exchange_code(code, config_store=_get_config_store(request))
+    if info is None:
+        return _oauth_error_response("QQ 认证失败", want_json)
+
+    store = _get_store(request)
+    return _oauth_success_response(store, info, want_json)
+
+
 def _wants_json(request: Request) -> bool:
     """判断客户端是否期望 JSON（API 调用）而非浏览器重定向。"""
     accept = request.headers.get("accept", "")
@@ -471,6 +499,31 @@ def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
     store.create_user(user)
     logger.info("OAuth 用户注册: %s via %s", info.email, info.provider)
     return _build_token_response(user)
+
+
+# ── 设置密码（OAuth 用户） ────────────────────────────
+
+
+@router.post("/me/set-password")
+async def set_password(
+    body: SetPasswordRequest,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """为 OAuth 注册的用户设置密码（仅限尚无密码的用户）。"""
+    if user.password_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="密码已存在，请使用忘记密码功能重置",
+        )
+
+    store = _get_store(request)
+    new_hash = hash_password(body.new_password)
+    store.update_user(user.id, password_hash=new_hash)
+    logger.info("OAuth 用户设置密码: %s", user.email)
+
+    updated = store.get_by_id(user.id)
+    return {"status": "ok", "user": UserPublic.from_record(updated or user).model_dump()}
 
 
 # ── 管理员：用户管理 ────────────────────────────────
@@ -597,6 +650,7 @@ async def admin_enforce_user_quota(
 _LOGIN_TOGGLE_KEYS: dict[str, bool] = {
     "login_github_enabled": True,
     "login_google_enabled": True,
+    "login_qq_enabled": False,
     "email_verify_required": False,
 }
 
@@ -608,6 +662,9 @@ _LOGIN_CREDENTIAL_KEYS: dict[str, str] = {
     "google_client_id":     "EXCELMANUS_GOOGLE_CLIENT_ID",
     "google_client_secret": "EXCELMANUS_GOOGLE_CLIENT_SECRET",
     "google_redirect_uri":  "EXCELMANUS_GOOGLE_REDIRECT_URI",
+    "qq_client_id":         "EXCELMANUS_QQ_CLIENT_ID",
+    "qq_client_secret":     "EXCELMANUS_QQ_CLIENT_SECRET",
+    "qq_redirect_uri":      "EXCELMANUS_QQ_REDIRECT_URI",
     "email_resend_api_key": "EXCELMANUS_RESEND_API_KEY",
     "email_smtp_host":      "EXCELMANUS_SMTP_HOST",
     "email_smtp_port":      "EXCELMANUS_SMTP_PORT",
@@ -617,7 +674,7 @@ _LOGIN_CREDENTIAL_KEYS: dict[str, str] = {
 }
 
 # 需要脱敏的 key（GET 时只返回 ****xxxx 格式）
-_SECRET_KEYS = {"github_client_secret", "google_client_secret", "email_resend_api_key", "email_smtp_password"}
+_SECRET_KEYS = {"github_client_secret", "google_client_secret", "qq_client_secret", "email_resend_api_key", "email_smtp_password"}
 
 
 def _mask_secret(value: str) -> str:

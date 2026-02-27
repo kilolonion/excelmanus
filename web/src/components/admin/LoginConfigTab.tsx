@@ -210,11 +210,13 @@ export default function LoginConfigTab() {
   // Draft state for credential forms
   const [ghDraft, setGhDraft] = useState({ client_id: "", client_secret: "", redirect_uri: "" });
   const [goDraft, setGoDraft] = useState({ client_id: "", client_secret: "", redirect_uri: "" });
+  const [qqDraft, setQqDraft] = useState({ client_id: "", client_secret: "", redirect_uri: "" });
   const [emDraft, setEmDraft] = useState({
     resend_api_key: "", smtp_host: "", smtp_port: "", smtp_user: "", smtp_password: "", from: "",
   });
   const [ghDirty, setGhDirty] = useState(false);
   const [goDirty, setGoDirty] = useState(false);
+  const [qqDirty, setQqDirty] = useState(false);
   const [emDirty, setEmDirty] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
 
@@ -227,6 +229,7 @@ export default function LoginConfigTab() {
   const syncDrafts = useCallback((c: LoginConfig) => {
     setGhDraft({ client_id: c.github_client_id, client_secret: c.github_client_secret, redirect_uri: c.github_redirect_uri });
     setGoDraft({ client_id: c.google_client_id, client_secret: c.google_client_secret, redirect_uri: c.google_redirect_uri });
+    setQqDraft({ client_id: c.qq_client_id, client_secret: c.qq_client_secret, redirect_uri: c.qq_redirect_uri });
     setEmDraft({
       resend_api_key: c.email_resend_api_key, smtp_host: c.email_smtp_host,
       smtp_port: c.email_smtp_port, smtp_user: c.email_smtp_user,
@@ -234,6 +237,7 @@ export default function LoginConfigTab() {
     });
     setGhDirty(false);
     setGoDirty(false);
+    setQqDirty(false);
     setEmDirty(false);
   }, []);
 
@@ -273,7 +277,7 @@ export default function LoginConfigTab() {
   );
 
   const handleSaveCredentials = useCallback(
-    async (section: "github" | "google" | "email") => {
+    async (section: "github" | "google" | "qq" | "email") => {
       setSaving(section);
       try {
         let payload: Partial<LoginConfig> = {};
@@ -288,6 +292,12 @@ export default function LoginConfigTab() {
             google_client_id: goDraft.client_id,
             google_client_secret: goDraft.client_secret,
             google_redirect_uri: goDraft.redirect_uri,
+          };
+        } else if (section === "qq") {
+          payload = {
+            qq_client_id: qqDraft.client_id,
+            qq_client_secret: qqDraft.client_secret,
+            qq_redirect_uri: qqDraft.redirect_uri,
           };
         } else {
           payload = {
@@ -309,7 +319,7 @@ export default function LoginConfigTab() {
         setSaving(null);
       }
     },
-    [ghDraft, goDraft, emDraft, syncDrafts, showToast],
+    [ghDraft, goDraft, qqDraft, emDraft, syncDrafts, showToast],
   );
 
   if (loading) {
@@ -425,6 +435,55 @@ export default function LoginConfigTab() {
               value={goDraft.redirect_uri}
               onChange={(v) => { setGoDraft((d) => ({ ...d, redirect_uri: v })); setGoDirty(true); }}
               placeholder="如 http://localhost:3000/api/v1/auth/oauth/google/callback"
+            />
+          </CredentialSection>
+        </div>
+      </div>
+
+      {/* ── QQ ─────────────────────────────────── */}
+      <div className="border-t border-border pt-6">
+        <h3 className="text-sm font-semibold mb-1">QQ 登录</h3>
+        <p className="text-xs text-muted-foreground mb-3">
+          配置 QQ 互联 OAuth 凭据。需要在{" "}
+          <a href="https://connect.qq.com" target="_blank" rel="noopener noreferrer" className="text-[var(--em-primary)] hover:underline">
+            QQ 互联平台
+          </a>
+          {" "}创建应用。
+        </p>
+        <div className="space-y-2">
+          <Toggle
+            icon={<svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 13.19c-.17.45-.63.84-1.33 1.15.06.22.1.49.1.68 0 .84-.96 1.53-2.14 1.53-.56 0-1.07-.15-1.45-.41-.38.26-.89.41-1.45.41-1.18 0-2.14-.69-2.14-1.53 0-.19.04-.46.1-.68-.7-.31-1.16-.7-1.33-1.15-.07-.19 0-.29.09-.29.14 0 .38.24.62.49.04-.63.22-1.56.68-2.47C9.02 10.78 10.08 8 12 8s2.98 2.78 3.31 4.92c.46.91.64 1.84.68 2.47.24-.25.48-.49.62-.49.09 0 .16.1.03.29z"/></svg>}
+            title="启用 QQ 登录"
+            description="允许用户使用 QQ 账号登录或注册"
+            checked={config.login_qq_enabled}
+            loading={toggling === "login_qq_enabled"}
+            onChange={(val) => handleToggle("login_qq_enabled", val)}
+          />
+          <CredentialSection
+            icon={<svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 13.19c-.17.45-.63.84-1.33 1.15.06.22.1.49.1.68 0 .84-.96 1.53-2.14 1.53-.56 0-1.07-.15-1.45-.41-.38.26-.89.41-1.45.41-1.18 0-2.14-.69-2.14-1.53 0-.19.04-.46.1-.68-.7-.31-1.16-.7-1.33-1.15-.07-.19 0-.29.09-.29.14 0 .38.24.62.49.04-.63.22-1.56.68-2.47C9.02 10.78 10.08 8 12 8s2.98 2.78 3.31 4.92c.46.91.64 1.84.68 2.47.24-.25.48-.49.62-.49.09 0 .16.1.03.29z"/></svg>}
+            title="QQ OAuth 凭据"
+            description="从QQ互联平台 → 应用管理 获取"
+            dirty={qqDirty}
+            saving={saving === "qq"}
+            onSave={() => handleSaveCredentials("qq")}
+          >
+            <TextInput
+              label="APP ID"
+              value={qqDraft.client_id}
+              onChange={(v) => { setQqDraft((d) => ({ ...d, client_id: v })); setQqDirty(true); }}
+              placeholder="如 101xxxxxx"
+            />
+            <SecretInput
+              label="APP Key"
+              value={qqDraft.client_secret}
+              onChange={(v) => { setQqDraft((d) => ({ ...d, client_secret: v })); setQqDirty(true); }}
+              placeholder="如 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            />
+            <TextInput
+              label="Redirect URI"
+              value={qqDraft.redirect_uri}
+              onChange={(v) => { setQqDraft((d) => ({ ...d, redirect_uri: v })); setQqDirty(true); }}
+              placeholder="如 http://localhost:3000/api/v1/auth/oauth/qq/callback"
             />
           </CredentialSection>
         </div>

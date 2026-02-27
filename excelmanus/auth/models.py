@@ -23,6 +23,7 @@ class UserRole(str, Enum):
 class OAuthProvider(str, Enum):
     GITHUB = "github"
     GOOGLE = "google"
+    QQ = "qq"
 
 
 # ── 数据库记录（基于 dict，SQLAlchemy 迁移前使用） ─────
@@ -127,6 +128,7 @@ class UserPublic(BaseModel):
     role: str
     avatar_url: str | None = None
     has_custom_llm_key: bool = False
+    has_password: bool = True
     allowed_models: list[str] = []
     created_at: str
 
@@ -152,6 +154,7 @@ class UserPublic(BaseModel):
             role=rec.role,
             avatar_url=rec.avatar_url,
             has_custom_llm_key=bool(rec.llm_api_key),
+            has_password=bool(rec.password_hash),
             allowed_models=am,
             created_at=rec.created_at,
         )
@@ -203,4 +206,10 @@ class ResetPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3)]
     code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=6)]
+    new_password: Annotated[str, StringConstraints(min_length=8, max_length=128)]
+
+
+class SetPasswordRequest(BaseModel):
+    """OAuth 用户首次设置密码。"""
+    model_config = ConfigDict(extra="forbid")
     new_password: Annotated[str, StringConstraints(min_length=8, max_length=128)]

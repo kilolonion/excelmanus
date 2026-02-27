@@ -54,8 +54,9 @@ function CallbackHandler() {
 
     const stateVal = searchParams.get("state") || "";
     const providerHint = searchParams.get("provider") || stateVal.split(":")[0];
-    let provider: "github" | "google" = "github";
+    let provider: "github" | "google" | "qq" = "github";
     if (providerHint === "google") provider = "google";
+    else if (providerHint === "qq") provider = "qq";
 
     handleOAuthCallback(provider, code, searchParams.get("state") || undefined)
       .then(() => {

@@ -20,6 +20,7 @@ interface TokenResponse {
     role: string;
     avatar_url: string | null;
     has_custom_llm_key: boolean;
+    has_password: boolean;
     allowed_models: string[];
     created_at: string;
   };
@@ -33,6 +34,7 @@ function mapUser(raw: TokenResponse["user"]): AuthUser {
     role: raw.role,
     avatarUrl: raw.avatar_url,
     hasCustomLlmKey: raw.has_custom_llm_key,
+    hasPassword: raw.has_password ?? true,
     allowedModels: raw.allowed_models ?? [],
     createdAt: raw.created_at,
   };
@@ -269,7 +271,7 @@ export async function updateProfile(updates: {
 
 // ── OAuth helpers ─────────────────────────────────────────
 
-export async function getOAuthUrl(provider: "github" | "google"): Promise<string> {
+export async function getOAuthUrl(provider: "github" | "google" | "qq"): Promise<string> {
   const res = await fetch(buildApiUrl(`/auth/oauth/${provider}`));
   if (!res.ok) throw new Error(`OAuth redirect failed: ${res.status}`);
   const data = await res.json();
@@ -277,7 +279,7 @@ export async function getOAuthUrl(provider: "github" | "google"): Promise<string
 }
 
 export async function handleOAuthCallback(
-  provider: "github" | "google",
+  provider: "github" | "google" | "qq",
   code: string,
   state?: string
 ) {
@@ -298,6 +300,28 @@ export async function handleOAuthCallback(
 export function logout() {
   useAuthStore.getState().logout();
   _clearUserSpecificStores();
+}
+
+// ── Set password (OAuth users) ────────────────────────────
+
+export async function setPassword(newPassword: string): Promise<AuthUser> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/me/set-password"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `设置密码失败: ${res.status}`);
+  }
+  const data = await res.json();
+  const user = mapUser(data.user);
+  useAuthStore.getState().setUser(user);
+  return user;
 }
 
 // ── Admin API ─────────────────────────────────────────────
@@ -392,6 +416,7 @@ export async function adminEnforceQuota(userId: string): Promise<{ deleted: stri
 export interface LoginConfig {
   login_github_enabled: boolean;
   login_google_enabled: boolean;
+  login_qq_enabled: boolean;
   email_verify_required: boolean;
   // GitHub OAuth
   github_client_id: string;
@@ -401,6 +426,10 @@ export interface LoginConfig {
   google_client_id: string;
   google_client_secret: string;
   google_redirect_uri: string;
+  // QQ OAuth
+  qq_client_id: string;
+  qq_client_secret: string;
+  qq_redirect_uri: string;
   // Email
   email_resend_api_key: string;
   email_smtp_host: string;
