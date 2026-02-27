@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="web/public/logo.png" width="380" alt="ExcelManus" />
+  <img src="web/public/logo.svg" width="380" alt="ExcelManus" />
 </p>
 
 <h3 align="center">AI Agent that operates Excel with natural language</h3>
