@@ -446,7 +446,9 @@ class TestDelegateSubagentConstraint:
         """delegate_to_subagent 应正确透传 agent_name 和规范化后的 file_paths。"""
         assume(task.strip() != "")
         # 避免 explorer 的“任务偏轻量且无 file_paths”时快速跳过，导致不调用 run_subagent
-        assume(len(file_paths) > 0 or len(task.strip()) > 60)
+        # normalize_file_paths 会过滤空字符串，所以需要用有效路径数量判断
+        _valid_paths = [p for p in file_paths if isinstance(p, str) and p.strip()]
+        assume(len(_valid_paths) > 0 or len(task.strip()) > 60)
 
         with tempfile.TemporaryDirectory() as tmp:
             engine = _setup_engine_in(
