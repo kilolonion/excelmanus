@@ -220,7 +220,7 @@ class AgentEngine:
         self._vlm_model = _vlm_model
         self._config = config
         # ── 视觉能力推断 ──
-        self._is_vision_capable = self._infer_vision_capable(config)
+        self._is_vision_capable = self._infer_vision_capable(config, database)
         # B 通道可用条件：
         #   1. vlm_enhance 总开关开启
         #   2. 有独立 VLM 端点（vlm_base_url 且 vlm_enabled），或主模型本身有视觉能力可兼作 VLM
@@ -241,6 +241,15 @@ class AgentEngine:
             "视觉模式: main_vision=%s, vlm_enhance=%s",
             self._is_vision_capable, self._vlm_enhance_available,
         )
+        # ── 首次使用关键词推断时，自动触发后台 probe 以获取 ground truth ──
+        if config.main_model_vision == "auto" and database is not None:
+            try:
+                from excelmanus.model_probe import load_capabilities
+                _cached = load_capabilities(database, config.model, config.base_url)
+                if _cached is None or _cached.supports_vision is None:
+                    self._schedule_background_probe(config, database)
+            except Exception:
+                pass
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
         self._registry = registry.fork() if hasattr(registry, "fork") else registry
@@ -538,121 +547,119 @@ class AgentEngine:
         self._meta_tool_builder = MetaToolBuilder(self)
         self._interaction_handler = InteractionHandler(self)
 
+    def _schedule_background_probe(self, config: "ExcelManusConfig", db: "Database | None") -> None:
+        """后台触发 probe 检测主模型视觉能力，结果缓存到 DB 供下次使用。"""
+        async def _do_probe() -> None:
+            try:
+                from excelmanus.model_probe import run_full_probe
+                caps = await run_full_probe(
+                    client=self._client,
+                    model=config.model,
+                    base_url=config.base_url,
+                    skip_if_cached=True,
+                    db=db,
+                )
+                if caps.supports_vision is not None and caps.supports_vision != self._is_vision_capable:
+                    logger.warning(
+                        "probe 检测视觉能力与关键词推断不一致: probe=%s, keyword=%s, model=%s。"
+                        "已缓存 probe 结果，下次创建 engine 时将使用 probe 结果。",
+                        caps.supports_vision, self._is_vision_capable, config.model,
+                    )
+                else:
+                    logger.info("probe 视觉检测完成: model=%s, vision=%s", config.model, caps.supports_vision)
+            except Exception:
+                logger.debug("后台 probe 检测失败", exc_info=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do_probe())
+            logger.info("已调度后台 probe 检测: model=%s", config.model)
+        except RuntimeError:
+            logger.debug("无事件循环，跳过后台 probe")
+
     @staticmethod
-    def _infer_vision_capable(config: "ExcelManusConfig") -> bool:
-        """推断主模型是否支持视觉输入。"""
+    def _infer_vision_capable(config: "ExcelManusConfig", db: "Database | None" = None) -> bool:
+        """推断主模型是否支持视觉输入。
+
+        优先级：手动覆盖 > probe 实际检测结果 > 关键词兜底推断。
+        """
         mv = config.main_model_vision
         if mv == "true":
             return True
         if mv == "false":
             return False
-        # auto: 根据模型名关键词推断
+
+        # ── 优先使用 probe 实际检测结果（ground truth）──
+        if db is not None:
+            try:
+                from excelmanus.model_probe import load_capabilities
+                caps = load_capabilities(db, config.model, config.base_url)
+                if caps is not None and caps.supports_vision is not None:
+                    logger.info(
+                        "视觉能力来自 probe 检测结果: model=%s, vision=%s",
+                        config.model, caps.supports_vision,
+                    )
+                    return caps.supports_vision
+            except Exception:
+                logger.debug("加载 probe 视觉检测结果失败，回退到关键词推断", exc_info=True)
+
+        # ── 兜底：根据模型名关键词推断（仅在无 probe 结果时使用）──
         model_lower = config.model.lower()
         _NON_VISION_KEYWORDS = (
-            # OpenAI o-mini 文本推理模型（无视觉）
             "o1-mini", "o3-mini",
-            # Amazon Nova 文本/语音模型（无视觉）
             "amazon.nova-micro", "amazon.nova-sonic",
-            # Gemini embedding（文本向量）
             "gemini-embedding",
-            # Llama 3.2 文本模型（非 Vision 版本）
             "llama-3.2-1b", "llama-3.2-3b",
-            # Stepfun 当前无图片理解标记的 flash 变体
             "step-3.5-flash",
-            # Mistral Small 3.0/3.1 文本模型（3.2 起支持视觉）
             "mistral-small-3.0", "mistral-small-3.1",
         )
         if any(kw in model_lower for kw in _NON_VISION_KEYWORDS):
+            logger.info("视觉能力来自关键词推断 (NON_VISION): model=%s → False", config.model)
             return False
 
         _VISION_KEYWORDS = (
-            # ── OpenAI GPT 系列 ──────────────────────────────────────
-            # GPT-4 视觉系列
             "gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-4.1",
-            # GPT-5 全系（gpt-5 / gpt-5.1 / gpt-5.2 均支持视觉）
             "gpt-5",
-            # OpenAI 图像模型
             "gpt-image-1",
-            # ── OpenAI o 推理系列（o1 起均支持图像输入）────────────
-            # o1 / o1-pro / o3 / o3-pro / o4-mini / o4
             "o1", "o3", "o4",
-            # ── xAI Grok 视觉系列 ────────────────────────────────────
-            # grok-2-vision 系列 / grok-4（原生多模态）
             "grok-2-vision", "grok-4",
-            # ── Anthropic Claude ────────────────────────────────────
-            # 3.x 格式：claude-opus-3-... / claude-sonnet-3-... / claude-haiku-3-...
             "claude-opus-", "claude-sonnet-", "claude-haiku-",
-            # 4.x+ 格式：claude-opus-4-6 / claude-sonnet-4-6 / claude-haiku-4-5
             "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
-            # ── Google Gemini ────────────────────────────────────────
-            # 覆盖 1.5 / 2.0 / 2.5 / 3.x / 3.1 全系（全部支持视觉）
             "gemini",
-            # ── Amazon Nova ─────────────────────────────────────────
-            # Nova Lite / Pro / Premier 支持图片+视频输入
-            # Bedrock 格式：amazon.nova-lite-v1:0 / amazon.nova-pro-v1:0
-            # Nova 2 系列：us.amazon.nova-2-lite-v1:0
             "amazon.nova", "nova-lite", "nova-pro", "nova-premier",
-            # ── 通用视觉后缀 ─────────────────────────────────────────
             "-vl", "-vision", "-multimodal",
-            # ── Qwen VL 系列（阿里云）────────────────────────────────
             "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
-            # Qwen-Omni / Qwen3-Omni：全模态（文本+图像+音频+视频）
             "qwen-omni", "qwen2.5-omni", "qwen3-omni",
-            # ── DeepSeek VL 系列 ─────────────────────────────────────
             "deepseek-vl",
-            # Janus-Pro：DeepSeek 开源多模态（第三方 API 部署）
             "janus-pro",
-            # ── Meta Llama Vision 系列 ───────────────────────────────
-            # Llama 3.2：Llama-3.2-11B-Vision / Llama-3.2-90B-Vision
             "llama-3.2-", "llama3.2-vision",
-            # Llama 4：Llama-4-Scout / Llama-4-Maverick（原生多模态）
             "llama-4-", "llama4-",
-            # ── Mistral 视觉系列 ─────────────────────────────────────
-            # Pixtral 12B / Pixtral Large
             "pixtral",
-            # Ministral 3B / 8B / 14B（支持视觉）
             "ministral-3b", "ministral-8b", "ministral-14b",
-            # Mistral Small 3.1+ / Mistral Medium 3+ / Mistral Large 3+（含视觉编码器）
             "mistral-small-3", "mistral-medium-3", "mistral-large-3",
-            # ── Microsoft Phi 多模态系列 ─────────────────────────────
-            # phi-3-vision / phi-3.5-vision / phi-4-multimodal
             "phi-3-vision", "phi-3.5-vision", "phi-4-multimodal",
-            # ── 智谱 GLM 视觉系列（Z.ai）────────────────────────────
-            # GLM-4V / GLM-4.1V / GLM-4.5V / GLM-4.6V
             "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v",
-            # ── 开源视觉模型 ─────────────────────────────────────────
-            "internvl",          # InternVL / InternVL2 / InternVL2.5 / InternVL3
-            "minicpm-v",         # MiniCPM-V 系列
-            "minicpm-o",         # MiniCPM-o 系列（全模态）
-            # ── 百度 ERNIE VL 系列 ───────────────────────────────────
+            "internvl",
+            "minicpm-v",
+            "minicpm-o",
             "ernie-4.5-vl", "ernie-vl",
-            # ── Cohere Command A Vision / Aya Vision ────────────────
             "command-a-vision",
-            "aya-vision",        # Cohere Aya Vision 8B / 32B（多语言视觉模型）
-            # ── Moonshot Kimi VL ─────────────────────────────────────
-            # moonshot-v1-vision-preview / kimi-vl
+            "aya-vision",
             "moonshot-v1-vision", "kimi-vl",
-            # ── 零一万物 Yi-VL ───────────────────────────────────────
             "yi-vl",
-            # ── 字节跳动 Doubao / Seed VL ────────────────────────────
-            # doubao-1.5-vision-pro / doubao-1.5-vision-pro-32k / doubao-1.6-vision
             "doubao-1.5-vision", "doubao-1.6-vision", "doubao-vision", "seed1.5-vl", "seed-vl",
-            # ── 腾讯混元 Hunyuan Vision ──────────────────────────────
-            # hunyuan-vision / hunyuan-vision-1.5
             "hunyuan-vision",
-            # ── MiniMax VL 系列 ──────────────────────────────────────
-            # MiniMax-VL-01（视觉语言模型）
             "minimax-vl",
-            # ── Stepfun Step 视觉系列 ────────────────────────────────
-            # step-1v / step-1.5v / step-3（多模态推理）
             "step-1v", "step-1.5v", "step-3",
-            # step-r1-v-mini / step-1o-vision-* / step-1o-turbo-vision
             "step-r1-v-mini", "step-1o-vision", "step-1o-turbo-vision",
-            # ── LLaVA 系列（开源经典）────────────────────────────────
-            # llava / llava-1.5 / llava-1.6 / llava-onevision / llava-next
             "llava",
         )
-        return any(kw in model_lower for kw in _VISION_KEYWORDS)
+        result = any(kw in model_lower for kw in _VISION_KEYWORDS)
+        logger.info(
+            "视觉能力来自关键词推断 (无 probe 缓存): model=%s → %s",
+            config.model, result,
+        )
+        return result
 
     # ── Property 代理：所有循环/会话级状态委托给 self._state ──────
 
