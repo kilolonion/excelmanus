@@ -410,7 +410,7 @@ class SuggestModeSwitchHandler(BaseToolHandler):
             question_payload=question_payload,
             tool_call_id=tool_call_id,
         )
-        e._emit_user_question_event(
+        e._interaction_handler.emit_user_question_event(
             question=pending_q,
             on_event=on_event,
             iteration=iteration,

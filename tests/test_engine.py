@@ -3705,7 +3705,7 @@ class TestCommandDispatchAndHooks:
             },
         )
 
-        result = engine._run_skill_hook(
+        result = engine._skill_resolver.run_skill_hook(
             skill=skill,
             event=HookEvent.USER_PROMPT_SUBMIT,
             payload={"user_message": "测试"},
@@ -3776,7 +3776,7 @@ class TestCommandDispatchAndHooks:
         engine = AgentEngine(config, registry)
         engine._hook_agent_action_depth = 1
 
-        resolved = await engine._resolve_hook_result(
+        resolved = await engine._skill_resolver.resolve_hook_result(
             event=HookEvent.PRE_TOOL_USE,
             hook_result=HookResult(
                 decision=HookDecision.CONTINUE,

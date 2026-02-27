@@ -1098,27 +1098,27 @@ class AgentEngine:
 
         if self._active_skills:
             _primary = self._active_skills[-1]
-            self._run_skill_hook(
+            self._skill_resolver.run_skill_hook(
                 skill=_primary,
                 event=HookEvent.STOP,
                 payload={"reason": "shutdown_mcp"},
             )
-            self._run_skill_hook(
+            self._skill_resolver.run_skill_hook(
                 skill=_primary,
                 event=HookEvent.SESSION_END,
                 payload={"reason": "shutdown_mcp"},
             )
         else:
             for skill_name in list(self._hook_started_skills):
-                skill = self._get_loaded_skill(skill_name)
+                skill = self._skill_resolver.get_loaded_skill(skill_name)
                 if skill is None:
                     continue
-                self._run_skill_hook(
+                self._skill_resolver.run_skill_hook(
                     skill=skill,
                     event=HookEvent.STOP,
                     payload={"reason": "shutdown_mcp"},
                 )
-                self._run_skill_hook(
+                self._skill_resolver.run_skill_hook(
                     skill=skill,
                     event=HookEvent.SESSION_END,
                     payload={"reason": "shutdown_mcp"},
@@ -1432,7 +1432,7 @@ class AgentEngine:
 
     def emit_pending_approval_event(self, **kwargs: Any) -> None:
         """发出待审批事件（Protocol: ToolExecutionContext）。"""
-        self._emit_pending_approval_event(**kwargs)
+        self._interaction_handler.emit_pending_approval_event(**kwargs)
 
     def get_tool_write_effect(self, tool_name: str) -> str:
         """获取工具写入效果（Protocol: ToolExecutionContext）。"""
@@ -1444,15 +1444,15 @@ class AgentEngine:
 
     def pick_route_skill(self, route_result: Any) -> Any:
         """选择路由技能（Protocol: ToolExecutionContext）。"""
-        return self._pick_route_skill(route_result)
+        return self._skill_resolver.pick_route_skill(route_result)
 
     def run_skill_hook(self, **kwargs: Any) -> Any:
         """运行技能钩子（Protocol: ToolExecutionContext）。"""
-        return self._run_skill_hook(**kwargs)
+        return self._skill_resolver.run_skill_hook(**kwargs)
 
     async def resolve_hook_result(self, **kwargs: Any) -> Any:
         """解析钩子结果（Protocol: ToolExecutionContext）。"""
-        return await self._resolve_hook_result(**kwargs)
+        return await self._skill_resolver.resolve_hook_result(**kwargs)
 
     def render_task_brief(self, task_brief: Any) -> str:
         """渲染任务简报（Protocol: ToolExecutionContext）。"""
@@ -1476,11 +1476,11 @@ class AgentEngine:
 
     def handle_ask_user(self, **kwargs: Any) -> tuple:
         """向用户提问（Protocol: DelegationContext）。"""
-        return self._handle_ask_user(**kwargs)
+        return self._interaction_handler.handle_ask_user(**kwargs)
 
     def enqueue_subagent_approval_question(self, **kwargs: Any) -> Any:
         """入队子代理审批问题（Protocol: DelegationContext）。"""
-        return self._enqueue_subagent_approval_question(**kwargs)
+        return self._interaction_handler.enqueue_subagent_approval_question(**kwargs)
 
     async def intercept_task_create_with_plan(self, **kwargs: Any) -> Any:
         """拦截 task_create 生成计划（Protocol: ToolExecutionContext）。"""
@@ -1752,7 +1752,7 @@ class AgentEngine:
 
         if self._question_flow.has_pending():
             pending_chat_start = time.monotonic()
-            pending_result = await self._handle_pending_question_answer(
+            pending_result = await self._interaction_handler.handle_pending_question_answer(
                 user_message=user_message,
                 on_event=on_event,
             )
@@ -1818,7 +1818,7 @@ class AgentEngine:
         # 兼容直接调用 engine.chat("/skill ...") 的旧路径：
         # 若调用方未显式传 slash_command，自动从用户输入中解析。
         if effective_slash_command is None:
-            manual_skill_with_args = self._resolve_skill_command_with_args(user_message)
+            manual_skill_with_args = self._skill_resolver.resolve_skill_command_with_args(user_message)
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
@@ -1921,8 +1921,8 @@ class AgentEngine:
 
         if effective_slash_command and route_result.route_mode == "slash_not_found":
             # 区分"技能被权限限制"与"技能真的不存在"，给出精确反馈
-            normalized_cmd = self._normalize_skill_command_name(effective_slash_command)
-            blocked = self._blocked_skillpacks()
+            normalized_cmd = SkillResolver.normalize_skill_command_name(effective_slash_command)
+            blocked = self._skill_resolver.blocked_skillpacks()
             if blocked and normalized_cmd in blocked:
                 reply = (
                     f"技能 `{effective_slash_command}` 当前受访问限制，"
@@ -1958,9 +1958,9 @@ class AgentEngine:
                 truncated=False,
             )
 
-        selected_skill = self._pick_route_skill(route_result)
+        selected_skill = self._skill_resolver.pick_route_skill(route_result)
         if selected_skill is not None:
-            user_prompt_hook_raw = self._run_skill_hook(
+            user_prompt_hook_raw = self._skill_resolver.run_skill_hook(
                 skill=selected_skill,
                 event=HookEvent.USER_PROMPT_SUBMIT,
                 payload={
@@ -1971,7 +1971,7 @@ class AgentEngine:
                     "skills_used": list(route_result.skills_used),
                 },
             )
-            user_prompt_hook = await self._resolve_hook_result(
+            user_prompt_hook = await self._skill_resolver.resolve_hook_result(
                 event=HookEvent.USER_PROMPT_SUBMIT,
                 hook_result=user_prompt_hook_raw,
                 on_event=on_event,
@@ -2142,74 +2142,14 @@ class AgentEngine:
 
     # ── Skill 解析与 Hook 管理（委托到 SkillResolver）──────────
 
-    @staticmethod
-    def _normalize_skill_command_name(name: str) -> str:
-        return SkillResolver.normalize_skill_command_name(name)
-
-    @staticmethod
-    def _iter_slash_command_lines(user_message: str) -> list[str]:
-        return SkillResolver.iter_slash_command_lines(user_message)
-
-    def _resolve_skill_from_command_line(self, command_line: str, *, skill_names: Sequence[str]) -> tuple[str, str] | None:
-        return self._skill_resolver.resolve_skill_from_command_line(command_line, skill_names=skill_names)
-
-    def _resolve_skill_command_with_args(self, user_message: str) -> tuple[str, str] | None:
-        return self._skill_resolver.resolve_skill_command_with_args(user_message)
-
-    def _list_loaded_skill_names(self) -> list[str]:
-        return self._skill_resolver.list_loaded_skill_names()
-
-    def _get_loaded_skillpacks(self) -> dict | None:
-        return self._skill_resolver.get_loaded_skillpacks()
-
-    def _list_manual_invocable_skill_names(self) -> list[str]:
-        return self._skill_resolver.list_manual_invocable_skill_names()
-
     def resolve_skill_command(self, user_message: str) -> str | None:
+        """将消息中的 `/skill_name ...` 解析为 Skill 名称（公开 API）。"""
         return self._skill_resolver.resolve_skill_command(user_message)
-
-    @staticmethod
-    def _normalize_skill_name(name: str) -> str:
-        return SkillResolver.normalize_skill_name(name)
-
-    def _blocked_skillpacks(self) -> set[str] | None:
-        return self._skill_resolver.blocked_skillpacks()
-
-    def _get_loaded_skill(self, name: str) -> Skillpack | None:
-        return self._skill_resolver.get_loaded_skill(name)
-
-    def _pick_route_skill(self, route_result: SkillMatchResult | None) -> Skillpack | None:
-        return self._skill_resolver.pick_route_skill(route_result)
 
     @property
     def _primary_skill(self) -> Skillpack | None:
+        """当前主 skill（列表末尾），无激活时返回 None。"""
         return self._skill_resolver.primary_skill
-
-    @staticmethod
-    def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
-        return SkillResolver.normalize_skill_agent_name(agent_name)
-
-    def _push_hook_context(self, text: str) -> None:
-        self._skill_resolver.push_hook_context(text)
-
-    @staticmethod
-    def _merge_hook_reasons(current: str, extra: str) -> str:
-        return SkillResolver.merge_hook_reasons(current, extra)
-
-    def _normalize_hook_decision_scope(self, *, event: HookEvent, hook_result: HookResult) -> HookResult:
-        return self._skill_resolver.normalize_hook_decision_scope(event=event, hook_result=hook_result)
-
-    def _apply_hook_agent_failure(self, *, hook_result: HookResult, action: HookAgentAction, message: str) -> HookResult:
-        return self._skill_resolver.apply_hook_agent_failure(hook_result=hook_result, action=action, message=message)
-
-    async def _apply_hook_agent_action(self, *, event: HookEvent, hook_result: HookResult, on_event: EventCallback | None) -> HookResult:
-        return await self._skill_resolver.apply_hook_agent_action(event=event, hook_result=hook_result, on_event=on_event)
-
-    async def _resolve_hook_result(self, *, event: HookEvent, hook_result: HookResult | None, on_event: EventCallback | None) -> HookResult | None:
-        return await self._skill_resolver.resolve_hook_result(event=event, hook_result=hook_result, on_event=on_event)
-
-    def _run_skill_hook(self, *, skill: Skillpack | None, event: HookEvent, payload: dict[str, Any], tool_name: str = ""):
-        return self._skill_resolver.run_skill_hook(skill=skill, event=event, payload=payload, tool_name=tool_name)
 
     # ── 元工具构建（委托到 MetaToolBuilder）──────────────────
 
@@ -2235,10 +2175,10 @@ class AgentEngine:
         # 检查是否尝试激活被限制的技能
         # 注意：必须对输入名称做归一化后再比较，防止通过大小写/连字符变体绕过限制
         # 例如 "Excel-Code-Runner" 归一化后与 "excel_code_runner" 相同
-        blocked = self._blocked_skillpacks()
+        blocked = self._skill_resolver.blocked_skillpacks()
         if blocked:
-            normalized_input = self._normalize_skill_name(skill_name)
-            normalized_blocked = {self._normalize_skill_name(b) for b in blocked}
+            normalized_input = SkillResolver.normalize_skill_name(skill_name)
+            normalized_blocked = {SkillResolver.normalize_skill_name(b) for b in blocked}
             if normalized_input in normalized_blocked:
                 # 从全量技能包中获取描述（尝试精确名和归一化名）
                 desc = ""
@@ -2246,7 +2186,7 @@ class AgentEngine:
                 if skill_obj is None:
                     # 尝试通过归一化名找到实际技能对象
                     skill_obj = next(
-                        (s for k, s in skillpacks.items() if self._normalize_skill_name(k) == normalized_input),
+                        (s for k, s in skillpacks.items() if SkillResolver.normalize_skill_name(k) == normalized_input),
                         None,
                     )
                 if skill_obj is not None:
@@ -2578,6 +2518,13 @@ class AgentEngine:
         if recent_context:
             parts.append(f"会话上下文：{recent_context[:800]}")
 
+        # 注入写入操作日志（供 verifier 精准验证变更而非盲目探索）
+        _state = getattr(self, "_state", None)
+        if _state is not None:
+            write_log = _state.render_write_operations_log()
+            if write_log:
+                parts.append(write_log)
+
         # 注入任务清单状态（含每步验证结果），帮助 verifier 对照验证条件
         task_list_notice = self._context_builder._build_task_list_status_notice()
         if task_list_notice:
@@ -2791,19 +2738,6 @@ class AgentEngine:
 
     # ── 问答与审批交互（委托到 InteractionHandler）──────────
 
-    @staticmethod
-    def _question_options_payload(question: PendingQuestion) -> list[dict[str, str]]:
-        return InteractionHandler.question_options_payload(question)
-
-    def _emit_user_question_event(self, *, question: PendingQuestion, on_event: EventCallback | None, iteration: int) -> None:
-        self._interaction_handler.emit_user_question_event(question=question, on_event=on_event, iteration=iteration)
-
-    def _emit_pending_approval_event(self, *, pending: "PendingApproval", on_event: EventCallback | None, iteration: int, tool_call_id: str = "") -> None:
-        self._interaction_handler.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=iteration, tool_call_id=tool_call_id)
-
-    def _handle_ask_user(self, *, arguments: dict[str, Any], tool_call_id: str, on_event: EventCallback | None, iteration: int) -> tuple[str, str]:
-        return self._interaction_handler.handle_ask_user(arguments=arguments, tool_call_id=tool_call_id, on_event=on_event, iteration=iteration)
-
     async def handle_ask_user_blocking(self, *, arguments: dict[str, Any], tool_call_id: str, on_event: EventCallback | None, iteration: int) -> str:
         return await self._interaction_handler.handle_ask_user_blocking(arguments=arguments, tool_call_id=tool_call_id, on_event=on_event, iteration=iteration)
 
@@ -2814,17 +2748,8 @@ class AgentEngine:
     def interaction_registry(self) -> InteractionRegistry:
         return self._interaction_registry
 
-    def _enqueue_subagent_approval_question(self, **kwargs: Any) -> PendingQuestion:
-        return self._interaction_handler.enqueue_subagent_approval_question(**kwargs)
-
     async def process_subagent_approval_inline(self, **kwargs: Any) -> tuple[str, bool]:
         return await self._interaction_handler.process_subagent_approval_inline(**kwargs)
-
-    async def _handle_subagent_approval_answer(self, *, action: dict[str, Any], parsed: Any, on_event: EventCallback | None) -> ChatResult:
-        return await self._interaction_handler.handle_subagent_approval_answer(action=action, parsed=parsed, on_event=on_event)
-
-    async def _handle_pending_question_answer(self, *, user_message: str, on_event: EventCallback | None) -> ChatResult | None:
-        return await self._interaction_handler.handle_pending_question_answer(user_message=user_message, on_event=on_event)
 
     async def _tool_calling_loop(
         self,
@@ -4184,12 +4109,12 @@ class AgentEngine:
         """清除对话历史。"""
         if self._active_skills:
             _primary = self._active_skills[-1]
-            self._run_skill_hook(
+            self._skill_resolver.run_skill_hook(
                 skill=_primary,
                 event=HookEvent.STOP,
                 payload={"reason": "clear_memory"},
             )
-            self._run_skill_hook(
+            self._skill_resolver.run_skill_hook(
                 skill=_primary,
                 event=HookEvent.SESSION_END,
                 payload={"reason": "clear_memory"},
@@ -4444,7 +4369,7 @@ class AgentEngine:
         if not task_text:
             return route_result, user_message
 
-        skill = self._pick_route_skill(route_result)
+        skill = self._skill_resolver.pick_route_skill(route_result)
         if skill is None:
             return route_result, user_message
         if skill.command_dispatch == "tool":

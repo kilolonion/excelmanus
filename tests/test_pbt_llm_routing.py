@@ -412,7 +412,7 @@ class TestSelectSkillCalls:
             # 某些 PBT 生成的名称（如 "no", "yes", "on", "off"）在 YAML
             # 中会被解析为布尔值，导致 loader 校验 name 字段失败而跳过。
             # 仅当 skill 确实被 loader 加载时才断言 activate_skill 的行为。
-            loaded = engine._list_loaded_skill_names()
+            loaded = engine._skill_resolver.list_loaded_skill_names()
             assume(selected in loaded)
 
             result = asyncio.run(engine._handle_activate_skill(selected))
@@ -445,6 +445,8 @@ class TestDelegateSubagentConstraint:
     ) -> None:
         """delegate_to_subagent 应正确透传 agent_name 和规范化后的 file_paths。"""
         assume(task.strip() != "")
+        # 避免 explorer 的“任务偏轻量且无 file_paths”时快速跳过，导致不调用 run_subagent
+        assume(len(file_paths) > 0 or len(task.strip()) > 60)
 
         with tempfile.TemporaryDirectory() as tmp:
             engine = _setup_engine_in(
