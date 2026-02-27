@@ -1,0 +1,52 @@
+"""窗口感知模型测试。"""
+
+from excelmanus.window_perception.domain import Window
+from excelmanus.window_perception import DetailLevel, IntentTag, PerceptionBudget, Viewport, WindowType
+from tests.window_factories import make_window
+
+
+class TestWindowModels:
+    """模型定义测试。"""
+
+    def test_viewport_defaults(self) -> None:
+        viewport = Viewport()
+        assert viewport.range_ref == "A1:T25"
+        assert viewport.visible_rows == 25
+        assert viewport.visible_cols == 20
+
+    def test_window_state_defaults(self) -> None:
+        state = make_window(id="w1", type=WindowType.SHEET, title="test")
+        assert state.sheet_tabs == []
+        assert state.preview_rows == []
+        assert state.metadata == {}
+        assert state.schema == []
+        assert state.columns == []
+        assert state.data_buffer == []
+        assert state.cached_ranges == []
+        assert state.viewport_range == ""
+        assert state.detail_level == DetailLevel.FULL
+        assert state.intent_tag == IntentTag.GENERAL
+        assert state.intent_confidence == 0.0
+        assert state.intent_source == "default"
+        assert state.idle_turns == 0
+        assert state.last_access_seq == 0
+        assert state.dormant is False
+
+    def test_budget_defaults(self) -> None:
+        budget = PerceptionBudget()
+        assert budget.system_budget_tokens == 3000
+        assert budget.tool_append_tokens == 500
+        assert budget.max_windows == 6
+        assert budget.background_after_idle == 2
+        assert budget.suspend_after_idle == 5
+        assert budget.terminate_after_idle == 8
+        assert budget.window_full_max_rows == 25
+        assert budget.window_full_total_budget_tokens == 500
+        assert budget.window_data_buffer_max_rows == 200
+
+
+def test_legacy_windowstate_is_not_exported() -> None:
+    import excelmanus.window_perception as wp
+
+    assert not hasattr(wp, "WindowState")
+    assert hasattr(wp, "Window")
