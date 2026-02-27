@@ -9,6 +9,7 @@ import { BackupApplyBadge } from "@/components/chat/BackupApplyBadge";
 import { SessionSync } from "@/components/providers/SessionSync";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
+import { SettingsDialog } from "@/components/settings/SettingsDialog";
 
 const ExcelSidePanel = dynamic(
   () => import("@/components/excel/ExcelSidePanel").then((m) => ({ default: m.ExcelSidePanel })),
@@ -38,6 +39,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
           <div className="flex items-center gap-2 min-w-0">
             <BackupApplyBadge />
             <SessionStatusBar />
+            <SettingsDialog />
           </div>
         </div>
         <div className="flex-1 min-h-0 overflow-hidden flex">
