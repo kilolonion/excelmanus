@@ -78,7 +78,9 @@ logs/
 tasks/
 dev-docs/
 docs/plans/
+docs/research/
 docs/audit_*.md
+docs/agent-architecture-review.md
 RELEASE_*.md
 !README.md
 !README_EN.md

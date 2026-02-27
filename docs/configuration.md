@@ -7,8 +7,8 @@
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_API_KEY` | LLM API Key（必填） | — |
-| `EXCELMANUS_BASE_URL` | LLM API 地址（必填，可由 `EXCELMANUS_MODELS` 首项继承） | — |
-| `EXCELMANUS_MODEL` | 模型名称（必填，可由 `EXCELMANUS_MODELS` 首项继承；Gemini 可从 BASE_URL 自动提取） | — |
+| `EXCELMANUS_BASE_URL` | LLM API 地址（必填） | — |
+| `EXCELMANUS_MODEL` | 模型名称（必填；Gemini 可从 BASE_URL 自动提取） | — |
 | `EXCELMANUS_MAX_ITERATIONS` | Agent 最大迭代轮数 | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API 会话空闲超时（秒） | `1800` |
@@ -34,7 +34,7 @@
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS` | 是否发现 `.agents/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS` | 是否发现外部工具目录 | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | 额外扫描目录（逗号分隔） | 空 |
-| `EXCELMANUS_MODELS` | 可切换模型档案（JSON 数组，供 `/model` 使用） | 空 |
+| `EXCELMANUS_AUX_ENABLED` | AUX 总开关（`false` 时即使配了 AUX 也回退主模型） | `true` |
 | `EXCELMANUS_AUX_API_KEY` | AUX API Key（路由 + 子代理默认模型 + 窗口顾问） | — |
 | `EXCELMANUS_AUX_BASE_URL` | AUX Base URL（未设置时回退主配置） | — |
 | `EXCELMANUS_AUX_MODEL` | AUX 模型名称（未设置时回退主模型） | — |
@@ -49,6 +49,9 @@
 | `EXCELMANUS_AUX_MODEL` | 辅助模型（路由 + subagent 默认模型 + 窗口顾问模型） | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `6` |
+| `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | 单个子代理执行超时（秒） | `600` |
+| `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | 并行子代理最大并发数 | `3` |
+| `EXCELMANUS_PARALLEL_READONLY_TOOLS` | 同一轮次相邻只读工具并发执行 | `true` |
 | `EXCELMANUS_SUBAGENT_USER_DIR` | 用户级 subagent 目录 | `~/.excelmanus/agents` |
 | `EXCELMANUS_SUBAGENT_PROJECT_DIR` | 项目级 subagent 目录 | `<workspace_root>/.excelmanus/agents` |
 
@@ -91,7 +94,9 @@
 
 ## 多模型与 AUX 模型
 
-- `/model <name>` 切换主对话模型（`EXCELMANUS_MODELS` 中的 profile）。
+> **注意**：`EXCELMANUS_MODELS` 环境变量已废弃。多模型档案已迁移至数据库管理，通过 Web 设置页面或 `/model` 命令操作。首次启动时若存在此环境变量会自动迁移到数据库。
+
+- `/model <name>` 切换主对话模型。
 - 未设置 `EXCELMANUS_AUX_MODEL` 时，路由与窗口顾问模型跟随 `/model` 切换。
 - 设置了 `EXCELMANUS_AUX_MODEL` 时，路由 + 子代理默认模型 + 窗口顾问模型统一使用 AUX，不受 `/model` 影响。
 
@@ -149,6 +154,10 @@
 | `EXCELMANUS_VLM_IMAGE_MAX_LONG_EDGE` | 图片长边上限（px） | `2048` |
 | `EXCELMANUS_VLM_IMAGE_JPEG_QUALITY` | JPEG 压缩质量 | `92` |
 | `EXCELMANUS_VLM_ENHANCE` | VLM 增强描述总开关 | `true` |
+| `EXCELMANUS_VLM_MAX_TOKENS` | VLM 最大输出 token 数 | `16384` |
+| `EXCELMANUS_VLM_PIPELINE_UNCERTAINTY_THRESHOLD` | 渐进式管线不确定项数量阈值（超过则暂停） | `5` |
+| `EXCELMANUS_VLM_PIPELINE_UNCERTAINTY_CONFIDENCE_FLOOR` | 任一项低于此置信度时暂停 | `0.3` |
+| `EXCELMANUS_VLM_PIPELINE_CHUNK_CELL_THRESHOLD` | 预估 cell 数超过此值时分区提取 | `500` |
 | `EXCELMANUS_MAIN_MODEL_VISION` | 主模型视觉能力（`auto`/`true`/`false`） | `auto` |
 
 ## 备份沙盒配置
@@ -196,6 +205,7 @@
 | `EXCELMANUS_MEMORY_ENABLED` | 全局记忆开关 | `true` |
 | `EXCELMANUS_MEMORY_DIR` | 记忆目录 | `~/.excelmanus/memory` |
 | `EXCELMANUS_MEMORY_AUTO_LOAD_LINES` | 自动加载行数 | `200` |
+| `EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL` | 每 N 轮后台静默提取记忆（0 = 禁用） | `15` |
 
 主题文件：`file_patterns.md`、`user_prefs.md`、`error_solutions.md`、`general.md`。
 核心文件 `MEMORY.md` 保存时会与主题文件同步写入，用于会话启动自动加载。
@@ -227,3 +237,102 @@ MCP 安全扫描：
 - 本地：`scripts/security/scan_secrets.sh`
 - pre-commit：`.pre-commit-config.yaml` 内置钩子
 - CI：`.github/workflows/security-secrets.yml`
+
+## 统一数据库
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_DB_PATH` | SQLite 数据库路径（聊天记录、记忆、向量、审批均存于此） | `~/.excelmanus/excelmanus.db` |
+| `EXCELMANUS_DATABASE_URL` | PostgreSQL 连接 URL（设置后优先使用 PG，忽略 `DB_PATH`） | 空 |
+
+## 聊天记录持久化
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_CHAT_HISTORY_ENABLED` | 是否启用聊天记录持久化 | `true` |
+
+## 文本回复门禁模式
+
+控制 Agent 是否在「只回复文本、未执行操作」时被门禁拦截并强制继续执行。
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_GUARD_MODE` | `off`（默认，完全关闭执行守卫和写入门禁）/ `soft`（保留门禁但降级为仅记录诊断事件） | `off` |
+
+## 工具参数 Schema 校验
+
+对 LLM 返回的工具调用参数进行 JSON Schema 级校验，分三级模式。
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE` | `off`（关闭）/ `shadow`（仅日志不阻断）/ `enforce`（阻断并返回错误） | `off` |
+| `EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT` | `enforce` 模式灰度比例（0~100），100 = 全量 | `100` |
+| `EXCELMANUS_TOOL_SCHEMA_STRICT_PATH` | 严格路径策略：路径参数必须为相对路径且禁止 `..` | `false` |
+
+## 轮次 Checkpoint
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_CHECKPOINT_ENABLED` | 每轮工具调用后自动快照被修改文件，支持按轮回退 | `false` |
+
+## Docker 沙盒
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_DOCKER_SANDBOX` | 启用 Docker 沙盒隔离（需预先构建镜像） | `false` |
+
+## Thinking（推理深度）
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_THINKING_EFFORT` | 推理深度级别（`none`/`minimal`/`low`/`medium`/`high`/`xhigh`） | `medium` |
+| `EXCELMANUS_THINKING_BUDGET` | 精确 token 预算（> 0 时覆盖 effort 换算值） | `0` |
+
+## OpenAI Responses API
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_USE_RESPONSES_API` | 设为 `1` 启用 Responses API（`/responses` 端点），仅对非 Gemini/Claude 的 OpenAI 兼容 URL 生效 | `0` |
+
+## 认证与多用户
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_AUTH_ENABLED` | 启用认证中间件（强制所有 API 请求携带 JWT token） | `false` |
+| `EXCELMANUS_SESSION_ISOLATION` | 会话用户隔离（需先启用认证；管理员可在运行时通过 API 开启） | `false` |
+| `EXCELMANUS_JWT_SECRET` | JWT 签名密钥（留空则每次重启自动生成，生产环境务必设置固定值） | 自动生成 |
+
+### OAuth 登录（可选）
+
+需在对应平台创建 OAuth App。
+
+| 环境变量 | 说明 |
+|---|---|
+| `EXCELMANUS_GITHUB_CLIENT_ID` | GitHub OAuth Client ID |
+| `EXCELMANUS_GITHUB_CLIENT_SECRET` | GitHub OAuth Client Secret |
+| `EXCELMANUS_GITHUB_REDIRECT_URI` | GitHub OAuth 回调地址 |
+| `EXCELMANUS_GOOGLE_CLIENT_ID` | Google OAuth Client ID |
+| `EXCELMANUS_GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret |
+| `EXCELMANUS_GOOGLE_REDIRECT_URI` | Google OAuth 回调地址 |
+| `EXCELMANUS_OAUTH_PROXY` | OAuth 代理（国内服务器访问 Google 需要） |
+
+### 邮件验证码（可选）
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_EMAIL_VERIFY_REQUIRED` | 注册须完成邮箱验证 | `false` |
+| `EXCELMANUS_EMAIL_FROM` | 发件人显示名 + 地址 | `ExcelManus <no-reply@yourdomain.com>` |
+| `EXCELMANUS_RESEND_API_KEY` | Resend API Key（方式一，推荐） | — |
+| `EXCELMANUS_SMTP_HOST` | SMTP 服务器（方式二） | — |
+| `EXCELMANUS_SMTP_PORT` | SMTP 端口（465 = SSL, 587 = STARTTLS） | — |
+| `EXCELMANUS_SMTP_USER` | SMTP 用户名 | — |
+| `EXCELMANUS_SMTP_PASSWORD` | SMTP 密码 | — |
+
+## 工作空间配额
+
+面向公众服务时建议配置，防止单用户占用过多资源。
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_WORKSPACE_MAX_SIZE_MB` | 每个用户工作空间最大存储容量（MB），超出后上传将被拒绝 | `100` |
+| `EXCELMANUS_WORKSPACE_MAX_FILES` | 每个用户工作空间最大文件数，超出后自动删除最旧文件 | `5` |
