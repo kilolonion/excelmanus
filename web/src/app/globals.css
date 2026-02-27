@@ -1,0 +1,1313 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+}
+
+:root {
+  --radius: 0.625rem;
+  /* ExcelManus 品牌色 */
+  --em-primary: #217346;
+  --em-primary-light: #33a867;
+  --em-accent: #107c41;
+  --em-sidebar-bg: #f7f7f8;
+  --em-primary-dark: #1a5c38;
+  --em-primary-alpha-10: rgba(33, 115, 70, 0.1);
+  --em-primary-alpha-06: rgba(33, 115, 70, 0.06);
+  --em-primary-alpha-15: rgba(33, 115, 70, 0.15);
+  --em-primary-alpha-20: rgba(33, 115, 70, 0.2);
+  --em-primary-alpha-25: rgba(33, 115, 70, 0.25);
+  --em-surface: #f4f4f5;
+  --em-error: #d13438;
+  --em-gold: #e5a100;
+  --em-cyan: #0078d4;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+  /* ExcelManus 深色主题覆盖 */
+  --em-sidebar-bg: #1a1a1b;
+  --em-primary-light: #2d8f56;
+  --em-primary-alpha-06: rgba(33, 115, 70, 0.08);
+  --em-primary-alpha-10: rgba(33, 115, 70, 0.12);
+  --em-primary-alpha-15: rgba(33, 115, 70, 0.18);
+  --em-primary-alpha-20: rgba(33, 115, 70, 0.25);
+  --em-primary-alpha-25: rgba(33, 115, 70, 0.3);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@keyframes pulse-green {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.animate-pulse-green {
+  animation: pulse-green 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-green {
+    animation: none;
+  }
+}
+
+/* 会话/文件卡片选中指示条动画 */
+@keyframes indicator-enter {
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+.card-indicator-enter {
+  animation: indicator-enter 0.2s ease-out forwards;
+  transform-origin: center;
+}
+
+/* 选中卡片微光 */
+.card-selected-glow {
+  box-shadow: inset 0 0 0 1px var(--em-primary-alpha-15),
+    0 0 8px var(--em-primary-alpha-10);
+}
+
+.dark .card-selected-glow {
+  box-shadow: inset 0 0 0 1px var(--em-primary-alpha-20),
+    0 0 12px var(--em-primary-alpha-15);
+}
+
+/* 确保 Univer Excel 预览区域不透明：
+   workbench-layout 容器需有实色背景，以便表格画布与网格线始终可见。 */
+[data-u-comp="workbench-layout"] {
+  background-color: #fff !important;
+}
+
+.dark [data-u-comp="workbench-layout"] {
+  background-color: #1f2937 !important;
+  /* 灰色 gray-800 */
+}
+
+/* 隐藏 Univer 行表头拖拽手柄（表头内窄竖条） */
+header .univer-box-border .univer-w-5.univer-cursor-pointer {
+  display: none !important;
+}
+
+/* 移动端 Univer.js 按钮尺寸修正 */
+@media (pointer: coarse) {
+
+  /* 针对“开始”按钮的简化选择器 */
+  a.univer-h-7.univer-rounded-full {
+    height: 20px !important;
+    min-height: 20px !important;
+    padding-left: 6px !important;
+    padding-right: 4px !important;
+    font-size: 10px !important;
+    min-width: auto !important;
+    line-height: 1.2 !important;
+  }
+
+  /* 父容器预留足够空间 */
+  .univer-h-10 {
+    height: 32px !important;
+    min-height: 32px !important;
+  }
+
+  /* Univer.js 通用按钮与工具栏元素 */
+  [data-u-comp] button,
+  [class*="univer"] button,
+  [class*="univerjs"] button,
+  .univer-toolbar button,
+  .univer-menu button {
+    min-height: 32px !important;
+    min-width: auto !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+  }
+}
+
+/* ── Univer Footer Status Bar: Mobile / Tablet Optimization ── */
+/* 在非桌面端（\u003c1280px，与 JS DESKTOP_BREAKPOINT 一致）精简 footer 布局：
+   保留工作表切换（< > 翻页箭头）和缩放控件（− + 百分比），
+   隐藏"添加工作表"和"工作表列表"按钮，压缩整体尺寸 */
+@media (max-width: 1279px) {
+
+  /* Footer 整体：降低高度、缩小内边距和字号 */
+  footer section[data-range-selector="true"] {
+    height: 28px !important;
+    min-height: 28px !important;
+    max-height: 28px !important;
+    padding: 0 6px !important;
+    font-size: 11px !important;
+    gap: 2px !important;
+  }
+
+  /* Footer 内所有按钮：覆盖全局 44px 触摸目标规则 */
+  footer section[data-range-selector="true"] button,
+  footer section[data-range-selector="true"] [role="button"] {
+    min-height: 22px !important;
+    min-width: 22px !important;
+    height: 22px !important;
+    width: auto !important;
+    padding: 2px 4px !important;
+    font-size: 11px !important;
+  }
+
+  /* Footer 内 SVG 图标缩小 */
+  footer section[data-range-selector="true"] svg {
+    width: 12px !important;
+    height: 12px !important;
+  }
+
+  /* 隐藏"添加工作表" + 按钮（左侧区域第1个按钮） */
+  footer section[data-range-selector="true"]> :first-child>button:first-of-type {
+    display: none !important;
+  }
+
+  /* 隐藏工作表管理图标（左侧区域第2个按钮） */
+  footer section[data-range-selector="true"]> :first-child>button:nth-of-type(2) {
+    display: none !important;
+  }
+
+  /* 缩放百分比文字缩小 */
+  footer section[data-range-selector="true"]> :last-child {
+    font-size: 10px !important;
+    padding: 0 2px !important;
+  }
+}
+
+/* 在更小的手机屏幕上进一步压缩 */
+@media (max-width: 767px) {
+  footer section[data-range-selector="true"] {
+    padding: 0 4px !important;
+    font-size: 10px !important;
+  }
+
+  footer section[data-range-selector="true"] button,
+  footer section[data-range-selector="true"] [role="button"] {
+    min-height: 20px !important;
+    min-width: 20px !important;
+    height: 20px !important;
+    padding: 1px 3px !important;
+  }
+
+  footer section[data-range-selector="true"] svg {
+    width: 10px !important;
+    height: 10px !important;
+  }
+}
+
+/* 正文内联代码自动换行，避免横向溢出 */
+.prose code {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+/* 聊天消息紧凑排版 */
+.prose.prose-sm {
+  font-size: 13px;
+  line-height: 1.625;
+}
+
+.prose.prose-sm p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose.prose-sm ul,
+.prose.prose-sm ol {
+  margin-top: 0.4em;
+  margin-bottom: 0.4em;
+  padding-left: 1.25em;
+}
+
+.prose.prose-sm li {
+  margin-top: 0.15em;
+  margin-bottom: 0.15em;
+}
+
+.prose.prose-sm h1,
+.prose.prose-sm h2,
+.prose.prose-sm h3,
+.prose.prose-sm h4 {
+  margin-top: 0.75em;
+  margin-bottom: 0.35em;
+}
+
+.prose.prose-sm pre {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  font-size: 12px;
+}
+
+.prose.prose-sm blockquote {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+/* ── Markdown Table ── */
+.md-table-wrap {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  scrollbar-width: thin;
+}
+
+.md-table-wrap::-webkit-scrollbar {
+  height: 4px;
+}
+
+.md-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--muted-foreground);
+  border-radius: 4px;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.md-thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.md-th {
+  padding: 7px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted-foreground);
+  background: oklch(0.97 0 0);
+  border-bottom: 1.5px solid var(--border);
+  white-space: nowrap;
+}
+
+.dark .md-th {
+  background: oklch(0.22 0 0);
+}
+
+.md-td {
+  padding: 6px 12px;
+  border-bottom: 1px solid oklch(0.94 0 0);
+  color: var(--foreground);
+}
+
+.dark .md-td {
+  border-bottom-color: oklch(0.25 0 0);
+}
+
+.md-tbody .md-tr:last-child .md-td {
+  border-bottom: none;
+}
+
+/* 斑马纹 */
+.md-tbody .md-tr:nth-child(even) .md-td {
+  background: oklch(0.98 0 0);
+}
+
+.dark .md-tbody .md-tr:nth-child(even) .md-td {
+  background: oklch(0.19 0 0);
+}
+
+/* 悬浮高亮 */
+.md-tbody .md-tr:hover .md-td {
+  background: var(--em-primary-alpha-06);
+}
+
+/* ── Markdown Blockquote ── */
+.md-blockquote {
+  border-left: 3px solid var(--em-primary);
+  padding: 0.35em 0.8em;
+  margin: 0.5em 0;
+  background: var(--em-primary-alpha-06);
+  border-radius: 0 6px 6px 0;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+}
+
+.md-blockquote p {
+  margin: 0.2em 0;
+}
+
+/* ── Markdown HR ── */
+.md-hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
+  margin: 1em 0;
+}
+
+/* Hide scrollbar while keeping scroll functional */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* Radix ScrollArea injects a display:table wrapper that expands to fit
+   content width, breaking text truncation and pushing right-side elements
+   beyond the overflow-x:hidden clip boundary. Force block layout so the
+   wrapper respects the viewport width constraint. */
+[data-radix-scroll-area-viewport]>div {
+  display: block !important;
+}
+
+/* ── Mobile Adaptations ── */
+
+/* Safe area insets for notch/home indicator devices */
+:root {
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sal: env(safe-area-inset-left);
+  --sar: env(safe-area-inset-right);
+}
+
+/* On touch devices, always show elements that rely on hover for visibility */
+@media (hover: none) {
+
+  .md\:opacity-0,
+  .touch-show {
+    opacity: 1 !important;
+  }
+}
+
+/* Prevent 300ms tap delay and remove tap highlight on mobile */
+@media (pointer: coarse) {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+/* Prevent pull-to-refresh, overscroll bounce, and iOS Safari swipe-back */
+body {
+  overscroll-behavior: none;
+  overscroll-behavior-x: none;
+}
+
+/* Prevent horizontal swipe from triggering browser back/forward on iOS */
+@supports (-webkit-touch-callout: none) {
+
+  html,
+  body {
+    overflow-x: hidden;
+  }
+}
+
+/* Viewport height that adapts to mobile browser chrome (address bar).
+   Two declarations ensure dvh overrides vh in the same block,
+   regardless of Tailwind's class generation order. */
+.h-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ── Button Active (Press) Feedback ── */
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled) {
+  transform: scale(0.97);
+  transition: transform 75ms ease;
+}
+
+/* ── Mobile Touch Enhancements ── */
+
+/* Ensure minimum 44×44px touch targets on coarse-pointer devices (WCAG 2.5.8) */
+@media (pointer: coarse) {
+
+  button,
+  [role="button"],
+  a,
+  input[type="checkbox"],
+  input[type="radio"],
+  select,
+  [tabindex="0"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Exceptions: icon-only buttons that already have explicit sizing */
+  button.h-5,
+  button.h-6,
+  button.h-7,
+  button.h-8,
+  [role="button"].h-5,
+  [role="button"].h-6,
+  [role="button"].h-7,
+  [role="button"].h-8 {
+    min-height: 36px;
+    min-width: 36px;
+  }
+
+  /* Exceptions: small compact buttons (chat mode tabs, regenerate buttons, etc.) */
+  button.text-xs,
+  [role="button"].text-xs,
+  button[class*="compact"],
+  [role="button"][class*="compact"] {
+    min-height: 32px;
+    min-width: auto;
+  }
+
+  /* Exceptions: Univer toolbar "开始" and similar compact links - keep desktop size on mobile */
+  a.univer-h-7.univer-rounded-full,
+  a[class*="univer-h-7"][class*="univer-rounded-full"] {
+    min-height: 0;
+    min-width: auto;
+  }
+
+  /* Exception: compact overlay buttons (e.g. image thumbnail close) */
+  button.touch-compact,
+  [role="button"].touch-compact {
+    min-height: 0;
+    min-width: 0;
+  }
+
+  /* Dropdown menu items need adequate touch height */
+  [role="menuitem"],
+  [role="option"] {
+    min-height: 44px;
+  }
+}
+
+/* Smooth momentum scrolling for all scrollable containers on touch */
+@media (pointer: coarse) {
+
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .overflow-auto,
+  [data-radix-scroll-area-viewport] {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Prevent text selection on interactive elements during touch */
+@media (pointer: coarse) {
+
+  button,
+  [role="button"],
+  [role="menuitem"],
+  [role="tab"],
+  .cursor-pointer {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/* Long-press context menu prevention on interactive elements */
+@media (pointer: coarse) {
+
+  button,
+  [role="button"],
+  img {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* ── Tool Card Status Animations ── */
+@keyframes tool-running-pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes tool-running-bar {
+  0% {
+    background-position: 0% 0%;
+  }
+
+  100% {
+    background-position: 0% 200%;
+  }
+}
+
+@keyframes tool-success-flash {
+  0% {
+    background-color: rgba(33, 115, 70, 0.12);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.dark .animate-tool-success-flash {
+  animation: tool-success-flash-dark 0.6s ease-out forwards;
+}
+
+@keyframes tool-success-flash-dark {
+  0% {
+    background-color: rgba(33, 115, 70, 0.18);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-tool-running-pulse {
+  animation: tool-running-pulse 1.8s ease-in-out infinite;
+}
+
+.animate-tool-running-bar {
+  background: linear-gradient(180deg, var(--tool-cat-color) 0%, rgba(255, 255, 255, 0.3) 50%, var(--tool-cat-color) 100%);
+  background-size: 100% 200%;
+  animation: tool-running-bar 1.5s ease-in-out infinite;
+}
+
+.animate-tool-success-flash {
+  animation: tool-success-flash 0.6s ease-out forwards;
+}
+
+/* ── Tool Card Collapse Animations ── */
+@keyframes tool-expand-smooth {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+
+  60% {
+    transform: rotate(90deg) scale(1.05);
+  }
+
+  100% {
+    transform: rotate(90deg) scale(1);
+  }
+}
+
+@keyframes tool-collapse-smooth {
+  0% {
+    transform: rotate(90deg) scale(1);
+  }
+
+  70% {
+    transform: rotate(20deg) scale(1.01);
+  }
+
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+@keyframes collapsible-down {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.tool-chevron-expand {
+  animation: tool-expand-smooth 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards !important;
+}
+
+.tool-chevron-collapse {
+  animation: tool-collapse-smooth 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+}
+
+.animate-collapsible-down {
+  animation: collapsible-down 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+.animate-collapsible-up {
+  animation: collapsible-up 0.2s cubic-bezier(0.55, 0.06, 0.68, 0.19);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .animate-tool-running-pulse,
+  .animate-tool-running-bar,
+  .animate-tool-success-flash,
+  .tool-chevron-expand,
+  .tool-chevron-collapse,
+  .animate-collapsible-down,
+  .animate-collapsible-up {
+    animation: none;
+  }
+
+  .tool-chevron-expand {
+    transform: rotate(90deg);
+  }
+
+  .tool-chevron-collapse {
+    transform: rotate(0deg);
+  }
+}
+
+/* ── Subagent Block Animations ── */
+@keyframes subagent-running-pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.7;
+  }
+}
+
+@keyframes subagent-tool-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes subagent-success-flash {
+  0% {
+    background-color: transparent;
+  }
+
+  30% {
+    background-color: rgb(139 92 246 / 0.08);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-subagent-running-pulse {
+  animation: subagent-running-pulse 1.8s ease-in-out infinite;
+}
+
+.animate-subagent-tool-enter {
+  animation: subagent-tool-enter 0.2s ease-out;
+}
+
+.animate-subagent-success-flash {
+  animation: subagent-success-flash 0.6s ease-out forwards;
+}
+
+@keyframes indeterminate-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(200%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .animate-subagent-running-pulse,
+  .animate-subagent-tool-enter,
+  .animate-subagent-success-flash {
+    animation: none;
+  }
+}
+
+/* ── Pipeline Stepper chip enter ── */
+@keyframes chipEnter {
+  0% {
+    opacity: 0;
+    transform: translateX(8px) scale(0.92);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translateX(-2px) scale(1.02);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.animate-chip-enter {
+  animation: chipEnter 0.35s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-chip-enter {
+    animation: none;
+  }
+}
+
+/* ── Empty State Float ── */
+@keyframes empty-float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-empty-float {
+  animation: empty-float 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-empty-float {
+    animation: none;
+  }
+}
+
+/* ── Diff Cell Highlight Fade-In ── */
+@keyframes diff-cell-in {
+  from {
+    background-color: transparent;
+  }
+}
+
+.diff-cell-animate {
+  animation: diff-cell-in 0.4s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-cell-animate {
+    animation: none;
+  }
+}
+
+/* Hide scrollbar utility */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Streaming Typing Cursor ── */
+@keyframes blink-caret {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
+}
+
+.streaming-cursor::after {
+  content: "▌";
+  display: inline;
+  animation: blink-caret 1s step-end infinite;
+  color: var(--em-primary);
+  font-weight: 300;
+  margin-left: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor::after {
+    animation: none;
+  }
+}
+
+/* ── Loading Screen Animations ── */
+
+/* Logo 呼吸脉冲 */
+@keyframes loading-logo-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.06); opacity: 0.88; }
+}
+
+/* 涟漪扩散 */
+@keyframes loading-ring-pulse {
+  0% { box-shadow: 0 0 0 0 var(--em-primary-alpha-25); opacity: 1; }
+  100% { box-shadow: 0 0 0 20px var(--em-primary-alpha-25); opacity: 0; }
+}
+
+/* 底部进度条 */
+@keyframes loading-progress {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(300%); }
+  100% { transform: translateX(-100%); }
+}
+
+/* 背景光晕呼吸 */
+@keyframes loading-bg-breathe {
+  0%, 100% { opacity: 0.04; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 0.07; transform: translate(-50%, -50%) scale(1.08); }
+}
+
+@keyframes loading-bg-breathe-delayed {
+  0%, 100% { opacity: 0.03; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 0.05; transform: translate(-50%, -50%) scale(1.12); }
+}
+
+/* 浮动光点 */
+@keyframes loading-float {
+  0%, 100% { transform: translateY(0) translateX(0); opacity: 0.2; }
+  25% { transform: translateY(-18px) translateX(6px); opacity: 0.35; }
+  50% { transform: translateY(-8px) translateX(-4px); opacity: 0.15; }
+  75% { transform: translateY(-22px) translateX(8px); opacity: 0.3; }
+}
+
+/* 光环旋转 */
+@keyframes loading-ring-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 外层光环缩放 */
+@keyframes loading-ring-scale {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.05); opacity: 1; }
+}
+
+/* 内层光环反向缩放 */
+@keyframes loading-ring-scale-reverse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.96); opacity: 0.6; }
+}
+
+/* 三点弹跳 */
+@keyframes loading-dot-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+
+/* 文字渐变闪光 */
+@keyframes loading-text-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+/* 淡入 */
+@keyframes loading-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 动画类 ── */
+.loading-logo-pulse {
+  animation: loading-logo-pulse 2.4s ease-in-out infinite;
+}
+
+.loading-ring-pulse {
+  animation: loading-ring-pulse 2.4s ease-out infinite;
+}
+
+.loading-progress-bar {
+  animation: loading-progress 2.2s ease-in-out infinite;
+}
+
+.loading-bg-breathe {
+  animation: loading-bg-breathe 4s ease-in-out infinite;
+}
+
+.loading-bg-breathe-delayed {
+  animation: loading-bg-breathe-delayed 5s ease-in-out infinite;
+  animation-delay: 1s;
+}
+
+.loading-float-particle {
+  animation: loading-float 6s ease-in-out infinite;
+}
+
+.loading-float-particle-delayed {
+  animation: loading-float 7s ease-in-out infinite;
+  animation-delay: 2s;
+}
+
+.loading-float-particle-slow {
+  animation: loading-float 9s ease-in-out infinite;
+  animation-delay: 3.5s;
+}
+
+.loading-ring-spin {
+  animation: loading-ring-spin 12s linear infinite;
+}
+
+.loading-ring-outer {
+  animation: loading-ring-scale 3s ease-in-out infinite;
+}
+
+.loading-ring-inner {
+  animation: loading-ring-scale-reverse 3s ease-in-out infinite;
+}
+
+.loading-dot-bounce {
+  animation: loading-dot-bounce 1.4s ease-in-out infinite;
+}
+
+.loading-text-shimmer {
+  background: linear-gradient(
+    90deg,
+    currentColor 0%,
+    var(--em-primary-light) 40%,
+    var(--em-primary) 50%,
+    var(--em-primary-light) 60%,
+    currentColor 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: loading-text-shimmer 3s ease-in-out infinite;
+}
+
+.loading-fade-in {
+  animation: loading-fade-in 0.6s ease-out both;
+  animation-delay: 0.3s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-logo-pulse,
+  .loading-ring-pulse,
+  .loading-progress-bar,
+  .loading-bg-breathe,
+  .loading-bg-breathe-delayed,
+  .loading-float-particle,
+  .loading-float-particle-delayed,
+  .loading-float-particle-slow,
+  .loading-ring-spin,
+  .loading-ring-outer,
+  .loading-ring-inner,
+  .loading-dot-bounce,
+  .loading-text-shimmer,
+  .loading-fade-in {
+    animation: none;
+  }
+
+  .loading-text-shimmer {
+    -webkit-text-fill-color: unset;
+    background: none;
+  }
+}
+
+/* ── Chat Input Focus Ring ── */
+.chat-input-ring {
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.chat-input-ring:focus-within {
+  border-color: var(--em-primary);
+  box-shadow: 0 0 0 2px var(--em-primary-alpha-15);
+}
+
+/* ── Highlight.js Syntax Theme (Light) ── */
+.hljs {
+  color: #383a42;
+  background: transparent;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #a0a1a7;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta {
+  color: #a626a4;
+}
+
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag {
+  color: #50a14f;
+}
+
+.hljs-number,
+.hljs-literal {
+  color: #986801;
+}
+
+.hljs-built_in,
+.hljs-type,
+.hljs-params {
+  color: #c18401;
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+  color: #4078f2;
+}
+
+.hljs-name,
+.hljs-selector-class {
+  color: #e45649;
+}
+
+.hljs-variable,
+.hljs-template-variable {
+  color: #e45649;
+}
+
+.hljs-attribute {
+  color: #986801;
+}
+
+.hljs-regexp,
+.hljs-link {
+  color: #50a14f;
+}
+
+.hljs-symbol,
+.hljs-bullet {
+  color: #4078f2;
+}
+
+.hljs-addition {
+  color: #50a14f;
+  background: rgba(80, 161, 79, 0.1);
+}
+
+.hljs-deletion {
+  color: #e45649;
+  background: rgba(228, 86, 73, 0.1);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}
+
+/* ── Highlight.js Syntax Theme (Dark) ── */
+.dark .hljs {
+  color: #abb2bf;
+}
+
+.dark .hljs-comment,
+.dark .hljs-quote {
+  color: #5c6370;
+  font-style: italic;
+}
+
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-meta {
+  color: #c678dd;
+}
+
+.dark .hljs-string,
+.dark .hljs-attr,
+.dark .hljs-template-tag {
+  color: #98c379;
+}
+
+.dark .hljs-number,
+.dark .hljs-literal {
+  color: #d19a66;
+}
+
+.dark .hljs-built_in,
+.dark .hljs-type,
+.dark .hljs-params {
+  color: #e5c07b;
+}
+
+.dark .hljs-title,
+.dark .hljs-title.function_,
+.dark .hljs-section {
+  color: #61afef;
+}
+
+.dark .hljs-name,
+.dark .hljs-selector-class {
+  color: #e06c75;
+}
+
+.dark .hljs-variable,
+.dark .hljs-template-variable {
+  color: #e06c75;
+}
+
+.dark .hljs-attribute {
+  color: #d19a66;
+}
+
+.dark .hljs-regexp,
+.dark .hljs-link {
+  color: #98c379;
+}
+
+.dark .hljs-symbol,
+.dark .hljs-bullet {
+  color: #61afef;
+}
+
+.dark .hljs-addition {
+  color: #98c379;
+  background: rgba(152, 195, 121, 0.1);
+}
+
+.dark .hljs-deletion {
+  color: #e06c75;
+  background: rgba(224, 108, 117, 0.1);
+}
+
+.dark .hljs-emphasis {
+  font-style: italic;
+}
+
+.dark .hljs-strong {
+  font-weight: bold;
+}
