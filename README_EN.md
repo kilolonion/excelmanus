@@ -1,50 +1,74 @@
 <p align="center">
-  <img src="logo.svg" width="320" alt="ExcelManus" />
+  <img src="logo.svg" width="280" alt="ExcelManus" />
+</p>
+
+<h3 align="center">AI Agent that operates Excel with natural language</h3>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
+  <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/version-1.6.0-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/Next.js-15-black?logo=next.js" alt="Next.js" />
 </p>
 
 <p align="center">
-  <strong>v1.6.0</strong> · Operate Excel with natural language
+  <a href="README.md">中文</a> · English · <a href="docs/configuration_en.md">Configuration</a> · <a href="docs/ops-manual.md">Ops Manual</a>
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · English
+  <img src="docs/images/webui-desktop.png" width="720" alt="Web UI" />
 </p>
 
-LLM-powered Excel Agent — read data, write formulas, run analysis, create charts. Supports OpenAI / Claude / Gemini, auto-detects provider from URL.
+---
 
-<p align="center">
-  <img src="docs/images/webui-desktop.png" width="800" alt="Web UI Desktop" />
-</p>
-<p align="center">Desktop Web UI — Chat + Excel side panel real-time preview</p>
+ExcelManus is an LLM-powered Excel Agent framework. Tell it what you want — it reads data, writes formulas, runs analysis, and creates charts automatically. Supports both CLI and Web interfaces, works with OpenAI / Claude / Gemini and any compatible LLM.
 
-<p align="center">
-  <img src="docs/images/webui-mobile.png" width="360" alt="Web UI Mobile" />
-</p>
-<p align="center">Mobile — Conversational interaction, tool calls and data changes at a glance</p>
+## ✨ Key Features
 
-## Features
+<table>
+<tr>
+<td width="50%">
 
-- **Read & Write Excel** — Cells, formulas, VLOOKUP, batch fill, multi-sheet
-- **Data Analysis** — Filter, sort, aggregation, pivot tables; complex logic generates Python scripts
-- **Charts** — Bar, line, pie charts, embed in Excel or export as image
-- **Image Recognition** — Table screenshot → structured data, supports data + style two-stage extraction
-- **Cross-Sheet Operations** — Create / copy / rename sheets, move data across sheets
-- **Version Management** — staging / audit / CoW version chain, `/undo` rollback
-- **Persistent Memory** — Remembers preferences and patterns across sessions
-- **Skillpack** — One Markdown file = one skill, inject domain knowledge
-- **MCP** — Connect external MCP Servers to extend tools
-- **Subagent** — Large files or complex tasks delegated to sub-agents
-- **Multi-User** — Independent workspace / database / sessions, admin panel controls permissions and usage
+### 📊 Read & Write Excel
+Cells · Formulas · VLOOKUP · Batch fill · Multi-sheet operations
 
-## Quick Start
+### 📈 Data Analysis & Charts
+Filter, sort, aggregate, pivot tables; complex logic auto-generates Python scripts. Bar, line, pie charts embedded in Excel or exported as images.
 
-**Install** (Python >= 3.10)
+### 🖼️ Image Recognition
+Table screenshot → structured data via 4-stage progressive pipeline extracting data + styles + formulas
+
+### 🔄 Version Management
+Staging / Audit / CoW version chain, `/undo` precise rollback to any operation
+
+</td>
+<td width="50%">
+
+### 🧠 Persistent Memory
+Cross-session memory for preferences and patterns, auto-adapts behavior
+
+### 🧩 Skillpack
+One Markdown = one skill. Auto-discovery, on-demand activation, supports Hooks and command dispatch
+
+### 🔌 MCP & Subagent
+Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents
+
+### 👥 Multi-User
+Independent workspace / database / session isolation, admin panel for permissions and usage control
+
+</td>
+</tr>
+</table>
+
+## 🚀 Quick Start
+
+**1. Install**
 
 ```bash
 pip install .
 ```
 
-Create `.env`:
+**2. Configure** — create `.env` with just 3 variables:
 
 ```dotenv
 EXCELMANUS_API_KEY=your-api-key
@@ -52,14 +76,16 @@ EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
 EXCELMANUS_MODEL=your-model-id
 ```
 
-Works with any OpenAI-compatible API. Auto-switches to native Claude / Gemini protocol for Anthropic / Google URLs.
+> Works with any OpenAI-compatible API. URLs containing `anthropic` or `googleapis` auto-switch to native protocol.
 
-> After first run, settings migrate to local database. Manage via `/config` or Web UI.
+**3. Run**
 
 ```bash
-excelmanus            # CLI
-excelmanus-api        # REST API + Web UI backend
+excelmanus            # CLI mode
+excelmanus-api        # Web UI + REST API
 ```
+
+**Try it out:**
 
 ```
 > Read the first 10 rows of sales.xlsx
@@ -67,11 +93,16 @@ excelmanus-api        # REST API + Web UI backend
 > Group sales by region and generate a bar chart
 ```
 
-## Usage
+> After first run, settings migrate to local database. Manage via `/config` command or Web UI settings panel.
+
+## 💻 Usage
 
 ### CLI
 
-Terminal chat, supports Dashboard and Classic layouts.
+Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
+
+<details>
+<summary>📋 Common Commands</summary>
 
 | Command | Description |
 | --- | --- |
@@ -87,27 +118,35 @@ Terminal chat, supports Dashboard and Classic layouts.
 | `/config import` | Import config |
 | `/clear` | Clear conversation |
 
-Auto-completion on `/`, typo correction built-in.
+</details>
 
 ### Web UI
 
-Built on Next.js + Univer.js.
+Built on Next.js + Univer.js, providing a full visual experience.
 
 ```bash
 excelmanus-api                          # Backend
 cd web && npm install && npm run dev    # Frontend
 ```
 
-- SSE streaming, live thinking process and tool calls
-- Embedded Excel viewer, side panel preview/edit, range selection support
-- Real-time diff on write operations
-- Multi-session, settings panel, admin panel
-- File drag & drop, `@` reference files / skills
-- High-risk operation approval confirmation
+- **SSE Streaming** — Real-time display of thinking process, tool calls, sub-agent execution
+- **Excel Side Panel** — Embedded viewer, live preview/edit, range selection support
+- **Write Diff** — Before/after comparison on every modification
+- **Multi-Session** — Persistent history, seamless switching
+- **File Interaction** — Drag & drop upload, `@` reference files and skills
+- **Approval Flow** — Confirmation dialog for high-risk operations
+
+<p align="center">
+  <img src="docs/images/webui-mobile.png" width="300" alt="Mobile" />
+</p>
+<p align="center"><sub>Mobile-friendly — responsive layout</sub></p>
 
 ### REST API
 
-Available after `excelmanus-api` starts.
+Available once `excelmanus-api` starts. SSE pushes 25+ event types.
+
+<details>
+<summary>📋 Main Endpoints</summary>
 
 | Endpoint | Description |
 | --- | --- |
@@ -121,34 +160,37 @@ Available after `excelmanus-api` starts.
 | `POST /api/v1/config/export` | Export config |
 | `GET /api/v1/health` | Health check |
 
-SSE pushes 25 event types (thinking, tool calls, subagents, Excel diff, approval, etc.).
+</details>
 
-## Models
+## 🤖 Model Support
 
 | Provider | Description |
 | --- | --- |
-| OpenAI Compatible | Default protocol |
-| Claude (Anthropic) | Auto-switches when URL contains `anthropic`, supports extended thinking |
-| Gemini (Google) | Auto-switches when URL contains `googleapis` / `generativelanguage` |
-| OpenAI Responses API | Enable with `EXCELMANUS_USE_RESPONSES_API=1` |
+| **OpenAI Compatible** | Default protocol, works with any compatible API |
+| **Claude (Anthropic)** | Auto-switches when URL contains `anthropic`, supports extended thinking |
+| **Gemini (Google)** | Auto-switches when URL contains `googleapis` / `generativelanguage` |
+| **OpenAI Responses API** | Enable with `EXCELMANUS_USE_RESPONSES_API=1` |
 
-Configure auxiliary model (AUX) for routing, sub-agents, and window management. Switch models at runtime via `/model` or Web UI.
+Configure an **auxiliary model (AUX)** for routing, sub-agents, and window management. Main and auxiliary models switch independently.
 
-## Security
+## 🔒 Security
 
-- **Path Sandbox** — Reads/writes restricted to working directory, path traversal and symlink escapes rejected
-- **Code Static Analysis** — `run_code` auto-approval by Green / Yellow / Red tiers
-- **Docker Sandbox** — Optional container isolation (`EXCELMANUS_DOCKER_SANDBOX=1`)
-- **Operation Approval** — High-risk writes require `/accept` confirmation, changes record diffs and snapshots
-- **Version Chain** — staging / audit / CoW, `/undo` rollback to any version
-- **MCP Whitelist** — External tools require confirmation by default
-- **User Isolation** — Physical workspace and database isolation per user
+| Mechanism | Description |
+| --- | --- |
+| **Path Sandbox** | Reads/writes restricted to working directory, path traversal and symlink escapes rejected |
+| **Code Review** | `run_code` static analysis, Green / Yellow / Red tier auto-approval |
+| **Docker Sandbox** | Optional container isolation (`EXCELMANUS_DOCKER_SANDBOX=1`) |
+| **Operation Approval** | High-risk writes require confirmation, changes auto-record diffs and snapshots |
+| **Version Chain** | Staging → Audit → CoW, `/undo` rollback to any version |
+| **MCP Whitelist** | External tools require per-item confirmation by default |
+| **User Isolation** | Physical workspace and database isolation per user in multi-user mode |
 
-## Skillpack
+## 🧩 Skillpack
 
-One directory + one `SKILL.md` (with `name` and `description`) is all you need. Auto-discovery and on-demand activation. Supports Hooks, command dispatch, MCP dependency declarations.
+One directory + one `SKILL.md` (with `name` and `description`) to create a skill. Auto-discovery, on-demand activation, supports Hooks, command dispatch, and MCP dependency declarations.
 
-Built-in skills:
+<details>
+<summary>📦 Built-in Skills</summary>
 
 | Skill | Purpose |
 | --- | --- |
@@ -160,37 +202,24 @@ Built-in skills:
 | `excel_code_runner` | Python scripts for large files |
 | `run_code_templates` | Common code templates |
 
-Protocol details in `docs/skillpack_protocol.md`.
+</details>
 
-## Bench
+Protocol details in [`docs/skillpack_protocol.md`](docs/skillpack_protocol.md).
 
-Built-in evaluation framework:
-
-```bash
-python -m excelmanus.bench --all                         # All
-python -m excelmanus.bench --suite bench/cases/xxx.json  # Specific suite
-python -m excelmanus.bench --message "Read first 10 rows"  # Single test
-```
-
-Supports multi-turn cases, auto-assertion, JSON logs, `--trace` engine internals, suite-level concurrency.
-
-## Deployment
+## 🏗️ Deployment
 
 ### Docker Compose (Recommended)
 
 ```bash
-cp .env.example .env
-# Edit .env for API Key, model, etc.
-
-docker compose up -d                          # Start (backend + frontend + PostgreSQL)
-docker compose --profile production up -d     # With Nginx reverse proxy
+cp .env.example .env   # Edit API Key, model, etc.
+docker compose up -d   # Backend + Frontend + PostgreSQL
 ```
 
-Access `http://localhost` (Nginx) or `http://localhost:3000` (direct frontend).
+Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse proxy at `http://localhost`.
 
-### Manual Deployment (BT Panel / Bare Metal)
+### Manual Deployment
 
-For non-Docker scenarios, see [docs/ops-manual.md](docs/ops-manual.md).
+For BT Panel / bare metal scenarios without Docker, see [Ops Manual](docs/ops-manual.md).
 
 ### Remote Update
 
@@ -200,30 +229,40 @@ For non-Docker scenarios, see [docs/ops-manual.md](docs/ops-manual.md).
 ./deploy.sh --frontend-only  # Frontend only
 ```
 
-> Automatically excludes `.env`, `data/`, `workspace/`, won't overwrite server data. Low-memory servers, Nginx SSE config, see [docs/ops-manual.md](docs/ops-manual.md).
+> Automatically excludes `.env`, `data/`, `workspace/` — won't overwrite server data.
 
-## Multi-User
+## 👥 Multi-User
 
 ```dotenv
 EXCELMANUS_AUTH_ENABLED=true
 EXCELMANUS_JWT_SECRET=your-random-secret-key-at-least-64-chars
 ```
 
-Supports email/password, GitHub OAuth, Google OAuth login. Each user has independent workspace and database (`users/{user_id}/data.db`). First registered user becomes admin.
+Supports **email/password**, **GitHub OAuth**, and **Google OAuth** login. Each user gets an independent workspace and database. First registered user becomes admin.
 
-OAuth and other detailed configuration in [docs/configuration.md](docs/configuration.md).
+See [Configuration](docs/configuration_en.md) for details.
 
-## Configuration Reference
+## 🧪 Evaluation Framework
 
-Quick start needs only 3 environment variables. Full configuration (window perception, security policies, Subagent, MCP, VLM, Embedding, etc.) in [docs/configuration.md](docs/configuration.md).
+Built-in Bench evaluation with multi-turn cases, auto-assertion, JSON logs, and suite-level concurrency:
 
-## Development
+```bash
+python -m excelmanus.bench --all                         # All
+python -m excelmanus.bench --suite bench/cases/xxx.json  # Specific suite
+python -m excelmanus.bench --message "Read first 10 rows"  # Single test
+```
+
+## 📖 Configuration Reference
+
+Quick start needs only 3 environment variables. Full configuration (window perception, security policies, Subagent, MCP, VLM, Embedding, etc.) in [Configuration](docs/configuration_en.md).
+
+## 🛠️ Development
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
-## License
+## 📄 License
 
-MIT
+[MIT](LICENSE) © kilolonion
