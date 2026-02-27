@@ -1,0 +1,855 @@
+"""格式化工具：提供单元格格式化、样式读取、合并单元格和行列尺寸调整能力。"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import unicodedata
+from typing import Any
+
+from openpyxl import load_workbook
+from openpyxl.cell.cell import Cell, MergedCell
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+from excelmanus.logger import get_logger
+from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools._helpers import get_worksheet
+from excelmanus.tools.registry import ToolDef
+
+logger = get_logger("tools.format")
+
+# ── Skill 元数据 ──────────────────────────────────────────
+
+SKILL_NAME = "format"
+SKILL_DESCRIPTION = "格式化工具集：样式读取与设置、合并单元格、行列尺寸调整"
+
+# ── 中文颜色名 → 十六进制映射 ────────────────────────────
+
+COLOR_NAME_MAP: dict[str, str] = {
+    # 基础色
+    "红": "FF0000", "红色": "FF0000", "red": "FF0000",
+    "绿": "00B050", "绿色": "00B050", "green": "00B050",
+    "蓝": "0000FF", "蓝色": "0000FF", "blue": "0000FF",
+    "黄": "FFFF00", "黄色": "FFFF00", "yellow": "FFFF00",
+    "白": "FFFFFF", "白色": "FFFFFF", "white": "FFFFFF",
+    "黑": "000000", "黑色": "000000", "black": "000000",
+    # 常用色
+    "橙": "FFC000", "橙色": "FFC000", "orange": "FFC000",
+    "紫": "7030A0", "紫色": "7030A0", "purple": "7030A0",
+    "粉": "FF69B4", "粉色": "FF69B4", "pink": "FF69B4",
+    "棕": "8B4513", "棕色": "8B4513", "brown": "8B4513",
+    "灰": "808080", "灰色": "808080", "gray": "808080", "grey": "808080",
+    "青": "00CED1", "青色": "00CED1", "cyan": "00FFFF",
+    # 浅色系
+    "浅蓝": "5B9BD5", "浅蓝色": "5B9BD5", "lightblue": "ADD8E6",
+    "浅绿": "92D050", "浅绿色": "92D050", "lightgreen": "90EE90",
+    "浅黄": "FFF2CC", "浅黄色": "FFF2CC", "lightyellow": "FFFFE0",
+    "浅灰": "D9D9D9", "浅灰色": "D9D9D9", "lightgray": "D3D3D3",
+    "浅红": "FF7F7F", "浅红色": "FF7F7F",
+    "浅紫": "B4A7D6", "浅紫色": "B4A7D6",
+    # 深色系
+    "深蓝": "002060", "深蓝色": "002060", "darkblue": "00008B",
+    "深绿": "006100", "深绿色": "006100", "darkgreen": "006400",
+    "深红": "C00000", "深红色": "C00000", "darkred": "8B0000",
+    "深灰": "404040", "深灰色": "404040", "darkgray": "A9A9A9",
+    # Excel 主题常用色
+    "金": "FFD700", "金色": "FFD700", "gold": "FFD700",
+    "银": "C0C0C0", "银色": "C0C0C0", "silver": "C0C0C0",
+    "天蓝": "4472C4", "天蓝色": "4472C4",
+    "草绿": "70AD47", "草绿色": "70AD47",
+    "珊瑚": "FF7F50", "珊瑚色": "FF7F50", "coral": "FF7F50",
+}
+
+# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
+
+_guard: FileAccessGuard | None = None
+
+
+def _get_guard() -> FileAccessGuard:
+    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
+    ctx_guard = _get_ctx_guard()
+    if ctx_guard is not None:
+        return ctx_guard
+    global _guard
+    if _guard is None:
+        _guard = FileAccessGuard(".")
+    return _guard
+
+
+def init_guard(workspace_root: str) -> None:
+    """初始化文件访问守卫（供外部配置调用）。
+
+    Args:
+        workspace_root: 工作目录根路径。
+    """
+    global _guard
+    _guard = FileAccessGuard(workspace_root)
+
+
+# ── 工具函数 ──────────────────────────────────────────────
+
+
+def format_cells(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+    font: dict[str, Any] | None = None,
+    fill: dict[str, Any] | None = None,
+    border: dict[str, Any] | None = None,
+    alignment: dict[str, Any] | None = None,
+    number_format: str | None = None,
+    return_styles: bool = False,
+) -> str:
+    """对指定单元格范围应用格式化样式。
+
+    注意：仅推荐用于单次、简单的区域格式化。整列或整表的批量条件样式，
+    强烈建议用 run_code 工具（openpyxl 脚本）完成。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 单元格范围，如 "A1:C3" 或 "A1"。
+        sheet_name: 工作表名称，默认活动工作表。
+        font: 字体设置，支持 name/size/bold/italic/color。
+        fill: 填充设置，支持 color（十六进制颜色码）。
+        border: 边框设置，支持 style（thin/medium/thick）和 color。
+        alignment: 对齐设置，支持 horizontal/vertical/wrap_text。
+        number_format: 数字格式字符串，如 "#,##0.00"。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    # 构建 openpyxl 样式对象
+    style_font = _build_font(font) if font else None
+    style_fill = _build_fill(fill) if fill else None
+    style_border = _build_border(border) if border else None
+    style_alignment = _build_alignment(alignment) if alignment else None
+
+    # 应用样式到范围内每个单元格
+    applied_count = 0
+    cell_data = ws[cell_range]
+
+    # ws[cell_range] 对单个单元格返回 Cell，对范围返回 tuple of tuples
+    if isinstance(cell_data, (Cell, MergedCell)):
+        rows = ((cell_data,),)
+    elif isinstance(cell_data, tuple) and cell_data and not isinstance(cell_data[0], tuple):
+        # 单行范围如 "A1:C1" 返回 tuple of Cell
+        rows = (cell_data,)
+    else:
+        rows = cell_data
+
+    for row in rows:
+        cells = row if isinstance(row, tuple) else (row,)
+        for cell in cells:
+            if style_font:
+                cell.font = style_font
+            if style_fill:
+                cell.fill = style_fill
+            if style_border:
+                cell.border = style_border
+            if style_alignment:
+                cell.alignment = style_alignment
+            if number_format:
+                cell.number_format = number_format
+            applied_count += 1
+
+    wb.save(safe_path)
+
+    result_data: dict[str, Any] = {
+        "status": "success",
+        "file": safe_path.name,
+        "range": cell_range,
+        "cells_formatted": applied_count,
+    }
+
+    # 格式化后返回样式快照
+    if return_styles:
+        from excelmanus.tools.data_tools import _collect_styles_compressed
+
+        # 需要重新打开文件读取写入后的样式
+        wb2 = load_workbook(safe_path)
+        try:
+            ws2 = get_worksheet(wb2, sheet_name)
+            result_data["after_styles"] = _collect_styles_compressed(ws2, max_rows=200)
+        finally:
+            wb2.close()
+    
+    wb.close()
+
+    logger.info("已格式化 %s 范围 %s（%d 个单元格）", safe_path.name, cell_range, applied_count)
+
+    return json.dumps(result_data, ensure_ascii=False, indent=2)
+
+
+def adjust_column_width(
+    file_path: str,
+    columns: dict[str, float] | None = None,
+    auto_fit: bool = False,
+    sheet_name: str | None = None,
+) -> str:
+    """调整列宽：支持指定宽度或自动适配。
+
+    Args:
+        file_path: Excel 文件路径。
+        columns: 列宽映射，如 {"A": 20, "B": 15}。与 auto_fit 互斥时优先使用。
+        auto_fit: 是否自动适配所有列宽（基于内容最大长度）。
+        sheet_name: 工作表名称，默认活动工作表。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    adjusted: dict[str, float] = {}
+
+    if columns:
+        # 手动指定列宽
+        for col_letter, width in columns.items():
+            ws.column_dimensions[col_letter.upper()].width = width
+            adjusted[col_letter.upper()] = width
+
+    elif auto_fit:
+        # 收集合并单元格的非锚点位置（跳过这些单元格）
+        merged_non_anchor: set[str] = set()
+        for mr in ws.merged_cells.ranges:
+            anchor = f"{get_column_letter(mr.min_col)}{mr.min_row}"
+            for r in range(mr.min_row, mr.max_row + 1):
+                for c in range(mr.min_col, mr.max_col + 1):
+                    addr = f"{get_column_letter(c)}{r}"
+                    if addr != anchor:
+                        merged_non_anchor.add(addr)
+
+        # 自动适配：遍历所有列，取每列最大显示宽度
+        for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
+            max_w = 0.0
+            col_letter = get_column_letter(col_cells[0].column)
+            for cell in col_cells:
+                coord = f"{col_letter}{cell.row}"
+                if coord in merged_non_anchor:
+                    continue
+                if cell.value is None:
+                    continue
+                font_size = 11.0
+                is_bold = False
+                if cell.font:
+                    if cell.font.size:
+                        font_size = float(cell.font.size)
+                    if cell.font.bold:
+                        is_bold = True
+                nf = cell.number_format if cell.number_format != "General" else None
+                w = _estimate_display_width(cell.value, font_size, is_bold, nf)
+                if w > max_w:
+                    max_w = w
+            width = max(_MIN_COL_WIDTH, min(max_w + _COL_PADDING, _MAX_COL_WIDTH))
+            ws.column_dimensions[col_letter].width = width
+            adjusted[col_letter] = round(width, 2)
+
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("已调整 %s 列宽（%d 列）", safe_path.name, len(adjusted))
+
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "columns_adjusted": adjusted,
+        },
+        ensure_ascii=False,
+    )
+
+
+def read_cell_styles(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+    summary_only: bool = False,
+) -> str:
+    """读取指定单元格范围的样式信息（字体、填充、边框、对齐等）。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 单元格范围，如 "A1:C3" 或 "A1"。
+        sheet_name: 工作表名称，默认活动工作表。
+        summary_only: 仅返回样式统计汇总而非逐单元格明细。
+
+    Returns:
+        JSON 格式的样式信息。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    # 获取合并单元格范围集合
+    merged_ranges = ws.merged_cells.ranges
+    merged_set: set[str] = set()
+    for mr in merged_ranges:
+        for row in mr.rows:
+            for cell_coord in row:
+                merged_set.add(f"{get_column_letter(cell_coord[1])}{cell_coord[0]}")
+
+    cell_data = ws[cell_range]
+    # 归一化为 tuple of tuples
+    if isinstance(cell_data, (Cell, MergedCell)):
+        rows: tuple = ((cell_data,),)
+    elif isinstance(cell_data, tuple) and cell_data and not isinstance(cell_data[0], tuple):
+        rows = (cell_data,)
+    else:
+        rows = cell_data
+
+    max_cells = 200
+    cell_styles: list[dict[str, Any]] = []
+    fill_colors: set[str] = set()
+    font_colors: set[str] = set()
+    font_names: set[str] = set()
+    border_styles_used: set[str] = set()
+    total_cells = 0
+
+    for row in rows:
+        row_cells = row if isinstance(row, tuple) else (row,)
+        for cell in row_cells:
+            total_cells += 1
+            coord = f"{get_column_letter(cell.column)}{cell.row}"
+            is_merged = coord in merged_set
+
+            # 提取样式信息
+            font_info = _extract_font(cell.font)
+            fill_info = _extract_fill(cell.fill)
+            border_info = _extract_border(cell.border)
+            align_info = _extract_alignment(cell.alignment)
+            num_fmt = cell.number_format if cell.number_format != "General" else None
+
+            # 收集统计信息
+            if fill_info and fill_info.get("color"):
+                fill_colors.add(fill_info["color"])
+            if font_info:
+                if font_info.get("color"):
+                    font_colors.add(font_info["color"])
+                if font_info.get("name"):
+                    font_names.add(font_info["name"])
+            if border_info:
+                for side_name in ("left", "right", "top", "bottom"):
+                    s = border_info.get(side_name)
+                    if s and s != "none":
+                        border_styles_used.add(s)
+
+            if not summary_only and len(cell_styles) < max_cells:
+                # 只输出有非默认样式的单元格
+                has_style = any([font_info, fill_info, border_info, align_info, num_fmt, is_merged])
+                if has_style:
+                    entry: dict[str, Any] = {"cell": coord}
+                    val = cell.value
+                    if val is not None:
+                        entry["value"] = str(val) if not isinstance(val, (int, float, bool)) else val
+                    if font_info:
+                        entry["font"] = font_info
+                    if fill_info:
+                        entry["fill"] = fill_info
+                    if border_info:
+                        entry["border"] = border_info
+                    if align_info:
+                        entry["alignment"] = align_info
+                    if num_fmt:
+                        entry["number_format"] = num_fmt
+                    if is_merged:
+                        entry["merged"] = True
+                    cell_styles.append(entry)
+
+    # 在 wb.close() 之前保存 shape 信息
+    sheet_max_row = ws.max_row or 0
+    sheet_max_col = ws.max_column or 0
+
+    wb.close()
+
+    # 构建合并范围列表
+    range_merged: list[str] = [str(mr) for mr in merged_ranges]
+
+    result: dict[str, Any] = {
+        "status": "success",
+        "file": safe_path.name,
+        "range": cell_range,
+        "total_cells": total_cells,
+        "rows": sheet_max_row,
+        "columns": sheet_max_col,
+        "summary": {
+            "fill_colors_used": sorted(fill_colors),
+            "font_colors_used": sorted(font_colors),
+            "font_names_used": sorted(font_names),
+            "border_styles_used": sorted(border_styles_used),
+            "merged_ranges": range_merged,
+            "has_merged_cells": len(range_merged) > 0,
+        },
+    }
+    if not summary_only:
+        result["styled_cells"] = cell_styles
+        if len(cell_styles) >= max_cells:
+            result["truncated"] = True
+            result["truncated_message"] = f"仅展示前 {max_cells} 个有样式的单元格"
+
+    logger.info("已读取 %s 范围 %s 的样式（%d 个单元格）", safe_path.name, cell_range, total_cells)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def adjust_row_height(
+    file_path: str,
+    rows: dict[str, float] | None = None,
+    auto_fit: bool = False,
+    sheet_name: str | None = None,
+) -> str:
+    """调整行高：支持指定高度或自动适配。
+
+    Args:
+        file_path: Excel 文件路径。
+        rows: 行高映射，如 {"1": 30, "2": 25}（键为行号字符串）。
+        auto_fit: 是否自动适配所有行高（基于默认行高 * 1.2）。
+        sheet_name: 工作表名称，默认活动工作表。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    adjusted: dict[str, float] = {}
+
+    if rows:
+        for row_num_str, height in rows.items():
+            row_num = int(row_num_str)
+            ws.row_dimensions[row_num].height = height
+            adjusted[str(row_num)] = height
+    elif auto_fit:
+        # 收集当前列宽用于 wrap_text 行数估算
+        current_col_widths: dict[str, float] = {}
+        for col_letter, dim in ws.column_dimensions.items():
+            if dim.width is not None:
+                current_col_widths[col_letter] = dim.width
+        for row_idx in range(1, (ws.max_row or 0) + 1):
+            row_cells = [cell for cell in ws[row_idx] if not isinstance(cell, MergedCell)]
+            if not row_cells:
+                continue
+            height = _estimate_row_height(row_cells, current_col_widths)
+            ws.row_dimensions[row_idx].height = height
+            adjusted[str(row_idx)] = height
+
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("已调整 %s 行高（%d 行）", safe_path.name, len(adjusted))
+
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "rows_adjusted": adjusted,
+        },
+        ensure_ascii=False,
+    )
+
+
+def merge_cells_tool(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+) -> str:
+    """合并指定范围的单元格。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 要合并的单元格范围，如 "A1:C1"。
+        sheet_name: 工作表名称，默认活动工作表。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    ws.merge_cells(cell_range)
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("已合并 %s 范围 %s", safe_path.name, cell_range)
+
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "merged_range": cell_range,
+        },
+        ensure_ascii=False,
+    )
+
+
+def unmerge_cells_tool(
+    file_path: str,
+    cell_range: str,
+    sheet_name: str | None = None,
+) -> str:
+    """取消合并指定范围的单元格。
+
+    Args:
+        file_path: Excel 文件路径。
+        cell_range: 要取消合并的单元格范围，如 "A1:C1"。
+        sheet_name: 工作表名称，默认活动工作表。
+
+    Returns:
+        JSON 格式的操作结果。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    wb = load_workbook(safe_path)
+    ws = get_worksheet(wb, sheet_name)
+
+    ws.unmerge_cells(cell_range)
+    wb.save(safe_path)
+    wb.close()
+
+    logger.info("已取消合并 %s 范围 %s", safe_path.name, cell_range)
+
+    return json.dumps(
+        {
+            "status": "success",
+            "file": safe_path.name,
+            "unmerged_range": cell_range,
+        },
+        ensure_ascii=False,
+    )
+
+
+# ── 列宽 / 行高智能估算 ─────────────────────────────────
+
+_MIN_COL_WIDTH = 8.0
+_MAX_COL_WIDTH = 60.0
+_COL_PADDING = 2.5
+_MIN_ROW_HEIGHT = 15.0
+
+
+def _is_wide_char(ch: str) -> bool:
+    """判断字符是否为东亚宽字符（CJK / 全角）。"""
+    ea = unicodedata.east_asian_width(ch)
+    return ea in ("W", "F")
+
+
+def _display_char_width(text: str) -> float:
+    """计算文本的显示字符宽度（CJK 字符按 2.0 计）。"""
+    width = 0.0
+    for ch in text:
+        width += 2.0 if _is_wide_char(ch) else 1.0
+    return width
+
+
+def _format_number_display(value: Any, number_format: str | None) -> str | None:
+    """尝试模拟 number_format 后的显示文本长度。
+
+    不追求 100% 精确——仅用于列宽估算。
+    """
+    if value is None or number_format is None or number_format == "General":
+        return None
+    try:
+        num = float(value)
+    except (ValueError, TypeError):
+        return None
+
+    fmt = number_format
+    result_len_hint: str | None = None
+
+    # 百分比：0.85 → "85%" or "85.0%"
+    if "%" in fmt:
+        pct = num * 100
+        dec_match = re.search(r"0\.(0+)%", fmt)
+        decimals = len(dec_match.group(1)) if dec_match else 0
+        result_len_hint = f"{pct:,.{decimals}f}%" if "#,##" in fmt else f"{pct:.{decimals}f}%"
+        return result_len_hint
+
+    # 千分位 + 小数
+    dec_match = re.search(r"0\.(0+)", fmt)
+    decimals = len(dec_match.group(1)) if dec_match else 0
+    has_comma = "#,##" in fmt or "," in fmt
+
+    if has_comma:
+        result_len_hint = f"{num:,.{decimals}f}"
+    elif decimals > 0:
+        result_len_hint = f"{num:.{decimals}f}"
+
+    # 货币前缀/后缀
+    for sym in ("$", "¥", "€", "£", "₩"):
+        if sym in fmt and result_len_hint:
+            result_len_hint = sym + result_len_hint
+            break
+
+    return result_len_hint
+
+
+def _estimate_display_width(
+    value: Any,
+    font_size: float = 11.0,
+    is_bold: bool = False,
+    number_format: str | None = None,
+) -> float:
+    """估算单元格内容的显示字符宽度。
+
+    返回以 Excel 列宽单位（≈字符数）计的宽度。
+    """
+    if value is None:
+        return 0.0
+
+    # 优先使用 number_format 模拟的显示文本
+    display = _format_number_display(value, number_format)
+    text = display if display is not None else str(value)
+
+    # 多行取最长行
+    lines = text.split("\n")
+    char_width = max(_display_char_width(line) for line in lines) if lines else 0.0
+
+    # 字体缩放
+    scale = font_size / 11.0
+    if is_bold:
+        scale *= 1.07
+
+    return char_width * scale
+
+
+def _estimate_row_height(
+    row_cells: tuple | list,
+    col_widths: dict[str, float] | None = None,
+) -> float:
+    """估算一行的合适行高（pt）。
+
+    考虑字体大小和 wrap_text 多行。
+    """
+    max_height = _MIN_ROW_HEIGHT
+
+    for cell in row_cells:
+        font_size = 11.0
+        if cell.font and cell.font.size:
+            font_size = float(cell.font.size)
+
+        # 基础单行行高
+        has_cjk = False
+        val_str = str(cell.value) if cell.value is not None else ""
+        if any(_is_wide_char(ch) for ch in val_str):
+            has_cjk = True
+        line_height = font_size * (1.45 if has_cjk else 1.35)
+
+        # wrap_text 多行估算
+        wrap = cell.alignment and cell.alignment.wrap_text
+        if wrap and cell.value is not None and col_widths:
+            col_letter = get_column_letter(cell.column)
+            col_w = col_widths.get(col_letter, 8.0)
+            # 可用字符宽度 ≈ 列宽 - padding
+            usable = max(col_w - 1.0, 4.0)
+            display_w = _estimate_display_width(
+                cell.value,
+                font_size=font_size,
+                is_bold=bool(cell.font and cell.font.bold),
+                number_format=cell.number_format if cell.number_format != "General" else None,
+            )
+            num_lines = max(1, math.ceil(display_w / usable))
+            # 也考虑显式换行符
+            explicit_lines = val_str.count("\n") + 1
+            num_lines = max(num_lines, explicit_lines)
+            cell_height = line_height * num_lines
+        else:
+            # 非 wrap 也考虑显式换行符
+            explicit_lines = val_str.count("\n") + 1
+            cell_height = line_height * explicit_lines
+
+        if cell_height > max_height:
+            max_height = cell_height
+
+    return round(max_height, 1)
+
+
+# ── 内部辅助函数 ──────────────────────────────────────────
+
+
+def _resolve_color(value: str | None) -> str | None:
+    """将颜色名称或十六进制码统一解析为十六进制码。"""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in COLOR_NAME_MAP:
+        return COLOR_NAME_MAP[normalized]
+    # 去除可能的 # 前缀
+    hex_value = value.strip().lstrip("#")
+    if len(hex_value) in (6, 8) and all(c in "0123456789abcdefABCDEF" for c in hex_value):
+        return hex_value.upper()
+    return value
+
+
+def _build_font(config: dict[str, Any]) -> Font:
+    """从配置字典构建 openpyxl Font 对象。"""
+    return Font(
+        name=config.get("name"),
+        size=config.get("size"),
+        bold=config.get("bold"),
+        italic=config.get("italic"),
+        color=_resolve_color(config.get("color")),
+        underline=config.get("underline"),
+        strike=config.get("strikethrough"),
+    )
+
+
+def _build_fill(config: dict[str, Any]) -> PatternFill:
+    """从配置字典构建 openpyxl PatternFill 对象。"""
+    color = _resolve_color(config.get("color")) or "FFFFFF"
+    fill_type = config.get("fill_type", "solid")
+    return PatternFill(
+        start_color=color,
+        end_color=color,
+        fill_type=fill_type,
+    )
+
+
+def _build_side(side_config: dict[str, Any] | str) -> Side:
+    """从配置构建单个 Side 对象。"""
+    if isinstance(side_config, str):
+        return Side(style=side_config, color="000000")
+    return Side(
+        style=side_config.get("style", "thin"),
+        color=_resolve_color(side_config.get("color")) or "000000",
+    )
+
+
+def _build_border(config: dict[str, Any]) -> Border:
+    """从配置字典构建 openpyxl Border 对象。支持统一设置或单边差异化。"""
+    # 如果指定了 left/right/top/bottom 中任意一个，使用单边模式
+    has_sides = any(k in config for k in ("left", "right", "top", "bottom"))
+    if has_sides:
+        return Border(
+            left=_build_side(config["left"]) if "left" in config else Side(),
+            right=_build_side(config["right"]) if "right" in config else Side(),
+            top=_build_side(config["top"]) if "top" in config else Side(),
+            bottom=_build_side(config["bottom"]) if "bottom" in config else Side(),
+        )
+    # 统一模式：四边相同
+    style = config.get("style", "thin")
+    color = _resolve_color(config.get("color")) or "000000"
+    side = Side(style=style, color=color)
+    return Border(left=side, right=side, top=side, bottom=side)
+
+
+def _build_alignment(config: dict[str, Any]) -> Alignment:
+    """从配置字典构建 openpyxl Alignment 对象。"""
+    return Alignment(
+        horizontal=config.get("horizontal"),
+        vertical=config.get("vertical"),
+        wrap_text=config.get("wrap_text"),
+    )
+
+
+# ── 样式提取辅助函数（用于 read_cell_styles）──────────────
+
+
+def _color_to_hex(color: Any) -> str | None:
+    """将 openpyxl Color 对象转换为十六进制字符串。"""
+    if color is None:
+        return None
+    if hasattr(color, "rgb") and color.rgb and color.rgb != "00000000":
+        rgb = str(color.rgb)
+        # openpyxl 的 rgb 可能是 AARRGGBB 格式
+        if len(rgb) == 8:
+            return rgb[2:]  # 去掉 alpha 通道
+        return rgb
+    if hasattr(color, "theme") and color.theme is not None:
+        return f"theme:{color.theme}"
+    if hasattr(color, "indexed") and color.indexed is not None:
+        return f"indexed:{color.indexed}"
+    return None
+
+
+def _extract_font(font: Font | None) -> dict[str, Any] | None:
+    """从 openpyxl Font 提取非默认属性字典。"""
+    if font is None:
+        return None
+    info: dict[str, Any] = {}
+    if font.name and font.name != "Calibri":
+        info["name"] = font.name
+    if font.size and font.size != 11:
+        info["size"] = font.size
+    if font.bold:
+        info["bold"] = True
+    if font.italic:
+        info["italic"] = True
+    if font.underline and font.underline != "none":
+        info["underline"] = font.underline
+    if font.strike:
+        info["strikethrough"] = True
+    color_hex = _color_to_hex(font.color)
+    if color_hex and color_hex != "000000":
+        info["color"] = color_hex
+    return info or None
+
+
+def _extract_fill(fill: PatternFill | None) -> dict[str, Any] | None:
+    """从 openpyxl PatternFill 提取非默认属性字典。"""
+    if fill is None:
+        return None
+    fill_type = fill.fill_type or fill.patternType
+    if not fill_type or fill_type == "none":
+        return None
+    info: dict[str, Any] = {"type": fill_type}
+    color_hex = _color_to_hex(fill.fgColor)
+    if color_hex:
+        info["color"] = color_hex
+    return info
+
+
+def _extract_border(border: Border | None) -> dict[str, Any] | None:
+    """从 openpyxl Border 提取非默认属性字典。"""
+    if border is None:
+        return None
+    info: dict[str, Any] = {}
+    for side_name in ("left", "right", "top", "bottom"):
+        side: Side = getattr(border, side_name, None)
+        if side and side.style and side.style != "none":
+            info[side_name] = side.style
+    return info or None
+
+
+def _extract_alignment(alignment: Alignment | None) -> dict[str, Any] | None:
+    """从 openpyxl Alignment 提取非默认属性字典。"""
+    if alignment is None:
+        return None
+    info: dict[str, Any] = {}
+    if alignment.horizontal and alignment.horizontal != "general":
+        info["horizontal"] = alignment.horizontal
+    if alignment.vertical and alignment.vertical != "bottom":
+        info["vertical"] = alignment.vertical
+    if alignment.wrap_text:
+        info["wrap_text"] = True
+    return info or None
+
+
+# ── get_tools() 导出 ──────────────────────────────────────
+
+
+def get_tools() -> list[ToolDef]:
+    """返回格式化 Skill 的所有工具定义。
+
+    Batch 2 精简：format_cells/adjust_column_width/read_cell_styles/
+    adjust_row_height/merge_cells/unmerge_cells 已删除，由 run_code 替代。
+    函数实现保留以支持内部引用和未来可能的恢复。
+    """
+    return []
