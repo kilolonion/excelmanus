@@ -601,14 +601,15 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 function Ensure-FrontendStandaloneAssets {
-    Write-Info "copy standalone static assets..."
+    Write-Info "check standalone static assets..."
     $cmd = @"
 cd '$($Script:CFG.FrontendDir)/web'
 if [ ! -d .next/standalone ]; then
-    echo '[WARN] no standalone output dir, skipped'
+    echo '[INFO] no standalone output (Turbopack/Next.js 16+ may not generate it), will use next start'
     exit 0
 fi
 
+echo '[INFO] standalone dir found, copying static assets...'
 # ensure target dirs exist
 mkdir -p .next/standalone/.next
 mkdir -p .next/standalone/public
@@ -627,11 +628,11 @@ fi
 # verify critical files
 _ok=true
 if [ ! -d .next/standalone/.next/static/chunks ]; then
-    echo '[ERROR] standalone/.next/static/chunks missing - JS will 404!'
+    echo '[WARN] standalone/.next/static/chunks missing'
     _ok=false
 fi
 if [ ! -f .next/standalone/server.js ]; then
-    echo '[ERROR] standalone/server.js missing!'
+    echo '[WARN] standalone/server.js missing'
     _ok=false
 fi
 
@@ -639,8 +640,7 @@ if [ "`$_ok" = true ]; then
     _cnt=`$(find .next/standalone/.next/static/chunks -name '*.js' | wc -l)
     echo "standalone assets copied (`${_cnt} JS chunks)"
 else
-    echo '[ERROR] standalone assets incomplete - frontend will fail!'
-    exit 1
+    echo '[WARN] standalone incomplete, will fall back to next start'
 fi
 "@
     Invoke-RemoteFrontend $cmd | Out-Null
@@ -649,17 +649,57 @@ fi
 function Restart-FrontendService {
     $cfg = $Script:CFG
     if ($cfg.ServiceManager -eq "systemd") {
-        return (Invoke-RemoteFrontend "sudo systemctl restart '$($cfg.Pm2Frontend)' 2>/dev/null || sudo systemctl start '$($cfg.Pm2Frontend)'")
+        # systemd: auto-detect standalone vs next start
+        $cmd = @"
+WEB_DIR='$($cfg.FrontendDir)/web'
+NODE_CMD=`$(command -v node 2>/dev/null || echo '$($cfg.NodeBin)/node')
+if [ -f "`$WEB_DIR/.next/standalone/server.js" ]; then
+    EXEC_START="`$NODE_CMD `$WEB_DIR/.next/standalone/server.js"
+    echo '[INFO] using standalone mode'
+else
+    NPX_CMD=`$(command -v npx 2>/dev/null || echo '$($cfg.NodeBin)/npx')
+    EXEC_START="`$NPX_CMD next start -p $($cfg.FrontendPort)"
+    echo '[INFO] standalone not found, using next start'
+fi
+sudo tee /etc/systemd/system/$($cfg.Pm2Frontend).service > /dev/null <<SVCEOF
+[Unit]
+Description=ExcelManus Frontend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=`$WEB_DIR
+ExecStart=`$EXEC_START
+Restart=on-failure
+RestartSec=5
+Environment=PORT=$($cfg.FrontendPort)
+Environment=PATH=$($cfg.NodeBin):/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+sudo systemctl daemon-reload
+sudo systemctl enable '$($cfg.Pm2Frontend)' 2>/dev/null || true
+sudo systemctl restart '$($cfg.Pm2Frontend)'
+"@
+        return (Invoke-RemoteFrontend $cmd)
     } elseif ($cfg.ServiceManager -eq "nssm") {
         # NSSM: Windows 原生服务管理
         Write-Info "restart frontend via NSSM..."
         return (Invoke-Run "nssm restart $($cfg.Pm2Frontend)")
     } else {
+        # PM2: auto-detect standalone vs next start
         $cmd = @"
-export PATH=$($cfg.NodeBin):`$PATH && \
-cd '$($cfg.FrontendDir)/web' && \
-pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true && \
-pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web' && \
+export PATH=$($cfg.NodeBin):`$PATH
+cd '$($cfg.FrontendDir)/web'
+pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true
+if [ -f .next/standalone/server.js ]; then
+    echo '[INFO] using standalone mode'
+    pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+else
+    echo '[INFO] standalone not found, using next start'
+    pm2 start "npx next start -p $($cfg.FrontendPort)" --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+fi
 pm2 save
 "@
         return (Invoke-RemoteFrontend $cmd)
