@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="web/public/logo.png" width="380" alt="ExcelManus" />
+  <img src="web/public/logo.svg" width="380" alt="ExcelManus" />
 </p>
 
 <h3 align="center">用自然语言驱动 Excel 的 AI Agent</h3>
