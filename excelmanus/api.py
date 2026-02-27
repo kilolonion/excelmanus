@@ -3335,6 +3335,101 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     })
 
 
+@_router.post("/api/v1/upload-from-url")
+async def upload_file_from_url(raw_request: Request) -> JSONResponse:
+    """从 URL 下载文件并保存到 workspace uploads 目录。
+
+    请求体 JSON::
+
+        {"url": "https://example.com/data.xlsx"}
+    """
+    assert _config is not None, "服务未初始化"
+
+    try:
+        body = await raw_request.json()
+    except Exception:
+        return _error_json_response(400, "请求体必须是 JSON")
+
+    url: str = (body.get("url") or "").strip()
+    if not url:
+        return _error_json_response(400, "缺少 url 字段")
+
+    # 仅允许 http/https
+    if not url.lower().startswith(("http://", "https://")):
+        return _error_json_response(400, "仅支持 http/https 链接")
+
+    import httpx
+    from urllib.parse import urlparse, unquote
+
+    # 从 URL 路径推断文件名
+    parsed = urlparse(url)
+    url_path = unquote(parsed.path.rstrip("/"))
+    raw_filename = url_path.split("/")[-1] if "/" in url_path else ""
+    if not raw_filename or "." not in raw_filename:
+        return _error_json_response(400, "无法从 URL 推断文件名（需带扩展名，如 .xlsx/.csv/.png）")
+
+    ext = os.path.splitext(raw_filename)[1].lower()
+    if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
+        return _error_json_response(400, f"不支持的文件格式: {ext}")
+
+    # 下载文件（限制大小）
+    max_download = _UPLOAD_MAX_PART_SIZE  # 复用上传限制
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        return _error_json_response(502, f"远程服务器返回 {exc.response.status_code}")
+    except Exception as exc:
+        return _error_json_response(502, f"下载失败: {exc}")
+
+    content = resp.content
+    if len(content) > max_download:
+        return _error_json_response(413, f"文件过大 (>{max_download // (1024*1024)} MB)")
+    if len(content) == 0:
+        return _error_json_response(400, "下载到空文件")
+
+    from excelmanus.auth.dependencies import extract_user_id
+    user_id = extract_user_id(raw_request)
+    ws = _resolve_workspace(raw_request)
+
+    auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
+    if auth_enabled and user_id:
+        allowed, reason = ws.check_upload_allowed(len(content))
+        if not allowed:
+            return _error_json_response(413, reason)
+
+    upload_dir = ws.get_upload_dir()
+    safe_name = f"{uuid.uuid4().hex[:8]}_{raw_filename}"
+    dest_path = upload_dir / safe_name
+
+    with open(dest_path, "wb") as f:
+        f.write(content)
+
+    if auth_enabled and user_id:
+        ws.enforce_quota()
+
+    rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
+
+    # 注册到 FileRegistry
+    registry = _get_file_registry(str(ws.root_dir), user_id=user_id)
+    if registry is not None:
+        try:
+            registry.register_upload(
+                canonical_path=str(dest_path.relative_to(ws.root_dir)),
+                original_name=raw_filename,
+                size_bytes=len(content),
+            )
+        except Exception:
+            logger.debug("FileRegistry register_upload 失败 (from-url)", exc_info=True)
+
+    return JSONResponse(content={
+        "filename": raw_filename,
+        "path": rel_path,
+        "size": len(content),
+    })
+
+
 # ── 文件管理 API ─────────────────────────────────────
 
 
@@ -3643,7 +3738,7 @@ async def compact_session_context(session_id: str, request: Request) -> JSONResp
         return _error_json_response(404, f"会话不存在: {session_id}")
 
     try:
-        result = await engine._handle_control_command("/compact")
+        result = await engine._command_handler.handle("/compact")
     except Exception as exc:
         logger.warning("会话 %s 执行 /compact 失败: %s", session_id, exc)
         return _error_json_response(500, f"压缩执行失败: {exc}")

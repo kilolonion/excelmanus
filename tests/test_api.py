@@ -809,8 +809,8 @@ class TestSessionCompactAPI:
         assert engine is not None
 
         with patch.object(
-            engine,
-            "_handle_control_command",
+            engine._command_handler,
+            "handle",
             new_callable=AsyncMock,
             return_value="✅ 上下文压缩完成。",
         ) as compact_mock:

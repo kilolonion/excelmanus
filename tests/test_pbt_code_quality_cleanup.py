@@ -257,13 +257,20 @@ class _MockClient:
     chat = _Chat()
 
 
+class _MockContextBuilder:
+    """模拟 _context_builder 对象，提供 bench 所需的 _prepare_system_prompts_for_request。"""
+
+    @staticmethod
+    def _prepare_system_prompts_for_request(skill_contexts, **kwargs):
+        return (["system prompt"], None)
+
+
 class _MockEngineWithAllAttrs:
     """模拟具备所有 bench 所需私有属性的 engine。"""
 
     def __init__(self):
         self._client = _MockClient()
-        # 模拟 _prepare_system_prompts_for_request 和 _enrich_tool_result_with_window_perception
-        self._prepare_system_prompts_for_request = self._mock_prepare
+        self._context_builder = _MockContextBuilder()
         self._enrich_tool_result_with_window_perception = self._mock_enrich
 
     @staticmethod
@@ -418,17 +425,17 @@ class TestPreservation:
         from excelmanus.bench import _EngineTracer
 
         engine = _MockEngineWithAllAttrs()
-        original_prepare = engine._prepare_system_prompts_for_request
+        original_prepare = engine._context_builder._prepare_system_prompts_for_request
         original_enrich = engine._enrich_tool_result_with_window_perception
 
         # 初始化应成功
         tracer = _EngineTracer(engine)
 
         # monkey-patch 后方法应被替换
-        assert engine._prepare_system_prompts_for_request is not original_prepare
+        assert engine._context_builder._prepare_system_prompts_for_request is not original_prepare
         assert engine._enrich_tool_result_with_window_perception is not original_enrich
 
         # restore 后应恢复原始方法
         tracer.restore()
-        assert engine._prepare_system_prompts_for_request is original_prepare
+        assert engine._context_builder._prepare_system_prompts_for_request is original_prepare
         assert engine._enrich_tool_result_with_window_perception is original_enrich

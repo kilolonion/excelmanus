@@ -752,14 +752,14 @@ class TestSystemMessageMode:
     def test_prepare_system_prompts_replace_mode_splits_system_messages(self) -> None:
         config = _make_config(system_message_mode="replace")
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts, _ = engine._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
+        prompts, _ = engine._context_builder._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
         assert len(prompts) == 2
         assert "[Skillpack] data_basic" in prompts[1]
 
     def test_prepare_system_prompts_merge_mode_merges_into_single_message(self) -> None:
         config = _make_config(system_message_mode="merge")
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts, _ = engine._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
+        prompts, _ = engine._context_builder._prepare_system_prompts_for_request(["[Skillpack] data_basic\n描述：测试"])
         assert len(prompts) == 1
         assert "[Skillpack] data_basic" in prompts[0]
 
@@ -1077,7 +1077,7 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        prompts, error = engine._prepare_system_prompts_for_request([])
+        prompts, error = engine._context_builder._prepare_system_prompts_for_request([])
         assert error is None
         merged_prompt = "\n\n".join(prompts)
         assert "## 窗口感知上下文" in merged_prompt
@@ -1620,7 +1620,7 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        prompts, error = engine._prepare_system_prompts_for_request(["## SkillCtx\n内容"])
+        prompts, error = engine._context_builder._prepare_system_prompts_for_request(["## SkillCtx\n内容"])
         assert error is None
         assert prompts[-1].startswith("## 数据窗口")
         assert "A | 100" in prompts[-1]
@@ -1687,7 +1687,7 @@ class TestContextBudgetAndHardCap:
                 route_result=None,
             )
 
-        notice = engine._build_window_perception_notice()
+        notice = engine._context_builder._build_window_perception_notice()
         tokens = TokenCounter.count_message({"role": "system", "content": notice})
         assert tokens <= config.window_perception_system_budget_tokens
         assert "## 窗口感知上下文" in notice
@@ -1749,19 +1749,19 @@ class TestContextBudgetAndHardCap:
             )
 
         await _read("sales.xlsx", 1)
-        notice1 = engine._build_window_perception_notice()
+        notice1 = engine._context_builder._build_window_perception_notice()
         assert "[ACTIVE -- sales.xlsx / Q1]" in notice1
 
         await _read("catalog.xlsx", 2)
-        notice2 = engine._build_window_perception_notice()
+        notice2 = engine._context_builder._build_window_perception_notice()
         assert "[ACTIVE -- catalog.xlsx / Q1]" in notice2
         assert "[BG -- sales.xlsx / Q1]" in notice2
 
-        notice3 = engine._build_window_perception_notice()
+        notice3 = engine._context_builder._build_window_perception_notice()
         assert "[BG -- sales.xlsx / Q1]" in notice3
         assert "[BG -- catalog.xlsx / Q1]" in notice3
 
-        notice4 = engine._build_window_perception_notice()
+        notice4 = engine._context_builder._build_window_perception_notice()
         assert "[IDLE -- sales.xlsx / Q1" in notice4
         assert "[BG -- catalog.xlsx / Q1]" in notice4
 
@@ -1818,12 +1818,12 @@ class TestContextBudgetAndHardCap:
             route_result=None,
         )
 
-        notice1 = engine._build_window_perception_notice()
+        notice1 = engine._context_builder._build_window_perception_notice()
         assert "reactivate.xlsx" in notice1
 
-        _ = engine._build_window_perception_notice()  # idle=1
-        _ = engine._build_window_perception_notice()  # idle=2
-        notice4 = engine._build_window_perception_notice()  # idle=3 -> terminated
+        _ = engine._context_builder._build_window_perception_notice()  # idle=1
+        _ = engine._context_builder._build_window_perception_notice()  # idle=2
+        notice4 = engine._context_builder._build_window_perception_notice()  # idle=3 -> terminated
         assert "reactivate.xlsx" not in notice4
 
         tc2 = SimpleNamespace(
@@ -1840,7 +1840,7 @@ class TestContextBudgetAndHardCap:
             iteration=2,
             route_result=None,
         )
-        notice5 = engine._build_window_perception_notice()
+        notice5 = engine._context_builder._build_window_perception_notice()
         assert "[ACTIVE -- reactivate.xlsx / Q1]" in notice5
 
     @pytest.mark.asyncio
@@ -1904,7 +1904,7 @@ class TestContextBudgetAndHardCap:
         )
 
         started = time.monotonic()
-        notice = engine._build_window_perception_notice()
+        notice = engine._context_builder._build_window_perception_notice()
         elapsed = time.monotonic() - started
         assert "sales.xlsx" in notice
         assert elapsed < 0.15
@@ -1969,7 +1969,7 @@ class TestContextBudgetAndHardCap:
         await _read("sales.xlsx", 1)
         await _read("catalog.xlsx", 2)
 
-        first_notice = engine._build_window_perception_notice()
+        first_notice = engine._context_builder._build_window_perception_notice()
         assert "sales.xlsx / Q1" in first_notice
         assert "catalog.xlsx / Q1" in first_notice
 
@@ -1978,11 +1978,11 @@ class TestContextBudgetAndHardCap:
             return_value=_make_text_response(plan_text)
         )
 
-        _ = engine._build_window_perception_notice()
+        _ = engine._context_builder._build_window_perception_notice()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        second_notice = engine._build_window_perception_notice()
+        second_notice = engine._context_builder._build_window_perception_notice()
         assert "[IDLE -- sales.xlsx / Q1" in second_notice
 
     @pytest.mark.asyncio
@@ -2043,9 +2043,9 @@ class TestContextBudgetAndHardCap:
 
         await _read("sales.xlsx", 1)
         await _read("catalog.xlsx", 2)
-        _ = engine._build_window_perception_notice()
+        _ = engine._context_builder._build_window_perception_notice()
         await asyncio.sleep(0)
-        fallback_notice = engine._build_window_perception_notice()
+        fallback_notice = engine._context_builder._build_window_perception_notice()
         assert "## 数据窗口" in fallback_notice
         assert "sales.xlsx / Q1" in fallback_notice or "catalog.xlsx / Q1" in fallback_notice
 
@@ -2141,7 +2141,7 @@ class TestManualSkillSlashCommand:
         engine._skill_router = mock_router
         engine._tool_calling_loop = AsyncMock(return_value=ChatResult(reply="ok"))
 
-        with patch.object(engine, "_set_window_perception_turn_hints") as mock_set_hints:
+        with patch.object(engine._context_builder, "_set_window_perception_turn_hints") as mock_set_hints:
             result = await engine.chat("从Sheet2批量填充到Sheet1")
 
         assert result.reply == "ok"
@@ -2578,10 +2578,10 @@ class TestDelegateSubagent:
         )
         assert result == "子代理摘要"
 
-        notice = engine._build_window_perception_notice()
+        notice = engine._context_builder._build_window_perception_notice()
         assert "examples/bench/stress_test_comprehensive.xlsx" in notice
 
-        prompts, _ = engine._prepare_system_prompts_for_request([])
+        prompts, _ = engine._context_builder._prepare_system_prompts_for_request([])
         assert len(prompts) >= 1
         assert any("examples/bench/stress_test_comprehensive.xlsx" in p for p in prompts)
 
@@ -5194,7 +5194,7 @@ class TestToolIndexNotice:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        notice = engine._build_tool_index_notice()
+        notice = engine._context_builder._build_tool_index_notice()
         assert notice == ""
 
     def test_tool_index_not_in_notice_when_no_categorized_tools(self) -> None:
@@ -5202,7 +5202,7 @@ class TestToolIndexNotice:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         # add_numbers 不在任何分类中
-        notice = engine._build_tool_index_notice()
+        notice = engine._context_builder._build_tool_index_notice()
         assert notice == ""
 
 
@@ -5240,7 +5240,7 @@ class TestToolInjectionOptimizationE2E:
         engine = AgentEngine(config, registry)
         # 确保无 active_skill
         assert not engine._active_skills
-        prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
+        prompts, error = engine._context_builder._prepare_system_prompts_for_request(skill_contexts=[])
         assert error is None
         # 合并所有 prompt 检查是否包含工具索引
         full_prompt = "\n".join(prompts)

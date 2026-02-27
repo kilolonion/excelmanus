@@ -731,17 +731,19 @@ class _EngineTracer:
         self._component_seen: dict[str, tuple[int, int]] = {}
 
         # 保存原始方法
-        for attr in ("_prepare_system_prompts_for_request",
-                     "_enrich_tool_result_with_window_perception"):
-            if not hasattr(engine, attr):
-                raise AttributeError(
-                    f"bench requires engine.{attr}; engine may have been refactored"
-                )
-        self._orig_prepare = engine._prepare_system_prompts_for_request
+        if not hasattr(engine, "_context_builder"):
+            raise AttributeError(
+                "bench requires engine._context_builder; engine may have been refactored"
+            )
+        if not hasattr(engine, "_enrich_tool_result_with_window_perception"):
+            raise AttributeError(
+                "bench requires engine._enrich_tool_result_with_window_perception; engine may have been refactored"
+            )
+        self._orig_prepare = engine._context_builder._prepare_system_prompts_for_request
         self._orig_enrich = engine._enrich_tool_result_with_window_perception
 
         # 猴子补丁：拦截系统提示和窗口感知方法
-        engine._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
+        engine._context_builder._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
         engine._enrich_tool_result_with_window_perception = self._traced_enrich  # type: ignore[assignment]
 
     def _traced_prepare(
@@ -853,7 +855,7 @@ class _EngineTracer:
 
     def restore(self) -> None:
         """恢复原始方法。"""
-        self._engine._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
+        self._engine._context_builder._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
         self._engine._enrich_tool_result_with_window_perception = self._orig_enrich  # type: ignore[assignment]
 
 
