@@ -4683,28 +4683,33 @@ def _resolve_model_info(
     req_name: str | None,
     req_model: str | None,
     req_base_url: str | None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """根据请求参数解析模型信息。
 
     优先级：profile name > model ID 匹配 profile > 直接使用 model+base_url。
+    返回 (model, base_url, api_key, protocol)。
     """
     assert _config is not None
+    _default_protocol = _config.protocol or "auto"
 
     # 1) 无参数：返回主模型配置
     if not req_name and not req_model:
-        return _resolve_active_engine_info()
+        m, b, a = _resolve_active_engine_info()
+        return m, b, a, _default_protocol
 
     # 1.5) 内置 section 名称直接返回对应配置
     if req_name == "main":
-        return _config.model, _config.base_url, _config.api_key
+        return _config.model, _config.base_url, _config.api_key, _default_protocol
     if req_name == "aux":
         return (_config.aux_model or _config.model,
                 _config.aux_base_url or _config.base_url,
-                _config.aux_api_key or _config.api_key)
+                _config.aux_api_key or _config.api_key,
+                _config.aux_protocol or _default_protocol)
     if req_name == "vlm":
         return (_config.vlm_model or _config.model,
                 _config.vlm_base_url or _config.base_url,
-                _config.vlm_api_key or _config.api_key)
+                _config.vlm_api_key or _config.api_key,
+                _config.vlm_protocol or _default_protocol)
 
     # 2) 按 profile name 精确查找
     lookup_name = req_name or req_model
@@ -4713,7 +4718,8 @@ def _resolve_model_info(
         if profile is not None:
             p_base_url = profile.get("base_url") or _config.base_url
             p_api_key = profile.get("api_key") or _config.api_key
-            return profile["model"], p_base_url, p_api_key
+            p_protocol = profile.get("protocol") or _default_protocol
+            return profile["model"], p_base_url, p_api_key, p_protocol
 
     # 3) 按 model ID 在所有 profiles 中查找（处理前端传 model ID 而非 name 的情况）
     if _config_store is not None and req_model:
@@ -4721,15 +4727,16 @@ def _resolve_model_info(
             if p["model"] == req_model:
                 p_base_url = p.get("base_url") or _config.base_url
                 p_api_key = p.get("api_key") or _config.api_key
+                p_protocol = p.get("protocol") or _default_protocol
                 # 如果也指定了 base_url，需要匹配
                 if req_base_url and p_base_url != req_base_url:
                     continue
-                return p["model"], p_base_url, p_api_key
+                return p["model"], p_base_url, p_api_key, p_protocol
 
     # 4) 兜底：直接使用参数，API key 从最新 _config 取
     model = req_model or _config.model
     base_url = req_base_url or _config.base_url
-    return model, base_url, _config.api_key
+    return model, base_url, _config.api_key, _default_protocol
 
 
 @_router.get("/api/v1/config/models/capabilities")
@@ -4750,7 +4757,7 @@ async def get_model_capabilities(request: Request) -> JSONResponse:
     req_name = request.query_params.get("name")
     req_model = request.query_params.get("model")
     req_base_url = request.query_params.get("base_url")
-    model, base_url, _ = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, _, _protocol = _resolve_model_info(req_name, req_model, req_base_url)
 
     caps = load_capabilities(db, model, base_url)
     return JSONResponse(content={
@@ -4825,14 +4832,14 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
-    model, base_url, api_key = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
     if body.get("api_key"):
         api_key = body["api_key"]
 
     if db is not None:
         delete_capabilities(db, model, base_url)
 
-    req_protocol = body.get("protocol") or _config.protocol
+    req_protocol = body.get("protocol") or resolved_protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
 
     try:
@@ -4924,7 +4931,7 @@ async def test_model_connection(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
-    model, base_url, api_key = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
     if body.get("api_key"):
         api_key = body["api_key"]
 
@@ -4951,7 +4958,7 @@ async def test_model_connection(request: Request) -> JSONResponse:
                 "model": model,
             })
 
-    req_protocol = body.get("protocol") or _config.protocol
+    req_protocol = body.get("protocol") or resolved_protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
     try:
         healthy, health_err = await probe_health(client, model, timeout=15.0)
@@ -5037,7 +5044,7 @@ async def update_model_capabilities(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
-    model, base_url, _ = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, _, _protocol = _resolve_model_info(req_name, req_model, req_base_url)
 
     caps = update_capabilities_override(db, model, base_url, overrides)
 
