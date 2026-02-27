@@ -68,6 +68,7 @@ logs/
 *.png
 !docs/images/*.png
 !assets/*.png
+image/RELEASE_*/
 *.csv
 *.xlsx
 *.log

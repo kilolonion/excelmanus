@@ -208,7 +208,7 @@ async def forgot_password(body: ForgotPasswordRequest, request: Request) -> Any:
         rate_limiter.check_send_code(body.email)
 
     user = store.get_by_email(body.email)
-    if user is not None and user.is_active and user.password_hash is not None:
+    if user is not None and user.is_active:
         store.invalidate_verifications(body.email, "reset_password")
         _, code = store.create_verification(body.email, "reset_password")
         await send_verification_email(body.email, code, "reset_password", _get_config_store(request))
@@ -499,6 +499,51 @@ def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
     store.create_user(user)
     logger.info("OAuth 用户注册: %s via %s", info.email, info.provider)
     return _build_token_response(user)
+
+
+# ── 头像代理（绕过 GFW） ─────────────────────────────
+
+
+# 允许代理的头像域名白名单
+_AVATAR_ALLOWED_DOMAINS = {
+    "lh3.googleusercontent.com",
+    "avatars.githubusercontent.com",
+    "thirdqq.qlogo.cn",
+    "q.qlogo.cn",
+}
+
+
+@router.get("/avatar-proxy")
+async def avatar_proxy(url: str) -> Any:
+    """代理外部头像 URL，解决浏览器直连被 GFW 屏蔽的问题。"""
+    from urllib.parse import urlparse
+    from fastapi.responses import Response
+    import httpx
+
+    if not url.startswith("https://"):
+        raise HTTPException(400, "仅允许 HTTPS URL")
+
+    domain = urlparse(url).hostname
+    if domain not in _AVATAR_ALLOWED_DOMAINS:
+        raise HTTPException(400, f"域名 {domain} 不在白名单中")
+
+    from excelmanus.auth.oauth import _get_oauth_proxy
+    proxy = _get_oauth_proxy()
+    try:
+        async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(502, "获取头像失败")
+            return Response(
+                content=resp.content,
+                media_type=resp.headers.get("content-type", "image/jpeg"),
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(504, "获取头像超时")
+    except httpx.RequestError as exc:
+        logger.warning("Avatar proxy failed: %s", exc)
+        raise HTTPException(502, "获取头像失败")
 
 
 # ── 设置密码（OAuth 用户） ────────────────────────────

@@ -8,8 +8,9 @@ import {
   refreshAccessToken,
   isTokenExpired,
 } from "@/lib/auth-api";
+import { LoadingScreen } from "@/components/ui/LoadingScreen";
 
-const PUBLIC_PATHS = ["/login", "/register", "/auth/callback"];
+const PUBLIC_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password"];
 
 interface AuthProviderProps {
   children: React.ReactNode;
@@ -138,14 +139,7 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
 
   // gate 关闭：无可用本地 token，等待网络
   if (!gateOpen && showSpinner) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-          <span className="text-sm text-muted-foreground">验证身份中...</span>
-        </div>
-      </div>
-    );
+    return <LoadingScreen message="验证身份中..." />;
   }
 
   const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));

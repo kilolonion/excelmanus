@@ -424,6 +424,7 @@ function Start-Backend {
     $startInfo.UseShellExecute = $false
 
     if ($LogDir) {
+        $backendLog = Join-Path $LogDir "backend.log"
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
     }
@@ -433,21 +434,15 @@ function Start-Backend {
         $Script:BackendProcess = $proc
 
         if ($LogDir) {
-            $backendLog = Join-Path $LogDir "backend.log"
-            # 异步读取输出到日志文件
-            $job = Start-Job -ScriptBlock {
-                param($proc, $logFile)
-                try {
-                    $stdout = $proc.StandardOutput
-                    $stderr = $proc.StandardError
-                    while (-not $proc.HasExited) {
-                        $line = $stdout.ReadLine()
-                        if ($line) { Add-Content -Path $logFile -Value $line }
-                        $errLine = $stderr.ReadLine()
-                        if ($errLine) { Add-Content -Path $logFile -Value "[ERR] $errLine" }
-                    }
-                } catch {}
-            } -ArgumentList $proc, $backendLog
+            # Use async event handlers instead of Start-Job (which serializes the Process object)
+            Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+                if ($EventArgs.Data) { Add-Content -Path $Event.MessageData -Value $EventArgs.Data }
+            } -MessageData $backendLog | Out-Null
+            Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+                if ($EventArgs.Data) { Add-Content -Path $Event.MessageData -Value "[ERR] $($EventArgs.Data)" }
+            } -MessageData $backendLog | Out-Null
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
         }
 
         Write-Dbg "后端进程已启动 (PID $($proc.Id))"
@@ -496,12 +491,14 @@ function Start-Frontend {
     $webDir = Join-Path $Script:PROJECT_ROOT "web"
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = "npm"
-    $startInfo.Arguments = "run $npmCmd -- -p $FrontendPort"
+    # npm is npm.cmd on Windows; .cmd files need cmd.exe to execute with UseShellExecute=false
+    $startInfo.FileName = "cmd.exe"
+    $startInfo.Arguments = "/c npm run $npmCmd -- -p $FrontendPort"
     $startInfo.WorkingDirectory = $webDir
     $startInfo.UseShellExecute = $false
 
     if ($LogDir) {
+        $frontendLog = Join-Path $LogDir "frontend.log"
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
     }
@@ -511,20 +508,14 @@ function Start-Frontend {
         $Script:FrontendProcess = $proc
 
         if ($LogDir) {
-            $frontendLog = Join-Path $LogDir "frontend.log"
-            Start-Job -ScriptBlock {
-                param($proc, $logFile)
-                try {
-                    $stdout = $proc.StandardOutput
-                    $stderr = $proc.StandardError
-                    while (-not $proc.HasExited) {
-                        $line = $stdout.ReadLine()
-                        if ($line) { Add-Content -Path $logFile -Value $line }
-                        $errLine = $stderr.ReadLine()
-                        if ($errLine) { Add-Content -Path $logFile -Value "[ERR] $errLine" }
-                    }
-                } catch {}
-            } -ArgumentList $proc, $frontendLog | Out-Null
+            Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+                if ($EventArgs.Data) { Add-Content -Path $Event.MessageData -Value $EventArgs.Data }
+            } -MessageData $frontendLog | Out-Null
+            Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+                if ($EventArgs.Data) { Add-Content -Path $Event.MessageData -Value "[ERR] $($EventArgs.Data)" }
+            } -MessageData $frontendLog | Out-Null
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
         }
 
         Write-Dbg "前端进程已启动 (PID $($proc.Id))"

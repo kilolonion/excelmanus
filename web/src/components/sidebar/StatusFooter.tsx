@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings } from "lucide-react";
-import { apiGet } from "@/lib/api";
+import { apiGet, proxyAvatarUrl } from "@/lib/api";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
@@ -27,10 +26,6 @@ import {
   DropdownMenuGroup,
 } from "@/components/ui/dropdown-menu";
 
-const SettingsDialog = dynamic(
-  () => import("@/components/settings/SettingsDialog").then((m) => ({ default: m.SettingsDialog })),
-  { ssr: false, loading: () => <div className="h-7 w-7" /> }
-);
 
 interface HealthData {
   status: string;
@@ -154,17 +149,9 @@ export function StatusFooter() {
           </Tooltip>
         </TooltipProvider>
 
-        {/* Right: user badge + settings */}
+        {/* Right: user badge (includes settings entry) */}
         <div className="flex items-center gap-1 flex-shrink-0">
-          <div className="hidden md:block">
-            <UserBadge compact />
-          </div>
-          <div className="hidden md:block transition-transform duration-300 ease-out hover:rotate-90">
-            <SettingsDialog />
-          </div>
-          <div className="md:hidden">
-            <UserBadge compact />
-          </div>
+          <UserBadge compact />
         </div>
       </div>
     </>
@@ -172,12 +159,23 @@ export function StatusFooter() {
 }
 
 function Avatar({ src, name, size = 5 }: { src?: string | null; name: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
   const initial = name[0]?.toUpperCase() || "U";
   const px = size * 4;
   const textSize = size <= 5 ? "text-[10px]" : "text-sm";
+  const proxiedSrc = proxyAvatarUrl(src);
 
-  if (src) {
-    return <img src={src} alt="" className={`rounded-full flex-shrink-0`} style={{ width: px, height: px }} />;
+  if (proxiedSrc && !failed) {
+    return (
+      <img
+        src={proxiedSrc}
+        alt=""
+        className="rounded-full flex-shrink-0"
+        style={{ width: px, height: px }}
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
   }
   return (
     <span

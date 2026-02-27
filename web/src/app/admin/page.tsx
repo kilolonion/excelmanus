@@ -42,6 +42,7 @@ import {
   adminEnforceQuota,
   type AdminUser,
 } from "@/lib/auth-api";
+import { proxyAvatarUrl } from "@/lib/api";
 import LoginConfigTab from "@/components/admin/LoginConfigTab";
 
 function formatBytes(bytes: number): string {
@@ -68,6 +69,30 @@ function formatDate(iso: string): string {
 
 type SortField = "email" | "created_at" | "role" | "workspace_size" | "workspace_files";
 type SortDir = "asc" | "desc";
+
+function AdminAvatar({ url, name }: { url?: string | null; name: string }) {
+  const [failed, setFailed] = useState(false);
+  const proxied = proxyAvatarUrl(url);
+  if (proxied && !failed) {
+    return (
+      <img
+        src={proxied}
+        alt=""
+        className="h-10 w-10 rounded-full"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <span
+      className="h-10 w-10 rounded-full flex items-center justify-center text-sm font-medium text-white"
+      style={{ backgroundColor: "var(--em-primary)" }}
+    >
+      {name[0]?.toUpperCase() || "U"}
+    </span>
+  );
+}
 
 function RoleBadge({ role }: { role: string }) {
   if (role === "admin") {
@@ -182,16 +207,7 @@ function UserRow({
       <div className="p-4 flex items-start gap-3">
         {/* Avatar */}
         <div className="flex-shrink-0">
-          {user.avatar_url ? (
-            <img src={user.avatar_url} alt="" className="h-10 w-10 rounded-full" />
-          ) : (
-            <span
-              className="h-10 w-10 rounded-full flex items-center justify-center text-sm font-medium text-white"
-              style={{ backgroundColor: "var(--em-primary)" }}
-            >
-              {(user.display_name || user.email)[0]?.toUpperCase() || "U"}
-            </span>
-          )}
+          <AdminAvatar url={user.avatar_url} name={user.display_name || user.email} />
         </div>
 
         {/* Info */}

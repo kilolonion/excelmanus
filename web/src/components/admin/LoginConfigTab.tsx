@@ -42,7 +42,7 @@ function Toggle({ icon, title, description, checked, loading, onChange }: Toggle
         aria-checked={checked}
         disabled={loading}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+        className={`relative inline-flex h-6 w-11 min-w-[2.75rem] min-h-[1.5rem] flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? "bg-[var(--em-primary)]" : "bg-muted-foreground/30"
         }`}
         style={checked ? { backgroundColor: "var(--em-primary)" } : undefined}

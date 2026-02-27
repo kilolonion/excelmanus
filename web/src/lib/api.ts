@@ -70,6 +70,30 @@ export function buildApiUrl(path: string, opts?: { direct?: boolean }): string {
 }
 
 /**
+ * 将外部头像 URL 转换为后端代理 URL，解决浏览器直连被 GFW 屏蔽的问题。
+ * 仅对已知外部域名（Google/GitHub/QQ）进行代理，其他 URL 原样返回。
+ */
+const _PROXY_AVATAR_DOMAINS = [
+  "lh3.googleusercontent.com",
+  "avatars.githubusercontent.com",
+  "thirdqq.qlogo.cn",
+  "q.qlogo.cn",
+];
+
+export function proxyAvatarUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const hostname = new URL(url).hostname;
+    if (_PROXY_AVATAR_DOMAINS.includes(hostname)) {
+      return `${API_BASE_PATH}/auth/avatar-proxy?url=${encodeURIComponent(url)}`;
+    }
+  } catch {
+    // invalid URL, return as-is
+  }
+  return url;
+}
+
+/**
  * 带 auth token 刷新重试的 fetch 包装（用于直连调用）。
  * 遇到 401 时自动刷新 token 并重试一次。
  */

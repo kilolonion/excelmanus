@@ -915,6 +915,26 @@ class CodePolicyHandler(BaseToolHandler):
         _has_ast_write = any(t.operation == "write" for t in extract_excel_targets(code))
         if (audit_record is not None and audit_record.changes) or _has_cow or _has_ast_write:
             e.record_write_action()
+            # 写入操作日志（供 verifier playbook 注入）
+            _state = getattr(e, "_state", None)
+            if _state is not None:
+                _cow_paths = ""
+                if _has_cow and _rc_json:
+                    _cow_map = _rc_json.get("cow_mapping")
+                    if isinstance(_cow_map, dict):
+                        _cow_paths = ", ".join(
+                            str(v) for v in _cow_map.values() if isinstance(v, str) and v.strip()
+                        )
+                _ast_paths = ", ".join(
+                    t.file_path for t in extract_excel_targets(code)
+                    if t.operation == "write" and t.file_path != "<variable>"
+                ) if _has_ast_write else ""
+                _file_path = _cow_paths or _ast_paths
+                _state.record_write_operation(
+                    tool_name="run_code",
+                    file_path=_file_path,
+                    summary=dispatcher._extract_run_code_write_summary(result_str),
+                )
 
         # ── window 感知桥接 ──
         _stdout_tail = ""

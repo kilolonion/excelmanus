@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { ExternalLink, Table2 } from "lucide-react";
 import type { ExcelPreviewData, CellStyle } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { cellStyleToCSS } from "./cell-style-utils";
+import { cellStyleToCSS, hasWrapText, formatCellByPattern } from "./cell-style-utils";
 import { buildMergeMaps } from "./merge-utils";
 
 interface ExcelPreviewTableProps {
@@ -96,10 +96,17 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                     const mergeInfo = masterMap.get(`${excelRow},${excelCol}`);
                     const cStyle = rowStyles?.[colIdx];
                     const css = cStyle ? cellStyleToCSS(cStyle as CellStyle) : {};
+                    const wrap = hasWrapText(cStyle as CellStyle);
+                    const formatted = hasStyles ? formatCellByPattern(cell, cStyle as CellStyle) : null;
+                    const display = formatted ?? (cell != null ? String(cell) : null);
                     return (
                       <td
                         key={colIdx}
-                        className={`border-r border-b border-border/15 px-2 py-1 whitespace-nowrap max-w-[200px] truncate ${
+                        className={`border-r border-b border-border/15 px-2 py-1 ${
+                          wrap
+                            ? "max-w-[300px] break-words"
+                            : "whitespace-nowrap max-w-[200px] truncate"
+                        } ${
                           typeof cell === "number" ? "text-right tabular-nums" : "text-left"
                         }`}
                         style={hasStyles ? css : undefined}
@@ -107,7 +114,7 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                         colSpan={mergeInfo?.colSpan}
                         rowSpan={mergeInfo?.rowSpan}
                       >
-                        {cell != null ? String(cell) : <span className="text-muted-foreground/20">—</span>}
+                        {display != null ? display : <span className="text-muted-foreground/20">—</span>}
                       </td>
                     );
                   })}

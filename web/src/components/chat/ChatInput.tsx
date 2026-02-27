@@ -42,6 +42,7 @@ import {
   type PopoverMode,
 } from "./chat-input-constants";
 import { ChatModeTabs } from "./ChatModeTabs";
+import { ThinkingLevelSelector } from "./ThinkingLevelSelector";
 import { FileAttachmentChips } from "./FileAttachmentChips";
 import { CommandPopover, type PopoverItem } from "./CommandPopover";
 
@@ -978,8 +979,13 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       />
 
 
-      {/* Chat Mode Tabs */}
-      <ChatModeTabs />
+      {/* Chat Mode Tabs + Thinking Level */}
+      <div className="flex items-center justify-between">
+        <ChatModeTabs />
+        <div className="pr-3 pt-1.5 pb-0">
+          <ThinkingLevelSelector />
+        </div>
+      </div>
 
       {/* File attachment chips */}
       <FileAttachmentChips

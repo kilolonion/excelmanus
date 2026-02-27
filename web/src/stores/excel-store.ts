@@ -22,6 +22,8 @@ export interface CellStyle {
   vt?: number;               // vertical alignment
   tb?: number;               // wrap text
   tr?: { a: number };        // text rotation
+  pd?: { l?: number };       // padding / indent (l = left indent level)
+  sk?: number;               // shrink to fit
   bd?: Record<string, { s: number; cl?: { rgb: string } }>; // borders
   n?: { pattern: string };   // number format
 }

@@ -1594,10 +1594,12 @@ class ToolDispatcher:
                     _sandbox_tier = _analysis.tier.value
                     _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
                     # ── run_code 前: 对可能被修改的 Excel 文件做快照 ──
-                    _rc_excel_targets = [
+                    _rc_excel_targets_raw = [
                         t.file_path for t in extract_excel_targets(_code_arg)
                         if t.operation in ("write", "unknown")
                     ]
+                    # 过滤 AST 无法解析的 <variable> 占位符
+                    _rc_excel_targets = [p for p in _rc_excel_targets_raw if p != "<variable>"]
                     _rc_before_snap = self._snapshot_excel_for_diff(
                         _rc_excel_targets, e.config.workspace_root,
                     ) if _rc_excel_targets else {}
@@ -1651,17 +1653,26 @@ class ToolDispatcher:
                     # ── run_code → files_changed 事件 ──
                     _uploads_after = self._snapshot_uploads_dir(e.config.workspace_root)
                     _uploads_changed = self._diff_uploads_snapshots(_uploads_before, _uploads_after)
+                    _rc_cow = _rc_json.get("cow_mapping") if _rc_json else None
                     self._emit_files_changed_from_audit(
                         e, on_event, tool_call_id, _code_arg,
                         audit_record.changes if audit_record else None,
                         iteration,
                         extra_changed_paths=_uploads_changed or None,
+                        cow_mapping=_rc_cow if isinstance(_rc_cow, dict) else None,
                     )
                     # ── run_code 后: 对比快照生成 Excel diff ──
-                    if _rc_excel_targets and on_event is not None:
+                    # 补充 AST 无法解析的实际文件路径（从 cow_mapping / audit 获取）
+                    _rc_all_targets = self._collect_actual_excel_paths(
+                        _rc_excel_targets,
+                        _rc_json,
+                        audit_record.changes if audit_record else None,
+                        e.config.workspace_root,
+                    )
+                    if _rc_all_targets and on_event is not None:
                         try:
                             _rc_after_snap = self._snapshot_excel_for_diff(
-                                _rc_excel_targets, e.config.workspace_root,
+                                _rc_all_targets, e.config.workspace_root,
                             )
                             _rc_diffs = self._compute_snapshot_diffs(
                                 _rc_before_snap, _rc_after_snap,
@@ -1723,10 +1734,11 @@ class ToolDispatcher:
                                 _re_analysis.tier.value,
                             )
                             _sanitized_args = {**arguments, "code": _sanitized_code, "sandbox_tier": _re_analysis.tier.value}
-                            _rc_targets_s = [
+                            _rc_targets_s_raw = [
                                 t.file_path for t in extract_excel_targets(_sanitized_code)
                                 if t.operation in ("write", "unknown")
                             ]
+                            _rc_targets_s = [p for p in _rc_targets_s_raw if p != "<variable>"]
                             _rc_before_snap_s = self._snapshot_excel_for_diff(
                                 _rc_targets_s, e.config.workspace_root,
                             ) if _rc_targets_s else {}
@@ -1779,17 +1791,25 @@ class ToolDispatcher:
                             # ── run_code(清洗) → files_changed 事件 ──
                             _uploads_after_s = self._snapshot_uploads_dir(e.config.workspace_root)
                             _uploads_changed_s = self._diff_uploads_snapshots(_uploads_before_s, _uploads_after_s)
+                            _rc_cow_s = _rc_json_s.get("cow_mapping") if _rc_json_s else None
                             self._emit_files_changed_from_audit(
                                 e, on_event, tool_call_id, _sanitized_code,
                                 audit_record.changes if audit_record else None,
                                 iteration,
                                 extra_changed_paths=_uploads_changed_s or None,
+                                cow_mapping=_rc_cow_s if isinstance(_rc_cow_s, dict) else None,
                             )
                             # ── run_code(清洗) 后: 对比快照生成 Excel diff ──
-                            if _rc_targets_s and on_event is not None:
+                            _rc_all_targets_s = self._collect_actual_excel_paths(
+                                _rc_targets_s,
+                                _rc_json_s,
+                                audit_record.changes if audit_record else None,
+                                e.config.workspace_root,
+                            )
+                            if _rc_all_targets_s and on_event is not None:
                                 try:
                                     _rc_after_snap_s = self._snapshot_excel_for_diff(
-                                        _rc_targets_s, e.config.workspace_root,
+                                        _rc_all_targets_s, e.config.workspace_root,
                                     )
                                     _rc_diffs_s = self._compute_snapshot_diffs(
                                         _rc_before_snap_s, _rc_after_snap_s,
@@ -2164,16 +2184,28 @@ class ToolDispatcher:
                         _parsed = _json.loads(_raw_result_for_excel_events.strip())
                         if isinstance(_parsed, dict):
                             _cow = _parsed.get("cow_mapping")
+                            _cow_paths = ""
                             if isinstance(_cow, dict):
                                 for _v in _cow.values():
                                     if isinstance(_v, str) and _v.strip():
                                         _state.record_affected_file(_v)
-                                # run_code 写入日志
-                                _state.record_write_operation(
-                                    tool_name="run_code",
-                                    file_path=", ".join(str(v) for v in _cow.values() if isinstance(v, str)),
-                                    summary=self._extract_run_code_write_summary(result_str),
+                                _cow_paths = ", ".join(
+                                    str(v) for v in _cow.values() if isinstance(v, str) and v.strip()
                                 )
+                            # 即使无 cow_mapping，只要 has_write_tool_call 已被标记
+                            # （由 CodePolicyHandler 或 legacy 路径设置），也应记录
+                            if _cow_paths or _state.has_write_tool_call:
+                                # 避免与 CodePolicyHandler 重复记录
+                                _already_logged = any(
+                                    e.get("tool_name") == "run_code"
+                                    for e in _state.write_operations_log
+                                )
+                                if not _already_logged:
+                                    _state.record_write_operation(
+                                        tool_name="run_code",
+                                        file_path=_cow_paths,
+                                        summary=self._extract_run_code_write_summary(result_str),
+                                    )
                     except Exception:
                         pass
                 elif e.get_tool_write_effect(tool_name) == "workspace_write":
@@ -2563,6 +2595,54 @@ class ToolDispatcher:
             wb.close()
 
     @staticmethod
+    def _collect_actual_excel_paths(
+        ast_targets: list[str],
+        result_json: dict | None,
+        audit_changes: list | None,
+        workspace_root: str,
+    ) -> list[str]:
+        """从 AST 目标、cow_mapping、audit_changes 中收集实际 Excel 文件路径。
+
+        过滤掉 AST 无法解析的 ``<variable>`` 占位符，并从执行结果中
+        补充实际被修改的文件路径，确保 diff 快照能正确工作。
+        """
+        from pathlib import Path
+        from excelmanus.window_perception.extractor import is_excel_path, normalize_path
+
+        seen: set[str] = set()
+        result: list[str] = []
+
+        # 1. AST 提取的字面量路径（过滤 <variable> 占位符）
+        for p in ast_targets:
+            if p and p != "<variable>" and p not in seen:
+                seen.add(p)
+                result.append(p)
+
+        # 2. cow_mapping 中的实际路径（CoW 模式下最可靠）
+        if result_json:
+            cow = result_json.get("cow_mapping")
+            if isinstance(cow, dict):
+                for orig, copy_path in cow.items():
+                    for cp in (orig, copy_path):
+                        if isinstance(cp, str) and cp.strip():
+                            norm = normalize_path(cp)
+                            if norm and is_excel_path(norm) and norm not in seen:
+                                seen.add(norm)
+                                result.append(norm)
+
+        # 3. audit_changes 中记录的实际文件变更
+        if audit_changes:
+            for change in audit_changes:
+                path = getattr(change, "path", None) or ""
+                if path:
+                    norm = normalize_path(path)
+                    if norm and is_excel_path(norm) and norm not in seen:
+                        seen.add(norm)
+                        result.append(norm)
+
+        return result
+
+    @staticmethod
     def _snapshot_excel_for_diff(
         file_paths: list[str], workspace_root: str,
     ) -> dict[str, list[tuple[str, list[dict], list[dict]]]]:
@@ -2852,8 +2932,9 @@ class ToolDispatcher:
         audit_changes: list[Any] | None,
         iteration: int,
         extra_changed_paths: list[str] | None = None,
+        cow_mapping: dict[str, str] | None = None,
     ) -> None:
-        """run_code 执行后，从审计、AST 和 mtime 探针中提取受影响文件并发射 FILES_CHANGED 事件。"""
+        """run_code 执行后，从审计、AST、cow_mapping 和 mtime 探针中提取受影响文件并发射 FILES_CHANGED 事件。"""
         from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.security.code_policy import extract_excel_targets
         from excelmanus.window_perception.extractor import is_excel_path, normalize_path
@@ -2869,10 +2950,19 @@ class ToolDispatcher:
                         affected.add(norm)
 
         for target in extract_excel_targets(code or ""):
-            if target.operation in ("write", "unknown"):
+            if target.operation in ("write", "unknown") and target.file_path != "<variable>":
                 norm = normalize_path(target.file_path)
                 if norm and is_excel_path(norm):
                     affected.add(norm)
+
+        # cow_mapping 中的实际路径（AST 无法解析变量时的可靠回退）
+        if cow_mapping:
+            for orig, copy_path in cow_mapping.items():
+                for cp in (orig, copy_path):
+                    if isinstance(cp, str) and cp.strip():
+                        norm = normalize_path(cp)
+                        if norm and is_excel_path(norm):
+                            affected.add(norm)
 
         # mtime 探针检测到的新建/变更文件（不限文件类型）
         if extra_changed_paths:

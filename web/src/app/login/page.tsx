@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { login, getOAuthUrl } from "@/lib/auth-api";
+import { proxyAvatarUrl } from "@/lib/api";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 
@@ -15,6 +16,30 @@ const cardVariants = {
   hidden: { opacity: 0, y: 24 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: "easeOut" as const } },
 };
+
+function AccountAvatar({ account }: { account: RecentAccount }) {
+  const [failed, setFailed] = useState(false);
+  const proxied = proxyAvatarUrl(account.avatarUrl);
+  if (proxied && !failed) {
+    return (
+      <img
+        src={proxied}
+        alt=""
+        className="h-8 w-8 rounded-full flex-shrink-0"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <span
+      className="h-8 w-8 rounded-full flex items-center justify-center text-sm font-medium text-white flex-shrink-0"
+      style={{ backgroundColor: "var(--em-primary)" }}
+    >
+      {(account.displayName || account.email)[0]?.toUpperCase() || "U"}
+    </span>
+  );
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -42,6 +67,14 @@ function LoginForm() {
       setShowRecentList(false);
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) setOauthLoading(null);
+    };
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
 
   const canSubmit = email.trim().length > 0 && password.length > 0 && !loading;
 
@@ -143,16 +176,7 @@ function LoginForm() {
                       i > 0 ? "border-t border-border" : ""
                     }`}
                   >
-                    {account.avatarUrl ? (
-                      <img src={account.avatarUrl} alt="" className="h-8 w-8 rounded-full flex-shrink-0" />
-                    ) : (
-                      <span
-                        className="h-8 w-8 rounded-full flex items-center justify-center text-sm font-medium text-white flex-shrink-0"
-                        style={{ backgroundColor: "var(--em-primary)" }}
-                      >
-                        {(account.displayName || account.email)[0]?.toUpperCase() || "U"}
-                      </span>
-                    )}
+                    <AccountAvatar account={account} />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium truncate">
                         {account.displayName || account.email.split("@")[0]}

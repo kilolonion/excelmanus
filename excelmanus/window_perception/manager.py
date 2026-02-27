@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import dataclasses
 import logging
 import re
 from typing import Any, Awaitable, Callable, Literal
@@ -360,6 +361,7 @@ class WindowPerceptionManager:
                     affected_range="-",
                     change_type=change_type,
                     iteration=iteration,
+                    affected_row_indices=[],
                 ),
             )
 
@@ -475,6 +477,7 @@ class WindowPerceptionManager:
                     affected_range="-",
                     change_type="code_modified",
                     iteration=iteration,
+                    affected_row_indices=[],
                 ),
             )
 
@@ -1770,7 +1773,11 @@ class WindowPerceptionManager:
         if window.data_buffer:
             preview_rows = list(window.data_buffer[:max_preview])
 
-        columns = list(window.columns or window.schema or [])
+        raw_cols = window.columns or window.schema or []
+        columns = [
+            dataclasses.asdict(c) if dataclasses.is_dataclass(c) else c
+            for c in raw_cols
+        ]
         viewport = window.viewport
         return {
             "preview": preview_rows,

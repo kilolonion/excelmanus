@@ -48,14 +48,14 @@ if /i "%~1"=="--no-open"        ( set "AUTO_OPEN=0"    & shift & goto :parse_arg
 if /i "%~1"=="--help"           ( goto :show_help )
 if /i "%~1"=="-h"               ( goto :show_help )
 echo [XX] 未知参数: %~1 （使用 --help 查看帮助）
-exit /b 1
+goto :exit_with_pause
 
 :args_done
 
 REM ── 互斥检查 ──
 if "%BACKEND_ONLY%"=="1" if "%FRONTEND_ONLY%"=="1" (
     echo [XX] --backend-only 与 --frontend-only 不能同时使用
-    exit /b 1
+    goto :exit_with_pause
 )
 
 REM ── 加载 .env（如存在）──
@@ -102,7 +102,7 @@ if "%PYTHON_BIN%"=="" (
     echo [XX] 未找到 .venv 虚拟环境
     echo     请先运行: python -m venv .venv
     echo     然后运行: .venv\Scripts\pip install -e .
-    exit /b 1
+    goto :exit_with_pause
 )
 
 REM 检查 uvicorn
@@ -112,7 +112,7 @@ if errorlevel 1 (
     "%PYTHON_BIN%" -m pip install uvicorn -q >nul 2>&1
     if errorlevel 1 (
         echo [XX] uvicorn 安装失败
-        exit /b 1
+        goto :exit_with_pause
     )
 )
 
@@ -123,14 +123,14 @@ REM 检查 Node.js
 where node >nul 2>&1
 if errorlevel 1 (
     echo [XX] 未找到 Node.js，请安装: https://nodejs.org/
-    exit /b 1
+    goto :exit_with_pause
 )
 
 REM 检查 npm
 where npm >nul 2>&1
 if errorlevel 1 (
     echo [XX] 未找到 npm，请安装: https://nodejs.org/
-    exit /b 1
+    goto :exit_with_pause
 )
 
 REM 检查 web/node_modules
@@ -141,7 +141,7 @@ if not exist "%PROJECT_ROOT%\web\node_modules" (
     if errorlevel 1 (
         echo [XX] npm install 失败
         popd
-        exit /b 1
+        goto :exit_with_pause
     )
     popd
 )
@@ -155,7 +155,7 @@ if "%PRODUCTION%"=="1" (
         if errorlevel 1 (
             echo [XX] npm run build 失败
             popd
-            exit /b 1
+            goto :exit_with_pause
         )
         popd
     )
@@ -196,7 +196,7 @@ goto :wait_backend
 
 :backend_timeout
 echo [XX] 后端启动超时（30s）
-exit /b 1
+goto :exit_with_pause
 
 :backend_ready
 :skip_backend
@@ -206,10 +206,10 @@ if "%BACKEND_ONLY%"=="1" goto :skip_frontend
 
 if "%PRODUCTION%"=="1" (
     echo [--] 启动 Next.js 前端 [start] (端口 %FRONTEND_PORT%)...
-    start "" /b cmd /c "cd /d "%PROJECT_ROOT%\web" && npm run start -- -p %FRONTEND_PORT%"
+    start "" /b cmd /c "cd /d %PROJECT_ROOT%\web && npm run start -- -p %FRONTEND_PORT%"
 ) else (
     echo [--] 启动 Next.js 前端 [dev] (端口 %FRONTEND_PORT%)...
-    start "" /b cmd /c "cd /d "%PROJECT_ROOT%\web" && npm run dev -- -p %FRONTEND_PORT%"
+    start "" /b cmd /c "cd /d %PROJECT_ROOT%\web && npm run dev -- -p %FRONTEND_PORT%"
 )
 
 REM 等待前端启动
@@ -246,6 +246,14 @@ echo [OK] 已关闭
 popd
 endlocal
 exit /b 0
+
+:exit_with_pause
+echo.
+echo   按任意键退出...
+pause >nul
+popd
+endlocal
+exit /b 1
 
 REM ═══════════════════════════════════════════════════════════════
 REM  子程序

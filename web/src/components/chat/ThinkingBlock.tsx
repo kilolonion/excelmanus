@@ -64,13 +64,13 @@ export function ThinkingBlock({
         type="button"
         onClick={() => !isActive && setExpanded((v) => !v)}
         className={cn(
-          "flex items-center gap-1.5 text-sm transition-colors select-none",
+          "flex items-center gap-1.5 text-sm transition-colors select-none max-w-full",
           isActive
             ? "text-muted-foreground cursor-default"
             : "text-muted-foreground hover:text-foreground cursor-pointer",
         )}
       >
-        <span>
+        <span className="truncate">
           {isActive ? "思考中" : "思考完成"}
           {durationStr && (
             <span className="ml-1 font-normal opacity-60">

@@ -964,6 +964,69 @@ button:active:not(:disabled),
   }
 }
 
+/* ── Loading Screen Animations ── */
+@keyframes loading-logo-pulse {
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  50% {
+    transform: scale(1.06);
+    opacity: 0.85;
+  }
+}
+
+@keyframes loading-ring-pulse {
+
+  0% {
+    box-shadow: 0 0 0 0 var(--em-primary-alpha-25);
+    opacity: 1;
+  }
+
+  100% {
+    box-shadow: 0 0 0 18px var(--em-primary-alpha-25);
+    opacity: 0;
+  }
+}
+
+@keyframes loading-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  50% {
+    transform: translateX(250%);
+  }
+
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+.loading-logo-pulse {
+  animation: loading-logo-pulse 2.4s ease-in-out infinite;
+}
+
+.loading-ring-pulse {
+  animation: loading-ring-pulse 2.4s ease-out infinite;
+}
+
+.loading-progress-bar {
+  animation: loading-progress 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .loading-logo-pulse,
+  .loading-ring-pulse,
+  .loading-progress-bar {
+    animation: none;
+  }
+}
+
 /* ── Chat Input Focus Ring ── */
 .chat-input-ring {
   transition: box-shadow 200ms ease, border-color 200ms ease;
