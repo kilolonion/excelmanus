@@ -346,14 +346,14 @@ class TestFinishTaskRestored:
             engine = _make_engine()
             engine._current_write_hint = hint
             engine._skill_router = None
-            tools = engine._build_meta_tools()
+            tools = engine._meta_tool_builder.build_meta_tools()
             names = [t["function"]["name"] for t in tools]
             assert "finish_task" in names, f"finish_task should exist when write_hint={hint}"
 
     def test_finish_task_in_v5_tools(self):
         engine = _make_engine()
         engine._current_write_hint = "may_write"
-        tools = engine._build_v5_tools()
+        tools = engine._meta_tool_builder.build_v5_tools()
         names = [t["function"]["name"] for t in tools]
         assert "finish_task" in names
 
@@ -361,7 +361,7 @@ class TestFinishTaskRestored:
         engine = _make_engine()
         engine._bench_mode = True
         engine._skill_router = None
-        tools = engine._build_meta_tools()
+        tools = engine._meta_tool_builder.build_meta_tools()
         ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
         assert "summary" in ft["function"]["parameters"]["required"]
 
@@ -369,7 +369,7 @@ class TestFinishTaskRestored:
         engine = _make_engine()
         engine._bench_mode = False
         engine._skill_router = None
-        tools = engine._build_meta_tools()
+        tools = engine._meta_tool_builder.build_meta_tools()
         ft = [t for t in tools if t["function"]["name"] == "finish_task"][0]
         props = ft["function"]["parameters"]["properties"]
         assert "affected_files" in props
@@ -960,7 +960,7 @@ class TestReadOnlyToolFiltering:
 
     def _tool_names(self, engine: AgentEngine, write_hint: str) -> set[str]:
         engine._current_write_hint = write_hint
-        tools = engine._build_v5_tools(write_hint=write_hint)
+        tools = engine._meta_tool_builder.build_v5_tools(write_hint=write_hint)
         return {t["function"]["name"] for t in tools}
 
     def test_write_tools_excluded_in_read_only(self):
@@ -1000,7 +1000,7 @@ class TestReadOnlyToolFiltering:
     def _plan_tool_names(self, engine: AgentEngine) -> set[str]:
         engine._current_chat_mode = "plan"
         engine._current_write_hint = "read_only"
-        tools = engine._build_v5_tools(write_hint="read_only")
+        tools = engine._meta_tool_builder.build_v5_tools(write_hint="read_only")
         return {t["function"]["name"] for t in tools}
 
     def test_plan_mode_allows_write_plan(self):

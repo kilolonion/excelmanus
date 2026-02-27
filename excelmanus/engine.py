@@ -2151,17 +2151,6 @@ class AgentEngine:
         """当前主 skill（列表末尾），无激活时返回 None。"""
         return self._skill_resolver.primary_skill
 
-    # ── 元工具构建（委托到 MetaToolBuilder）──────────────────
-
-    def _build_meta_tools(self) -> list[dict[str, Any]]:
-        return self._meta_tool_builder.build_meta_tools()
-
-    def _build_v5_tools(self, *, write_hint: str = "unknown", task_tags: tuple[str, ...] = ()) -> list[dict[str, Any]]:
-        return self._meta_tool_builder.build_v5_tools(write_hint=write_hint, task_tags=task_tags)
-
-    def _build_v5_tools_impl(self, *, write_hint: str = "unknown", task_tags: tuple[str, ...] = ()) -> list[dict[str, Any]]:
-        return self._meta_tool_builder.build_v5_tools_impl(write_hint=write_hint, task_tags=task_tags)
-
     async def _handle_activate_skill(self, skill_name: str, reason: str = "") -> str:
         """处理 activate_skill 调用：激活技能并返回技能上下文。"""
         if self._skill_router is None:
@@ -2955,7 +2944,7 @@ class AgentEngine:
 
             # 分层 schema（core=完整, extended=摘要/已展开=完整）
             _task_tags = tuple(getattr(current_route_result, "task_tags", ()) or ())
-            tools = self._build_v5_tools(write_hint=write_hint, task_tags=_task_tags)
+            tools = self._meta_tool_builder.build_v5_tools(write_hint=write_hint, task_tags=_task_tags)
             tool_scope = None
 
             kwargs: dict[str, Any] = {

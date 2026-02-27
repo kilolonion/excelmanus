@@ -3316,7 +3316,7 @@ class TestMetaToolDefinitions:
             ["folder_summarizer"],
         )
 
-        meta_tools = engine._build_meta_tools()
+        meta_tools = engine._meta_tool_builder.build_meta_tools()
         assert len(meta_tools) >= 4
         by_name = {tool["function"]["name"]: tool for tool in meta_tools}
         assert "activate_skill" in by_name
@@ -3373,8 +3373,8 @@ class TestMetaToolDefinitions:
         ]
         engine._skill_router = mock_router
 
-        first = engine._build_meta_tools()
-        second = engine._build_meta_tools()
+        first = engine._meta_tool_builder.build_meta_tools()
+        second = engine._meta_tool_builder.build_meta_tools()
 
         first_enum = first[0]["function"]["parameters"]["properties"]["skill_name"]["enum"]
         second_enum = second[0]["function"]["parameters"]["properties"]["skill_name"]["enum"]
@@ -4192,8 +4192,8 @@ class TestIterationLimit:
         engine = AgentEngine(config, registry)
         _activate_test_tools(engine)
 
-        # 每轮都返回 tool_call，永不返回纯文本
-        tool_responses = [
+        # 构造无限 tool_call 响应（每轮都返回 tool_call，永不返回纯文本）
+        infinite_tool_responses = [
             _make_tool_call_response(
                 [(f"call_{i}", "add_numbers", json.dumps({"a": i, "b": i}))]
             )
@@ -4201,7 +4201,7 @@ class TestIterationLimit:
         ]
 
         engine._client.chat.completions.create = AsyncMock(
-            side_effect=tool_responses
+            side_effect=infinite_tool_responses
         )
 
         result = await engine.chat("无限循环测试")

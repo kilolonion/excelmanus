@@ -75,7 +75,7 @@ def _extract_tool_names(schemas: list[dict]) -> set[str]:
 
 
 class TestBuildV5ToolsPruning:
-    """通过 mock engine 测试 _build_v5_tools_impl 的 tag-based 裁剪逻辑。"""
+    """通过 mock engine._meta_tool_builder.build_v5_tools 的 tag-based 裁剪逻辑。"""
 
     @pytest.fixture(autouse=True)
     def _setup_engine(self, tmp_path):
@@ -120,13 +120,13 @@ class TestBuildV5ToolsPruning:
         engine.active_model = "test-model"
 
         # Patch _build_meta_tools to return empty (meta tools tested separately)
-        engine._build_meta_tools = MagicMock(return_value=[])
+        engine._meta_tool_builder.build_meta_tools = MagicMock(return_value=[])
 
         self.engine = engine
         self.registry = registry
 
     def _call_impl(self, write_hint="unknown", task_tags=()):
-        """直接调用 _build_v5_tools_impl 的逻辑。"""
+        """直接调用 engine._meta_tool_builder.build_v5_tools 的逻辑。"""
         from excelmanus.tools.policy import (
             READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, TAG_EXCLUDED_TOOLS,
         )

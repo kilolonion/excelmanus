@@ -298,7 +298,7 @@ class TestSkillCatalogIntegrity:
             ]
             engine = _setup_engine_in(Path(tmp), skills)
 
-            meta_tools = engine._build_meta_tools()
+            meta_tools = engine._meta_tool_builder.build_meta_tools()
             activate_tool = next(
                 tool for tool in meta_tools
                 if tool["function"]["name"] == "activate_skill"
