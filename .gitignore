@@ -67,6 +67,7 @@ logs/
 # ==============================
 *.png
 !docs/images/*.png
+!assets/*.png
 *.csv
 *.xlsx
 *.log
