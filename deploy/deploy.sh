@@ -492,14 +492,15 @@ _remote_backend()  { _remote "$BACKEND_HOST" "$BACKEND_SSH_KEY_PATH" "$@"; }
 _remote_frontend() { _remote "$FRONTEND_HOST" "$FRONTEND_SSH_KEY_PATH" "$@"; }
 
 _ensure_frontend_standalone_assets() {
-  info "复制 standalone 静态资源..."
+  info "检查 standalone 静态资源..."
   _remote_frontend "
     cd '${FRONTEND_DIR}/web'
     if [[ ! -d .next/standalone ]]; then
-      echo '[WARN] 未检测到 standalone 输出目录，跳过'
+      echo '[INFO] 未检测到 standalone 输出（Turbopack/Next.js 16+ 可能不生成），将使用 next start 启动'
       exit 0
     fi
 
+    echo '[INFO] 检测到 standalone 目录，复制静态资源...'
     # 确保目标目录存在
     mkdir -p .next/standalone/.next
     mkdir -p .next/standalone/public
@@ -519,11 +520,11 @@ _ensure_frontend_standalone_assets() {
     # 验证关键文件存在
     _ok=true
     if [[ ! -d .next/standalone/.next/static/chunks ]]; then
-      echo '[ERROR] standalone/.next/static/chunks 不存在，JS 资源将 404！'
+      echo '[WARN] standalone/.next/static/chunks 不存在'
       _ok=false
     fi
     if [[ ! -f .next/standalone/server.js ]]; then
-      echo '[ERROR] standalone/server.js 不存在！'
+      echo '[WARN] standalone/server.js 不存在'
       _ok=false
     fi
 
@@ -531,16 +532,25 @@ _ensure_frontend_standalone_assets() {
       _chunk_count=\$(find .next/standalone/.next/static/chunks -name '*.js' | wc -l)
       echo \"standalone 静态资源复制完成（\${_chunk_count} 个 JS chunks）\"
     else
-      echo '[ERROR] standalone 静态资源不完整，前端将无法正常加载！'
-      exit 1
+      echo '[WARN] standalone 不完整，将回退到 next start'
     fi
   "
 }
 
 _restart_frontend_service() {
   if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
-    _remote_frontend "sudo systemctl restart '${PM2_FRONTEND}' 2>/dev/null || { \
-      echo 'systemd 服务不存在，尝试创建...'; \
+    # systemd: 自动检测 standalone vs next start
+    _remote_frontend "
+      WEB_DIR='${FRONTEND_DIR}/web'
+      NODE_CMD=\$(command -v node 2>/dev/null || echo '${NODE_BIN}/node')
+      if [[ -f \"\$WEB_DIR/.next/standalone/server.js\" ]]; then
+        EXEC_START=\"\$NODE_CMD \$WEB_DIR/.next/standalone/server.js\"
+        echo \"[INFO] 使用 standalone 模式启动\"
+      else
+        NPX_CMD=\$(command -v npx 2>/dev/null || echo '${NODE_BIN}/npx')
+        EXEC_START=\"\$NPX_CMD next start -p ${FRONTEND_PORT}\"
+        echo \"[INFO] standalone 不存在，使用 next start 启动\"
+      fi
       sudo tee /etc/systemd/system/${PM2_FRONTEND}.service > /dev/null <<SVCEOF
 [Unit]
 Description=ExcelManus Frontend
@@ -548,24 +558,33 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=${FRONTEND_DIR}/web
-ExecStart=$(command -v node 2>/dev/null || echo ${NODE_BIN}/node) .next/standalone/server.js
+WorkingDirectory=\$WEB_DIR
+ExecStart=\$EXEC_START
 Restart=on-failure
 RestartSec=5
 Environment=PORT=${FRONTEND_PORT}
+Environment=PATH=${NODE_BIN}:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target
 SVCEOF
-      sudo systemctl daemon-reload && \
-      sudo systemctl enable '${PM2_FRONTEND}' && \
-      sudo systemctl start '${PM2_FRONTEND}'; }"
+      sudo systemctl daemon-reload
+      sudo systemctl enable '${PM2_FRONTEND}' 2>/dev/null || true
+      sudo systemctl restart '${PM2_FRONTEND}'
+    "
   else
+    # PM2: 自动检测 standalone vs next start
     _remote_frontend "
-      export PATH=${NODE_BIN}:\$PATH && \
-      cd '${FRONTEND_DIR}/web' && \
-      pm2 delete '${PM2_FRONTEND}' 2>/dev/null || true && \
-      pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web' && \
+      export PATH=${NODE_BIN}:\$PATH
+      cd '${FRONTEND_DIR}/web'
+      pm2 delete '${PM2_FRONTEND}' 2>/dev/null || true
+      if [[ -f .next/standalone/server.js ]]; then
+        echo '[INFO] 使用 standalone 模式启动'
+        pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+      else
+        echo '[INFO] standalone 不存在，使用 next start 启动'
+        pm2 start \"npx next start -p ${FRONTEND_PORT}\" --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+      fi
       pm2 save
     "
   fi
@@ -586,7 +605,7 @@ _auto_fix_frontend_backend_origin() {
 
   # 提取当前值
   local current_val
-  current_val=$(echo "$fe_origin" | grep -oP '(?<=NEXT_PUBLIC_BACKEND_ORIGIN=).*' | head -1 | tr -d '[:space:]')
+  current_val=$(echo "$fe_origin" | sed -n 's/^NEXT_PUBLIC_BACKEND_ORIGIN=//p' | head -1 | tr -d '[:space:]')
 
   # 已经是 same-origin 或空，无需修复
   if [[ -z "$current_val" || "$current_val" == "same-origin" ]]; then
