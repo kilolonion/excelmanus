@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.4-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.5-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -309,9 +309,9 @@ ExcelManusDeployTool.exe    ← 双击即可
 镜像已发布到 Docker Hub，支持 **amd64**（Intel/AMD）和 **arm64**（Apple Silicon / AWS Graviton）双架构，`docker pull` 时自动匹配：
 
 ```bash
-docker pull kilol/excelmanus-api:1.6.4       # 后端 API
-docker pull kilol/excelmanus-sandbox:1.6.4   # 代码沙盒（可选）
-docker pull kilol/excelmanus-web:1.6.4       # 前端 Web
+docker pull kilol/excelmanus-api:1.6.5       # 后端 API
+docker pull kilol/excelmanus-sandbox:1.6.5   # 代码沙盒（可选）
+docker pull kilol/excelmanus-web:1.6.5       # 前端 Web
 ```
 
 #### Docker Compose 一键启动
