@@ -180,13 +180,23 @@ export function StatusFooter() {
 }
 
 function Avatar({ src, name, size = 5 }: { src?: string | null; name: string; size?: number }) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const accessToken = useAuthStore((s) => s.accessToken);
   const initial = name[0]?.toUpperCase() || "U";
   const px = size * 4;
   const textSize = size <= 5 ? "text-[10px]" : "text-sm";
-  const proxiedSrc = proxyAvatarUrl(src);
 
-  if (proxiedSrc && !failed) {
+  const proxiedSrc = (() => {
+    const base = proxyAvatarUrl(src);
+    if (!base || !accessToken) return base;
+    if (base.includes("/avatar-file")) {
+      const sep = base.includes("?") ? "&" : "?";
+      return `${base}${sep}token=${accessToken}`;
+    }
+    return base;
+  })();
+
+  if (proxiedSrc && failedSrc !== src) {
     return (
       <img
         src={proxiedSrc}
@@ -194,7 +204,7 @@ function Avatar({ src, name, size = 5 }: { src?: string | null; name: string; si
         className="rounded-full flex-shrink-0"
         style={{ width: px, height: px }}
         referrerPolicy="no-referrer"
-        onError={() => setFailed(true)}
+        onError={() => setFailedSrc(src ?? null)}
       />
     );
   }

@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from excelmanus.auth.dependencies import get_current_user, require_admin
+from excelmanus.auth.dependencies import get_current_user, get_current_user_optional, require_admin
 from excelmanus.auth.models import (
     ChangeEmailRequest,
     ChangePasswordRequest,
@@ -764,10 +764,27 @@ def _compress_avatar(data: bytes, ext: str, max_size: int = 256) -> tuple[bytes,
 @router.get("/me/avatar-file")
 async def get_avatar_file(
     request: Request,
-    user: UserRecord = Depends(get_current_user),
+    token: str | None = None,
+    user: UserRecord | None = Depends(get_current_user_optional),
 ) -> Any:
-    """返回当前用户的头像文件。"""
+    """返回当前用户的头像文件。
+
+    支持 query param ``?token=xxx`` 认证，兼容 ``<img>`` 标签无法发送 Authorization header 的场景。
+    """
     from fastapi.responses import Response
+
+    # query param token 兜底（<img> 标签场景）
+    if user is None and token:
+        from excelmanus.auth.jwt import decode_token
+        payload = decode_token(token)
+        if payload and payload.get("type") == "access":
+            user_id = payload.get("sub")
+            if user_id:
+                store = _get_store(request)
+                user = store.get_by_id(user_id)
+
+    if user is None or not user.is_active:
+        raise HTTPException(401, "未认证")
 
     ws_root = _get_workspace_root(request)
     ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True)

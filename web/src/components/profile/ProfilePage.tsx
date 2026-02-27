@@ -87,10 +87,24 @@ function ProfileAvatar({
   onUpload: (file: File) => void;
   uploading: boolean;
 }) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const proxied = proxyAvatarUrl(src);
+  const accessToken = useAuthStore((s) => s.accessToken);
+
+  // Append token to avatar URL for <img> tag auth
+  const proxied = (() => {
+    const base = proxyAvatarUrl(src);
+    if (!base || !accessToken) return base;
+    // Only append token for local avatar-file endpoint
+    if (base.includes("/avatar-file")) {
+      const sep = base.includes("?") ? "&" : "?";
+      return `${base}${sep}token=${accessToken}`;
+    }
+    return base;
+  })();
+
   const initial = name[0]?.toUpperCase() || "U";
+  const showImage = proxied && failedSrc !== src;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -101,13 +115,13 @@ function ProfileAvatar({
   return (
     <div className="relative group">
       <div className="relative h-24 w-24 rounded-full overflow-hidden ring-4 ring-background shadow-lg">
-        {proxied && !failed ? (
+        {showImage ? (
           <img
             src={proxied}
             alt=""
             className="h-full w-full object-cover"
             referrerPolicy="no-referrer"
-            onError={() => setFailed(true)}
+            onError={() => setFailedSrc(src ?? null)}
           />
         ) : (
           <span
