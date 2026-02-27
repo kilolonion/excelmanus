@@ -1,0 +1,12 @@
+# Default: auto-detect and normalize to LF in repo, native on checkout
+* text=auto
+
+# Windows scripts must keep CRLF
+*.bat text eol=crlf
+# NOTE: working-tree-encoding=UTF-8-BOM removed due to Git-for-Windows iconv bug.
+# .ps1 files are stored with BOM as-is; PowerShell handles them correctly.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must keep LF
+*.sh text eol=lf
