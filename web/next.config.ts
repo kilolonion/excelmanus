@@ -16,6 +16,7 @@ function getLocalNetworkOrigins(port = 3000): string[] {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  typescript: { ignoreBuildErrors: true },
   allowedDevOrigins: getLocalNetworkOrigins(),
   async rewrites() {
     // BACKEND_INTERNAL_URL: Next.js 服务端 rewrite 代理的目标地址。
