@@ -518,8 +518,11 @@ body {
   overscroll-behavior-x: none;
 }
 
-/* Prevent horizontal swipe from triggering browser back/forward on iOS */
-@supports (-webkit-touch-callout: none) {
+/* Prevent horizontal overflow on all touch devices (not just iOS).
+   Elements with min-height touch-target rules or wide content can push
+   the layout beyond the viewport; clipping it here prevents the
+   "page pushed left" symptom on Android and other mobile browsers. */
+@media (pointer: coarse) {
 
   html,
   body {
@@ -549,13 +552,10 @@ button:active:not(:disabled),
 
   button,
   [role="button"],
-  a,
   input[type="checkbox"],
   input[type="radio"],
-  select,
-  [tabindex="0"] {
+  select {
     min-height: 44px;
-    min-width: 44px;
   }
 
   /* Exceptions: icon-only buttons that already have explicit sizing */
@@ -568,7 +568,6 @@ button:active:not(:disabled),
   [role="button"].h-7,
   [role="button"].h-8 {
     min-height: 36px;
-    min-width: 36px;
   }
 
   /* Exceptions: small compact buttons (chat mode tabs, regenerate buttons, etc.) */
@@ -577,21 +576,12 @@ button:active:not(:disabled),
   button[class*="compact"],
   [role="button"][class*="compact"] {
     min-height: 32px;
-    min-width: auto;
-  }
-
-  /* Exceptions: Univer toolbar "开始" and similar compact links - keep desktop size on mobile */
-  a.univer-h-7.univer-rounded-full,
-  a[class*="univer-h-7"][class*="univer-rounded-full"] {
-    min-height: 0;
-    min-width: auto;
   }
 
   /* Exception: compact overlay buttons (e.g. image thumbnail close) */
   button.touch-compact,
   [role="button"].touch-compact {
     min-height: 0;
-    min-width: 0;
   }
 
   /* Dropdown menu items need adequate touch height */
