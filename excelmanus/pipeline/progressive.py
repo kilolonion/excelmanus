@@ -680,16 +680,13 @@ class ProgressivePipeline:
 
         if self._on_event:
             try:
-                self._on_event({
-                    "type": "pipeline_progress",
-                    "stage": f"vlm_extract_{phase.value}",
-                    "message": message,
-                    "phase_index": phase_idx,
-                    "total_phases": total_phases,
-                    "spec_path": self._last_saved_path,
-                    "diff": diff,
-                    "checkpoint": checkpoint,
-                })
+                from excelmanus.events import EventType, ToolCallEvent
+                self._on_event(ToolCallEvent(
+                    event_type=EventType.PIPELINE_PROGRESS,
+                    pipeline_stage=f"vlm_extract_{phase.value}",
+                    pipeline_message=message,
+                    pipeline_phase_index=phase_idx,
+                ))
             except Exception:
                 pass
 
