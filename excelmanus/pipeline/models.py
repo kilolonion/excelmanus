@@ -21,17 +21,7 @@ class PipelineConfig(BaseModel):
     skip_style: bool = False
     uncertainty_pause_threshold: int = 5
     uncertainty_confidence_floor: float = 0.3
-
-
-class PhaseResult(BaseModel):
-    """单阶段输出。"""
-
-    phase: PipelinePhase
-    success: bool
-    raw_json: dict[str, Any] | None = None
-    spec_snapshot_path: str | None = None
-    uncertainties_count: int = 0
-    error: str | None = None
+    chunk_cell_threshold: int = 500
 
 
 class CorrectionPatch(BaseModel):

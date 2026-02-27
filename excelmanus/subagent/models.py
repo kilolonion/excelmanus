@@ -53,6 +53,8 @@ class SubagentResult:
     conversation_id: str
     iterations: int = 0
     tool_calls_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     error: str | None = None
     pending_approval_id: str | None = None
     structured_changes: list[SubagentFileChange] = field(default_factory=list)

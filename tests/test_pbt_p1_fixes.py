@@ -1,4 +1,4 @@
-"""P1 Bug 修复验证测试。
+"""PBT Bug 修复验证测试。
 
 覆盖 B1 / B3 / B4 / U1 四个修复点的 Fix Checking 和 Preservation Checking。
 

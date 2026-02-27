@@ -181,9 +181,15 @@ class SessionManager:
             )
 
     def notify_file_deleted(self, file_path: str) -> None:
-        """W4: 通知所有活跃 session 文件已被删除，清理 staging 条目。"""
+        """W4: 通知活跃 session 文件已被删除，清理 staging 条目。
+
+        ISO-4: 仅通知工作区包含目标文件的会话，避免跨用户干扰。
+        """
         for entry in self._sessions.values():
             try:
+                ws_root = str(entry.engine.workspace.root_dir)
+                if not file_path.startswith(ws_root):
+                    continue
                 _reg = entry.engine.file_registry
                 if _reg is not None and _reg.has_versions:
                     _reg.remove_staging_for_path(file_path)
@@ -191,9 +197,15 @@ class SessionManager:
                 pass
 
     def notify_file_renamed(self, old_path: str, new_path: str) -> None:
-        """W5: 通知所有活跃 session 文件已被重命名，更新 staging 条目。"""
+        """W5: 通知活跃 session 文件已被重命名，更新 staging 条目。
+
+        ISO-4: 仅通知工作区包含目标文件的会话。
+        """
         for entry in self._sessions.values():
             try:
+                ws_root = str(entry.engine.workspace.root_dir)
+                if not old_path.startswith(ws_root):
+                    continue
                 _reg = entry.engine.file_registry
                 if _reg is not None and _reg.has_versions:
                     _reg.rename_staging_path(old_path, new_path)
@@ -396,6 +408,9 @@ class SessionManager:
         )
         if history_messages:
             engine.inject_history(history_messages)
+            # 恢复 checkpoint（SessionState + TaskStore）
+            engine._session_id = session_id
+            engine.restore_checkpoint()
         # 从用户级配置恢复激活模型（隔离：每个用户独立的 active_model）
         _user_config = self._resolve_user_config_store(user_id)
         if _user_config is not None:

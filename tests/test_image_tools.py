@@ -120,6 +120,9 @@ class TestTryInjectImage:
         dispatcher._engine = engine
         dispatcher._pending_vlm_image = None
         dispatcher._deferred_image_injections = []
+        dispatcher._injected_image_hashes = set()
+        dispatcher._last_vlm_description = None
+        dispatcher._last_vlm_description_image_hash = None
         dispatcher._tool_call_store = None
         dispatcher._handlers = []
         return dispatcher, engine
@@ -127,10 +130,12 @@ class TestTryInjectImage:
     def test_inject_image_from_result(self) -> None:
         """含 __tool_result_image__ 的结果应延迟注入并移除字段。"""
         dispatcher, engine = self._make_dispatcher()
+        # 使用合法 base64，避免解码路径（如 hash 或 VLM）在部分环境下报 Incorrect padding
+        b64 = _MINIMAL_PNG_B64.replace("\n", "").strip()
         result = json.dumps({
             "status": "ok",
             "hint": "图片已加载",
-            "__tool_result_image__": {"base64": "abc", "mime_type": "image/png", "detail": "auto"},
+            "__tool_result_image__": {"base64": b64, "mime_type": "image/png", "detail": "auto"},
         })
         cleaned = dispatcher._try_inject_image(result)
         parsed = json.loads(cleaned)
@@ -139,11 +144,11 @@ class TestTryInjectImage:
         # 图片不再立即注入 memory，而是延迟到所有 tool result 写入后
         engine.memory.add_image_message.assert_not_called()
         assert len(dispatcher._deferred_image_injections) == 1
-        assert dispatcher._deferred_image_injections[0]["base64"] == "abc"
+        assert dispatcher._deferred_image_injections[0]["base64"] == b64
         # flush 后才真正注入
         dispatcher.flush_deferred_images()
         engine.memory.add_image_message.assert_called_once_with(
-            base64_data="abc", mime_type="image/png", detail="auto",
+            base64_data=b64, mime_type="image/png", detail="auto",
         )
         assert len(dispatcher._deferred_image_injections) == 0
 

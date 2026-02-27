@@ -137,6 +137,8 @@ class SubagentExecutor:
         last_summary = ""
         success = True
         error: str | None = None
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
 
         client = create_client(
             api_key=config.api_key or self._parent_config.api_key,
@@ -166,6 +168,10 @@ class SubagentExecutor:
                     if tool_scope
                     else openai.NOT_GIVEN,
                 )
+                _usage = getattr(response, "usage", None)
+                if _usage is not None:
+                    total_prompt_tokens += getattr(_usage, "prompt_tokens", 0) or 0
+                    total_completion_tokens += getattr(_usage, "completion_tokens", 0) or 0
                 message = response.choices[0].message
                 message_tool_calls = getattr(message, "tool_calls", None)
                 if not message_tool_calls:
@@ -456,6 +462,8 @@ class SubagentExecutor:
             conversation_id=conversation_id,
             iterations=iterations,
             tool_calls_count=tool_calls,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
             error=error,
             pending_approval_id=pending_id,
             structured_changes=structured_changes,

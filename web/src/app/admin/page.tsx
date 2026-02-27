@@ -21,10 +21,13 @@ import {
   AlertCircle,
   CheckCircle,
   X,
+  Settings2,
+  LogIn,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -39,6 +42,7 @@ import {
   adminEnforceQuota,
   type AdminUser,
 } from "@/lib/auth-api";
+import LoginConfigTab from "@/components/admin/LoginConfigTab";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -530,6 +534,7 @@ export default function AdminPage() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [allModelNames, setAllModelNames] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<"users" | "login">("users");
   let toastIdRef = 0;
 
   const addToast = useCallback((type: "success" | "error", message: string) => {
@@ -666,28 +671,48 @@ export default function AdminPage() {
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="flex items-center gap-2">
-            <Users className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
-            <h1 className="text-lg font-semibold">用户管理</h1>
+            <Settings2 className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
+            <h1 className="text-lg font-semibold">管理中心</h1>
           </div>
           <div className="flex-1" />
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 text-xs"
-            onClick={loadUsers}
-            disabled={loading}
-          >
-            {loading ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3 w-3" />
-            )}
-            刷新
-          </Button>
+          {activeTab === "users" && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={loadUsers}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3" />
+              )}
+              刷新
+            </Button>
+          )}
         </div>
       </div>
 
       <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {/* Tab navigation */}
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "users" | "login")}>
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="users" className="gap-1.5 text-xs">
+              <Users className="h-3.5 w-3.5" />
+              用户管理
+            </TabsTrigger>
+            <TabsTrigger value="login" className="gap-1.5 text-xs">
+              <LogIn className="h-3.5 w-3.5" />
+              登录设置
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="login">
+            <LoginConfigTab />
+          </TabsContent>
+
+          <TabsContent value="users" className="space-y-6">
         {/* Stats cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="rounded-xl border border-border bg-card p-3">
@@ -805,6 +830,8 @@ export default function AdminPage() {
             ))}
           </div>
         )}
+          </TabsContent>
+        </Tabs>
       </div>
 
       {/* Toast notifications */}

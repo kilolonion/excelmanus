@@ -355,6 +355,11 @@ class ToolRegistry:
             max_length = schema.get("maxLength")
             if isinstance(max_length, int) and len(value) > max_length:
                 violations.append(f"{path}: 长度不能超过 {max_length}")
+            pattern = schema.get("pattern")
+            if isinstance(pattern, str) and pattern:
+                import re as _re
+                if not _re.search(pattern, value):
+                    violations.append(f"{path}: 不匹配 pattern {pattern!r}")
 
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             minimum = schema.get("minimum")

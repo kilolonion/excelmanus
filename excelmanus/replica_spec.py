@@ -83,6 +83,29 @@ class SemanticHints(BaseModel):
     formula_patterns: list[FormulaPattern] = Field(default_factory=list)
 
 
+class ConditionalFormatRule(BaseModel):
+    """条件格式规则（颜色刻度/数据条/图标集/单元格值）。"""
+
+    type: Literal["color_scale", "data_bar", "icon_set", "cell_value"]
+    range: str  # Excel 范围，如 "C2:C9"
+    # color_scale
+    min_color: str | None = None
+    mid_color: str | None = None
+    max_color: str | None = None
+    # data_bar
+    bar_color: str | None = None
+    # icon_set
+    icon_style: str | None = None  # "3_arrows" | "3_traffic_lights" 等
+    # cell_value
+    operator: str | None = None  # "greater_than" | "less_than" | "between" | "equal" | "not_equal"
+    value: Any = None
+    value2: Any = None  # 仅 between 时使用
+    font_color: str | None = None
+    fill_color: str | None = None
+    bold: bool | None = None
+    confidence: float = 0.7
+
+
 class ObjectsSpec(BaseModel):
     charts: list[Any] = Field(default_factory=list)
     images: list[Any] = Field(default_factory=list)
@@ -99,6 +122,7 @@ class SheetSpec(BaseModel):
     styles: dict[str, StyleClass] = Field(default_factory=dict)
     column_widths: list[float] = Field(default_factory=list)
     row_heights: dict[str, float] = Field(default_factory=dict)  # 行号字符串 → 行高
+    conditional_formats: list[ConditionalFormatRule] = Field(default_factory=list)
     objects: ObjectsSpec = Field(default_factory=ObjectsSpec)
     semantic_hints: SemanticHints = Field(default_factory=SemanticHints)
 

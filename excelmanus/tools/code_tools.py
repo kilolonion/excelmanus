@@ -1101,11 +1101,13 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="run_code",
             description=(
-                "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
-                "适用场景：所有数据写入、格式修改、跨表操作、批量计算。"
-                "必须：包含顶层 try/except（错误 print 到 stderr）；禁止 sys.exit()/exec()/eval()；"
+                "必须：代码包含顶层 try/except（错误 print 到 stderr）；禁止 sys.exit()/exec()/eval()；"
                 "写入后在 stdout 打印关键验证数据（行数、列名、抽样值）。"
+                "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
+                "适用场景：所有数据写入、格式修改、跨表操作、批量计算、任何需要 openpyxl/pandas 的操作。"
+                "不适用：简单数据查看（改用 read_excel）、简单筛选（改用 filter_data）。"
                 "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
+                "相关工具：write_text_file（先写脚本再用 script_path 执行）、read_excel（执行前了解数据结构）。"
             ),
             input_schema={
                 "type": "object",

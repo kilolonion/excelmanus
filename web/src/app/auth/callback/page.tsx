@@ -52,7 +52,8 @@ function CallbackHandler() {
       return;
     }
 
-    const providerHint = searchParams.get("provider");
+    const stateVal = searchParams.get("state") || "";
+    const providerHint = searchParams.get("provider") || stateVal.split(":")[0];
     let provider: "github" | "google" = "github";
     if (providerHint === "google") provider = "google";
 

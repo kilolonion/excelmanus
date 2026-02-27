@@ -243,6 +243,11 @@ class SkillRouter:
                 lexical_tags.append("plan_worthy")
             else:
                 lexical_tags.append("plan_not_needed")
+        # simple_read 推断：read_only 且无宽标签时自动追加，用于工具裁剪
+        _WIDE_TAGS = {"cross_sheet", "large_data", "image_replica"}
+        if classified_hint == "read_only" and not (set(lexical_tags) & _WIDE_TAGS):
+            if "simple_read" not in lexical_tags:
+                lexical_tags.append("simple_read")
         deduped_tags = tuple(dict.fromkeys(lexical_tags))
         return await self._build_all_tools_result(
             user_message=user_message,

@@ -1,10 +1,8 @@
 """FileRegistry：统一文件注册表 — 元数据 + provenance + 物理操作 + 路径解析。
 
-方案 B（重型替换）：统一收敛为文件管理的唯一外部接口。
-
-Phase 1: 核心数据模型 + 注册/查询/事件记录 + 路径解析 + panorama 构建。
-Phase 2: 全文件类型扫描 + uploads 接入 + engine/api 集成。
-Phase 3: Staging + CoW + checkpoint/rollback（组合 FVM，统一外部接口）。
+当前实现：核心数据模型、注册/查询/事件记录、路径解析、panorama 构建。
+目标为统一收敛为文件管理的唯一外部接口，后续可扩展全文件类型扫描、
+uploads 接入、Staging/CoW/checkpoint 等。
 """
 from __future__ import annotations
 

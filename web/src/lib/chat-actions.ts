@@ -6,7 +6,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
-import type { AssistantBlock, TaskItem, AttachedFile } from "@/lib/types";
+import type { AssistantBlock, TaskItem, AttachedFile, FileAttachment } from "@/lib/types";
 
 /** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
 function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
@@ -623,7 +623,8 @@ export async function sendMessage(
           }
 
           case "subagent_iteration": {
-            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
               if (b.type === "subagent" && b.status === "running") {
                 return {
                   ...b,
@@ -637,7 +638,8 @@ export async function sendMessage(
           }
 
           case "subagent_tool_start": {
-            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
               if (b.type !== "subagent" || b.status !== "running") return b;
               const args = (data.arguments as Record<string, unknown>) || {};
               const parts: string[] = [];
@@ -660,7 +662,8 @@ export async function sendMessage(
           }
 
           case "subagent_tool_end": {
-            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
               if (b.type !== "subagent") return b;
               const tools = [...(b.tools || [])];
               const toolName = (data.tool_name as string) || "";
@@ -681,7 +684,8 @@ export async function sendMessage(
           }
 
           case "subagent_summary": {
-            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,
@@ -696,7 +700,8 @@ export async function sendMessage(
           }
 
           case "subagent_end": {
-            S().updateBlockByType(assistantMsgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,
@@ -1368,7 +1373,8 @@ export async function sendContinuation(
           }
 
           case "subagent_iteration": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent" && b.status === "running") {
                 return {
                   ...b,
@@ -1382,7 +1388,8 @@ export async function sendContinuation(
           }
 
           case "subagent_tool_start": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type !== "subagent" || b.status !== "running") return b;
               const args = (data.arguments as Record<string, unknown>) || {};
               const parts: string[] = [];
@@ -1405,7 +1412,8 @@ export async function sendContinuation(
           }
 
           case "subagent_tool_end": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type !== "subagent") return b;
               const tools = [...(b.tools || [])];
               const toolName = (data.tool_name as string) || "";
@@ -1426,7 +1434,8 @@ export async function sendContinuation(
           }
 
           case "subagent_summary": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,
@@ -1441,7 +1450,8 @@ export async function sendContinuation(
           }
 
           case "subagent_end": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,
@@ -1801,6 +1811,7 @@ export async function rollbackAndResend(
   rollbackFiles: boolean,
   sessionId: string | null,
   files?: File[],
+  retainedFiles?: FileAttachment[],
 ) {
   const store = useChatStore.getState();
   if (store.isStreaming) return;
@@ -1837,12 +1848,20 @@ export async function rollbackAndResend(
   const truncated = messages.slice(0, msgIndex);
   store.setMessages(truncated);
 
-  // 预先上传文件（与 ChatInput 的 triggerUpload 相同），
+  // 为保留的原有附件创建合成 AttachedFile（已上传，无需重传）
+  const retainedAttached: AttachedFile[] = (retainedFiles ?? []).map((f, i) => ({
+    id: `retained-${Date.now()}-${i}`,
+    file: new File([], f.filename),
+    status: "success" as const,
+    uploadResult: { filename: f.filename, path: f.path, size: f.size },
+  }));
+
+  // 预先上传新文件（与 ChatInput 的 triggerUpload 相同），
   // 确保 sendMessage 收到带有 uploadResult 的正确 AttachedFile 对象。
-  let attached: AttachedFile[] | undefined;
+  let newAttached: AttachedFile[] = [];
   if (files && files.length > 0) {
     const { uploadFile } = await import("./api");
-    attached = await Promise.all(
+    newAttached = await Promise.all(
       files.map(async (f, i): Promise<AttachedFile> => {
         const id = `resend-${Date.now()}-${i}`;
         try {
@@ -1856,8 +1875,10 @@ export async function rollbackAndResend(
     );
   }
 
+  const allAttached = [...retainedAttached, ...newAttached];
+
   // sendMessage 会在前后端各添加用户消息 + 触发流式回复
-  await sendMessage(newContent, attached, effectiveSessionId);
+  await sendMessage(newContent, allAttached.length > 0 ? allAttached : undefined, effectiveSessionId);
 }
 
 /**
@@ -2321,7 +2342,8 @@ export async function subscribeToSession(sessionId: string) {
           }
 
           case "subagent_iteration": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent" && b.status === "running") {
                 return {
                   ...b,
@@ -2335,7 +2357,8 @@ export async function subscribeToSession(sessionId: string) {
           }
 
           case "subagent_tool_start": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type !== "subagent" || b.status !== "running") return b;
               const args = (data.arguments as Record<string, unknown>) || {};
               const parts: string[] = [];
@@ -2358,7 +2381,8 @@ export async function subscribeToSession(sessionId: string) {
           }
 
           case "subagent_tool_end": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type !== "subagent") return b;
               const tools = [...(b.tools || [])];
               const toolName = (data.tool_name as string) || "";
@@ -2379,7 +2403,8 @@ export async function subscribeToSession(sessionId: string) {
           }
 
           case "subagent_summary": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,
@@ -2394,7 +2419,8 @@ export async function subscribeToSession(sessionId: string) {
           }
 
           case "subagent_end": {
-            S().updateBlockByType(msgId, "subagent", (b) => {
+            const cid = (data.conversation_id as string) || null;
+            S().updateSubagentBlock(msgId, cid, (b) => {
               if (b.type === "subagent") {
                 return {
                   ...b,

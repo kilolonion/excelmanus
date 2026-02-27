@@ -1,4 +1,4 @@
-"""FileRegistry Phase 1 单元测试。
+"""FileRegistry 单元测试。
 
 覆盖：
 - FileEntry / FileEvent 数据模型
@@ -1099,6 +1099,20 @@ class TestVersionedRegistry:
 # ── System Prompt 统一 + 写后事件记录 ──────────────────────
 
 
+class _CowMappingFake:
+    """最小桩：仅提供 CoW 映射，供 _build_file_registry_notice 的 state.get_cow_mappings() 使用。"""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = dict(mapping)
+        self.has_versions = True
+
+    def register_cow_mapping(self, src_rel: str, dst_rel: str) -> None:
+        self._mapping[src_rel] = dst_rel
+
+    def get_cow_mappings(self) -> dict[str, str]:
+        return dict(self._mapping)
+
+
 class TestBuildFileRegistryNotice:
     """_build_file_registry_notice 统一测试。"""
 
@@ -1113,7 +1127,8 @@ class TestBuildFileRegistryNotice:
         engine.state = _state
         engine.file_registry = file_registry
         if registry:
-            _state.register_cow_mappings(registry)
+            # SessionState 的 get_cow_mappings() 仅从 state._file_registry 读取且要求 has_versions
+            _state._file_registry = _CowMappingFake(registry)
         builder = ContextBuilder(engine)
         return builder
 

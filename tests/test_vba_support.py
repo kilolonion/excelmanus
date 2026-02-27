@@ -1,4 +1,4 @@
-"""VBA 支持相关回归测试：P0 keep_vba、P1 VBA 查看、P1 guard 豁免。"""
+"""VBA 支持相关回归测试：keep_vba、VBA 信息提取与查看、guard 豁免。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from excelmanus.engine import (
 )
 
 
-# ── P0: write_excel keep_vba 修复验证 ──────────────────────
+# ── write_excel keep_vba ──────────────────────────────────────
 
 
 class TestWriteExcelKeepVba:
@@ -82,7 +82,7 @@ class TestWriteExcelKeepVba:
             assert parsed["status"] == "success"
 
 
-# ── P1: VBA 信息提取 ──────────────────────────────────────
+# ── VBA 信息提取 ─────────────────────────────────────────────
 
 
 class TestCollectVbaInfo:
@@ -141,7 +141,7 @@ class TestCollectVbaInfo:
         assert "vba" in _SCAN_FILES_DIMENSIONS
 
 
-# ── P1: VBA 用户请求检测 ──────────────────────────────────
+# ── VBA 用户请求检测 ─────────────────────────────────────────
 
 
 class TestUserRequestsVba:
@@ -183,7 +183,7 @@ class TestUserRequestsVba:
         assert _user_requests_vba(None) is False  # type: ignore[arg-type]
 
 
-# ── P1: _contains_formula_advice vba_exempt 参数 ──────────
+# ── _contains_formula_advice vba_exempt 参数 ─────────────────
 
 
 class TestContainsFormulaAdviceVbaExempt:
@@ -224,7 +224,7 @@ class TestContainsFormulaAdviceVbaExempt:
         assert _contains_formula_advice(text, vba_exempt=True) is False
 
 
-# ── P1: Engine 集成测试 — VBA 豁免 ────────────────────────
+# ── Engine 集成测试 — VBA 豁免 ──────────────────────────────
 
 
 class TestVbaExemptEngineIntegration:

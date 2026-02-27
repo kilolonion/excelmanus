@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any, Callable
 
 
 class TaskStatus(Enum):
@@ -97,11 +98,19 @@ class TaskList:
 
 
 class TaskStore:
-    """单会话任务清单存储。"""
+    """单会话任务清单存储。
 
-    def __init__(self) -> None:
+    支持可选的 on_change 回调，状态变更时自动触发持久化。
+    """
+
+    def __init__(
+        self,
+        *,
+        on_change: Callable[["TaskStore"], None] | None = None,
+    ) -> None:
         self._task_list: TaskList | None = None
         self._plan_file_path: str | None = None
+        self._on_change = on_change
 
     @property
     def plan_file_path(self) -> str | None:
@@ -146,6 +155,7 @@ class TaskStore:
             else:
                 items.append(TaskItem(title=str(entry)))
         self._task_list = TaskList(title=title, items=items)
+        self._notify_change()
         return self._task_list
 
     def update_item(
@@ -162,9 +172,46 @@ class TaskStore:
         item.transition(new_status)
         if result is not None:
             item.result = result
+        self._notify_change()
         return item
 
     def clear(self) -> None:
         """清除当前任务清单和关联的计划文档路径。"""
         self._task_list = None
         self._plan_file_path = None
+        self._notify_change()
+
+    def _notify_change(self) -> None:
+        """触发持久化回调（如已注册）。"""
+        if self._on_change is not None:
+            try:
+                self._on_change(self)
+            except Exception:  # noqa: BLE001
+                pass  # 持久化失败不影响内存操作
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化整个 TaskStore 状态为 dict。"""
+        result: dict[str, Any] = {
+            "plan_file_path": self._plan_file_path,
+        }
+        if self._task_list is not None:
+            result["task_list"] = self._task_list.to_dict()
+        return result
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        on_change: Callable[["TaskStore"], None] | None = None,
+    ) -> "TaskStore":
+        """从 dict 恢复 TaskStore 状态。"""
+        store = cls(on_change=on_change)
+        store._plan_file_path = data.get("plan_file_path")
+        tl_data = data.get("task_list")
+        if tl_data is not None and isinstance(tl_data, dict):
+            try:
+                store._task_list = TaskList.from_dict(tl_data)
+            except (KeyError, ValueError):
+                pass  # 损坏的数据不阻塞恢复
+        return store
