@@ -808,6 +808,23 @@ export async function uploadFile(file: File): Promise<{
   return res.json();
 }
 
+export async function uploadFileFromUrl(url: string): Promise<{
+  filename: string;
+  path: string;
+  size: number;
+}> {
+  const res = await fetch(buildApiUrl("/upload-from-url", { direct: true }), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `URL upload error: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── 工作区事务 API（原备份应用）────
 
 export interface BackupFile {

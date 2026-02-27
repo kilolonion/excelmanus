@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Bot,
   CheckCircle2,
@@ -166,8 +167,17 @@ export function SubagentBlock({
       </button>
 
       {/* ── Expanded content ── */}
-      {expanded && (
-        <div className="px-3 pb-2.5 pt-0 space-y-2">
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            key="subagent-content"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+            className="overflow-hidden"
+          >
+          <div className="px-3 pb-2.5 pt-0 space-y-2">
           {/* Reason — 可展开 */}
           {reason && (
             <div className="ml-1">
@@ -303,7 +313,9 @@ export function SubagentBlock({
             </div>
           )}
         </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

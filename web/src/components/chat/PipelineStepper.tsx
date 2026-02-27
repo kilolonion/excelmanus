@@ -206,9 +206,9 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                   transition-all duration-300 ease-out flex-shrink-0
                   ${
                     isCurrent
-                      ? "bg-[var(--em-primary)]/10 text-[var(--em-primary)] font-medium shadow-[0_0_0_1px_var(--em-primary)]/15"
+                      ? "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] font-medium shadow-[0_0_0_1px_var(--em-primary-alpha-15)]"
                       : isDone
-                        ? "text-[var(--em-primary)]/70"
+                        ? "text-[var(--em-primary)]"
                         : "text-muted-foreground/40"
                   }
                   ${isAnimating ? "animate-chip-enter" : ""}
@@ -218,7 +218,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                 <span
                   className={`flex-shrink-0 flex items-center justify-center rounded-full transition-all duration-300 ${
                     isCurrent
-                      ? "h-4.5 w-4.5 bg-[var(--em-primary)]/15"
+                      ? "h-4.5 w-4.5 bg-[var(--em-primary-alpha-15)]"
                       : "h-3.5 w-3.5"
                   }`}
                 >
@@ -243,7 +243,7 @@ export const PipelineStepper = React.memo(function PipelineStepper({
                 {/* 已用时间徽章 */}
                 {isCurrent && elapsed > 0 && (
                   <span
-                    className="text-[10px] leading-none opacity-60 tabular-nums bg-[var(--em-primary)]/8 px-1 py-0.5 rounded"
+                    className="text-[10px] leading-none opacity-60 tabular-nums bg-[var(--em-primary-alpha-06)] px-1 py-0.5 rounded"
                   >
                     {elapsed}s
                   </span>

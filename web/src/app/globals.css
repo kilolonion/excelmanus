@@ -880,6 +880,52 @@ button:active:not(:disabled),
   animation: chipEnter 0.35s ease-out;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .animate-chip-enter {
+    animation: none;
+  }
+}
+
+/* ── Empty State Float ── */
+@keyframes empty-float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-empty-float {
+  animation: empty-float 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-empty-float {
+    animation: none;
+  }
+}
+
+/* ── Diff Cell Highlight Fade-In ── */
+@keyframes diff-cell-in {
+  from {
+    background-color: transparent;
+  }
+}
+
+.diff-cell-animate {
+  animation: diff-cell-in 0.4s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diff-cell-animate {
+    animation: none;
+  }
+}
+
 /* Hide scrollbar utility */
 .scrollbar-none {
   scrollbar-width: none;
@@ -910,6 +956,12 @@ button:active:not(:disabled),
   color: var(--em-primary);
   font-weight: 300;
   margin-left: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor::after {
+    animation: none;
+  }
 }
 
 /* ── Chat Input Focus Ring ── */

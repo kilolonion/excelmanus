@@ -10,6 +10,7 @@ import { buildMergeMaps, type MergeSpan } from "./merge-utils";
 // ── 阈值 ────────────────────────────────────────────────
 const INLINE_THRESHOLD = 5;
 const VERTICAL_BREAKPOINT = 480;
+const GRID_VERTICAL_BREAKPOINT = 640;
 
 type DiffLayout = "horizontal" | "vertical";
 type DiffProfile = "all-added" | "all-deleted" | "mixed";
@@ -18,9 +19,10 @@ interface ExcelDiffTableProps {
   data: ExcelDiffEntry;
 }
 
-type ChangeType = "added" | "modified" | "deleted";
+type ChangeType = "added" | "modified" | "deleted" | "style";
 
-function classifyChange(change: { old: string | number | boolean | null; new: string | number | boolean | null }): ChangeType {
+function classifyChange(change: { old: string | number | boolean | null; new: string | number | boolean | null; styleOnly?: boolean }): ChangeType {
+  if (change.styleOnly) return "style";
   const oldEmpty = change.old == null || change.old === "";
   const newEmpty = change.new == null || change.new === "";
   if (oldEmpty && !newEmpty) return "added";
@@ -79,24 +81,28 @@ const CHANGE_INDICATOR: Record<ChangeType, string> = {
   added: "border-l-2 border-l-green-500 dark:border-l-green-600",
   modified: "border-l-2 border-l-amber-400 dark:border-l-amber-500",
   deleted: "border-l-2 border-l-red-400 dark:border-l-red-500",
+  style: "border-l-2 border-l-blue-400 dark:border-l-blue-500",
 };
 
 const CELL_BG: Record<ChangeType, string> = {
   added: "bg-green-50 dark:bg-green-950/30",
   modified: "bg-amber-50 dark:bg-amber-950/25",
   deleted: "bg-red-50 dark:bg-red-950/30",
+  style: "bg-blue-50 dark:bg-blue-950/25",
 };
 
 const CELL_BORDER: Record<ChangeType, string> = {
   added: "border border-green-200 dark:border-green-800/60",
   modified: "border border-amber-200 dark:border-amber-800/60",
   deleted: "border border-red-200 dark:border-red-800/60",
+  style: "border border-blue-200 dark:border-blue-800/60",
 };
 
 const CELL_RING: Record<ChangeType, string> = {
   added: "ring-2 ring-inset ring-green-400/50 dark:ring-green-500/40",
   modified: "ring-2 ring-inset ring-amber-400/50 dark:ring-amber-500/40",
   deleted: "ring-2 ring-inset ring-red-400/50 dark:ring-red-500/40",
+  style: "ring-2 ring-inset ring-blue-400/50 dark:ring-blue-500/40",
 };
 
 // ── 样式单元格渲染 ──────────────────────────────────────
@@ -140,8 +146,9 @@ function ChangeBadge({ type, size = "sm" }: { type: ChangeType; size?: "sm" | "x
     added: "bg-green-100 dark:bg-green-900/50 text-green-700 dark:text-green-300 border border-green-200/60 dark:border-green-700/40",
     modified: "bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-700/40",
     deleted: "bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300 border border-red-200/60 dark:border-red-700/40",
+    style: "bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 border border-blue-200/60 dark:border-blue-700/40",
   };
-  const labelMap: Record<ChangeType, string> = { added: "新增", modified: "修改", deleted: "删除" };
+  const labelMap: Record<ChangeType, string> = { added: "新增", modified: "修改", deleted: "删除", style: "样式" };
   return (
     <span className={`inline-flex items-center rounded-full font-medium leading-none ${cls} ${colorMap[type]}`}>
       {labelMap[type]}
@@ -156,10 +163,10 @@ function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
   return (
     <div className="overflow-x-auto max-h-[320px] overflow-y-auto text-[11px] leading-[1.6]" style={{ touchAction: "pan-x pan-y" }}>
       <div className="flex items-center bg-muted/60 border-b border-border text-[10px] text-muted-foreground font-medium sticky top-0 z-10 backdrop-blur-sm">
-        <span className="w-14 flex-shrink-0 px-1 text-center">Cell</span>
-        <span className="flex-1 px-2 text-center border-l border-border/40">Before</span>
+        <span className="w-14 flex-shrink-0 px-1 text-center">单元格</span>
+        <span className="flex-1 px-2 text-center border-l border-border/40">修改前</span>
         <span className="w-5 flex-shrink-0" />
-        <span className="flex-1 px-2 text-center border-l border-border/40">After</span>
+        <span className="flex-1 px-2 text-center border-l border-border/40">修改后</span>
       </div>
       {sorted.map((change, i) => {
         const type = classifyChange(change);
@@ -173,11 +180,11 @@ function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
             <span className="w-14 flex-shrink-0 px-1 text-center font-mono font-semibold text-muted-foreground/70 tabular-nums text-[10px]">
               {change.cell}
             </span>
-            <div className="flex-1 px-1.5 py-1 border-l border-border/20 bg-red-50/30 dark:bg-red-950/8">
+            <div className="flex-1 px-1.5 py-1 border-l border-border/20 bg-red-50/30 dark:bg-red-950/8 diff-cell-animate">
               <StyledCell value={change.old} style={change.oldStyle} isEmptySlot={type === "added"} />
             </div>
             <span className="w-5 flex-shrink-0 text-center text-muted-foreground/40 text-[10px]">→</span>
-            <div className="flex-1 px-1.5 py-1 border-l border-border/20 bg-green-50/30 dark:bg-green-950/8">
+            <div className="flex-1 px-1.5 py-1 border-l border-border/20 bg-green-50/30 dark:bg-green-950/8 diff-cell-animate">
               <StyledCell value={change.new} style={change.newStyle} isEmptySlot={type === "deleted"} />
             </div>
           </div>
@@ -207,14 +214,14 @@ function InlineVerticalView({ changes }: { changes: ExcelCellDiff[] }) {
               <ChangeBadge type={type} size="xs" />
             </div>
             {type !== "added" && (
-              <div className="flex items-center px-2.5 py-1 bg-red-50/30 dark:bg-red-950/8">
-                <span className="w-12 flex-shrink-0 text-[9px] text-red-500/70 dark:text-red-400/70 font-medium uppercase tracking-wider">Before</span>
+              <div className="flex items-center px-2.5 py-1 bg-red-50/30 dark:bg-red-950/8 diff-cell-animate">
+                <span className="w-12 flex-shrink-0 text-[9px] text-red-500/70 dark:text-red-400/70 font-medium tracking-wider">修改前</span>
                 <StyledCell value={change.old} style={change.oldStyle} className="max-w-none" />
               </div>
             )}
             {type !== "deleted" && (
-              <div className="flex items-center px-2.5 py-1 bg-green-50/30 dark:bg-green-950/8">
-                <span className="w-12 flex-shrink-0 text-[9px] text-green-600/70 dark:text-green-400/70 font-medium uppercase tracking-wider">After</span>
+              <div className="flex items-center px-2.5 py-1 bg-green-50/30 dark:bg-green-950/8 diff-cell-animate">
+                <span className="w-12 flex-shrink-0 text-[9px] text-green-600/70 dark:text-green-400/70 font-medium tracking-wider">修改后</span>
                 <StyledCell value={change.new} style={change.newStyle} className="max-w-none" />
               </div>
             )}
@@ -327,7 +334,7 @@ function GridHalfTable({
                 return (
                   <td
                     key={c}
-                    className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] ${
+                    className={`border-r border-b border-border/15 px-2 py-1 truncate max-w-[120px] diff-cell-animate ${
                       hasBg ? CELL_RING[cell.type] : `${CELL_BG[cell.type]} ${CELL_BORDER[cell.type]}`
                     } font-medium`}
                     style={css}
@@ -347,17 +354,9 @@ function GridHalfTable({
   );
 }
 
-/** 单表展示模式：全新增/全删除时只展示有意义的一侧 */
-function GridSingleView({
-  changes,
-  profile,
-  mergeRanges,
-}: {
-  changes: ExcelCellDiff[];
-  profile: "all-added" | "all-deleted";
-  mergeRanges?: MergeRange[];
-}) {
-  const { cols, rows, cellMap } = useMemo(() => {
+/** 共享 Grid 布局计算：从 changes 提取 cols/rows/cellMap */
+function useGridLayout(changes: ExcelCellDiff[]) {
+  return useMemo(() => {
     let minCol = Infinity, maxCol = 0, minRow = Infinity, maxRow = 0;
     const map = new Map<string, GridCell>();
     for (const c of changes) {
@@ -376,7 +375,7 @@ function GridSingleView({
         newStyle: c.newStyle,
       });
     }
-    if (minCol === Infinity) return { cols: [], rows: [], cellMap: map };
+    if (minCol === Infinity) return { cols: [] as number[], rows: [] as number[], cellMap: map };
     const cappedMaxRow = Math.min(maxRow, minRow + 49);
     const cappedMaxCol = Math.min(maxCol, minCol + 25);
     const colArr: number[] = [];
@@ -385,6 +384,19 @@ function GridSingleView({
     for (let r = minRow; r <= cappedMaxRow; r++) rowArr.push(r);
     return { cols: colArr, rows: rowArr, cellMap: map };
   }, [changes]);
+}
+
+/** 单表展示模式：全新增/全删除时只展示有意义的一侧 */
+function GridSingleView({
+  changes,
+  profile,
+  mergeRanges,
+}: {
+  changes: ExcelCellDiff[];
+  profile: "all-added" | "all-deleted";
+  mergeRanges?: MergeRange[];
+}) {
+  const { cols, rows, cellMap } = useGridLayout(changes);
 
   const side = profile === "all-added" ? "after" as const : "before" as const;
   const label = profile === "all-added" ? "写入内容" : "删除内容";
@@ -410,7 +422,7 @@ function GridSingleView({
               ? "bg-green-200/60 dark:bg-green-800/40 text-green-700 dark:text-green-300"
               : "bg-red-200/60 dark:bg-red-800/40 text-red-700 dark:text-red-300"
           }`}>
-            {changes.length} cells
+            {changes.length} 个单元格
           </span>
         }
       />
@@ -424,34 +436,7 @@ function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }:
     return <GridSingleView changes={changes} profile={profile} mergeRanges={profile === "all-deleted" ? oldMergeRanges : mergeRanges} />;
   }
 
-  const { cols, rows, cellMap } = useMemo(() => {
-    let minCol = Infinity, maxCol = 0, minRow = Infinity, maxRow = 0;
-    const map = new Map<string, GridCell>();
-    for (const c of changes) {
-      const ref = c.cell.toUpperCase();
-      const parsed = parseCellRef(ref);
-      if (!parsed) continue;
-      minCol = Math.min(minCol, parsed.col);
-      maxCol = Math.max(maxCol, parsed.col);
-      minRow = Math.min(minRow, parsed.row);
-      maxRow = Math.max(maxRow, parsed.row);
-      map.set(ref, {
-        type: classifyChange(c),
-        oldVal: c.old,
-        newVal: c.new,
-        oldStyle: c.oldStyle,
-        newStyle: c.newStyle,
-      });
-    }
-    if (minCol === Infinity) return { cols: [], rows: [], cellMap: map };
-    const cappedMaxRow = Math.min(maxRow, minRow + 49);
-    const cappedMaxCol = Math.min(maxCol, minCol + 25);
-    const colArr: number[] = [];
-    for (let c = minCol; c <= cappedMaxCol; c++) colArr.push(c);
-    const rowArr: number[] = [];
-    for (let r = minRow; r <= cappedMaxRow; r++) rowArr.push(r);
-    return { cols: colArr, rows: rowArr, cellMap: map };
-  }, [changes]);
+  const { cols, rows, cellMap } = useGridLayout(changes);
 
   const { masterMap: oldMMap, hiddenSet: oldHSet } = useMemo(
     () => buildMergeMaps(oldMergeRanges),
@@ -471,12 +456,12 @@ function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }:
       }`}
       style={{ touchAction: "pan-x pan-y" }}
     >
-      <GridHalfTable label="Before" side="before" cols={cols} rows={rows} cellMap={cellMap} masterMap={oldMMap} hiddenSet={oldHSet} />
+      <GridHalfTable label="修改前" side="before" cols={cols} rows={rows} cellMap={cellMap} masterMap={oldMMap} hiddenSet={oldHSet} />
       <div className={isVertical
         ? "h-px bg-border/60 flex-shrink-0"
         : "w-px bg-border/60 flex-shrink-0"
       } />
-      <GridHalfTable label="After" side="after" cols={cols} rows={rows} cellMap={cellMap} masterMap={newMMap} hiddenSet={newHSet} />
+      <GridHalfTable label="修改后" side="after" cols={cols} rows={rows} cellMap={cellMap} masterMap={newMMap} hiddenSet={newHSet} />
     </div>
   );
 }
@@ -512,7 +497,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
     openPanel(data.filePath, data.sheet);
   };
 
-  const counts = { added: 0, modified: 0, deleted: 0 };
+  const counts = { added: 0, modified: 0, deleted: 0, style: 0 };
   for (const change of data.changes) {
     counts[classifyChange(change)]++;
   }
@@ -522,10 +507,6 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
     counts.added === total ? "all-added"
     : counts.deleted === total ? "all-deleted"
     : "mixed";
-
-  const layout: DiffLayout = containerWidth > 0 && containerWidth < VERTICAL_BREAKPOINT
-    ? "vertical"
-    : "horizontal";
 
   const useInline = useMemo(() => {
     const n = data.changes.length;
@@ -544,6 +525,11 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
     if (area / n > GRID_DENSITY_THRESHOLD) return true;
     return false;
   }, [data.changes]);
+
+  const breakpoint = useInline ? VERTICAL_BREAKPOINT : GRID_VERTICAL_BREAKPOINT;
+  const layout: DiffLayout = containerWidth > 0 && containerWidth < breakpoint
+    ? "vertical"
+    : "horizontal";
 
   // Header 变更类型图标
   const HeaderIcon = profile === "all-added" ? Plus
@@ -570,12 +556,18 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
           <span className="text-[9px] text-muted-foreground/50 flex-shrink-0 font-mono">({data.affectedRange})</span>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <span className="text-[10px] tabular-nums font-medium">
-            {(counts.added + counts.modified) > 0 && (
-              <span className="text-green-600 dark:text-green-400">+{counts.added + counts.modified}</span>
+          <span className="text-[10px] tabular-nums font-medium flex items-center gap-1">
+            {counts.added > 0 && (
+              <span className="text-green-600 dark:text-green-400">+{counts.added}</span>
             )}
-            {(counts.deleted + counts.modified) > 0 && (
-              <span className="text-red-500 dark:text-red-400 ml-1">−{counts.deleted + counts.modified}</span>
+            {counts.modified > 0 && (
+              <span className="text-amber-600 dark:text-amber-400">~{counts.modified}</span>
+            )}
+            {counts.deleted > 0 && (
+              <span className="text-red-500 dark:text-red-400">−{counts.deleted}</span>
+            )}
+            {counts.style > 0 && (
+              <span className="text-blue-500 dark:text-blue-400">✦{counts.style}</span>
             )}
           </span>
           <button
@@ -614,6 +606,12 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
           <span className="flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400" />
             {counts.deleted} 删除
+          </span>
+        )}
+        {counts.style > 0 && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 dark:bg-blue-400" />
+            {counts.style} 样式
           </span>
         )}
         {profile === "mixed" && (

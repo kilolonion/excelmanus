@@ -26,6 +26,7 @@ import { PipelineStepper } from "./PipelineStepper";
 import { baseMarkdownComponents } from "./MarkdownComponents";
 import { MessageActions } from "./MessageActions";
 import { VlmPipelineCard } from "./VlmPipelineCard";
+import VerificationCard from "./VerificationCard";
 import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -413,7 +414,12 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
   if (validFiles.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-border/30">
+    <motion.div
+      className="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-border/30"
+      initial="hidden"
+      animate="show"
+      variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05, delayChildren: 0.1 } } }}
+    >
       <FileSpreadsheet
         className="h-3 w-3 text-muted-foreground flex-shrink-0"
       />
@@ -421,9 +427,10 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
       {validFiles.map((filePath) => {
         const filename = filePath.split("/").pop() || filePath;
         return (
-          <span
+          <motion.span
             key={filePath}
             className="inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
+            variants={{ hidden: { opacity: 0, scale: 0.8 }, show: { opacity: 1, scale: 1, transition: { duration: 0.2, ease: "easeOut" } } }}
           >
             <button
               type="button"
@@ -446,23 +453,34 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
             >
               <Download className="h-3 w-3" />
             </button>
-          </span>
+          </motion.span>
         );
       })}
-    </div>
+    </motion.div>
   );
 }
 
-function IterationDivider({ iteration }: { iteration: number; isActive?: boolean }) {
+function IterationDivider({ iteration }: { iteration: number }) {
   return (
     <div className="flex items-center gap-2 my-3 text-xs">
-      <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--em-primary-alpha-06)] border border-[var(--em-primary-alpha-15)]">
+      <motion.div
+        className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--em-primary-alpha-06)] border border-[var(--em-primary-alpha-15)]"
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.25, ease: "easeOut" }}
+      >
         <Repeat className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
         <span className="font-medium" style={{ color: "var(--em-primary)" }}>
           第 {iteration} 轮迭代
         </span>
-      </div>
-      <div className="flex-1 border-t border-[var(--em-primary-alpha-15)]" />
+      </motion.div>
+      <motion.div
+        className="flex-1 border-t border-[var(--em-primary-alpha-15)]"
+        initial={{ scaleX: 0 }}
+        animate={{ scaleX: 1 }}
+        transition={{ duration: 0.35, ease: [0.4, 0, 0.2, 1], delay: 0.1 }}
+        style={{ transformOrigin: "left" }}
+      />
     </div>
   );
 }
@@ -539,10 +557,7 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <TaskList items={block.items} />;
     case "iteration":
       return (
-        <IterationDivider
-          iteration={block.iteration}
-          isActive={isStreamingText !== undefined && blockIndex === (isStreamingText ? -1 : blockIndex)}
-        />
+        <IterationDivider iteration={block.iteration} />
       );
     case "status": {
       const isStopped = block.label === "对话已停止";
@@ -606,6 +621,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <MemoryExtractedBlock block={block} />;
     case "file_download":
       return <FileDownloadCard block={block} />;
+    case "verification_report":
+      return <VerificationCard verdict={block.verdict} confidence={block.confidence} checks={block.checks} issues={block.issues} mode={block.mode} />;
     default:
       return null;
   }
@@ -676,7 +693,12 @@ function MemoryExtractedBlock({
   const hasMore = block.entries.length > 3;
 
   return (
-    <div className="my-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 overflow-hidden">
+    <motion.div
+      className="my-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 overflow-hidden"
+      initial={{ opacity: 0, x: -16 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
+    >
       <div className="flex items-center gap-2 px-3 py-2">
         <Brain className="h-4 w-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
         <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
@@ -719,7 +741,7 @@ function MemoryExtractedBlock({
           </div>
         ))}
       </div>
-    </div>
+    </motion.div>
   );
 }
 

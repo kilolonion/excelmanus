@@ -316,13 +316,6 @@ function VlmTimelineNode({
 }
 
 function UncertaintySummary({ phases }: { phases: VlmPhaseEntry[] }) {
-  const totalUncertainties = phases.reduce((acc, p) => {
-    const changes = p.diff?.changes ?? [];
-    // 若有 diff 摘要文本则从中计数
-    return acc;
-  }, 0);
-
-  // 无有效数据时不显示
   if (phases.length === 0) return null;
 
   // 从最后一阶段的 diff 摘要中提取不确定数量

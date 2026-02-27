@@ -273,7 +273,10 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   }, [toolCallId, canHaveTextDiff, allTextDiffs]);
 
   // 按文件去重获取涉及的文件路径
-  const diffFilePaths = Array.from(new Set(diffs.map((d) => d.filePath).filter(Boolean)));
+  const diffFilePaths = useMemo(
+    () => Array.from(new Set(diffs.map((d) => d.filePath).filter(Boolean))),
+    [diffs],
+  );
   const hasPendingBackup = diffFilePaths.some((fp) =>
     pendingBackups.some((b) => b.original_path === fp)
   );
@@ -462,7 +465,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
                   ) : (
                     <>
                       <Upload className="h-3 w-3" />
-                      Apply 到原文件
+                      应用到原文件
                     </>
                   )}
                 </button>
