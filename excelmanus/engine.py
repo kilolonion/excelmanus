@@ -53,6 +53,7 @@ from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
 from excelmanus.engine_core.llm_caller import LLMCaller
+from excelmanus.engine_core.skill_resolver import SkillResolver
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
@@ -523,6 +524,7 @@ class AgentEngine:
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
         self._llm_caller = LLMCaller(self)
+        self._skill_resolver = SkillResolver(self)
 
     @staticmethod
     def _infer_vision_capable(config: "ExcelManusConfig") -> bool:
@@ -2134,384 +2136,76 @@ class AgentEngine:
 
         return chat_result
 
+    # ── Skill 解析与 Hook 管理（委托到 SkillResolver）──────────
+
     @staticmethod
     def _normalize_skill_command_name(name: str) -> str:
-        """命令名归一化：小写并移除连字符/下划线。"""
-        return name.strip().lower().replace("-", "").replace("_", "")
+        return SkillResolver.normalize_skill_command_name(name)
 
     @staticmethod
     def _iter_slash_command_lines(user_message: str) -> list[str]:
-        """提取消息中所有可能的斜杠命令片段（支持命令出现在句中）。"""
-        text = user_message.strip()
-        if not text:
-            return []
-        command_lines: list[str] = []
-        for idx, char in enumerate(text):
-            if char != "/":
-                continue
-            if idx > 0 and not text[idx - 1].isspace():
-                continue
-            command_line = text[idx + 1 :].strip()
-            if command_line:
-                command_lines.append(command_line)
-        return command_lines
+        return SkillResolver.iter_slash_command_lines(user_message)
 
-    def _resolve_skill_from_command_line(
-        self,
-        command_line: str,
-        *,
-        skill_names: Sequence[str],
-    ) -> tuple[str, str] | None:
-        """解析单个命令片段，返回 (skill_name, raw_args)。"""
-        lower_to_name = {name.lower(): name for name in skill_names}
-        command_line_lower = command_line.lower()
-
-        # 1) 精确匹配（含命名空间）
-        exact = lower_to_name.get(command_line_lower)
-        if exact is not None:
-            return exact, ""
-
-        # 2) 前缀匹配（/skill_name 后跟参数）
-        for candidate in sorted(skill_names, key=len, reverse=True):
-            lower_candidate = candidate.lower()
-            if command_line_lower == lower_candidate:
-                return candidate, ""
-            if command_line_lower.startswith(lower_candidate + " "):
-                raw_args = command_line[len(candidate) :].strip()
-                return candidate, raw_args
-
-        command_token, _, raw_tail = command_line.partition(" ")
-
-        # 先尝试已注册技能匹配，之后再按路径输入兜底排除，避免误伤命名空间技能。
-        if "/" in command_token and "." in command_token:
-            return None
-
-        # 3) 无分隔符归一兜底匹配（兼容旧命令）
-        normalized_cmd = self._normalize_skill_command_name(command_token)
-        normalized_matches = [
-            name
-            for name in skill_names
-            if self._normalize_skill_command_name(name) == normalized_cmd
-        ]
-        if len(normalized_matches) == 1:
-            return normalized_matches[0], raw_tail.strip()
-        return None
+    def _resolve_skill_from_command_line(self, command_line: str, *, skill_names: Sequence[str]) -> tuple[str, str] | None:
+        return self._skill_resolver.resolve_skill_from_command_line(command_line, skill_names=skill_names)
 
     def _resolve_skill_command_with_args(self, user_message: str) -> tuple[str, str] | None:
-        """解析消息中的手动 Skill 命令并返回 (skill_name, raw_args)。"""
-        skill_names = self._list_manual_invocable_skill_names()
-        if not skill_names:
-            return None
-        for command_line in self._iter_slash_command_lines(user_message):
-            resolved = self._resolve_skill_from_command_line(
-                command_line,
-                skill_names=skill_names,
-            )
-            if resolved is not None:
-                return resolved
-        return None
+        return self._skill_resolver.resolve_skill_command_with_args(user_message)
 
     def _list_loaded_skill_names(self) -> list[str]:
-        """获取当前可匹配的 Skill 名称；为空时尝试主动加载。"""
-        if self._skill_router is None:
-            return []
-        skillpacks = self._skill_router._loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = self._skill_router._loader.load_all()
-        return list(skillpacks.keys())
+        return self._skill_resolver.list_loaded_skill_names()
 
     def _get_loaded_skillpacks(self) -> dict | None:
-        """获取运行时已加载的 Skillpack 对象字典，供预路由 catalog 构建使用。"""
-        if self._skill_router is None:
-            return None
-        skillpacks = self._skill_router._loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = self._skill_router._loader.load_all()
-        return skillpacks or None
+        return self._skill_resolver.get_loaded_skillpacks()
 
     def _list_manual_invocable_skill_names(self) -> list[str]:
-        """获取可手动调用的技能名（user_invocable=true）。"""
-        if self._skillpack_manager is not None:
-            rows = self._skillpack_manager.list_skillpacks()
-            return [
-                str(item["name"])
-                for item in rows
-                if bool(item.get("user_invocable", True))
-            ]
-        if self._skill_router is None:
-            return []
-        skillpacks = self._skill_router._loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = self._skill_router._loader.load_all()
-        names: list[str] = []
-        for name, skill in skillpacks.items():
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if bool(getattr(skill, "user_invocable", True)):
-                names.append(name)
-        return names
+        return self._skill_resolver.list_manual_invocable_skill_names()
 
     def resolve_skill_command(self, user_message: str) -> str | None:
-        """将消息中的 `/skill_name ...` 解析为 Skill 名称（用于手动调用）。"""
-        resolved = self._resolve_skill_command_with_args(user_message)
-        if resolved is None:
-            return None
-        return resolved[0]
+        return self._skill_resolver.resolve_skill_command(user_message)
 
     @staticmethod
     def _normalize_skill_name(name: str) -> str:
-        """归一化技能名：小写、去除连字符和下划线，与 router 保持一致。"""
-        return name.strip().lower().replace("-", "").replace("_", "")
+        return SkillResolver.normalize_skill_name(name)
 
     def _blocked_skillpacks(self) -> set[str] | None:
-        """返回当前会话被限制的技能包集合。"""
-        if self._full_access_enabled:
-            return None
-        return set(self._restricted_code_skillpacks)
+        return self._skill_resolver.blocked_skillpacks()
 
     def _get_loaded_skill(self, name: str) -> Skillpack | None:
-        if self._skill_router is None:
-            return None
-        loader = self._skill_router._loader
-        skill = loader.get_skillpack(name)
-        if skill is not None:
-            return skill
-        skillpacks = loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = loader.load_all()
-        return skillpacks.get(name)
+        return self._skill_resolver.get_loaded_skill(name)
 
     def _pick_route_skill(self, route_result: SkillMatchResult | None) -> Skillpack | None:
-        if self._active_skills:
-            return self._active_skills[-1]
-        if route_result is None or not route_result.skills_used:
-            return None
-        return self._get_loaded_skill(route_result.skills_used[0])
+        return self._skill_resolver.pick_route_skill(route_result)
 
     @property
     def _primary_skill(self) -> Skillpack | None:
-        """当前主 skill（列表末尾），无激活时返回 None。"""
-        return self._active_skills[-1] if self._active_skills else None
+        return self._skill_resolver.primary_skill
 
     @staticmethod
     def _normalize_skill_agent_name(agent_name: str | None) -> str | None:
-        if not agent_name:
-            return None
-        normalized = agent_name.strip()
-        if not normalized:
-            return None
-        lowered = normalized.lower()
-        return _SKILL_AGENT_ALIASES.get(lowered, normalized)
+        return SkillResolver.normalize_skill_agent_name(agent_name)
 
     def _push_hook_context(self, text: str) -> None:
-        normalized = text.strip()
-        if not normalized:
-            return
-        self._transient_hook_contexts.append(normalized)
+        self._skill_resolver.push_hook_context(text)
 
     @staticmethod
     def _merge_hook_reasons(current: str, extra: str) -> str:
-        parts = [part.strip() for part in (current, extra) if str(part).strip()]
-        return " | ".join(parts)
+        return SkillResolver.merge_hook_reasons(current, extra)
 
-    def _normalize_hook_decision_scope(
-        self,
-        *,
-        event: HookEvent,
-        hook_result: HookResult,
-    ) -> HookResult:
-        if hook_result.decision != HookDecision.ASK or event == HookEvent.PRE_TOOL_USE:
-            return hook_result
-        reason = self._merge_hook_reasons(
-            hook_result.reason,
-            f"事件 {event.value} 不支持 ASK，已降级为 CONTINUE",
-        )
-        logger.warning("Hook ASK 降级：event=%s reason=%s", event.value, reason)
-        return HookResult(
-            decision=HookDecision.CONTINUE,
-            reason=reason,
-            updated_input=hook_result.updated_input,
-            additional_context=hook_result.additional_context,
-            agent_action=hook_result.agent_action,
-            raw_output=dict(hook_result.raw_output),
-        )
+    def _normalize_hook_decision_scope(self, *, event: HookEvent, hook_result: HookResult) -> HookResult:
+        return self._skill_resolver.normalize_hook_decision_scope(event=event, hook_result=hook_result)
 
-    def _apply_hook_agent_failure(
-        self,
-        *,
-        hook_result: HookResult,
-        action: HookAgentAction,
-        message: str,
-    ) -> HookResult:
-        decision = hook_result.decision
-        if action.on_failure == "deny":
-            decision = HookDecision.DENY
-        reason = self._merge_hook_reasons(hook_result.reason, message)
-        return HookResult(
-            decision=decision,
-            reason=reason,
-            updated_input=hook_result.updated_input,
-            additional_context=hook_result.additional_context,
-            agent_action=hook_result.agent_action,
-            raw_output=dict(hook_result.raw_output),
-        )
+    def _apply_hook_agent_failure(self, *, hook_result: HookResult, action: HookAgentAction, message: str) -> HookResult:
+        return self._skill_resolver.apply_hook_agent_failure(hook_result=hook_result, action=action, message=message)
 
-    async def _apply_hook_agent_action(
-        self,
-        *,
-        event: HookEvent,
-        hook_result: HookResult,
-        on_event: EventCallback | None,
-    ) -> HookResult:
-        action = hook_result.agent_action
-        if action is None:
-            return hook_result
+    async def _apply_hook_agent_action(self, *, event: HookEvent, hook_result: HookResult, on_event: EventCallback | None) -> HookResult:
+        return await self._skill_resolver.apply_hook_agent_action(event=event, hook_result=hook_result, on_event=on_event)
 
-        task_text = action.task.strip()
-        if not task_text:
-            return hook_result
+    async def _resolve_hook_result(self, *, event: HookEvent, hook_result: HookResult | None, on_event: EventCallback | None) -> HookResult | None:
+        return await self._skill_resolver.resolve_hook_result(event=event, hook_result=hook_result, on_event=on_event)
 
-        if self._hook_agent_action_depth > 0:
-            message = "agent hook 递归触发已被跳过"
-            logger.warning("Hook agent action 递归保护触发：event=%s", event.value)
-            return self._apply_hook_agent_failure(
-                hook_result=hook_result,
-                action=action,
-                message=message,
-            )
-
-        picked_agent = self._normalize_skill_agent_name(action.agent_name)
-        if not picked_agent:
-            picked_agent = await self._auto_select_subagent(
-                task=task_text,
-                file_paths=[],
-            )
-        picked_agent = self._normalize_skill_agent_name(picked_agent) or "subagent"
-
-        logger.info(
-            "执行 hook agent action：event=%s agent=%s",
-            event.value,
-            picked_agent,
-        )
-        self._hook_agent_action_depth += 1
-        try:
-            sub_result = await self.run_subagent(
-                agent_name=picked_agent,
-                prompt=task_text,
-                on_event=on_event,
-            )
-        except Exception as exc:  # noqa: BLE001
-            message = f"agent hook 执行异常（{picked_agent}）：{exc}"
-            logger.warning(message)
-            return self._apply_hook_agent_failure(
-                hook_result=hook_result,
-                action=action,
-                message=message,
-            )
-        finally:
-            self._hook_agent_action_depth -= 1
-
-        if not sub_result.success:
-            message = f"agent hook 执行失败（{picked_agent}）：{sub_result.summary}"
-            logger.warning(message)
-            return self._apply_hook_agent_failure(
-                hook_result=hook_result,
-                action=action,
-                message=message,
-            )
-
-        summary = (sub_result.summary or "").strip()
-        additional_context = hook_result.additional_context
-        if action.inject_summary_as_context and summary:
-            injected = f"[Hook Agent:{picked_agent}] {summary}"
-            additional_context = (
-                f"{additional_context}\n{injected}"
-                if additional_context
-                else injected
-            )
-        return HookResult(
-            decision=hook_result.decision,
-            reason=hook_result.reason,
-            updated_input=hook_result.updated_input,
-            additional_context=additional_context,
-            agent_action=hook_result.agent_action,
-            raw_output=dict(hook_result.raw_output),
-        )
-
-    async def _resolve_hook_result(
-        self,
-        *,
-        event: HookEvent,
-        hook_result: HookResult | None,
-        on_event: EventCallback | None,
-    ) -> HookResult | None:
-        if hook_result is None:
-            return None
-        normalized = self._normalize_hook_decision_scope(
-            event=event,
-            hook_result=hook_result,
-        )
-        resolved = await self._apply_hook_agent_action(
-            event=event,
-            hook_result=normalized,
-            on_event=on_event,
-        )
-
-        before = (normalized.additional_context or "").strip()
-        after = (resolved.additional_context or "").strip()
-        if after:
-            if before and after.startswith(before):
-                delta = after[len(before) :].strip()
-                if delta:
-                    self._push_hook_context(delta)
-            elif after != before:
-                self._push_hook_context(after)
-        return resolved
-
-    def _run_skill_hook(
-        self,
-        *,
-        skill: Skillpack | None,
-        event: HookEvent,
-        payload: dict[str, Any],
-        tool_name: str = "",
-    ):
-        if skill is None:
-            return None
-
-        def _invoke(target_event: HookEvent, target_payload: dict[str, Any]):
-            context = HookCallContext(
-                event=target_event,
-                skill_name=skill.name,
-                payload=target_payload,
-                tool_name=tool_name,
-                full_access_enabled=self._full_access_enabled,
-            )
-            hook_result = self._hook_runner.run(skill=skill, context=context)
-            if hook_result.additional_context:
-                self._push_hook_context(hook_result.additional_context)
-            return self._normalize_hook_decision_scope(
-                event=target_event,
-                hook_result=hook_result,
-            )
-
-        if event == HookEvent.SESSION_START:
-            self._hook_started_skills.add(skill.name)
-            return _invoke(event, payload)
-
-        if skill.name not in self._hook_started_skills:
-            start_result = _invoke(
-                HookEvent.SESSION_START,
-                {"trigger_event": event.value, **payload},
-            )
-            self._hook_started_skills.add(skill.name)
-            if start_result is not None and start_result.decision == HookDecision.DENY:
-                return start_result
-
-        result = _invoke(event, payload)
-        if event in {HookEvent.STOP, HookEvent.SESSION_END}:
-            self._hook_started_skills.discard(skill.name)
-        return result
+    def _run_skill_hook(self, *, skill: Skillpack | None, event: HookEvent, payload: dict[str, Any], tool_name: str = ""):
+        return self._skill_resolver.run_skill_hook(skill=skill, event=event, payload=payload, tool_name=tool_name)
 
     def _build_meta_tools(self) -> list[dict[str, Any]]:
         """构建 LLM-Native 元工具定义。
