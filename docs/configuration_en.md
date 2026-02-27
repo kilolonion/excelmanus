@@ -7,8 +7,8 @@ Priority: Environment variables > `.env` > Default values.
 | Environment Variable | Description | Default |
 |---|---|---|
 | `EXCELMANUS_API_KEY` | LLM API Key (required) | — |
-| `EXCELMANUS_BASE_URL` | LLM API endpoint (required; can be inherited from the first entry of `EXCELMANUS_MODELS`) | — |
-| `EXCELMANUS_MODEL` | Model name (required; can be inherited from the first entry of `EXCELMANUS_MODELS`; Gemini can be auto-extracted from BASE_URL) | — |
+| `EXCELMANUS_BASE_URL` | LLM API endpoint (required) | — |
+| `EXCELMANUS_MODEL` | Model name (required; Gemini can be auto-extracted from BASE_URL) | — |
 | `EXCELMANUS_MAX_ITERATIONS` | Maximum agent iteration rounds | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | Consecutive failure circuit-breaker threshold | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API session idle timeout (seconds) | `1800` |
@@ -34,7 +34,7 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS` | Discover `.agents/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS` | Discover external tool directories | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | Extra scan directories (comma-separated) | empty |
-| `EXCELMANUS_MODELS` | Switchable model profiles (JSON array, used by `/model`) | empty |
+| `EXCELMANUS_AUX_ENABLED` | AUX master switch (`false` to fall back to main model even if AUX is configured) | `true` |
 | `EXCELMANUS_AUX_API_KEY` | AUX API Key (routing + subagent default model + window advisor) | — |
 | `EXCELMANUS_AUX_BASE_URL` | AUX Base URL (falls back to main config if not set) | — |
 | `EXCELMANUS_AUX_MODEL` | AUX model name (falls back to main model if not set) | — |
@@ -49,6 +49,9 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_AUX_MODEL` | Auxiliary model (routing + subagent default model + window advisor model) | — |
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | Subagent maximum iteration rounds | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | Subagent consecutive failure circuit-breaker threshold | `6` |
+| `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | Single subagent execution timeout (seconds) | `600` |
+| `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | Maximum parallel subagent concurrency | `3` |
+| `EXCELMANUS_PARALLEL_READONLY_TOOLS` | Concurrent execution of adjacent read-only tools in the same turn | `true` |
 | `EXCELMANUS_SUBAGENT_USER_DIR` | User-level subagent directory | `~/.excelmanus/agents` |
 | `EXCELMANUS_SUBAGENT_PROJECT_DIR` | Project-level subagent directory | `<workspace_root>/.excelmanus/agents` |
 
@@ -91,7 +94,9 @@ When the conversation exceeds the threshold, the auxiliary model compresses earl
 
 ## Multi-Model & AUX Model
 
-- `/model <name>` switches the main conversation model (profile from `EXCELMANUS_MODELS`).
+> **Note**: The `EXCELMANUS_MODELS` environment variable is deprecated. Multi-model profiles have been migrated to database management via the Web settings page or `/model` command. On first launch, if this env var exists it will be auto-migrated to the database.
+
+- `/model <name>` switches the main conversation model.
 - When `EXCELMANUS_AUX_MODEL` is not set, the routing and window advisor models follow `/model` switching.
 - When `EXCELMANUS_AUX_MODEL` is set, routing + subagent default model + window advisor model all use AUX, unaffected by `/model`.
 
@@ -149,6 +154,10 @@ Supports image recognition and vision-enhanced descriptions. VLM model can be co
 | `EXCELMANUS_VLM_IMAGE_MAX_LONG_EDGE` | Image long edge limit (px) | `2048` |
 | `EXCELMANUS_VLM_IMAGE_JPEG_QUALITY` | JPEG compression quality | `92` |
 | `EXCELMANUS_VLM_ENHANCE` | VLM enhanced description master switch | `true` |
+| `EXCELMANUS_VLM_MAX_TOKENS` | VLM maximum output tokens | `16384` |
+| `EXCELMANUS_VLM_PIPELINE_UNCERTAINTY_THRESHOLD` | Progressive pipeline uncertainty item threshold (pauses when exceeded) | `5` |
+| `EXCELMANUS_VLM_PIPELINE_UNCERTAINTY_CONFIDENCE_FLOOR` | Pauses when any item falls below this confidence | `0.3` |
+| `EXCELMANUS_VLM_PIPELINE_CHUNK_CELL_THRESHOLD` | Partitioned extraction when estimated cells exceed this value | `500` |
 | `EXCELMANUS_MAIN_MODEL_VISION` | Main model vision capability (`auto`/`true`/`false`) | `auto` |
 
 ## Backup Sandbox Configuration
@@ -196,6 +205,7 @@ Provides semantic search capabilities for persistent memory and file manifests. 
 | `EXCELMANUS_MEMORY_ENABLED` | Global memory switch | `true` |
 | `EXCELMANUS_MEMORY_DIR` | Memory directory | `~/.excelmanus/memory` |
 | `EXCELMANUS_MEMORY_AUTO_LOAD_LINES` | Auto-load line count | `200` |
+| `EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL` | Background silent memory extraction every N turns (0 = disabled) | `15` |
 
 Topic files: `file_patterns.md`, `user_prefs.md`, `error_solutions.md`, `general.md`.
 The core file `MEMORY.md` is synced to topic files on save, used for automatic loading at session startup.
@@ -227,3 +237,102 @@ MCP security scanning:
 - Local: `scripts/security/scan_secrets.sh`
 - pre-commit: Built-in hook in `.pre-commit-config.yaml`
 - CI: `.github/workflows/security-secrets.yml`
+
+## Unified Database
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_DB_PATH` | SQLite database path (chat history, memory, vectors, approvals all stored here) | `~/.excelmanus/excelmanus.db` |
+| `EXCELMANUS_DATABASE_URL` | PostgreSQL connection URL (takes priority over `DB_PATH` when set) | empty |
+
+## Chat History Persistence
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_CHAT_HISTORY_ENABLED` | Enable chat history persistence | `true` |
+
+## Text Reply Guard Mode
+
+Controls whether the Agent is intercepted and forced to continue execution when it "only replies with text without performing operations."
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_GUARD_MODE` | `off` (default, completely disables execution guard and write gate) / `soft` (retains guard but downgrades to diagnostic events only) | `off` |
+
+## Tool Parameter Schema Validation
+
+Performs JSON Schema-level validation on tool call parameters returned by the LLM, with three modes.
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE` | `off` (disabled) / `shadow` (log only, no blocking) / `enforce` (block and return error) | `off` |
+| `EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT` | `enforce` mode canary percentage (0~100), 100 = full rollout | `100` |
+| `EXCELMANUS_TOOL_SCHEMA_STRICT_PATH` | Strict path policy: path parameters must be relative and forbid `..` | `false` |
+
+## Turn Checkpoint
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_CHECKPOINT_ENABLED` | Auto-snapshot modified files after each tool call turn, supporting per-turn rollback | `false` |
+
+## Docker Sandbox
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_DOCKER_SANDBOX` | Enable Docker sandbox isolation (requires pre-built image) | `false` |
+
+## Thinking (Reasoning Depth)
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_THINKING_EFFORT` | Reasoning depth level (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`) | `medium` |
+| `EXCELMANUS_THINKING_BUDGET` | Exact token budget (overrides effort calculation when > 0) | `0` |
+
+## OpenAI Responses API
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_USE_RESPONSES_API` | Set to `1` to enable Responses API (`/responses` endpoint), only effective for non-Gemini/Claude OpenAI-compatible URLs | `0` |
+
+## Authentication & Multi-User
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_AUTH_ENABLED` | Enable authentication middleware (forces all API requests to carry JWT token) | `false` |
+| `EXCELMANUS_SESSION_ISOLATION` | Session user isolation (requires auth to be enabled first; admin can enable at runtime via API) | `false` |
+| `EXCELMANUS_JWT_SECRET` | JWT signing secret (auto-generated on each restart if empty; must be fixed in production) | Auto-generated |
+
+### OAuth Login (Optional)
+
+Requires creating an OAuth App on the corresponding platform.
+
+| Environment Variable | Description |
+|---|---|
+| `EXCELMANUS_GITHUB_CLIENT_ID` | GitHub OAuth Client ID |
+| `EXCELMANUS_GITHUB_CLIENT_SECRET` | GitHub OAuth Client Secret |
+| `EXCELMANUS_GITHUB_REDIRECT_URI` | GitHub OAuth callback URL |
+| `EXCELMANUS_GOOGLE_CLIENT_ID` | Google OAuth Client ID |
+| `EXCELMANUS_GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret |
+| `EXCELMANUS_GOOGLE_REDIRECT_URI` | Google OAuth callback URL |
+| `EXCELMANUS_OAUTH_PROXY` | OAuth proxy (needed for China servers to access Google) |
+
+### Email Verification (Optional)
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_EMAIL_VERIFY_REQUIRED` | Require email verification on registration | `false` |
+| `EXCELMANUS_EMAIL_FROM` | Sender display name + address | `ExcelManus <no-reply@yourdomain.com>` |
+| `EXCELMANUS_RESEND_API_KEY` | Resend API Key (method 1, recommended) | — |
+| `EXCELMANUS_SMTP_HOST` | SMTP server (method 2) | — |
+| `EXCELMANUS_SMTP_PORT` | SMTP port (465 = SSL, 587 = STARTTLS) | — |
+| `EXCELMANUS_SMTP_USER` | SMTP username | — |
+| `EXCELMANUS_SMTP_PASSWORD` | SMTP password | — |
+
+## Workspace Quota
+
+Recommended for public-facing deployments to prevent a single user from consuming excessive resources.
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_WORKSPACE_MAX_SIZE_MB` | Maximum storage per user workspace (MB); uploads rejected when exceeded | `100` |
+| `EXCELMANUS_WORKSPACE_MAX_FILES` | Maximum files per user workspace; oldest files auto-deleted when exceeded | `5` |
