@@ -1,0 +1,139 @@
+# ==============================
+# 敏感文件 / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+mcp.json
+*.pem
+client_secret*.json
+server.crt
+server.key
+id_new_server.pem.pub
+*.pem.pub
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+*.cover
+
+# ==============================
+# IDE / 编辑器 / AI 工具配置
+# ==============================
+.vscode/
+.idea/
+.cursor/
+.claude/
+.kiro/
+.windsurf/
+.codex/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==============================
+# 虚拟环境
+# ==============================
+.venv/
+
+# ==============================
+# 项目运行产物
+# ==============================
+.excelmanus/
+outputs/
+uploads/
+logs/
+.worktrees/
+
+# ==============================
+# 临时 / 生成文件
+# ==============================
+*.png
+!docs/images/*.png
+!assets/*.png
+image/RELEASE_*/
+*.csv
+*.xlsx
+*.log
+.tmp/
+你好.md
+
+# ==============================
+# 内部开发文档与任务
+# ==============================
+tasks/
+dev-docs/
+docs/plans/
+docs/research/
+docs/audit_*.md
+docs/agent-architecture-review.md
+RELEASE_*.md
+!README.md
+!README_EN.md
+
+# ==============================
+# 锁文件
+# ==============================
+uv.lock
+
+# ==============================
+# Benchmark 数据与脚本
+# ==============================
+bench/
+scripts/
+!scripts/
+scripts/*
+!scripts/__init__.py
+!scripts/migrate_skills_to_standard.py
+!scripts/security/
+scripts/security/*
+!scripts/security/scan_secrets.sh
+
+# ==============================
+# 测试报告
+# ==============================
+test_report/
+
+# ==============================
+# 用户数据
+# ==============================
+users/
+
+# ==============================
+# 外部工具仓库
+# ==============================
+gemini-cli/
+windsurf-*
+
+# ==============================
+# Web 前端构建产物
+# ==============================
+web/node_modules/
+web/.next/
+web/.env.local
+
+# ==============================
+# 部署产物
+# ==============================
+deploy/.deploy.lock
+deploy/.deploy_logs/
+deploy/.deploy_history
+deploy/.env.deploy
+
