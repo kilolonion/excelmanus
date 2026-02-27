@@ -3091,6 +3091,68 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")
 
+    # ── CSV 快捷路径 ──────────────────────────────────────
+    if os.path.splitext(resolved)[1].lower() == ".csv":
+        try:
+            import csv as _csv
+
+            # 自动检测编码
+            _enc = "utf-8"
+            for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
+                try:
+                    with open(resolved, "r", encoding=_try_enc) as _f:
+                        _f.read(4096)
+                    _enc = _try_enc
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+
+            with open(resolved, "r", encoding=_enc, newline="") as _f:
+                reader = _csv.reader(_f)
+                all_rows_raw: list[list[str]] = []
+                for row in reader:
+                    all_rows_raw.append(row)
+                    if len(all_rows_raw) > max_rows + 1:
+                        break
+
+            total_rows = len(all_rows_raw)
+            total_cols = max((len(r) for r in all_rows_raw), default=0)
+            headers = all_rows_raw[0] if all_rows_raw else []
+            col_letters = [chr(65 + i) if i < 26 else f"A{chr(65 + i - 26)}" for i in range(min(total_cols, 100))]
+            data_rows = all_rows_raw[1: min(max_rows + 1, total_rows)]
+            # 将纯数字字符串转换为数字
+            converted_rows: list[list[Any]] = []
+            for dr in data_rows:
+                conv: list[Any] = []
+                for v in dr:
+                    if v == "":
+                        conv.append(None)
+                    else:
+                        try:
+                            conv.append(int(v))
+                        except ValueError:
+                            try:
+                                conv.append(float(v))
+                            except ValueError:
+                                conv.append(v)
+                converted_rows.append(conv)
+
+            snap_csv: dict[str, Any] = {
+                "file": os.path.basename(resolved),
+                "sheet": "Sheet1",
+                "sheets": ["Sheet1"],
+                "shape": {"rows": total_rows, "columns": total_cols},
+                "column_letters": col_letters,
+                "headers": headers,
+                "rows": converted_rows,
+                "total_rows": total_rows,
+                "truncated": total_rows > max_rows + 1,
+            }
+            return JSONResponse(content=snap_csv)
+        except Exception as exc:
+            logger.error("CSV snapshot 生成失败: %s", exc, exc_info=True)
+            return _error_json_response(500, f"读取文件失败: {exc}")
+
     try:
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
