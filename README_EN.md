@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" width="280" alt="ExcelManus" />
+  <img src="assets/logo.png" width="380" alt="ExcelManus" />
 </p>
 
 <h3 align="center">AI Agent that operates Excel with natural language</h3>
@@ -85,6 +85,21 @@ excelmanus            # CLI mode
 excelmanus-api        # Web UI + REST API
 ```
 
+Or use the one-click start script (launches backend + frontend together):
+
+```bash
+./deploy/start.sh                    # macOS / Linux dev mode
+./deploy/start.sh --prod             # Production mode
+./deploy/start.sh --backend-port 9000  # Custom port
+```
+
+Windows users:
+
+```powershell
+.\deploy\start.ps1                   # PowerShell
+deploy\start.bat                     # CMD
+```
+
 **Try it out:**
 
 ```
@@ -125,6 +140,10 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 Built on Next.js + Univer.js, providing a full visual experience.
 
 ```bash
+# Option 1: One-click start (recommended)
+./deploy/start.sh
+
+# Option 2: Start separately
 excelmanus-api                          # Backend
 cd web && npm install && npm run dev    # Frontend
 ```
@@ -221,6 +240,25 @@ Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse prox
 
 For BT Panel / bare metal scenarios without Docker, see [Ops Manual](docs/ops-manual.md).
 
+### One-Click Start (Local Development)
+
+```bash
+# macOS / Linux
+./deploy/start.sh              # Dev mode
+./deploy/start.sh --prod       # Production mode (npm run start)
+./deploy/start.sh --workers 4  # Multi-worker
+
+# Windows PowerShell
+.\deploy\start.ps1 -Production
+
+# Windows CMD
+deploy\start.bat --prod
+```
+
+Supports `--backend-port`, `--frontend-port`, `--log-dir`, `--backend-only`, `--frontend-only` and more. See `./deploy/start.sh --help` for details.
+
+Scripts auto-detect OS (macOS / Linux / Windows) and on Linux identify apt / dnf / yum / pacman package managers with install hints.
+
 ### Remote Update
 
 ```bash
@@ -229,7 +267,7 @@ For BT Panel / bare metal scenarios without Docker, see [Ops Manual](docs/ops-ma
 ./deploy/deploy.sh --frontend-only  # Frontend only
 ```
 
-> Automatically excludes `.env`, `data/`, `workspace/` — won't overwrite server data.
+> Automatically excludes `.env`, `data/`, `workspace/` — won't overwrite server data. Works on macOS and Linux.
 
 ## 👥 Multi-User
 
@@ -255,6 +293,16 @@ python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 ## 📖 Configuration Reference
 
 Quick start needs only 3 environment variables. Full configuration (window perception, security policies, Subagent, MCP, VLM, Embedding, etc.) in [Configuration](docs/configuration_en.md).
+
+## 🖥️ Platform Support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| **macOS** | ✅ Full support | Primary dev platform |
+| **Linux** | ✅ Full support | Ubuntu / Debian / CentOS / Fedora / Arch etc. |
+| **Windows** | ✅ Full support | PowerShell 5.1+ or CMD, requires Python + Node.js |
+
+Start scripts auto-detect OS and package manager, providing precise install commands when dependencies are missing.
 
 ## 🛠️ Development
 
