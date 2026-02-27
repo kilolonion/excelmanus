@@ -10,7 +10,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 const ModelTab = lazy(() => import("./ModelTab").then(m => ({ default: m.ModelTab })));
@@ -154,11 +153,6 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={settingsOpen} onOpenChange={handleOpenChange}>
-      <DialogTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openSettings("model")}>
-          <Settings className="h-4 w-4" />
-        </Button>
-      </DialogTrigger>
       <DialogContent showCloseButton={false} className="!grid-none !flex !flex-col max-w-none sm:max-w-2xl h-[100dvh] sm:h-[70vh] sm:max-h-[85vh] p-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
         <DialogHeader className="px-4 pt-4 pb-0 sm:px-6 sm:pt-6 flex-shrink-0 flex-row items-center">
           <DialogTitle className="flex items-center gap-2 flex-1">

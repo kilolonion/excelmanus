@@ -304,7 +304,17 @@ ExcelManusDeployTool.exe    ← 双击即可
 
 > 该工具为纯 C# 编译的单文件 exe，基于 .NET Framework 4.0（Windows 内置），零外部依赖。源码位于 `deploy/ExcelManusSetup.cs`，可通过 `deploy/build_exe.bat` 重新编译。
 
-### Docker Compose（推荐）
+### Docker 部署（推荐）
+
+镜像已发布到 Docker Hub，支持 **amd64**（Intel/AMD）和 **arm64**（Apple Silicon / AWS Graviton）双架构，`docker pull` 时自动匹配：
+
+```bash
+docker pull kilol/excelmanus-api:1.6.4       # 后端 API
+docker pull kilol/excelmanus-sandbox:1.6.4   # 代码沙盒（可选）
+docker pull kilol/excelmanus-web:1.6.4       # 前端 Web
+```
+
+#### Docker Compose 一键启动
 
 ```bash
 cp .env.example .env                      # 编辑 API Key、模型等
@@ -312,6 +322,20 @@ docker compose -f deploy/docker-compose.yml up -d   # 后端 + 前端 + PostgreS
 ```
 
 访问 `http://localhost:3000`。加 `--profile production` 启用 Nginx 反向代理后访问 `http://localhost`。
+
+#### 多平台镜像构建
+
+如需自行构建多架构镜像：
+
+```bash
+# Linux / macOS
+./deploy/build_multiarch.sh --push
+
+# Windows
+deploy\build_multiarch.bat --push
+```
+
+默认构建 `linux/amd64` + `linux/arm64`，可通过环境变量 `REGISTRY`、`PLATFORMS` 自定义。
 
 ### 手动部署
 

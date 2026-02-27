@@ -22,7 +22,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # ---------- 配置 ----------
 REGISTRY="${REGISTRY:-excelmanus}"
 VERSION="${VERSION:-$(grep -oP 'version\s*=\s*"\K[^"]+' "$PROJECT_ROOT/pyproject.toml")}"
-PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64,linux/arm/v7}"
+PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER_NAME="excelmanus-multiarch"
 
 # ---------- 参数解析 ----------

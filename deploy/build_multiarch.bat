@@ -33,7 +33,7 @@ if errorlevel 1 (
 
 :: ---------- Defaults ----------
 if "%REGISTRY%"=="" set "REGISTRY=excelmanus"
-if "%PLATFORMS%"=="" set "PLATFORMS=linux/amd64,linux/arm64,linux/arm/v7"
+if "%PLATFORMS%"=="" set "PLATFORMS=linux/amd64,linux/arm64"
 
 :: Read version from pyproject.toml
 if "%VERSION%"=="" (
