@@ -233,6 +233,62 @@ class ContextBuilder:
 
         return "## 进展反思\n" + "\n".join(parts)
 
+    def _build_explorer_report_notice(self) -> str:
+        """将已缓存的 explorer 结构化报告格式化为 system prompt 注入文本。
+
+        仅在 session_state 中存在 explorer_reports 时注入。
+        输出紧凑摘要（文件/sheet 概览 + 关键发现），控制 token 开销。
+        """
+        e = self._engine
+        state = getattr(e, "_state", None)
+        if state is None:
+            return ""
+        reports: list[dict[str, Any]] = state.explorer_reports
+        if not reports:
+            return ""
+
+        # 只取最近一份报告（最相关）
+        report = reports[-1]
+        parts: list[str] = ["## 数据探索概况"]
+
+        summary = report.get("summary", "")
+        if summary:
+            parts.append(summary)
+
+        # 文件/Sheet 概览
+        files = report.get("files", [])
+        if files:
+            file_lines: list[str] = []
+            for f in files[:5]:  # 最多展示 5 个文件
+                path = f.get("path", "?")
+                sheets = f.get("sheets", [])
+                if sheets:
+                    sheet_descs = [
+                        f"{s.get('name', '?')}({s.get('rows', '?')}×{s.get('cols', '?')})"
+                        for s in sheets[:8]  # 最多 8 个 sheet
+                    ]
+                    file_lines.append(f"- `{path}`: {', '.join(sheet_descs)}")
+                else:
+                    file_lines.append(f"- `{path}`")
+            parts.append("文件概览：\n" + "\n".join(file_lines))
+
+        # 关键发现（仅 high/medium severity）
+        findings = report.get("findings", [])
+        important = [
+            f for f in findings
+            if f.get("severity") in ("high", "medium")
+        ]
+        if important:
+            finding_lines = [f"- [{f.get('type', '?')}] {f.get('detail', '')}" for f in important[:5]]
+            parts.append("关键发现：\n" + "\n".join(finding_lines))
+
+        # 建议
+        rec = report.get("recommendation", "")
+        if rec:
+            parts.append(f"建议：{rec}")
+
+        return "\n\n".join(parts)
+
     @staticmethod
     def _compute_reasoning_level_static(route_result: Any) -> str:
         """根据任务上下文计算推荐推理级别。"""
@@ -376,6 +432,11 @@ class ContextBuilder:
         if meta_cognition:
             base_prompt = base_prompt + "\n\n" + meta_cognition
 
+        # R6: 注入已缓存的 explorer 结构化报告摘要
+        explorer_notice = self._build_explorer_report_notice()
+        if explorer_notice:
+            base_prompt = base_prompt + "\n\n" + explorer_notice
+
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
         current_skill_contexts = [
@@ -402,6 +463,8 @@ class ContextBuilder:
             _snapshot_components["hook_context"] = _hook_context_captured
         if task_plan_notice:
             _snapshot_components["task_plan_notice"] = task_plan_notice
+        if explorer_notice:
+            _snapshot_components["explorer_report_notice"] = explorer_notice
         if window_perception_context:
             _snapshot_components["window_perception_context"] = window_perception_context
         for idx, ctx in enumerate(current_skill_contexts):

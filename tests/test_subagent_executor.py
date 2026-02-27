@@ -188,7 +188,8 @@ def _registry_with_tools(tmp_path: Path) -> ToolRegistry:
 
 
 @pytest.mark.asyncio
-async def test_readonly_blocks_high_risk_tool(tmp_path: Path) -> None:
+async def test_readonly_blocks_tool_not_in_allowed_list(tmp_path: Path) -> None:
+    """readOnly 模式下，工具不在 allowed_tools 且不在 READ_ONLY_SAFE_TOOLS 中时应被拒绝。"""
     config = _make_config(tmp_path)
     registry = _registry_with_tools(tmp_path)
     approval = ApprovalManager(str(tmp_path))
@@ -197,10 +198,11 @@ async def test_readonly_blocks_high_risk_tool(tmp_path: Path) -> None:
         parent_registry=registry,
         approval_manager=approval,
     )
+    # allowed_tools 为空——仅依赖 readOnly 策略
     sub_cfg = SubagentConfig(
         name="explorer",
         description="只读测试",
-        allowed_tools=["write_text_file"],
+        allowed_tools=[],
         permission_mode="readOnly",
         max_iterations=2,
         max_consecutive_failures=1,
@@ -814,8 +816,12 @@ async def test_on_event_callback_error_does_not_interrupt_run(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
-    """Batch 3: write_cells 已删除，改用 copy_file 测试 readOnly 拦截。"""
+async def test_readonly_allows_explicitly_whitelisted_tool(tmp_path: Path) -> None:
+    """readOnly 模式下，allowed_tools 显式白名单中的工具应被允许执行。
+
+    这是 explorer 使用 run_code 的基础：子代理定义者显式把工具放入
+    allowed_tools 表示有意授权，readOnly 策略不应阻止。
+    """
     config = _make_config(tmp_path)
     registry = _registry_with_tools(tmp_path)
     approval = ApprovalManager(str(tmp_path))
@@ -826,7 +832,7 @@ async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
     )
     sub_cfg = SubagentConfig(
         name="explorer",
-        description="只读模式写入拦截测试",
+        description="显式白名单测试",
         allowed_tools=["copy_file"],
         permission_mode="readOnly",
         max_iterations=2,
@@ -856,10 +862,10 @@ async def test_readonly_blocks_write_cells_tool(tmp_path: Path) -> None:
     with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
         result = await executor.run(config=sub_cfg, prompt="复制文件")
 
-    assert result.success is False
-    assert result.error is not None
-    assert "只读模式仅允许白名单工具" in result.error
-    assert "copy_file" in result.error
+    # 工具在 allowed_tools 中，readOnly 不应阻止
+    # （实际执行可能因其他原因失败，但不是因为 readOnly 拦截）
+    if result.error:
+        assert "只读模式仅允许白名单工具" not in result.error
 
 
 @pytest.mark.asyncio

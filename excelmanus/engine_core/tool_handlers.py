@@ -243,10 +243,20 @@ class DelegationHandler(BaseToolHandler):
 class FinishTaskHandler(BaseToolHandler):
     """处理 finish_task 工具调用。"""
 
-    # 需要 blocking verifier 的 task_tags 集合
-    _BLOCKING_VERIFIER_TAGS: frozenset[str] = frozenset({
-        "cross_sheet", "large_data",
-    })
+    # ── 分级验证强度 ──────────────────────────────────────
+    # skip:     不触发 verifier
+    # advisory: verifier 结果仅追加提示，不阻塞 finish
+    # blocking: verifier fail+high 阻塞 finish，支持 fix-verify 循环
+    _VERIFIER_LEVEL_BY_TAG: dict[str, str] = {
+        "cross_sheet": "blocking",
+        "large_data": "blocking",
+        "formula": "blocking",
+        "multi_file": "blocking",
+        "simple": "advisory",
+    }
+    _DEFAULT_VERIFIER_LEVEL: str = "advisory"
+    # blocking 模式最大重试次数（之后降为 advisory）
+    _MAX_BLOCKING_ATTEMPTS: int = 2
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "finish_task"
@@ -310,6 +320,26 @@ class FinishTaskHandler(BaseToolHandler):
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=success, finish_accepted=finish_accepted)
 
+    def _resolve_verifier_level(
+        self, task_tags: tuple[str, ...], has_write: bool, write_hint: str,
+    ) -> str:
+        """根据 task_tags 和写入状态决定验证级别。
+
+        Returns: "skip" | "advisory" | "blocking"
+        """
+        # 无写入 + read_only hint → 跳过
+        if not has_write and write_hint == "read_only":
+            return "skip"
+
+        # 从 tag 映射中取最高级别
+        level = self._DEFAULT_VERIFIER_LEVEL
+        for tag in task_tags:
+            tag_level = self._VERIFIER_LEVEL_BY_TAG.get(tag)
+            if tag_level == "blocking":
+                level = "blocking"
+                break  # blocking 已是最高级别
+        return level
+
     async def _run_verifier_if_needed(
         self,
         engine: Any,
@@ -330,15 +360,22 @@ class FinishTaskHandler(BaseToolHandler):
         if last_route is not None:
             task_tags = tuple(getattr(last_route, "task_tags", ()) or ())
 
-        needs_blocking = bool(self._BLOCKING_VERIFIER_TAGS & set(task_tags))
+        has_write = getattr(engine, "_has_write_tool_call", False)
+        write_hint = getattr(engine, "_current_write_hint", "unknown")
+        level = self._resolve_verifier_level(task_tags, has_write, write_hint)
+
+        if level == "skip":
+            return None
+
         attempt_count = getattr(engine, "_verification_attempt_count", 0)
 
-        if needs_blocking and attempt_count < 1:
+        if level == "blocking" and attempt_count < self._MAX_BLOCKING_ATTEMPTS:
             engine._verification_attempt_count = attempt_count + 1
             return await engine._run_finish_verifier_advisory(
                 report=report, summary=summary, on_event=on_event, blocking=True,
             )
         else:
+            # blocking 超过最大重试次数 → 降为 advisory
             return await engine._run_finish_verifier_advisory(
                 report=report, summary=summary, on_event=on_event, blocking=False,
             )

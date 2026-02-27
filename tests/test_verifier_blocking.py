@@ -129,11 +129,33 @@ class TestFinishTaskVerifierIntegration:
         assert call_kwargs["blocking"] is True
 
     @pytest.mark.asyncio
-    async def test_second_finish_skips_blocking(self, _handler):
-        """verification_attempt_count >= 1 时降为 advisory，不再 blocking。"""
+    async def test_second_attempt_still_blocking(self, _handler):
+        """verification_attempt_count=1 < MAX_BLOCKING_ATTEMPTS(2) → 仍 blocking。"""
         engine = _make_engine(
             task_tags=("cross_sheet",),
             verification_attempt_count=1,
+        )
+        _handler._engine = engine
+
+        engine._run_finish_verifier_advisory = AsyncMock(
+            return_value="BLOCK:⚠️ 验证未通过：数据不完整。请修正后再次调用 finish_task。"
+        )
+
+        result = await _handler.handle(
+            "finish_task", "tc1", {"summary": "done"},
+            tool_scope=[], on_event=None, iteration=1, route_result=None,
+        )
+
+        assert result.finish_accepted is False
+        call_kwargs = engine._run_finish_verifier_advisory.call_args.kwargs
+        assert call_kwargs["blocking"] is True
+
+    @pytest.mark.asyncio
+    async def test_third_attempt_downgrades_to_advisory(self, _handler):
+        """verification_attempt_count >= MAX_BLOCKING_ATTEMPTS(2) → 降为 advisory。"""
+        engine = _make_engine(
+            task_tags=("cross_sheet",),
+            verification_attempt_count=2,
         )
         _handler._engine = engine
 
@@ -147,7 +169,6 @@ class TestFinishTaskVerifierIntegration:
         )
 
         assert result.finish_accepted is True
-        # 确认 blocking=False
         call_kwargs = engine._run_finish_verifier_advisory.call_args.kwargs
         assert call_kwargs["blocking"] is False
 
@@ -199,6 +220,8 @@ class TestVerifierAdvisoryBlockingMode:
         engine._build_parent_context_summary.return_value = ""
         engine._context_builder = MagicMock()
         engine._context_builder._build_task_list_status_notice.return_value = ""
+        engine._state.render_write_operations_log.return_value = ""
+        engine._state.write_operations_log = []
 
         vr = _make_verifier_result(
             verdict="fail", confidence="high", issues=["输出文件不存在"],
@@ -229,6 +252,8 @@ class TestVerifierAdvisoryBlockingMode:
         engine._build_parent_context_summary.return_value = ""
         engine._context_builder = MagicMock()
         engine._context_builder._build_task_list_status_notice.return_value = ""
+        engine._state.render_write_operations_log.return_value = ""
+        engine._state.write_operations_log = []
 
         vr = _make_verifier_result(
             verdict="fail", confidence="medium", issues=["可能缺少数据"],
@@ -258,6 +283,8 @@ class TestVerifierAdvisoryBlockingMode:
         engine._build_parent_context_summary.return_value = ""
         engine._context_builder = MagicMock()
         engine._context_builder._build_task_list_status_notice.return_value = ""
+        engine._state.render_write_operations_log.return_value = ""
+        engine._state.write_operations_log = []
 
         vr = _make_verifier_result(
             verdict="fail", confidence="high", issues=["数据不完整"],

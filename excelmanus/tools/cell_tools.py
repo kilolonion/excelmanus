@@ -156,14 +156,26 @@ def _compute_cell_diff(
     for cell_ref in all_cells:
         old_val = before_map.get(cell_ref)
         new_val = after_map.get(cell_ref)
+        old_s = before_style_map.get(cell_ref)
+        new_s = after_style_map.get(cell_ref)
         if old_val != new_val:
             entry: dict[str, Any] = {
                 "cell": cell_ref,
                 "old": _serialize_cell_value(old_val),
                 "new": _serialize_cell_value(new_val),
             }
-            old_s = before_style_map.get(cell_ref)
-            new_s = after_style_map.get(cell_ref)
+            if old_s is not None:
+                entry["old_style"] = old_s
+            if new_s is not None:
+                entry["new_style"] = new_s
+            changes.append(entry)
+        elif old_s != new_s and (old_s is not None or new_s is not None):
+            entry = {
+                "cell": cell_ref,
+                "old": _serialize_cell_value(old_val),
+                "new": _serialize_cell_value(new_val),
+                "style_only": True,
+            }
             if old_s is not None:
                 entry["old_style"] = old_s
             if new_s is not None:

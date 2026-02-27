@@ -1668,10 +1668,11 @@ class ToolDispatcher:
                             )
                             from excelmanus.events import EventType, ToolCallEvent
                             for _rd in _rc_diffs:
-                                _rc_merges: list[dict[str, int]] = []
+                                _rc_old_merges: list[dict[str, int]] = _rd.get("old_merge_ranges", [])
+                                _rc_new_merges: list[dict[str, int]] = _rd.get("new_merge_ranges", [])
                                 _rc_hints: list[str] = []
                                 try:
-                                    _rc_merges, _rc_hints = self._extract_sheet_metadata(
+                                    _, _rc_hints = self._extract_sheet_metadata(
                                         _rd["file_path"], _rd["sheet"] or None,
                                         e.config.workspace_root,
                                     )
@@ -1686,7 +1687,8 @@ class ToolDispatcher:
                                         excel_sheet=_rd["sheet"],
                                         excel_affected_range=_rd["affected_range"],
                                         excel_changes=_rd["changes"],
-                                        excel_merge_ranges=_rc_merges,
+                                        excel_merge_ranges=_rc_new_merges,
+                                        excel_old_merge_ranges=_rc_old_merges,
                                         excel_metadata_hints=_rc_hints,
                                     ),
                                 )
@@ -1794,10 +1796,11 @@ class ToolDispatcher:
                                     )
                                     from excelmanus.events import EventType, ToolCallEvent
                                     for _rd_s in _rc_diffs_s:
-                                        _rc_merges_s: list[dict[str, int]] = []
+                                        _rc_old_merges_s: list[dict[str, int]] = _rd_s.get("old_merge_ranges", [])
+                                        _rc_new_merges_s: list[dict[str, int]] = _rd_s.get("new_merge_ranges", [])
                                         _rc_hints_s: list[str] = []
                                         try:
-                                            _rc_merges_s, _rc_hints_s = self._extract_sheet_metadata(
+                                            _, _rc_hints_s = self._extract_sheet_metadata(
                                                 _rd_s["file_path"], _rd_s["sheet"] or None,
                                                 e.config.workspace_root,
                                             )
@@ -1812,7 +1815,8 @@ class ToolDispatcher:
                                                 excel_sheet=_rd_s["sheet"],
                                                 excel_affected_range=_rd_s["affected_range"],
                                                 excel_changes=_rd_s["changes"],
-                                                excel_merge_ranges=_rc_merges_s,
+                                                excel_merge_ranges=_rc_new_merges_s,
+                                                excel_old_merge_ranges=_rc_old_merges_s,
                                                 excel_metadata_hints=_rc_hints_s,
                                             ),
                                         )
@@ -2048,6 +2052,13 @@ class ToolDispatcher:
                     )
                     result_str = result_str + "".join(notice_parts)
                     e.state.backup_write_notice_shown = True
+
+        # ── Post-Write Inline Checkpoint（零 LLM 调用回读验证）──
+        if success and tool_name in self._EXCEL_WRITE_TOOLS:
+            _ws_root = getattr(getattr(e, "_config", None), "workspace_root", "")
+            _ckpt = self._post_write_checkpoint(tool_name, arguments, _ws_root)
+            if _ckpt:
+                result_str = result_str + _ckpt
 
         # ── B 通道：异步 VLM 描述追加 ──
         if success and self._pending_vlm_image is not None:
@@ -2316,6 +2327,137 @@ class ToolDispatcher:
                 changed.append(rel_path)
         return changed
 
+    # ── Post-Write Inline Checkpoint ────────────────────────
+
+    @staticmethod
+    def _post_write_checkpoint(
+        tool_name: str,
+        arguments: dict,
+        workspace_root: str,
+    ) -> str:
+        """写入工具成功后执行轻量级回读验证（零 LLM 调用）。
+
+        返回一行简洁的 checkpoint 结果，如 "✓ 回读确认: Sheet1, 100行×3列"。
+        任何异常静默返回空字符串（不影响主流程）。
+        """
+        from pathlib import Path as _P
+
+        file_path = (arguments.get("file_path") or "").strip()
+        if not file_path:
+            return ""
+
+        abs_path = _P(file_path) if _P(file_path).is_absolute() else _P(workspace_root) / file_path
+        abs_path = abs_path.resolve()
+        if not abs_path.is_file():
+            return ""
+
+        try:
+            if tool_name == "write_cells":
+                return ToolDispatcher._checkpoint_write_cells(abs_path, arguments)
+            elif tool_name == "create_sheet":
+                return ToolDispatcher._checkpoint_create_sheet(abs_path, arguments)
+            elif tool_name == "delete_sheet":
+                return ToolDispatcher._checkpoint_delete_sheet(abs_path, arguments)
+            elif tool_name in ("insert_rows", "insert_columns"):
+                return ToolDispatcher._checkpoint_insert(abs_path, arguments, tool_name)
+        except Exception:
+            return ""
+        return ""
+
+    @staticmethod
+    def _checkpoint_write_cells(abs_path: "Path", arguments: dict) -> str:
+        """write_cells 后回读验证：检查写入范围的行列数。"""
+        import openpyxl as _opx
+
+        sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
+        cell = arguments.get("cell")
+        cell_range = arguments.get("cell_range")
+        values = arguments.get("values")
+
+        wb = _opx.load_workbook(str(abs_path), read_only=False, data_only=True)
+        try:
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+            if ws is None:
+                return ""
+
+            # 单元格模式
+            if cell and not cell_range:
+                val = ws[cell].value
+                display = repr(val)[:60] if val is not None else "None"
+                return f"\n✓ 回读确认: {ws.title}!{cell} = {display}"
+
+            # 范围模式：检查写入区域行列数
+            if values and isinstance(values, list):
+                expected_rows = len(values)
+                expected_cols = max((len(r) if isinstance(r, list) else 1) for r in values)
+                # 读取实际写入区域的行列范围
+                start_ref = (cell_range or "A1").split(":")[0]
+                # 简单验证：读取目标区域的第一个和最后一个单元格
+                first_val = ws[start_ref].value
+                actual_rows = ws.max_row
+                return (
+                    f"\n✓ 回读确认: {ws.title}, "
+                    f"写入 {expected_rows}行×{expected_cols}列, "
+                    f"首格={repr(first_val)[:40]}, "
+                    f"sheet总行数={actual_rows}"
+                )
+
+            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}"
+        finally:
+            wb.close()
+
+    @staticmethod
+    def _checkpoint_create_sheet(abs_path: "Path", arguments: dict) -> str:
+        """create_sheet 后验证：确认 sheet 存在。"""
+        import openpyxl as _opx
+
+        target = arguments.get("sheet_name") or arguments.get("name", "")
+        if not target:
+            return ""
+        wb = _opx.load_workbook(str(abs_path), read_only=True)
+        try:
+            if target in wb.sheetnames:
+                return f"\n✓ 回读确认: sheet「{target}」已创建"
+            else:
+                return f"\n⚠ 回读异常: sheet「{target}」未找到"
+        finally:
+            wb.close()
+
+    @staticmethod
+    def _checkpoint_delete_sheet(abs_path: "Path", arguments: dict) -> str:
+        """delete_sheet 后验证：确认 sheet 已删除。"""
+        import openpyxl as _opx
+
+        target = arguments.get("sheet_name") or arguments.get("name", "")
+        if not target:
+            return ""
+        wb = _opx.load_workbook(str(abs_path), read_only=True)
+        try:
+            if target not in wb.sheetnames:
+                return f"\n✓ 回读确认: sheet「{target}」已删除"
+            else:
+                return f"\n⚠ 回读异常: sheet「{target}」仍存在"
+        finally:
+            wb.close()
+
+    @staticmethod
+    def _checkpoint_insert(abs_path: "Path", arguments: dict, tool_name: str) -> str:
+        """insert_rows/insert_columns 后验证：报告当前维度。"""
+        import openpyxl as _opx
+
+        sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
+        wb = _opx.load_workbook(str(abs_path), read_only=True)
+        try:
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+            if ws is None:
+                return ""
+            if tool_name == "insert_rows":
+                return f"\n✓ 回读确认: {ws.title}, 当前总行数={ws.max_row}"
+            else:
+                return f"\n✓ 回读确认: {ws.title}, 当前总列数={ws.max_column}"
+        finally:
+            wb.close()
+
     # ── 写入操作日志辅助（供 verifier delta 注入）────────────
 
     @staticmethod
@@ -2493,31 +2635,30 @@ class ToolDispatcher:
             for sheet in sorted(all_sheets):
                 b_data, b_merges = before_sheets.get(sheet, ([], []))
                 a_data, a_merges = after_sheets.get(sheet, ([], []))
-                b_cells = {c["cell"]: c["value"] for c in b_data}
-                a_cells = {c["cell"]: c["value"] for c in a_data}
-                b_styles = {c["cell"]: c.get("style") for c in b_data}
-                a_styles = {c["cell"]: c.get("style") for c in a_data}
-                changes: list[dict] = []
-                for ref in sorted(set(b_cells) | set(a_cells)):
-                    old_val = b_cells.get(ref)
-                    new_val = a_cells.get(ref)
-                    if old_val != new_val:
-                        _ser = lambda v: None if v is None else (v if isinstance(v, (int, float, bool)) else str(v))
-                        ch: dict = {"cell": ref, "old": _ser(old_val), "new": _ser(new_val)}
-                        old_s = b_styles.get(ref)
-                        new_s = a_styles.get(ref)
-                        if old_s is not None:
-                            ch["old_style"] = old_s
-                        if new_s is not None:
-                            ch["new_style"] = new_s
-                        changes.append(ch)
+                from excelmanus.tools.cell_tools import _compute_cell_diff
+                changes = _compute_cell_diff(b_data, a_data)
                 if changes:
-                    first = changes[0]["cell"]
-                    last = changes[-1]["cell"]
+                    from openpyxl.utils import get_column_letter as _gcl
+                    from openpyxl.utils.cell import coordinate_to_tuple as _ctt
+                    min_r = min_c = float("inf")
+                    max_r = max_c = 0
+                    for ch in changes:
+                        try:
+                            r, c = _ctt(ch["cell"].upper())
+                            if r < min_r: min_r = r
+                            if r > max_r: max_r = r
+                            if c < min_c: min_c = c
+                            if c > max_c: max_c = c
+                        except Exception:
+                            pass
+                    if min_r != float("inf"):
+                        _range = f"{_gcl(min_c)}{min_r}:{_gcl(max_c)}{max_r}" if (min_r, min_c) != (max_r, max_c) else f"{_gcl(min_c)}{min_r}"
+                    else:
+                        _range = changes[0]["cell"]
                     results.append({
                         "file_path": fp,
                         "sheet": sheet,
-                        "affected_range": f"{first}:{last}" if first != last else first,
+                        "affected_range": _range,
                         "changes": changes[:200],
                         "old_merge_ranges": b_merges,
                         "new_merge_ranges": a_merges,

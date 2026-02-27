@@ -53,6 +53,13 @@ class SessionState:
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
 
+        # 写入操作日志（供 verifier delta 注入）
+        # 每条: {tool_name, file_path, sheet, range, summary}
+        self.write_operations_log: list[dict[str, str]] = []
+
+        # explorer 结构化报告缓存（供 context_builder 注入 system prompt）
+        self.explorer_reports: list[dict[str, Any]] = []
+
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
 
@@ -92,6 +99,8 @@ class SessionState:
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
+        self.write_operations_log = []
+        # 注意：explorer_reports 是跨轮次缓存，不在此处清空
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
@@ -116,6 +125,8 @@ class SessionState:
         self._recent_tool_calls.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
+        self.write_operations_log = []
+        self.explorer_reports = []
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
@@ -130,6 +141,50 @@ class SessionState:
         normalized = path.strip()
         if normalized and normalized not in self.affected_files:
             self.affected_files.append(normalized)
+
+    def record_write_operation(
+        self,
+        *,
+        tool_name: str,
+        file_path: str = "",
+        sheet: str = "",
+        cell_range: str = "",
+        summary: str = "",
+    ) -> None:
+        """记录一次写入操作的结构化摘要，供 verifier delta 注入。"""
+        entry: dict[str, str] = {"tool_name": tool_name}
+        if file_path:
+            entry["file_path"] = file_path
+        if sheet:
+            entry["sheet"] = sheet
+        if cell_range:
+            entry["range"] = cell_range
+        if summary:
+            entry["summary"] = summary
+        self.write_operations_log.append(entry)
+
+    def render_write_operations_log(self) -> str:
+        """将写入操作日志渲染为可读文本，供 verifier prompt 注入。"""
+        if not self.write_operations_log:
+            return ""
+        lines: list[str] = ["## 本轮写入操作记录"]
+        for i, entry in enumerate(self.write_operations_log, 1):
+            parts = [entry.get("tool_name", "unknown")]
+            fp = entry.get("file_path", "")
+            if fp:
+                parts.append(fp)
+            sheet = entry.get("sheet", "")
+            if sheet:
+                parts[-1] = f"{parts[-1]} / {sheet}"
+            cr = entry.get("range", "")
+            if cr:
+                parts[-1] = f"{parts[-1]} / {cr}"
+            summary = entry.get("summary", "")
+            desc = " → ".join(parts)
+            if summary:
+                desc = f"{desc} — {summary}"
+            lines.append(f"{i}. {desc}")
+        return "\n".join(lines)
 
     def record_tool_success(self) -> None:
         """记录一次工具调用成功。"""

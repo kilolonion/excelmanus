@@ -511,13 +511,10 @@ class SubagentOrchestrator:
             engine = self._engine
             # 缓存到 session_state，供 context_builder 和后续轮次引用
             if hasattr(engine, "_state"):
-                existing = getattr(engine._state, "explorer_reports", None)
-                if existing is None:
-                    engine._state.explorer_reports = []  # type: ignore[attr-defined]
-                engine._state.explorer_reports.append(report)  # type: ignore[attr-defined]
+                engine._state.explorer_reports.append(report)
                 # 保留最近 5 份报告，避免累积过多
-                if len(engine._state.explorer_reports) > 5:  # type: ignore[attr-defined]
-                    engine._state.explorer_reports = engine._state.explorer_reports[-5:]  # type: ignore[attr-defined]
+                if len(engine._state.explorer_reports) > 5:
+                    engine._state.explorer_reports = engine._state.explorer_reports[-5:]
             logger.info(
                 "explorer 结构化报告已缓存: files=%d, findings=%d",
                 len(report.get("files", [])),
