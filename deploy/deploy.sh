@@ -91,7 +91,9 @@ set -euo pipefail
 #    --version            显示版本
 # ═══════════════════════════════════════════════════════════════════════
 
-VERSION="2.0.0"
+VERSION="2.1.0"
+# 远程服务器系统 PATH（解决 SSH 非交互会话 PATH 为空导致 sh/tail/git 找不到的问题）
+REMOTE_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -481,10 +483,12 @@ _ssh_opts() {
 _remote() {
   local host="$1" key="$2"; shift 2
   local cmd="$*"
+  # 自动注入系统 PATH（解决 SSH 非交互会话 PATH 为空的问题）
+  local full_cmd="export PATH=${NODE_BIN}:${REMOTE_SYSTEM_PATH}:\$PATH && ${cmd}"
   if [[ "$TOPOLOGY" == "local" ]]; then
-    run "bash -c '$cmd'"
+    run "bash -c '$full_cmd'"
   else
-    run "ssh $(_ssh_opts "$key") ${SSH_USER}@${host} '$cmd'"
+    run "ssh $(_ssh_opts "$key") ${SSH_USER}@${host} '$full_cmd'"
   fi
 }
 
@@ -574,19 +578,38 @@ SVCEOF
       sudo systemctl restart '${PM2_FRONTEND}'
     "
   else
-    # PM2: 自动检测 standalone vs next start
+    # PM2 or direct process: 自动检测 standalone vs next start
     _remote_frontend "
-      export PATH=${NODE_BIN}:\$PATH
       cd '${FRONTEND_DIR}/web'
-      pm2 delete '${PM2_FRONTEND}' 2>/dev/null || true
-      if [[ -f .next/standalone/server.js ]]; then
-        echo '[INFO] 使用 standalone 模式启动'
-        pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+      if command -v pm2 >/dev/null 2>&1; then
+        pm2 delete '${PM2_FRONTEND}' 2>/dev/null || true
+        if [[ -f .next/standalone/server.js ]]; then
+          echo '[INFO] 使用 standalone 模式启动 (PM2)'
+          pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+        else
+          echo '[INFO] standalone 不存在，使用 next start (PM2)'
+          pm2 start \"npx next start -p ${FRONTEND_PORT}\" --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+        fi
+        pm2 save
       else
-        echo '[INFO] standalone 不存在，使用 next start 启动'
-        pm2 start \"npx next start -p ${FRONTEND_PORT}\" --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web'
+        # no PM2: kill old process and start directly
+        echo '[INFO] PM2 not found, using direct process management'
+        pkill -f 'next-server|node.*standalone/server.js' 2>/dev/null || true
+        sleep 1
+        if [[ -f .next/standalone/server.js ]]; then
+          echo '[INFO] 使用 standalone 模式启动 (direct)'
+          PORT=${FRONTEND_PORT} nohup node .next/standalone/server.js > /tmp/excelmanus-web.log 2>&1 &
+        else
+          echo '[INFO] 使用 next start 启动 (direct)'
+          nohup npx next start -p ${FRONTEND_PORT} > /tmp/excelmanus-web.log 2>&1 &
+        fi
+        sleep 3
+        if ss -tlnp 2>/dev/null | grep -q ':${FRONTEND_PORT}'; then
+          echo '[OK] frontend started on port ${FRONTEND_PORT}'
+        else
+          echo '[WARN] frontend may not have started, check /tmp/excelmanus-web.log'
+        fi
       fi
-      pm2 save
     "
   fi
 }
@@ -651,7 +674,6 @@ _build_frontend_remote() {
   # 注意：不使用 | tail 管道，避免吞掉 npm run build 的退出码
   info "构建前端..."
   if _remote_frontend "
-    export PATH=${NODE_BIN}:\$PATH && \
     cd '${FRONTEND_DIR}/web' && \
     ${cold_cmd}npm run build 2>&1; \
     BUILD_EXIT=\$?; \
@@ -663,7 +685,6 @@ _build_frontend_remote() {
 
   warn "默认构建失败，尝试 webpack 兜底（npm run build:webpack）..."
   _remote_frontend "
-    export PATH=${NODE_BIN}:\$PATH && \
     cd '${FRONTEND_DIR}/web' && \
     ${cold_cmd}npm run build:webpack 2>&1; \
     BUILD_EXIT=\$?; \
@@ -857,8 +878,20 @@ _sync_code() {
     [[ "$host" == "$BACKEND_HOST" ]] && key_for_host="$BACKEND_SSH_KEY_PATH" || true
     [[ "$host" == "$FRONTEND_HOST" ]] && key_for_host="$FRONTEND_SSH_KEY_PATH" || true
     local git_cmd="
+      # 自动安装 git（如果远程服务器没有）
+      if ! command -v git >/dev/null 2>&1; then
+        echo '[deploy] git not found, installing...'
+        if command -v yum >/dev/null 2>&1; then yum install -y git >/dev/null 2>&1
+        elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1
+        elif command -v dnf >/dev/null 2>&1; then dnf install -y git >/dev/null 2>&1
+        elif command -v apk >/dev/null 2>&1; then apk add git >/dev/null 2>&1
+        fi
+        command -v git >/dev/null 2>&1 || { echo '[FATAL] failed to install git'; exit 1; }
+        echo '[deploy] git installed'
+      fi
+      git config --global --add safe.directory '${remote_dir}' 2>/dev/null || true
       set -e
-      cd '${remote_dir}'
+      cd '${remote_dir}' 2>/dev/null || mkdir -p '${remote_dir}'
       if [[ ! -d .git ]]; then
         echo '仓库不存在，正在克隆...'
         cd /
@@ -921,7 +954,6 @@ SVCEOF
       sudo systemctl start '${PM2_BACKEND}'; }"
   else
     _remote_backend "
-      export PATH=${NODE_BIN}:\$PATH && \
       pm2 restart '${PM2_BACKEND}' --update-env 2>/dev/null || \
       pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
         --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
@@ -987,9 +1019,8 @@ _deploy_frontend() {
     if [[ "$SKIP_DEPS" != true ]]; then
       info "安装前端依赖..."
       _remote_frontend "
-        export PATH=${NODE_BIN}:\$PATH && \
         cd '${FRONTEND_DIR}/web' && \
-        npm install --production=false 2>&1 | tail -3
+        npm install --production=false 2>&1
       "
     fi
 
@@ -1560,7 +1591,7 @@ _cmd_status() {
     if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
       _remote_backend "systemctl is-active '${PM2_BACKEND}' 2>/dev/null || echo 'inactive'" || true
     else
-      _remote_backend "export PATH=${NODE_BIN}:\$PATH && pm2 describe '${PM2_BACKEND}' 2>/dev/null | grep -E 'status|uptime|memory' || echo '进程未找到'" || true
+      _remote_backend "pm2 describe '${PM2_BACKEND}' 2>/dev/null | grep -E 'status|uptime|memory' || echo '进程未找到'" || true
     fi
     _remote_backend "curl -s --max-time 5 http://localhost:${BACKEND_PORT}/api/v1/health 2>/dev/null || echo '健康检查不可达'" || true
     _remote_backend "cd '${BACKEND_DIR}' && git log -1 --format='最近提交: %h %s (%cr)' 2>/dev/null || echo 'Git: 无法获取'" || true
@@ -1571,7 +1602,7 @@ _cmd_status() {
     if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
       _remote_frontend "systemctl is-active '${PM2_FRONTEND}' 2>/dev/null || echo 'inactive'" || true
     else
-      _remote_frontend "export PATH=${NODE_BIN}:\$PATH && pm2 describe '${PM2_FRONTEND}' 2>/dev/null | grep -E 'status|uptime|memory' || echo '进程未找到'" || true
+      _remote_frontend "pm2 describe '${PM2_FRONTEND}' 2>/dev/null | grep -E 'status|uptime|memory' || echo '进程未找到'" || true
     fi
   fi
 }
@@ -1626,7 +1657,7 @@ _cmd_rollback() {
     if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
       _remote_backend "sudo systemctl restart '${PM2_BACKEND}'" || rollback_ok=false
     else
-      _remote_backend "export PATH=${NODE_BIN}:\$PATH && pm2 restart '${PM2_BACKEND}' --update-env" || rollback_ok=false
+      _remote_backend "pm2 restart '${PM2_BACKEND}' --update-env" || rollback_ok=false
     fi
     [[ "$rollback_ok" == true ]] && log "后端回滚完成" || warn "后端回滚可能不完整"
   fi

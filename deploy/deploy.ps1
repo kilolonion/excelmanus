@@ -228,12 +228,15 @@ param(
 #  常量与路径
 # ═══════════════════════════════════════════════════════════════
 
-$Script:VERSION = "2.0.0"
+$Script:VERSION = "2.1.0"
 $Script:SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Script:PROJECT_ROOT = Split-Path -Parent $Script:SCRIPT_DIR
 $Script:DEPLOY_LOG_FILE = ""
 $Script:LOCK_FILE = ""
 $Script:DEPLOY_START_TIME = $null
+$Script:LAST_OUTPUT = ""
+# 远程服务器系统 PATH（解决 SSH 非交互会话 PATH 为空导致 sh/tail/git 找不到的问题）
+$Script:REMOTE_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 if ($ShowVersion) {
     Write-Output "ExcelManus Deploy v$Script:VERSION (PowerShell)"
@@ -293,6 +296,7 @@ function Invoke-Run {
     if ($DryRun) {
         Write-Host "[dry-run] $Cmd" -ForegroundColor Yellow
         Write-LogToFile "DRY $Cmd"
+        $Script:LAST_OUTPUT = ""
         return $true
     }
     Write-Debug2 "exec: $Cmd"
@@ -301,6 +305,7 @@ function Invoke-Run {
     } else {
         $result = cmd /c $Cmd 2>&1
     }
+    $Script:LAST_OUTPUT = if ($result) { ($result | Out-String).Trim() } else { "" }
     if ($result) { $result | ForEach-Object { Write-Host $_ } }
     return ($LASTEXITCODE -eq 0)
 }
@@ -503,7 +508,9 @@ function Assert-LocalShell {
 
 function Get-SshOpts {
     param([string]$KeyOverride = "")
-    $opts = @("-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30")
+    $opts = @("-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+             "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6",
+             "-o", "TCPKeepAlive=yes")
     $keyPath = if ($KeyOverride) { $KeyOverride } else { $Script:CFG.SshKeyPath }
     if ($keyPath) { $opts += @("-i", $keyPath) }
     if ($Script:CFG.SshPort -ne 22) { $opts += @("-p", $Script:CFG.SshPort) }
@@ -516,9 +523,23 @@ function Invoke-Remote {
         $shell = Assert-LocalShell
         return Invoke-Run "$shell -c '$RemoteCmd'"
     }
-    $sshOpts = (Get-SshOpts -KeyOverride $KeyPath) -join " "
-    $target = "$($Script:CFG.SshUser)@$TargetHost"
-    return Invoke-Run "ssh $sshOpts $target `"$RemoteCmd`""
+    if ($DryRun) {
+        Write-Host "[dry-run] ssh -> ${TargetHost}: $RemoteCmd" -ForegroundColor Yellow
+        Write-LogToFile "DRY ssh -> ${TargetHost}"
+        $Script:LAST_OUTPUT = ""
+        return $true
+    }
+    # 自动在远程命令前注入系统 PATH（解决 SSH 非交互会话 PATH 为空问题）
+    $nodeBin = $Script:CFG.NodeBin
+    $fullRemoteCmd = "export PATH=${nodeBin}:$($Script:REMOTE_SYSTEM_PATH):`$PATH && $RemoteCmd"
+    # 直接调用 ssh 进程，避免 cmd /c 包装导致长命令输出缓冲挂死
+    $sshArgs = Get-SshOpts -KeyOverride $KeyPath
+    $sshArgs += @("$($Script:CFG.SshUser)@$TargetHost", $fullRemoteCmd)
+    Write-Debug2 "ssh $($Script:CFG.SshUser)@${TargetHost}: $RemoteCmd"
+    $output = & ssh @sshArgs 2>&1
+    $Script:LAST_OUTPUT = if ($output) { ($output | Out-String).Trim() } else { "" }
+    if ($output) { $output | ForEach-Object { Write-Host $_ } }
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Invoke-RemoteBackend {
@@ -558,7 +579,7 @@ function Sync-Code {
     param([string]$TargetHost, [string]$RemoteDir, [string]$Label, [string]$KeyPath = "")
 
     if ($FromLocal) {
-        Write-Info "rsync sync code -> $Label ($($TargetHost ?? 'localhost'))..."
+        Write-Info "rsync sync code -> $Label ($(if ($TargetHost) { $TargetHost } else { 'localhost' }))..."
         if ($Script:CFG.Topology -eq "local") {
             Write-Debug2 "local mode, skip sync"
             return $true
@@ -566,18 +587,28 @@ function Sync-Code {
         $sshOpts = (Get-SshOpts -KeyOverride $KeyPath) -join " "
         $excludes = Get-RsyncExcludeArgs
         $target = "$($Script:CFG.SshUser)@${TargetHost}:${RemoteDir}/"
-        # Windows: 需要 rsync（通过 Git Bash/WSL/MSYS2）
-        # 自动检测 --append-verify 支持（macOS openrsync 不支持）
         $rsyncExtra = ""
         $rsyncHelp = & rsync --help 2>&1 | Out-String
         if ($rsyncHelp -match '--append-verify') { $rsyncExtra = "--append-verify" }
         $rsyncCmd = "rsync -az --partial $rsyncExtra --timeout=120 $excludes --progress -e `"ssh $sshOpts`" `"$Script:PROJECT_ROOT/`" `"$target`""
         return Invoke-Run $rsyncCmd
     } else {
-        Write-Info "git pull -> $Label ($($TargetHost ?? 'localhost'))..."
+        Write-Info "git pull -> $Label ($(if ($TargetHost) { $TargetHost } else { 'localhost' }))..."
+        # 自动安装 git（如果远程服务器没有）
         $gitCmd = @"
+if ! command -v git >/dev/null 2>&1; then
+    echo '[deploy] git not found, installing...'
+    if command -v yum >/dev/null 2>&1; then yum install -y git >/dev/null 2>&1
+    elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then dnf install -y git >/dev/null 2>&1
+    elif command -v apk >/dev/null 2>&1; then apk add git >/dev/null 2>&1
+    fi
+    command -v git >/dev/null 2>&1 || { echo '[FATAL] failed to install git'; exit 1; }
+    echo '[deploy] git installed'
+fi
+git config --global --add safe.directory '$RemoteDir' 2>/dev/null || true
 set -e
-cd '$RemoteDir'
+cd '$RemoteDir' 2>/dev/null || mkdir -p '$RemoteDir'
 if [ ! -d .git ]; then
     echo 'repo not found, cloning...'
     cd /
@@ -688,19 +719,38 @@ sudo systemctl restart '$($cfg.Pm2Frontend)'
         Write-Info "restart frontend via NSSM..."
         return (Invoke-Run "nssm restart $($cfg.Pm2Frontend)")
     } else {
-        # PM2: auto-detect standalone vs next start
+        # PM2 or direct process: auto-detect standalone vs next start
         $cmd = @"
-export PATH=$($cfg.NodeBin):`$PATH
 cd '$($cfg.FrontendDir)/web'
-pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true
-if [ -f .next/standalone/server.js ]; then
-    echo '[INFO] using standalone mode'
-    pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+if command -v pm2 >/dev/null 2>&1; then
+    pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true
+    if [ -f .next/standalone/server.js ]; then
+        echo '[INFO] using standalone mode (PM2)'
+        pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+    else
+        echo '[INFO] standalone not found, using next start (PM2)'
+        pm2 start "npx next start -p $($cfg.FrontendPort)" --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+    fi
+    pm2 save
 else
-    echo '[INFO] standalone not found, using next start'
-    pm2 start "npx next start -p $($cfg.FrontendPort)" --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+    # no PM2: kill old process and start directly
+    echo '[INFO] PM2 not found, using direct process management'
+    pkill -f 'next-server\|node.*standalone/server.js' 2>/dev/null || true
+    sleep 1
+    if [ -f .next/standalone/server.js ]; then
+        echo '[INFO] using standalone mode (direct)'
+        PORT=$($cfg.FrontendPort) nohup node .next/standalone/server.js > /tmp/excelmanus-web.log 2>&1 &
+    else
+        echo '[INFO] standalone not found, using next start (direct)'
+        nohup npx next start -p $($cfg.FrontendPort) > /tmp/excelmanus-web.log 2>&1 &
+    fi
+    sleep 3
+    if ss -tlnp 2>/dev/null | grep -q ':$($cfg.FrontendPort)'; then
+        echo '[OK] frontend started on port $($cfg.FrontendPort)'
+    else
+        echo '[WARN] frontend may not have started, check /tmp/excelmanus-web.log'
+    fi
 fi
-pm2 save
 "@
         return (Invoke-RemoteFrontend $cmd)
     }
@@ -711,7 +761,8 @@ function Repair-FrontendBackendOrigin {
     $cfg = $Script:CFG
     if (-not $cfg.FrontendHost -or $cfg.Topology -eq "local") { return }
 
-    $feOrigin = Invoke-RemoteFrontend "timeout 5 grep -E '^NEXT_PUBLIC_BACKEND_ORIGIN=' '$($cfg.FrontendDir)/web/.env.local' 2>/dev/null || echo __MISSING__"
+    Invoke-RemoteFrontend "timeout 5 grep -E '^NEXT_PUBLIC_BACKEND_ORIGIN=' '$($cfg.FrontendDir)/web/.env.local' 2>/dev/null || echo __MISSING__" | Out-Null
+    $feOrigin = $Script:LAST_OUTPUT
     if (-not $feOrigin -or $feOrigin -match '__MISSING__') { return }
 
     # 提取当前值
@@ -748,11 +799,11 @@ function Build-FrontendRemote {
 
     # 注意：不使用 | tail 管道，避免吞掉 npm run build 的退出码
     Write-Info "building frontend..."
-    $cmd = "export PATH=$($cfg.NodeBin):`$PATH && cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build 2>&1; BUILD_EXIT=`$?; echo \"[deploy] npm run build exit code: `$BUILD_EXIT\"; exit `$BUILD_EXIT"
+    $cmd = "cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build 2>&1; BUILD_EXIT=`$?; echo `"[deploy] npm run build exit code: `$BUILD_EXIT`"; exit `$BUILD_EXIT"
     if (Invoke-RemoteFrontend $cmd) { return $true }
 
     Write-Warn "default build failed, trying webpack fallback..."
-    $cmd = "export PATH=$($cfg.NodeBin):`$PATH && cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build:webpack 2>&1; BUILD_EXIT=`$?; echo \"[deploy] webpack build exit code: `$BUILD_EXIT\"; exit `$BUILD_EXIT"
+    $cmd = "cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build:webpack 2>&1; BUILD_EXIT=`$?; echo `"[deploy] webpack build exit code: `$BUILD_EXIT`"; exit `$BUILD_EXIT"
     return (Invoke-RemoteFrontend $cmd)
 }
 
@@ -897,7 +948,6 @@ function Deploy-Backend {
         Invoke-Run "nssm restart $($cfg.Pm2Backend)" | Out-Null
     } else {
         $restartCmd = @"
-export PATH=$($cfg.NodeBin):`$PATH && \
 pm2 restart '$($cfg.Pm2Backend)' --update-env 2>/dev/null || \
 pm2 start '$($cfg.BackendDir)/$($cfg.VenvDir)/bin/python' \
     --name '$($cfg.Pm2Backend)' --cwd '$($cfg.BackendDir)' \
@@ -960,7 +1010,7 @@ function Deploy-Frontend {
     } else {
         if (-not $SkipDeps) {
             Write-Info "installing frontend deps..."
-            Invoke-RemoteFrontend "export PATH=$($cfg.NodeBin):`$PATH && cd '$($cfg.FrontendDir)/web' && npm install --production=false 2>&1 | tail -3" | Out-Null
+            Invoke-RemoteFrontend "cd '$($cfg.FrontendDir)/web' && npm install --production=false 2>&1" | Out-Null
         }
 
         Write-Warn "building on remote. For low-memory servers use -FrontendArtifact."
@@ -991,7 +1041,7 @@ function Deploy-Docker {
     Write-Step "Docker Compose Deploy"
 
     if (-not $FromLocal -and $cfg.Topology -ne "local") {
-        Sync-Code -TargetHost ($cfg.BackendHost ?? "localhost") -RemoteDir $cfg.BackendDir -Label "Docker" -KeyPath $cfg.BackendSshKeyPath | Out-Null
+        Sync-Code -TargetHost $(if ($cfg.BackendHost) { $cfg.BackendHost } else { 'localhost' }) -RemoteDir $cfg.BackendDir -Label "Docker" -KeyPath $cfg.BackendSshKeyPath | Out-Null
     }
 
     $composeCmd = "docker compose"
@@ -1149,6 +1199,29 @@ function Show-Summary {
 #  前置检查
 # ═══════════════════════════════════════════════════════════════
 
+function Repair-PemPermissions {
+    param([string]$KeyPath)
+    if (-not $KeyPath -or -not (Test-Path $KeyPath)) { return }
+    try {
+        $acl = Get-Acl $KeyPath
+        $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Value }
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        # 如果有非当前用户/SYSTEM 的访问条目，说明权限过宽
+        $badEntries = $acl.Access | Where-Object {
+            $_.IdentityReference.Value -ne $currentUser -and
+            $_.IdentityReference.Value -ne "NT AUTHORITY\SYSTEM" -and
+            $_.IdentityReference.Value -ne "BUILTIN\Administrators"
+        }
+        if ($badEntries) {
+            Write-Info "fixing PEM permissions: $KeyPath"
+            & icacls $KeyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" 2>&1 | Out-Null
+            Write-Log "PEM permissions fixed: $KeyPath"
+        }
+    } catch {
+        Write-Debug2 "PEM permission check skipped: $_"
+    }
+}
+
 function Invoke-Preflight {
     if ($FrontendArtifact -and -not (Test-Path $FrontendArtifact)) {
         Write-Err "frontend artifact not found: $FrontendArtifact"
@@ -1161,6 +1234,10 @@ function Invoke-Preflight {
             if ($keyPath -and -not (Test-Path $keyPath)) {
                 Write-Err "SSH key not found: $keyPath"
                 exit 1
+            }
+            # Windows: 自动修复 PEM 文件权限（避免 SSH "UNPROTECTED PRIVATE KEY FILE" 错误）
+            if ($keyPath -and (Test-Path $keyPath)) {
+                Repair-PemPermissions -KeyPath $keyPath
             }
         }
 
@@ -1267,7 +1344,7 @@ function Invoke-CmdStatus {
     }
     if ($cfg.FrontendHost) {
         Write-Host "`nFrontend ($($cfg.FrontendHost)):" -ForegroundColor White
-        Invoke-RemoteFrontend "export PATH=$($cfg.NodeBin):`$PATH && pm2 describe '$($cfg.Pm2Frontend)' 2>/dev/null | grep -E 'status|uptime|memory' || echo 'process not found'" | Out-Null
+        Invoke-RemoteFrontend "pm2 describe '$($cfg.Pm2Frontend)' 2>/dev/null | grep -E 'status|uptime|memory' || echo 'process not found'" | Out-Null
     }
 }
 
@@ -1318,7 +1395,7 @@ function Invoke-CmdRollback {
         } elseif ($cfg.ServiceManager -eq "nssm") {
             Invoke-Run "nssm restart $($cfg.Pm2Backend)" | Out-Null
         } else {
-            Invoke-RemoteBackend "export PATH=$($cfg.NodeBin):`$PATH && pm2 restart '$($cfg.Pm2Backend)' --update-env" | Out-Null
+            Invoke-RemoteBackend "pm2 restart '$($cfg.Pm2Backend)' --update-env" | Out-Null
         }
         if ($ok) { Write-Log "backend rollback complete" } else { Write-Warn "backend rollback may be incomplete" }
     }
@@ -1346,7 +1423,8 @@ function Test-CrossConnectivity {
     if ($cfg.FrontendHost -and $cfg.BackendHost) {
         $backendUrl = "http://$($cfg.BackendHost):$($cfg.BackendPort)/api/v1/health"
         Write-Info "Frontend($($cfg.FrontendHost)) -> Backend($($cfg.BackendHost):$($cfg.BackendPort))..."
-        $result = Invoke-RemoteFrontend "curl -s --max-time 10 '$backendUrl' 2>/dev/null || echo '__UNREACHABLE__'"
+        Invoke-RemoteFrontend "curl -s --max-time 10 '$backendUrl' 2>/dev/null || echo '__UNREACHABLE__'" | Out-Null
+        $result = $Script:LAST_OUTPUT
         if ($result -match '"status"') {
             Write-Log "Frontend -> Backend: connected ($backendUrl)"
         } elseif ($result -match '__UNREACHABLE__') {
@@ -1363,7 +1441,8 @@ function Test-CrossConnectivity {
     if ($cfg.BackendHost -and $cfg.FrontendHost -and $cfg.Topology -eq "split") {
         $frontendUrl = "http://$($cfg.FrontendHost):$($cfg.FrontendPort)"
         Write-Info "Backend($($cfg.BackendHost)) -> Frontend($($cfg.FrontendHost):$($cfg.FrontendPort))..."
-        $result = Invoke-RemoteBackend "curl -s --max-time 10 -o /dev/null -w '%{http_code}' '$frontendUrl' 2>/dev/null || echo '000'"
+        Invoke-RemoteBackend "curl -s --max-time 10 -o /dev/null -w '%{http_code}' '$frontendUrl' 2>/dev/null || echo '000'" | Out-Null
+        $result = $Script:LAST_OUTPUT
         if ($result -match '^(200|301|302|304)$') {
             Write-Log "Backend -> Frontend: connected (HTTP $result)"
         } else {
@@ -1374,7 +1453,8 @@ function Test-CrossConnectivity {
     # 3) CORS check（加超时防挂起）
     if ($cfg.BackendHost -and $Script:SITE_URL) {
         Write-Info "Checking backend CORS config..."
-        $corsCheck = Invoke-RemoteBackend "timeout 5 grep -i 'CORS_ALLOW_ORIGINS' '$($cfg.BackendDir)/.env' 2>/dev/null || echo '__NO_CORS__'"
+        Invoke-RemoteBackend "timeout 5 grep -i 'CORS_ALLOW_ORIGINS' '$($cfg.BackendDir)/.env' 2>/dev/null || echo '__NO_CORS__'" | Out-Null
+        $corsCheck = $Script:LAST_OUTPUT
         if ($corsCheck -match '__NO_CORS__') {
             Write-Warn "Backend .env missing EXCELMANUS_CORS_ALLOW_ORIGINS"
         } elseif ($corsCheck -match [regex]::Escape($Script:SITE_URL)) {
@@ -1387,7 +1467,8 @@ function Test-CrossConnectivity {
     # 4) Frontend BACKEND_ORIGIN check（加超时防挂起）
     if ($cfg.FrontendHost) {
         Write-Info "Checking frontend BACKEND_ORIGIN config..."
-        $feOrigin = Invoke-RemoteFrontend "timeout 5 grep -iE 'NEXT_PUBLIC_BACKEND_ORIGIN|BACKEND_INTERNAL_URL' '$($cfg.FrontendDir)/web/.env.local' '$($cfg.FrontendDir)/web/.env' 2>/dev/null || echo '__NO_ORIGIN__'"
+        Invoke-RemoteFrontend "timeout 5 grep -iE 'NEXT_PUBLIC_BACKEND_ORIGIN|BACKEND_INTERNAL_URL' '$($cfg.FrontendDir)/web/.env.local' '$($cfg.FrontendDir)/web/.env' 2>/dev/null || echo '__NO_ORIGIN__'" | Out-Null
+        $feOrigin = $Script:LAST_OUTPUT
         if ($feOrigin -match '__NO_ORIGIN__') {
             Write-Info "Frontend has no BACKEND_ORIGIN set (will use default fallback)"
         } else {
@@ -1423,7 +1504,8 @@ function Invoke-CmdInitEnv {
     # Backend .env
     if ($cfg.Mode -ne "frontend" -and $cfg.BackendHost) {
         $beEnvPath = "$($cfg.BackendDir)/.env"
-        $beExists = Invoke-RemoteBackend "[[ -f '$beEnvPath' ]] && echo 'exists' || echo 'missing'"
+        Invoke-RemoteBackend "[[ -f '$beEnvPath' ]] && echo 'exists' || echo 'missing'" | Out-Null
+        $beExists = $Script:LAST_OUTPUT
         if ($beExists -match 'exists') {
             if (-not $Force) {
                 Write-Warn "Backend $beEnvPath exists, skipping (use -Force to overwrite)"
@@ -1440,7 +1522,8 @@ function Invoke-CmdInitEnv {
     # Frontend .env.local
     if ($cfg.Mode -ne "backend" -and $cfg.FrontendHost) {
         $feEnvPath = "$($cfg.FrontendDir)/web/.env.local"
-        $feExists = Invoke-RemoteFrontend "[[ -f '$feEnvPath' ]] && echo 'exists' || echo 'missing'"
+        Invoke-RemoteFrontend "[[ -f '$feEnvPath' ]] && echo 'exists' || echo 'missing'" | Out-Null
+        $feExists = $Script:LAST_OUTPUT
         if ($feExists -match 'exists') {
             if (-not $Force) {
                 Write-Warn "Frontend $feEnvPath exists, skipping (use -Force to overwrite)"
