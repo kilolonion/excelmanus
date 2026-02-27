@@ -2,7 +2,30 @@
 
 ## 🎯 版本亮点
 
-本版本重点修复了**非视觉模型图片处理崩溃**、**SSE 流式推送序列化异常**等关键 Bug，同时将部署脚本升级至 **v2.1.0**，大幅增强远程部署的健壮性与兼容性，并优化了移动端触控体验。
+本版本新增 **CSV 文件预览与扫描**、**视觉能力 Probe 自动检测**，修复了**非视觉模型图片处理崩溃**、**SSE 流式推送序列化异常**等关键 Bug，同时将部署脚本升级至 **v2.1.0**，大幅增强远程部署的健壮性与兼容性，并优化了移动端触控体验。
+
+---
+
+## 🆕 新增功能
+
+### CSV 文件预览与扫描
+
+- **API 端**：`get_excel_snapshot` 新增 CSV 快捷路径，自动检测文件编码（utf-8-sig / utf-8 / gbk / gb18030 / latin-1），将 CSV 解析为与 Excel 一致的 snapshot 格式返回，前端可直接预览 CSV 文件
+- **文件注册**：`FileRegistry._scan_file_sheets` 新增 CSV 分支，跳过 openpyxl，直接用标准库 `csv` 模块扫描行列数和表头，使 CSV 文件能正确出现在工作区文件列表中
+
+涉及文件：`excelmanus/api.py`、`excelmanus/file_registry.py`
+
+### 视觉能力 Probe 自动检测
+
+主模型视觉能力判断从纯关键词推断升级为**三级优先级**机制：
+
+1. **手动覆盖**（`main_model_vision = true/false`）— 最高优先级
+2. **Probe 实际检测结果**（ground truth）— 从数据库缓存读取，首次使用时自动调度后台 probe
+3. **关键词兜底推断** — 仅在无 probe 结果时使用
+
+首次使用时自动在后台调度 `run_full_probe`，检测结果缓存到数据库，下次创建 engine 时直接使用 probe 结果，避免关键词推断不准确的问题。
+
+涉及文件：`excelmanus/engine.py`
 
 ---
 
@@ -81,7 +104,7 @@
 ## 📦 文件变更统计（vs v1.6.4）
 
 ```text
-34 files changed, 2192 insertions(+), 1670 deletions(-)
+36 files changed, 2350 insertions(+), 1730 deletions(-)
 ```
 
 ### 新增文件
@@ -106,9 +129,10 @@
 | ---- | ------ | ---- |
 | `deploy/deploy.ps1` | +149/-0 | 部署脚本 v2.1.0 |
 | `deploy/deploy.sh` | +73/-0 | 部署脚本 v2.1.0 |
-| `excelmanus/engine.py` | +21/-0 | 非视觉模型图片处理 |
+| `excelmanus/engine.py` | +75/-47 | 视觉 Probe 检测 + 非视觉模型图片处理 |
+| `excelmanus/api.py` | +129/-0 | CSV snapshot + API 扩展 |
+| `excelmanus/file_registry.py` | +49/-0 | CSV 文件扫描支持 |
 | `excelmanus/pipeline/progressive.py` | +17/-0 | SSE 事件类型修复 |
-| `excelmanus/api.py` | +61/-0 | API 扩展 |
 | `web/src/app/globals.css` | +22/-0 | 移动端触控优化 |
 | `web/src/components/chat/AssistantMessage.tsx` | +81/-0 | 消息渲染优化 |
 | `web/src/components/settings/RuntimeTab.tsx` | +75/-0 | 运行时设置改进 |
