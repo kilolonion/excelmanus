@@ -928,7 +928,7 @@ class AgentEngine:
         }
 
     async def _run_registry_scan(self) -> None:
-        """后台执行 FileRegistry 全量扫描。"""
+        """后台执行 FileRegistry 全量扫描 + 自动数据探索。"""
         if self._file_registry is None:
             return
         try:
@@ -941,6 +941,116 @@ class AgentEngine:
             self._registry_scan_done = False
             self._registry_scan_error = str(exc) or exc.__class__.__name__
             logger.debug("FileRegistry 后台扫描失败", exc_info=True)
+            return
+
+        # R8: 扫描成功后自动执行 Level 0 数据探索
+        try:
+            await self._auto_explore_after_scan()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("自动数据探索失败，不影响正常使用", exc_info=True)
+
+    async def _auto_explore_after_scan(self) -> None:
+        """Registry 扫描完成后，自动调用 inspect_excel_files 生成数据概览。
+
+        条件：FileRegistry 中存在 Excel 文件且尚无 explorer_reports 缓存。
+        结果以 EXPLORER_REPORT 格式缓存到 session_state，供 context_builder 注入。
+        """
+        # 已有缓存则跳过
+        if getattr(self._state, "explorer_reports", None):
+            return
+
+        # 检查是否有 Excel 文件
+        if self._file_registry is None:
+            return
+        try:
+            all_files = self._file_registry.list_all()
+        except Exception:
+            return
+        excel_files = [
+            f for f in all_files
+            if any(str(getattr(f, "path", f)).lower().endswith(ext)
+                   for ext in (".xlsx", ".xlsm", ".xls", ".csv"))
+        ]
+        if not excel_files:
+            return
+
+        # 调用 inspect_excel_files 工具（同步工具，在线程中执行）
+        if not hasattr(self, "registry") or not hasattr(self.registry, "call_tool"):
+            return
+        tool_names = self.registry.get_tool_names()
+        if "inspect_excel_files" not in tool_names:
+            return
+
+        try:
+            raw_result = await asyncio.to_thread(
+                self.registry.call_tool,
+                "inspect_excel_files",
+                {"directory": ".", "max_files": 10, "preview_rows": 0},
+            )
+            result_text = str(raw_result)
+        except Exception:
+            logger.debug("自动 inspect_excel_files 调用失败", exc_info=True)
+            return
+
+        # 将 inspect 结果转为 EXPLORER_REPORT 格式
+        report = self._convert_inspect_to_explorer_report(result_text)
+        if report is None:
+            return
+
+        if not hasattr(self._state, "explorer_reports") or self._state.explorer_reports is None:
+            self._state.explorer_reports = []  # type: ignore[attr-defined]
+        self._state.explorer_reports.append(report)  # type: ignore[attr-defined]
+        logger.info(
+            "R8 自动数据探索完成: %d 个文件, %d 个发现",
+            len(report.get("files", [])),
+            len(report.get("findings", [])),
+        )
+
+    @staticmethod
+    def _convert_inspect_to_explorer_report(inspect_result: str) -> dict[str, Any] | None:
+        """将 inspect_excel_files 的 JSON 输出转为 EXPLORER_REPORT 格式。"""
+        try:
+            data = json.loads(inspect_result)
+        except (ValueError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        raw_files = data.get("files", [])
+        if not raw_files:
+            return None
+
+        report_files: list[dict[str, Any]] = []
+        total_rows = 0
+        total_sheets = 0
+        for f in raw_files:
+            path = f.get("path", "")
+            sheets_raw = f.get("sheets", [])
+            sheets: list[dict[str, Any]] = []
+            for s in sheets_raw:
+                _rows = s.get("rows") or 0
+                _cols = s.get("cols") or 0
+                sheet_info: dict[str, Any] = {
+                    "name": s.get("name", "?"),
+                    "rows": _rows,
+                    "cols": _cols,
+                    "has_header": bool(s.get("header")),
+                }
+                sheets.append(sheet_info)
+                total_rows += _rows
+                total_sheets += 1
+            report_files.append({"path": path, "sheets": sheets})
+
+        return {
+            "summary": f"工作区共 {len(report_files)} 个 Excel 文件，{total_sheets} 个工作表，约 {total_rows} 行数据",
+            "files": report_files,
+            "findings": [],
+            "recommendation": "",
+            "_source": "auto_explore",
+        }
 
     def start_registry_scan(self, *, force: bool = False) -> bool:
         """启动 FileRegistry 后台扫描。"""
@@ -1750,6 +1860,11 @@ class AgentEngine:
 
             self._memory.add_user_message(parts if parts else text)
 
+        # 修复上一次中断（abort / CancelledError）可能遗留的悬空 tool_call
+        _repaired = self._memory.repair_dangling_tool_calls()
+        if _repaired:
+            logger.info("修复了 %d 个中断遗留的悬空 tool_call", _repaired)
+
         if self._question_flow.has_pending():
             pending_chat_start = time.monotonic()
             pending_result = await self._interaction_handler.handle_pending_question_answer(
@@ -2513,6 +2628,10 @@ class AgentEngine:
             write_log = _state.render_write_operations_log()
             if write_log:
                 parts.append(write_log)
+            # 根据写入操作类型注入针对性验证清单
+            playbook = AgentEngine._select_verification_playbook(_state.write_operations_log)
+            if playbook:
+                parts.append(playbook)
 
         # 注入任务清单状态（含每步验证结果），帮助 verifier 对照验证条件
         task_list_notice = self._context_builder._build_task_list_status_notice()
@@ -2538,6 +2657,7 @@ class AgentEngine:
         # 解析 verdict
         verdict_text = result.summary.strip()
         verdict = "unknown"
+        confidence = "unknown"
         issues: list[str] = []
         checks: list[str] = []
 
@@ -2545,17 +2665,29 @@ class AgentEngine:
             parsed = json.loads(verdict_text)
             if isinstance(parsed, dict):
                 verdict = str(parsed.get("verdict", "unknown")).lower()
+                confidence = str(parsed.get("confidence", "unknown")).lower()
                 issues = parsed.get("issues", [])
                 checks = parsed.get("checks", [])
         except (json.JSONDecodeError, TypeError):
             # verifier 未按格式输出，视为 unknown
             pass
 
-        confidence = "unknown"
-        try:
-            confidence = str(parsed.get("confidence", "unknown")).lower()  # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001
-            pass
+        # 发射结构化 VERIFICATION_REPORT 事件（供前端渲染验证卡片）
+        if on_event is not None:
+            try:
+                self.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.VERIFICATION_REPORT,
+                        verification_verdict=verdict,
+                        verification_confidence=confidence,
+                        verification_checks=[str(c) for c in checks[:10]],
+                        verification_issues=[str(i) for i in issues[:10]],
+                        verification_mode="blocking" if blocking else "advisory",
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
         if verdict == "pass":
             check_str = "、".join(str(c) for c in checks[:3]) if checks else "基本检查"
@@ -2567,6 +2699,90 @@ class AgentEngine:
             return f"\n\n⚠️ **验证发现问题**（advisory）：{issue_str}（任务仍标记完成，建议复查）"
         else:
             return f"\n\n🔍 **验证结果不确定**：{verdict_text[:200]}"
+
+    @staticmethod
+    def _select_verification_playbook(
+        write_ops: list[dict[str, str]],
+    ) -> str:
+        """根据写入操作日志中的工具类型，选择针对性验证清单注入 verifier prompt。
+
+        返回空字符串表示无需额外清单（verifier.md 中已有通用清单）。
+        """
+        if not write_ops:
+            return ""
+
+        tool_names = {entry.get("tool_name", "") for entry in write_ops}
+        has_run_code = "run_code" in tool_names
+        has_write_cells = "write_cells" in tool_names
+        has_create_sheet = "create_sheet" in tool_names
+        has_delete_sheet = "delete_sheet" in tool_names
+        has_insert = bool(tool_names & {"insert_rows", "insert_columns"})
+
+        # 检测公式写入（values 中含 = 开头的字符串）
+        has_formula = False
+        for entry in write_ops:
+            summary = entry.get("summary", "")
+            if "公式" in summary or "VLOOKUP" in summary.upper() or "formula" in summary.lower():
+                has_formula = True
+                break
+
+        # 检测跨 sheet 操作（涉及多个不同 sheet）
+        sheets = {entry.get("sheet", "") for entry in write_ops if entry.get("sheet")}
+        is_cross_sheet = len(sheets) > 1 or has_create_sheet
+
+        sections: list[str] = ["## 针对性验证清单（根据本轮操作自动生成）"]
+
+        if has_formula:
+            sections.append(
+                "### 公式验证\n"
+                "- 用 `run_code` + openpyxl(data_only=False) 回读公式文本，确认公式语法正确\n"
+                "- 检查公式引用的 sheet 和范围是否有效（不指向空区域）\n"
+                "- 抽样 2-3 个公式单元格，用 data_only=True 读取计算值，判断是否合理"
+            )
+
+        if is_cross_sheet:
+            sections.append(
+                "### 跨表一致性\n"
+                "- 验证源表和目标表的行数关系是否符合预期\n"
+                "- 对比关键列的值域（如 ID 列）是否一致\n"
+                "- 检查新建的 sheet 是否存在且列头正确"
+            )
+
+        if has_run_code:
+            sections.append(
+                "### run_code 写入验证\n"
+                "- 用 `read_excel` 或 `run_code`(只读) 检查目标文件的行数和列数\n"
+                "- 抽样首行和末行数据，确认写入内容正确\n"
+                "- 验证数据类型（数字未变为字符串、日期格式正确）"
+            )
+
+        if has_write_cells and not has_formula:
+            sections.append(
+                "### 数据写入验证\n"
+                "- 用 `read_excel` 读取写入范围，确认行列数匹配\n"
+                "- 抽检首行和末行的值是否与预期一致\n"
+                "- 检查是否有意外的空值或类型错误"
+            )
+
+        if has_delete_sheet:
+            sections.append(
+                "### 删除验证\n"
+                "- 用 `list_sheets` 确认目标 sheet 已不存在\n"
+                "- 确认其他 sheet 未受影响"
+            )
+
+        if has_insert:
+            sections.append(
+                "### 插入行/列验证\n"
+                "- 验证插入后总行数/列数是否正确\n"
+                "- 检查插入位置附近的数据是否正确偏移（无覆盖）"
+            )
+
+        # 只有标题没有具体清单时返回空
+        if len(sections) <= 1:
+            return ""
+
+        return "\n\n".join(sections)
 
     def _build_full_mode_contexts(self) -> list[str]:
         """为 full 模式子代理构建主代理级别的丰富上下文。"""

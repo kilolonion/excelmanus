@@ -297,6 +297,56 @@ class ConversationMemory:
                 output.append(msg)
         return system_msgs + output
 
+    def repair_dangling_tool_calls(self) -> int:
+        """修复尾部悬空的 tool_call：为缺失 result 的 tool_call 补占位 tool result。
+
+        当任务被中断（abort / CancelledError）时，memory 尾部可能存在
+        assistant 消息包含 N 个 tool_calls 但只有 0..N-1 个 tool results。
+        LLM API 要求每个 tool_call 都有对应 tool result，否则下次调用会报错。
+
+        Returns:
+            补充的占位 tool result 数量。
+        """
+        if not self._messages:
+            return 0
+
+        # 收集尾部 assistant tool_call 消息中所有 call id
+        expected_ids: list[str] = []
+        for msg in reversed(self._messages):
+            role = msg.get("role")
+            if role == "tool":
+                continue  # 跳过已有的 tool result
+            if role == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                    if tc_id:
+                        expected_ids.append(tc_id)
+                break  # 只修复最近一组
+            else:
+                break  # 遇到非 tool/非 tool_call assistant 消息即停止
+
+        if not expected_ids:
+            return 0
+
+        # 收集已有的 tool result id
+        existing_ids: set[str] = set()
+        for msg in self._messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                existing_ids.add(msg["tool_call_id"])
+
+        # 为缺失的 tool_call 补占位 result
+        repaired = 0
+        for tc_id in expected_ids:
+            if tc_id not in existing_ids:
+                self._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": "[任务已中断，该工具未执行完成]",
+                })
+                repaired += 1
+
+        return repaired
+
     def inject_messages(self, messages: list[dict]) -> None:
         """注入历史消息（用于会话恢复）。不触发截断。"""
         self._messages.extend(messages)
@@ -445,6 +495,9 @@ class ConversationMemory:
                     # 直接丢弃最后一条，保证请求不会持续超预算。
                     self._messages.pop(0)
                     break
+                # 收缩后仍可能因 system 过大而超阈值，此时保留最后一条不删
+                if self._total_tokens_with_system_messages(system_msgs) > threshold:
+                    break
                 continue
 
             # 移除最早的消息，但至少保留最后一条（最近的消息）
@@ -491,8 +544,11 @@ class ConversationMemory:
         """尽量收缩最后一条消息内容，返回是否完成收缩。"""
         msg = self._messages[-1]
         content = msg.get("content")
-        if not isinstance(content, str) or not content:
+        if not isinstance(content, str):
             return False
+        if not content:
+            # 已为空，无需再收缩，保留该条消息
+            return True
 
         message_tokens = self._token_counter.count_message(msg)
         content_tokens = self._token_counter.count(content)

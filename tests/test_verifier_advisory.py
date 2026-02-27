@@ -180,7 +180,7 @@ class TestVerifierAdvisorySkip:
 
 
 class TestVerifierAdvisoryTaskListContext:
-    """Phase 2b: verifier prompt 应包含任务清单上下文。"""
+    """verifier prompt 应包含任务清单上下文。"""
 
     @pytest.mark.asyncio
     async def test_verifier_prompt_includes_task_list_when_present(self):

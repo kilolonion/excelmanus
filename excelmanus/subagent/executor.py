@@ -183,6 +183,39 @@ class SubagentExecutor:
 
                 memory.add_assistant_tool_message(assistant_message_to_dict(message))
 
+                # ── R7: 只读并行快速路径 ──
+                # 当一批 tool_calls 全部可解析且全部是只读安全工具时，
+                # 用 asyncio.gather 并行执行以加速 explorer 多工具探索。
+                _parallel_handled = await self._try_parallel_readonly_batch(
+                    config=config,
+                    message_tool_calls=message_tool_calls,
+                    registry=filtered_registry,
+                    tool_scope=tool_scope,
+                    full_access_enabled=full_access_enabled,
+                    persistent_memory=persistent_memory,
+                    tool_result_enricher=tool_result_enricher,
+                    session_turn=session_turn,
+                    file_access_guard=file_access_guard,
+                    sandbox_env=sandbox_env,
+                    cow_mappings=cow_mappings,
+                    workspace_root=workspace_root,
+                    # mutable accumulators
+                    memory=memory,
+                    on_event=on_event,
+                    conversation_id=conversation_id,
+                    observed_files=observed_files,
+                    structured_changes=structured_changes,
+                )
+                if _parallel_handled is not None:
+                    _p_tc, _p_success, _p_error = _parallel_handled
+                    tool_calls += _p_tc
+                    if not _p_success:
+                        success = False
+                        error = _p_error
+                    # 并行路径不触发 breaker/pending，直接进入下一迭代
+                    continue
+
+                # ── 串行回退路径（含 breaker/pending/failure tracking） ──
                 breaker_skip_msg = (
                     f"工具未执行：同一失败重复 {config.max_consecutive_failures} 次，已触发熔断。"
                 )
@@ -470,6 +503,150 @@ class SubagentExecutor:
             observed_files=sorted(observed_files),
         )
 
+    async def _try_parallel_readonly_batch(
+        self,
+        *,
+        config: SubagentConfig,
+        message_tool_calls: list[Any],
+        registry: FilteredToolRegistry,
+        tool_scope: list[str],
+        full_access_enabled: bool,
+        persistent_memory: Any,
+        tool_result_enricher: ToolResultEnricher | None,
+        session_turn: int | None,
+        file_access_guard: Any | None,
+        sandbox_env: Any | None,
+        cow_mappings: dict[str, str] | None,
+        workspace_root: str,
+        # mutable accumulators
+        memory: ConversationMemory,
+        on_event: EventCallback | None,
+        conversation_id: str,
+        observed_files: set[str],
+        structured_changes: list[SubagentFileChange],
+    ) -> tuple[int, bool, str | None] | None:
+        """尝试并行执行一批全部为只读的工具调用。
+
+        返回 (tool_call_count, all_success, last_error) 表示已处理；
+        返回 None 表示不适用并行，需回退串行路径。
+
+        前置条件（全部满足才走并行）：
+        1. 批次 >= 2 个工具调用
+        2. 全部参数可解析
+        3. 全部是只读安全工具（READ_ONLY_SAFE_TOOLS 或 allowed_tools 显式授权的只读工具）
+        """
+        if len(message_tool_calls) < 2:
+            return None
+
+        # ── 阶段 1: 预解析全部工具调用 ──
+        parsed: list[tuple[str, str, dict[str, Any]]] = []  # (call_id, tool_name, args)
+        for tc in message_tool_calls:
+            call_id = getattr(tc, "id", "")
+            tool_name = getattr(getattr(tc, "function", None), "name", "")
+            raw_args = getattr(getattr(tc, "function", None), "arguments", "{}")
+            try:
+                args = json.loads(raw_args or "{}")
+                if not isinstance(args, dict):
+                    return None  # 解析失败 → 回退串行
+            except Exception:
+                return None
+            if not self._approval.is_read_only_safe_tool(tool_name):
+                return None  # 非 READ_ONLY_SAFE 工具 → 回退串行（需要审计/审批流程）
+            parsed.append((call_id, tool_name, args))
+
+        # ── 阶段 2: 发射 start 事件 + 并行执行 ──
+        _tool_timeout = getattr(config, "tool_timeout", 300)
+        _exec_kwargs = dict(
+            config=config,
+            registry=registry,
+            tool_scope=tool_scope,
+            full_access_enabled=full_access_enabled,
+            persistent_memory=persistent_memory,
+            tool_result_enricher=tool_result_enricher,
+            session_turn=session_turn,
+            file_access_guard=file_access_guard,
+            sandbox_env=sandbox_env,
+            cow_mappings=cow_mappings,
+            workspace_root=workspace_root,
+        )
+
+        async def _run_one(call_id: str, tool_name: str, args: dict[str, Any], idx: int) -> _ExecResult:
+            self._emit_safe(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_TOOL_START,
+                    subagent_name=config.name,
+                    subagent_conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    arguments=self._summarize_args(tool_name, args),
+                    subagent_tool_index=idx,
+                ),
+            )
+            try:
+                return await asyncio.wait_for(
+                    self._execute_tool(tool_name=tool_name, arguments=args, **_exec_kwargs),
+                    timeout=_tool_timeout,
+                )
+            except asyncio.TimeoutError:
+                return _ExecResult(
+                    success=False,
+                    result=f"[错误] 工具 {tool_name} 执行超时（{_tool_timeout}s）",
+                    error=f"timeout after {_tool_timeout}s",
+                )
+
+        # 收集路径观察
+        for _, tool_name, args in parsed:
+            observed_files.update(self._extract_excel_paths_from_arguments(args))
+
+        results = await asyncio.gather(
+            *[_run_one(cid, tn, a, i + 1) for i, (cid, tn, a) in enumerate(parsed)],
+            return_exceptions=True,
+        )
+
+        # ── 阶段 3: 顺序处理结果 ──
+        tc_count = len(parsed)
+        all_success = True
+        last_error: str | None = None
+
+        for i, (call_id, tool_name, args) in enumerate(parsed):
+            raw = results[i]
+            if isinstance(raw, BaseException):
+                result = _ExecResult(success=False, result=str(raw), error=str(raw))
+            else:
+                result = raw
+
+            memory.add_tool_result(call_id, result.result)
+            self._emit_safe(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.SUBAGENT_TOOL_END,
+                    subagent_name=config.name,
+                    subagent_conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    success=result.success,
+                    result=result.result[:300] if result.result else "",
+                    error=result.error[:200] if result.error else None,
+                    subagent_tool_index=i + 1,
+                ),
+            )
+            observed_source = result.raw_result if result.raw_result is not None else result.result
+            observed_files.update(
+                self._extract_excel_paths_from_tool_result(tool_name=tool_name, text=observed_source)
+            )
+            if result.file_changes:
+                for _fc_path in result.file_changes:
+                    structured_changes.append(SubagentFileChange(
+                        path=_fc_path,
+                        tool_name=tool_name,
+                        change_type=self._infer_change_type(tool_name),
+                        sheets_affected=self._extract_sheet_names(tool_name, args),
+                    ))
+            if not result.success:
+                all_success = False
+                last_error = result.error or result.result
+
+        return (tc_count, all_success, last_error)
+
     async def _execute_with_probe(
         self,
         *,
@@ -687,7 +864,10 @@ class SubagentExecutor:
         confirm_required = self._approval.is_confirm_required_tool(tool_name)
         audit_only = self._approval.is_audit_only_tool(tool_name)
         if mode == "readOnly":
-            if not read_only_safe:
+            # allowed_tools 显式白名单优先于 readOnly 策略：
+            # 子代理定义者明确授权的工具允许执行（如 explorer 使用 run_code）。
+            explicitly_allowed = bool(config.allowed_tools) and tool_name in config.allowed_tools
+            if not read_only_safe and not explicitly_allowed:
                 msg = f"只读模式仅允许白名单工具：{tool_name}"
                 return _ExecResult(success=False, result=msg, error=msg)
 

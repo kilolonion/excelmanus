@@ -24,6 +24,13 @@ def _make_orchestrator(
     engine_mock._normalize_skill_agent_name = MagicMock(
         side_effect=lambda x: x or "subagent"
     )
+    # orchestrator 通过 _skill_resolver 访问这些方法
+    engine_mock._skill_resolver = MagicMock()
+    engine_mock._skill_resolver.normalize_skill_agent_name = MagicMock(
+        side_effect=lambda x: x or "subagent"
+    )
+    engine_mock._skill_resolver.run_skill_hook = MagicMock(return_value=None)
+    engine_mock._skill_resolver.resolve_hook_result = AsyncMock(return_value=None)
     engine_mock._run_skill_hook = MagicMock(return_value=None)
     engine_mock._resolve_hook_result = AsyncMock(return_value=None)
     engine_mock._auto_select_subagent = AsyncMock(return_value="subagent")
@@ -456,6 +463,110 @@ class TestFailureReplyDedup:
 
         assert outcome.success is False
         assert "已保留部分产出" in outcome.reply
+
+
+class TestExplorerReportParsing:
+    """R3: EXPLORER_REPORT 结构化报告解析。"""
+
+    def test_extracts_valid_report(self):
+        summary = (
+            "数据概览如下...\n"
+            "<!-- EXPLORER_REPORT_START -->\n"
+            '{"summary": "2 files, 3 sheets", "files": [{"path": "a.xlsx", "sheets": []}], "findings": []}\n'
+            "<!-- EXPLORER_REPORT_END -->"
+        )
+        report = SubagentOrchestrator._extract_explorer_report(summary)
+        assert report is not None
+        assert report["summary"] == "2 files, 3 sheets"
+        assert len(report["files"]) == 1
+        assert report["files"][0]["path"] == "a.xlsx"
+
+    def test_returns_none_when_no_markers(self):
+        report = SubagentOrchestrator._extract_explorer_report("普通文本摘要")
+        assert report is None
+
+    def test_returns_none_for_invalid_json(self):
+        summary = (
+            "<!-- EXPLORER_REPORT_START -->\n"
+            "{invalid json}\n"
+            "<!-- EXPLORER_REPORT_END -->"
+        )
+        report = SubagentOrchestrator._extract_explorer_report(summary)
+        assert report is None
+
+    def test_returns_none_for_missing_end_marker(self):
+        summary = '<!-- EXPLORER_REPORT_START -->\n{"summary": "test"}'
+        report = SubagentOrchestrator._extract_explorer_report(summary)
+        assert report is None
+
+    def test_returns_none_for_non_dict_json(self):
+        summary = (
+            "<!-- EXPLORER_REPORT_START -->\n"
+            "[1, 2, 3]\n"
+            "<!-- EXPLORER_REPORT_END -->"
+        )
+        report = SubagentOrchestrator._extract_explorer_report(summary)
+        assert report is None
+
+    def test_caches_report_to_session_state(self):
+        orch = _make_orchestrator()
+        orch._engine._state = MagicMock()
+        orch._engine._state.explorer_reports = []  # 初始空列表
+        summary_with_report = (
+            "概览\n"
+            "<!-- EXPLORER_REPORT_START -->\n"
+            '{"summary": "ok", "files": [], "findings": [{"type": "anomaly", "detail": "test"}]}\n'
+            "<!-- EXPLORER_REPORT_END -->"
+        )
+        result = orch._parse_and_cache_explorer_report(summary_with_report)
+        assert result is not None
+        assert result["summary"] == "ok"
+        assert len(orch._engine._state.explorer_reports) == 1
+
+    def test_cache_limit_5(self):
+        orch = _make_orchestrator()
+        orch._engine._state = MagicMock()
+        orch._engine._state.explorer_reports = [{"summary": f"r{i}"} for i in range(5)]
+        summary = (
+            "<!-- EXPLORER_REPORT_START -->\n"
+            '{"summary": "r5"}\n'
+            "<!-- EXPLORER_REPORT_END -->"
+        )
+        orch._parse_and_cache_explorer_report(summary)
+        assert len(orch._engine._state.explorer_reports) == 5
+        assert orch._engine._state.explorer_reports[-1]["summary"] == "r5"
+
+
+class TestExplorationDepthEstimation:
+    """R5: 探索深度估算。"""
+
+    def test_deep_keywords_return_depth_4(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="检查数据质量", file_paths=[]) == 4
+        assert orch._estimate_exploration_depth(task="找出重复行", file_paths=[]) == 4
+        assert orch._estimate_exploration_depth(task="公式依赖分析", file_paths=[]) == 4
+
+    def test_profile_keywords_return_depth_3(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="统计各列空值", file_paths=[]) == 3
+        assert orch._estimate_exploration_depth(task="数据类型概况", file_paths=[]) == 3
+
+    def test_schema_keywords_return_depth_2(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="有哪些列", file_paths=[]) == 2
+        assert orch._estimate_exploration_depth(task="表结构是什么", file_paths=[]) == 2
+
+    def test_file_path_returns_depth_1(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="看看", file_paths=["a.xlsx"]) == 1
+
+    def test_excel_filename_in_task_returns_depth_1(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="打开 report.xlsx", file_paths=[]) == 1
+
+    def test_default_depth_is_2(self):
+        orch = _make_orchestrator()
+        assert orch._estimate_exploration_depth(task="帮我看看这个", file_paths=[]) == 2
 
 
 class TestOutcomeStructure:

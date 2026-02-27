@@ -180,19 +180,20 @@ async def test_property_2_unauthorized_tool_error_response_format(
     except (json.JSONDecodeError, TypeError) as exc:
         pytest.fail(f"error 字段不是合法 JSON: {result.error!r}, 异常: {exc}")
 
-    # 验证 JSON 包含必需的四个键
-    required_keys = {"error_code", "tool", "message"}
+    # 当前实现经 classify_tool_error + compact_error 后返回新格式：error_kind / summary / suggestion
+    required_keys = {"error_kind", "summary"}
     missing_keys = required_keys - set(error_data.keys())
     assert not missing_keys, (
         f"错误响应 JSON 缺少必需键: {missing_keys}，实际键: {set(error_data.keys())}"
     )
 
-    # 验证 error_code 值
-    assert error_data["error_code"] == "TOOL_NOT_ALLOWED", (
-        f"error_code 应为 'TOOL_NOT_ALLOWED'，实际: {error_data['error_code']!r}"
+    # 未授权工具被分类为永久错误
+    assert error_data["error_kind"] == "permanent", (
+        f"error_kind 应为 'permanent'，实际: {error_data['error_kind']!r}"
     )
 
-    # 验证 tool 值与请求的工具名一致
-    assert error_data["tool"] == tool_name, (
-        f"tool 应为 {tool_name!r}，实际: {error_data['tool']!r}"
+    # summary 中应包含工具名或授权相关语义
+    summary = error_data.get("summary", "")
+    assert tool_name in summary or "授权" in summary or "不在" in summary, (
+        f"summary 应包含工具名或授权语义，实际: {summary!r}"
     )

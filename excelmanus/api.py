@@ -2072,6 +2072,7 @@ def _sse_event_to_sse(
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
         EventType.FILE_DOWNLOAD: "file_download",
+        EventType.VERIFICATION_REPORT: "verification_report",
         EventType.RETRACT_THINKING: "retract_thinking",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
@@ -2326,6 +2327,14 @@ def _sse_event_to_sse(
             "file_path": _public_excel_path(event.download_file_path, safe_mode=safe_mode),
             "filename": sanitize_external_text(event.download_filename, max_len=260),
             "description": sanitize_external_text(event.download_description, max_len=500),
+        }
+    elif event.event_type == EventType.VERIFICATION_REPORT:
+        data = {
+            "verdict": event.verification_verdict,
+            "confidence": event.verification_confidence,
+            "checks": event.verification_checks[:10],
+            "issues": event.verification_issues[:10],
+            "mode": event.verification_mode,
         }
     elif event.event_type == EventType.RETRACT_THINKING:
         data = {"iteration": event.iteration}

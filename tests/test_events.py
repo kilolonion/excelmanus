@@ -128,6 +128,9 @@ class TestEventTypeEnum:
             "FILE_DOWNLOAD",
             "PLAN_CREATED",
             "TEXT_DIFF",
+            "TOOL_CALL_ARGS_DELTA",
+            "VERIFICATION_REPORT",
+            "RETRACT_THINKING",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -165,6 +168,7 @@ class TestEventTypeEnum:
             ("APPROVAL_RESOLVED", "approval_resolved"),
             ("THINKING_DELTA", "thinking_delta"),
             ("TEXT_DELTA", "text_delta"),
+            ("TOOL_CALL_ARGS_DELTA", "tool_call_args_delta"),
             ("MODE_CHANGED", "mode_changed"),
             ("EXCEL_PREVIEW", "excel_preview"),
             ("EXCEL_DIFF", "excel_diff"),
@@ -174,6 +178,8 @@ class TestEventTypeEnum:
             ("MEMORY_EXTRACTED", "memory_extracted"),
             ("FILE_DOWNLOAD", "file_download"),
             ("PLAN_CREATED", "plan_created"),
+            ("VERIFICATION_REPORT", "verification_report"),
+            ("RETRACT_THINKING", "retract_thinking"),
         ]
 
 
@@ -328,5 +334,15 @@ class TestToolCallEventFields:
             "text_diff_additions",
             "text_diff_deletions",
             "text_diff_truncated",
+            "args_delta",
+            "excel_cell_styles",
+            "excel_merge_ranges",
+            "excel_old_merge_ranges",
+            "excel_metadata_hints",
+            "verification_verdict",
+            "verification_confidence",
+            "verification_checks",
+            "verification_issues",
+            "verification_mode",
         }
         assert set(annotations.keys()) == expected_fields

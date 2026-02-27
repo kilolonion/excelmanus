@@ -41,6 +41,7 @@ class EventType(Enum):
     MEMORY_EXTRACTED = "memory_extracted"
     FILE_DOWNLOAD = "file_download"
     PLAN_CREATED = "plan_created"
+    VERIFICATION_REPORT = "verification_report"
     RETRACT_THINKING = "retract_thinking"
 
 
@@ -154,6 +155,12 @@ class ToolCallEvent:
     plan_file_path: str = ""
     plan_title: str = ""
     plan_task_count: int = 0
+    # verification_report 事件字段
+    verification_verdict: str = ""       # pass / fail / unknown
+    verification_confidence: str = ""    # high / medium / low
+    verification_checks: List[str] = field(default_factory=list)
+    verification_issues: List[str] = field(default_factory=list)
+    verification_mode: str = ""          # advisory / blocking
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""
