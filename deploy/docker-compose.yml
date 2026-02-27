@@ -1,0 +1,96 @@
+services:
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: excelmanus-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: excelmanus
+      POSTGRES_USER: ${PG_USER:-excelmanus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-excelmanus}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-excelmanus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend API ──
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: excelmanus-api
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      - EXCELMANUS_AUTH_ENABLED=${EXCELMANUS_AUTH_ENABLED:-true}
+      - EXCELMANUS_JWT_SECRET=${EXCELMANUS_JWT_SECRET:-}
+      - EXCELMANUS_DATABASE_URL=postgresql://${PG_USER:-excelmanus}:${PG_PASSWORD:-excelmanus}@postgres:5432/excelmanus
+      - EXCELMANUS_WORKSPACE_ROOT=/workspace
+      - EXCELMANUS_DB_PATH=/data/excelmanus.db
+      - EXCELMANUS_CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost
+    volumes:
+      - workspace_data:/workspace
+      - db_data:/data
+      # Docker 沙盒需要挂载 Docker socket（启用 EXCELMANUS_DOCKER_SANDBOX=true 时取消注释）
+      # - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Frontend ──
+  frontend:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+    container_name: excelmanus-web
+    restart: unless-stopped
+    environment:
+      - BACKEND_INTERNAL_URL=http://backend:8000
+    # 默认 NEXT_PUBLIC_BACKEND_ORIGIN 留空 → 前端自动回退 http://{hostname}:8000 直连后端
+    # 生产环境使用 Nginx 时，取消下方注释以走同源：
+    # build:
+    #   context: ../web
+    #   dockerfile: Dockerfile
+    #   args:
+    #     NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Nginx Reverse Proxy (optional, for production with TLS) ──
+  # 启用 Nginx 时，请同时在 frontend.build.args 中设置：
+  #   NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
+  nginx:
+    image: nginx:alpine
+    container_name: excelmanus-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - frontend
+      - backend
+    profiles:
+      - production
+
+volumes:
+  pg_data:
+  workspace_data:
+  db_data:
