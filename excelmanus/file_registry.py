@@ -1048,6 +1048,49 @@ class FileRegistry:
     @staticmethod
     def _scan_file_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
         """用 openpyxl 扫描单个 Excel 文件的 sheet 元数据。"""
+        # CSV 文件不走 openpyxl
+        if fp.suffix.lower() == ".csv":
+            import csv as _csv
+
+            _enc = "utf-8"
+            for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
+                try:
+                    with open(fp, "r", encoding=_try_enc) as _f:
+                        _f.read(4096)
+                    _enc = _try_enc
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+
+            with open(fp, "r", encoding=_enc, newline="") as _f:
+                reader = _csv.reader(_f)
+                rows_raw: list[list[str]] = []
+                for row in reader:
+                    rows_raw.append(row)
+                    if len(rows_raw) >= header_scan_rows + 1:
+                        break
+
+            total_rows = len(rows_raw)
+            total_cols = max((len(r) for r in rows_raw), default=0)
+            headers: list[str] = []
+            if rows_raw:
+                best_idx = 0
+                best_score = -1
+                for idx, r in enumerate(rows_raw):
+                    non_empty = [v for v in r if v and v.strip()]
+                    score = len(non_empty) * 2
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+                headers = [v.strip() for v in rows_raw[best_idx] if v and v.strip()]
+
+            return [{
+                "name": "Sheet1",
+                "rows": total_rows,
+                "columns": total_cols,
+                "headers": headers,
+            }]
+
         from openpyxl import load_workbook
 
         sheets: list[dict] = []
