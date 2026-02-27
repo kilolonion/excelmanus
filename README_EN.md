@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="logo.svg" width="280" alt="ExcelManus" />
+  <img src="assets/logo.svg" width="280" alt="ExcelManus" />
 </p>
 
 <h3 align="center">AI Agent that operates Excel with natural language</h3>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/version-1.6.0-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-15-black?logo=next.js" alt="Next.js" />
@@ -211,8 +211,8 @@ Protocol details in [`docs/skillpack_protocol.md`](docs/skillpack_protocol.md).
 ### Docker Compose (Recommended)
 
 ```bash
-cp .env.example .env   # Edit API Key, model, etc.
-docker compose up -d   # Backend + Frontend + PostgreSQL
+cp .env.example .env                      # Edit API Key, model, etc.
+docker compose -f deploy/docker-compose.yml up -d   # Backend + Frontend + PostgreSQL
 ```
 
 Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse proxy at `http://localhost`.
@@ -224,9 +224,9 @@ For BT Panel / bare metal scenarios without Docker, see [Ops Manual](docs/ops-ma
 ### Remote Update
 
 ```bash
-./deploy.sh                  # Full deploy
-./deploy.sh --backend-only   # Backend only
-./deploy.sh --frontend-only  # Frontend only
+./deploy/deploy.sh                  # Full deploy
+./deploy/deploy.sh --backend-only   # Backend only
+./deploy/deploy.sh --frontend-only  # Frontend only
 ```
 
 > Automatically excludes `.env`, `data/`, `workspace/` — won't overwrite server data.
@@ -265,4 +265,4 @@ pytest
 
 ## 📄 License
 
-[MIT](LICENSE) © kilolonion
+[Apache License 2.0](LICENSE) © kilolonion

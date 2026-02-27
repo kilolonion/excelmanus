@@ -119,17 +119,17 @@ firewall-cmd --reload                             # Apply
 
 ### 5.1 One-Click Deployment
 
-The `deploy.sh` in the project root supports separate frontend/backend deployment:
+`deploy/deploy.sh` supports separate frontend/backend deployment:
 
 ```bash
 # Full deployment (backend + frontend)
-./deploy.sh
+./deploy/deploy.sh
 
 # Update backend only
-./deploy.sh --backend-only
+./deploy/deploy.sh --backend-only
 
 # Update frontend only
-./deploy.sh --frontend-only
+./deploy/deploy.sh --frontend-only
 
 # Build and package frontend artifact locally (recommended)
 cd /path/to/excelmanus/web
@@ -138,16 +138,16 @@ mkdir -p ../web-dist
 tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
 
 # Skip frontend build, restart only
-./deploy.sh --frontend-only --skip-build
+./deploy/deploy.sh --frontend-only --skip-build
 
 # Use locally/CI-built frontend artifact (recommended for low-memory servers)
-./deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
+./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
 
 # Remote cold build (troubleshooting only, high risk)
-./deploy.sh --frontend-only --cold-build
+./deploy/deploy.sh --frontend-only --cold-build
 
 # Sync from local via rsync (bypasses GitHub)
-./deploy.sh --from-local
+./deploy/deploy.sh --from-local
 ```
 
 ### 5.2 Manual Operations
@@ -472,11 +472,17 @@ firewall-cmd --reload
 
 ```
 Project Root/
-├── deploy.sh              # One-click deployment script (separate frontend/backend)
-├── <SSH_KEY_FILE>      # SSH private key (shared by both servers)
+├── deploy/
+│   ├── deploy.sh          # One-click deployment script (separate frontend/backend)
+│   ├── Dockerfile         # Backend Docker image
+│   ├── Dockerfile.sandbox # Code sandbox image
+│   ├── docker-compose.yml # Docker Compose orchestration
+│   ├── nginx.conf         # Nginx reverse proxy config
+│   └── certs/             # TLS certificates
+├── assets/
+│   └── logo.svg           # Brand logo
 ├── .env                   # Local development environment variables
 ├── mcp.json               # MCP server configuration
-├── start.sh               # Local development startup script
 └── docs/
     └── ops-manual.md      # This manual
 ```

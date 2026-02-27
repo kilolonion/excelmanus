@@ -12,7 +12,7 @@ set -euo pipefail
 #
 #  配置优先级：命令行参数 > 环境变量 > deploy/.env.deploy > 内置默认值
 #
-#  用法:  ./deploy.sh [选项]
+#  用法:  ./deploy/deploy.sh [选项]
 #
 #  基本选项:
 #    --backend-only       只更新后端
@@ -74,6 +74,7 @@ set -euo pipefail
 
 VERSION="1.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── 颜色 ──
 if [[ -t 1 ]]; then
@@ -150,7 +151,7 @@ VERIFY_TIMEOUT=""
 
 # ── 加载配置文件 ──
 _load_config() {
-  local config_file="${SCRIPT_DIR}/deploy/.env.deploy"
+  local config_file="${SCRIPT_DIR}/.env.deploy"
   if [[ -f "$config_file" ]]; then
     debug "加载配置: $config_file"
     # shellcheck source=/dev/null
@@ -163,7 +164,7 @@ _load_config() {
     [[ -z "$BACKEND_DIR" && -n "${BACKEND_REMOTE_DIR:-}" ]]  && BACKEND_DIR="$BACKEND_REMOTE_DIR"
     [[ -z "$FRONTEND_DIR" && -n "${FRONTEND_REMOTE_DIR:-}" ]] && FRONTEND_DIR="$FRONTEND_REMOTE_DIR"
     [[ -z "$NODE_BIN" && -n "${FRONTEND_NODE_BIN:-}" ]]      && NODE_BIN="$FRONTEND_NODE_BIN"
-    [[ -z "$SSH_KEY_PATH" && -n "${SSH_KEY_NAME:-}" ]]       && SSH_KEY_PATH="${SCRIPT_DIR}/${SSH_KEY_NAME}"
+    [[ -z "$SSH_KEY_PATH" && -n "${SSH_KEY_NAME:-}" ]]       && SSH_KEY_PATH="${PROJECT_ROOT}/${SSH_KEY_NAME}"
     [[ -z "$REPO_URL" && -n "${REPO_URL:-}" ]]               || true
     [[ -z "$REPO_BRANCH" && -n "${REPO_BRANCH:-}" ]]         || true
   else
@@ -290,28 +291,28 @@ _show_help() {
   echo ""
   echo "示例:"
   echo "  # 单机部署（前后端同一台服务器）"
-  echo "  ./deploy.sh --host 192.168.1.100 --dir /opt/excelmanus"
+  echo "  ./deploy/deploy.sh --host 192.168.1.100 --dir /opt/excelmanus"
   echo ""
   echo "  # 前后端分离部署"
-  echo "  ./deploy.sh --backend-host 10.0.0.1 --frontend-host 10.0.0.2"
+  echo "  ./deploy/deploy.sh --backend-host 10.0.0.1 --frontend-host 10.0.0.2"
   echo ""
   echo "  # 只更新后端，从本地同步"
-  echo "  ./deploy.sh --backend-only --from-local"
+  echo "  ./deploy/deploy.sh --backend-only --from-local"
   echo ""
   echo "  # Docker 部署"
-  echo "  ./deploy.sh --docker"
+  echo "  ./deploy/deploy.sh --docker"
   echo ""
   echo "  # 本地开发部署"
-  echo "  ./deploy.sh --local --skip-deps"
+  echo "  ./deploy/deploy.sh --local --skip-deps"
   echo ""
   echo "  # 自定义 Node.js 路径和 PM2 进程名"
-  echo "  ./deploy.sh --host myserver --node-bin /usr/local/node/bin --pm2-backend my-api"
+  echo "  ./deploy/deploy.sh --host myserver --node-bin /usr/local/node/bin --pm2-backend my-api"
   echo ""
   echo "  # 使用本地构建的前端制品（推荐低内存服务器）"
-  echo "  ./deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz"
+  echo "  ./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz"
   echo ""
   echo "  # 远端冷构建（仅排障使用）"
-  echo "  ./deploy.sh --frontend-only --cold-build"
+  echo "  ./deploy/deploy.sh --frontend-only --cold-build"
 }
 
 # ── SSH 执行封装 ──
@@ -519,7 +520,7 @@ _sync_code() {
     fi
     local rsync_ssh="ssh $(_ssh_opts)"
     run "rsync -az --partial --append-verify --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
-      '${SCRIPT_DIR}/' '${SSH_USER}@${host}:${remote_dir}/'"
+      '${PROJECT_ROOT}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
     info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
     local git_cmd="

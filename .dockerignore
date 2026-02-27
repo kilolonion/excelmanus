@@ -37,5 +37,7 @@ test_report
 *.png
 *.csv
 uv.lock
-Dockerfile
+deploy/Dockerfile
+deploy/Dockerfile.sandbox
+deploy/docker-compose.yml
 .dockerignore
