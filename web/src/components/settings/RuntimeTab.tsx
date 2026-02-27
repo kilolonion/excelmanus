@@ -446,6 +446,7 @@ export function RuntimeTab() {
   const [saved, setSaved] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [restartTimeout, setRestartTimeout] = useState(false);
 
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
@@ -488,25 +489,46 @@ export function RuntimeTab() {
       const res = await apiPut<{ restarting?: boolean }>("/config/runtime", draft);
       if (res?.restarting) {
         setRestarting(true);
+        setRestartTimeout(false);
         setSaving(false);
+
         // 直连后端健康检查 URL（绕过 Next.js 代理和 auth 拦截）
-        const directBase = `http://${window.location.hostname}:8000`;
-        const healthUrl = `${directBase}/api/v1/health`;
-        // 等待后端进程退出
-        await new Promise((r) => setTimeout(r, 5000));
-        const poll = async () => {
-          for (let i = 0; i < 60; i++) {
-            try {
-              const r = await fetch(healthUrl, { method: "GET", signal: AbortSignal.timeout(3000) });
-              if (r.ok) { window.location.reload(); return; }
-            } catch {
-              // 连接失败 = 后端尚未就绪
-            }
-            await new Promise((r) => setTimeout(r, 2000));
+        // same-origin → 走 Nginx 代理（相对路径）；显式配置 → 直连；默认 → hostname:8000
+        const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
+        const backendOrigin = configured
+          ? (configured.toLowerCase() === "same-origin" ? "" : configured.replace(/\/+$/, ""))
+          : `http://${window.location.hostname}:8000`;
+        const healthUrl = `${backendOrigin}/api/v1/health`;
+
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+        const probe = async (): Promise<boolean> => {
+          try {
+            const r = await fetch(healthUrl, { method: "GET", signal: AbortSignal.timeout(2000) });
+            return r.ok;
+          } catch {
+            return false;
           }
-          setRestarting(false);
         };
-        poll();
+
+        // Phase 1: 等待后端下线（最多 15 秒）
+        await wait(2000);
+        for (let i = 0; i < 26; i++) {
+          if (!(await probe())) break;
+          await wait(500);
+        }
+
+        // Phase 2: 等待后端上线（最多 60 秒）
+        let online = false;
+        for (let i = 0; i < 60; i++) {
+          if (await probe()) { online = true; break; }
+          await wait(1000);
+        }
+
+        if (online) {
+          window.location.reload();
+        } else {
+          setRestartTimeout(true);
+        }
         return;
       }
       setSaved(true);
@@ -522,11 +544,24 @@ export function RuntimeTab() {
   if (restarting) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-4">
-        <Loader2 className="h-8 w-8 animate-spin" style={{ color: "var(--em-primary)" }} />
-        <div className="text-center space-y-1">
-          <p className="text-sm font-medium">服务正在重启…</p>
-          <p className="text-xs text-muted-foreground">认证配置已更新，正在等待后端就绪，请勿关闭页面</p>
-        </div>
+        {restartTimeout ? (
+          <>
+            <AlertCircle className="h-8 w-8 text-destructive" />
+            <div className="text-center space-y-1">
+              <p className="text-sm font-medium">重启超时</p>
+              <p className="text-xs text-muted-foreground">后端未能在预期时间内恢复，请检查服务日志</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>手动刷新页面</Button>
+          </>
+        ) : (
+          <>
+            <Loader2 className="h-8 w-8 animate-spin" style={{ color: "var(--em-primary)" }} />
+            <div className="text-center space-y-1">
+              <p className="text-sm font-medium">服务正在重启…</p>
+              <p className="text-xs text-muted-foreground">认证配置已更新，正在等待后端就绪，请勿关闭页面</p>
+            </div>
+          </>
+        )}
       </div>
     );
   }

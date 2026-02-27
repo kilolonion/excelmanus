@@ -1,0 +1,11 @@
+[registry."docker.io"]
+  mirrors = ["docker.1ms.run", "docker.xuanyuan.me", "docker.rainbond.cc"]
+
+[registry."docker.1ms.run"]
+  http = false
+
+[registry."docker.xuanyuan.me"]
+  http = false
+
+[registry."docker.rainbond.cc"]
+  http = false

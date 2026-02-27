@@ -48,8 +48,6 @@ import asyncio
 import json
 import os
 import re
-import subprocess
-import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -4772,7 +4770,7 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     if db is not None:
         delete_capabilities(db, model, base_url)
 
-    req_protocol = body.get("protocol", "auto") or "auto"
+    req_protocol = body.get("protocol") or _config.protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
 
     try:
@@ -4891,7 +4889,7 @@ async def test_model_connection(request: Request) -> JSONResponse:
                 "model": model,
             })
 
-    req_protocol = body.get("protocol", "auto") or "auto"
+    req_protocol = body.get("protocol") or _config.protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
     try:
         healthy, health_err = await probe_health(client, model, timeout=15.0)
@@ -5159,60 +5157,9 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     })
     if need_restart:
         from starlette.background import BackgroundTask
-        resp.background = BackgroundTask(_restart_process_async)
+        from excelmanus.restart import schedule_restart
+        resp.background = BackgroundTask(schedule_restart)
     return resp
-
-
-async def _restart_process_async() -> None:
-    """响应发送完成后异步触发进程重启。"""
-    import threading
-    t = threading.Thread(target=_restart_process, daemon=False)
-    t.start()
-    await asyncio.sleep(5)
-    os._exit(0)
-
-
-def _restart_process() -> None:
-    """启动一个独立的重启辅助进程，然后退出当前进程。"""
-    import logging as _logging
-    import tempfile
-    import time as _time
-
-    _log = _logging.getLogger(__name__)
-
-    # 始终使用 venv 的 Python + 已知模块入口，避免 sys.orig_argv 指向全局 Python
-    restart_args = [sys.executable, "-c", "from excelmanus.api import main; main()"]
-    cmd_line = subprocess.list2cmdline(restart_args)
-    _log.info("重启命令: %s", cmd_line)
-
-    try:
-        if sys.platform == "win32":
-            bat_path = os.path.join(tempfile.gettempdir(), "_excelmanus_restart.bat")
-            with open(bat_path, "w", encoding="utf-8") as f:
-                f.write("@echo off\r\n")
-                f.write("ping 127.0.0.1 -n 6 >nul 2>&1\r\n")
-                f.write(f"{cmd_line}\r\n")
-            _log.info("重启脚本: %s", bat_path)
-            subprocess.Popen(
-                f'cmd /c "{bat_path}"',
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.CREATE_NO_WINDOW,
-            )
-        else:
-            subprocess.Popen(
-                f"sleep 3 && {cmd_line}",
-                shell=True,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    except Exception:
-        _log.exception("启动重启辅助进程失败")
-        return
-
-    _log.info("辅助进程已启动，1 秒后退出当前进程")
-    _time.sleep(1)
-    os._exit(0)
 
 
 # ── MCP Server 管理 API ──────────────────────────────────

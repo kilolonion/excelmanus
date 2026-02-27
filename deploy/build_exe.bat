@@ -1,17 +1,14 @@
 @echo off
-chcp 65001 >nul
-echo.
-echo   ╔══════════════════════════════════════════════╗
-echo   ║  ExcelManus 部署工具 - 编译脚本              ║
-echo   ║  使用 Windows 内置 .NET Framework 编译器     ║
-echo   ╚══════════════════════════════════════════════╝
-echo.
+setlocal
+
+set "AUTO=0"
+if /I "%~1"=="/auto" set "AUTO=1"
 
 set "SCRIPT_DIR=%~dp0"
 set "SRC=%SCRIPT_DIR%ExcelManusSetup.cs"
-set "OUT=%SCRIPT_DIR%ExcelManus部署工具.exe"
+set "OUT=%SCRIPT_DIR%ExcelManusDeployTool.exe"
 
-REM 查找 csc.exe (优先 64 位)
+REM Find csc.exe (prefer x64)
 set "CSC="
 if exist "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" (
     set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -20,36 +17,35 @@ if exist "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" (
 )
 
 if "%CSC%"=="" (
-    echo [XX] 未找到 .NET Framework C# 编译器 csc.exe
-    echo     请确保已安装 .NET Framework 4.0+（Windows 10/11 自带）
-    pause
+    echo [ERR] csc.exe not found under .NET Framework v4.0.30319
+    echo       Make sure .NET Framework 4.x is available on this Windows machine.
+    if "%AUTO%"=="0" pause
     exit /b 1
 )
 
-echo [OK] 编译器: %CSC%
-echo [..] 正在编译...
-echo.
+echo [OK] Compiler: %CSC%
+echo [..] Building EXE...
 
-"%CSC%" /nologo /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /win32manifest:NUL /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
+"%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
 
 if errorlevel 1 (
-    echo.
-    echo [XX] 编译失败！
-    pause
+    echo [ERR] Build failed.
+    if "%AUTO%"=="0" pause
     exit /b 1
 )
 
-echo.
-echo [OK] 编译成功！
-echo [OK] 输出: %OUT%
-echo.
+echo [OK] Build succeeded.
+echo [OK] Output: %OUT%
 
-REM 复制到项目根目录方便使用
-copy /Y "%OUT%" "%SCRIPT_DIR%..\ExcelManus部署工具.exe" >nul 2>&1
+REM Copy to repo root for direct run
+copy /Y "%OUT%" "%SCRIPT_DIR%..\ExcelManusDeployTool.exe" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] 已复制到项目根目录: ExcelManus部署工具.exe
+    echo [OK] Copied to repo root: ExcelManusDeployTool.exe
 )
 
-echo.
-echo   按任意键退出...
-pause >nul
+if "%AUTO%"=="0" (
+    echo.
+    echo Press any key to exit...
+    pause >nul
+)
+exit /b 0
