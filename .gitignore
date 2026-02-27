@@ -126,3 +126,11 @@ web/node_modules/
 web/.next/
 web/.env.local
 
+# ==============================
+# 部署产物
+# ==============================
+deploy/.deploy.lock
+deploy/.deploy_logs/
+deploy/.deploy_history
+deploy/.env.deploy
+

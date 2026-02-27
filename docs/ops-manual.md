@@ -117,9 +117,61 @@ firewall-cmd --reload                             # 生效
 
 ## 5. 日常运维
 
-### 5.1 一键部署
+### 5.1 本地一键启动
 
-`deploy/deploy.sh` 支持前后端分离部署：
+`deploy/start.sh` 支持同时启动后端 + 前端，适用于本地开发和单机部署：
+
+```bash
+# macOS / Linux
+./deploy/start.sh                          # 开发模式
+./deploy/start.sh --prod                   # 生产模式（npm run start）
+./deploy/start.sh --backend-port 9000      # 自定义后端端口
+./deploy/start.sh --frontend-port 8080     # 自定义前端端口
+./deploy/start.sh --workers 4 --prod       # 多 worker 生产模式
+./deploy/start.sh --backend-only           # 仅启动后端
+./deploy/start.sh --frontend-only          # 仅启动前端
+./deploy/start.sh --log-dir ./logs         # 日志输出到文件
+./deploy/start.sh --no-open                # 不自动打开浏览器
+./deploy/start.sh --skip-deps              # 跳过依赖检查
+./deploy/start.sh --help                   # 查看完整参数列表
+```
+
+**Windows 用户：**
+
+```powershell
+# PowerShell
+.\deploy\start.ps1
+.\deploy\start.ps1 -Production
+.\deploy\start.ps1 -BackendPort 9000 -Production -Workers 4
+
+# CMD
+deploy\start.bat
+deploy\start.bat --prod
+deploy\start.bat --backend-port 9000
+```
+
+> 脚本自动检测操作系统（macOS / Linux / Windows），在 Linux 上识别 apt / dnf / yum / pacman / zypper / apk 等包管理器，缺少依赖时自动给出对应安装命令。支持优雅关闭（先 SIGTERM，5s 后 SIGKILL）、.env 自动加载、自动打开浏览器。
+
+### 5.2 远程一键部署 (v2.0.0)
+
+`deploy/deploy.sh`（和 Windows 版 `deploy/deploy.ps1`）在**本地机器**运行，通过 SSH 操作远程服务器。支持单机 / 前后端分离 / Docker / 本地四种拓扑。
+
+**首次部署建议流程：**
+
+```bash
+# 1. 检查环境依赖（本地 + 远程工具、前后端互联、磁盘/内存）
+./deploy/deploy.sh check
+
+# 2. 推送 .env 模板到远程服务器（自动填充 CORS 和前端 BACKEND_ORIGIN）
+./deploy/deploy.sh init-env
+# 然后 SSH 登录远程服务器，编辑 .env 填入真实 API Key
+
+# 3. 执行部署
+./deploy/deploy.sh
+# 部署后自动执行：健康检查 + 前后端互联检测 + CORS 配置验证
+```
+
+**日常部署：**
 
 ```bash
 # 完整部署（后端 + 前端）
@@ -137,20 +189,47 @@ npm run build
 mkdir -p ../web-dist
 tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
 
-# 跳过前端构建，只重启
-./deploy/deploy.sh --frontend-only --skip-build
-
 # 使用本地/CI 构建好的前端制品（推荐低内存服务器）
 ./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
-
-# 远端冷构建（仅排障，风险高）
-./deploy/deploy.sh --frontend-only --cold-build
 
 # 从本地 rsync 同步（不走 GitHub）
 ./deploy/deploy.sh --from-local
 ```
 
-### 5.2 手动操作
+**运维命令：**
+
+```bash
+./deploy/deploy.sh status                  # 查看远程服务状态（进程 + 健康检查 + Git 版本）
+./deploy/deploy.sh rollback                # 回滚上一版本（前端备份恢复 + 后端 git reset）
+./deploy/deploy.sh history                 # 查看部署历史（时间/状态/拓扑/分支/耗时）
+./deploy/deploy.sh logs                    # 查看最近一次部署的详细日志
+```
+
+**高级选项：**
+
+```bash
+--dry-run                  # 仅打印将执行的操作，不实际执行
+--service-manager systemd  # 使用 systemd 而非 PM2 管理服务
+--pre-deploy ./hook.sh     # 部署前执行自定义脚本
+--post-deploy ./hook.sh    # 部署后执行自定义脚本
+--no-lock                  # 跳过部署锁（允许并行部署，危险）
+--force                    # 跳过确认提示
+--cold-build               # 远端清理缓存后重新构建（仅排障）
+```
+
+**Windows PowerShell：**
+
+```powershell
+.\deploy\deploy.ps1                        # 完整部署
+.\deploy\deploy.ps1 init-env               # 推送 .env 模板
+.\deploy\deploy.ps1 check                  # 环境检查
+.\deploy\deploy.ps1 rollback -Force        # 回滚（跳过确认）
+.\deploy\deploy.ps1 -ServiceManager nssm   # 使用 NSSM 管理 Windows 服务
+```
+
+> **安全机制**：部署锁防止并行部署冲突；每次部署生成日志文件（保留 20 个）；历史记录保留 100 条；异常退出时自动释放锁并报告耗时。
+
+### 5.3 手动操作
 
 **后端 (<BACKEND_IP>)**：
 
@@ -204,7 +283,7 @@ pm2 logs excelmanus-web --lines 50 --nostream
 > 低内存机器（1~2G）应优先使用 `--frontend-artifact` 制品化发布，避免现场冷编译触发 OOM。
 > 跨区传输推荐使用支持断点续传的 rsync（脚本已内置 `--partial --append-verify`）。
 
-### 5.3 健康检查
+### 5.4 健康检查
 
 ```bash
 # 通过域名（走完整链路）
@@ -473,7 +552,13 @@ firewall-cmd --reload
 ```
 项目根目录/
 ├── deploy/
-│   ├── deploy.sh          # 一键部署脚本（前后端分离）
+│   ├── start.sh           # 一键启动脚本（macOS / Linux）
+│   ├── start.ps1          # 一键启动脚本（Windows PowerShell）
+│   ├── start.bat          # 一键启动脚本（Windows CMD）
+│   ├── deploy.sh          # 远程部署脚本 v2.0（macOS / Linux）
+│   ├── deploy.ps1         # 远程部署脚本 v2.0（Windows PowerShell）
+│   ├── .env.deploy        # 部署配置（服务器地址/端口/路径，不入 Git）
+│   ├── .env.deploy.example # 部署配置模板
 │   ├── Dockerfile         # 后端 Docker 镜像
 │   ├── Dockerfile.sandbox # 代码沙盒镜像
 │   ├── docker-compose.yml # Docker Compose 编排
