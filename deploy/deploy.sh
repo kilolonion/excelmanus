@@ -48,7 +48,9 @@ set -euo pipefail
 #    --frontend-host HOST 前端服务器地址
 #    --host HOST          单机模式的服务器地址
 #    --user USER          SSH 用户名（默认 root）
-#    --key PATH           SSH 私钥路径
+#    --key PATH           SSH 私钥路径（全局，未指定独立密钥时回退使用）
+#    --backend-key PATH   后端服务器 SSH 私钥路径（覆盖 --key）
+#    --frontend-key PATH  前端服务器 SSH 私钥路径（覆盖 --key）
 #    --port PORT          SSH 端口（默认 22）
 #
 #  路径选项:
@@ -220,6 +222,8 @@ BACKEND_HOST=""
 FRONTEND_HOST=""
 SSH_USER=""
 SSH_KEY_PATH=""
+BACKEND_SSH_KEY_PATH=""
+FRONTEND_SSH_KEY_PATH=""
 SSH_PORT=""
 
 # 路径
@@ -268,6 +272,8 @@ _load_config() {
     [[ -z "$FRONTEND_DIR" && -n "${FRONTEND_REMOTE_DIR:-}" ]] && FRONTEND_DIR="$FRONTEND_REMOTE_DIR" || true
     [[ -z "$NODE_BIN" && -n "${FRONTEND_NODE_BIN:-}" ]]      && NODE_BIN="$FRONTEND_NODE_BIN" || true
     [[ -z "$SSH_KEY_PATH" && -n "${SSH_KEY_NAME:-}" ]]       && SSH_KEY_PATH="${PROJECT_ROOT}/${SSH_KEY_NAME}" || true
+    [[ -z "$BACKEND_SSH_KEY_PATH" && -n "${BACKEND_SSH_KEY_NAME:-}" ]] && BACKEND_SSH_KEY_PATH="${PROJECT_ROOT}/${BACKEND_SSH_KEY_NAME}" || true
+    [[ -z "$FRONTEND_SSH_KEY_PATH" && -n "${FRONTEND_SSH_KEY_NAME:-}" ]] && FRONTEND_SSH_KEY_PATH="${PROJECT_ROOT}/${FRONTEND_SSH_KEY_NAME}" || true
     [[ -z "$REPO_URL" && -n "${REPO_URL:-}" ]]               || true
     [[ -z "$REPO_BRANCH" && -n "${REPO_BRANCH:-}" ]]         || true
   else
@@ -312,6 +318,10 @@ _apply_defaults() {
     FRONTEND_DIR="${FRONTEND_DIR:-$BACKEND_DIR}"
     FRONTEND_HOST="${FRONTEND_HOST:-$BACKEND_HOST}"
   fi
+
+  # 每服务器独立密钥（未设置时回退到全局 SSH_KEY_PATH）
+  BACKEND_SSH_KEY_PATH="${BACKEND_SSH_KEY_PATH:-$SSH_KEY_PATH}"
+  FRONTEND_SSH_KEY_PATH="${FRONTEND_SSH_KEY_PATH:-$SSH_KEY_PATH}"
 
   # 健康检查 URL
   if [[ -z "$HEALTH_URL" ]]; then
@@ -361,6 +371,8 @@ _parse_args() {
       --host)            BACKEND_HOST="$2"; FRONTEND_HOST="$2"; TOPOLOGY="single"; shift ;;
       --user)            SSH_USER="$2"; shift ;;
       --key)             SSH_KEY_PATH="$2"; shift ;;
+      --backend-key)     BACKEND_SSH_KEY_PATH="$2"; shift ;;
+      --frontend-key)    FRONTEND_SSH_KEY_PATH="$2"; shift ;;
       --port)            SSH_PORT="$2"; shift ;;
 
       # 路径
@@ -450,41 +462,78 @@ _show_help() {
   echo "  # 带 pre/post hook"
   echo "  ./deploy/deploy.sh --pre-deploy ./scripts/pre.sh --post-deploy ./scripts/post.sh"
   echo ""
+  echo "  # 前后端分离 + 双密钥"
+  echo "  ./deploy/deploy.sh --backend-host 10.0.0.1 --frontend-host 10.0.0.2 \\"
+  echo "      --backend-key ~/.ssh/backend.pem --frontend-key ~/.ssh/frontend.pem"
+  echo ""
   echo "  # 首次部署：推送 .env 模板到远程服务器"
   echo "  ./deploy/deploy.sh init-env --host 192.168.1.100"
 }
 
 # ── SSH 执行封装 ──
 _ssh_opts() {
+  local key_override="${1:-$SSH_KEY_PATH}"
   local opts="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
-  [[ -n "$SSH_KEY_PATH" ]] && opts="$opts -i $SSH_KEY_PATH" || true
+  [[ -n "$key_override" ]] && opts="$opts -i $key_override" || true
   [[ "$SSH_PORT" != "22" ]] && opts="$opts -p $SSH_PORT" || true
   echo "$opts"
 }
 
 _remote() {
-  local host="$1"; shift
+  local host="$1" key="$2"; shift 2
   local cmd="$*"
   if [[ "$TOPOLOGY" == "local" ]]; then
     run "bash -c '$cmd'"
   else
-    run "ssh $(_ssh_opts) ${SSH_USER}@${host} '$cmd'"
+    run "ssh $(_ssh_opts "$key") ${SSH_USER}@${host} '$cmd'"
   fi
 }
 
-_remote_backend()  { _remote "$BACKEND_HOST" "$@"; }
-_remote_frontend() { _remote "$FRONTEND_HOST" "$@"; }
+_remote_backend()  { _remote "$BACKEND_HOST" "$BACKEND_SSH_KEY_PATH" "$@"; }
+_remote_frontend() { _remote "$FRONTEND_HOST" "$FRONTEND_SSH_KEY_PATH" "$@"; }
 
 _ensure_frontend_standalone_assets() {
   info "复制 standalone 静态资源..."
   _remote_frontend "
-    cd '${FRONTEND_DIR}/web' && \
-    if [[ -d .next/standalone ]]; then
-      cp -r public .next/standalone/ 2>/dev/null || true
-      cp -r .next/static .next/standalone/.next/ 2>/dev/null || true
-      echo 'standalone 静态资源复制完成'
+    cd '${FRONTEND_DIR}/web'
+    if [[ ! -d .next/standalone ]]; then
+      echo '[WARN] 未检测到 standalone 输出目录，跳过'
+      exit 0
+    fi
+
+    # 确保目标目录存在
+    mkdir -p .next/standalone/.next
+    mkdir -p .next/standalone/public
+
+    # 清理旧的静态资源后重新复制（避免残留不一致）
+    rm -rf .next/standalone/.next/static
+    rm -rf .next/standalone/public
+
+    # 复制静态资源
+    if [[ -d .next/static ]]; then
+      cp -r .next/static .next/standalone/.next/static
+    fi
+    if [[ -d public ]]; then
+      cp -r public .next/standalone/public
+    fi
+
+    # 验证关键文件存在
+    _ok=true
+    if [[ ! -d .next/standalone/.next/static/chunks ]]; then
+      echo '[ERROR] standalone/.next/static/chunks 不存在，JS 资源将 404！'
+      _ok=false
+    fi
+    if [[ ! -f .next/standalone/server.js ]]; then
+      echo '[ERROR] standalone/server.js 不存在！'
+      _ok=false
+    fi
+
+    if [[ \"\$_ok\" == true ]]; then
+      _chunk_count=\$(find .next/standalone/.next/static/chunks -name '*.js' | wc -l)
+      echo \"standalone 静态资源复制完成（\${_chunk_count} 个 JS chunks）\"
     else
-      echo '未检测到 standalone 输出，跳过静态资源复制'
+      echo '[ERROR] standalone 静态资源不完整，前端将无法正常加载！'
+      exit 1
     fi
   "
 }
@@ -516,9 +565,51 @@ SVCEOF
     _remote_frontend "
       export PATH=${NODE_BIN}:\$PATH && \
       cd '${FRONTEND_DIR}/web' && \
-      pm2 restart '${PM2_FRONTEND}' 2>/dev/null || \
-      pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web' 2>/dev/null
+      pm2 delete '${PM2_FRONTEND}' 2>/dev/null || true && \
+      pm2 start .next/standalone/server.js --name '${PM2_FRONTEND}' --cwd '${FRONTEND_DIR}/web' && \
+      pm2 save
     "
+  fi
+}
+
+# ── 自动修复前端 BACKEND_ORIGIN 指向旧内网 IP ──
+_auto_fix_frontend_backend_origin() {
+  [[ -z "$FRONTEND_HOST" ]] && return 0 || true
+  [[ "$TOPOLOGY" == "local" ]] && return 0 || true
+
+  local fe_origin
+  fe_origin=$(_remote_frontend "timeout 5 grep -E '^NEXT_PUBLIC_BACKEND_ORIGIN=' ${FRONTEND_DIR}/web/.env.local 2>/dev/null || echo __MISSING__" 2>&1 || echo "__MISSING__")
+
+  # 没有 .env.local 或没有该变量，跳过
+  if echo "$fe_origin" | grep -q '__MISSING__'; then
+    return 0
+  fi
+
+  # 提取当前值
+  local current_val
+  current_val=$(echo "$fe_origin" | grep -oP '(?<=NEXT_PUBLIC_BACKEND_ORIGIN=).*' | head -1 | tr -d '[:space:]')
+
+  # 已经是 same-origin 或空，无需修复
+  if [[ -z "$current_val" || "$current_val" == "same-origin" ]]; then
+    return 0
+  fi
+
+  # 检测是否指向内网 IP（RFC 1918）
+  if echo "$current_val" | grep -qE '(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
+    # 计算正确值
+    local correct_val
+    if [[ -n "${SITE_URL:-}" ]]; then
+      correct_val="same-origin"
+    elif [[ -n "$BACKEND_HOST" ]]; then
+      correct_val="http://${BACKEND_HOST}:${BACKEND_PORT}"
+    else
+      return 0
+    fi
+
+    warn "前端 BACKEND_ORIGIN 指向旧内网 IP: ${current_val}"
+    info "自动修复为: ${correct_val}"
+    _remote_frontend "sed -i 's|^NEXT_PUBLIC_BACKEND_ORIGIN=.*|NEXT_PUBLIC_BACKEND_ORIGIN=${correct_val}|' '${FRONTEND_DIR}/web/.env.local'" || true
+    log "前端 BACKEND_ORIGIN 已自动修正"
   fi
 }
 
@@ -530,6 +621,13 @@ _build_frontend_remote() {
   else
     info "保留远端 .next/cache 以降低冷启动构建内存峰值。需要冷构建时请显式传 --cold-build。"
   fi
+
+  # 自动清理干扰 Next.js 编译的旧备份目录（src.bak.* 等）
+  info "清理干扰构建的旧备份目录..."
+  _remote_frontend "
+    cd '${FRONTEND_DIR}/web' && \
+    find . -maxdepth 1 -type d \( -name 'src.bak.*' -o -name 'src.backup.*' -o -name 'src_old*' \) -exec rm -rf {} + 2>/dev/null || true
+  " || true
 
   info "构建前端（默认命令：npm run build）..."
   if _remote_frontend "
@@ -561,8 +659,8 @@ _upload_frontend_artifact() {
   if [[ "$TOPOLOGY" == "local" ]]; then
     run "cp '${artifact_path}' '${remote_path}'"
   else
-    local rsync_ssh="ssh $(_ssh_opts)"
-    run "rsync -az --partial --append-verify --timeout=120 --progress -e \"$rsync_ssh\" \
+    local rsync_ssh="ssh $(_ssh_opts "$FRONTEND_SSH_KEY_PATH")"
+    run "rsync -az --partial --timeout=120 --progress -e \"$rsync_ssh\" \
       '${artifact_path}' '${SSH_USER}@${FRONTEND_HOST}:${remote_path}'"
   fi
 
@@ -681,8 +779,16 @@ _sync_code() {
       debug "本地模式，跳过同步"
       return
     fi
-    local rsync_ssh="ssh $(_ssh_opts)"
-    run "rsync -az --partial --append-verify --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
+    local key_for_host="$SSH_KEY_PATH"
+    [[ "$host" == "$BACKEND_HOST" ]] && key_for_host="$BACKEND_SSH_KEY_PATH" || true
+    [[ "$host" == "$FRONTEND_HOST" ]] && key_for_host="$FRONTEND_SSH_KEY_PATH" || true
+    local rsync_ssh="ssh $(_ssh_opts "$key_for_host")"
+    # macOS openrsync 不支持 --append-verify，自动检测
+    local _rsync_extra=""
+    if rsync --help 2>&1 | grep -q -- '--append-verify'; then
+      _rsync_extra="--append-verify"
+    fi
+    run "rsync -az --partial ${_rsync_extra} --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
       '${PROJECT_ROOT}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
     info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
@@ -753,8 +859,10 @@ SVCEOF
     _remote_backend "
       export PATH=${NODE_BIN}:\$PATH && \
       pm2 restart '${PM2_BACKEND}' --update-env 2>/dev/null || \
-      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python -c \"import uvicorn; uvicorn.run(\\\"excelmanus.api:app\\\", host=\\\"0.0.0.0\\\", port=${BACKEND_PORT}, log_level=\\\"info\\\")\"' \
-        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' 2>/dev/null || true
+      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
+        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
+        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info \
+        2>/dev/null || true
     "
   fi
   log "后端部署完成"
@@ -802,6 +910,9 @@ _deploy_frontend() {
     log "前端制品部署完成"
     return 0
   fi
+
+  # 自动检测并修复前端 NEXT_PUBLIC_BACKEND_ORIGIN 指向旧内网 IP
+  _auto_fix_frontend_backend_origin
 
   if [[ "$SKIP_BUILD" == true ]]; then
     info "跳过构建，仅重启..."
@@ -961,23 +1072,25 @@ _preflight() {
 
   # SSH 密钥检查（非本地/Docker 模式）
   if [[ "$TOPOLOGY" != "local" && "$TOPOLOGY" != "docker" ]]; then
-    if [[ -n "$SSH_KEY_PATH" && ! -f "$SSH_KEY_PATH" ]]; then
-      error "SSH 私钥不存在: $SSH_KEY_PATH"
-      exit 1
-    fi
-    [[ -n "$SSH_KEY_PATH" ]] && chmod 600 "$SSH_KEY_PATH" 2>/dev/null || true
+    for _key_path in "$BACKEND_SSH_KEY_PATH" "$FRONTEND_SSH_KEY_PATH"; do
+      if [[ -n "$_key_path" && ! -f "$_key_path" ]]; then
+        error "SSH 私钥不存在: $_key_path"
+        exit 1
+      fi
+      [[ -n "$_key_path" ]] && chmod 600 "$_key_path" 2>/dev/null || true
+    done
 
     # 检查目标服务器可达性
     if [[ "$MODE" != "frontend" && -n "$BACKEND_HOST" ]]; then
       debug "检查后端服务器连通性..."
-      if ! ssh $(_ssh_opts) -o BatchMode=yes "${SSH_USER}@${BACKEND_HOST}" "echo ok" &>/dev/null; then
+      if ! ssh $(_ssh_opts "$BACKEND_SSH_KEY_PATH") -o BatchMode=yes "${SSH_USER}@${BACKEND_HOST}" "echo ok" &>/dev/null; then
         error "无法连接后端服务器: ${SSH_USER}@${BACKEND_HOST}"
         exit 1
       fi
     fi
     if [[ "$MODE" != "backend" && -n "$FRONTEND_HOST" && "$FRONTEND_HOST" != "$BACKEND_HOST" ]]; then
       debug "检查前端服务器连通性..."
-      if ! ssh $(_ssh_opts) -o BatchMode=yes "${SSH_USER}@${FRONTEND_HOST}" "echo ok" &>/dev/null; then
+      if ! ssh $(_ssh_opts "$FRONTEND_SSH_KEY_PATH") -o BatchMode=yes "${SSH_USER}@${FRONTEND_HOST}" "echo ok" &>/dev/null; then
         error "无法连接前端服务器: ${SSH_USER}@${FRONTEND_HOST}"
         exit 1
       fi
@@ -1065,7 +1178,7 @@ _check_cross_connectivity() {
     local backend_url="http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/health"
     info "前端(${FRONTEND_HOST}) → 后端(${BACKEND_HOST}:${BACKEND_PORT})..."
     local fe_to_be
-    fe_to_be=$(_remote_frontend "curl -s --max-time 10 '${backend_url}' 2>/dev/null || echo '__UNREACHABLE__'" 2>&1 || echo "__UNREACHABLE__")
+    fe_to_be=$(_remote_frontend "curl -s --max-time 10 ${backend_url} 2>/dev/null || echo __UNREACHABLE__" 2>&1 || echo "__UNREACHABLE__")
     if echo "$fe_to_be" | grep -q '"status"'; then
       log "前端 → 后端: 连通（${backend_url}）"
     elif echo "$fe_to_be" | grep -q '__UNREACHABLE__'; then
@@ -1083,7 +1196,7 @@ _check_cross_connectivity() {
     local frontend_url="http://${FRONTEND_HOST}:${FRONTEND_PORT}"
     info "后端(${BACKEND_HOST}) → 前端(${FRONTEND_HOST}:${FRONTEND_PORT})..."
     local be_to_fe
-    be_to_fe=$(_remote_backend "curl -s --max-time 10 -o /dev/null -w '%{http_code}' '${frontend_url}' 2>/dev/null || echo '000'" 2>&1 || echo "000")
+    be_to_fe=$(_remote_backend "curl -s --max-time 10 -o /dev/null -w %{http_code} ${frontend_url} 2>/dev/null || echo 000" 2>&1 || echo "000")
     if [[ "$be_to_fe" =~ ^(200|301|302|304)$ ]]; then
       log "后端 → 前端: 连通（HTTP ${be_to_fe}）"
     else
@@ -1092,11 +1205,11 @@ _check_cross_connectivity() {
     fi
   fi
 
-  # 3) 检查后端 CORS 配置是否包含前端域名
+  # 3) 检查后端 CORS 配置是否包含前端域名（加超时防挂起）
   if [[ -n "$BACKEND_HOST" && -n "${SITE_URL:-}" ]]; then
     info "检查后端 CORS 配置..."
     local cors_check
-    cors_check=$(_remote_backend "grep -i 'CORS_ALLOW_ORIGINS' '${BACKEND_DIR}/.env' 2>/dev/null || echo '__NO_CORS__'" 2>&1 || echo "__NO_CORS__")
+    cors_check=$(_remote_backend "timeout 5 grep -i CORS_ALLOW_ORIGINS ${BACKEND_DIR}/.env 2>/dev/null || echo __NO_CORS__" 2>&1 || echo "__NO_CORS__")
     if echo "$cors_check" | grep -q '__NO_CORS__'; then
       warn "后端 .env 中未找到 EXCELMANUS_CORS_ALLOW_ORIGINS 配置"
       warn "  如果前端通过浏览器直连后端，需要配置 CORS 允许前端域名"
@@ -1108,15 +1221,20 @@ _check_cross_connectivity() {
     fi
   fi
 
-  # 4) 检查前端 BACKEND_ORIGIN 配置
+  # 4) 检查前端 BACKEND_ORIGIN 配置（加超时防挂起）
   if [[ -n "$FRONTEND_HOST" ]]; then
     info "检查前端 BACKEND_ORIGIN 配置..."
     local fe_backend_origin
-    fe_backend_origin=$(_remote_frontend "grep -i 'NEXT_PUBLIC_BACKEND_ORIGIN\|BACKEND_INTERNAL_URL' '${FRONTEND_DIR}/web/.env.local' '${FRONTEND_DIR}/web/.env' 2>/dev/null || echo '__NO_ORIGIN__'" 2>&1 || echo "__NO_ORIGIN__")
+    fe_backend_origin=$(_remote_frontend "timeout 5 grep -iE 'NEXT_PUBLIC_BACKEND_ORIGIN|BACKEND_INTERNAL_URL' ${FRONTEND_DIR}/web/.env.local ${FRONTEND_DIR}/web/.env 2>/dev/null || echo __NO_ORIGIN__" 2>&1 || echo "__NO_ORIGIN__")
     if echo "$fe_backend_origin" | grep -q '__NO_ORIGIN__'; then
       info "前端未设置 BACKEND_ORIGIN（将使用默认回退: http://{hostname}:${BACKEND_PORT}）"
     else
       log "前端后端指向: $(echo "$fe_backend_origin" | head -1)"
+      # 检测是否指向旧内网 IP
+      if echo "$fe_backend_origin" | grep -qE '(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
+        warn "前端 BACKEND_ORIGIN 指向内网 IP，浏览器无法访问！"
+        warn "  建议运行 deploy 命令自动修复，或手动设为 same-origin"
+      fi
     fi
   fi
 
@@ -1198,7 +1316,7 @@ _push_env_to_backend() {
   if [[ "$TOPOLOGY" == "local" ]]; then
     run "cp '$tmp_env' '${BACKEND_DIR}/.env'"
   else
-    local rsync_ssh="ssh $(_ssh_opts)"
+    local rsync_ssh="ssh $(_ssh_opts "$BACKEND_SSH_KEY_PATH")"
     run "rsync -az -e \"$rsync_ssh\" '$tmp_env' '${SSH_USER}@${BACKEND_HOST}:${BACKEND_DIR}/.env'"
   fi
   rm -f "$tmp_env" "${tmp_env}.bak"
@@ -1237,7 +1355,7 @@ ENVEOF
   if [[ "$TOPOLOGY" == "local" ]]; then
     run "cp '$tmp_env' '${FRONTEND_DIR}/web/.env.local'"
   else
-    local rsync_ssh="ssh $(_ssh_opts)"
+    local rsync_ssh="ssh $(_ssh_opts "$FRONTEND_SSH_KEY_PATH")"
     run "rsync -az -e \"$rsync_ssh\" '$tmp_env' '${SSH_USER}@${FRONTEND_HOST}:${FRONTEND_DIR}/web/.env.local'"
   fi
   rm -f "$tmp_env"
@@ -1290,7 +1408,7 @@ _cmd_check() {
 
   if [[ "$TOPOLOGY" != "local" && -n "$BACKEND_HOST" ]]; then
     echo -e "\n${BOLD}后端服务器 (${BACKEND_HOST}):${NC}"
-    if ssh $(_ssh_opts) -o BatchMode=yes "${SSH_USER}@${BACKEND_HOST}" "echo ok" &>/dev/null; then
+    if ssh $(_ssh_opts "$BACKEND_SSH_KEY_PATH") -o BatchMode=yes "${SSH_USER}@${BACKEND_HOST}" "echo ok" &>/dev/null; then
       log "SSH 连接: 正常"
       # 远端 OS 检测
       _remote_backend "uname -s -m 2>/dev/null && (. /etc/os-release 2>/dev/null && echo \"Distro: \${PRETTY_NAME:-\$ID}\" || true)" || true
@@ -1316,7 +1434,7 @@ _cmd_check() {
 
   if [[ "$TOPOLOGY" == "split" && -n "$FRONTEND_HOST" && "$FRONTEND_HOST" != "$BACKEND_HOST" ]]; then
     echo -e "\n${BOLD}前端服务器 (${FRONTEND_HOST}):${NC}"
-    if ssh $(_ssh_opts) -o BatchMode=yes "${SSH_USER}@${FRONTEND_HOST}" "echo ok" &>/dev/null; then
+    if ssh $(_ssh_opts "$FRONTEND_SSH_KEY_PATH") -o BatchMode=yes "${SSH_USER}@${FRONTEND_HOST}" "echo ok" &>/dev/null; then
       log "SSH 连接: 正常"
       _remote_frontend "uname -s -m 2>/dev/null && (. /etc/os-release 2>/dev/null && echo \"Distro: \${PRETTY_NAME:-\$ID}\" || true)" || true
       _remote_frontend "node --version 2>&1 || echo 'Node: 未安装'" || true
