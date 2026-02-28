@@ -213,6 +213,9 @@ class ProgressivePipeline:
         self._conversation: list[dict] = []
         # B 通道描述缓存，由 ExtractTableSpecHandler 注入
         self._b_channel_description: str | None = None
+        # 图片预处理缓存：mode -> (compressed_bytes, mime)
+        # 避免同一张图片在多个阶段重复进行耗时的图像处理
+        self._image_cache: dict[str, tuple[bytes, str]] = {}
 
     async def run(self) -> tuple[ReplicaSpec, str]:
         """执行全部阶段，返回 (final_spec, final_spec_path)。
@@ -231,6 +234,7 @@ class ProgressivePipeline:
 
         # ── Phase 1: Structure（传图，B 通道描述作为先验） ──
         if self._should_run_phase(1):
+            self._emit_phase_start(PipelinePhase.STRUCTURE, "正在识别表格结构...")
             p1_prompt = build_phase1_prompt()
             if self._b_channel_description:
                 p1_prompt = (
@@ -267,6 +271,7 @@ class ProgressivePipeline:
 
         # ── Phase 2: Data（支持大表格分区提取）──
         if self._should_run_phase(2):
+            self._emit_phase_start(PipelinePhase.DATA, "正在提取数据...")
             structure_summary = build_structure_summary(skeleton)
             estimated_cells = self._estimate_total_cells(skeleton)
             threshold = self.config.chunk_cell_threshold
@@ -313,6 +318,7 @@ class ProgressivePipeline:
 
         # ── Phase 3: Style (可选，传图——样式需要观察颜色) ──
         if not self.config.skip_style and self._should_run_phase(3):
+            self._emit_phase_start(PipelinePhase.STYLE, "正在提取样式...")
             data_summary = build_data_summary(data_spec)
             p3_json = await self._call_vlm_phase(
                 PipelinePhase.STYLE,
@@ -348,6 +354,7 @@ class ProgressivePipeline:
 
         # ── Phase 4: Verification（支持大表格分区校验）──
         if self._should_run_phase(4):
+            self._emit_phase_start(PipelinePhase.VERIFICATION, "正在进行自校验...")
             cell_count = sum(len(s.cells) for s in styled_spec.sheets)
             threshold = self.config.chunk_cell_threshold
 
@@ -400,6 +407,21 @@ class ProgressivePipeline:
 
     # ── VLM 调用 ──
 
+    def _get_prepared_image(self, mode: str) -> tuple[bytes, str]:
+        """获取预处理后的图片，使用缓存避免重复处理。
+
+        Args:
+            mode: 图像模式 ("data" 或 "style")
+
+        Returns:
+            (compressed_bytes, mime_type) 元组
+        """
+        if mode not in self._image_cache:
+            compressed, mime = self._image_preparer(self._image_bytes, mode)
+            self._image_cache[mode] = (compressed, mime)
+            logger.debug("图片预处理缓存: mode=%s, size=%d bytes", mode, len(compressed))
+        return self._image_cache[mode]
+
     async def _call_vlm_phase(
         self,
         phase: PipelinePhase,
@@ -417,7 +439,7 @@ class ProgressivePipeline:
         """
         content: list[dict[str, Any]] = []
         if include_image:
-            compressed, mime = self._image_preparer(self._image_bytes, image_mode)
+            compressed, mime = self._get_prepared_image(image_mode)
             b64 = base64.b64encode(compressed).decode("ascii")
             content.append({
                 "type": "image_url",
@@ -427,6 +449,9 @@ class ProgressivePipeline:
 
         # 追加到多轮对话历史
         self._conversation.append({"role": "user", "content": content})
+
+        # 发射 VLM 调用开始事件，让用户知道正在调用
+        self._emit_vlm_calling(phase, include_image)
 
         raw_text, error = await self._vlm_caller(
             self._conversation,
@@ -551,7 +576,11 @@ class ProgressivePipeline:
         self,
         spec: ReplicaSpec,
     ) -> dict[str, Any] | None:
-        """分区 Phase 4：按行范围分片校验，每片独立带图调用，合并 patches。"""
+        """分区 Phase 4：按行范围分片校验，每片独立带图调用，合并 patches。
+
+        优化：只在首尾分区传图，中间分区使用 multi-turn 上下文（不传图），
+        大幅减少图片预处理和 VLM 处理时间。
+        """
         _CHUNK_ROWS = 100
 
         all_patches: list[dict] = []
@@ -559,26 +588,36 @@ class ProgressivePipeline:
         if max_rows == 0:
             return None
 
+        # 计算总分区数，用于判断首尾分区
+        total_chunks = (max_rows + _CHUNK_ROWS - 1) // _CHUNK_ROWS
+
         row_start = 1
         chunk_idx = 0
         while row_start <= max_rows:
             row_end = min(row_start + _CHUNK_ROWS - 1, max_rows)
             chunk_idx += 1
+            # 判断是否为首分区或尾分区
+            is_first_chunk = chunk_idx == 1
+            is_last_chunk = chunk_idx == total_chunks
+
             logger.info(
-                "Phase 4 分区 %d: 行 %d-%d (共 %d 行)",
+                "Phase 4 分区 %d: 行 %d-%d (共 %d 行)%s",
                 chunk_idx, row_start, row_end, max_rows,
+                " [首区-传图]" if is_first_chunk else (" [尾区-传图]" if is_last_chunk else " [中间区-不传图]"),
             )
 
             partial_summary = build_partial_summary(spec, row_start, row_end)
             prompt = build_phase4_chunked_prompt(partial_summary, row_start, row_end)
 
-            # 每区独立调用（带图），不依赖 multi-turn
+            # 优化：只在首尾分区传图，中间分区使用 multi-turn 上下文（不传图）
+            # 这样可以复用之前的视觉上下文，同时大幅减少图片预处理开销
             self._conversation.clear()
+            include_image = is_first_chunk or is_last_chunk
             chunk_json = await self._call_vlm_phase(
                 PipelinePhase.VERIFICATION,
                 prompt,
                 image_mode="data",
-                include_image=True,
+                include_image=include_image,
             )
 
             if chunk_json is not None:
@@ -686,6 +725,52 @@ class ProgressivePipeline:
                     pipeline_stage=f"vlm_extract_{phase.value}",
                     pipeline_message=message,
                     pipeline_phase_index=phase_idx,
+                    pipeline_total_phases=total_phases,
+                    pipeline_spec_path=self._last_saved_path,
+                    pipeline_diff=diff,
+                    pipeline_checkpoint=checkpoint,
+                ))
+            except Exception:
+                pass
+
+    def _emit_phase_start(self, phase: PipelinePhase, message: str) -> None:
+        """发射阶段开始事件，让前端更早获得反馈。"""
+        phase_idx = _PHASE_INDEX.get(phase, -1)
+        total_phases = 3 if self.config.skip_style else 4
+
+        if self._on_event:
+            try:
+                from excelmanus.events import EventType, ToolCallEvent
+                self._on_event(ToolCallEvent(
+                    event_type=EventType.PIPELINE_PROGRESS,
+                    pipeline_stage=f"vlm_extract_{phase.value}",
+                    pipeline_message=message,
+                    pipeline_phase_index=phase_idx,
+                    pipeline_total_phases=total_phases,
+                    # 阶段开始时使用上一次保存的 spec 路径
+                    pipeline_spec_path=self._last_saved_path,
+                ))
+            except Exception:
+                pass
+
+    def _emit_vlm_calling(self, phase: PipelinePhase, include_image: bool) -> None:
+        """发射 VLM 开始调用事件，提供更细粒度的进度反馈。"""
+        phase_idx = _PHASE_INDEX.get(phase, -1)
+        total_phases = 3 if self.config.skip_style else 4
+        
+        action = "传图分析" if include_image else "文本推理"
+        
+        if self._on_event:
+            try:
+                from excelmanus.events import EventType, ToolCallEvent
+                self._on_event(ToolCallEvent(
+                    event_type=EventType.PIPELINE_PROGRESS,
+                    pipeline_stage=f"vlm_calling_{phase.value}",
+                    pipeline_message=f"正在调用 VLM ({action})...",
+                    pipeline_phase_index=phase_idx,
+                    pipeline_total_phases=total_phases,
+                    # VLM 调用时使用上一次保存的 spec 路径
+                    pipeline_spec_path=self._last_saved_path,
                 ))
             except Exception:
                 pass
