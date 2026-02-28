@@ -335,4 +335,4 @@ Recommended for public-facing deployments to prevent a single user from consumin
 | Environment Variable | Description | Default |
 |---|---|---|
 | `EXCELMANUS_WORKSPACE_MAX_SIZE_MB` | Maximum storage per user workspace (MB); uploads rejected when exceeded | `100` |
-| `EXCELMANUS_WORKSPACE_MAX_FILES` | Maximum files per user workspace; oldest files auto-deleted when exceeded | `5` |
+| `EXCELMANUS_WORKSPACE_MAX_FILES` | Maximum files per user workspace; oldest files auto-deleted when exceeded | `1000` |

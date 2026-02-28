@@ -335,4 +335,4 @@ MCP 安全扫描：
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_WORKSPACE_MAX_SIZE_MB` | 每个用户工作空间最大存储容量（MB），超出后上传将被拒绝 | `100` |
-| `EXCELMANUS_WORKSPACE_MAX_FILES` | 每个用户工作空间最大文件数，超出后自动删除最旧文件 | `5` |
+| `EXCELMANUS_WORKSPACE_MAX_FILES` | 每个用户工作空间最大文件数，超出后自动删除最旧文件 | `1000` |
