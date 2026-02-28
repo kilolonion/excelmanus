@@ -81,6 +81,7 @@ class CommandHandler:
         if command == "/fullaccess":
             if (action in {"on", ""}) and not too_many_args:
                 e._full_access_enabled = True
+                e._persist_full_access(True)
                 self._emit_mode_changed(on_event, "full_access", True)
                 msg = "已开启 fullaccess。当前代码技能权限：full_access。"
                 # 若当前有 pending approval，自动执行并续上对话
@@ -93,6 +94,7 @@ class CommandHandler:
                 return msg
             if action == "off" and not too_many_args:
                 e._full_access_enabled = False
+                e._persist_full_access(False)
                 # 将受限 skill 从 _active_skills 中驱逐，避免下一轮 scope 泄漏
                 blocked = set(e._restricted_code_skillpacks)
                 e._active_skills = [
@@ -201,6 +203,9 @@ class CommandHandler:
 
         if command == "/memory":
             return self._handle_memory_command(parts)
+
+        if command == "/playbook":
+            return self._handle_playbook_command(parts)
 
         return self._handle_undo_command(parts)
 
@@ -433,7 +438,7 @@ class CommandHandler:
         e._pending_approval_tool_call_id = None
 
         exec_ok, exec_result, record = await e._execute_approved_pending(
-            pending, on_event=on_event,
+            pending, on_event=on_event, tool_call_id=saved_tool_call_id,
         )
 
         from excelmanus.events import EventType, ToolCallEvent
@@ -828,3 +833,84 @@ class CommandHandler:
             preview = entry.content[:80] + ("..." if len(entry.content) > 80 else "")
             lines.append(f"  `{entry.id}` {preview}")
         return "\n".join(lines)
+
+    # ── /playbook 命令处理 ──────────────────────────────────
+
+    def _handle_playbook_command(self, parts: list[str]) -> str:
+        """处理 /playbook 命令。
+
+        用法：
+        - /playbook             — 列出所有条目
+        - /playbook list        — 同上
+        - /playbook stats       — 统计信息
+        - /playbook search <q>  — 按关键词搜索
+        - /playbook delete <id> — 删除条目
+        - /playbook reset       — 清空所有条目
+        """
+        e = self._engine
+        store = getattr(e, "_playbook_store", None)
+        if store is None:
+            return "Playbook 未启用。请设置 `EXCELMANUS_PLAYBOOK_ENABLED=true` 并重启。"
+
+        action = parts[1].strip().lower() if len(parts) >= 2 else "list"
+
+        if action in ("list", ""):
+            bullets = store.list_all(limit=20)
+            if not bullets:
+                return "Playbook 为空，暂无历史经验条目。"
+            lines = [f"**Playbook 历史经验** ({store.count()} 条)"]
+            for b in bullets:
+                helpful = f"👍{b.helpful_count}" if b.helpful_count else ""
+                harmful = f"👎{b.harmful_count}" if b.harmful_count else ""
+                score = f" {helpful}{harmful}" if (helpful or harmful) else ""
+                preview = b.content[:60] + ("..." if len(b.content) > 60 else "")
+                lines.append(f"  `{b.id}` **[{b.category}]** {preview}{score}")
+            return "\n".join(lines)
+
+        if action == "stats":
+            stats = store.stats()
+            if stats["total"] == 0:
+                return "Playbook 为空。"
+            lines = [
+                f"**Playbook 统计**",
+                f"- 总条目数: {stats['total']}",
+                f"- 平均有用次数: {stats['avg_helpful']}",
+                f"- 分类分布:",
+            ]
+            for cat, cnt in sorted(stats["categories"].items()):
+                lines.append(f"  - {cat}: {cnt}")
+            return "\n".join(lines)
+
+        if action == "search":
+            query = " ".join(parts[2:]).strip()
+            if not query:
+                return "用法：/playbook search <关键词>"
+            # 简单文本搜索（无 embedding 时降级为 content 包含匹配）
+            bullets = store.list_all(limit=100)
+            matched = [b for b in bullets if query.lower() in b.content.lower()]
+            if not matched:
+                return f"未找到包含「{query}」的条目。"
+            lines = [f"**搜索结果** ({len(matched)} 条)"]
+            for b in matched[:10]:
+                lines.append(f"  `{b.id}` **[{b.category}]** {b.content[:80]}")
+            return "\n".join(lines)
+
+        if action == "delete":
+            if len(parts) < 3:
+                return "用法：/playbook delete <id>"
+            bullet_id = parts[2].strip()
+            ok = store.delete(bullet_id)
+            return f"已删除条目 `{bullet_id}`。" if ok else f"条目 `{bullet_id}` 不存在。"
+
+        if action == "reset":
+            count = store.clear()
+            return f"已清空 Playbook，删除 {count} 条。"
+
+        return (
+            "无效参数。用法：\n"
+            "  /playbook             — 列出条目\n"
+            "  /playbook stats       — 统计信息\n"
+            "  /playbook search <q>  — 搜索\n"
+            "  /playbook delete <id> — 删除\n"
+            "  /playbook reset       — 清空"
+        )

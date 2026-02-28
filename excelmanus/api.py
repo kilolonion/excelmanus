@@ -137,6 +137,8 @@ class ChatResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # 自动生成的会话标题（仅首轮返回）
+    title: str | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -1242,6 +1244,15 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         await _session_manager.release_for_chat(session_id)
 
     normalized_reply = guard_public_reply(chat_result.reply.strip())
+    # ── 自动标题生成（仅首轮）──
+    generated_title: str | None = None
+    if engine.session_turn == 1:
+        generated_title = await _generate_session_title_with_timeout(
+            session_id=session_id,
+            user_message=display_text,
+            assistant_reply=normalized_reply,
+            timeout=5.0,
+        )
     route = engine.last_route_result
     route_mode, skills_used, tool_scope = _public_route_fields(
         route.route_mode,
@@ -1260,6 +1271,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         prompt_tokens=chat_result.prompt_tokens,
         completion_tokens=chat_result.completion_tokens,
         total_tokens=chat_result.total_tokens,
+        title=generated_title,
     )
 
 
@@ -1280,6 +1292,41 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     session_id, engine = await _session_manager.acquire_for_chat(
         request.session_id, user_id=isolation_user_id,
     )
+
+    # ── 工作区配额前置检查：超限时阻止对话 ──────────────
+    _auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
+    if _auth_enabled:
+        _ws = _resolve_workspace(raw_request)
+        _usage = _ws.get_usage()
+        if _usage.over_files or _usage.over_size:
+            await _session_manager.release_for_chat(session_id)
+            _parts: list[str] = []
+            if _usage.over_files:
+                _parts.append(f"文件数 {_usage.file_count}/{_usage.max_files}")
+            if _usage.over_size:
+                _parts.append(f"存储 {_usage.size_mb} MB/{_usage.max_size_mb} MB")
+            _detail = "、".join(_parts)
+            _quota_msg = (
+                f"⚠️ **工作区已满**（{_detail}），无法继续对话。\n\n"
+                "请先清理工作区文件后再试：\n"
+                "- 在左侧文件列表中删除不需要的文件\n"
+                "- 或联系管理员调整配额"
+            )
+
+            async def _quota_error_stream() -> AsyncIterator[str]:
+                yield _sse_format("session_init", {"session_id": session_id})
+                yield _sse_format("error", {"error": _quota_msg, "error_code": "workspace_full"})
+                yield _sse_format("done", {})
+
+            return StreamingResponse(
+                _quota_error_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
     if _is_save_command(request.message):
         async def _save_stream() -> AsyncIterator[str]:
@@ -1581,6 +1628,13 @@ class BackupDiscardRequest(BaseModel):
     files: list[str] | None = Field(default=None, description="要丢弃的原始文件路径列表。为空或 null 时丢弃全部。")
 
 
+class BackupUndoRequest(BaseModel):
+    """撤销已应用的备份。"""
+    session_id: str
+    original_path: str = Field(description="原始文件路径")
+    undo_path: str = Field(description="undo 备份文件路径")
+
+
 class RollbackRequest(BaseModel):
     """对话回退请求体。"""
 
@@ -1611,13 +1665,32 @@ async def backup_list(session_id: str, request: Request) -> JSONResponse:
     files = []
     for b in staged:
         bp = Path(b["backup"])
-        files.append({
+        file_info: dict = {
             "original_path": tx.to_relative(b["original"]),
             "backup_path": tx.to_relative(b["backup"]),
             "exists": b["exists"] == "True",
             "modified_at": bp.stat().st_mtime if bp.exists() else None,
-        })
-    return JSONResponse(status_code=200, content={"files": files, "backup_enabled": True})
+        }
+        # 附加轻量变更摘要
+        try:
+            summary = tx.diff_staged_summary(b["original"])
+            if summary:
+                file_info["summary"] = summary
+        except Exception:
+            pass
+        files.append(file_info)
+    # 检查 agent 是否活跃（用于前端 in-flight 提示）
+    in_flight = False
+    if _session_manager is not None:
+        try:
+            in_flight = await _session_manager.is_session_in_flight(session_id)
+        except Exception:
+            pass
+    return JSONResponse(status_code=200, content={
+        "files": files,
+        "backup_enabled": True,
+        "in_flight": in_flight,
+    })
 
 
 @_router.post("/api/v1/backup/apply")
@@ -1641,27 +1714,40 @@ async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSO
         for fp in request.files:
             result = tx.commit_one(fp)
             if result:
-                applied.append({
+                item: dict = {
                     "original": tx.to_relative(result["original"]),
                     "backup": tx.to_relative(result["backup"]),
-                })
+                }
+                if result.get("undo_path"):
+                    item["undo_path"] = result["undo_path"]
+                applied.append(item)
                 original_rel_paths.add(tx.to_relative(result["original"]))
         if original_rel_paths:
             engine._approval.mark_non_undoable_for_paths(original_rel_paths)
-        return JSONResponse(status_code=200, content={"status": "ok", "applied": applied, "count": len(applied)})
+        remaining = len(tx.list_staged())
+        return JSONResponse(status_code=200, content={
+            "status": "ok", "applied": applied, "count": len(applied),
+            "pending_count": remaining,
+        })
     else:
         raw_applied = tx.commit_all()
         applied = []
         original_rel_paths_all: set[str] = set()
         for a in raw_applied:
-            applied.append({
+            item_all: dict = {
                 "original": tx.to_relative(a["original"]),
                 "backup": tx.to_relative(a["backup"]),
-            })
+            }
+            if a.get("undo_path"):
+                item_all["undo_path"] = a["undo_path"]
+            applied.append(item_all)
             original_rel_paths_all.add(tx.to_relative(a["original"]))
         if original_rel_paths_all:
             engine._approval.mark_non_undoable_for_paths(original_rel_paths_all)
-        return JSONResponse(status_code=200, content={"status": "ok", "applied": applied, "count": len(applied)})
+        return JSONResponse(status_code=200, content={
+            "status": "ok", "applied": applied, "count": len(applied),
+            "pending_count": 0,
+        })
 
 
 @_router.post("/api/v1/backup/discard")
@@ -1684,10 +1770,29 @@ async def backup_discard(request: BackupDiscardRequest, raw_request: Request) ->
         for fp in request.files:
             if tx.rollback_one(fp):
                 count += 1
-        return JSONResponse(status_code=200, content={"status": "ok", "discarded": count})
+        remaining = len(tx.list_staged())
+        return JSONResponse(status_code=200, content={"status": "ok", "discarded": count, "pending_count": remaining})
     else:
         tx.rollback_all()
-        return JSONResponse(status_code=200, content={"status": "ok", "discarded": "all"})
+        return JSONResponse(status_code=200, content={"status": "ok", "discarded": "all", "pending_count": 0})
+
+
+@_router.post("/api/v1/backup/undo")
+async def backup_undo(request: BackupUndoRequest, raw_request: Request) -> JSONResponse:
+    """撤销已应用的备份，将原始文件恢复到应用前的状态。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    user_id = _get_isolation_user_id(raw_request)
+    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+    tx = engine.transaction
+    if tx is None:
+        return _error_json_response(400, "该会话未启用备份模式。")
+    ok = tx.undo_commit(request.original_path, request.undo_path)
+    if not ok:
+        return _error_json_response(400, "撤销失败：undo 备份文件不存在或已过期。")
+    return JSONResponse(status_code=200, content={"status": "ok", "undone": request.original_path})
 
 
 # ── 工作区事务别名（规范名称） ────────
@@ -2229,12 +2334,14 @@ def _sse_event_to_sse(
         EventType.EXCEL_PREVIEW: "excel_preview",
         EventType.EXCEL_DIFF: "excel_diff",
         EventType.TEXT_DIFF: "text_diff",
+        EventType.TEXT_PREVIEW: "text_preview",
         EventType.FILES_CHANGED: "files_changed",
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
         EventType.FILE_DOWNLOAD: "file_download",
         EventType.VERIFICATION_REPORT: "verification_report",
         EventType.RETRACT_THINKING: "retract_thinking",
+        EventType.STAGING_UPDATED: "staging_updated",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -2464,6 +2571,14 @@ def _sse_event_to_sse(
             "deletions": event.text_diff_deletions,
             "truncated": event.text_diff_truncated,
         }
+    elif event.event_type == EventType.TEXT_PREVIEW:
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "file_path": sanitize_external_text(event.text_preview_file_path, max_len=500),
+            "content": event.text_preview_content[:20000],
+            "line_count": event.text_preview_line_count,
+            "truncated": event.text_preview_truncated,
+        }
     elif event.event_type == EventType.FILES_CHANGED:
         data = {
             "files": [
@@ -2482,6 +2597,8 @@ def _sse_event_to_sse(
             "diff": event.pipeline_diff,
             "checkpoint": event.pipeline_checkpoint,
         }
+        if event.tool_call_id:
+            data["tool_call_id"] = sanitize_external_text(event.tool_call_id, max_len=160)
     elif event.event_type == EventType.MEMORY_EXTRACTED:
         data = {
             "entries": (event.memory_entries or [])[:50],
@@ -2505,6 +2622,12 @@ def _sse_event_to_sse(
         }
     elif event.event_type == EventType.RETRACT_THINKING:
         data = {"iteration": event.iteration}
+    elif event.event_type == EventType.STAGING_UPDATED:
+        data = {
+            "action": event.staging_action,
+            "files": event.staging_files[:50],
+            "pending_count": event.staging_pending_count,
+        }
     else:
         data = event.to_dict()
 
@@ -2883,6 +3006,13 @@ def _resolve_excel_path(
         target = (workspace / path).resolve()
         if str(target).startswith(workspace_str) and target.is_file():
             resolved = str(target)
+        else:
+            # Fallback: 裸文件名可能位于 outputs/ 或 scripts/ 等子目录
+            for _subdir in ("outputs", "scripts", "uploads"):
+                fallback = (workspace / _subdir / path).resolve()
+                if str(fallback).startswith(workspace_str) and fallback.is_file():
+                    resolved = str(fallback)
+                    break
 
     if resolved is None:
         return None
@@ -3028,6 +3158,24 @@ async def list_workspace_files(request: Request) -> JSONResponse:
 
     results.sort(key=lambda x: (not x["is_dir"], x["path"].lower()))
     return JSONResponse(content={"files": results, "truncated": len(results) >= _MAX_WORKSPACE_FILES})
+
+
+@_router.get("/api/v1/files/workspace/storage")
+async def get_workspace_storage(request: Request) -> JSONResponse:
+    """返回当前用户工作区的存储用量概览（用于前端进度条展示）。"""
+    assert _config is not None, "服务未初始化"
+    ws = _resolve_workspace(request)
+    usage = ws.get_usage()
+    return JSONResponse(content={
+        "total_bytes": usage.total_bytes,
+        "size_mb": usage.size_mb,
+        "max_bytes": usage.max_bytes,
+        "max_size_mb": usage.max_size_mb,
+        "file_count": usage.file_count,
+        "max_files": usage.max_files,
+        "over_size": usage.over_size,
+        "over_files": usage.over_files,
+    })
 
 
 @_router.get("/api/v1/files/registry")
@@ -3375,6 +3523,12 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
                 "total_rows": total_rows,
                 "truncated": total_rows > max_rows + 1,
             }
+            if all_sheets:
+                return JSONResponse(content={
+                    "file": os.path.basename(resolved),
+                    "sheets": ["Sheet1"],
+                    "all_snapshots": [snap_csv],
+                })
             return JSONResponse(content=snap_csv)
         except Exception as exc:
             logger.error("CSV snapshot 生成失败: %s", exc, exc_info=True)
@@ -4145,6 +4299,44 @@ async def scan_session_registry(session_id: str, request: Request) -> JSONRespon
         "session_id": session_id,
         "started": started,
         "message": "文件扫描已启动" if started else "扫描正在进行中，请稍候",
+    })
+
+
+@_router.post("/api/v1/sessions/{session_id}/full-access")
+async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
+    """切换指定会话的 full_access 开关（供前端快捷按钮使用）。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    user_id = _get_isolation_user_id(request)
+
+    body = await request.json()
+    enabled = bool(body.get("enabled", True))
+
+    engine = await _session_manager.get_or_restore_engine(
+        session_id, user_id=user_id
+    )
+    if engine is not None:
+        engine._full_access_enabled = enabled
+        engine._persist_full_access(enabled)
+        if not enabled:
+            # 关闭时驱逐受限 skill，与 command_handler 保持一致
+            blocked = set(engine._restricted_code_skillpacks)
+            engine._active_skills = [
+                s for s in engine._active_skills if s.name not in blocked
+            ]
+    else:
+        # 会话尚未创建（local-first），仅持久化到 UserConfigStore
+        if _database is not None:
+            try:
+                from excelmanus.stores.config_store import UserConfigStore
+                uc = UserConfigStore(_database.conn, user_id=user_id)
+                uc.set_full_access(enabled)
+            except Exception:
+                logger.debug("持久化 full_access 失败（无会话）", exc_info=True)
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "full_access_enabled": enabled,
     })
 
 
@@ -5863,15 +6055,23 @@ async def execute_command(request: Request) -> JSONResponse:
 
     # /fullaccess status
     if command == "/fullaccess status":
-        # fullaccess 是会话级状态，默认关闭
-        hint = "全权限模式: **关闭**（默认）\n\n使用 `/fullaccess on` 开启，开启后工具调用将跳过审批确认"
-        if _session_manager is not None:
+        # fullaccess 已改为跨会话持久化设置
+        hint = "全权限模式: **关闭**\n\n使用 `/fullaccess on` 开启，开启后工具调用将跳过审批确认（跨会话生效）"
+        if _database is not None:
+            try:
+                from excelmanus.stores.config_store import UserConfigStore
+                _uc = UserConfigStore(_database.conn, user_id=_get_isolation_user_id(request))
+                if _uc.get_full_access():
+                    hint = "全权限模式: **开启**（跨会话生效）\n\n使用 `/fullaccess off` 关闭"
+            except Exception:
+                pass
+        elif _session_manager is not None:
             try:
                 sessions = await _session_manager.list_sessions()
                 for s in sessions:
                     detail = await _session_manager.get_session_detail(s["id"])
                     if detail.get("full_access_enabled"):
-                        hint = f"全权限模式: **开启**（会话 `{s['id'][:8]}...`）\n\n使用 `/fullaccess off` 关闭"
+                        hint = f"全权限模式: **开启**\n\n使用 `/fullaccess off` 关闭"
                         break
             except Exception:
                 pass

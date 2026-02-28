@@ -308,8 +308,8 @@ class AgentEngine:
         )
         # U1 修复：注册 introspect_capability 工具
         register_introspection_tools(self._registry)
-        # 会话级权限控制：默认限制代码 Skillpack，显式 /fullaccess 后解锁
-        self._full_access_enabled: bool = False
+        # 会话级权限控制：从持久化配置读取，继承上次设置
+        self._full_access_enabled: bool = self._load_persisted_full_access(database)
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
         self._subagent_enabled: bool = config.subagent_enabled
         self._subagent_registry = SubagentRegistry(config)
@@ -391,8 +391,6 @@ class AgentEngine:
         self._checkpoint_enabled: bool = config.checkpoint_enabled
         self._turn_dirty_files: set[str] = set()  # 当前轮次被写的文件路径
         self._bench_mode: bool = False
-        # PlanInterceptHandler 需要此属性（尽管 plan 模式已废弃，handler 仍可能被调用）
-        self._plan_intercept_task_create: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
         self._current_chat_mode: str = "write"
         self._window_perception = WindowPerceptionManager(
@@ -435,6 +433,10 @@ class AgentEngine:
 
         # ── 上下文自动压缩（Compaction）──────────────────────
         self._compaction_manager = CompactionManager(config)
+
+        # ── 验证门控（Verification Gate）──────────────────────
+        from excelmanus.engine_core.verification_gate import VerificationGate
+        self._verification_gate = VerificationGate(self)
 
         # ── PromptComposer 集成 ─────────────────────────────
         self._prompt_composer: Any = None
@@ -542,6 +544,7 @@ class AgentEngine:
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
         self._pending_classify_task: asyncio.Task[Any] | None = None  # 后台 LLM 分类任务
+        self._pending_verifier_task: asyncio.Task[str | None] | None = None  # advisory 模式后台验证任务
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
         self._llm_caller = LLMCaller(self)
@@ -1434,6 +1437,29 @@ class AgentEngine:
         """当前会话是否启用 fullaccess。"""
         return self._full_access_enabled
 
+    def _load_persisted_full_access(self, database: "Database | None") -> bool:
+        """从用户级配置读取持久化的 full_access 开关（跨会话继承）。"""
+        if database is None:
+            return False
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            store = UserConfigStore(database.conn, user_id=self._user_id)
+            return store.get_full_access()
+        except Exception:
+            logger.debug("读取持久化 full_access 失败", exc_info=True)
+            return False
+
+    def _persist_full_access(self, enabled: bool) -> None:
+        """将 full_access 开关持久化到用户级配置（跨会话生效）。"""
+        if self._database is None:
+            return
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            store = UserConfigStore(self._database.conn, user_id=self._user_id)
+            store.set_full_access(enabled)
+        except Exception:
+            logger.debug("持久化 full_access 失败", exc_info=True)
+
     @property
     def subagent_enabled(self) -> bool:
         """当前会话是否启用 subagent。"""
@@ -1613,21 +1639,10 @@ class AgentEngine:
         """入队子代理审批问题（Protocol: DelegationContext）。"""
         return self._interaction_handler.enqueue_subagent_approval_question(**kwargs)
 
-    async def intercept_task_create_with_plan(self, **kwargs: Any) -> Any:
-        """拦截 task_create 生成计划（Protocol: ToolExecutionContext）。
-
-        注意：plan 模式已废弃，此方法返回错误提示。
-        """
-        # Plan 模式已废弃，直接返回错误
-        error_msg = "Plan mode has been deprecated. Please use normal task creation."
-        return None, None, error_msg
-
     def enable_bench_sandbox(self) -> None:
         """启用 benchmark 沙盒模式：解除所有交互式阻塞。
 
         - fullaccess = True：高风险工具直接执行，不弹确认
-        - plan 拦截关闭：task_create 直接执行，不生成待审批计划
-        - plan mode 关闭：普通对话不进入仅规划路径
         - subagent 启用：允许委派子代理
         - bench 模式标志：用于 activate_skill 短路非 Excel 类 skill
         """
@@ -2219,6 +2234,7 @@ class AgentEngine:
 
         # ── 异步 LLM 分类：已内化到 router._classify_task 同步流程 ──
         self._pending_classify_task = None
+        self._pending_verifier_task = None
 
         try:
             chat_result = await self._tool_calling_loop(
@@ -2228,6 +2244,17 @@ class AgentEngine:
             )
         finally:
             pass
+
+        # ── F: 等待后台 advisory verifier 完成（不阻塞 finish_task 回复） ──
+        _vt = self._pending_verifier_task
+        if _vt is not None:
+            self._pending_verifier_task = None
+            try:
+                advisory_text = await _vt
+                if advisory_text and not advisory_text.startswith("BLOCK:"):
+                    chat_result.reply = (chat_result.reply or "") + advisory_text
+            except Exception:  # noqa: BLE001
+                logger.debug("后台 advisory verifier 异常，fail-open", exc_info=True)
 
         # 注入路由诊断信息到 ChatResult
         chat_result.write_hint = self._current_write_hint
@@ -2653,12 +2680,7 @@ class AgentEngine:
         else:
             return None
 
-        # 注入最近对话上下文帮助 verifier 理解任务
-        recent_context = self._build_parent_context_summary()
-        if recent_context:
-            parts.append(f"会话上下文：{recent_context[:800]}")
-
-        # 注入写入操作日志（供 verifier 精准验证变更而非盲目探索）
+        # 注入写入操作日志（最高验证价值，精准定位变更）
         _state = getattr(self, "_state", None)
         if _state is not None:
             write_log = _state.render_write_operations_log()
@@ -2669,10 +2691,15 @@ class AgentEngine:
             if playbook:
                 parts.append(playbook)
 
-        # 注入任务清单状态（含每步验证结果），帮助 verifier 对照验证条件
+        # 精简注入会话上下文（仅用于补充任务目标理解，截短以减少 prompt token）
+        recent_context = self._build_parent_context_summary()
+        if recent_context:
+            parts.append(f"会话上下文：{recent_context[:400]}")
+
+        # 注入任务清单状态（截短，仅含验证条件摘要）
         task_list_notice = self._context_builder._build_task_list_status_notice()
         if task_list_notice:
-            parts.append(f"任务清单验证记录：\n{task_list_notice}")
+            parts.append(f"任务清单：\n{task_list_notice[:600]}")
 
         prompt = "\n".join(parts)
 
@@ -3586,7 +3613,7 @@ class AgentEngine:
                                         logger.info("内联审批: fullaccess 已开启")
                                     # 执行已批准的工具
                                     exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                        pending, on_event=on_event,
+                                        pending, on_event=on_event, tool_call_id=tool_call_id,
                                     )
                                     # 用真实结果替换之前写入 memory 的审批提示
                                     if tool_call_id:
@@ -3695,7 +3722,7 @@ class AgentEngine:
                                             self._full_access_enabled = True
                                             logger.info("Web 审批: fullaccess 已开启")
                                         exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                            pending, on_event=on_event,
+                                            pending, on_event=on_event, tool_call_id=tool_call_id,
                                         )
                                         if tool_call_id:
                                             self._memory.replace_tool_result(tool_call_id, exec_result)
@@ -4260,6 +4287,7 @@ class AgentEngine:
         pending: PendingApproval,
         *,
         on_event: EventCallback | None = None,
+        tool_call_id: str | None = None,
     ) -> tuple[bool, str, AppliedApprovalRecord | None]:
         """执行待确认操作并处理副作用（写入追踪、CoW 映射等）。
 
@@ -4326,6 +4354,41 @@ class AgentEngine:
                 record.changes,
                 0,
             )
+
+        # ── write_text_file / edit_text_file → TEXT_DIFF + FILES_CHANGED 事件 ──
+        _TEXT_DIFF_TOOLS = {"write_text_file", "edit_text_file"}
+        if pending.tool_name in _TEXT_DIFF_TOOLS and on_event is not None and record.result_preview:
+            try:
+                _td_result = json.loads(record.result_preview)
+                if isinstance(_td_result, dict):
+                    _td_data = _td_result.get("_text_diff")
+                    if isinstance(_td_data, dict) and _td_data.get("hunks"):
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.TEXT_DIFF,
+                                tool_call_id=tool_call_id or pending.approval_id,
+                                text_diff_file_path=_td_data.get("file_path", ""),
+                                text_diff_hunks=_td_data.get("hunks", [])[:300],
+                                text_diff_additions=_td_data.get("additions", 0),
+                                text_diff_deletions=_td_data.get("deletions", 0),
+                                text_diff_truncated=_td_data.get("truncated", False),
+                            ),
+                        )
+                    # FILES_CHANGED 事件
+                    _td_file = _td_result.get("file") or ""
+                    if _td_file:
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.FILES_CHANGED,
+                                tool_call_id=tool_call_id or pending.approval_id,
+                                iteration=0,
+                                changed_files=[_td_file],
+                            ),
+                        )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # ── 通用 CoW 映射提取 ──
         if record.result_preview:

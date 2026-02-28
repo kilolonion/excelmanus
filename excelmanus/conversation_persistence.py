@@ -71,8 +71,11 @@ class ConversationPersistence:
         self._sync_title(session_id, messages)
 
     def _sync_title(self, session_id: str, messages: list) -> None:
-        """从消息列表中派生标题并更新 SQLite（仅当当前标题为空时）。"""
+        """从消息列表中派生标题并更新 SQLite（仅当标题尚未被 LLM 或用户设置时）。"""
         try:
+            existing_source = self._chat_history.get_title_source(session_id)
+            if existing_source in ("auto", "user"):
+                return
             title = ""
             for msg in messages:
                 if isinstance(msg, dict) and msg.get("role") == "user":

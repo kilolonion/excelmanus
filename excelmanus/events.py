@@ -36,6 +36,7 @@ class EventType(Enum):
     EXCEL_PREVIEW = "excel_preview"
     EXCEL_DIFF = "excel_diff"
     TEXT_DIFF = "text_diff"
+    TEXT_PREVIEW = "text_preview"
     FILES_CHANGED = "files_changed"
     PIPELINE_PROGRESS = "pipeline_progress"
     MEMORY_EXTRACTED = "memory_extracted"
@@ -44,6 +45,7 @@ class EventType(Enum):
     VERIFICATION_REPORT = "verification_report"
     RETRACT_THINKING = "retract_thinking"
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
+    STAGING_UPDATED = "staging_updated"  # staging 文件列表变化（apply/discard/新增）
 
 
 @dataclass
@@ -135,6 +137,11 @@ class ToolCallEvent:
     text_diff_additions: int = 0
     text_diff_deletions: int = 0
     text_diff_truncated: bool = False
+    # text_preview 事件字段
+    text_preview_file_path: str = ""
+    text_preview_content: str = ""
+    text_preview_line_count: int = 0
+    text_preview_truncated: bool = False
     # files_changed 事件字段
     changed_files: List[str] = field(default_factory=list)
     # pipeline_progress 事件字段
@@ -168,6 +175,10 @@ class ToolCallEvent:
     verification_checks: List[str] = field(default_factory=list)
     verification_issues: List[str] = field(default_factory=list)
     verification_mode: str = ""          # advisory / blocking
+    # staging_updated 事件字段
+    staging_action: str = ""             # "applied" | "discarded" | "undone" | "new"
+    staging_files: List[Dict[str, Any]] = field(default_factory=list)  # 变化的文件列表
+    staging_pending_count: int = 0       # 剩余待应用文件数
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

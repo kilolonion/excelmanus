@@ -867,7 +867,7 @@ class FileRegistry:
     def scan_workspace(
         self,
         *,
-        max_files: int = 500,
+        max_files: int = 1000,
         header_scan_rows: int = 5,
         excel_only: bool = False,
     ) -> ScanResult:
@@ -1235,6 +1235,18 @@ class FileRegistry:
         if self._fvm is None:
             return False
         return self._fvm.has_staging(file_path)
+
+    def undo_commit(self, original_path: str, undo_path: str) -> bool:
+        """撤销一次 commit。"""
+        if self._fvm is None:
+            return False
+        return self._fvm.undo_commit(original_path, undo_path)
+
+    def diff_staged_summary(self, file_path: str) -> dict | None:
+        """返回 staged vs original 的轻量变更摘要。"""
+        if self._fvm is None:
+            return None
+        return self._fvm.diff_staged_summary(file_path)
 
     def remove_staging_for_path(self, file_path: str) -> bool:
         """移除指定文件的 staging 条目。"""

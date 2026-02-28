@@ -40,6 +40,7 @@ class SubagentConfig:
     source: SubagentSource = "builtin"
     capability_mode: SubagentCapabilityMode = "restricted"
     system_prompt: str = ""
+    max_tokens: int | None = None  # LLM 生成上限（None=模型默认）
 
 
 @dataclass

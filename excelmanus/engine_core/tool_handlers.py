@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -317,6 +318,32 @@ class FinishTaskHandler(BaseToolHandler):
             if top_files and isinstance(top_files, list):
                 _report_for_event = {"affected_files": top_files}
         self._dispatcher._emit_files_changed_from_report(e, on_event, tool_call_id, _report_for_event, iteration)
+
+        # 任务完成时，如果有 pending staged 文件，发射 staging_updated 提示
+        if finish_accepted and on_event is not None:
+            try:
+                tx = getattr(e, "transaction", None)
+                if tx is not None:
+                    staged = tx.list_staged()
+                    if staged:
+                        from excelmanus.events import EventType, ToolCallEvent as _TCEvent
+                        staging_files = []
+                        for s in staged:
+                            staging_files.append({
+                                "original_path": tx.to_relative(s["original"]),
+                                "backup_path": tx.to_relative(s["backup"]),
+                            })
+                        on_event(_TCEvent(
+                            event_type=EventType.STAGING_UPDATED,
+                            tool_call_id=tool_call_id,
+                            staging_action="finish_hint",
+                            staging_files=staging_files,
+                            staging_pending_count=len(staged),
+                            iteration=iteration,
+                        ))
+            except Exception:
+                pass
+
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=success, finish_accepted=finish_accepted)
 
@@ -351,9 +378,9 @@ class FinishTaskHandler(BaseToolHandler):
         """根据 task_tags 决定 verifier 模式并执行。
 
         返回值含义：
-        - None: 跳过或 fail-open
+        - None: 跳过或 fail-open（advisory 后台模式也返回 None，结果通过 _pending_verifier_task 异步获取）
         - "BLOCK:..." : blocking 模式下验证失败
-        - 其他字符串: advisory 追加文本
+        - 其他字符串: advisory 追加文本（仅 blocking 降级时同步返回）
         """
         last_route = getattr(engine, "_last_route_result", None)
         task_tags: tuple[str, ...] = ()
@@ -375,10 +402,15 @@ class FinishTaskHandler(BaseToolHandler):
                 report=report, summary=summary, on_event=on_event, blocking=True,
             )
         else:
-            # blocking 超过最大重试次数 → 降为 advisory
-            return await engine._run_finish_verifier_advisory(
-                report=report, summary=summary, on_event=on_event, blocking=False,
+            # advisory / blocking 降级 → 后台并行执行，不阻塞 finish 回复
+            task = asyncio.create_task(
+                engine._run_finish_verifier_advisory(
+                    report=report, summary=summary, on_event=on_event, blocking=False,
+                ),
+                name="verifier_advisory",
             )
+            engine._pending_verifier_task = task
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -468,33 +500,6 @@ class SuggestModeSwitchHandler(BaseToolHandler):
         result_str = _json.dumps(payload, ensure_ascii=False) if isinstance(payload, dict) else str(payload)
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=True)
-
-
-# ---------------------------------------------------------------------------
-# 计划拦截处理器（PlanInterceptHandler）
-# ---------------------------------------------------------------------------
-
-class PlanInterceptHandler(BaseToolHandler):
-    """拦截 task_create 进入 plan 模式。"""
-
-    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        if tool_name != "task_create":
-            return False
-        e = self._engine
-        return bool(e._plan_intercept_task_create)
-
-    async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-
-        result_str, _plan_id, plan_error = await self._engine.intercept_task_create_with_plan(
-            arguments=arguments, route_result=route_result, tool_call_id=tool_call_id, on_event=on_event,
-        )
-        success = plan_error is None
-        log_tool_call(logger, tool_name, arguments, result=result_str if success else None, error=plan_error if not success else None)
-        return _ToolExecOutcome(
-            result_str=result_str, success=success, error=plan_error,
-            defer_tool_result=success,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +641,16 @@ class ExtractTableSpecHandler(BaseToolHandler):
             log_tool_call(logger, tool_name, arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
+        # 包装 on_event 回调，为 PIPELINE_PROGRESS 事件自动注入 tool_call_id
+        def _on_event_with_tool_id(event):
+            if on_event is not None:
+                from excelmanus.events import EventType
+                if hasattr(event, "event_type") and event.event_type == EventType.PIPELINE_PROGRESS:
+                    event.tool_call_id = tool_call_id
+                on_event(event)
+
+        wrapped_on_event = _on_event_with_tool_id if on_event else None
+
         # 判断是否使用批量模式
         use_batch = len(file_paths) > 1
 
@@ -644,7 +659,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 file_paths=file_paths,
                 output_path=output_path,
                 skip_style=skip_style,
-                on_event=on_event,
+                on_event=wrapped_on_event,
                 arguments=arguments,
             )
         else:
@@ -652,7 +667,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 file_path=file_paths[0],
                 output_path=output_path,
                 skip_style=skip_style,
-                on_event=on_event,
+                on_event=wrapped_on_event,
                 arguments=arguments,
             )
 

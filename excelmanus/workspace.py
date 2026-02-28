@@ -27,8 +27,9 @@ _EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"})
 # ── 配额辅助（自 auth/workspace.py 迁移） ────────
 
 
-DEFAULT_MAX_SIZE_MB = 100
-DEFAULT_MAX_FILES = 200
+DEFAULT_MAX_SIZE_MB = 200
+DEFAULT_MAX_FILES = 1000
+ADMIN_DEFAULT_MAX_SIZE_MB = 1024
 
 
 def _env_int(name: str, default: int) -> int:
@@ -53,6 +54,27 @@ class QuotaPolicy:
         max_mb = _env_int("EXCELMANUS_WORKSPACE_MAX_SIZE_MB", DEFAULT_MAX_SIZE_MB)
         max_files = _env_int("EXCELMANUS_WORKSPACE_MAX_FILES", DEFAULT_MAX_FILES)
         return QuotaPolicy(max_bytes=max_mb * 1024 * 1024, max_files=max_files)
+
+    @classmethod
+    def for_user(cls, user_record: Any) -> "QuotaPolicy":
+        """从用户记录读取个人配额，0 或缺失时回退全局默认。
+
+        管理员默认 1 GB，普通用户默认 200 MB。
+        """
+        env = cls.from_env()
+        user_mb = getattr(user_record, "max_storage_mb", 0) or 0
+        user_files = getattr(user_record, "max_files", 0) or 0
+        is_admin = getattr(user_record, "role", "") == "admin"
+        if user_mb > 0:
+            default_bytes = user_mb * 1024 * 1024
+        elif is_admin:
+            default_bytes = ADMIN_DEFAULT_MAX_SIZE_MB * 1024 * 1024
+        else:
+            default_bytes = env.max_bytes
+        return cls(
+            max_bytes=default_bytes,
+            max_files=user_files if user_files > 0 else env.max_files,
+        )
 
     @property
     def max_size_mb(self) -> float:
@@ -98,8 +120,25 @@ class WorkspaceUsage:
         }
 
 
+# 系统/配置文件前缀与名称，不计入用户配额
+_SYSTEM_DIR_PREFIXES = frozenset({"outputs/backups", "outputs/approvals", "outputs/.versions", "scripts"})
+_SYSTEM_FILE_NAMES = frozenset({"data.db", "data.db-shm", "data.db-wal"})
+
+
+def _is_system_file(rel: Path) -> bool:
+    """判断相对路径是否属于系统/配置文件，不应计入用户配额。"""
+    if rel.name in _SYSTEM_FILE_NAMES:
+        return True
+    rel_str = str(rel)
+    return any(rel_str.startswith(prefix) for prefix in _SYSTEM_DIR_PREFIXES)
+
+
 def scan_workspace(workspace_dir: str) -> list[dict]:
-    """遍历 workspace_dir 并返回按修改时间排序的文件元数据。"""
+    """遍历 workspace_dir 并返回按修改时间排序的文件元数据。
+
+    跳过隐藏目录和系统文件（data.db, backups, approvals 等），
+    仅统计用户实际创建/上传的文件。
+    """
     results: list[dict] = []
     ws_path = Path(workspace_dir)
     if not ws_path.is_dir():
@@ -107,9 +146,12 @@ def scan_workspace(workspace_dir: str) -> list[dict]:
     for entry in ws_path.rglob("*"):
         if not entry.is_file():
             continue
-        # 跳过隐藏目录（如 .avatars）中的文件
+        # 跳过隐藏目录（如 .avatars, .tmp）中的文件
         rel = entry.relative_to(ws_path)
         if any(part.startswith(".") for part in rel.parts[:-1]):
+            continue
+        # 跳过系统/配置文件
+        if _is_system_file(rel):
             continue
         try:
             stat = entry.stat()
@@ -254,6 +296,14 @@ class WorkspaceTransaction:
     def staged_file_map(self) -> dict[str, str]:
         """返回 original_abs → staged_abs 的映射。"""
         return self._registry.staged_file_map()
+
+    def undo_commit(self, original_path: str, undo_path: str) -> bool:
+        """撤销一次 commit。"""
+        return self._registry.undo_commit(original_path, undo_path)
+
+    def diff_staged_summary(self, file_path: str) -> dict | None:
+        """返回 staged vs original 的轻量变更摘要。"""
+        return self._registry.diff_staged_summary(file_path)
 
     def register_cow_mappings(self, mapping: dict[str, str]) -> None:
         """将子进程级 CoW 映射合并进本事务。"""

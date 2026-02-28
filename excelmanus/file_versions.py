@@ -22,7 +22,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from excelmanus.security.path_utils import resolve_in_workspace, to_workspace_relative
 
@@ -404,7 +404,10 @@ class FileVersionManager:
         return entry.staged_abs if entry else None
 
     def commit_staged(self, file_path: str) -> dict[str, str] | None:
-        """将 staged 文件提交回原始位置。返回 {original, backup} 或 None。"""
+        """将 staged 文件提交回原始位置。返回 {original, backup, undo_path?} 或 None。
+
+        提交前将原始文件备份到 undo 目录，支持后续撤销。
+        """
         resolved = self._resolve(file_path)
         rel = self._to_rel(resolved)
         entry = self._staging.get(rel)
@@ -413,25 +416,59 @@ class FileVersionManager:
 
         staged = Path(entry.staged_abs)
         original = Path(entry.original_abs)
+        undo_path_str = ""
+
+        # 提交前备份原始文件（支持 undo）
+        if original.exists() and original.is_file():
+            undo_dir = self._versions_dir / "_undo"
+            undo_dir.mkdir(parents=True, exist_ok=True)
+            undo_name = f"{original.stem}_{secrets.token_hex(3)}{original.suffix}"
+            undo_path = undo_dir / undo_name
+            shutil.copy2(str(original), str(undo_path))
+            undo_path_str = str(undo_path)
+
         if staged.exists():
             original.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(staged), str(original))
 
         del self._staging[rel]
         self._save_staging()
-        return {"original": entry.original_abs, "backup": entry.staged_abs}
+        result: dict[str, str] = {
+            "original": entry.original_abs,
+            "backup": entry.staged_abs,
+        }
+        if undo_path_str:
+            result["undo_path"] = undo_path_str
+        return result
 
     def commit_all_staged(self) -> list[dict[str, str]]:
         """提交所有 staged 文件。"""
         results: list[dict[str, str]] = []
+        undo_dir = self._versions_dir / "_undo"
         for rel in list(self._staging.keys()):
             entry = self._staging[rel]
             staged = Path(entry.staged_abs)
             original = Path(entry.original_abs)
+            undo_path_str = ""
+
+            # 提交前备份原始文件
+            if original.exists() and original.is_file():
+                undo_dir.mkdir(parents=True, exist_ok=True)
+                undo_name = f"{original.stem}_{secrets.token_hex(3)}{original.suffix}"
+                undo_path = undo_dir / undo_name
+                shutil.copy2(str(original), str(undo_path))
+                undo_path_str = str(undo_path)
+
             if staged.exists():
                 original.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(staged), str(original))
-            results.append({"original": entry.original_abs, "backup": entry.staged_abs})
+            result: dict[str, str] = {
+                "original": entry.original_abs,
+                "backup": entry.staged_abs,
+            }
+            if undo_path_str:
+                result["undo_path"] = undo_path_str
+            results.append(result)
         self._staging.clear()
         self._save_staging()
         return results
@@ -462,6 +499,112 @@ class FileVersionManager:
         self._staging.clear()
         self._save_staging()
         return count
+
+    def undo_commit(self, original_path: str, undo_path: str) -> bool:
+        """撤销一次 commit：将 undo 备份恢复回原始位置。"""
+        undo = Path(undo_path)
+        original = Path(original_path)
+        if not undo.exists():
+            logger.warning("undo 文件不存在: %s", undo_path)
+            return False
+        original.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(undo), str(original))
+        undo.unlink(missing_ok=True)
+        return True
+
+    def diff_staged_summary(self, file_path: str) -> dict | None:
+        """比较 staged 文件与原始文件，返回轻量摘要。
+
+        返回 {cells_changed, cells_added, cells_removed, sheets_added,
+               sheets_removed, size_delta_bytes} 或 None。
+        仅支持 .xlsx/.xlsm 文件。
+        """
+        resolved = self._resolve(file_path)
+        rel = self._to_rel(resolved)
+        entry = self._staging.get(rel)
+        if entry is None:
+            return None
+        original = Path(entry.original_abs)
+        staged = Path(entry.staged_abs)
+        if not staged.exists():
+            return None
+
+        # 文件大小差异
+        orig_size = original.stat().st_size if original.exists() else 0
+        staged_size = staged.stat().st_size
+        size_delta = staged_size - orig_size
+
+        suffix = original.suffix.lower()
+        if suffix not in {".xlsx", ".xlsm"}:
+            return {"size_delta_bytes": size_delta}
+
+        try:
+            import openpyxl
+            wb_orig = openpyxl.load_workbook(str(original), data_only=True, read_only=True) if original.exists() else None
+            wb_staged = openpyxl.load_workbook(str(staged), data_only=True, read_only=True)
+        except Exception:
+            return {"size_delta_bytes": size_delta}
+
+        orig_sheets = set(wb_orig.sheetnames) if wb_orig else set()
+        staged_sheets = set(wb_staged.sheetnames)
+        sheets_added = list(staged_sheets - orig_sheets)
+        sheets_removed = list(orig_sheets - staged_sheets)
+
+        cells_changed = 0
+        cells_added = 0
+        cells_removed = 0
+
+        common_sheets = orig_sheets & staged_sheets
+        for sn in common_sheets:
+            try:
+                ws_o = wb_orig[sn]
+                ws_s = wb_staged[sn]
+                o_cells: dict[tuple, Any] = {}
+                for row in ws_o.iter_rows():
+                    for cell in row:
+                        if cell.value is not None:
+                            o_cells[(cell.row, cell.column)] = cell.value
+                s_cells: dict[tuple, Any] = {}
+                for row in ws_s.iter_rows():
+                    for cell in row:
+                        if cell.value is not None:
+                            s_cells[(cell.row, cell.column)] = cell.value
+                all_coords = set(o_cells.keys()) | set(s_cells.keys())
+                for coord in all_coords:
+                    ov = o_cells.get(coord)
+                    sv = s_cells.get(coord)
+                    if ov is None and sv is not None:
+                        cells_added += 1
+                    elif ov is not None and sv is None:
+                        cells_removed += 1
+                    elif ov != sv:
+                        cells_changed += 1
+            except Exception:
+                pass
+
+        # 新增 sheet 中的所有单元格算 added
+        for sn in sheets_added:
+            try:
+                ws = wb_staged[sn]
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if cell.value is not None:
+                            cells_added += 1
+            except Exception:
+                pass
+
+        if wb_orig:
+            wb_orig.close()
+        wb_staged.close()
+
+        return {
+            "cells_changed": cells_changed,
+            "cells_added": cells_added,
+            "cells_removed": cells_removed,
+            "sheets_added": sheets_added,
+            "sheets_removed": sheets_removed,
+            "size_delta_bytes": size_delta,
+        }
 
     def list_staged(self) -> list[dict[str, str]]:
         """列出所有活跃的 staged 文件。"""

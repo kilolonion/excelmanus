@@ -105,6 +105,12 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         help_label="/memory [<category>|delete|clear]",
         arguments=("file_pattern", "user_pref", "error_solution", "general", "delete", "clear"),
     ),
+    ControlCommandSpec(
+        command="/playbook",
+        description="Playbook 历史经验管理",
+        help_label="/playbook [list|search|stats|delete|reset]",
+        arguments=("list", "search", "stats", "delete", "reset"),
+    ),
 )
 
 

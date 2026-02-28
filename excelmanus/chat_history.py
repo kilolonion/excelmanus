@@ -68,8 +68,9 @@ class ChatHistoryStore:
     ) -> None:
         now = self._now_iso()
         self._conn.execute(
-            "INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at, user_id) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO sessions "
+            "(id, title, created_at, updated_at, user_id, title_source) "
+            "VALUES (?, ?, ?, ?, ?, 'fallback')",
             (session_id, title, now, now, user_id),
         )
         self._conn.commit()
@@ -100,6 +101,15 @@ class ChatHistoryStore:
     def session_owned_by(self, session_id: str, user_id: str) -> bool:
         """检查会话是否属于指定用户。"""
         return self.session_exists(session_id, user_id=user_id)
+
+    def get_title_source(self, session_id: str) -> str | None:
+        """返回会话的 title_source 字段，会话不存在时返回 None。"""
+        row = self._conn.execute(
+            "SELECT title_source FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return row["title_source"] if hasattr(row, "__getitem__") else row[0]
 
     def update_session(self, session_id: str, **kwargs: str) -> None:
         sets: list[str] = []

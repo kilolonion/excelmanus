@@ -19,7 +19,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
         "filter_data",
         "list_sheets",
-        # get_file_info, find_files, read_text_file: Batch 5 精简
+        # get_file_info, find_files: Batch 5 精简
+        "read_text_file",
         "list_directory",
         # read_cell_styles: Batch 2 精简
         "inspect_excel_files",
@@ -45,6 +46,7 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
         "read_excel",
         "filter_data",
         "list_sheets",
+        "read_text_file",
         "list_directory",
         "inspect_excel_files",
         "memory_read_topic",
@@ -61,11 +63,9 @@ if not PARALLELIZABLE_READONLY_TOOLS <= READ_ONLY_SAFE_TOOLS:
 # Tier A：需要进入 /accept 门禁确认后才能执行
 MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
     {
-        "write_text_file",
-        "edit_text_file",
         "run_shell",
         "delete_file",
-        "rename_file",
+        # write_text_file, edit_text_file, rename_file: 降级到 Tier B（沙盒守卫 + 审计即可）
         # write_excel, transform_data: Batch 1 精简
         # create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets: Batch 3 精简
     }
@@ -74,6 +74,10 @@ MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
 # Tier B：不拦截确认，但必须纳入审计
 MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
     {
+        # 文本文件操作（沙盒守卫，低风险）
+        "write_text_file",
+        "edit_text_file",
+        "rename_file",
         "copy_file",
         # 图表工具（写 Excel，低风险）
         "create_excel_chart",
@@ -144,7 +148,9 @@ WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "dist",
     "build",
     ".worktrees",
-    "outputs/approvals",
+    "outputs",
+    "scripts",
+    ".tmp",
 )
 
 
@@ -161,8 +167,8 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "sheet": ("list_sheets", "focus_window"),  # list_sheets 保留为只读结构发现
     "chart": ("create_excel_chart",),
     "file": (
-        "list_directory", "copy_file", "rename_file", "delete_file",
-        # get_file_info, find_files, read_text_file: Batch 5 精简
+        "read_text_file", "list_directory", "copy_file", "rename_file", "delete_file",
+        # get_file_info, find_files: Batch 5 精简
     ),
     "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
     "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica", "extract_table_spec"),
@@ -184,8 +190,9 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     # sheet（list_sheets 保留）
     "list_sheets": "列出 Excel 文件中所有工作表的名称、行列数等概况信息",
     # 文件操作
+    "read_text_file": "读取文本文件内容（md/txt/py/json/csv/yaml 等），查看脚本源码、配置、文档、日志",
     "list_directory": "列出指定目录下的文件和子目录，返回名称、类型和大小",
-    # get_file_info, find_files, read_text_file: Batch 5 精简
+    # get_file_info, find_files: Batch 5 精简
     "copy_file": "复制文件到工作区内的新位置",
     "rename_file": "重命名或移动文件到工作区内的新位置",
     "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",

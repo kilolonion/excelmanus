@@ -429,6 +429,10 @@ def _check_golden_cells(
             out_values.append(out_row)
             gold_values.append(gold_row)
 
+        # ── 公式工作簿惰性加载（仅在需要时加载一次）──
+        ws_out_formula = None
+        wb_out_formula = None
+
         # ── 逐单元格比对 ──
         for row_idx, (out_row, gold_row) in enumerate(zip(out_values, gold_values)):
             row = min_row + row_idx
@@ -460,23 +464,19 @@ def _check_golden_cells(
                     matched += 1
                 else:
                     # ── 公式容错：输出为 None 但有公式写入 ──
-                    # 延迟加载公式（仅在需要时）
                     if norm_out is None and norm_gold is not None:
-                        # 只有在第一次发现不匹配且需要检查公式时才加载公式文件
-                        if formula_written == 0 and mismatches == []:
+                        # 惰性加载公式工作簿（仅首次需要时加载）
+                        if wb_out_formula is None:
                             try:
                                 wb_out_formula = load_workbook(output_file, data_only=False, read_only=True)
                                 ws_out_formula = wb_out_formula[sheet_name] if sheet_name in wb_out_formula.sheetnames else None
-                                if ws_out_formula is not None:
-                                    formula_val = ws_out_formula.cell(row=row, column=col).value
-                                    if isinstance(formula_val, str) and formula_val.startswith("="):
-                                        formula_written += 1
-                                        matched += 1  # 计入 matched
-                                        continue  # 不计入 mismatches
-                                if ws_out_formula:
-                                    wb_out_formula.close()
                             except Exception:
-                                pass  # 忽略公式加载失败
+                                wb_out_formula = False  # 标记加载失败，避免重试
+                        if ws_out_formula is not None:
+                            formula_val = ws_out_formula.cell(row=row, column=col).value
+                            if isinstance(formula_val, str) and formula_val.startswith("="):
+                                formula_written += 1
+                                continue  # 不计入 mismatches
 
                     if len(mismatches) < max_mismatches:
                         from openpyxl.utils import get_column_letter
@@ -490,6 +490,8 @@ def _check_golden_cells(
     finally:
         wb_out.close()
         wb_gold.close()
+        if wb_out_formula and wb_out_formula is not False:
+            wb_out_formula.close()
 
     effective_matched = matched + formula_written
     accuracy = round(effective_matched / total * 100, 1) if total > 0 else 0.0

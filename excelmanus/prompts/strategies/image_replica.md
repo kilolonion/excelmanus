@@ -40,7 +40,7 @@ conditions:
 3. 执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 收尾
 4. 用 `finish_task` 交付，说明已按快速模式生成，如需精修可再次要求
 
-> **注意**：快速模式下不调用 `extract_table_spec` / `rebuild_excel_from_spec` / `verify_excel_replica`，优先速度而非像素级还原。
+> **注意**：快速模式直接使用 `run_code` + openpyxl 一次性生成，优先速度而非像素级还原。
 
 ### 推荐流程（自动化流水线）
 
