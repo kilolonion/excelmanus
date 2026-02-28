@@ -534,6 +534,12 @@ def run_code(
     两种模式（互斥，必须且只能指定其一）：
     - **内联模式**：传入 ``code`` 参数，内部写临时文件执行后清理。
     - **文件模式**：传入 ``script_path`` 参数，直接执行已有 ``.py`` 文件。
+
+    **路径处理指南**：
+    - 代码执行在隔离的沙盒环境中，工作目录由 ``workdir`` 参数决定（默认为当前目录）。
+    - 可通过 ``os.environ.get("EXCELMANUS_WORKSPACE_ROOT")`` 获取沙盒工作区根目录。
+    - 可通过 ``os.environ.get("EXCELMANUS_WORKDIR")`` 获取当前工作目录。
+    - 推荐使用绝对路径或相对于工作区的相对路径（如 ``./outputs/file.txt``）。
     """
     # ── 参数规范化：空字符串 / 纯空白视为未传 ──
     # LLM 生成 JSON 时常传 "" 或 "  "，在互斥校验前统一转为 None
@@ -639,6 +645,9 @@ def _execute_script_docker(
         "HOME": "/tmp",
         "MPLCONFIGDIR": "/tmp/mpl",
         "EXCELMANUS_COW_LOG": host_to_container_path(cow_log_path, workspace_root),
+        # 路径上下文：帮助Agent理解sandbox中的工作目录
+        "EXCELMANUS_WORKSPACE_ROOT": CONTAINER_WORKSPACE,  # 容器内的工作区根目录
+        "EXCELMANUS_WORKDIR": host_to_container_path(workdir_safe, workspace_root),  # 当前工作目录
     }
 
     # ── staging 映射注入（Docker 路径转换） ──
@@ -862,6 +871,10 @@ def _execute_script(
     # ── CoW 日志 ──
     cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     sandbox_env["EXCELMANUS_COW_LOG"] = str(cow_log_path)
+
+    # ── 路径上下文：帮助Agent理解sandbox中的工作目录 ──
+    sandbox_env["EXCELMANUS_WORKSPACE_ROOT"] = str(guard.workspace_root)
+    sandbox_env["EXCELMANUS_WORKDIR"] = str(workdir_safe)
 
     # ── staging 映射注入（transaction 感知） ──
     _sandbox_env_obj = _get_active_sandbox_env()
@@ -1108,6 +1121,8 @@ def get_tools() -> list[ToolDef]:
                 "不适用：简单数据查看（改用 read_excel）、简单筛选（改用 filter_data）。"
                 "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
                 "相关工具：write_text_file（先写脚本再用 script_path 执行）、read_excel（执行前了解数据结构）。"
+                "路径说明：代码中的路径相对于沙盒工作目录，可通过 os.environ.get('EXCELMANUS_WORKDIR') 获取当前目录，"
+                "os.environ.get('EXCELMANUS_WORKSPACE_ROOT') 获取工作区根目录。"
             ),
             input_schema={
                 "type": "object",

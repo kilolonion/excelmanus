@@ -765,11 +765,14 @@ def _compress_avatar(data: bytes, ext: str, max_size: int = 256) -> tuple[bytes,
 async def get_avatar_file(
     request: Request,
     token: str | None = None,
+    t: str | None = None,  # 时间戳参数，用于绕过缓存
     user: UserRecord | None = Depends(get_current_user_optional),
 ) -> Any:
     """返回当前用户的头像文件。
 
     支持 query param ``?token=xxx`` 认证，兼容 ``<img>`` 标签无法发送 Authorization header 的场景。
+    
+    如果 URL 包含时间戳参数 ``?t=xxx``（表示新上传的头像），则设置不缓存的响应头。
     """
     from fastapi.responses import Response
 
@@ -797,10 +800,19 @@ async def get_avatar_file(
                 "jpg": "image/jpeg", "jpeg": "image/jpeg",
                 "png": "image/png", "webp": "image/webp", "gif": "image/gif",
             }
+            # 如果 URL 包含时间戳参数 t，说明是新上传的头像，设置不缓存
+            if t is not None:
+                headers = {
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                }
+            else:
+                headers = {"Cache-Control": "public, max-age=86400"}
             return Response(
                 content=path.read_bytes(),
                 media_type=media_types.get(ext, "image/jpeg"),
-                headers={"Cache-Control": "public, max-age=86400"},
+                headers=headers,
             )
 
     raise HTTPException(404, "未找到头像文件")
