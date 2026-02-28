@@ -9,7 +9,7 @@ import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { login, getOAuthUrl } from "@/lib/auth-api";
 import { proxyAvatarUrl } from "@/lib/api";
-import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
+import { useRecentAccountsStore, canAutoLogin, type RecentAccount } from "@/stores/recent-accounts-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 
 const cardVariants = {
@@ -46,6 +46,7 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const recentAccounts = useRecentAccountsStore((s) => s.accounts);
   const removeAccount = useRecentAccountsStore((s) => s.removeAccount);
+  const recordLogin = useRecentAccountsStore((s) => s.recordLogin);
   const loginMethods = useAuthConfigStore((s) => s.loginMethods);
   const githubEnabled = loginMethods.github_enabled;
   const googleEnabled = loginMethods.google_enabled;
@@ -59,6 +60,8 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [showRecentList, setShowRecentList] = useState(true);
+  const [rememberMe, setRememberMe] = useState(false);
+  const [autoLoggingIn, setAutoLoggingIn] = useState(false);
 
   useEffect(() => {
     const prefill = searchParams.get("email");
@@ -76,6 +79,37 @@ function LoginForm() {
     return () => window.removeEventListener("pageshow", handlePageShow);
   }, []);
 
+  // 自动登录逻辑：检查最近账号是否有保存的密码且未过期
+  useEffect(() => {
+    // 如果有 email 参数，不自动登录
+    if (searchParams.get("email")) return;
+    // 如果已经有最近账号，尝试自动登录第一个可用的
+    if (recentAccounts.length > 0 && !email && !autoLoggingIn) {
+      const account = recentAccounts.find(canAutoLogin);
+      if (account && account.savedPassword) {
+        setAutoLoggingIn(true);
+        setEmail(account.email);
+        setPassword(account.savedPassword);
+        setShowRecentList(false);
+        // 延迟执行自动登录，确保状态已更新
+        setTimeout(async () => {
+          try {
+            setError("");
+            await login(account.email, account.savedPassword!);
+            router.push("/");
+          } catch (err) {
+            // 自动登录失败，清除保存的密码并显示错误
+            console.error("自动登录失败:", err);
+            setAutoLoggingIn(false);
+            setEmail(account.email);
+            setPassword("");
+            setError("自动登录失败，请重新输入密码");
+          }
+        }, 100);
+      }
+    }
+  }, [recentAccounts, searchParams, email, autoLoggingIn, router]);
+
   const canSubmit = email.trim().length > 0 && password.length > 0 && !loading;
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
@@ -84,13 +118,21 @@ function LoginForm() {
     setLoading(true);
     try {
       await login(email.trim(), password);
+      // 登录成功后，记录到最近账号（如果选择了记住我，保存密码）
+      recordLogin({
+        email: email.trim(),
+        displayName: "",
+        avatarUrl: null,
+        password: rememberMe ? password : undefined,
+        rememberMe,
+      });
       router.push("/");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "登录失败");
     } finally {
       setLoading(false);
     }
-  }, [email, password, router]);
+  }, [email, password, router, rememberMe, recordLogin]);
 
   const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
     setOauthLoading(provider);
@@ -270,6 +312,23 @@ function LoginForm() {
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
+            </div>
+
+            {/* 记住我 */}
+            <div className="flex items-center">
+              <label
+                htmlFor="remember-me"
+                className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none"
+              >
+                <input
+                  id="remember-me"
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="w-4 h-4 rounded border-border text-[var(--em-primary)] focus:ring-[var(--em-primary)] focus:ring-offset-0"
+                />
+                7天内免密登录
+              </label>
             </div>
 
             <Button
