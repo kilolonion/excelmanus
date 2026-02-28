@@ -104,7 +104,7 @@ class ChatHistoryStore:
     def update_session(self, session_id: str, **kwargs: str) -> None:
         sets: list[str] = []
         vals: list[str] = []
-        for key in ("title", "status"):
+        for key in ("title", "status", "title_source"):
             if key in kwargs:
                 sets.append(f"{key} = ?")
                 vals.append(kwargs[key])
