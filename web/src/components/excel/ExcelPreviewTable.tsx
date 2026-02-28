@@ -14,6 +14,15 @@ interface ExcelPreviewTableProps {
 export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
   const openPanel = useExcelStore((s) => s.openPanel);
 
+  // 防御性检查：确保必要的数据字段存在
+  if (!data || !data.columns || !data.rows) {
+    return (
+      <div className="my-2 rounded-lg border border-border/80 overflow-hidden text-xs shadow-sm p-4 text-center text-muted-foreground">
+        预览数据不可用
+      </div>
+    );
+  }
+
   const handleOpenPanel = () => {
     openPanel(data.filePath, data.sheet);
   };

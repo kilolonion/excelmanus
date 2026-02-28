@@ -380,6 +380,11 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
     [blocks],
   );
 
+  // 获取工具调用统计
+  const stats = useMemo(() => getChainStats(chainBlocks), [chainBlocks]);
+  const totalTools = stats.totalTools;
+  const iterations = stats.iterations;
+
   // 流式时始终显示 pipeline 进度，不限于 blocks 为空时。保证多轮阶段（准备上下文、调用 LLM 等）在首个 thinking/text 块到达后仍可见。
   const showPipeline = isStreaming && (blocks.length === 0 || pipelineStatus !== null);
 
@@ -402,7 +407,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
       <div className="flex-1 min-w-0 border-l-[1.5px] pl-3 relative" style={{ borderColor: "var(--em-primary)" }}>
 
         <AnimatePresence mode="wait" initial={false}>
-          {collapsed && hasChain ? (
+          {collapsed && ((totalTools > 0 && hasChain) || (totalTools === 0 && tailBlocks.length > 0)) ? (
             <motion.div
               key="collapsed"
               initial={{ opacity: 0, height: 0 }}
@@ -428,7 +433,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
                   messageId={messageId}
                   isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
                   isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
-                  showCollapseButton={origIndex === 0 && hasChain && tailBlocks.length > 0}
+                  showCollapseButton={origIndex === 0 && iterations > 0 && ((totalTools > 0 && hasChain && tailBlocks.length > 0) || (totalTools === 0 && tailBlocks.length > 0))}
                   onCollapse={() => setCollapsed(true)}
                 />
               ))}
@@ -444,8 +449,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
             messageId={messageId}
             isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
             isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
-            showCollapseButton={false}
-            onCollapse={undefined}
+            showCollapseButton={origIndex === tailBlocks[0]?.origIndex && iterations > 0 && totalTools === 0 && tailBlocks.length > 1}
+            onCollapse={origIndex === tailBlocks[0]?.origIndex && iterations > 0 && totalTools === 0 && tailBlocks.length > 1 ? () => setCollapsed(true) : undefined}
             defaultExpanded={block.type === "text"}
           />
         ))}
