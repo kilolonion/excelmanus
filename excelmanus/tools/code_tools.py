@@ -420,8 +420,17 @@ def write_text_file(
         except Exception:
             pass
 
-    safe_path.parent.mkdir(parents=True, exist_ok=True)
-    safe_path.write_text(content, encoding=encoding)
+    # staging 重定向：有活跃事务时写入到 staged 副本
+    write_path = safe_path
+    _env = _get_active_sandbox_env()
+    if _env is not None and getattr(_env, "transaction", None) is not None:
+        _staged = _env.transaction.stage_for_write(str(safe_path))
+        _staged_p = Path(_staged)
+        if _staged_p != safe_path:
+            write_path = _staged_p
+
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    write_path.write_text(content, encoding=encoding)
 
     rel_path = str(safe_path.relative_to(guard.workspace_root))
     result: dict[str, Any] = {
@@ -498,7 +507,17 @@ def edit_text_file(
         new_text = old_text.replace(old_string, new_string, 1)
         match_count = 1
 
-    safe_path.write_text(new_text, encoding=encoding)
+    # staging 重定向：有活跃事务时写入到 staged 副本
+    write_path = safe_path
+    _env = _get_active_sandbox_env()
+    if _env is not None and getattr(_env, "transaction", None) is not None:
+        _staged = _env.transaction.stage_for_write(str(safe_path))
+        _staged_p = Path(_staged)
+        if _staged_p != safe_path:
+            write_path = _staged_p
+
+    write_path.parent.mkdir(parents=True, exist_ok=True)
+    write_path.write_text(new_text, encoding=encoding)
 
     rel_path = str(safe_path.relative_to(guard.workspace_root))
     result: dict[str, Any] = {

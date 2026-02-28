@@ -271,6 +271,14 @@ class UserConfigStore:
         else:
             self.delete_key("active_model")
 
+    def get_full_access(self) -> bool:
+        """读取持久化的 full_access 开关（跨会话）。"""
+        return self.get("full_access_enabled") == "true"
+
+    def set_full_access(self, enabled: bool) -> None:
+        """持久化 full_access 开关（跨会话）。"""
+        self.set("full_access_enabled", "true" if enabled else "false")
+
 
 # ── 向后兼容别名 ─────────────────────────────────────────
 

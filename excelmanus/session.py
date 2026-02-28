@@ -426,6 +426,9 @@ class SessionManager:
                     engine.switch_model(active_name)
                 except Exception:
                     logger.debug("恢复激活模型 %s 失败", active_name, exc_info=True)
+            # 从用户级配置恢复 full_access 开关（跨会话持久化）
+            if hasattr(_user_config, "get_full_access"):
+                engine._full_access_enabled = _user_config.get_full_access()
         # 从数据库加载模型能力探测缓存
         if self._database is not None:
             try:
@@ -1132,12 +1135,17 @@ class SessionManager:
             elif not self._chat_history.session_exists(session_id):
                 raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
             messages = self._chat_history.load_messages(session_id)
+            # 从持久化配置读取 full_access 开关
+            _fa = False
+            _uc = self._resolve_user_config_store(user_id)
+            if _uc is not None and hasattr(_uc, "get_full_access"):
+                _fa = _uc.get_full_access()
             return {
                 "id": session_id,
                 "message_count": len(messages),
                 "in_flight": False,
                 "messages": messages,
-                "full_access_enabled": False,
+                "full_access_enabled": _fa,
                 "chat_mode": "write",
                 "current_model": None,
                 "current_model_name": None,

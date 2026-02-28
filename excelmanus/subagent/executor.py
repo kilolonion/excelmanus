@@ -163,13 +163,16 @@ class SubagentExecutor:
                     ),
                 )
                 messages = memory.get_messages(system_prompts=[system_prompt])
-                response = await client.chat.completions.create(
+                _create_kwargs: dict[str, Any] = dict(
                     model=model,
                     messages=messages,
                     tools=filtered_registry.get_openai_schemas(mode="chat_completions")
                     if tool_scope
                     else openai.NOT_GIVEN,
                 )
+                if config.max_tokens is not None:
+                    _create_kwargs["max_tokens"] = config.max_tokens
+                response = await client.chat.completions.create(**_create_kwargs)
                 _usage = getattr(response, "usage", None)
                 if _usage is not None:
                     total_prompt_tokens += getattr(_usage, "prompt_tokens", 0) or 0
@@ -661,20 +664,25 @@ class SubagentExecutor:
         log_prefix: str = "subagent unknown",
         file_access_guard: Any | None = None,
         sandbox_env: Any | None = None,
+        skip_probe: bool = False,
     ) -> _ExecResult:
         """探针→执行→错误检测→探针对比→截断→增强 的通用流水线。
 
         MCP-audit 路径和无审计路径共用此方法，仅 log_prefix 不同。
+        skip_probe=True 时跳过文件系统快照探针（readOnly 子代理场景）。
         """
         # ── 前置探针（write_effect 未知时收集工作区快照） ──
         probe_before: dict[str, tuple[int, int]] | None = None
         probe_before_partial = False
-        tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
-        write_effect = (
-            getattr(tool_def, "write_effect", "unknown")
-            if tool_def is not None
-            else "unknown"
-        )
+        if not skip_probe:
+            tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
+            write_effect = (
+                getattr(tool_def, "write_effect", "unknown")
+                if tool_def is not None
+                else "unknown"
+            )
+        else:
+            write_effect = "none"
         if isinstance(write_effect, str) and write_effect.strip().lower() == "unknown":
             try:
                 probe_before, probe_before_partial = collect_workspace_mtime_index(
@@ -919,6 +927,7 @@ class SubagentExecutor:
                     log_prefix="subagent mcp unknown",
                     file_access_guard=file_access_guard,
                     sandbox_env=sandbox_env,
+                    skip_probe=config.permission_mode == "readOnly",
                 )
 
             def _execute(name: str, args: dict[str, Any], scope: list[str]) -> Any:
@@ -976,6 +985,7 @@ class SubagentExecutor:
             tool_result_enricher=tool_result_enricher,
             file_access_guard=file_access_guard,
             sandbox_env=sandbox_env,
+            skip_probe=config.permission_mode == "readOnly",
         )
 
     async def _call_tool_with_memory_context(

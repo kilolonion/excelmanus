@@ -361,6 +361,7 @@ class InteractionHandler:
             lines: list[str] = []
             if not e._full_access_enabled:
                 e._full_access_enabled = True
+                e._persist_full_access(True)
                 lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
             else:
                 lines.append("fullaccess 已开启。")
@@ -438,6 +439,7 @@ class InteractionHandler:
             lines: list[str] = []
             if not e._full_access_enabled:
                 e._full_access_enabled = True
+                e._persist_full_access(True)
                 lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
             else:
                 lines.append("fullaccess 已开启。")

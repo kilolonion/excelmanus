@@ -714,12 +714,20 @@ def read_text_file(
         )
 
     total_lines = len(lines)
+    rel_path = str(safe_path.relative_to(guard.workspace_root))
+    content_str = "\n".join(lines)
     result = {
         "file": safe_path.name,
         "encoding": encoding,
         "lines_read": total_lines,
         "truncated": truncated,
-        "content": "\n".join(lines),
+        "content": content_str,
+        "_text_preview": {
+            "file_path": rel_path,
+            "content": content_str,
+            "line_count": total_lines,
+            "truncated": truncated,
+        },
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -976,7 +984,41 @@ def get_tools() -> list[ToolDef]:
             max_result_chars=0,
             write_effect="none",
         ),
-        # get_file_info, find_files, read_text_file: Batch 5 精简，由 run_code/run_shell 替代
+        ToolDef(
+            name="read_text_file",
+            description=(
+                "读取文本文件内容（md、txt、py、json、csv、yaml、toml 等）。"
+                "适用场景：查看脚本源码、配置文件、文档、日志等非 Excel 文本文件。"
+                "不适用：Excel/二进制文件请用 read_excel。"
+                "返回文件内容与行数信息；超长文件自动截断。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "文件路径（相对于工作目录）",
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "description": "文件编码",
+                        "default": "utf-8",
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "最大读取行数（默认200）",
+                        "default": 200,
+                        "minimum": 1,
+                        "maximum": 1000,
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=read_text_file,
+            max_result_chars=6000,
+            write_effect="none",
+        ),
         ToolDef(
             name="copy_file",
             description=(

@@ -278,7 +278,6 @@ class ToolDispatcher:
             ExtractTableSpecHandler,
             FinishTaskHandler,
             HighRiskApprovalHandler,
-            PlanInterceptHandler,
             SkillActivationHandler,
             SuggestModeSwitchHandler,
         )
@@ -288,7 +287,6 @@ class ToolDispatcher:
             FinishTaskHandler(engine, self),
             AskUserHandler(engine, self),
             SuggestModeSwitchHandler(engine, self),
-            PlanInterceptHandler(engine, self),
             ExtractTableSpecHandler(engine, self),
             CodePolicyHandler(engine, self),
             AuditOnlyHandler(engine, self),
@@ -310,7 +308,6 @@ class ToolDispatcher:
         self._specific_handlers: dict[str, Any] = _specific
         # 动态/条件 handler + 兜底（保持原有顺序）
         self._generic_handlers = [
-            PlanInterceptHandler(engine, self),
             CodePolicyHandler(engine, self),
             AuditOnlyHandler(engine, self),
             HighRiskApprovalHandler(engine, self),
@@ -2082,6 +2079,15 @@ class ToolDispatcher:
 
         # ── B 通道：异步 VLM 描述追加 ──
         if success and self._pending_vlm_image is not None:
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.PIPELINE_PROGRESS,
+                    tool_call_id=tool_call_id,
+                    pipeline_stage="vlm_describe",
+                    pipeline_message="正在调用 VLM 生成图片描述...",
+                ),
+            )
             vlm_desc = await self._run_vlm_describe()
             if vlm_desc:
                 result_str = (
@@ -2147,10 +2153,22 @@ class ToolDispatcher:
                 _raw_result_for_excel_events, iteration,
             )
 
-        # 写入类工具 → files_changed 事件（补充 _excel_diff 未覆盖的场景）
-        if success and on_event is not None and tool_name in self._EXCEL_WRITE_TOOLS:
-            _fp = arguments.get("file_path") or ""
-            if _fp:
+        # 写入类工具 → files_changed 事件（补充 _excel_diff / _text_diff 未覆盖的场景）
+        if success and on_event is not None:
+            _emit_fc = False
+            _fc_files: list[str] = []
+            if tool_name in self._EXCEL_WRITE_TOOLS:
+                _fp = (arguments.get("file_path") or "").strip()
+                if _fp:
+                    _fc_files.append(_fp)
+                    _emit_fc = True
+            elif e.get_tool_write_effect(tool_name) == "workspace_write":
+                for _pk_fc in ("file_path", "output_path", "path", "target_path"):
+                    _pv_fc = (arguments.get(_pk_fc) or "").strip()
+                    if _pv_fc:
+                        _fc_files.append(_pv_fc)
+                        _emit_fc = True
+            if _emit_fc and _fc_files:
                 from excelmanus.events import EventType, ToolCallEvent
                 e.emit(
                     on_event,
@@ -2158,7 +2176,7 @@ class ToolDispatcher:
                         event_type=EventType.FILES_CHANGED,
                         tool_call_id=tool_call_id,
                         iteration=iteration,
-                        changed_files=[_fp],
+                        changed_files=_fc_files,
                     ),
                 )
 
@@ -2874,6 +2892,23 @@ class ToolDispatcher:
                         text_diff_additions=text_diff_data.get("additions", 0),
                         text_diff_deletions=text_diff_data.get("deletions", 0),
                         text_diff_truncated=text_diff_data.get("truncated", False),
+                    ),
+                )
+
+        # _text_preview 对应 TEXT_PREVIEW（read_text_file 在结果中附带）
+        text_preview_data = parsed.get("_text_preview")
+        if isinstance(text_preview_data, dict):
+            preview_content = text_preview_data.get("content", "")
+            if preview_content:
+                e.emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TEXT_PREVIEW,
+                        tool_call_id=tool_call_id,
+                        text_preview_file_path=text_preview_data.get("file_path", ""),
+                        text_preview_content=preview_content[:20000],
+                        text_preview_line_count=text_preview_data.get("line_count", 0),
+                        text_preview_truncated=text_preview_data.get("truncated", False),
                     ),
                 )
 
