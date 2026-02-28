@@ -219,8 +219,8 @@ class TestHappyPath:
         pipeline = _make_pipeline(str(tmp_path), caller)
         asyncio.get_event_loop().run_until_complete(pipeline.run())
 
-        # on_event 应被调用 4 次（每阶段 1 次）
-        assert pipeline._on_event.call_count == 4
+        # on_event 应被调用 8 次（每阶段 2 次：开始 + 结束）
+        assert pipeline._on_event.call_count == 8
 
 
 # ════════════════════════════════════════════════════════════════
