@@ -96,7 +96,7 @@ from excelmanus.skillpacks import (
 )
 from excelmanus.skillpacks.importer import SkillImportError
 from excelmanus.tools import ToolRegistry
-from excelmanus.api.sse import (
+from excelmanus.api_sse import (
     SessionStreamState as _SessionStreamState,
     sse_event_to_sse as _sse_event_to_sse_impl,
     sse_format as _sse_format,
