@@ -312,6 +312,15 @@ export async function archiveSession(
   });
 }
 
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<{ status: string; title: string }> {
+  return apiPatch(`/sessions/${encodeURIComponent(sessionId)}/title`, {
+    title,
+  });
+}
+
 export async function fetchSessionMessages(
   sessionId: string,
   limit = 50,

@@ -420,7 +420,7 @@ export async function sendMessage(
               useChatStore.setState({ currentSessionId: sid });
             }
             if (text) {
-              ss.updateSessionTitle(ss.activeSessionId || sid, text.slice(0, 60));
+              ss.updateSessionTitle(ss.activeSessionId || sid, text.slice(0, 20));
             }
             // 同步模式状态
             const ui = useUIStore.getState();
@@ -429,6 +429,16 @@ export async function sendMessage(
             }
             if (typeof data.chat_mode === "string") {
               ui.setChatMode(data.chat_mode as "write" | "read" | "plan");
+            }
+            break;
+          }
+
+          // ── 自动生成的会话标题 ─────────────────────
+          case "session_title": {
+            const titleSid = (data.session_id as string) || "";
+            const titleText = (data.title as string) || "";
+            if (titleSid && titleText) {
+              useSessionStore.getState().updateSessionTitle(titleSid, titleText);
             }
             break;
           }
