@@ -324,11 +324,68 @@ class ContextBuilder:
 
         return "\n\n".join(parts)
 
+    def _build_post_write_verification_hint(self) -> str:
+        """关键写入操作后注入即时验证提示，让主代理在下一轮迭代中自检。
+
+        借鉴 Windsurf 的 post_write_code hook：不等到 finish_task 才验证，
+        而是在写入后立即提醒主代理确认结果。
+
+        仅在满足以下条件时触发（避免过度提示）：
+        - 本轮有写入操作（write_operations_log 非空）
+        - 写入涉及关键操作（跨 sheet、公式、大批量等）
+        - 未处于 finish_task 阶段（避免和 verifier 重复）
+        """
+        e = self._engine
+        state = getattr(e, "_state", None)
+        if state is None:
+            return ""
+        ops = state.write_operations_log
+        if not ops:
+            return ""
+        # finish_task 阶段不注入（verifier 会接管）
+        if getattr(state, "finish_task_warned", False):
+            return ""
+
+        # 判断是否涉及关键操作（简单单次写入不提示，避免噪音）
+        tool_names = {entry.get("tool_name", "") for entry in ops}
+        sheets = {entry.get("sheet", "") for entry in ops if entry.get("sheet")}
+        is_critical = (
+            len(ops) >= 3                          # 多步写入
+            or len(sheets) > 1                     # 跨 sheet
+            or "run_code" in tool_names            # 代码写入（风险高）
+            or any("公式" in (e.get("summary", "") or "") or "VLOOKUP" in (e.get("summary", "") or "").upper() for e in ops)
+        )
+        if not is_critical:
+            return ""
+
+        # 构建最近写入的简要摘要
+        recent = ops[-3:]  # 最近 3 条
+        summaries = []
+        for entry in recent:
+            tool = entry.get("tool_name", "?")
+            fp = entry.get("file_path", "")
+            sheet = entry.get("sheet", "")
+            desc = entry.get("summary", "")[:60]
+            parts = [tool]
+            if fp:
+                parts.append(fp.split("/")[-1])
+            if sheet:
+                parts.append(sheet)
+            if desc:
+                parts.append(desc)
+            summaries.append(" · ".join(parts))
+
+        return (
+            "## ⚡ 写入后自检提示\n"
+            "你刚执行了关键写入操作，建议在继续下一步前快速确认：\n"
+            + "\n".join(f"- {s}" for s in summaries)
+            + "\n\n用 `read_excel` 或 `scan_excel_snapshot` 抽检目标区域，"
+            "确认数据正确后再继续。发现问题立即修正，不要等到 finish_task。"
+        )
+
     def _build_scan_tool_hint(self) -> str:
         """当工作区有 Excel 文件但无 explorer 缓存时，自动预扫描并注入缓存。
 
-        借鉴 Windsurf Fast Context（query-triggered auto-context）和
-        Cursor（upload-triggered indexing）的思路：
         - 首次 chat 时检测到 Excel 文件且无缓存 → 自动调用 scan_excel_snapshot
         - 将扫描结果转换为 explorer_report 格式注入 session_state.explorer_reports
         - 同一轮的 _build_explorer_report_notice 即可接管展示
@@ -555,6 +612,11 @@ class ContextBuilder:
         verification_fix_notice = self._build_verification_fix_notice()
         if verification_fix_notice:
             base_prompt = base_prompt + "\n\n" + verification_fix_notice
+
+        # R8: 写入后即时验证提示（借鉴 Windsurf post_write hooks）
+        post_write_hint = self._build_post_write_verification_hint()
+        if post_write_hint:
+            base_prompt = base_prompt + "\n\n" + post_write_hint
 
         # R7: 自动预扫描（必须在 R6 之前，以便注入缓存后被 R6 读取）
         scan_hint = self._build_scan_tool_hint()
