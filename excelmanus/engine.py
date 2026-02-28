@@ -2638,6 +2638,11 @@ class AgentEngine:
         if task_list_notice:
             parts.append(f"任务清单：\n{task_list_notice[:600]}")
 
+        # 注入 VerificationGate 已通过的自动检查结果
+        gate_summary = self._build_gate_results_for_verifier()
+        if gate_summary:
+            parts.append(gate_summary)
+
         prompt = "\n".join(parts)
 
         try:
@@ -2782,6 +2787,69 @@ class AgentEngine:
         if len(sections) <= 1:
             return ""
 
+        return "\n\n".join(sections)
+
+    def _build_gate_results_for_verifier(self) -> str:
+        """汇总 VerificationGate 结果 + 待 verifier 手动验证的条件，注入 verifier prompt。
+
+        分三层：
+        1. Gate 已自动通过的条件 → 告知 verifier 无需重复
+        2. Gate 自动检查失败的条件 → 告知 verifier 重点关注
+        3. custom 类型 / 未被 Gate 处理的条件 → 明确列出，让 verifier 按清单执行
+        """
+        task_list = self._task_store.current
+        if task_list is None:
+            return ""
+
+        auto_passed: list[str] = []
+        auto_failed: list[str] = []
+        needs_manual: list[str] = []
+
+        for item in task_list.items:
+            vc = item.verification_criteria
+            if vc is None:
+                continue
+
+            detail = f"{vc.check_type}"
+            if vc.target_file:
+                detail += f" @ {vc.target_file}"
+            if vc.target_sheet:
+                detail += f"/{vc.target_sheet}"
+            if vc.expected:
+                detail += f" (期望: {vc.expected}"
+                if vc.actual:
+                    detail += f", 实际: {vc.actual}"
+                detail += ")"
+
+            if vc.check_type == "custom" or vc.passed is None:
+                # custom 类型或未被 Gate 处理 → 需要 verifier 手动验证
+                label = vc.expected or detail
+                needs_manual.append(f"- 🔍 {item.title}: {label}")
+            elif vc.passed:
+                auto_passed.append(f"- ✅ {detail}")
+            else:
+                auto_failed.append(f"- ❌ {detail}")
+
+        if not auto_passed and not auto_failed and not needs_manual:
+            return ""
+
+        sections: list[str] = ["## 验证条件协作清单"]
+
+        if auto_passed:
+            sections.append(
+                "**已自动通过（无需重复）**：\n" + "\n".join(auto_passed)
+            )
+        if auto_failed:
+            sections.append(
+                "**自动检查失败（重点关注）**：\n" + "\n".join(auto_failed)
+            )
+        if needs_manual:
+            sections.append(
+                "**需要你验证（Gate 无法覆盖）**：\n" + "\n".join(needs_manual)
+                + "\n请用 scan_excel_snapshot / search_excel_values / read_excel 逐条验证以上条件。"
+            )
+
+        sections.append("此外，请聚焦于任何自动检查未覆盖的语义验证（数据正确性、业务逻辑）。")
         return "\n\n".join(sections)
 
     def _build_full_mode_contexts(self) -> list[str]:
