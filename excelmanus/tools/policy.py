@@ -16,6 +16,7 @@ from __future__ import annotations
 READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "read_excel",
+        "compare_excel",
         # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
         "filter_data",
         "list_sheets",
@@ -24,6 +25,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "list_directory",
         # read_cell_styles: Batch 2 精简
         "inspect_excel_files",
+        "scan_excel_snapshot",
+        "search_excel_values",
         "memory_read_topic",
         # 任务工具仅修改会话内存态，不触达工作区文件。
         "task_create",
@@ -44,11 +47,14 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
 PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
         "read_excel",
+        "compare_excel",
         "filter_data",
         "list_sheets",
         "read_text_file",
         "list_directory",
         "inspect_excel_files",
+        "scan_excel_snapshot",
+        "search_excel_values",
         "memory_read_topic",
         "read_image",
         "introspect_capability",
@@ -158,7 +164,9 @@ WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "data_read": (
-        "read_excel", "inspect_excel_files", "filter_data",
+        "read_excel", "inspect_excel_files", "filter_data", "compare_excel",
+        "scan_excel_snapshot",
+        "search_excel_values",
         # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
     ),
     # data_write: Batch 1 精简
@@ -181,8 +189,11 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     # 数据读取
     "read_excel": "读取 Excel/CSV 数据摘要与首尾预览，支持 range 精确读取、分页、采样，可按需附加样式/图表/公式/数据概要等维度",
     "inspect_excel_files": "批量扫描目录下所有 Excel 文件概况，快速了解工作区全貌",
+    "scan_excel_snapshot": "一次性扫描 Excel 文件全貌（schema/统计/质量信号/跨 Sheet 关联），替代多次 read_excel + run_code",
+    "search_excel_values": "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀匹配，返回匹配位置和上下文",
     # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
     "filter_data": "按条件筛选 Excel/CSV 数据行，支持 14 种运算符、多条件组合、排序和 Top-N",
+    "compare_excel": "对比两个 Excel 文件或同一文件的两个工作表，返回结构化差异报告（新增/删除/修改行和单元格）",
     # 数据写入
     # write_excel, write_cells, transform_data, insert_rows, insert_columns: Batch 1 精简
     # Batch 2 精简（format 全部）
