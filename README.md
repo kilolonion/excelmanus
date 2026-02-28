@@ -93,6 +93,7 @@ cd excelmanus
 <summary><b>macOS / Linux — 启动脚本</b></summary>
 
 ```bash
+chmod +x ./deploy/start.sh  # 首次使用需添加执行权限
 ./deploy/start.sh
 ```
 
@@ -107,7 +108,7 @@ cd excelmanus
 ./deploy/start.sh --backend-port 9000  # 自定义后端端口
 ./deploy/start.sh --workers 4         # 多 worker
 ./deploy/start.sh --backend-only      # 只启动后端
-./deploy/start.sh --help              # 查看全部选项
+./deploy/start.sh --help               # 查看全部选项
 ```
 
 </details>
