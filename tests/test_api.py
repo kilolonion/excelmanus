@@ -2533,11 +2533,17 @@ class TestImageAttachment:
                 )
                 stream_iter = response.body_iterator
 
-                first_chunk = await anext(stream_iter)
-                first_payload = json.loads(first_chunk.split("data:", 1)[1].strip())
-                session_id = first_payload["session_id"]
+                # 新架构下首个事件是 pipeline_progress，session_init 在 acquire 后
+                # 消费 chunk 直到找到 session_init 获取 session_id
+                session_id: str | None = None
+                async for chunk in stream_iter:
+                    if "event: session_init" in chunk:
+                        payload = json.loads(chunk.split("data:", 1)[1].strip())
+                        session_id = payload["session_id"]
+                        break
+                assert session_id is not None, "未收到 session_init 事件"
 
-                # 消费 chunk 直到 chat_started 被 set（兼容 pipeline_progress 等中间 chunk）
+                # 消费 chunk 直到 chat_started 被 set
                 async def _consume_until_started() -> None:
                     async for _ in stream_iter:
                         if chat_started.is_set():
@@ -2574,11 +2580,11 @@ class TestMCPServerEndpoints:
         """POST /api/v1/mcp/servers/{name}/test 成功时返回工具列表。"""
         with (
             patch(
-                "excelmanus.api._find_mcp_config_path",
+                "excelmanus.api_routes_mcp._find_mcp_config_path",
                 return_value=Path("/tmp/mcp.json"),
             ),
             patch(
-                "excelmanus.api._read_mcp_json",
+                "excelmanus.api_routes_mcp._read_mcp_json",
                 return_value={
                     "mcpServers": {
                         "excel": {
