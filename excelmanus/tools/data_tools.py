@@ -52,6 +52,17 @@ _TITLE_HINT_PREFIXES = (
     "机密",
 )
 
+# ── 表单类文档识别配置 ────────────────────────────────────
+# 表单类文档特征：大量标签-值对，标签行占比高，大量合并单元格
+_FORM_LABEL_KEYWORDS = (
+    "交款人", "交款单位", "联系人", "联系方式", "付款账户", "付款人",
+    "付款事由", "付款方式", "付款金额", "其他金额", "费用合计", "大写金额",
+    "备注", "说明", "日期", "编号", "单位", "姓名", "电话", "地址",
+    "客户", "供应商", "发票", "账号", "开户行",
+)
+_FORM_LABEL_RATIO_THRESHOLD = 0.3  # 标签行占比超过此阈值认为是表单类文档
+_FORM_MERGED_CELL_RATIO_THRESHOLD = 0.15  # 合并单元格占比超过此阈值认为是表单类文档
+
 # ── CSV/TSV 支持 ──────────────────────────────────────────
 
 _CSV_EXTENSIONS: frozenset[str] = frozenset({".csv", ".tsv", ".txt"})
@@ -165,6 +176,77 @@ def _looks_like_title_row(first_cell: Any) -> bool:
     return any(hint in text for hint in _TITLE_HINT_PREFIXES)
 
 
+def _is_form_type_document(
+    safe_path: Any,
+    sheet_name: str | None,
+    max_scan: int = _HEADER_SCAN_ROWS,
+) -> tuple[bool, str]:
+    """检测是否为表单类文档（如收据、模板等非标准数据表格）。
+
+    表单类文档特征：
+    1. 大量标签-值对（标签行占比高）
+    2. 大量合并单元格
+    3. 缺少标准列头
+
+    Returns:
+        (is_form_document, reason) 元组
+    """
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(safe_path, read_only=False, data_only=True)
+    except Exception:
+        return False, ""
+
+    try:
+        if sheet_name:
+            resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
+            ws = wb[resolved] if resolved else wb.active
+        else:
+            ws = wb.active
+        if ws is None:
+            return False, ""
+
+        max_row = min(max_scan, ws.max_row or max_scan)
+        max_col = ws.max_column or 10
+
+        # 统计合并单元格占比
+        total_cells = max_row * max_col
+        merged_cells = 0
+        for merged_range in ws.merged_cells.ranges:
+            merged_cells += (merged_range.max_row - merged_range.min_row + 1) * \
+                           (merged_range.max_col - merged_range.min_col + 1)
+
+        merged_ratio = merged_cells / max(total_cells, 1)
+
+        # 统计标签行（包含表单标签关键词的非空行）占比
+        label_rows = 0
+        total_scannable_rows = 0
+
+        for row in ws.iter_rows(min_row=1, max_row=max_scan, min_col=1, max_col=max_col, values_only=True):
+            row_values = [_normalize_cell(c) for c in row]
+            non_empty = [v for v in row_values if v is not None]
+
+            if len(non_empty) >= 2:  # 至少2个非空单元格才计入
+                total_scannable_rows += 1
+                # 检查是否包含表单标签关键词
+                row_text = " ".join(str(v) for v in non_empty if isinstance(v, str))
+                if any(kw in row_text for kw in _FORM_LABEL_KEYWORDS):
+                    label_rows += 1
+
+        label_ratio = label_rows / max(total_scannable_rows, 1)
+
+        # 判断逻辑
+        if merged_ratio > _FORM_MERGED_CELL_RATIO_THRESHOLD:
+            return True, f"合并单元格占比 {merged_ratio:.1%} 超过阈值 {_FORM_MERGED_CELL_RATIO_THRESHOLD:.1%}"
+
+        if label_ratio > _FORM_LABEL_RATIO_THRESHOLD:
+            return True, f"表单标签行占比 {label_ratio:.1%} 超过阈值 {_FORM_LABEL_RATIO_THRESHOLD:.1%}"
+
+        return False, ""
+    finally:
+        wb.close()
+
+
 def _header_row_score(
     row_values: list[Any],
     row_idx0: int,
@@ -240,13 +322,21 @@ def _detect_header_row(
     """启发式检测 header 行号（0-indexed）。
 
     策略：
-    1. 扫描前 N 行（默认 30）和前 M 列（默认 200）；
-    2. 对每一行按“文本占比、关键字、唯一性、数据行特征”打分；
-    3. 选择分数最高者作为表头。
+    1. 首先检测是否为表单类文档（收据、模板等），如果是则返回 -1 表示无需 header
+    2. 扫描前 N 行（默认 30）和前 M 列（默认 200）；
+    3. 对每一行按"文本占比、关键字、唯一性、数据行特征"打分；
+    4. 选择分数最高者作为表头。
 
     Returns:
         检测到的 header 行号（从0开始），无法确定时返回 None。
+        返回 -1 表示检测为表单类文档，不应使用 header。
     """
+    # 首先检测是否为表单类文档
+    is_form, reason = _is_form_type_document(safe_path, sheet_name, max_scan)
+    if is_form:
+        logger.info("检测为表单类文档：%s", reason)
+        return -1  # 特殊标记：表单类文档，不使用 header
+
     try:
         from openpyxl import load_workbook
         wb = load_workbook(safe_path, read_only=False, data_only=True)
@@ -308,9 +398,11 @@ def _build_read_kwargs(
         header_row: 列头所在行号（从0开始），默认自动检测。
             不传此参数时工具会启发式检测真正的表头行；
             仅在自动检测不准确时才显式指定。
+            特殊值 -1 表示表单类文档，不使用 header（header=None）。
 
     Returns:
         可直接传给 pd.read_excel 的关键字参数字典。
+        包含特殊键 "_form_type_document" 表示是否被检测为表单类文档。
     """
     kwargs: dict[str, Any] = {"io": safe_path}
     if sheet_name is not None:
@@ -318,13 +410,25 @@ def _build_read_kwargs(
     if max_rows is not None:
         kwargs["nrows"] = max_rows
     if header_row is not None:
-        kwargs["header"] = header_row
+        # header_row=-1 表示表单类文档，不使用 header
+        if header_row == -1:
+            kwargs["header"] = None
+            kwargs["_form_type_document"] = True
+            logger.info("检测为表单类文档，使用 header=None 读取 (sheet=%s)", sheet_name)
+        else:
+            kwargs["header"] = header_row
     else:
         # 启发式自动检测 header 行（仅当用户未显式指定时）
         detected = _detect_header_row(safe_path, sheet_name)
-        if detected is not None and detected > 0:
-            kwargs["header"] = detected
-            logger.info("自动检测 header_row=%d (sheet=%s)", detected, sheet_name)
+        if detected is not None:
+            if detected == -1:
+                # 表单类文档，不使用 header
+                kwargs["header"] = None
+                kwargs["_form_type_document"] = True
+                logger.info("自动检测为表单类文档，使用 header=None 读取 (sheet=%s)", sheet_name)
+            elif detected > 0:
+                kwargs["header"] = detected
+                logger.info("自动检测 header_row=%d (sheet=%s)", detected, sheet_name)
     return kwargs
 
 
@@ -510,19 +614,36 @@ def _read_df(
     当自动检测的 header_row 导致超过 50% 列名为 Unnamed 时，
     自动向下尝试最多 5 行寻找更合理的表头。
 
+    当检测为表单类文档时（header_row=-1），使用 header=None 读取全部数据，
+    不执行 Unnamed 回退逻辑。
+
     Returns:
         (DataFrame, effective_header_row) 元组。
+        effective_header 为 -1 表示表单类文档，None 表示使用默认 header=0。
     """
     # CSV/TSV 走专用路径
     if _is_csv_file(safe_path):
         return _read_csv_df(safe_path, max_rows=max_rows, header_row=header_row)
 
     kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_rows, header_row=header_row)
-    effective_header = kwargs.get("header", 0)
+    # 注意=None 时 kwargs.get("header") 返回 None，不是 0
+    # 我们需要区分：用户指定 header=None（不使用header）和表单类文档（header=None）
+    # 通过检查 kwargs 中是否有特殊的标记来区分
+    effective_header = kwargs.get("header")
+    if effective_header is None:
+        # header=None 可能是用户指定，也可能是表单类文档
+        # 需要检查是否是被自动检测为表单类文档
+        if kwargs.get("_form_type_document"):
+            effective_header = -1
+        else:
+            effective_header = 0  # 用户显式指定 header=None，使用默认值
+    # 移除内部标记，避免传给 pd.read_excel
+    kwargs.pop("_form_type_document", None)
     df = pd.read_excel(**kwargs)
 
+    # 表单类文档（header=-1）不使用 Unnamed 回退逻辑
     # 仅在自动检测模式下（用户未显式指定 header_row）执行 Unnamed 回退
-    if header_row is None:
+    if header_row is None and effective_header != -1:
         unnamed_ratio = (
             sum(1 for c in df.columns if str(c).startswith("Unnamed"))
             / max(len(df.columns), 1)
@@ -718,12 +839,18 @@ def read_excel(
             summary["formula_resolution"] = formula_meta
 
     # 当 header_row 被自动检测时，告知 LLM 实际使用的行号
+    # effective_header=-1 表示检测为表单类文档，使用 header=None
     if header_row is None and effective_header != 0:
-        summary["detected_header_row"] = effective_header
+        if effective_header == -1:
+            summary["detected_form_type"] = True
+            summary["detected_header_row"] = "form_type_document"
+        else:
+            summary["detected_header_row"] = effective_header
 
     # Unnamed 列名警告：提醒 LLM 列名不可靠，建议指定 header_row
+    # 表单类文档不使用此警告
     unnamed_cols = [str(c) for c in df.columns if str(c).startswith("Unnamed")]
-    if unnamed_cols:
+    if unnamed_cols and effective_header != -1:
         summary["unnamed_columns_warning"] = (
             f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
             f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
