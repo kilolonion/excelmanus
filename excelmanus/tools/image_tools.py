@@ -752,17 +752,23 @@ def get_tools() -> list[ToolDef]:
             description=(
                 "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON。"
                 "支持多表格检测，采用 4 阶段渐进式 VLM 提取（骨架 → 数据 → 样式 → 校验）。"
+                "支持批量处理多个图片文件，大幅减少 VLM API 调用次数。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "图片文件路径",
+                        "description": "单张图片文件路径（与 file_paths 二选一）",
+                    },
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "多张图片文件路径数组，批量处理时自动使用优化的批量管线",
                     },
                     "output_path": {
                         "type": "string",
-                        "description": "输出 ReplicaSpec JSON 路径",
+                        "description": "输出 ReplicaSpec JSON 路径（批量模式时为目录前缀）",
                         "default": "outputs/replica_spec.json",
                     },
                     "skip_style": {
@@ -771,7 +777,10 @@ def get_tools() -> list[ToolDef]:
                         "default": False,
                     },
                 },
-                "required": ["file_path"],
+                "oneOf": [
+                    {"required": ["file_path"]},
+                    {"required": ["file_paths"]},
+                ],
                 "additionalProperties": False,
             },
             func=lambda **kw: json.dumps({"__extract_pending__": True}),

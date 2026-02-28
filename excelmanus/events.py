@@ -43,6 +43,7 @@ class EventType(Enum):
     PLAN_CREATED = "plan_created"
     VERIFICATION_REPORT = "verification_report"
     RETRACT_THINKING = "retract_thinking"
+    BATCH_PROGRESS = "batch_progress"  # 批量任务进度
 
 
 @dataclass
@@ -144,6 +145,12 @@ class ToolCallEvent:
     pipeline_spec_path: str = ""  # 当前阶段产出的 spec 文件路径
     pipeline_diff: Optional[Dict[str, Any]] = None  # 阶段间 diff 数据
     pipeline_checkpoint: Optional[Dict[str, Any]] = None  # 断点续跑信息
+    # batch_progress 事件字段（批量任务进度）
+    batch_index: int = 0           # 当前任务序号 (0-based)
+    batch_total: int = 1           # 总任务数
+    batch_item_name: str = ""      # 当前任务名称（如文件名）
+    batch_status: str = ""         # "running" | "completed" | "failed"
+    batch_elapsed_seconds: float = 0.0  # 当前任务耗时
     # memory_extracted 事件字段
     memory_entries: List[Dict[str, Any]] = field(default_factory=list)
     memory_trigger: str = ""  # "periodic" | "pre_compaction" | "session_end"
