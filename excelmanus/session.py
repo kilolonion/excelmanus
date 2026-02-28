@@ -799,6 +799,22 @@ class SessionManager:
 
         return False
 
+    async def update_session_title(
+        self, session_id: str, title: str, *, user_id: str | None = None
+    ) -> bool:
+        """更新会话标题（用户手动设置），返回是否成功。"""
+        if self._chat_history is None:
+            return False
+        if user_id is not None:
+            if not self._chat_history.session_owned_by(session_id, user_id):
+                return False
+        elif not self._chat_history.session_exists(session_id):
+            return False
+        self._chat_history.update_session(
+            session_id, title=title, title_source="user"
+        )
+        return True
+
     async def cleanup_expired(self, now: float | None = None) -> int:
         """清理超过 TTL 的空闲会话。
 
