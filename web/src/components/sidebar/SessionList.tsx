@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -12,6 +12,7 @@ import {
   Layers,
   Zap,
   MessageSquarePlus,
+  Pencil,
   type LucideIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -22,7 +23,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { archiveSession, deleteSession, abortChat } from "@/lib/api";
+import { archiveSession, deleteSession, abortChat, updateSessionTitle } from "@/lib/api";
 import { stopGeneration } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -66,6 +67,38 @@ export function SessionList() {
   const [sessionView, setSessionView] = useState<SessionView>("all");
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingSessionId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingSessionId]);
+
+  const handleStartEdit = useCallback((sessionId: string, currentTitle: string) => {
+    setEditingSessionId(sessionId);
+    setEditValue(currentTitle);
+  }, []);
+
+  const handleFinishEdit = useCallback(async (sessionId: string) => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== sessions.find(s => s.id === sessionId)?.title) {
+      useSessionStore.getState().updateSessionTitle(sessionId, trimmed);
+      try {
+        await updateSessionTitle(sessionId, trimmed);
+      } catch {
+        // 静默忽略，本地已更新
+      }
+    }
+    setEditingSessionId(null);
+  }, [editValue, sessions]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingSessionId(null);
+  }, []);
 
   const activeCount = useMemo(
     () =>
@@ -304,15 +337,40 @@ export function SessionList() {
                         : "var(--muted-foreground)",
                     }}
                   />
-                  <span
-                    className={`flex-1 min-w-0 truncate ${
-                      isActive
-                        ? "font-medium text-foreground"
-                        : "text-foreground/80"
-                    }`}
-                  >
-                    {session.title}
-                  </span>
+                  {editingSessionId === session.id ? (
+                    <input
+                      ref={editInputRef}
+                      type="text"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void handleFinishEdit(session.id);
+                        } else if (e.key === "Escape") {
+                          handleCancelEdit();
+                        }
+                        e.stopPropagation();
+                      }}
+                      onBlur={() => void handleFinishEdit(session.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex-1 min-w-0 text-sm bg-transparent border-b border-[var(--em-primary)] outline-none px-0 py-0"
+                    />
+                  ) : (
+                    <span
+                      className={`flex-1 min-w-0 truncate ${
+                        isActive
+                          ? "font-medium text-foreground"
+                          : "text-foreground/80"
+                      }`}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        handleStartEdit(session.id, session.title);
+                      }}
+                    >
+                      {session.title}
+                    </span>
+                  )}
 
                   {/* Three-dot menu — visible on hover or when active */}
                   <DropdownMenu>
@@ -333,6 +391,15 @@ export function SessionList() {
                       align="start"
                       className="w-40"
                     >
+                      <DropdownMenuItem
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartEdit(session.id, session.title);
+                        }}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        重命名
+                      </DropdownMenuItem>
                       <DropdownMenuItem
                         onClick={(e) => {
                           e.stopPropagation();
