@@ -5,8 +5,10 @@ import {
   fetchWorkspaceFiles,
   applyBackup,
   discardBackup,
+  undoBackup,
   normalizeExcelPath,
   type BackupFile,
+  type AppliedFile,
   type ExcelFileListItem,
 } from "@/lib/api";
 
@@ -81,6 +83,14 @@ export interface TextDiffEntry {
   timestamp: number;
 }
 
+export interface TextPreviewEntry {
+  toolCallId: string;
+  filePath: string;
+  content: string;
+  lineCount: number;
+  truncated: boolean;
+}
+
 export interface ExcelFileRef {
   path: string;
   filename: string;
@@ -105,6 +115,9 @@ interface ExcelState {
   // 聊天内嵌预览数据（按 toolCallId 索引）
   previews: Record<string, ExcelPreviewData>;
 
+  // 文本文件预览数据（按 toolCallId 索引）
+  textPreviews: Record<string, TextPreviewEntry>;
+
   // 面板刷新计数器（每次 diff 后递增，触发 Univer 重新加载）
   refreshCounter: number;
 
@@ -125,6 +138,9 @@ interface ExcelState {
   // 用户明确关闭的路径，在重挂载间保留，以便自动发现（工作区扫描/会话恢复）不会再次加入。
   dismissedPaths: Set<string>;
 
+  // 工作区系统文件可见性（默认隐藏，用户可在侧栏开关切换）
+  showSystemFiles: boolean;
+
   // 工作区文件树刷新信号（在 files_changed 事件时递增）
   workspaceFilesVersion: number;
 
@@ -135,11 +151,17 @@ interface ExcelState {
   // 流式工具调用参数累积（用于实时预览文本写入内容）
   streamingToolContent: Record<string, string>;
 
+  // 文本文件预览弹窗 tab 栏（最近打开的文件）
+  previewTabs: { filePath: string; filename: string }[];
+
   // 备份应用
   pendingBackups: BackupFile[];
   backupEnabled: boolean;
   backupLoading: boolean;
+  backupInFlight: boolean;
   appliedPaths: Set<string>;
+  /** 最近 apply 的文件列表（支持 undo） */
+  undoableApplies: AppliedFile[];
 
   // 操作
   openPanel: (filePath: string, sheet?: string) => void;
@@ -147,6 +169,7 @@ interface ExcelState {
   setActiveSheet: (sheet: string) => void;
   addDiff: (diff: ExcelDiffEntry) => void;
   addTextDiff: (diff: TextDiffEntry) => void;
+  addTextPreview: (preview: TextPreviewEntry) => void;
   appendStreamingArgs: (toolCallId: string, delta: string) => void;
   clearStreamingArgs: (toolCallId: string) => void;
   addPreview: (preview: ExcelPreviewData) => void;
@@ -173,6 +196,11 @@ interface ExcelState {
   discardFile: (sessionId: string, filePath: string) => Promise<void>;
   discardAll: (sessionId: string) => Promise<void>;
   isFileApplied: (filePath: string) => boolean;
+  undoApply: (sessionId: string, item: AppliedFile) => Promise<boolean>;
+  handleStagingUpdated: (action: string, files: { original_path: string; backup_path: string }[], pendingCount: number) => void;
+  addPreviewTab: (tab: { filePath: string; filename: string }) => void;
+  removePreviewTab: (filePath: string) => void;
+  toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
   refreshWorkspaceFiles: () => Promise<void>;
   clearSession: () => void;
@@ -187,6 +215,7 @@ export const useExcelStore = create<ExcelState>()(
   diffs: [],
   textDiffs: [],
   previews: {},
+  textPreviews: {},
   refreshCounter: 0,
   recentFiles: [],
   fullViewPath: null,
@@ -195,14 +224,18 @@ export const useExcelStore = create<ExcelState>()(
   pendingSelection: null,
   pendingFileMention: null,
   dismissedPaths: new Set<string>(),
+  showSystemFiles: false,
   workspaceFilesVersion: 0,
   workspaceFiles: [],
   wsFilesLoaded: false,
   streamingToolContent: {},
+  previewTabs: [],
   pendingBackups: [],
   backupEnabled: false,
   backupLoading: false,
+  backupInFlight: false,
   appliedPaths: new Set<string>(),
+  undoableApplies: [],
 
   openPanel: (filePath, sheet) =>
     set({
@@ -233,6 +266,11 @@ export const useExcelStore = create<ExcelState>()(
             : state.refreshCounter,
       };
     }),
+
+  addTextPreview: (preview) =>
+    set((state) => ({
+      textPreviews: { ...state.textPreviews, [preview.toolCallId]: preview },
+    })),
 
   addTextDiff: (diff) =>
     set((state) => {
@@ -378,6 +416,7 @@ export const useExcelStore = create<ExcelState>()(
       set({
         pendingBackups: data.files,
         backupEnabled: data.backup_enabled,
+        backupInFlight: !!data.in_flight,
         backupLoading: false,
       });
     } catch {
@@ -399,6 +438,7 @@ export const useExcelStore = create<ExcelState>()(
             ),
             appliedPaths: newApplied,
             refreshCounter: state.refreshCounter + 1,
+            undoableApplies: [...state.undoableApplies, ...result.applied],
           };
         });
         return true;
@@ -421,6 +461,7 @@ export const useExcelStore = create<ExcelState>()(
           pendingBackups: [],
           appliedPaths: newApplied,
           refreshCounter: state.refreshCounter + 1,
+          undoableApplies: [...state.undoableApplies, ...result.applied],
         };
       });
       return result.count;
@@ -456,6 +497,68 @@ export const useExcelStore = create<ExcelState>()(
     return get().appliedPaths.has(normalizeExcelPath(filePath));
   },
 
+  undoApply: async (sessionId, item) => {
+    if (!item.undo_path) return false;
+    try {
+      await undoBackup({
+        sessionId,
+        originalPath: item.original,
+        undoPath: item.undo_path,
+      });
+      set((state) => {
+        const newApplied = new Set(state.appliedPaths);
+        newApplied.delete(normalizeExcelPath(item.original));
+        return {
+          appliedPaths: newApplied,
+          undoableApplies: state.undoableApplies.filter(
+            (a) => a.undo_path !== item.undo_path
+          ),
+          refreshCounter: state.refreshCounter + 1,
+        };
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  handleStagingUpdated: (action, files, pendingCount) => {
+    if (action === "finish_hint" || action === "new") {
+      // 触发备份列表刷新 — 前端收到后由 chat-actions 调用 fetchBackups
+      set((state) => ({
+        backupEnabled: true,
+        pendingBackups: files.length > 0
+          ? files.map((f) => ({
+              original_path: f.original_path,
+              backup_path: f.backup_path,
+              exists: true,
+              modified_at: Date.now() / 1000,
+            }))
+          : state.pendingBackups,
+      }));
+    } else if (action === "applied" || action === "discarded" || action === "undone") {
+      // 服务端已处理完成，直接更新 pending count
+      if (pendingCount === 0) {
+        set({ pendingBackups: [] });
+      }
+    }
+  },
+
+  addPreviewTab: (tab) =>
+    set((state) => {
+      const exists = state.previewTabs.some((t) => t.filePath === tab.filePath);
+      if (exists) return {};
+      return { previewTabs: [...state.previewTabs, tab].slice(-10) };
+    }),
+
+  removePreviewTab: (filePath) =>
+    set((state) => ({
+      previewTabs: state.previewTabs.filter((t) => t.filePath !== filePath),
+    })),
+
+  toggleShowSystemFiles: () =>
+    set((state) => ({ showSystemFiles: !state.showSystemFiles })),
+
   bumpWorkspaceFilesVersion: () =>
     set((state) => ({ workspaceFilesVersion: state.workspaceFilesVersion + 1 })),
 
@@ -477,6 +580,7 @@ export const useExcelStore = create<ExcelState>()(
       textDiffs: [],
       previews: {},
       streamingToolContent: {},
+      previewTabs: [],
       refreshCounter: 0,
       fullViewPath: null,
       fullViewSheet: null,
@@ -485,7 +589,9 @@ export const useExcelStore = create<ExcelState>()(
       pendingBackups: [],
       backupEnabled: false,
       backupLoading: false,
+      backupInFlight: false,
       appliedPaths: new Set<string>(),
+      undoableApplies: [],
     }),
     }),
     {
@@ -493,6 +599,7 @@ export const useExcelStore = create<ExcelState>()(
       partialize: (state) => ({
         recentFiles: state.recentFiles,
         dismissedPaths: Array.from(state.dismissedPaths),
+        showSystemFiles: state.showSystemFiles,
       }),
       merge: (persisted, current) => {
         const p = persisted as Record<string, unknown> | undefined;

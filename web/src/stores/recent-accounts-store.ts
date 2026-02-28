@@ -34,19 +34,28 @@ export const useRecentAccountsStore = create<RecentAccountsState>()(
 
       recordLogin: (account) =>
         set((state) => {
+          const existing = state.accounts.find(
+            (a) => a.email === account.email,
+          );
           const filtered = state.accounts.filter(
             (a) => a.email !== account.email,
           );
+          // 如果显式传了 rememberMe，按其值决定是否保存密码；
+          // 如果未传（如 handleTokenResponse 仅更新头像/昵称），保留已有的密码信息。
+          const hasExplicitRememberMe = account.rememberMe !== undefined;
           const entry: RecentAccount = {
             email: account.email,
             displayName: account.displayName,
             avatarUrl: account.avatarUrl,
             lastLoginAt: new Date().toISOString(),
-            // 如果选择了记住我，保存加密的密码和过期时间
-            savedPassword: account.rememberMe ? account.password : undefined,
-            autoLoginExpiresAt: account.rememberMe 
-              ? new Date(Date.now() + AUTO_LOGIN_DAYS * 24 * 60 * 60 * 1000).toISOString()
-              : undefined,
+            savedPassword: hasExplicitRememberMe
+              ? (account.rememberMe ? account.password : undefined)
+              : existing?.savedPassword,
+            autoLoginExpiresAt: hasExplicitRememberMe
+              ? (account.rememberMe
+                  ? new Date(Date.now() + AUTO_LOGIN_DAYS * 24 * 60 * 60 * 1000).toISOString()
+                  : undefined)
+              : existing?.autoLoginExpiresAt,
           };
           return { accounts: [entry, ...filtered].slice(0, MAX_RECENT) };
         }),

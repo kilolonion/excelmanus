@@ -339,7 +339,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           </div>
         ) : (
           <div
-            className={`group/bubble relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 shadow-sm transition-colors ${
+            className={`group/bubble relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 user-bubble ${
               onEditAndResend && !isStreaming
                 ? "cursor-pointer hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-25)]"
                 : ""

@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useDropzone } from "react-dropzone";
 import { useChatStore } from "@/stores/chat-store";
+import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { buildApiUrl, apiGet, apiPut, uploadFile, uploadFileFromUrl } from "@/lib/api";
@@ -49,6 +50,8 @@ import { ChatModeTabs } from "./ChatModeTabs";
 import { ThinkingLevelSelector } from "./ThinkingLevelSelector";
 import { FileAttachmentChips } from "./FileAttachmentChips";
 import { CommandPopover, type PopoverItem } from "./CommandPopover";
+import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
+import { answerQuestion } from "@/lib/api";
 
 
 interface ChatInputProps {
@@ -81,6 +84,33 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const setConfigError = useUIStore((s) => s.setConfigError);
   const [confirmedTokens, setConfirmedTokens] = useState<Set<string>>(new Set());
   const [undoPanelOpen, setUndoPanelOpen] = useState(false);
+  const pendingQuestion = useChatStore((s) => s.pendingQuestion);
+  const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
+  const [questionSelected, setQuestionSelected] = useState<Set<string>>(new Set());
+
+  // Reset selection when question changes
+  useEffect(() => {
+    setQuestionSelected(new Set());
+  }, [pendingQuestion?.id]);
+
+  const toggleQuestionOption = useCallback((label: string) => {
+    setQuestionSelected((prev) => {
+      const next = new Set(prev);
+      if (pendingQuestion?.multiSelect) {
+        if (next.has(label)) next.delete(label);
+        else next.add(label);
+      } else {
+        if (next.has(label)) {
+          next.clear();
+        } else {
+          next.clear();
+          next.add(label);
+        }
+      }
+      return next;
+    });
+  }, [pendingQuestion?.multiSelect]);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -913,6 +943,31 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
 
     // 3) 其他全部 → 作为聊天消息发送
+    // 如果有待回答的问题，提交答案而非发送聊天消息
+    if (pendingQuestion) {
+      const selectedLabels = Array.from(questionSelected);
+      let answer: string;
+      if (selectedLabels.length > 0 && trimmed) {
+        answer = `${selectedLabels.join(", ")}\n${trimmed}`;
+      } else if (selectedLabels.length > 0) {
+        answer = selectedLabels.join(", ");
+      } else {
+        answer = trimmed;
+      }
+      if (!answer.trim()) return;
+      const questionId = pendingQuestion.id;
+      const sessionId = useSessionStore.getState().activeSessionId;
+      setPendingQuestion(null);
+      setQuestionSelected(new Set());
+      setText("");
+      requestAnimationFrame(autoResize);
+      if (sessionId && questionId) {
+        answerQuestion(sessionId, questionId, answer).catch((err) =>
+          console.error("[ChatInput] answerQuestion failed:", err),
+        );
+      }
+      return;
+    }
     onSend(trimmed, files.length > 0 ? files : undefined);
     setText("");
     setFiles([]);
@@ -1106,13 +1161,26 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         )}
       </AnimatePresence>
 
+      {/* Inline Question Banner (when agent asks user) */}
+      <AnimatePresence>
+        {pendingQuestion && (
+          <InlineQuestionBanner
+            question={pendingQuestion}
+            selected={questionSelected}
+            onToggle={toggleQuestionOption}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Chat Mode Tabs + Thinking Level */}
-      <div className="flex items-center justify-between">
-        <ChatModeTabs />
-        <div className="pr-3 pt-1.5 pb-0">
-          <ThinkingLevelSelector />
+      {!pendingQuestion && (
+        <div className="flex items-center justify-between">
+          <ChatModeTabs />
+          <div className="pr-3 pt-1.5 pb-0">
+            <ThinkingLevelSelector />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* File attachment chips */}
       <FileAttachmentChips
@@ -1178,7 +1246,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             onPaste={handlePaste}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
-            placeholder="有问题，尽管问"
+            placeholder={pendingQuestion ? "输入自定义回答，或选择上方选项后发送" : "有问题，尽管问"}
             disabled={disabled}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0
@@ -1217,10 +1285,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               >
                 <Button
                   size="icon"
-                  className="h-8 w-8 rounded-full text-white transition-opacity"
+                  className="h-8 w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
-                  disabled={disabled || configBlocked || (!text.trim() && files.length === 0) || files.some((af) => af.status === "uploading")}
+                  disabled={disabled || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}
                 >
                   <ArrowUp className="h-3.5 w-3.5" />
                 </Button>

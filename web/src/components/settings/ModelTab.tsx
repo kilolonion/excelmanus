@@ -29,6 +29,8 @@ import {
   Dices,
   Wifi,
   XCircle,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -367,6 +369,15 @@ export function ModelTab() {
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
 
+  // 折叠/展开状态
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const toggleSection = useCallback((key: string) => {
+    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  // 底部高级区 pills
+  const [advancedPill, setAdvancedPill] = useState<"capabilities" | "thinking" | "transfer">("capabilities");
+
   // 连通测试状态
   const [testingKey, setTestingKey] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, TestConnectionResult | null>>({});
@@ -664,188 +675,222 @@ export function ModelTab() {
   }
 
   return (
-    <div className="space-y-4">
-        {/* Section cards */}
+    <div className="space-y-2">
+        {/* ── Collapsible model endpoint cards ── */}
         {SECTION_META.map((section) => {
           const sectionCaps = capsMap[section.key];
+          const isExpanded = !!expandedSections[section.key];
+          const modelId = editDrafts[section.key]?.model || (config?.[section.key as keyof ModelConfig] as ModelSection)?.model || "";
+          const isDisabled = (section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false;
           return (
-          <div key={section.key} className={`rounded-lg border p-4 transition-colors ${
+          <div key={section.key} className={`rounded-lg border transition-colors ${
             isModelUnhealthy(sectionCaps)
               ? "border-destructive/40 bg-destructive/5"
               : "border-border"
           }`}>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
-              <h3 className="font-semibold text-sm">{section.label}</h3>
+            {/* ── Collapsed summary row (always visible) ── */}
+            <button
+              type="button"
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden"
+              onClick={() => toggleSection(section.key)}
+            >
+              <span className="text-muted-foreground transition-transform flex-shrink-0" style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>
+                <ChevronRight className="h-3.5 w-3.5" />
+              </span>
+              <span className="flex-shrink-0" style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
+              <span className="font-semibold text-sm whitespace-nowrap">{section.label}</span>
               {(section.key === "aux" || section.key === "vlm") && (
                 <Switch
                   checked={enabledDrafts[section.key] !== false}
-                  onCheckedChange={(checked) => handleToggleEnabled(section.key, checked)}
-                  className="ml-1 scale-75 origin-left"
+                  onCheckedChange={(checked) => { handleToggleEnabled(section.key, checked); }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="ml-0.5 scale-75 origin-left"
                 />
               )}
-              <span className="text-xs text-muted-foreground ml-auto hidden sm:inline">{section.desc}</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-0.5 ml-6 sm:hidden">{section.desc}</p>
-            {isModelUnhealthy(sectionCaps) ? (
-              <div className="mt-1.5 mb-1 ml-6 flex items-center gap-1.5 text-destructive">
-                <AlertTriangle className="h-3 w-3 flex-shrink-0" />
-                <span className="text-[11px] truncate" title={getHealthError(sectionCaps)}>
-                  连接失败: {getHealthError(sectionCaps) || "模型不可达"}
+              {modelId && (
+                <Badge variant="secondary" className="text-[10px] font-mono max-w-[20%] sm:max-w-[30%] truncate">
+                  {modelId}
+                </Badge>
+              )}
+              {isModelUnhealthy(sectionCaps) ? (
+                <span className="inline-flex items-center gap-1 text-destructive text-[10px] shrink-0">
+                  <AlertTriangle className="h-2.5 w-2.5" />
+                  <span className="hidden sm:inline">连接失败</span>
                 </span>
-              </div>
-            ) : (
-              <div className="mt-1 mb-1 ml-6">
-                <CapabilityBadges caps={sectionCaps ?? null} />
-              </div>
-            )}
-            {(section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false && (
-              <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 ml-6">已禁用，将回退到主模型</p>
-            )}
-            <div className={`space-y-2 mt-3 transition-opacity ${(section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false ? "opacity-40 pointer-events-none" : ""}`}>
-              {section.fields.map((field) => (
-                <div key={field} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
-                  <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">
-                    {FIELD_LABELS[field]}
-                  </label>
-                  <div className="flex-1 relative">
-                    <Input
-                      value={editDrafts[section.key]?.[field] || ""}
-                      onChange={(e) => updateDraft(section.key, field, e.target.value)}
-                      type={field === "api_key" && !showKeys[`${section.key}_${field}`] ? "password" : "text"}
-                      className={`h-8 text-xs font-mono ${field === "api_key" ? "pr-8" : ""}`}
-                      placeholder={`输入 ${FIELD_LABELS[field]}...`}
-                    />
-                    {field === "api_key" && (
-                      <button
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
-                        onClick={() =>
-                          setShowKeys((prev) => ({
-                            ...prev,
-                            [`${section.key}_${field}`]: !prev[`${section.key}_${field}`],
-                          }))
-                        }
-                      >
-                        {showKeys[`${section.key}_${field}`] ? (
-                          <EyeOff className="h-3 w-3" />
-                        ) : (
-                          <Eye className="h-3 w-3" />
+              ) : (
+                <span className="hidden sm:inline-flex"><CapabilityBadges caps={sectionCaps ?? null} /></span>
+              )}
+              {isDisabled && (
+                <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">已禁用</span>
+              )}
+            </button>
+
+            {/* ── Expanded edit form ── */}
+            {isExpanded && (
+              <div className="px-4 pb-4 pt-1 border-t border-border/50">
+                {isModelUnhealthy(sectionCaps) && (
+                  <div className="mb-2 flex items-center gap-1.5 text-destructive">
+                    <AlertTriangle className="h-3 w-3 flex-shrink-0" />
+                    <span className="text-[11px] truncate" title={getHealthError(sectionCaps)}>
+                      连接失败: {getHealthError(sectionCaps) || "模型不可达"}
+                    </span>
+                  </div>
+                )}
+                {isDisabled && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">已禁用，将回退到主模型</p>
+                )}
+                <div className={`space-y-2 transition-opacity ${isDisabled ? "opacity-40 pointer-events-none" : ""}`}>
+                  {section.fields.map((field) => (
+                    <div key={field} className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                      <label className="text-xs text-muted-foreground sm:w-16 flex-shrink-0">
+                        {FIELD_LABELS[field]}
+                      </label>
+                      <div className="flex-1 relative">
+                        <Input
+                          value={editDrafts[section.key]?.[field] || ""}
+                          onChange={(e) => updateDraft(section.key, field, e.target.value)}
+                          type={field === "api_key" && !showKeys[`${section.key}_${field}`] ? "password" : "text"}
+                          className={`h-8 text-xs font-mono ${field === "api_key" ? "pr-8" : ""}`}
+                          placeholder={`输入 ${FIELD_LABELS[field]}...`}
+                        />
+                        {field === "api_key" && (
+                          <button
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
+                            onClick={() =>
+                              setShowKeys((prev) => ({
+                                ...prev,
+                                [`${section.key}_${field}`]: !prev[`${section.key}_${field}`],
+                              }))
+                            }
+                          >
+                            {showKeys[`${section.key}_${field}`] ? (
+                              <EyeOff className="h-3 w-3" />
+                            ) : (
+                              <Eye className="h-3 w-3" />
+                            )}
+                          </button>
                         )}
-                      </button>
-                    )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
+                    <label className="text-xs text-muted-foreground sm:w-16 shrink-0">协议</label>
+                    <select
+                      value={editDrafts[section.key]?.protocol || "auto"}
+                      onChange={(e) => updateDraft(section.key, "protocol", e.target.value)}
+                      className="h-8 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                    >
+                      <option value="auto">auto（自动检测）</option>
+                      <option value="openai">openai（Chat Completions）</option>
+                      <option value="openai_responses">openai_responses（Responses API）</option>
+                      <option value="anthropic">anthropic（Claude 原生）</option>
+                      <option value="gemini">gemini（Gemini 原生）</option>
+                    </select>
                   </div>
                 </div>
-              ))}
-              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
-                <label className="text-xs text-muted-foreground sm:w-16 shrink-0">协议</label>
-                <select
-                  value={editDrafts[section.key]?.protocol || "auto"}
-                  onChange={(e) => updateDraft(section.key, "protocol", e.target.value)}
-                  className="h-8 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="auto">auto（自动检测）</option>
-                  <option value="openai">openai（Chat Completions）</option>
-                  <option value="openai_responses">openai_responses（Responses API）</option>
-                  <option value="anthropic">anthropic（Claude 原生）</option>
-                  <option value="gemini">gemini（Gemini 原生）</option>
-                </select>
-              </div>
-            </div>
-            {/* 连通测试结果 */}
-            {testResult[section.key] && (
-              <div className={`mt-2 rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
-                testResult[section.key]!.ok
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                  : "bg-destructive/10 text-destructive border border-destructive/20"
-              }`}>
-                {testResult[section.key]!.ok ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <XCircle className="h-3.5 w-3.5 shrink-0" />
+                {testResult[section.key] && (
+                  <div className={`mt-2 rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
+                    testResult[section.key]!.ok
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                      : "bg-destructive/10 text-destructive border border-destructive/20"
+                  }`}>
+                    {testResult[section.key]!.ok ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    ) : (
+                      <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {testResult[section.key]!.ok ? "连通测试成功" : testResult[section.key]!.error || "连通测试失败"}
+                    </span>
+                    <button
+                      className="ml-auto shrink-0 hover:opacity-70"
+                      onClick={() => setTestResult((prev) => ({ ...prev, [section.key]: null }))}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
                 )}
-                <span className="truncate">
-                  {testResult[section.key]!.ok ? "连通测试成功" : testResult[section.key]!.error || "连通测试失败"}
-                </span>
-                <button
-                  className="ml-auto shrink-0 hover:opacity-70"
-                  onClick={() => setTestResult((prev) => ({ ...prev, [section.key]: null }))}
-                >
-                  <X className="h-3 w-3" />
-                </button>
+                <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 sm:h-7 text-xs gap-1"
+                    onClick={() => handleTestConnection(section.key, {
+                      name: section.key,
+                      model: editDrafts[section.key]?.model,
+                      base_url: editDrafts[section.key]?.base_url,
+                      api_key: isMaskedApiKey(editDrafts[section.key]?.api_key || "") ? undefined : editDrafts[section.key]?.api_key,
+                    })}
+                    disabled={testingKey === section.key}
+                  >
+                    {testingKey === section.key ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Wifi className="h-3 w-3" />
+                    )}
+                    {testingKey === section.key ? "测试中..." : "连通测试"}
+                  </Button>
+                  {section.key === "main" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 sm:h-7 text-xs gap-1"
+                      onClick={() => handleProbeOne(section.key)}
+                      disabled={probingKey === section.key}
+                    >
+                      {probingKey === section.key ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Zap className="h-3 w-3" />
+                      )}
+                      {probingKey === section.key ? "探测中" : "探测能力"}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    className="h-8 sm:h-7 text-xs gap-1 text-white"
+                    style={{ backgroundColor: "var(--em-primary)" }}
+                    onClick={() => handleSaveSection(section.key)}
+                    disabled={saving === section.key}
+                  >
+                    {saving === section.key ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : saved === section.key ? (
+                      <CheckCircle2 className="h-3 w-3" />
+                    ) : (
+                      <Save className="h-3 w-3" />
+                    )}
+                    {saved === section.key ? "已保存" : "保存"}
+                  </Button>
+                </div>
               </div>
             )}
-            <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 sm:h-7 text-xs gap-1"
-                onClick={() => handleTestConnection(section.key, {
-                  name: section.key,
-                  model: editDrafts[section.key]?.model,
-                  base_url: editDrafts[section.key]?.base_url,
-                  api_key: isMaskedApiKey(editDrafts[section.key]?.api_key || "") ? undefined : editDrafts[section.key]?.api_key,
-                })}
-                disabled={testingKey === section.key}
-              >
-                {testingKey === section.key ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Wifi className="h-3 w-3" />
-                )}
-                {testingKey === section.key ? "测试中..." : "连通测试"}
-              </Button>
-              {section.key === "main" && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 sm:h-7 text-xs gap-1"
-                  onClick={() => handleProbeOne(section.key)}
-                  disabled={probingKey === section.key}
-                >
-                  {probingKey === section.key ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Zap className="h-3 w-3" />
-                  )}
-                  {probingKey === section.key ? "探测中" : "探测能力"}
-                </Button>
-              )}
-              <Button
-                size="sm"
-                className="h-8 sm:h-7 text-xs gap-1 text-white"
-                style={{ backgroundColor: "var(--em-primary)" }}
-                onClick={() => handleSaveSection(section.key)}
-                disabled={saving === section.key}
-              >
-                {saving === section.key ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : saved === section.key ? (
-                  <CheckCircle2 className="h-3 w-3" />
-                ) : (
-                  <Save className="h-3 w-3" />
-                )}
-                {saved === section.key ? "已保存" : "保存"}
-              </Button>
-            </div>
           </div>
           );
         })}
 
-        {/* Profiles section */}
-        <Separator />
-        <div>
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <div className="min-w-0">
-              <h3 className="font-semibold text-sm">多模型配置</h3>
-              <p className="text-xs text-muted-foreground">
-                通过 /model 命令切换的模型档案
-              </p>
-            </div>
+        {/* ── Profiles section (collapsible) ── */}
+        <div className="rounded-lg border border-border">
+          <button
+            type="button"
+            className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden"
+            onClick={() => toggleSection("profiles")}
+          >
+            <span className="text-muted-foreground transition-transform flex-shrink-0" style={{ transform: expandedSections.profiles ? "rotate(90deg)" : "rotate(0deg)" }}>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </span>
+            <Dices className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+            <span className="font-semibold text-sm">多模型配置</span>
+            {config?.profiles && config.profiles.length > 0 && (
+              <Badge variant="secondary" className="text-[10px]">{config.profiles.length} 个档案</Badge>
+            )}
             <Button
               size="sm"
               variant="outline"
-              className="h-7 text-xs gap-1 flex-shrink-0"
-              onClick={() => {
+              className="h-6 text-[10px] gap-0.5 flex-shrink-0 ml-auto"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpandedSections((prev) => ({ ...prev, profiles: true }));
                 setNewProfile(true);
                 setEditingProfile(null);
                 setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto" });
@@ -853,442 +898,460 @@ export function ModelTab() {
               }}
             >
               <Plus className="h-3 w-3" />
-              新增模型
+              新增
             </Button>
-          </div>
+          </button>
 
-          {/* New/Edit profile form */}
-          {(newProfile || editingProfile) && (
-            <div ref={formRef} className="rounded-lg border border-dashed border-border p-3 mb-3 space-y-2">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-muted-foreground">名称 *</label>
-                  <Input
-                    value={profileDraft.name}
-                    onChange={(e) => setProfileDraft((d) => ({ ...d, name: e.target.value }))}
-                    className="h-8 sm:h-7 text-xs"
-                    placeholder="如: gpt4"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground">Model ID *</label>
-                  <Input
-                    value={profileDraft.model}
-                    onChange={(e) => setProfileDraft((d) => ({ ...d, model: e.target.value }))}
-                    className="h-8 sm:h-7 text-xs font-mono"
-                    placeholder="如: gpt-4o"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Base URL（空则继承主配置）</label>
-                <Input
-                  value={profileDraft.base_url}
-                  onChange={(e) => setProfileDraft((d) => ({ ...d, base_url: e.target.value }))}
-                  className="h-8 sm:h-7 text-xs font-mono"
-                  placeholder="https://..."
-                />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">API Key（空则继承主配置）</label>
-                <div className="relative">
-                  <Input
-                    value={profileDraft.api_key}
-                    onChange={(e) => setProfileDraft((d) => ({ ...d, api_key: e.target.value }))}
-                    className="h-8 sm:h-7 text-xs font-mono pr-8"
-                    type={showKeys["profile_api_key"] ? "text" : "password"}
-                    placeholder="sk-..."
-                  />
-                  <button
-                    type="button"
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
-                    onClick={() => setShowKeys((prev) => ({ ...prev, profile_api_key: !prev.profile_api_key }))}
-                  >
-                    {showKeys["profile_api_key"] ? (
-                      <EyeOff className="h-3 w-3" />
-                    ) : (
-                      <Eye className="h-3 w-3" />
-                    )}
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">描述</label>
-                <Input
-                  value={profileDraft.description}
-                  onChange={(e) => setProfileDraft((d) => ({ ...d, description: e.target.value }))}
-                  className="h-8 sm:h-7 text-xs"
-                  placeholder="简短说明"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">协议</label>
-                <select
-                  value={profileDraft.protocol || "auto"}
-                  onChange={(e) => setProfileDraft((d) => ({ ...d, protocol: e.target.value }))}
-                  className="w-full h-8 sm:h-7 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
-                >
-                  <option value="auto">auto（自动检测）</option>
-                  <option value="openai">openai（Chat Completions）</option>
-                  <option value="openai_responses">openai_responses（Responses API）</option>
-                  <option value="anthropic">anthropic（Claude 原生）</option>
-                  <option value="gemini">gemini（Gemini 原生）</option>
-                </select>
-              </div>
-              {/* 连通测试结果 */}
-              {testResult["_profile_form"] && (
-                <div className={`rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
-                  testResult["_profile_form"]!.ok
-                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                    : "bg-destructive/10 text-destructive border border-destructive/20"
-                }`}>
-                  {testResult["_profile_form"]!.ok ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                  ) : (
-                    <XCircle className="h-3.5 w-3.5 shrink-0" />
-                  )}
-                  <span className="truncate">
-                    {testResult["_profile_form"]!.ok ? "连通测试成功" : testResult["_profile_form"]!.error || "连通测试失败"}
-                  </span>
-                  <button
-                    className="ml-auto shrink-0 hover:opacity-70"
-                    onClick={() => setTestResult((prev) => ({ ...prev, _profile_form: null }))}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              )}
-              <div className="flex justify-end gap-2 pt-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 text-xs gap-1"
-                  onClick={() => {
-                    setNewProfile(false);
-                    setEditingProfile(null);
-                    setTestResult((prev) => ({ ...prev, _profile_form: null }));
-                  }}
-                >
-                  <X className="h-3 w-3" /> 取消
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-xs gap-1"
-                  disabled={!profileDraft.model || testingKey === "_profile_form"}
-                  onClick={() => handleTestConnection("_profile_form", {
-                    model: profileDraft.model,
-                    base_url: profileDraft.base_url || undefined,
-                    api_key: profileDraft.api_key || undefined,
-                  })}
-                >
-                  {testingKey === "_profile_form" ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Wifi className="h-3 w-3" />
-                  )}
-                  {testingKey === "_profile_form" ? "测试中..." : "连通测试"}
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-7 text-xs gap-1 text-white"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                  disabled={!profileDraft.name || !profileDraft.model}
-                  onClick={() =>
-                    editingProfile
-                      ? handleUpdateProfile(editingProfile)
-                      : handleAddProfile()
-                  }
-                >
-                  <Save className="h-3 w-3" />
-                  {editingProfile ? "更新" : "添加"}
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Profile list */}
-          <div className="space-y-1.5">
-            {config?.profiles.map((p) => {
-              const pCaps = capsMap[p.name];
-              return (
-              <div
-                key={p.name}
-                className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm transition-colors overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 ${
-                  isModelUnhealthy(pCaps)
-                    ? "border-destructive/40 bg-destructive/5 opacity-70"
-                    : "border-border"
-                }`}
-                onClick={() => {
-                  setEditingProfile(p.name);
-                  setNewProfile(false);
-                  setProfileDraft({
-                    name: p.name,
-                    model: p.model,
-                    api_key: "",
-                    base_url: p.base_url,
-                    description: p.description,
-                    protocol: p.protocol || "auto",
-                  });
-                  scrollToForm();
-                }}
-              >
-                {/* Row 1: name + model badge + action buttons */}
-                <div className="flex items-center gap-2">
-                  <span className="font-medium truncate min-w-0">{p.name}</span>
-                  <Badge variant="secondary" className="text-[10px] font-mono min-w-0 max-w-[40%] truncate">
-                    {p.model}
-                  </Badge>
-                  <div className="flex gap-0.5 shrink-0 ml-auto">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      title="探测能力"
-                      onClick={(e) => { e.stopPropagation(); handleProbeOne(p.name); }}
-                      disabled={probingKey === p.name}
+          {expandedSections.profiles && (
+            <div className="px-4 pb-4 pt-1 border-t border-border/50">
+              {/* New/Edit profile form */}
+              {(newProfile || editingProfile) && (
+                <div ref={formRef} className="rounded-lg border border-dashed border-border p-3 mb-3 space-y-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs text-muted-foreground">名称 *</label>
+                      <Input
+                        value={profileDraft.name}
+                        onChange={(e) => setProfileDraft((d) => ({ ...d, name: e.target.value }))}
+                        className="h-8 sm:h-7 text-xs"
+                        placeholder="如: gpt4"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground">Model ID *</label>
+                      <Input
+                        value={profileDraft.model}
+                        onChange={(e) => setProfileDraft((d) => ({ ...d, model: e.target.value }))}
+                        className="h-8 sm:h-7 text-xs font-mono"
+                        placeholder="如: gpt-4o"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">Base URL（空则继承主配置）</label>
+                    <Input
+                      value={profileDraft.base_url}
+                      onChange={(e) => setProfileDraft((d) => ({ ...d, base_url: e.target.value }))}
+                      className="h-8 sm:h-7 text-xs font-mono"
+                      placeholder="https://..."
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">API Key（空则继承主配置）</label>
+                    <div className="relative">
+                      <Input
+                        value={profileDraft.api_key}
+                        onChange={(e) => setProfileDraft((d) => ({ ...d, api_key: e.target.value }))}
+                        className="h-8 sm:h-7 text-xs font-mono pr-8"
+                        type={showKeys["profile_api_key"] ? "text" : "password"}
+                        placeholder="sk-..."
+                      />
+                      <button
+                        type="button"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
+                        onClick={() => setShowKeys((prev) => ({ ...prev, profile_api_key: !prev.profile_api_key }))}
+                      >
+                        {showKeys["profile_api_key"] ? (
+                          <EyeOff className="h-3 w-3" />
+                        ) : (
+                          <Eye className="h-3 w-3" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">描述</label>
+                    <Input
+                      value={profileDraft.description}
+                      onChange={(e) => setProfileDraft((d) => ({ ...d, description: e.target.value }))}
+                      className="h-8 sm:h-7 text-xs"
+                      placeholder="简短说明"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground">协议</label>
+                    <select
+                      value={profileDraft.protocol || "auto"}
+                      onChange={(e) => setProfileDraft((d) => ({ ...d, protocol: e.target.value }))}
+                      className="w-full h-8 sm:h-7 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
                     >
-                      {probingKey === p.name ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
+                      <option value="auto">auto（自动检测）</option>
+                      <option value="openai">openai（Chat Completions）</option>
+                      <option value="openai_responses">openai_responses（Responses API）</option>
+                      <option value="anthropic">anthropic（Claude 原生）</option>
+                      <option value="gemini">gemini（Gemini 原生）</option>
+                    </select>
+                  </div>
+                  {testResult["_profile_form"] && (
+                    <div className={`rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
+                      testResult["_profile_form"]!.ok
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                        : "bg-destructive/10 text-destructive border border-destructive/20"
+                    }`}>
+                      {testResult["_profile_form"]!.ok ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                       ) : (
-                        <Zap className="h-3 w-3" />
+                        <XCircle className="h-3.5 w-3.5 shrink-0" />
                       )}
-                    </Button>
+                      <span className="truncate">
+                        {testResult["_profile_form"]!.ok ? "连通测试成功" : testResult["_profile_form"]!.error || "连通测试失败"}
+                      </span>
+                      <button
+                        className="ml-auto shrink-0 hover:opacity-70"
+                        onClick={() => setTestResult((prev) => ({ ...prev, _profile_form: null }))}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-1">
                     <Button
+                      size="sm"
                       variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingProfile(p.name);
+                      className="h-8 sm:h-7 text-xs gap-1"
+                      onClick={() => {
                         setNewProfile(false);
-                        setProfileDraft({
-                          name: p.name,
-                          model: p.model,
-                          api_key: "",
-                          base_url: p.base_url,
-                          description: p.description,
-                          protocol: p.protocol || "auto",
-                        });
-                        scrollToForm();
+                        setEditingProfile(null);
+                        setTestResult((prev) => ({ ...prev, _profile_form: null }));
                       }}
                     >
-                      <Pencil className="h-3 w-3" />
+                      <X className="h-3 w-3" /> 取消
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-destructive"
-                      onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.name); }}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 sm:h-7 text-xs gap-1 flex-1 sm:flex-initial"
+                        disabled={!profileDraft.model || testingKey === "_profile_form"}
+                        onClick={() => handleTestConnection("_profile_form", {
+                          model: profileDraft.model,
+                          base_url: profileDraft.base_url || undefined,
+                          api_key: profileDraft.api_key || undefined,
+                        })}
+                      >
+                        {testingKey === "_profile_form" ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Wifi className="h-3 w-3" />
+                        )}
+                        {testingKey === "_profile_form" ? "测试中..." : "连通测试"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-8 sm:h-7 text-xs gap-1 text-white flex-1 sm:flex-initial"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        disabled={!profileDraft.name || !profileDraft.model}
+                        onClick={() =>
+                          editingProfile
+                            ? handleUpdateProfile(editingProfile)
+                            : handleAddProfile()
+                        }
+                      >
+                        <Save className="h-3 w-3" />
+                        {editingProfile ? "更新" : "添加"}
+                      </Button>
+                    </div>
                   </div>
                 </div>
-                {/* Row 2: capabilities / error + description */}
-                <div className="flex items-center gap-1.5 mt-1 flex-nowrap">
-                  {isModelUnhealthy(pCaps) ? (
-                    <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
-                      <AlertTriangle className="h-2.5 w-2.5" />
-                      不可用
-                    </span>
-                  ) : (
-                    <CapabilityBadges caps={pCaps ?? null} />
-                  )}
-                  {!isModelUnhealthy(pCaps) && p.description && (
-                    <span className="text-[11px] text-muted-foreground truncate">· {p.description}</span>
-                  )}
-                </div>
-                {/* Error detail */}
-                {isModelUnhealthy(pCaps) && (
-                  <p className="text-[10px] text-destructive truncate mt-0.5" title={getHealthError(pCaps)}>
-                    {getHealthError(pCaps) || "连接失败"}
+              )}
+
+              {/* Profile list */}
+              <div className="space-y-1.5">
+                {config?.profiles.map((p) => {
+                  const pCaps = capsMap[p.name];
+                  return (
+                  <div
+                    key={p.name}
+                    className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm transition-colors overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 ${
+                      isModelUnhealthy(pCaps)
+                        ? "border-destructive/40 bg-destructive/5 opacity-70"
+                        : "border-border"
+                    }`}
+                    onClick={() => {
+                      setEditingProfile(p.name);
+                      setNewProfile(false);
+                      setProfileDraft({
+                        name: p.name,
+                        model: p.model,
+                        api_key: "",
+                        base_url: p.base_url,
+                        description: p.description,
+                        protocol: p.protocol || "auto",
+                      });
+                      scrollToForm();
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium truncate min-w-0">{p.name}</span>
+                      <Badge variant="secondary" className="text-[10px] font-mono min-w-0 max-w-[25%] sm:max-w-[40%] truncate">
+                        {p.model}
+                      </Badge>
+                      <div className="flex gap-0.5 shrink-0 ml-auto">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          title="探测能力"
+                          onClick={(e) => { e.stopPropagation(); handleProbeOne(p.name); }}
+                          disabled={probingKey === p.name}
+                        >
+                          {probingKey === p.name ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Zap className="h-3 w-3" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingProfile(p.name);
+                            setNewProfile(false);
+                            setProfileDraft({
+                              name: p.name,
+                              model: p.model,
+                              api_key: "",
+                              base_url: p.base_url,
+                              description: p.description,
+                              protocol: p.protocol || "auto",
+                            });
+                            scrollToForm();
+                          }}
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 text-destructive"
+                          onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.name); }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                      {isModelUnhealthy(pCaps) ? (
+                        <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          不可用
+                        </span>
+                      ) : (
+                        <CapabilityBadges caps={pCaps ?? null} />
+                      )}
+                      {!isModelUnhealthy(pCaps) && p.description && (
+                        <span className="text-[11px] text-muted-foreground truncate">· {p.description}</span>
+                      )}
+                    </div>
+                    {isModelUnhealthy(pCaps) && (
+                      <p className="text-[10px] text-destructive truncate mt-0.5" title={getHealthError(pCaps)}>
+                        {getHealthError(pCaps) || "连接失败"}
+                      </p>
+                    )}
+                  </div>
+                  );
+                })}
+                {config?.profiles.length === 0 && !newProfile && (
+                  <p className="text-xs text-muted-foreground text-center py-3">
+                    暂无多模型配置，点击"新增"添加
                   </p>
                 )}
               </div>
-              );
-            })}
-            {config?.profiles.length === 0 && !newProfile && (
-              <p className="text-xs text-muted-foreground text-center py-4">
-                暂无多模型配置，点击"新增模型"添加
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Model Capabilities Detail */}
-        <Separator />
-        <div>
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <div className="min-w-0">
-              <h3 className="font-semibold text-sm flex items-center gap-1.5">
-                <Zap className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-                模型能力详情
-              </h3>
-              <p className="text-xs text-muted-foreground truncate">
-                当前主模型: {config?.main?.model || "未配置"}
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-xs gap-1 flex-shrink-0"
-              onClick={handleProbeAll}
-              disabled={probingAll}
-            >
-              {probingAll ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Zap className="h-3 w-3" />
-              )}
-              {probingAll ? "探测中..." : "一键探测全部"}
-            </Button>
-          </div>
-
-          {capsMap.main ? (
-            <div className="space-y-2">
-              <CapabilityRow
-                icon={<Wrench className="h-3.5 w-3.5" />}
-                label="工具调用 (Tool Calling)"
-                desc="模型是否支持 function calling"
-                value={capsMap.main.supports_tool_calling}
-                error={capsMap.main.probe_errors?.tool_calling}
-                onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_tool_calling", v)}
-              />
-              <CapabilityRow
-                icon={<ImageIcon className="h-3.5 w-3.5" />}
-                label="图像识别 (Vision)"
-                desc="模型是否支持图片输入"
-                value={capsMap.main.supports_vision}
-                error={capsMap.main.probe_errors?.vision}
-                onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_vision", v)}
-              />
-              <CapabilityRow
-                icon={<Brain className="h-3.5 w-3.5" />}
-                label="思考输出 (Thinking)"
-                desc={capsMap.main.thinking_type ? `类型: ${capsMap.main.thinking_type}` : "模型是否支持输出推理过程"}
-                value={capsMap.main.supports_thinking}
-                error={capsMap.main.probe_errors?.thinking}
-                onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_thinking", v)}
-              />
-              {capsMap.main.detected_at && (
-                <p className="text-[10px] text-muted-foreground mt-2">
-                  上次探测: {new Date(capsMap.main.detected_at).toLocaleString()}
-                  {capsMap.main.manual_override && (
-                    <Badge variant="secondary" className="ml-1.5 text-[9px]">手动覆盖</Badge>
-                  )}
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="text-center py-6">
-              <p className="text-xs text-muted-foreground mb-2">
-                尚未探测模型能力
-              </p>
-              <Button
-                size="sm"
-                className="h-7 text-xs gap-1 text-white"
-                style={{ backgroundColor: "var(--em-primary)" }}
-                onClick={handleProbeAll}
-                disabled={probingAll}
-              >
-                {probingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-                一键探测全部
-              </Button>
             </div>
           )}
         </div>
 
-        {/* Thinking 配置 */}
-        <Separator />
+        {/* ── Advanced section with pills ── */}
+        <Separator className="my-1" />
         <div>
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <div className="min-w-0">
-              <h3 className="font-semibold text-sm flex items-center gap-1.5">
-                <Brain className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-                推理深度 (Thinking)
-              </h3>
+          {/* Pills navigation */}
+          <div className="flex items-center gap-1 mb-3 overflow-x-auto scrollbar-none">
+            {([
+              { key: "capabilities" as const, label: "能力探测", icon: <Zap className="h-3 w-3" /> },
+              { key: "thinking" as const, label: "推理深度", icon: <Brain className="h-3 w-3" /> },
+              { key: "transfer" as const, label: "导入导出", icon: <Download className="h-3 w-3" /> },
+            ] as const).map((pill) => {
+              const isActive = advancedPill === pill.key;
+              return (
+                <button
+                  key={pill.key}
+                  type="button"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
+                    isActive
+                      ? "text-white border-transparent"
+                      : "border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                  }`}
+                  style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
+                  onClick={() => setAdvancedPill(pill.key)}
+                >
+                  {pill.icon}
+                  {pill.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* ── Capabilities pill ── */}
+          {advancedPill === "capabilities" && (
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground truncate">
+                    当前主模型: {config?.main?.model || "未配置"}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs gap-1 flex-shrink-0"
+                  onClick={handleProbeAll}
+                  disabled={probingAll}
+                >
+                  {probingAll ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Zap className="h-3 w-3" />
+                  )}
+                  {probingAll ? "探测中..." : "一键探测全部"}
+                </Button>
+              </div>
+
+              {capsMap.main ? (
+                <div className="space-y-2">
+                  <CapabilityRow
+                    icon={<Wrench className="h-3.5 w-3.5" />}
+                    label="工具调用 (Tool Calling)"
+                    desc="模型是否支持 function calling"
+                    value={capsMap.main.supports_tool_calling}
+                    error={capsMap.main.probe_errors?.tool_calling}
+                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_tool_calling", v)}
+                  />
+                  <CapabilityRow
+                    icon={<ImageIcon className="h-3.5 w-3.5" />}
+                    label="图像识别 (Vision)"
+                    desc="模型是否支持图片输入"
+                    value={capsMap.main.supports_vision}
+                    error={capsMap.main.probe_errors?.vision}
+                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_vision", v)}
+                  />
+                  <CapabilityRow
+                    icon={<Brain className="h-3.5 w-3.5" />}
+                    label="思考输出 (Thinking)"
+                    desc={capsMap.main.thinking_type ? `类型: ${capsMap.main.thinking_type}` : "模型是否支持输出推理过程"}
+                    value={capsMap.main.supports_thinking}
+                    error={capsMap.main.probe_errors?.thinking}
+                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_thinking", v)}
+                  />
+                  {capsMap.main.detected_at && (
+                    <p className="text-[10px] text-muted-foreground mt-2">
+                      上次探测: {new Date(capsMap.main.detected_at).toLocaleString()}
+                      {capsMap.main.manual_override && (
+                        <Badge variant="secondary" className="ml-1.5 text-[9px]">手动覆盖</Badge>
+                      )}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-6">
+                  <p className="text-xs text-muted-foreground mb-2">
+                    尚未探测模型能力
+                  </p>
+                  <Button
+                    size="sm"
+                    className="h-7 text-xs gap-1 text-white"
+                    style={{ backgroundColor: "var(--em-primary)" }}
+                    onClick={handleProbeAll}
+                    disabled={probingAll}
+                  >
+                    {probingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                    一键探测全部
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Thinking pill ── */}
+          {advancedPill === "thinking" && (
+            <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
                 控制模型思考链的深度，影响推理质量和 token 消耗
               </p>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {/* Effort 等级选择器 */}
-            <div>
-              <label className="text-xs text-muted-foreground mb-1.5 block">思考等级</label>
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 sm:gap-1">
-                {(["none", "minimal", "low", "medium", "high", "xhigh"] as const).map((level) => {
-                  const labels: Record<string, string> = {
-                    none: "关闭", minimal: "极简", low: "低",
-                    medium: "中", high: "高", xhigh: "极高",
-                  };
-                  const isActive = thinkingEffort === level;
-                  return (
-                    <button
-                      key={level}
-                      className={`px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border ${
-                        isActive
-                          ? "text-white border-transparent"
-                          : "border-border text-muted-foreground hover:bg-muted/60"
-                      }`}
-                      style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
-                      onClick={() => {
-                        setThinkingEffort(level);
-                        handleSaveThinking(level, thinkingBudget);
-                      }}
-                      disabled={thinkingSaving}
-                    >
-                      {labels[level]}
-                    </button>
-                  );
-                })}
+              <div>
+                <label className="text-xs text-muted-foreground mb-1.5 block">思考等级</label>
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 sm:gap-1">
+                  {(["none", "minimal", "low", "medium", "high", "xhigh"] as const).map((level) => {
+                    const labels: Record<string, string> = {
+                      none: "关闭", minimal: "极简", low: "低",
+                      medium: "中", high: "高", xhigh: "极高",
+                    };
+                    const isActive = thinkingEffort === level;
+                    return (
+                      <button
+                        key={level}
+                        className={`px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border ${
+                          isActive
+                            ? "text-white border-transparent"
+                            : "border-border text-muted-foreground hover:bg-muted/60"
+                        }`}
+                        style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
+                        onClick={() => {
+                          setThinkingEffort(level);
+                          handleSaveThinking(level, thinkingBudget);
+                        }}
+                        disabled={thinkingSaving}
+                      >
+                        {labels[level]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1.5 block">
+                  Token 预算（可选，留空则按等级自动换算）
+                </label>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <Input
+                    value={thinkingBudget}
+                    onChange={(e) => setThinkingBudget(e.target.value.replace(/\D/g, ""))}
+                    className="h-8 text-xs font-mono w-full sm:w-32"
+                    placeholder="自动"
+                    inputMode="numeric"
+                  />
+                  <Button
+                    size="sm"
+                    className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
+                    style={{ backgroundColor: "var(--em-primary)" }}
+                    onClick={() => handleSaveThinking(thinkingEffort, thinkingBudget)}
+                    disabled={thinkingSaving}
+                  >
+                    {thinkingSaving ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : thinkingSaved ? (
+                      <CheckCircle2 className="h-3 w-3" />
+                    ) : (
+                      <Save className="h-3 w-3" />
+                    )}
+                    {thinkingSaved ? "已保存" : "保存"}
+                  </Button>
+                </div>
+                {thinkingEffectiveBudget > 0 && (
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    当前生效预算: {thinkingEffectiveBudget.toLocaleString()} tokens
+                  </p>
+                )}
               </div>
             </div>
+          )}
 
-            {/* Budget 精确预算 */}
-            <div>
-              <label className="text-xs text-muted-foreground mb-1.5 block">
-                Token 预算（可选，留空则按等级自动换算）
-              </label>
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                <Input
-                  value={thinkingBudget}
-                  onChange={(e) => setThinkingBudget(e.target.value.replace(/\D/g, ""))}
-                  className="h-8 text-xs font-mono w-full sm:w-32"
-                  placeholder="自动"
-                  inputMode="numeric"
-                />
-                <Button
-                  size="sm"
-                  className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                  onClick={() => handleSaveThinking(thinkingEffort, thinkingBudget)}
-                  disabled={thinkingSaving}
-                >
-                  {thinkingSaving ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : thinkingSaved ? (
-                    <CheckCircle2 className="h-3 w-3" />
-                  ) : (
-                    <Save className="h-3 w-3" />
-                  )}
-                  {thinkingSaved ? "已保存" : "保存"}
-                </Button>
-              </div>
-              {thinkingEffectiveBudget > 0 && (
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  当前生效预算: {thinkingEffectiveBudget.toLocaleString()} tokens
-                </p>
-              )}
-            </div>
-          </div>
+          {/* ── Transfer pill ── */}
+          {advancedPill === "transfer" && (
+            <ConfigTransferPanel config={config} />
+          )}
         </div>
-
-        {/* Config Export / Import */}
-        <Separator />
-        <ConfigTransferPanel config={config} />
     </div>
   );
 }
@@ -1413,19 +1476,19 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
               : "导出个人 LLM 配置，加密备份或迁移"}
           </p>
         </div>
-        <div className="flex gap-1.5 flex-shrink-0">
+        <div className="flex gap-1.5 flex-shrink-0 flex-wrap">
           {mode !== "export" && (
-            <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => { resetState(); setMode("export"); }}>
+            <Button size="sm" variant="outline" className="h-8 sm:h-7 text-xs gap-1" onClick={() => { resetState(); setMode("export"); }}>
               <Download className="h-3 w-3" /> 导出
             </Button>
           )}
           {mode !== "import" && (
-            <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => { resetState(); setMode("import"); }}>
+            <Button size="sm" variant="outline" className="h-8 sm:h-7 text-xs gap-1" onClick={() => { resetState(); setMode("import"); }}>
               <Upload className="h-3 w-3" /> 导入
             </Button>
           )}
           {mode !== "idle" && (
-            <Button size="sm" variant="ghost" className="h-7 text-xs gap-1" onClick={resetState}>
+            <Button size="sm" variant="ghost" className="h-8 sm:h-7 text-xs gap-1" onClick={resetState}>
               <X className="h-3 w-3" /> 关闭
             </Button>
           )}

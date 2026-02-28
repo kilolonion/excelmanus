@@ -123,6 +123,11 @@ export type AssistantBlock =
   | {
       type: "config_error";
       items: { name: string; field: string; model: string }[];
+    }
+  | {
+      type: "staging_hint";
+      pendingCount: number;
+      files: string[];
     };
 
 export interface TaskItem {

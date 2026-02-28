@@ -10,6 +10,8 @@ import {
   FolderTree,
   List,
   Folder,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import {
   Tooltip,
@@ -30,11 +32,12 @@ import {
   workspaceDeleteItem,
 } from "@/lib/api";
 import { isExcelFile } from "@/components/ui/file-type-icon";
-import { buildTree } from "./file-tree-helpers";
+import { buildTree, filterWorkspaceFiles } from "./file-tree-helpers";
 import { InlineCreateInput } from "./InlineInputs";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
+import { StorageBar } from "./StorageBar";
 
 const ALL_EXTENSIONS = ".xlsx,.xls,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
 
@@ -84,6 +87,14 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const workspaceFiles = useExcelStore((s) => s.workspaceFiles);
   const wsFilesLoaded = useExcelStore((s) => s.wsFilesLoaded);
   const refreshWorkspaceFiles = useExcelStore((s) => s.refreshWorkspaceFiles);
+  const showSystemFiles = useExcelStore((s) => s.showSystemFiles);
+  const toggleShowSystemFiles = useExcelStore((s) => s.toggleShowSystemFiles);
+
+  // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
+  const visibleFiles = useMemo(
+    () => filterWorkspaceFiles(workspaceFiles, showSystemFiles),
+    [workspaceFiles, showSystemFiles],
+  );
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const currentUserId = useAuthStore((s) => s.user?.id ?? "__anonymous__");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -99,8 +110,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     return m;
   }, [recentFiles]);
 
-  // 视图模式：扁平列表 vs 文件夹树
-  const [treeView, setTreeView] = useState(true);
+  // 视图模式：扁平列表 vs 文件夹树（默认列表视图）
+  const [treeView, setTreeView] = useState(false);
 
   // 多选模式
   const [selectMode, setSelectMode] = useState(false);
@@ -125,7 +136,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     });
   }, []);
 
-  const wsFilePaths = workspaceFiles.filter((f) => !f.is_dir).map((f) => f.path);
+  const wsFilePaths = visibleFiles.filter((f) => !f.is_dir).map((f) => f.path);
+  const totalFileCount = workspaceFiles.filter((f) => !f.is_dir).length;
+  const hiddenCount = totalFileCount - wsFilePaths.length;
 
   const toggleSelectAll = useCallback(() => {
     setSelectedPaths((prev) => {
@@ -279,7 +292,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const isDeleteAll = pendingRemovePaths.length === wsFilePaths.length && wsFilePaths.length > 0;
 
   // 空状态：仅非嵌入时显示（父组件控制可见性）
-  if (wsFilePaths.length === 0 && !embedded) {
+  if (totalFileCount === 0 && !embedded) {
     return (
       <div className="px-3 pb-2">
         <div className="flex items-center justify-between mb-1.5">
@@ -330,7 +343,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     );
   }
 
-  if (wsFilePaths.length === 0 && !wsFilesLoaded && !embedded) return null;
+  if (totalFileCount === 0 && !wsFilesLoaded && !embedded) return null;
 
   return (
     <div className={embedded ? "px-2 py-1" : "px-3 pb-2"}>
@@ -341,6 +354,17 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             工作区文件
           </span>
           <div className="flex items-center gap-0.5">
+            <button
+              onClick={toggleShowSystemFiles}
+              className={`min-h-8 min-w-8 flex items-center justify-center rounded transition-all duration-150 ease-out ${
+                showSystemFiles
+                  ? "text-foreground bg-accent"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent/60"
+              }`}
+              title={showSystemFiles ? "隐藏系统文件" : `显示系统文件${hiddenCount > 0 ? ` (已隐藏 ${hiddenCount})` : ""}`}
+            >
+              {showSystemFiles ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+            </button>
             <button
               onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
               className={`min-h-8 min-w-8 flex items-center justify-center rounded transition-all duration-150 ease-out ${
@@ -403,6 +427,21 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
+                    onClick={toggleShowSystemFiles}
+                    className={`h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
+                      showSystemFiles
+                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
+                        : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
+                    }`}
+                  >
+                    {showSystemFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{showSystemFiles ? "隐藏系统文件" : `显示系统文件${hiddenCount > 0 ? ` (已隐藏 ${hiddenCount})` : ""}`}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
                     onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
                     className={`h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
                       selectMode
@@ -456,6 +495,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         </TooltipProvider>
       )}
 
+      {/* Storage progress bar */}
+      {embedded && <StorageBar />}
+
       {/* Multi-select action bar */}
       {selectMode && (
         <div className="flex items-center gap-1 mb-1 px-1">
@@ -499,7 +541,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             </div>
           )}
           <FileTreeView
-            files={workspaceFiles}
+            files={visibleFiles}
             sessionId={activeSessionId ?? undefined}
             panelOpen={panelOpen}
             activeFilePath={activeFilePath}
@@ -518,7 +560,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         </>
       ) : (
         <FlatFileListView
-          files={workspaceFiles}
+          files={visibleFiles}
           recentTimestamps={recentTimestamps}
           sessionId={activeSessionId ?? undefined}
           panelOpen={panelOpen}
@@ -538,7 +580,11 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       {wsFilesLoaded && wsFilePaths.length === 0 && embedded && (
         <div className="flex flex-col items-center gap-2 py-4 text-center">
           <FileSpreadsheet className="h-6 w-6 text-muted-foreground/40" />
-          <span className="text-[11px] text-muted-foreground/60">暂无文件，点击上方 + 上传</span>
+          <span className="text-[11px] text-muted-foreground/60">
+            {hiddenCount > 0
+              ? `${hiddenCount} 个系统文件已隐藏，点击眼睛图标显示`
+              : "暂无文件，点击上方 + 上传"}
+          </span>
         </div>
       )}
 

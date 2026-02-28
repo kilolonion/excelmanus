@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { normalizeExcelPath } from "@/lib/api";
 import { FilePathLink, isFilePath } from "./FilePathLink";
+import { isCodeFile } from "./CodePreviewModal";
 
 const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
 
@@ -167,9 +168,20 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
       continue;
     }
 
-    const isExcelMention =
-      (token.kind === "file" || token.kind === "bare-file") &&
-      isExcel(token.value);
+    const isFileMention = token.kind === "file" || token.kind === "bare-file";
+    const isExcelMention = isFileMention && isExcel(token.value);
+    const isPreviewable = isFileMention && !isExcelMention && isCodeFile(token.value);
+
+    // 可预览的文本/代码文件 → 通过 FilePathLink 打开预览弹窗
+    if (isPreviewable) {
+      parts.push(
+        <FilePathLink key={`m-${token.start}`} filePath={token.value} variant="text">
+          {token.raw}
+        </FilePathLink>
+      );
+      cursor = token.end;
+      continue;
+    }
 
     parts.push(
       <span

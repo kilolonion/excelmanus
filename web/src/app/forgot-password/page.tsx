@@ -148,22 +148,29 @@ export default function ForgotPasswordPage() {
   }, [email, resendCooldown, resendLoading]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 relative overflow-hidden">
+      <div className="auth-bg-orb auth-bg-orb-1" />
+      <div className="auth-bg-orb auth-bg-orb-2" />
       <AnimatePresence mode="wait">
         {/* ── Step 1: Enter email ── */}
         {step === "email" && (
           <motion.div
             key="email"
-            className="w-full max-w-[400px] space-y-6"
+            className="w-full max-w-[420px] auth-card relative z-10"
             variants={cardVariants}
             initial="hidden"
             animate="visible"
             exit={{ opacity: 0, y: -16, transition: { duration: 0.2 } }}
           >
-            <div className="text-center space-y-2">
-              <img src="/logo.svg" alt="ExcelManus" className="h-12 w-auto mx-auto" />
-              <h1 className="text-2xl font-bold tracking-tight">找回密码</h1>
-              <p className="text-muted-foreground text-sm">输入您的注册邮箱，我们将发送验证码</p>
+            <div className="space-y-6">
+            <div className="text-center space-y-3">
+              <div className="auth-logo-glow inline-block">
+                <img src="/logo.svg" alt="ExcelManus" className="h-14 w-auto mx-auto relative" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight">找回密码</h1>
+                <p className="text-muted-foreground text-sm mt-1">输入您的注册邮箱，我们将发送验证码</p>
+              </div>
             </div>
 
             <AnimatePresence>
@@ -191,7 +198,7 @@ export default function ForgotPasswordPage() {
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full h-11 rounded-lg border border-border bg-background px-3 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+                  className="auth-input w-full h-11 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none placeholder:text-muted-foreground/50"
                   placeholder="you@example.com"
                 />
               </div>
@@ -199,8 +206,7 @@ export default function ForgotPasswordPage() {
               <Button
                 type="submit"
                 disabled={!email.trim() || loading}
-                className="w-full h-11 text-white font-medium"
-                style={{ backgroundColor: "var(--em-primary)" }}
+                className="auth-btn-primary w-full h-11 text-white font-medium border-0"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "发送验证码"}
               </Button>
@@ -212,6 +218,7 @@ export default function ForgotPasswordPage() {
                 返回登录
               </Link>
             </p>
+            </div>
           </motion.div>
         )}
 
@@ -219,12 +226,13 @@ export default function ForgotPasswordPage() {
         {step === "code" && (
           <motion.div
             key="code"
-            className="w-full max-w-[400px] space-y-6"
+            className="w-full max-w-[420px] auth-card relative z-10"
             variants={cardVariants}
             initial="hidden"
             animate="visible"
             exit={{ opacity: 0, y: -16, transition: { duration: 0.2 } }}
           >
+            <div className="space-y-6">
             <div className="text-center space-y-3">
               <div className="flex items-center justify-center w-16 h-16 mx-auto rounded-2xl bg-[var(--em-primary)]/10">
                 <MailCheck className="h-8 w-8 text-[var(--em-primary)]" />
@@ -267,7 +275,7 @@ export default function ForgotPasswordPage() {
                     minLength={8}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    className="w-full h-11 rounded-lg border border-border bg-background px-3 pr-10 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+                    className="auth-input w-full h-11 rounded-lg border border-border bg-background px-3 pr-10 text-sm focus:outline-none placeholder:text-muted-foreground/50"
                     placeholder="至少 8 个字符"
                   />
                   <button
@@ -287,8 +295,7 @@ export default function ForgotPasswordPage() {
               <Button
                 type="submit"
                 disabled={code.length !== 6 || newPassword.length < 8 || loading}
-                className="w-full h-11 text-white font-medium"
-                style={{ backgroundColor: "var(--em-primary)" }}
+                className="auth-btn-primary w-full h-11 text-white font-medium border-0"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "重置密码"}
               </Button>
@@ -322,6 +329,7 @@ export default function ForgotPasswordPage() {
                 ← 返回修改邮箱
               </button>
             </div>
+            </div>
           </motion.div>
         )}
 
@@ -329,11 +337,12 @@ export default function ForgotPasswordPage() {
         {step === "done" && (
           <motion.div
             key="done"
-            className="w-full max-w-[400px] space-y-6 text-center"
+            className="w-full max-w-[420px] auth-card relative z-10 text-center"
             variants={cardVariants}
             initial="hidden"
             animate="visible"
           >
+            <div className="space-y-6">
             <div className="space-y-3">
               <div className="flex items-center justify-center w-16 h-16 mx-auto rounded-2xl bg-green-500/10">
                 <CheckCircle2 className="h-8 w-8 text-green-500" />
@@ -346,11 +355,11 @@ export default function ForgotPasswordPage() {
 
             <Button
               onClick={() => router.push("/login")}
-              className="w-full h-11 text-white font-medium"
-              style={{ backgroundColor: "var(--em-primary)" }}
+              className="auth-btn-primary w-full h-11 text-white font-medium border-0"
             >
               前往登录
             </Button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

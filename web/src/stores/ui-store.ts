@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { getIsMobile, getIsDesktop } from "@/hooks/use-mobile";
 
 interface UIState {
@@ -10,6 +11,8 @@ interface UIState {
   thinkingEffort: string;
   settingsOpen: boolean;
   settingsTab: string;
+  profileOpen: boolean;
+  adminOpen: boolean;
   configReady: boolean | null;
   configError: string | null;
   configPlaceholderItems: { name: string; field: string; model: string }[];
@@ -22,12 +25,18 @@ interface UIState {
   setThinkingEffort: (effort: string) => void;
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
+  openProfile: () => void;
+  closeProfile: () => void;
+  openAdmin: () => void;
+  closeAdmin: () => void;
   setConfigReady: (ready: boolean) => void;
   setConfigError: (error: string | null) => void;
   setConfigPlaceholderItems: (items: { name: string; field: string; model: string }[]) => void;
 }
 
-export const useUIStore = create<UIState>((set) => ({
+export const useUIStore = create<UIState>()(
+  persist(
+    (set) => ({
   // 只有在桌面端（>=1280px）时才默认打开侧边栏
   sidebarOpen: !getIsMobile() && getIsDesktop(),
   currentModel: "",
@@ -37,6 +46,8 @@ export const useUIStore = create<UIState>((set) => ({
   thinkingEffort: "medium",
   settingsOpen: false,
   settingsTab: "model",
+  profileOpen: false,
+  adminOpen: false,
   configReady: null,
   configError: null,
   configPlaceholderItems: [],
@@ -49,7 +60,17 @@ export const useUIStore = create<UIState>((set) => ({
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab || "model" }),
   closeSettings: () => set({ settingsOpen: false }),
+  openProfile: () => set({ profileOpen: true }),
+  closeProfile: () => set({ profileOpen: false }),
+  openAdmin: () => set({ adminOpen: true }),
+  closeAdmin: () => set({ adminOpen: false }),
   setConfigReady: (ready) => set({ configReady: ready, ...(ready ? { configError: null } : {}) }),
   setConfigError: (error) => set({ configError: error }),
   setConfigPlaceholderItems: (items) => set({ configPlaceholderItems: items }),
-}));
+    }),
+    {
+      name: "excelmanus-ui",
+      partialize: (state) => ({ fullAccessEnabled: state.fullAccessEnabled }),
+    }
+  )
+);

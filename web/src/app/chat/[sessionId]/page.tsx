@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useParams } from "next/navigation";
 import { MessageStream } from "@/components/chat/MessageStream";
 import { ChatInput } from "@/components/chat/ChatInput";
-import { QuestionPanel } from "@/components/modals/QuestionPanel";
 import { CommandResultDialog, useCommandResult } from "@/components/modals/CommandResultDialog";
 import { ExcelFullView } from "@/components/excel/ExcelFullView";
 import { useChatStore } from "@/stores/chat-store";
@@ -21,7 +20,6 @@ function ChatPage() {
   const sessionId = params.sessionId as string;
   const messages = useChatStore((s) => s.messages);
   const isStreaming = useChatStore((s) => s.isStreaming);
-  const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const cmdResult = useCommandResult();
@@ -49,11 +47,11 @@ function ChatPage() {
               onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
                 rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
               }}
-              onRetry={(assistantMessageId: string) => {
-                retryAssistantMessage(assistantMessageId, sessionId);
+              onRetry={(assistantMessageId: string, rollbackFiles?: boolean) => {
+                retryAssistantMessage(assistantMessageId, sessionId, undefined, rollbackFiles);
               }}
-              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-                retryAssistantMessage(assistantMessageId, sessionId, modelName);
+              onRetryWithModel={(assistantMessageId: string, modelName: string, rollbackFiles?: boolean) => {
+                retryAssistantMessage(assistantMessageId, sessionId, modelName, rollbackFiles);
               }}
             />
           </motion.div>
@@ -62,7 +60,6 @@ function ChatPage() {
 
       <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">
-          {pendingQuestion && <QuestionPanel />}
           <ChatInput
             onSend={handleSend}
             onCommandResult={cmdResult.show}

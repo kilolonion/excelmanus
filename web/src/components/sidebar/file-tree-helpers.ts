@@ -86,6 +86,57 @@ export function countFiles(node: TreeNode): number {
   return node.children.reduce((sum, c) => sum + countFiles(c), 0);
 }
 
+/* ── System file filtering ── */
+
+/** Directory names considered internal / system (hidden by default). */
+const SYSTEM_DIR_NAMES = new Set([
+  "scripts", "outputs", "backups", "originals",
+  "__pycache__", "node_modules", ".versions",
+]);
+
+/** File extensions considered internal / system (hidden by default). */
+const SYSTEM_EXTENSIONS = new Set([
+  ".py", ".pyc", ".pyo",
+  ".log",
+  ".db", ".db-shm", ".db-wal",
+  ".sh", ".bat", ".ps1",
+]);
+
+/** Check whether a workspace file entry is a "system" file that should be hidden by default. */
+export function isSystemFile(entry: { path: string; filename: string; is_dir?: boolean }): boolean {
+  const normalized = normalizePath(entry.path);
+  const parts = normalized.split("/").filter(Boolean);
+
+  // Directory: check if top-level dir name is a system dir
+  if (entry.is_dir) {
+    const topDir = parts[0]?.toLowerCase();
+    return SYSTEM_DIR_NAMES.has(topDir ?? "");
+  }
+
+  // File inside a system directory
+  if (parts.length >= 2) {
+    const topDir = parts[0].toLowerCase();
+    if (SYSTEM_DIR_NAMES.has(topDir)) return true;
+  }
+
+  // File at root level: check extension
+  const name = entry.filename.toLowerCase();
+  for (const ext of SYSTEM_EXTENSIONS) {
+    if (name.endsWith(ext)) return true;
+  }
+
+  return false;
+}
+
+/** Filter workspace files, optionally hiding system files. */
+export function filterWorkspaceFiles(
+  files: { path: string; filename: string; is_dir?: boolean }[],
+  showSystem: boolean,
+): { path: string; filename: string; is_dir?: boolean }[] {
+  if (showSystem) return files;
+  return files.filter((f) => !isSystemFile(f));
+}
+
 /** Check if a folder name indicates it's a backup/origin folder */
 export function isSysFolderName(name: string): string | null {
   const lower = name.toLowerCase();

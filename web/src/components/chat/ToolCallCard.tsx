@@ -28,9 +28,11 @@ import {
 } from "@/components/ui/collapsible";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
+import { useChatStore } from "@/stores/chat-store";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
 import { TextDiffView } from "./TextDiffView";
+import { TextPreviewView } from "./TextPreviewView";
 import StreamingTextPreview from "./StreamingTextPreview";
 import { CodeBlock } from "./CodeBlock";
 
@@ -195,6 +197,7 @@ const EXCEL_DIFF_TOOLS = new Set([
 const TEXT_DIFF_TOOLS = new Set([
   "write_text_file", "edit_text_file", "run_code", "write_plan",
 ]);
+const TEXT_PREVIEW_TOOLS = new Set(["read_text_file"]);
 
 interface ToolCallCardProps {
   toolCallId?: string;
@@ -232,6 +235,11 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
       : null
   );
 
+  // 工具级进度（VLM 管线 / B 通道等长耗时操作）
+  const toolProgress = useChatStore((s) =>
+    toolCallId ? s.toolProgress[toolCallId] ?? null : null
+  );
+
   useEffect(() => {
     if (status !== "running" && !isStreaming) {
       startRef.current = null;
@@ -258,6 +266,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   );
   const canHaveDiff = EXCEL_DIFF_TOOLS.has(name);
   const canHaveTextDiff = TEXT_DIFF_TOOLS.has(name);
+  const canHaveTextPreview = TEXT_PREVIEW_TOOLS.has(name);
   
   // 使用 useMemo 缓存 diffs 计算结果，避免无限循环
   const allDiffs = useExcelStore((s) => s.diffs);
@@ -271,6 +280,10 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     if (!toolCallId || !canHaveTextDiff) return [];
     return allTextDiffs.filter((d) => d.toolCallId === toolCallId);
   }, [toolCallId, canHaveTextDiff, allTextDiffs]);
+
+  const textPreview = useExcelStore((s) =>
+    toolCallId && canHaveTextPreview ? s.textPreviews[toolCallId] : undefined
+  );
 
   // 按文件去重获取涉及的文件路径
   const diffFilePaths = useMemo(
@@ -324,7 +337,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
       : `${theme.cardBg} ${theme.cardHover}`;
 
   return (
-    <div className={`my-1 rounded-lg ${isSuccess ? "animate-tool-success-flash" : ""}`}>
+    <div className={`my-1 rounded-lg relative ${isSuccess ? "animate-tool-success-flash tool-success-sparkle" : ""}`}>
       <Collapsible open={open} onOpenChange={handleOpenChange}>
         <CollapsibleTrigger
           className={`group/card flex items-center gap-0 rounded-lg border transition-all duration-200 w-full text-left text-sm overflow-hidden hover:shadow-sm ${borderCls} ${bgCls}`}
@@ -369,6 +382,16 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
                   <span className="text-[10px] text-indigo-600 dark:text-indigo-400 tabular-nums font-medium">
                     {Math.max(Math.round((args.seconds as number) - elapsed), 0)}s
                   </span>
+                </span>
+              )}
+              {isRunning && toolProgress && (
+                <span className="flex items-center gap-1 max-w-[200px]">
+                  <span className="text-[10px] text-[var(--em-cyan)] truncate">{toolProgress.message}</span>
+                  {toolProgress.phaseIndex != null && toolProgress.totalPhases != null && (
+                    <span className="text-[9px] text-muted-foreground/60 tabular-nums flex-shrink-0">
+                      {toolProgress.phaseIndex + 1}/{toolProgress.totalPhases}
+                    </span>
+                  )}
                 </span>
               )}
               {isRunning && !(name === "sleep" && typeof args.seconds === "number") && elapsed > 0 && (
@@ -437,6 +460,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
           ))}
         </div>
       )}
+
+      {/* 文本文件预览 — read_text_file 有数据时显示 */}
+      {textPreview && <TextPreviewView data={textPreview} />}
 
       {/* Excel 内联预览/差异 — 有数据时始终显示 */}
       {preview && <ExcelPreviewTable data={preview} />}

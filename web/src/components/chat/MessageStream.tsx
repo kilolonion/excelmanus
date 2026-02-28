@@ -16,8 +16,8 @@ interface MessageStreamProps {
   messages: Message[];
   isStreaming: boolean;
   onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => void;
-  onRetry?: (assistantMessageId: string) => void;
-  onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
+  onRetry?: (assistantMessageId: string, rollbackFiles?: boolean) => void;
+  onRetryWithModel?: (assistantMessageId: string, modelName: string, rollbackFiles?: boolean) => void;
 }
 
 const TIMESTAMP_GAP_MS = 5 * 60 * 1000; // 5 分钟
@@ -77,12 +77,14 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
   const [rollbackDialog, setRollbackDialog] = useState<{
     open: boolean;
+    mode: "edit" | "retry";
     messageId: string;
     newContent: string;
     turnIndex: number;
     files?: File[];
     retainedFiles?: FileAttachment[];
-  }>({ open: false, messageId: "", newContent: "", turnIndex: 0 });
+    switchToModel?: string;
+  }>({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
 
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -239,25 +241,113 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       for (let i = 0; i < msgIndex; i++) {
         if (messages[i].role === "user") turnIdx++;
       }
-      setRollbackDialog({ open: true, messageId, newContent, turnIndex: turnIdx, files, retainedFiles });
+      setRollbackDialog({ open: true, mode: "edit", messageId, newContent, turnIndex: turnIdx, files, retainedFiles });
     },
     [onEditAndResend, messages]
   );
 
+  const handleRetry = useCallback(
+    (assistantMessageId: string) => {
+      if (!onRetry) return;
+
+      const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
+      if (assistantIdx === -1) { onRetry(assistantMessageId); return; }
+
+      // 找到该 assistant 前面最近的 user 消息
+      let userIdx = -1;
+      for (let i = assistantIdx - 1; i >= 0; i--) {
+        if (messages[i].role === "user") { userIdx = i; break; }
+      }
+      if (userIdx === -1) { onRetry(assistantMessageId); return; }
+
+      // 检查该 user 消息之后是否有工具调用（文件变更）
+      let hasFileChanges = false;
+      for (let i = userIdx + 1; i < messages.length; i++) {
+        const m = messages[i];
+        if (m.role === "assistant" && m.blocks.some((b) => b.type === "tool_call")) {
+          hasFileChanges = true;
+          break;
+        }
+      }
+
+      if (!hasFileChanges) { onRetry(assistantMessageId); return; }
+
+      const pref = getRollbackFilePreference();
+      if (pref !== null) {
+        onRetry(assistantMessageId, pref === "always_rollback");
+        return;
+      }
+
+      let turnIdx = 0;
+      for (let i = 0; i < userIdx; i++) {
+        if (messages[i].role === "user") turnIdx++;
+      }
+      setRollbackDialog({ open: true, mode: "retry", messageId: assistantMessageId, newContent: "", turnIndex: turnIdx });
+    },
+    [onRetry, messages]
+  );
+
+  const handleRetryWithModel = useCallback(
+    (assistantMessageId: string, modelName: string) => {
+      if (!onRetryWithModel) return;
+
+      const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
+      if (assistantIdx === -1) { onRetryWithModel(assistantMessageId, modelName); return; }
+
+      let userIdx = -1;
+      for (let i = assistantIdx - 1; i >= 0; i--) {
+        if (messages[i].role === "user") { userIdx = i; break; }
+      }
+      if (userIdx === -1) { onRetryWithModel(assistantMessageId, modelName); return; }
+
+      let hasFileChanges = false;
+      for (let i = userIdx + 1; i < messages.length; i++) {
+        const m = messages[i];
+        if (m.role === "assistant" && m.blocks.some((b) => b.type === "tool_call")) {
+          hasFileChanges = true;
+          break;
+        }
+      }
+
+      if (!hasFileChanges) { onRetryWithModel(assistantMessageId, modelName); return; }
+
+      const pref = getRollbackFilePreference();
+      if (pref !== null) {
+        onRetryWithModel(assistantMessageId, modelName, pref === "always_rollback");
+        return;
+      }
+
+      let turnIdx = 0;
+      for (let i = 0; i < userIdx; i++) {
+        if (messages[i].role === "user") turnIdx++;
+      }
+      setRollbackDialog({ open: true, mode: "retry", messageId: assistantMessageId, newContent: "", turnIndex: turnIdx, switchToModel: modelName });
+    },
+    [onRetryWithModel, messages]
+  );
+
   const handleRollbackConfirm = useCallback(
     (rollbackFiles: boolean) => {
-      const pendingFiles = rollbackDialog.files;
-      const pendingRetained = rollbackDialog.retainedFiles;
-      setRollbackDialog({ open: false, messageId: "", newContent: "", turnIndex: 0 });
-      if (onEditAndResend) {
-        onEditAndResend(rollbackDialog.messageId, rollbackDialog.newContent, rollbackFiles, pendingFiles, pendingRetained);
+      const { mode, messageId, newContent, files, retainedFiles, switchToModel } = rollbackDialog;
+      setRollbackDialog({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
+      if (mode === "edit") {
+        if (onEditAndResend) {
+          onEditAndResend(messageId, newContent, rollbackFiles, files, retainedFiles);
+        }
+      } else {
+        // retry mode
+        if (switchToModel && onRetryWithModel) {
+          onRetryWithModel(messageId, switchToModel, rollbackFiles);
+        } else if (onRetry) {
+          onRetry(messageId, rollbackFiles);
+        }
       }
     },
-    [onEditAndResend, rollbackDialog.messageId, rollbackDialog.newContent, rollbackDialog.files, rollbackDialog.retainedFiles]
+    [onEditAndResend, onRetry, onRetryWithModel, rollbackDialog]
   );
 
   const handleRollbackCancel = useCallback(() => {
-    setRollbackDialog({ open: false, messageId: "", newContent: "", turnIndex: 0 });
+    setRollbackDialog({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
   }, []);
 
   const timestampIndices = useMemo(
@@ -338,8 +428,8 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
                       blocks={message.blocks}
                       affectedFiles={message.affectedFiles}
                       isLastMessage={isLast}
-                      onRetry={onRetry ? () => onRetry(message.id) : undefined}
-                      onRetryWithModel={onRetryWithModel ? (model: string) => onRetryWithModel(message.id, model) : undefined}
+                      onRetry={onRetry ? () => handleRetry(message.id) : undefined}
+                      onRetryWithModel={onRetryWithModel ? (model: string) => handleRetryWithModel(message.id, model) : undefined}
                     />
                   )}
                 </motion.div>

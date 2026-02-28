@@ -5,6 +5,7 @@ import { FileSpreadsheet, FileText } from "lucide-react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { normalizeExcelPath, downloadFile } from "@/lib/api";
+import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 
 const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv", ".tsv"]);
 const DOWNLOADABLE_EXTS =
@@ -50,6 +51,7 @@ export function FilePathLink({
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
   const excel = isExcel(filePath);
+  const codePreviewable = !excel && isCodeFile(filePath);
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
@@ -79,7 +81,34 @@ export function FilePathLink({
   );
 
   const Icon = excel ? FileSpreadsheet : FileText;
-  const title = excel ? "点击预览表格" : "点击下载文件";
+  const title = excel ? "点击预览表格" : codePreviewable ? "点击预览文件" : "点击下载文件";
+
+  // 代码/文本文件：点击弹出预览弹窗
+  if (codePreviewable) {
+    const previewFilename = filePath.split("/").pop() || filePath;
+    const trigger = variant === "code" ? (
+      <code
+        role="button"
+        tabIndex={0}
+        className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[12.5px] font-mono cursor-pointer transition-colors bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)] hover:underline"
+        title={title}
+      >
+        <Icon className="h-3 w-3 flex-shrink-0 inline" />
+        {children}
+      </code>
+    ) : (
+      <span
+        role="button"
+        tabIndex={0}
+        className="inline-flex items-center gap-0.5 cursor-pointer transition-colors text-[var(--em-primary)] hover:underline font-medium"
+        title={title}
+      >
+        <Icon className="h-3 w-3 flex-shrink-0 inline" />
+        {children}
+      </span>
+    );
+    return <CodePreviewModal filePath={filePath} filename={previewFilename} trigger={trigger} />;
+  }
 
   if (variant === "code") {
     return (

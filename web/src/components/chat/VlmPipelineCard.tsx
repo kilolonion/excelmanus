@@ -19,6 +19,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useChatStore, type VlmPhaseEntry, type BatchProgress } from "@/stores/chat-store";
 import { MiniSpecTable } from "./MiniSpecTable";
 import { buildApiUrl } from "@/lib/api";
+import { useAuthImage } from "@/hooks/use-auth-image";
 
 /**
  * VLM pipeline stage metadata for display.
@@ -48,6 +49,12 @@ export const VlmPipelineCard = React.memo(function VlmPipelineCard({
   const isStreaming = useChatStore((s) => s.isStreaming);
   const batchProgress = useChatStore((s) => s.batchProgress);
   const [imageExpanded, setImageExpanded] = useState(false);
+
+  // 通过 fetch + auth header 加载图片
+  const imageApiPath = imagePath
+    ? `/files/image?path=${encodeURIComponent(imagePath)}`
+    : undefined;
+  const { blobUrl: imageBlobUrl } = useAuthImage(imageApiPath, imageExpanded);
 
   // 如果有批量进度，显示批量进度卡片
   if (batchProgress && batchProgress.batchTotal > 1) {
@@ -94,12 +101,17 @@ export const VlmPipelineCard = React.memo(function VlmPipelineCard({
                 className="overflow-hidden"
               >
                 <div className="px-3 pb-3">
-                  <img
-                    src={buildApiUrl(`/files/image?path=${encodeURIComponent(imagePath)}`)}
-                    alt="源图片"
-                    className="max-h-48 rounded-lg object-contain w-full bg-white dark:bg-zinc-800"
-                    loading="lazy"
-                  />
+                  {imageBlobUrl ? (
+                    <img
+                      src={imageBlobUrl}
+                      alt="源图片"
+                      className="max-h-48 rounded-lg object-contain w-full bg-white dark:bg-zinc-800"
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-24">
+                      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -389,7 +401,8 @@ function BatchProgressHeader({ batchProgress }: { batchProgress: BatchProgress }
 // 批量进度时间线（显示所有任务状态）
 function BatchProgressTimeline({ batchProgress }: { batchProgress: BatchProgress }) {
   // 生成任务列表显示
-  const tasks = [];
+  type TaskItem = { index: number; status: string };
+  const tasks: TaskItem[] = [];
   for (let i = 0; i < batchProgress.batchTotal; i++) {
     const isCurrent = i === batchProgress.batchIndex;
     const isCompleted = i < batchProgress.batchIndex || (i === batchProgress.batchIndex && batchProgress.batchStatus === "completed");

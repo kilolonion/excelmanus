@@ -10,7 +10,7 @@ import {
 } from "@/lib/auth-api";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 
-const PUBLIC_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password"];
+const PUBLIC_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 
 interface AuthProviderProps {
   children: React.ReactNode;

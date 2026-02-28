@@ -35,6 +35,12 @@ const _EXCEL_WRITE_TOOL_NAMES = new Set([
   "create_sheet", "delete_sheet", "run_code",
 ]);
 
+// 所有会修改工作区文件的工具（含 Excel 写入 + 文本写入），用于恢复 affected files
+const _ALL_WRITE_TOOL_NAMES = new Set([
+  ...Array.from(_EXCEL_WRITE_TOOL_NAMES),
+  "write_text_file", "edit_text_file",
+]);
+
 const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
 const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(（\[])([^ \t\r\n`"'()（）\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)）\]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
@@ -43,6 +49,7 @@ const _MAX_DIFFS_IN_STORE = 500;
 // 从后端刷新时，必须从现有内存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 后 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
+  "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
 ]);
 
 /**
@@ -249,6 +256,32 @@ function _buildRecoveredDiffFromToolResult(
   };
 }
 
+/**
+ * 从工具结果 JSON 中恢复 _text_diff 到 ExcelStore（write_text_file / edit_text_file）。
+ */
+function _recoverTextDiffFromToolResult(
+  toolCallId: string,
+  toolResultText: string,
+): void {
+  const parsed = _parseLooseJsonObject(toolResultText);
+  if (!parsed) return;
+  const td = parsed._text_diff as Record<string, unknown> | undefined;
+  if (!td || typeof td !== "object") return;
+  const hunks = td.hunks;
+  if (!Array.isArray(hunks) || hunks.length === 0) return;
+  const filePath = typeof td.file_path === "string" ? td.file_path : "";
+  if (!filePath) return;
+  useExcelStore.getState().addTextDiff({
+    toolCallId,
+    filePath,
+    hunks: hunks as string[],
+    additions: (td.additions as number) || 0,
+    deletions: (td.deletions as number) || 0,
+    truncated: !!td.truncated,
+    timestamp: Date.now(),
+  });
+}
+
 function _isToolResultError(content: string): boolean {
   // 简单启发：检查工具结果 JSON 是否含顶层 "status": "error"。
   // 与后端约定一致：失败的工具调用以 {"status": "error", "message": "..."} 作为工具消息内容。
@@ -378,7 +411,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
-          if (_EXCEL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
+          if (_ALL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
             const argFilePath = typeof args.file_path === "string" ? args.file_path : "";
             const normalizedArgPath = _normalizeRecoveredPath(argFilePath);
             if (normalizedArgPath) {
@@ -399,6 +432,8 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
               if (recoveredDiff) {
                 recoveredDiffs.push(recoveredDiff);
               }
+              // 恢复文本文件 diff（write_text_file / edit_text_file）
+              _recoverTextDiffFromToolResult(tcId, toolResultText);
             }
           }
         }
@@ -753,6 +788,7 @@ interface ChatState {
   pipelineStatus: PipelineStatus | null;
   vlmPhases: VlmPhaseEntry[];
   batchProgress: BatchProgress | null;
+  toolProgress: Record<string, { stage: string; message: string; phaseIndex?: number; totalPhases?: number }>;
   isLoadingMessages: boolean;
 
   setMessages: (messages: Message[]) => void;
@@ -780,6 +816,8 @@ interface ChatState {
   setAbortController: (controller: AbortController | null) => void;
   setPipelineStatus: (status: PipelineStatus | null) => void;
   setBatchProgress: (progress: BatchProgress | null) => void;
+  setToolProgress: (toolCallId: string, progress: { stage: string; message: string; phaseIndex?: number; totalPhases?: number }) => void;
+  clearToolProgress: (toolCallId: string) => void;
   pushVlmPhase: (entry: VlmPhaseEntry) => void;
   clearVlmPhases: () => void;
   clearMessages: () => void;
@@ -800,6 +838,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pipelineStatus: null,
   vlmPhases: [],
   batchProgress: null,
+  toolProgress: {},
   isLoadingMessages: false,
 
   setMessages: (messages) => set({ messages }),
@@ -951,6 +990,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setAbortController: (controller) => set({ abortController: controller }),
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
   setBatchProgress: (progress) => set({ batchProgress: progress }),
+  setToolProgress: (toolCallId, progress) =>
+    set((state) => ({
+      toolProgress: { ...state.toolProgress, [toolCallId]: progress },
+    })),
+  clearToolProgress: (toolCallId) =>
+    set((state) => {
+      const { [toolCallId]: _, ...rest } = state.toolProgress;
+      return { toolProgress: rest };
+    }),
   pushVlmPhase: (entry) =>
     set((state) => ({
       vlmPhases: [...state.vlmPhases.filter((p) => p.stage !== entry.stage), entry],

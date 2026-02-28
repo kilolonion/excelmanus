@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useEffect, useState, useCallback, lazy, Suspense } from "react";
+import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -33,90 +33,13 @@ import { useUIStore } from "@/stores/ui-store";
 import { checkModelPlaceholder } from "@/lib/api";
 
 const TAB_META = [
-  { value: "model", label: "模型", icon: <Server className="h-3.5 w-3.5" /> },
-  { value: "rules", label: "规则", icon: <ScrollText className="h-3.5 w-3.5" /> },
-  { value: "skills", label: "技能", icon: <Package className="h-3.5 w-3.5" /> },
-  { value: "mcp", label: "MCP", icon: <Plug className="h-3.5 w-3.5" /> },
-  { value: "memory", label: "记忆", icon: <Brain className="h-3.5 w-3.5" /> },
-  { value: "runtime", label: "系统", icon: <SlidersHorizontal className="h-3.5 w-3.5" /> },
+  { value: "model", label: "模型", icon: <Server className="size-4" /> },
+  { value: "rules", label: "规则", icon: <ScrollText className="size-4" /> },
+  { value: "skills", label: "技能", icon: <Package className="size-4" /> },
+  { value: "mcp", label: "MCP", icon: <Plug className="size-4" /> },
+  { value: "memory", label: "记忆", icon: <Brain className="size-4" /> },
+  { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
 ];
-
-function useScrollableTabs() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
-  const dragState = useRef({ active: false, startX: 0, scrollLeft: 0, moved: false });
-
-  const updateOverflow = useCallback(() => {
-    const el = ref.current;
-    if (!el) return;
-    const threshold = 2;
-    setCanScrollLeft(el.scrollLeft > threshold);
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - threshold);
-  }, []);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-
-    updateOverflow();
-    const ro = new ResizeObserver(updateOverflow);
-    ro.observe(el);
-    el.addEventListener("scroll", updateOverflow, { passive: true });
-
-    const onWheel = (e: WheelEvent) => {
-      if (el.scrollWidth <= el.clientWidth) return;
-      e.preventDefault();
-      el.scrollBy({ left: e.deltaY || e.deltaX, behavior: "smooth" });
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-
-    return () => {
-      ro.disconnect();
-      el.removeEventListener("scroll", updateOverflow);
-      el.removeEventListener("wheel", onWheel);
-    };
-  }, [updateOverflow]);
-
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    const el = ref.current;
-    if (!el || el.scrollWidth <= el.clientWidth) return;
-    dragState.current = { active: true, startX: e.clientX, scrollLeft: el.scrollLeft, moved: false };
-    el.setPointerCapture(e.pointerId);
-    el.style.cursor = "grabbing";
-    el.style.userSelect = "none";
-  }, []);
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const ds = dragState.current;
-    if (!ds.active) return;
-    const el = ref.current;
-    if (!el) return;
-    const dx = e.clientX - ds.startX;
-    if (Math.abs(dx) > 3) ds.moved = true;
-    el.scrollLeft = ds.scrollLeft - dx;
-  }, []);
-
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    const ds = dragState.current;
-    if (!ds.active) return;
-    ds.active = false;
-    const el = ref.current;
-    if (!el) return;
-    el.releasePointerCapture(e.pointerId);
-    el.style.cursor = "";
-    el.style.userSelect = "";
-    if (ds.moved) {
-      e.preventDefault();
-    }
-  }, []);
-
-  const scroll = useCallback((dir: "left" | "right") => {
-    ref.current?.scrollBy({ left: dir === "left" ? -120 : 120, behavior: "smooth" });
-  }, []);
-
-  return { ref, canScrollLeft, canScrollRight, onPointerDown, onPointerMove, onPointerUp, scroll };
-}
 
 export function SettingsDialog() {
   const { settingsOpen, settingsTab, openSettings, closeSettings } = useUIStore(
@@ -127,8 +50,6 @@ export function SettingsDialog() {
       closeSettings: s.closeSettings,
     }))
   );
-
-  const tabs = useScrollableTabs();
 
   const handleOpenChange = useCallback((v: boolean) => {
     if (v) {
@@ -172,50 +93,9 @@ export function SettingsDialog() {
           onValueChange={(v) => openSettings(v)}
           className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
         >
-          {/* Custom tab bar */}
-          <div className="relative flex-shrink-0 px-4 sm:px-6">
-            {/* Left scroll arrow + fade */}
-            <div
-              className={`absolute left-4 sm:left-6 top-0 bottom-0 z-10 flex items-center transition-opacity duration-200 ${
-                tabs.canScrollLeft ? "opacity-100" : "opacity-0 pointer-events-none"
-              }`}
-            >
-              <button
-                type="button"
-                tabIndex={-1}
-                onClick={() => tabs.scroll("left")}
-                className="flex items-center justify-center h-8 w-6 rounded-md bg-background/90 backdrop-blur-sm text-muted-foreground hover:text-foreground shadow-sm border border-border/50 transition-colors"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-              </button>
-              <div className="w-4 h-full bg-gradient-to-r from-background to-transparent" />
-            </div>
-
-            {/* Right scroll arrow + fade */}
-            <div
-              className={`absolute right-4 sm:right-6 top-0 bottom-0 z-10 flex items-center transition-opacity duration-200 ${
-                tabs.canScrollRight ? "opacity-100" : "opacity-0 pointer-events-none"
-              }`}
-            >
-              <div className="w-4 h-full bg-gradient-to-l from-background to-transparent" />
-              <button
-                type="button"
-                tabIndex={-1}
-                onClick={() => tabs.scroll("right")}
-                className="flex items-center justify-center h-8 w-6 rounded-md bg-background/90 backdrop-blur-sm text-muted-foreground hover:text-foreground shadow-sm border border-border/50 transition-colors"
-              >
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            <div
-              ref={tabs.ref}
-              onPointerDown={tabs.onPointerDown}
-              onPointerMove={tabs.onPointerMove}
-              onPointerUp={tabs.onPointerUp}
-              onPointerCancel={tabs.onPointerUp}
-              className="flex gap-1 overflow-x-auto scrollbar-none touch-pan-x cursor-grab py-1"
-            >
+          {/* ── Tab navigation ── */}
+          <nav className="relative flex-shrink-0" role="tablist">
+            <div className="flex px-1 sm:px-4 overflow-x-auto scrollbar-none">
               {TAB_META.map((tab) => {
                 const isActive = settingsTab === tab.value;
                 return (
@@ -224,12 +104,17 @@ export function SettingsDialog() {
                     type="button"
                     role="tab"
                     aria-selected={isActive}
-                    className={`relative flex items-center gap-1.5 px-3 sm:px-4 py-1.5 text-[11px] sm:text-xs font-medium select-none flex-none whitespace-nowrap transition-all duration-200 outline-none rounded-full border
-                      ${isActive
-                        ? "text-foreground bg-accent border-border shadow-sm"
-                        : "text-muted-foreground hover:text-foreground/80 hover:bg-accent/50 border-transparent"}
-                    `}
                     onClick={() => openSettings(tab.value)}
+                    className={`
+                      relative flex-1 min-w-[44px] flex items-center justify-center
+                      gap-0.5 sm:gap-2 py-2 sm:py-3
+                      outline-none select-none whitespace-nowrap
+                      transition-colors duration-200
+                      flex-col sm:flex-row
+                      ${isActive
+                        ? "text-foreground"
+                        : "text-muted-foreground hover:text-foreground/70"}
+                    `}
                   >
                     <span
                       className="transition-colors duration-200"
@@ -237,14 +122,24 @@ export function SettingsDialog() {
                     >
                       {tab.icon}
                     </span>
-                    {tab.label}
+                    <span className="text-[10px] sm:text-[13px] font-medium leading-tight">
+                      {tab.label}
+                    </span>
+                    {isActive && (
+                      <motion.div
+                        layoutId="settings-tab-underline"
+                        className="absolute bottom-0 inset-x-1.5 sm:inset-x-2 h-[2px] rounded-full"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                      />
+                    )}
                   </button>
                 );
               })}
             </div>
             <div className="border-b border-border" />
-          </div>
-          <div className="h-3 flex-shrink-0" />
+          </nav>
+          <div className="h-2 sm:h-3 flex-shrink-0" />
 
           <AnimatePresence mode="wait">
             <motion.div

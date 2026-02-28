@@ -621,16 +621,16 @@ export function RuntimeTab() {
             const value = merged[item.key];
             return (
               <div key={item.key}>
-                <div className="flex items-center justify-between gap-3 sm:gap-4">
-                  <div className="flex items-start gap-2.5 sm:gap-3 flex-1 min-w-0">
-                    <span className="mt-0.5 text-muted-foreground flex-shrink-0">{item.icon}</span>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">{item.label}</div>
-                      <div className="text-[11px] sm:text-xs text-muted-foreground">{item.desc}</div>
+                {item.type === "bool" ? (
+                  /* Boolean toggle: always horizontal */
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                      <span className="mt-0.5 text-muted-foreground flex-shrink-0">{item.icon}</span>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">{item.label}</div>
+                        <div className="text-[11px] sm:text-xs text-muted-foreground">{item.desc}</div>
+                      </div>
                     </div>
-                  </div>
-
-                  {item.type === "bool" ? (
                     <Switch
                       checked={value as boolean}
                       onCheckedChange={(checked: boolean) =>
@@ -638,40 +638,52 @@ export function RuntimeTab() {
                       }
                       className="flex-shrink-0"
                     />
-                  ) : item.type === "select" && item.options ? (
-                    <select
-                      className="w-28 sm:w-32 h-8 text-sm rounded-md border border-input bg-background px-2 flex-shrink-0"
-                      value={value as string}
-                      onChange={(e) =>
-                        setDraft((prev) => ({ ...prev, [item.key]: e.target.value }))
-                      }
-                    >
-                      {item.options.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <Input
-                      type="number"
-                      className="w-20 sm:w-24 h-8 text-sm text-right flex-shrink-0"
-                      step={item.type === "float" ? 0.05 : 1}
-                      min={item.min ?? (item.type === "float" ? 0 : 1)}
-                      max={item.max ?? (item.type === "float" ? 1 : 500)}
-                      value={value as number}
-                      onChange={(e) => {
-                        const v =
-                          item.type === "float"
-                            ? parseFloat(e.target.value)
-                            : parseInt(e.target.value, 10);
-                        if (!isNaN(v)) {
-                          setDraft((prev) => ({ ...prev, [item.key]: v }));
+                  </div>
+                ) : (
+                  /* Select / Number: stack vertically on mobile */
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4">
+                    <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                      <span className="mt-0.5 text-muted-foreground flex-shrink-0">{item.icon}</span>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">{item.label}</div>
+                        <div className="text-[11px] sm:text-xs text-muted-foreground">{item.desc}</div>
+                      </div>
+                    </div>
+                    {item.type === "select" && item.options ? (
+                      <select
+                        className="w-full sm:w-32 h-9 sm:h-8 text-sm rounded-md border border-input bg-background px-2 flex-shrink-0 ml-0 sm:ml-auto"
+                        value={value as string}
+                        onChange={(e) =>
+                          setDraft((prev) => ({ ...prev, [item.key]: e.target.value }))
                         }
-                      }}
-                    />
-                  )}
-                </div>
+                      >
+                        {item.options.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <Input
+                        type="number"
+                        className="w-full sm:w-24 h-9 sm:h-8 text-sm text-right flex-shrink-0"
+                        step={item.type === "float" ? 0.05 : 1}
+                        min={item.min ?? (item.type === "float" ? 0 : 1)}
+                        max={item.max ?? (item.type === "float" ? 1 : 500)}
+                        value={value as number}
+                        onChange={(e) => {
+                          const v =
+                            item.type === "float"
+                              ? parseFloat(e.target.value)
+                              : parseInt(e.target.value, 10);
+                          if (!isNaN(v)) {
+                            setDraft((prev) => ({ ...prev, [item.key]: v }));
+                          }
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
                 <Separator className="mt-3" />
               </div>
             );

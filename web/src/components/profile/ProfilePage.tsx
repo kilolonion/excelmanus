@@ -1,10 +1,8 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
-  ArrowLeft,
   Camera,
   Check,
   Eye,
@@ -195,7 +193,6 @@ function SectionCard({
 // ── Main Page ──────────────────────────────────────────────
 
 export function ProfilePage() {
-  const router = useRouter();
   const user = useAuthStore((s) => s.user);
 
   // toast
@@ -238,7 +235,6 @@ export function ProfilePage() {
   }, []);
 
   if (!user) {
-    router.push("/login");
     return null;
   }
 
@@ -313,7 +309,7 @@ export function ProfilePage() {
       : 0;
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full">
       {toast && (
         <Toast
           message={toast.message}
@@ -322,29 +318,23 @@ export function ProfilePage() {
         />
       )}
 
-      <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
-        {/* Header */}
-        <div className="flex items-center gap-3">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => router.push("/")}
-            className="h-8 w-8"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-xl font-bold">个人中心</h1>
-        </div>
-
+      <div className="px-5 py-5 space-y-5">
         {/* Profile Header Card */}
         <motion.div
           variants={cardVariants}
           custom={0}
           initial="hidden"
           animate="visible"
-          className="rounded-xl border border-border bg-card p-6 shadow-sm"
+          className="relative overflow-hidden rounded-xl border border-border bg-card p-5 shadow-sm"
         >
-          <div className="flex items-center gap-5">
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background: `radial-gradient(ellipse at 0% -30%, var(--em-primary-alpha-10) 0%, transparent 60%),
+                            radial-gradient(ellipse at 100% 120%, var(--em-primary-alpha-06) 0%, transparent 50%)`,
+            }}
+          />
+          <div className="relative flex items-center gap-5">
             <ProfileAvatar
               src={user.avatarUrl}
               name={user.displayName || user.email}
@@ -577,7 +567,7 @@ export function ProfilePage() {
           </div>
         </SectionCard>
 
-        <div className="h-8" />
+        <div className="h-4" />
       </div>
     </div>
   );

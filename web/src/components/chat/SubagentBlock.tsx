@@ -11,8 +11,10 @@ import {
   XCircle,
   AlertTriangle,
   ClipboardList,
+  HelpCircle,
+  Shield,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+
 import type { SubagentToolCall } from "@/lib/types";
 
 const TOOL_TIMELINE_COLLAPSE_THRESHOLD = 5;
@@ -27,6 +29,14 @@ function getDisplayName(name: string): string {
   return DISPLAY_NAMES[name] || name;
 }
 
+interface VerificationReport {
+  verdict: "pass" | "fail" | "unknown";
+  confidence: "high" | "medium" | "low";
+  checks: string[];
+  issues: string[];
+  mode: "advisory" | "blocking";
+}
+
 interface SubagentBlockProps {
   name: string;
   reason: string;
@@ -36,7 +46,41 @@ interface SubagentBlockProps {
   summary?: string;
   success?: boolean;
   tools?: SubagentToolCall[];
+  verificationReport?: VerificationReport;
 }
+
+const verificationVerdictConfig = {
+  pass: {
+    icon: CheckCircle2,
+    label: "验证通过",
+    iconColor: "text-emerald-600 dark:text-emerald-400",
+    labelColor: "text-emerald-700 dark:text-emerald-300",
+  },
+  fail: {
+    icon: AlertTriangle,
+    label: "验证未通过",
+    iconColor: "text-amber-600 dark:text-amber-400",
+    labelColor: "text-amber-700 dark:text-amber-300",
+  },
+  unknown: {
+    icon: HelpCircle,
+    label: "验证不确定",
+    iconColor: "text-slate-500 dark:text-slate-400",
+    labelColor: "text-slate-600 dark:text-slate-300",
+  },
+};
+
+const verificationConfidenceBadge: Record<string, string> = {
+  high: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  medium: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  low: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+};
+
+const confidenceLabelMap: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
 
 export function SubagentBlock({
   name,
@@ -47,6 +91,7 @@ export function SubagentBlock({
   summary,
   success,
   tools = [],
+  verificationReport,
 }: SubagentBlockProps) {
   const [expanded, setExpanded] = useState(true);
   const [showAllTools, setShowAllTools] = useState(false);
@@ -57,12 +102,12 @@ export function SubagentBlock({
   const isDone = status === "done";
   const isFailed = isDone && success === false;
 
-  // 完成后自动折叠
+  // 完成后自动折叠（有验证报告时保持展开以显示结果）
   useEffect(() => {
-    if (isDone && !isFailed) {
+    if (isDone && !isFailed && !verificationReport) {
       setExpanded(false);
     }
-  }, [isDone, isFailed]);
+  }, [isDone, isFailed, verificationReport]);
 
   // 自动滚动到最新工具
   useEffect(() => {
@@ -106,7 +151,7 @@ export function SubagentBlock({
 
   return (
     <div
-      className={`my-2 rounded-lg border transition-colors ${
+      className={`my-1 rounded-lg border transition-colors ${
         isDone
           ? isFailed
             ? "border-red-300/40 dark:border-red-500/20 bg-red-500/[0.02] dark:bg-red-500/[0.03]"
@@ -118,52 +163,59 @@ export function SubagentBlock({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-left cursor-pointer hover:bg-violet-500/[0.05] dark:hover:bg-violet-500/[0.08] rounded-t-lg transition-colors"
+        className="group/card flex w-full items-center gap-0 text-sm text-left cursor-pointer hover:bg-violet-500/[0.05] dark:hover:bg-violet-500/[0.08] rounded-t-lg transition-colors overflow-hidden"
       >
-        <div className={`w-1 self-stretch rounded-full shrink-0 ${barColor}`} />
-        <div
-          className={`flex items-center justify-center h-6 w-6 rounded-md shrink-0 ${
-            isDone
-              ? isFailed
-                ? "bg-red-500/10 dark:bg-red-400/15"
-                : "bg-emerald-500/10 dark:bg-emerald-400/15"
-              : "bg-violet-500/10 dark:bg-violet-400/15"
-          }`}
-        >
-          <Bot
-            className={`h-3.5 w-3.5 ${
+        {/* 左侧强调条 */}
+        <div className={`w-[3px] self-stretch rounded-l-lg shrink-0 ${barColor}`} />
+
+        <div className="flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5">
+          {/* 圆形图标徽章 */}
+          <div
+            className={`flex items-center justify-center h-5 w-5 rounded-full shrink-0 ${
               isDone
                 ? isFailed
-                  ? "text-red-600 dark:text-red-400"
-                  : "text-emerald-600 dark:text-emerald-400"
-                : "text-violet-600 dark:text-violet-400"
+                  ? "bg-red-500/10 dark:bg-red-400/15"
+                  : "bg-emerald-500/10 dark:bg-emerald-400/15"
+                : "bg-violet-500/10 dark:bg-violet-400/15"
             }`}
-          />
+          >
+            <Bot
+              className={`h-3 w-3 ${
+                isDone
+                  ? isFailed
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-emerald-600 dark:text-emerald-400"
+                  : "text-violet-600 dark:text-violet-400"
+              }`}
+            />
+          </div>
+
+          {/* 名称胶囊 */}
+          <span className="inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium font-mono flex-shrink-0 bg-violet-100/60 dark:bg-violet-500/15 text-violet-700 dark:text-violet-300">
+            {getDisplayName(name)}
+          </span>
+
+          {/* 状态图标 */}
+          {status === "running" ? (
+            <Loader2 className="h-3 w-3 animate-spin text-violet-500 dark:text-violet-400 shrink-0" />
+          ) : isFailed ? (
+            <XCircle className="h-3 w-3 text-red-500 dark:text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="h-3 w-3 text-emerald-500 dark:text-emerald-400 shrink-0" />
+          )}
+
+          {/* 右侧：统计 + 箭头 */}
+          <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
+            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+              {iterations} 轮 · {toolCalls} 调用
+            </span>
+            <ChevronRight
+              className={`h-3 w-3 text-muted-foreground/50 shrink-0 transition-all duration-300 ${
+                expanded ? "rotate-90" : "group-hover/card:translate-x-0.5 group-hover/card:text-muted-foreground/70"
+              }`}
+            />
+          </span>
         </div>
-        <Badge
-          variant="secondary"
-          className="text-xs font-mono truncate max-w-[140px] sm:max-w-none bg-violet-100/60 dark:bg-violet-500/15 text-violet-700 dark:text-violet-300 border-0"
-        >
-          {getDisplayName(name)}
-        </Badge>
-        {status === "running" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500 dark:text-violet-400 shrink-0" />
-        ) : isFailed ? (
-          <XCircle className="h-3.5 w-3.5 text-red-500 dark:text-red-400 shrink-0" />
-        ) : (
-          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 dark:text-emerald-400 shrink-0" />
-        )}
-        <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap hidden sm:inline">
-          {iterations} 轮 · {toolCalls} 调用
-        </span>
-        <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap sm:hidden">
-          {iterations}轮·{toolCalls}调用
-        </span>
-        <ChevronRight
-          className={`h-3.5 w-3.5 text-muted-foreground shrink-0 transition-transform duration-200 ${
-            expanded ? "rotate-90" : ""
-          }`}
-        />
       </button>
 
       {/* ── Expanded content ── */}
@@ -312,6 +364,51 @@ export function SubagentBlock({
               </div>
             </div>
           )}
+
+          {/* Inline Verification Report */}
+          {verificationReport && isDone && (() => {
+            const vCfg = verificationVerdictConfig[verificationReport.verdict] || verificationVerdictConfig.unknown;
+            const VIcon = vCfg.icon;
+            return (
+              <div className="ml-1 pt-1.5 border-t border-border/50 space-y-1">
+                <div className="flex items-center gap-2">
+                  <VIcon className={`h-3.5 w-3.5 ${vCfg.iconColor}`} />
+                  <span className={`text-xs font-medium ${vCfg.labelColor}`}>{vCfg.label}</span>
+                  {confidenceLabelMap[verificationReport.confidence] && (
+                    <span className={`rounded-full px-1.5 py-px text-[10px] font-medium ${verificationConfidenceBadge[verificationReport.confidence] || verificationConfidenceBadge.low}`}>
+                      {confidenceLabelMap[verificationReport.confidence]}
+                    </span>
+                  )}
+                  {verificationReport.mode === "blocking" && (
+                    <span className="flex items-center gap-0.5 rounded-full bg-red-100 px-1.5 py-px text-[10px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300">
+                      <Shield className="h-2.5 w-2.5" />
+                      阻断
+                    </span>
+                  )}
+                </div>
+                {verificationReport.checks.length > 0 && (
+                  <div className="space-y-0.5">
+                    {verificationReport.checks.map((check, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+                        <span className="mt-px text-emerald-500">✓</span>
+                        <span>{check}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {verificationReport.issues.length > 0 && (
+                  <div className="space-y-0.5">
+                    {verificationReport.issues.map((issue, i) => (
+                      <div key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                        <span className="mt-px">⚠</span>
+                        <span>{issue}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
           </motion.div>
         )}

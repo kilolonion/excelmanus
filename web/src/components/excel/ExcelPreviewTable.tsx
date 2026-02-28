@@ -6,6 +6,7 @@ import type { ExcelPreviewData, CellStyle } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText, formatCellByPattern } from "./cell-style-utils";
 import { buildMergeMaps } from "./merge-utils";
+import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
 
 interface ExcelPreviewTableProps {
   data: ExcelPreviewData;
@@ -62,77 +63,79 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
       </div>
 
       {/* Table */}
-      <div className="overflow-x-auto max-h-[320px] overflow-y-auto" style={{ touchAction: "pan-x pan-y" }}>
-        <table className="w-full border-collapse text-[11px]">
-          <thead>
-            <tr>
-              <th className="sticky top-0 left-0 z-20 w-9 min-w-[36px] bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-1 py-1 text-center text-muted-foreground/60 font-normal text-[10px]">
-                #
-              </th>
-              {data.columns.map((col, i) => {
-                const colNum = i + 1; // 1-based
-                const mergeInfo = masterMap.get(`1,${colNum}`);
-                if (hiddenSet.has(`1,${colNum}`)) return null;
-                const hStyle = headerStyles?.[i];
-                const css = hStyle ? cellStyleToCSS(hStyle as CellStyle) : {};
+      <ScrollablePreview collapsedHeight={180} expandedHeight={400}>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-[11px]">
+            <thead>
+              <tr>
+                <th className="sticky top-0 left-0 z-20 w-9 min-w-[36px] bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-1 py-1 text-center text-muted-foreground/60 font-normal text-[10px]">
+                  #
+                </th>
+                {data.columns.map((col, i) => {
+                  const colNum = i + 1; // 1-based
+                  const mergeInfo = masterMap.get(`1,${colNum}`);
+                  if (hiddenSet.has(`1,${colNum}`)) return null;
+                  const hStyle = headerStyles?.[i];
+                  const css = hStyle ? cellStyleToCSS(hStyle as CellStyle) : {};
+                  return (
+                    <th
+                      key={i}
+                      className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-2 py-1 text-left font-semibold whitespace-nowrap text-muted-foreground/90 min-w-[56px]"
+                      style={css}
+                      colSpan={mergeInfo?.colSpan}
+                      rowSpan={mergeInfo?.rowSpan}
+                    >
+                      {col}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((row, rowIdx) => {
+                // cellStyles[rowIdx + 1] = this data row (offset by 1 for header)
+                const rowStyles = data.cellStyles?.[rowIdx + 1];
                 return (
-                  <th
-                    key={i}
-                    className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-2 py-1 text-left font-semibold whitespace-nowrap text-muted-foreground/90 min-w-[56px]"
-                    style={css}
-                    colSpan={mergeInfo?.colSpan}
-                    rowSpan={mergeInfo?.rowSpan}
-                  >
-                    {col}
-                  </th>
+                  <tr key={rowIdx} className="hover:bg-muted/15 transition-colors">
+                    <td className="sticky left-0 z-10 w-9 min-w-[36px] bg-muted/60 backdrop-blur-sm border-r border-b border-border/40 px-1 py-1 text-center text-muted-foreground/60 tabular-nums font-normal text-[10px]">
+                      {rowIdx + 1}
+                    </td>
+                    {row.map((cell, colIdx) => {
+                      const excelRow = rowIdx + 2; // 1-based, offset by header row
+                      const excelCol = colIdx + 1; // 1-based
+                      if (hiddenSet.has(`${excelRow},${excelCol}`)) return null;
+                      const mergeInfo = masterMap.get(`${excelRow},${excelCol}`);
+                      const cStyle = rowStyles?.[colIdx];
+                      const css = cStyle ? cellStyleToCSS(cStyle as CellStyle) : {};
+                      const wrap = hasWrapText(cStyle as CellStyle);
+                      const formatted = hasStyles ? formatCellByPattern(cell, cStyle as CellStyle) : null;
+                      const display = formatted ?? (cell != null ? String(cell) : null);
+                      return (
+                        <td
+                          key={colIdx}
+                          className={`border-r border-b border-border/15 px-2 py-1 ${
+                            wrap
+                              ? "max-w-[300px] break-words"
+                              : "whitespace-nowrap max-w-[200px] truncate"
+                          } ${
+                            typeof cell === "number" ? "text-right tabular-nums" : "text-left"
+                          }`}
+                          style={hasStyles ? css : undefined}
+                          title={cell != null ? String(cell) : ""}
+                          colSpan={mergeInfo?.colSpan}
+                          rowSpan={mergeInfo?.rowSpan}
+                        >
+                          {display != null ? display : <span className="text-muted-foreground/20">—</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
                 );
               })}
-            </tr>
-          </thead>
-          <tbody>
-            {data.rows.map((row, rowIdx) => {
-              // cellStyles[rowIdx + 1] = this data row (offset by 1 for header)
-              const rowStyles = data.cellStyles?.[rowIdx + 1];
-              return (
-                <tr key={rowIdx} className="hover:bg-muted/15 transition-colors">
-                  <td className="sticky left-0 z-10 w-9 min-w-[36px] bg-muted/60 backdrop-blur-sm border-r border-b border-border/40 px-1 py-1 text-center text-muted-foreground/60 tabular-nums font-normal text-[10px]">
-                    {rowIdx + 1}
-                  </td>
-                  {row.map((cell, colIdx) => {
-                    const excelRow = rowIdx + 2; // 1-based, offset by header row
-                    const excelCol = colIdx + 1; // 1-based
-                    if (hiddenSet.has(`${excelRow},${excelCol}`)) return null;
-                    const mergeInfo = masterMap.get(`${excelRow},${excelCol}`);
-                    const cStyle = rowStyles?.[colIdx];
-                    const css = cStyle ? cellStyleToCSS(cStyle as CellStyle) : {};
-                    const wrap = hasWrapText(cStyle as CellStyle);
-                    const formatted = hasStyles ? formatCellByPattern(cell, cStyle as CellStyle) : null;
-                    const display = formatted ?? (cell != null ? String(cell) : null);
-                    return (
-                      <td
-                        key={colIdx}
-                        className={`border-r border-b border-border/15 px-2 py-1 ${
-                          wrap
-                            ? "max-w-[300px] break-words"
-                            : "whitespace-nowrap max-w-[200px] truncate"
-                        } ${
-                          typeof cell === "number" ? "text-right tabular-nums" : "text-left"
-                        }`}
-                        style={hasStyles ? css : undefined}
-                        title={cell != null ? String(cell) : ""}
-                        colSpan={mergeInfo?.colSpan}
-                        rowSpan={mergeInfo?.rowSpan}
-                      >
-                        {display != null ? display : <span className="text-muted-foreground/20">—</span>}
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+            </tbody>
+          </table>
+        </div>
+      </ScrollablePreview>
 
       {/* Footer */}
       <div className="px-3 py-1 bg-muted/30 border-t border-border/50 text-[10px] text-muted-foreground/70">

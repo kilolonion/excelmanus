@@ -445,6 +445,23 @@ export async function submitApproval(
   return res.json();
 }
 
+export async function toggleFullAccess(
+  sessionId: string,
+  enabled: boolean,
+): Promise<{ session_id: string; full_access_enabled: boolean }> {
+  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/full-access`, { direct: true });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `Toggle full-access error: ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function abortChat(sessionId: string): Promise<{ status: string }> {
   const url = buildApiUrl("/chat/abort", { direct: true });
   const res = await fetch(url, {
@@ -599,6 +616,24 @@ export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
+}
+
+export interface WorkspaceStorage {
+  total_bytes: number;
+  size_mb: number;
+  max_bytes: number;
+  max_size_mb: number;
+  file_count: number;
+  max_files: number;
+  over_size: boolean;
+  over_files: boolean;
+}
+
+export async function fetchWorkspaceStorage(): Promise<WorkspaceStorage | null> {
+  const url = buildApiUrl("/files/workspace/storage");
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  if (!res.ok) return null;
+  return res.json();
 }
 
 // ── FileRegistry API ─────────────────────────────────────
@@ -870,16 +905,27 @@ export async function uploadFileFromUrl(url: string): Promise<{
 
 // ── 工作区事务 API（原备份应用）────
 
+export interface BackupFileSummary {
+  cells_changed?: number;
+  cells_added?: number;
+  cells_removed?: number;
+  sheets_added?: string[];
+  sheets_removed?: string[];
+  size_delta_bytes?: number;
+}
+
 export interface BackupFile {
   original_path: string;
   backup_path: string;
   exists: boolean;
   modified_at: number | null;
+  summary?: BackupFileSummary;
 }
 
 export interface BackupListResponse {
   files: BackupFile[];
   backup_enabled: boolean;
+  in_flight?: boolean;
 }
 
 export async function fetchBackupList(
@@ -895,10 +941,16 @@ export async function fetchBackupList(
   return res.json();
 }
 
+export interface AppliedFile {
+  original: string;
+  backup: string;
+  undo_path?: string;
+}
+
 export async function applyBackup(opts: {
   sessionId: string;
   files?: string[];
-}): Promise<{ status: string; applied: { original: string; backup: string }[]; count: number }> {
+}): Promise<{ status: string; applied: AppliedFile[]; count: number; pending_count: number }> {
   const url = buildApiUrl("/workspace/commit");
   const res = await fetch(url, {
     method: "POST",
@@ -918,7 +970,7 @@ export async function applyBackup(opts: {
 export async function discardBackup(opts: {
   sessionId: string;
   files?: string[];
-}): Promise<{ status: string; discarded: number | string }> {
+}): Promise<{ status: string; discarded: number | string; pending_count?: number }> {
   const url = buildApiUrl("/workspace/rollback");
   const res = await fetch(url, {
     method: "POST",
@@ -933,6 +985,34 @@ export async function discardBackup(opts: {
     throw new Error(data.error || data.detail || `Rollback error: ${res.status}`);
   }
   return res.json();
+}
+
+export async function undoBackup(opts: {
+  sessionId: string;
+  originalPath: string;
+  undoPath: string;
+}): Promise<{ status: string; undone: string }> {
+  const url = buildApiUrl("/backup/undo");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({
+      session_id: opts.sessionId,
+      original_path: opts.originalPath,
+      undo_path: opts.undoPath,
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `Undo error: ${res.status}`);
+  }
+  return res.json();
+}
+
+export function buildBackupDownloadUrl(sessionId: string, filePath: string): string {
+  return buildApiUrl(
+    `/files/excel?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`
+  );
 }
 
 // ── 模型检测 API ─────────────────────────────────────────
