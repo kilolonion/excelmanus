@@ -1,12 +1,14 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet } from "lucide-react";
+import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { MentionHighlighter } from "./MentionHighlighter";
 import { downloadFile, buildApiUrl } from "@/lib/api";
+import { ImagePreviewModal } from "./ImagePreviewModal";
+import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import type { FileAttachment } from "@/lib/types";
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
@@ -48,6 +50,10 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const wsPickerRef = useRef<HTMLDivElement>(null);
 
+  // 监听来自 excel-store 的已确认 Excel 范围选择（在编辑模式下）
+  const pendingSelection = useExcelStore((s) => s.pendingSelection);
+  const clearPendingSelection = useExcelStore((s) => s.clearPendingSelection);
+
   useEffect(() => {
     if (contentRef.current) {
       setNeedsExpand(contentRef.current.scrollHeight > MAX_COLLAPSED_HEIGHT);
@@ -77,6 +83,45 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     setWsFiles([]);
     setWsFilter("");
   }, [content]);
+
+  // 监听来自 excel-store 的已确认 Excel 范围选择（在编辑模式下）
+  useEffect(() => {
+    // 只有在编辑模式下才处理选择
+    if (!editing || !pendingSelection) return;
+
+    const { filePath, sheet, range } = pendingSelection;
+    const filename = filePath.split("/").pop() || filePath;
+    const token = `@file:${filename}[${sheet}!${range}]`;
+
+    const textarea = textareaRef.current;
+    // 使用 textarea 的当前值，而不是 editText 状态（避免闭包问题）
+    const currentText = textarea?.value ?? "";
+    const cursorPos = textarea?.selectionStart ?? currentText.length;
+    const before = currentText.slice(0, cursorPos);
+    const after = currentText.slice(cursorPos);
+    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
+    const prefix = needsSpace ? " " : "";
+    const newText = before + prefix + token + " " + after;
+    setEditText(newText);
+
+    // 将光标移动到插入内容之后
+    const newCursorPos = (before + prefix + token + " ").length;
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(newCursorPos, newCursorPos);
+    });
+
+    // 记录到最近文件
+    const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+    if (EXCEL_EXTS.has(extLower)) {
+      useExcelStore.getState().addRecentFile({
+        path: filePath,
+        filename,
+      });
+    }
+
+    clearPendingSelection();
+  }, [editing, pendingSelection, clearPendingSelection]);
 
   const fetchWorkspaceFiles = useCallback(async () => {
     try {
@@ -167,7 +212,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               rows={Math.min(editText.split("\n").length + 1, 8)}
             />
             {(retainedFiles.length > 0 || editFiles.length > 0) && (
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1">
                 {retainedFiles.map((f, i) => {
                   const image = isImageFile(f.filename);
                   return (
@@ -346,15 +391,18 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           </div>
         )}
         {!editing && files && files.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mt-2">
+          <div className="flex flex-wrap gap-1 mt-1.5">
             {files.map((f, i) => {
               const excel = isExcelFile(f.filename);
               const image = isImageFile(f.filename);
-              return (
+              const code = isCodeFile(f.filename);
+              
+              // 直接渲染，不使用 DialogTrigger，让移动端也能点击
+              const attachment = (
                 <Badge
                   key={i}
                   variant="secondary"
-                  className={`text-xs gap-1 pr-1 max-w-[200px] ${
+                  className={`text-xs gap-1 pr-1 max-w-[200px] touch-show ${
                     excel ? "cursor-pointer hover:bg-secondary/70" : ""
                   }`}
                   onClick={
@@ -369,7 +417,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                       : undefined
                   }
                 >
-                  {image && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
+                  {image ? (
+                    <ImageIcon className="h-3 w-3 flex-shrink-0" />
+                  ) : code ? (
+                    <FileText className="h-3 w-3 flex-shrink-0" />
+                  ) : null}
                   <span className="truncate">{f.filename}</span>
                   <button
                     type="button"
@@ -388,6 +440,31 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                   </button>
                 </Badge>
               );
+
+              // 移动端直接渲染预览组件，让 onClick 触发
+              if (image) {
+                return (
+                  <ImagePreviewModal
+                    key={i}
+                    imagePath={f.path}
+                    filename={f.filename}
+                    trigger={attachment}
+                  />
+                );
+              }
+
+              if (code) {
+                return (
+                  <CodePreviewModal
+                    key={i}
+                    filePath={f.path}
+                    filename={f.filename}
+                    trigger={attachment}
+                  />
+                );
+              }
+
+              return attachment;
             })}
           </div>
         )}
