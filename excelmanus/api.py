@@ -1480,6 +1480,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         _user_store.record_token_usage(auth_user_id, chat_result.total_tokens)
                 except Exception:
                     logger.debug("记录用户 token 用量失败", exc_info=True)
+            # ── 自动标题生成（仅首轮，超时 5 秒）──
+            if engine.session_turn == 1:
+                _generated_title = await _generate_session_title_with_timeout(
+                    session_id=session_id,
+                    user_message=display_text,
+                    assistant_reply=normalized_reply,
+                    timeout=5.0,
+                )
+                if _generated_title:
+                    yield _sse_format("session_title", {
+                        "session_id": session_id,
+                        "title": _generated_title,
+                    })
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -2124,6 +2137,54 @@ def _sse_format(event_type: str, data: dict) -> str:
     """将事件格式化为 SSE 文本行。"""
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event_type}\ndata: {payload}\n\n"
+
+
+async def _generate_session_title_with_timeout(
+    *,
+    session_id: str,
+    user_message: str,
+    assistant_reply: str,
+    timeout: float = 5.0,
+) -> str | None:
+    """用 AUX 模型生成会话标题，超时返回 None。"""
+    if _config is None or _session_manager is None:
+        return None
+    ch = _session_manager.chat_history
+    if ch is None:
+        return None
+
+    _aux_effective = _config.aux_enabled and bool(_config.aux_model)
+    if not _aux_effective:
+        return None
+
+    try:
+        from excelmanus.providers import create_client as _create_client
+        from excelmanus.session_title import generate_session_title
+
+        client = _create_client(
+            api_key=_config.aux_api_key or _config.api_key,
+            base_url=_config.aux_base_url or _config.base_url,
+            protocol=_config.aux_protocol,
+        )
+        title = await asyncio.wait_for(
+            generate_session_title(
+                user_message=user_message,
+                assistant_reply=assistant_reply,
+                client=client,
+                model=_config.aux_model,
+            ),
+            timeout=timeout,
+        )
+        if title:
+            ch.update_session(session_id, title=title, title_source="auto")
+            logger.info("会话 %s 自动标题: %s", session_id, title)
+        return title
+    except asyncio.TimeoutError:
+        logger.info("会话 %s 标题生成超时 (%.1fs)", session_id, timeout)
+        return None
+    except Exception:
+        logger.warning("会话 %s 标题生成失败", session_id, exc_info=True)
+        return None
 
 
 def _sse_event_to_sse(
