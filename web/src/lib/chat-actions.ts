@@ -2270,6 +2270,29 @@ export async function subscribeToSession(sessionId: string) {
               specPath: (data.spec_path as string) || undefined,
               diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
               checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
+              // 批量任务相关字段
+              batchIndex: typeof data.batch_index === "number" ? data.batch_index : undefined,
+              batchTotal: typeof data.batch_total === "number" ? data.batch_total : undefined,
+            });
+            break;
+          }
+
+          case "batch_progress": {
+            // 批量任务进度事件
+            const batchIndex = typeof data.batch_index === "number" ? data.batch_index : 0;
+            const batchTotal = typeof data.batch_total === "number" ? data.batch_total : 1;
+            const batchItemName = (data.batch_item_name as string) || `任务 ${batchIndex + 1}`;
+            const batchStatus = (data.batch_status as string) || "running";
+            const batchElapsed = typeof data.batch_elapsed_seconds === "number" ? data.batch_elapsed_seconds : 0;
+            const batchMsg = (data.message as string) || "";
+
+            S().setBatchProgress({
+              batchIndex,
+              batchTotal,
+              batchItemName,
+              batchStatus,
+              batchElapsed,
+              message: batchMsg,
             });
             break;
           }
