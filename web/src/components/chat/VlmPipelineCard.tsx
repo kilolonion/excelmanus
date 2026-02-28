@@ -13,9 +13,10 @@ import {
   ChevronRight,
   Maximize2,
   Image as ImageIcon,
+  Layers,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useChatStore, type VlmPhaseEntry } from "@/stores/chat-store";
+import { useChatStore, type VlmPhaseEntry, type BatchProgress } from "@/stores/chat-store";
 import { MiniSpecTable } from "./MiniSpecTable";
 import { buildApiUrl } from "@/lib/api";
 
@@ -45,7 +46,18 @@ export const VlmPipelineCard = React.memo(function VlmPipelineCard({
 }: VlmPipelineCardProps) {
   const vlmPhases = useChatStore((s) => s.vlmPhases);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const batchProgress = useChatStore((s) => s.batchProgress);
   const [imageExpanded, setImageExpanded] = useState(false);
+
+  // 如果有批量进度，显示批量进度卡片
+  if (batchProgress && batchProgress.batchTotal > 1) {
+    return (
+      <div className="my-3 rounded-xl border border-border/60 bg-card overflow-hidden">
+        <BatchProgressHeader batchProgress={batchProgress} />
+        <BatchProgressTimeline batchProgress={batchProgress} />
+      </div>
+    );
+  }
 
   if (vlmPhases.length === 0) return null;
 
@@ -329,6 +341,102 @@ function UncertaintySummary({ phases }: { phases: VlmPhaseEntry[] }) {
     <div className="border-t border-border/40 px-3 py-2 text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
       <ShieldCheck className="h-3 w-3 flex-shrink-0" />
       <span>{count} 处不确定项</span>
+    </div>
+  );
+}
+
+// 批量进度头部
+function BatchProgressHeader({ batchProgress }: { batchProgress: BatchProgress }) {
+  const progress = ((batchProgress.batchIndex + (batchProgress.batchStatus === "completed" ? 1 : 0)) / batchProgress.batchTotal) * 100;
+  const statusIcon = batchProgress.batchStatus === "completed" ? (
+    <Check className="h-4 w-4 text-green-500" />
+  ) : batchProgress.batchStatus === "failed" ? (
+    <Circle className="h-4 w-4 text-red-500" />
+  ) : (
+    <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+  );
+
+  return (
+    <div className="border-b border-border/40 bg-muted/20 px-3 py-2">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <Layers className="h-4 w-4 text-blue-500" />
+          <span className="text-sm font-medium">批量提取</span>
+          <span className="text-xs text-muted-foreground">
+            ({batchProgress.batchIndex + 1}/{batchProgress.batchTotal})
+          </span>
+        </div>
+        {statusIcon}
+      </div>
+      {/* 进度条 */}
+      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+        <motion.div
+          className="h-full bg-blue-500 rounded-full"
+          initial={{ width: 0 }}
+          animate={{ width: `${progress}%` }}
+          transition={{ duration: 0.3 }}
+        />
+      </div>
+      {/* 当前任务名称 */}
+      <div className="mt-1.5 text-xs text-muted-foreground truncate">
+        {batchProgress.batchItemName}
+        {batchProgress.message && <span className="ml-1">- {batchProgress.message}</span>}
+      </div>
+    </div>
+  );
+}
+
+// 批量进度时间线（显示所有任务状态）
+function BatchProgressTimeline({ batchProgress }: { batchProgress: BatchProgress }) {
+  // 生成任务列表显示
+  const tasks = [];
+  for (let i = 0; i < batchProgress.batchTotal; i++) {
+    const isCurrent = i === batchProgress.batchIndex;
+    const isCompleted = i < batchProgress.batchIndex || (i === batchProgress.batchIndex && batchProgress.batchStatus === "completed");
+    const isFailed = false; // TODO: 从后端获取失败状态
+
+    let status = "pending";
+    if (isCompleted) status = "completed";
+    else if (isFailed) status = "failed";
+    else if (isCurrent) status = "running";
+
+    tasks.push({ index: i, status });
+  }
+
+  return (
+    <div className="px-3 py-2">
+      <div className="flex items-center gap-1 overflow-x-auto pb-1">
+        {tasks.map((task, idx) => (
+          <React.Fragment key={task.index}>
+            <div
+              className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium transition-colors ${
+                task.status === "completed"
+                  ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                  : task.status === "failed"
+                    ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                    : task.status === "running"
+                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                      : "bg-muted text-muted-foreground"
+              }`}
+            >
+              {task.status === "completed" ? (
+                <Check className="h-3 w-3" />
+              ) : task.status === "running" ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                task.index + 1
+              )}
+            </div>
+            {idx < tasks.length - 1 && (
+              <div
+                className={`flex-shrink-0 h-0.5 w-4 ${
+                  tasks[idx + 1].status !== "pending" ? "bg-green-500" : "bg-muted"
+                }`}
+              />
+            )}
+          </React.Fragment>
+        ))}
+      </div>
     </div>
   );
 }
