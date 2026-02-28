@@ -31,6 +31,8 @@ _EXPLORER_TOOLS: list[str] = [
 
 # verifier 验证工具白名单（探索 + 计算验证）
 _VERIFIER_TOOLS: list[str] = [
+    "scan_excel_snapshot",    # 快速校验文件结构和数据质量
+    "search_excel_values",    # 跨 Sheet 搜索验证特定值
     "read_excel",
     "list_sheets",
     "inspect_excel_files",
