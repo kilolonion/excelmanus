@@ -88,14 +88,16 @@ class TestFinishTaskVerifierIntegration:
 
     @pytest.mark.asyncio
     async def test_advisory_fail_does_not_block(self, _handler):
-        """无 blocking tags 时，verifier fail 仅追加文本，finish_accepted 仍为 True。"""
+        """无 blocking tags 时，verifier 后台异步执行，finish_accepted 仍为 True。
+
+        F 优化：advisory 模式下 verifier 不阻塞 finish 回复，
+        通过 _pending_verifier_task 异步获取结果。
+        """
         engine = _make_engine(task_tags=("simple",))
         _handler._engine = engine
 
-        vr = _make_verifier_result(verdict="fail", confidence="high", issues=["数据不完整"])
-        engine._run_finish_verifier_advisory = AsyncMock(
-            return_value="\n\n⚠️ **验证发现问题**（advisory）：数据不完整（任务仍标记完成，建议复查）"
-        )
+        advisory_text = "\n\n⚠️ **验证发现问题**（advisory）：数据不完整（任务仍标记完成，建议复查）"
+        engine._run_finish_verifier_advisory = AsyncMock(return_value=advisory_text)
 
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome, _render_finish_task_report
         result = await _handler.handle(
@@ -104,7 +106,13 @@ class TestFinishTaskVerifierIntegration:
         )
 
         assert result.finish_accepted is True
-        assert "advisory" in result.result_str
+        # advisory 模式下 verifier 不在 result_str 中（后台执行）
+        assert "advisory" not in result.result_str
+        # 后台任务已创建
+        assert engine._pending_verifier_task is not None
+        # 等待后台任务完成，验证返回的 advisory 文本
+        bg_result = await engine._pending_verifier_task
+        assert bg_result == advisory_text
 
     @pytest.mark.asyncio
     async def test_blocking_fail_high_blocks_finish(self, _handler):
@@ -152,16 +160,15 @@ class TestFinishTaskVerifierIntegration:
 
     @pytest.mark.asyncio
     async def test_third_attempt_downgrades_to_advisory(self, _handler):
-        """verification_attempt_count >= MAX_BLOCKING_ATTEMPTS(2) → 降为 advisory。"""
+        """verification_attempt_count >= MAX_BLOCKING_ATTEMPTS(2) → 降为 advisory（后台执行）。"""
         engine = _make_engine(
             task_tags=("cross_sheet",),
             verification_attempt_count=2,
         )
         _handler._engine = engine
 
-        engine._run_finish_verifier_advisory = AsyncMock(
-            return_value="\n\n⚠️ **验证发现问题**（advisory）：数据不完整（任务仍标记完成，建议复查）"
-        )
+        advisory_text = "\n\n⚠️ **验证发现问题**（advisory）：数据不完整（任务仍标记完成，建议复查）"
+        engine._run_finish_verifier_advisory = AsyncMock(return_value=advisory_text)
 
         result = await _handler.handle(
             "finish_task", "tc1", {"summary": "done"},
@@ -169,6 +176,11 @@ class TestFinishTaskVerifierIntegration:
         )
 
         assert result.finish_accepted is True
+        # 降级 advisory → 后台执行，不在 result_str 中
+        assert engine._pending_verifier_task is not None
+        bg_result = await engine._pending_verifier_task
+        assert bg_result == advisory_text
+        # 验证调用了 blocking=False
         call_kwargs = engine._run_finish_verifier_advisory.call_args.kwargs
         assert call_kwargs["blocking"] is False
 

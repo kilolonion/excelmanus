@@ -348,7 +348,7 @@ class TestRunCodeValidation:
 class TestGetTools:
     def test_tool_names(self) -> None:
         names = {tool.name for tool in code_tools.get_tools()}
-        assert names == {"write_text_file", "run_code"}
+        assert names == {"write_text_file", "edit_text_file", "run_code"}
 
     def test_run_code_truncation_strategy(self) -> None:
         tools = {tool.name: tool for tool in code_tools.get_tools()}

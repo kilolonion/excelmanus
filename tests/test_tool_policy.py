@@ -19,16 +19,18 @@ from excelmanus.tools.policy import (
 
 
 EXPECTED_MUTATING_CONFIRM_TOOLS = {
-    "write_text_file",
-    "edit_text_file",
     "run_shell",
     "delete_file",
-    "rename_file",
+    # write_text_file, edit_text_file, rename_file: 降级到 Tier B
     # Batch 1: write_excel, transform_data
     # Batch 3: create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets
 }
 
 EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
+    # 文本文件操作（沙盒守卫，低风险）
+    "write_text_file",
+    "edit_text_file",
+    "rename_file",
     "copy_file",
     # 图表工具
     "create_excel_chart",
@@ -109,7 +111,9 @@ def test_workspace_scan_budget_constants_contract() -> None:
         "dist",
         "build",
         ".worktrees",
-        "outputs/approvals",
+        "outputs",
+        "scripts",
+        ".tmp",
     )
 
 

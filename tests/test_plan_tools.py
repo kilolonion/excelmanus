@@ -103,8 +103,11 @@ class TestWritePlan:
         task_list = store.current
         assert task_list is not None
         assert len(task_list.items) == 4
-        # 第一个子任务有验证条件
-        assert task_list.items[0].verification_criteria == "行数 > 0"
+        # 第一个子任务有验证条件（str 自动转为 VerificationCriteria）
+        vc = task_list.items[0].verification_criteria
+        assert vc is not None
+        assert vc.check_type == "custom"
+        assert vc.expected == "行数 > 0"
         # 第二个子任务没有验证条件
         assert task_list.items[1].verification_criteria is None
 

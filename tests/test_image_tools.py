@@ -115,7 +115,6 @@ class TestTryInjectImage:
         engine.approval.is_audit_only_tool = MagicMock(return_value=False)
         engine.approval.is_high_risk_tool = MagicMock(return_value=False)
         engine.full_access_enabled = False
-        engine._plan_intercept_task_create = False
         dispatcher = ToolDispatcher.__new__(ToolDispatcher)
         dispatcher._engine = engine
         dispatcher._pending_vlm_image = None
@@ -204,7 +203,6 @@ class TestTryInjectImage:
         engine.approval.is_audit_only_tool = MagicMock(return_value=False)
         engine.approval.is_high_risk_tool = MagicMock(return_value=False)
         engine.full_access_enabled = False
-        engine._plan_intercept_task_create = False
 
         dispatcher = ToolDispatcher(engine)
         out = await dispatcher.call_registry_tool(

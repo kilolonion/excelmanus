@@ -128,9 +128,12 @@ class TestEventTypeEnum:
             "FILE_DOWNLOAD",
             "PLAN_CREATED",
             "TEXT_DIFF",
+            "TEXT_PREVIEW",
             "TOOL_CALL_ARGS_DELTA",
             "VERIFICATION_REPORT",
             "RETRACT_THINKING",
+            "BATCH_PROGRESS",
+            "STAGING_UPDATED",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -173,6 +176,7 @@ class TestEventTypeEnum:
             ("EXCEL_PREVIEW", "excel_preview"),
             ("EXCEL_DIFF", "excel_diff"),
             ("TEXT_DIFF", "text_diff"),
+            ("TEXT_PREVIEW", "text_preview"),
             ("FILES_CHANGED", "files_changed"),
             ("PIPELINE_PROGRESS", "pipeline_progress"),
             ("MEMORY_EXTRACTED", "memory_extracted"),
@@ -180,6 +184,8 @@ class TestEventTypeEnum:
             ("PLAN_CREATED", "plan_created"),
             ("VERIFICATION_REPORT", "verification_report"),
             ("RETRACT_THINKING", "retract_thinking"),
+            ("BATCH_PROGRESS", "batch_progress"),
+            ("STAGING_UPDATED", "staging_updated"),
         ]
 
 
@@ -344,5 +350,17 @@ class TestToolCallEventFields:
             "verification_checks",
             "verification_issues",
             "verification_mode",
+            "text_preview_file_path",
+            "text_preview_content",
+            "text_preview_line_count",
+            "text_preview_truncated",
+            "batch_index",
+            "batch_total",
+            "batch_item_name",
+            "batch_status",
+            "batch_elapsed_seconds",
+            "staging_action",
+            "staging_files",
+            "staging_pending_count",
         }
         assert set(annotations.keys()) == expected_fields

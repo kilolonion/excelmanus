@@ -125,7 +125,7 @@ class TestClassifyPermission:
     def test_confirm_tool(self) -> None:
         reg = _make_registry([])
         gen = CapabilityMapGenerator(reg)
-        assert gen._classify_permission("write_text_file") == ICON_CONFIRM
+        assert gen._classify_permission("delete_file") == ICON_CONFIRM
 
     def test_audit_only_tool(self) -> None:
         reg = _make_registry([])

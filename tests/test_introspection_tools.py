@@ -173,7 +173,7 @@ class TestToolDetail:
 
     def test_permission_confirm(self, registry: ToolRegistry) -> None:
         """Tier A 工具应标注为 🔴。"""
-        result = introspect_capability("tool_detail", "write_text_file")
+        result = introspect_capability("tool_detail", "delete_file")
         assert "🔴" in result
 
     def test_permission_audit(self, registry: ToolRegistry) -> None:
