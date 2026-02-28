@@ -1370,34 +1370,58 @@ def _save_result(
 
     result_dict = result.to_dict()
 
-    # 执行断言校验
+    # 执行断言校验（同步版本，保留用于兼容）
     validation: ValidationSummary | None = None
-    # 当 expected 包含 golden 信息时，即使 assertions 为空也需要校验
     has_golden = bool(
         expected and expected.get("golden_file") and expected.get("answer_position")
     )
     if assertions or has_golden:
-        validation = validate_case(
+        validation = _validate_result_sync(
             result_dict,
             assertions or {},
             expected=expected,
             workfile_dir=workfile_dir,
         )
-        result_dict["validation"] = validation.to_dict()
-        if validation.failed > 0:
-            logger.warning(
-                "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
-                result.case_id, validation.passed, validation.total, validation.failed,
-            )
-        else:
-            logger.info(
-                "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
-                result.case_id, validation.passed, validation.total,
-            )
 
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(result_dict, f, ensure_ascii=False, indent=2)
     return filepath, validation
+
+
+def _validate_result_sync(
+    result_dict: dict[str, Any],
+    assertions: dict[str, Any],
+    *,
+    expected: dict[str, Any] | None = None,
+    workfile_dir: Path | None = None,
+) -> ValidationSummary | None:
+    """同步执行断言校验（不推荐，推荐使用异步版本）。"""
+    has_golden = bool(
+        expected and expected.get("golden_file") and expected.get("answer_position")
+    )
+    if not assertions and not has_golden:
+        return None
+
+    validation = validate_case(
+        result_dict,
+        assertions,
+        expected=expected,
+        workfile_dir=workfile_dir,
+    )
+    result_dict["validation"] = validation.to_dict()
+    if validation.failed > 0:
+        logger.warning(
+            "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
+            result_dict.get("case_id", "unknown"),
+            validation.passed, validation.total, validation.failed,
+        )
+    else:
+        logger.info(
+            "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
+            result_dict.get("case_id", "unknown"),
+            validation.passed, validation.total,
+        )
+    return validation
 
 
 def _save_suite_summary(
@@ -1538,24 +1562,75 @@ async def run_suite(
             )
         # 构建 workfile 目录路径（与 _isolate_source_files 一致）
         workfile_dir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
-        try:
-            filepath, validation = _save_result(
-                result, output_dir,
-                assertions=case.assertions or None,
-                expected=case.expected or None,
-                workfile_dir=workfile_dir if workfile_dir.is_dir() else None,
+        
+        # 先保存结果（不含验证）
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        short_id = uuid.uuid4().hex[:6]
+        filename = f"run_{ts}_{result.case_id}_{short_id}.json"
+        filepath = output_dir / filename
+        
+        result_dict = result.to_dict()
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, ensure_ascii=False, indent=2)
+        logger.info("  日志已保存: %s", filepath)
+        
+        # 异步在后台执行验证（不阻塞任务结束）
+        if case.assertions or (case.expected and case.expected.get("golden_file") and case.expected.get("answer_position")):
+            asyncio.create_task(
+                _run_validation_async(
+                    filepath, result_dict,
+                    case.assertions or {},
+                    case.expected or {},
+                    workfile_dir if workfile_dir.is_dir() else None,
+                    _validations_lock, case_validations
+                )
             )
-            if validation is not None:
-                async with _validations_lock:
-                    case_validations.append((case.id, validation))
-            logger.info("  日志已保存: %s", filepath)
-        except Exception as exc:  # pragma: no cover - 文件系统异常兜底
-            logger.error("用例 %s 日志保存失败: %s", case.id, exc, exc_info=True)
-            filepath = output_dir / f"run_save_error_{case.id}.json"
+        
         # 通知完成
         if on_progress:
             on_progress(case.id, case.name, result)
         return index, result, filepath
+
+    async def _run_validation_async(
+        filepath: Path,
+        result_dict: dict[str, Any],
+        assertions: dict[str, Any],
+        expected: dict[str, Any],
+        workfile_dir: Path | None,
+        lock: asyncio.Lock,
+        case_validations: list,
+    ):
+        """后台异步执行验证，不阻塞主流程。"""
+        try:
+            validation = validate_case(
+                result_dict,
+                assertions,
+                expected=expected if expected.get("golden_file") or expected.get("answer_position") else None,
+                workfile_dir=workfile_dir,
+            )
+            # 更新文件（追加验证结果）
+            result_dict["validation"] = validation.to_dict()
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(result_dict, f, ensure_ascii=False, indent=2)
+            
+            async with lock:
+                case_validations.append((result_dict.get("case_id", "unknown"), validation))
+            
+            if validation.failed > 0:
+                logger.warning(
+                    "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
+                    result_dict.get("case_id", "unknown"),
+                    validation.passed, validation.total, validation.failed,
+                )
+            else:
+                logger.info(
+                    "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
+                    result_dict.get("case_id", "unknown"),
+                    validation.passed, validation.total,
+                )
+        except Exception as exc:
+            logger.error("用例 %s 验证失败: %s", result_dict.get("case_id", "unknown"), exc, exc_info=True)
 
     results: list[BenchResult | None] = [None] * len(cases)
     case_log_files: list[Path | None] = [None] * len(cases)

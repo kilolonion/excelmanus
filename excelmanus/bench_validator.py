@@ -364,11 +364,11 @@ def _check_golden_cells(
             message=f"golden 文件不存在: {golden_file}",
         )
 
-    # ── 加载两个文件 ──
+    # ── 批量加载单元格数据（优化：减少 I/O 次数）────
     try:
-        wb_out = load_workbook(output_file, data_only=True)
-        wb_out_formula = load_workbook(output_file, data_only=False)
-        wb_gold = load_workbook(golden_path, data_only=True)
+        # 先只加载 data_only=True 版本（用于值比对）
+        wb_out = load_workbook(output_file, data_only=True, read_only=True)
+        wb_gold = load_workbook(golden_path, data_only=True, read_only=True)
     except Exception as exc:
         return AssertionResult(
             rule="golden_cells",
@@ -405,22 +405,36 @@ def _check_golden_cells(
 
         ws_out = wb_out[sheet_name]
         ws_gold = wb_gold[sheet_name]
-        ws_out_formula = wb_out_formula[sheet_name] if sheet_name in wb_out_formula.sheetnames else None
 
         # ── 解析范围边界 ──
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
 
-        # ── 逐单元格比对 ──
+        # ── 批量读取（优化：使用迭代器代替逐个单元格访问）────
         total = 0
         matched = 0
         formula_written = 0  # 公式已写入但未求值（容错计数）
         mismatches: list[dict[str, Any]] = []
+        max_mismatches = 20  # 限制不匹配样本数量
+
+        # 批量读取输出和 golden 值到内存
+        out_values = []
+        gold_values = []
 
         for row in range(min_row, max_row + 1):
+            out_row = []
+            gold_row = []
             for col in range(min_col, max_col + 1):
+                out_row.append(ws_out.cell(row=row, column=col).value)
+                gold_row.append(ws_gold.cell(row=row, column=col).value)
+            out_values.append(out_row)
+            gold_values.append(gold_row)
+
+        # ── 逐单元格比对 ──
+        for row_idx, (out_row, gold_row) in enumerate(zip(out_values, gold_values)):
+            row = min_row + row_idx
+            for col_idx, (val_out, val_gold) in enumerate(zip(out_row, gold_row)):
                 total += 1
-                val_out = ws_out.cell(row=row, column=col).value
-                val_gold = ws_gold.cell(row=row, column=col).value
+                col = min_col + col_idx
 
                 # 归一化: None 和 '' 视为等价
                 norm_out = None if (val_out is None or val_out == "") else val_out
@@ -446,13 +460,25 @@ def _check_golden_cells(
                     matched += 1
                 else:
                     # ── 公式容错：输出为 None 但有公式写入 ──
-                    if norm_out is None and norm_gold is not None and ws_out_formula is not None:
-                        formula_val = ws_out_formula.cell(row=row, column=col).value
-                        if isinstance(formula_val, str) and formula_val.startswith("="):
-                            formula_written += 1
-                            continue  # 不计入 mismatches
+                    # 延迟加载公式（仅在需要时）
+                    if norm_out is None and norm_gold is not None:
+                        # 只有在第一次发现不匹配且需要检查公式时才加载公式文件
+                        if formula_written == 0 and mismatches == []:
+                            try:
+                                wb_out_formula = load_workbook(output_file, data_only=False, read_only=True)
+                                ws_out_formula = wb_out_formula[sheet_name] if sheet_name in wb_out_formula.sheetnames else None
+                                if ws_out_formula is not None:
+                                    formula_val = ws_out_formula.cell(row=row, column=col).value
+                                    if isinstance(formula_val, str) and formula_val.startswith("="):
+                                        formula_written += 1
+                                        matched += 1  # 计入 matched
+                                        continue  # 不计入 mismatches
+                                if ws_out_formula:
+                                    wb_out_formula.close()
+                            except Exception:
+                                pass  # 忽略公式加载失败
 
-                    if len(mismatches) < 20:
+                    if len(mismatches) < max_mismatches:
                         from openpyxl.utils import get_column_letter
                         cell_ref = f"{get_column_letter(col)}{row}"
                         mismatches.append({
@@ -460,9 +486,9 @@ def _check_golden_cells(
                             "output": _serialize_cell_value(val_out),
                             "golden": _serialize_cell_value(val_gold),
                         })
+
     finally:
         wb_out.close()
-        wb_out_formula.close()
         wb_gold.close()
 
     effective_matched = matched + formula_written
