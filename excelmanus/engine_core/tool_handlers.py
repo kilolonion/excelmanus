@@ -598,7 +598,12 @@ _MAX_IMAGE_SIZE_BYTES = 20_000_000
 
 
 class ExtractTableSpecHandler(BaseToolHandler):
-    """处理 extract_table_spec 工具：4 阶段渐进式 VLM 提取 → ReplicaSpec JSON。"""
+    """处理 extract_table_spec 工具：4 阶段渐进式 VLM 提取 → ReplicaSpec JSON。
+    
+    支持两种模式：
+    - 单个文件：使用 ProgressivePipeline
+    - 多个文件：使用 ProgressivePipelineBatch（批量优化，减少 VLM 调用）
+    """
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "extract_table_spec"
@@ -612,10 +617,59 @@ class ExtractTableSpecHandler(BaseToolHandler):
 
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
         from excelmanus.pipeline import PipelineConfig, PipelinePauseError, ProgressivePipeline
+        from excelmanus.pipeline.batch import ProgressivePipelineBatch, BatchPipelineConfig
 
         file_path = arguments.get("file_path", "")
+        file_paths = arguments.get("file_paths", [])
         output_path = arguments.get("output_path", "outputs/replica_spec.json")
         skip_style = arguments.get("skip_style", False)
+
+        # 统一处理：单个文件转为列表
+        if file_path and not file_paths:
+            file_paths = [file_path]
+        
+        if not file_paths:
+            result_str = json.dumps(
+                {"status": "error", "message": "必须提供 file_path 或 file_paths 参数"},
+                ensure_ascii=False,
+            )
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 判断是否使用批量模式
+        use_batch = len(file_paths) > 1
+
+        if use_batch:
+            return await self._handle_batch(
+                file_paths=file_paths,
+                output_path=output_path,
+                skip_style=skip_style,
+                on_event=on_event,
+                arguments=arguments,
+            )
+        else:
+            return await self._handle_single(
+                file_path=file_paths[0],
+                output_path=output_path,
+                skip_style=skip_style,
+                on_event=on_event,
+                arguments=arguments,
+            )
+
+    async def _handle_single(
+        self,
+        file_path: str,
+        output_path: str,
+        skip_style: bool,
+        on_event,
+        arguments: dict,
+    ) -> _ToolExecOutcome:
+        """处理单个文件模式。"""
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
+        from excelmanus.pipeline import PipelineConfig, PipelinePauseError, ProgressivePipeline
 
         # ── 校验文件（基于 workspace_root 解析相对路径） ──
         from excelmanus.security import FileAccessGuard, SecurityViolationError
@@ -628,14 +682,14 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 {"status": "error", "message": f"路径校验失败: {exc}"},
                 ensure_ascii=False,
             )
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
         if not path.is_file():
             result_str = json.dumps(
                 {"status": "error", "message": f"文件不存在: {file_path}"},
                 ensure_ascii=False,
             )
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         if path.suffix.lower() not in _SUPPORTED_IMAGE_EXTENSIONS:
@@ -643,7 +697,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 {"status": "error", "message": f"不支持的图片格式: {path.suffix}"},
                 ensure_ascii=False,
             )
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         size = path.stat().st_size
@@ -652,7 +706,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 {"status": "error", "message": f"文件过大: {size} > {_MAX_IMAGE_SIZE_BYTES}"},
                 ensure_ascii=False,
             )
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         # ── 读取图片 ──
@@ -704,7 +758,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
         # 输出目录：从 output_path 推导
         out_path = Path(output_path)
         output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
-        output_basename = out_path.stem  # e.g. "replica_spec"
+        output_basename = out_path.stem
 
         pipeline_config = PipelineConfig(
             skip_style=skip_style,
@@ -749,20 +803,19 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 ],
                 "hint": "请确认不确定项后，使用 resume_from_phase 继续管线。",
             }, ensure_ascii=False)
-            log_tool_call(logger, tool_name, arguments, result=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, result=result_str)
             self._engine.record_write_action()
             return _ToolExecOutcome(result_str=result_str, success=True)
         except RuntimeError as exc:
-            # VLM 调用失败等运行时错误
             result_str = ToolDispatcher._build_vlm_failure_result(exc, 1, str(path))
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
         except Exception as exc:
             result_str = json.dumps({
                 "status": "error",
                 "message": f"管线执行失败: {exc}",
             }, ensure_ascii=False)
-            log_tool_call(logger, tool_name, arguments, error=result_str)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         total_cells = sum(len(s.cells) for s in spec.sheets)
@@ -779,7 +832,170 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 "下一步请调用 rebuild_excel_from_spec 编译为 Excel 文件。"
             ),
         }, ensure_ascii=False)
-        log_tool_call(logger, tool_name, arguments, result=result_str)
+        log_tool_call(logger, "extract_table_spec", arguments, result=result_str)
+        self._engine.record_write_action()
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    async def _handle_batch(
+        self,
+        file_paths: list[str],
+        output_path: str,
+        skip_style: bool,
+        on_event,
+        arguments: dict,
+    ) -> _ToolExecOutcome:
+        """处理批量文件模式 - 使用批量优化的管线。"""
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
+        from excelmanus.pipeline.batch import ProgressivePipelineBatch, BatchPipelineConfig
+
+        # ── 校验所有文件 ──
+        from excelmanus.security import FileAccessGuard, SecurityViolationError
+        workspace_root = self._engine.config.workspace_root
+        guard = FileAccessGuard(workspace_root)
+
+        mime_map = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".bmp": "image/bmp", ".webp": "image/webp",
+        }
+
+        items = []
+        for fp in file_paths:
+            try:
+                path = guard.resolve_and_validate(fp)
+            except SecurityViolationError as exc:
+                result_str = json.dumps(
+                    {"status": "error", "message": f"路径校验失败: {exc}"},
+                    ensure_ascii=False,
+                )
+                log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+            
+            if not path.is_file():
+                result_str = json.dumps(
+                    {"status": "error", "message": f"文件不存在: {fp}"},
+                    ensure_ascii=False,
+                )
+                log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+            if path.suffix.lower() not in _SUPPORTED_IMAGE_EXTENSIONS:
+                result_str = json.dumps(
+                    {"status": "error", "message": f"不支持的图片格式: {path.suffix}"},
+                    ensure_ascii=False,
+                )
+                log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+            size = path.stat().st_size
+            if size > _MAX_IMAGE_SIZE_BYTES:
+                result_str = json.dumps(
+                    {"status": "error", "message": f"文件过大: {size} > {_MAX_IMAGE_SIZE_BYTES}"},
+                    ensure_ascii=False,
+                )
+                log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+            # 读取图片
+            raw_bytes = path.read_bytes()
+            ext = path.suffix.lower()
+            mime = mime_map.get(ext, "image/png")
+
+            from excelmanus.engine_core.tool_dispatcher import _image_content_hash
+            image_hash = f"sha256:{_image_content_hash(raw_bytes)}"
+            provenance = {
+                "source_image_hash": image_hash,
+                "model": self._engine.vlm_model,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            items.append({
+                "image_bytes": raw_bytes,
+                "mime": mime,
+                "file_path": str(path),
+                "output_dir": "outputs",
+                "output_basename": path.stem,
+                "provenance": provenance,
+            })
+
+        # ── 构建适配器回调 ──
+        e = self._engine
+        dispatcher = self._dispatcher
+
+        async def _vlm_caller(
+            messages: list[dict], phase_label: str, response_format: dict | None,
+        ) -> tuple[str | None, Exception | None]:
+            raw_text, error, _fr = await dispatcher._call_vlm_with_retry(
+                messages=messages,
+                vlm_client=e.vlm_client,
+                vlm_model=e.vlm_model,
+                vlm_timeout=e.config.vlm_timeout_seconds,
+                vlm_max_retries=e.config.vlm_max_retries,
+                vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
+                phase_label=phase_label,
+                response_format=response_format,
+                max_tokens=e.config.vlm_max_tokens,
+            )
+            return raw_text, error
+
+        def _image_preparer(raw: bytes, mode: str) -> tuple[bytes, str]:
+            return ToolDispatcher._prepare_image_for_vlm(
+                raw,
+                max_long_edge=e.config.vlm_image_max_long_edge,
+                jpeg_quality=e.config.vlm_image_jpeg_quality,
+                mode=mode,
+            )
+
+        # 输出目录
+        out_path = Path(output_path)
+        output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
+
+        # 批量管线配置
+        batch_config = BatchPipelineConfig.from_pipeline_config(PipelineConfig(
+            skip_style=skip_style,
+            uncertainty_pause_threshold=e.config.vlm_pipeline_uncertainty_threshold,
+            uncertainty_confidence_floor=e.config.vlm_pipeline_uncertainty_confidence_floor,
+            chunk_cell_threshold=e.config.vlm_pipeline_chunk_cell_threshold,
+        ))
+
+        # 创建批量管线
+        pipeline = ProgressivePipelineBatch(
+            items=items,
+            config=batch_config,
+            vlm_caller=_vlm_caller,
+            image_preparer=_image_preparer,
+            on_event=on_event,
+        )
+
+        try:
+            results = await pipeline.run()
+        except Exception as exc:
+            result_str = json.dumps({
+                "status": "error",
+                "message": f"批量管线执行失败: {exc}",
+            }, ensure_ascii=False)
+            log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 统计结果
+        success_count = sum(1 for spec, _ in results if spec is not None)
+        total_count = len(results)
+        
+        output_files = [path for _, path in results if path]
+        
+        result_str = json.dumps({
+            "status": "ok",
+            "total_files": total_count,
+            "success_count": success_count,
+            "output_paths": output_files,
+            "hint": (
+                f"批量提取完成：{success_count}/{total_count} 个文件成功。"
+                "下一步请调用 rebuild_excel_from_spec 编译为 Excel 文件。"
+            ),
+        }, ensure_ascii=False)
+        log_tool_call(logger, "extract_table_spec", arguments, result=result_str)
         self._engine.record_write_action()
         return _ToolExecOutcome(result_str=result_str, success=True)
 
