@@ -790,7 +790,17 @@ export async function writeExcelCells(opts: {
   return res.json();
 }
 
+// 下载冷却时间配置（毫秒）
+const DOWNLOAD_COOLDOWN_MS = 1000;
+let lastDownloadTime = 0;
+
 export async function downloadFile(path: string, filename?: string, sessionId?: string): Promise<void> {
+  const now = Date.now();
+  if (now - lastDownloadTime < DOWNLOAD_COOLDOWN_MS) {
+    // 冷却中，忽略本次请求
+    return;
+  }
+  lastDownloadTime = now;
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (sessionId) params.set("session_id", sessionId);
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
