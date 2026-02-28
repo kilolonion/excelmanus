@@ -7,37 +7,17 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile, FileAttachment } from "@/lib/types";
-
-/** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
-function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((item: unknown) => {
-    const c = item as Record<string, unknown>;
-    return {
-      cell: (c.cell as string) || "",
-      old: c.old as string | number | boolean | null,
-      new: c.new as string | number | boolean | null,
-      oldStyle: (c.old_style ?? c.oldStyle ?? null) as ExcelCellDiff["oldStyle"],
-      newStyle: (c.new_style ?? c.newStyle ?? null) as ExcelCellDiff["newStyle"],
-      styleOnly: Boolean(c.style_only ?? c.styleOnly),
-    };
-  });
-}
-
-/** 将后端 route_mode 映射为用户友好的中文标签 */
-function _friendlyRouteMode(mode: string): string {
-  const map: Record<string, string> = {
-    all_tools: "智能路由",
-    control_command: "控制命令",
-    slash_direct: "技能指令",
-    slash_not_found: "技能未找到",
-    slash_not_user_invocable: "技能不可用",
-    no_skillpack: "基础模式",
-    fallback: "回退模式",
-    hidden: "路由",
-  };
-  return map[mode] || mode;
-}
+import {
+  dispatchSSEEvent,
+  preDispatch,
+  finalizeThinking,
+  getLastAssistantMessage,
+  _friendlyRouteMode,
+  _mapDiffChanges,
+  type SSEHandlerContext,
+  type SSEEvent,
+  type DeltaBatcher as DeltaBatcherInterface,
+} from "./sse-event-handler";
 
 const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 function _isImageFile(name: string): boolean {
@@ -152,7 +132,7 @@ let _deferredTokenStats: {
 export async function sendMessage(
   text: string,
   files?: AttachedFile[],
-  sessionId?: string | null
+  sessionId?: string | null,
 ) {
   const store = useChatStore.getState();
   const sessionStore = useSessionStore.getState();
@@ -160,7 +140,6 @@ export async function sendMessage(
 
   if (store.isStreaming) return;
 
-  // 模型配置未就绪时阻断发送，直接在聊天中显示提示
   if (uiState.configReady === false || uiState.configReady === null) {
     const userMsgId = uuid();
     store.addUserMessage(userMsgId, text);
@@ -174,6 +153,22 @@ export async function sendMessage(
     store.saveCurrentSession();
     return;
   }
+
+  // 尽早创建 AbortController 并设置流式状态 - 在任何异步操作之前。
+  // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
+  // 如果延迟到异步操作之后，SessionSync 的 effect 可能在 await 间隙触发，
+  // 发现 abortController===null 后调用 switchSession，清空 addUserMessage 即将创建的消息。
+  const abortController = new AbortController();
+  store.setAbortController(abortController);
+  store.setStreaming(true);
+  store.setPipelineStatus({
+    stage: "connecting",
+    message: "正在连接...",
+    startedAt: Date.now(),
+  });
+
+  // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
+  _deferredTokenStats = null;
 
   // 工作区配额前置检查：超限时直接在聊天中显示提示，避免 SSE 往返
   try {
@@ -195,27 +190,14 @@ export async function sendMessage(
           "- 或联系管理员调整配额",
       });
       store.saveCurrentSession();
+      store.setStreaming(false);
+      store.setAbortController(null);
+      store.setPipelineStatus(null);
       return;
     }
   } catch {
     // 配额检查失败不阻断发送，交由后端兜底
   }
-
-  // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
-  _deferredTokenStats = null;
-
-  // 尽早创建 AbortController 并设置流式状态 - 在任何异步操作（base64 编码）之前。
-  // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
-  // 如果延迟到文件处理之后，SessionSync 的 effect 可能在 await 间隙触发，
-  // 发现 abortController===null 后调用 switchSession，清空 addUserMessage 即将创建的消息。
-  const abortController = new AbortController();
-  store.setAbortController(abortController);
-  store.setStreaming(true);
-  store.setPipelineStatus({
-    stage: "connecting",
-    message: "正在连接...",
-    startedAt: Date.now(),
-  });
 
   // 文件已由 ChatInput 预先上传。这里只需：
   // 1. 收集上传成功的路径用于 agent 通知
@@ -322,73 +304,24 @@ export async function sendMessage(
     }
   });
 
-  // 辅助函数：从当前 assistant 消息中获取指定类型的最后一个 block
-  const getLastBlockOfType = (type: string) => {
-    const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-    if (!msg) return null;
-    for (let i = msg.blocks.length - 1; i >= 0; i--) {
-      if (msg.blocks[i].type === type) return msg.blocks[i];
-    }
-    return null;
+  // ── SSE 事件处理上下文 ──
+  const sseCtx: SSEHandlerContext = {
+    assistantMsgId,
+    batcher: batcher as unknown as DeltaBatcherInterface,
+    effectiveSessionId: effectiveSessionId || "",
+    isFirstSend: true,
+    userText: text,
+    thinkingInProgress: false,
+    hadStreamError: false,
   };
 
-  const normalizeTaskItems = (taskListPayload: unknown): TaskItem[] => {
-    let rawItems: unknown[] = [];
-
-    if (Array.isArray(taskListPayload)) {
-      rawItems = taskListPayload;
-    } else if (
-      taskListPayload
-      && typeof taskListPayload === "object"
-      && "items" in taskListPayload
-      && Array.isArray((taskListPayload as { items?: unknown[] }).items)
-    ) {
-      rawItems = (taskListPayload as { items: unknown[] }).items;
-    }
-
-    return rawItems.map((rawItem, i) => {
-      const item = rawItem as Record<string, unknown>;
-      return {
-        content:
-          (item.content as string)
-          || (item.title as string)
-          || (item.description as string)
-          || `任务 ${i + 1}`,
-        status: (item.status as string) || "pending",
-        index: typeof item.index === "number" ? item.index : i,
-        verification: (item.verification as string) || undefined,
-      };
-    });
-  };
-
-  const applyTaskStatusPatch = (
-    items: TaskItem[],
-    taskIndex: number | null,
-    taskStatus: string,
-  ): TaskItem[] => {
-    if (taskIndex === null || !taskStatus) {
-      return items;
-    }
-    return items.map((item) =>
-      item.index === taskIndex ? { ...item, status: taskStatus } : item
-    );
-  };
-
-  let thinkingInProgress = false;
-  let _hadStreamError = false;
-
-  const finalizeThinking = () => {
-    if (!thinkingInProgress) return;
-    thinkingInProgress = false;
-    // 在确定时长之前刷新所有缓冲的思考增量
-    batcher.flush();
-    S().updateBlockByType(assistantMsgId, "thinking", (b) => {
-      if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
-        return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
-      }
-      return b;
-    });
-  };
+  // 连接超时：30 秒内未收到任何 SSE 事件则自动中止，防止无限"正在连接"。
+  let _connectionTimedOut = false;
+  const _CONNECTION_TIMEOUT_MS = 30_000;
+  const _connectionTimer = setTimeout(() => {
+    _connectionTimedOut = true;
+    abortController.abort();
+  }, _CONNECTION_TIMEOUT_MS);
 
   // 诊断日志：记录图片附件状态
   if (files && files.length > 0) {
@@ -417,717 +350,46 @@ export async function sendMessage(
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
+        // 收到首个事件，取消连接超时
+        clearTimeout(_connectionTimer);
+
+        const sseEvent = event as SSEEvent;
+        preDispatch(sseEvent, sseCtx);
+        dispatchSSEEvent(sseEvent, sseCtx);
+
+        // ── sendMessage 独有的后分发逻辑 ──
         const data = event.data;
 
-        if (event.event !== "thinking_delta" && event.event !== "thinking") {
-          finalizeThinking();
-        }
-        // 在任何非增量事件前刷新缓冲的增量，以保持 block 顺序
-        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
-          batcher.flush();
-        }
-
-        switch (event.event) {
-          // ── 会话 ────────────────────────────────
-          case "session_init": {
-            const sid = data.session_id as string;
-            const ss = useSessionStore.getState();
-            if (!ss.activeSessionId) {
-              ss.setActiveSession(sid);
-            }
-            // 仅同步会话 ID 而不清空/重新加载消息。
-            // switchSession() 会清空消息数组并触发异步后端加载，
-            // 恢复的 ID 不会与 userMsgId 匹配，导致用户气泡重复。
-            const chatState = S();
-            if (chatState.currentSessionId !== sid) {
-              if (chatState.currentSessionId && chatState.messages.length > 0) {
-                chatState.saveCurrentSession();
-              }
-              useChatStore.setState({ currentSessionId: sid });
-            }
-            if (text) {
-              ss.updateSessionTitle(ss.activeSessionId || sid, text.slice(0, 20));
-            }
-            // 同步模式状态
-            const ui = useUIStore.getState();
-            if (typeof data.full_access_enabled === "boolean") {
-              ui.setFullAccessEnabled(data.full_access_enabled);
-            }
-            if (typeof data.chat_mode === "string") {
-              ui.setChatMode(data.chat_mode as "write" | "read" | "plan");
-            }
-            break;
-          }
-
-          // ── 自动生成的会话标题 ─────────────────────
-          case "session_title": {
-            const titleSid = (data.session_id as string) || "";
-            const titleText = (data.title as string) || "";
-            if (titleSid && titleText) {
-              useSessionStore.getState().updateSessionTitle(titleSid, titleText);
-            }
-            break;
-          }
-
-          // ── 流水线进度 ─────────────────────
-          case "pipeline_progress": {
-            const stage = (data.stage as string) || "";
-            const pipelineMsg = (data.message as string) || "";
-            const phaseIndex = typeof data.phase_index === "number" ? data.phase_index : undefined;
-            const totalPhases = typeof data.total_phases === "number" ? data.total_phases : undefined;
-            const specPath = (data.spec_path as string) || undefined;
-            const diff = (data.diff as PipelineStatus["diff"]) ?? undefined;
-            const checkpoint = (data.checkpoint as Record<string, unknown>) ?? undefined;
-            const progressToolCallId = (data.tool_call_id as string) || "";
-
-            S().setPipelineStatus({
-              stage, message: pipelineMsg, startedAt: Date.now(),
-              phaseIndex, totalPhases, specPath, diff, checkpoint,
-            });
-
-            // 工具级进度：绑定到对应的 ToolCallCard
-            if (progressToolCallId) {
-              S().setToolProgress(progressToolCallId, { stage, message: pipelineMsg, phaseIndex, totalPhases });
-            }
-
-            // 累积 VLM 提取阶段用于时间线卡片
-            if (stage.startsWith("vlm_extract_") && phaseIndex != null && totalPhases != null) {
-              S().pushVlmPhase({
-                stage,
-                message: pipelineMsg,
-                startedAt: Date.now(),
-                diff,
-                specPath,
-                phaseIndex,
-                totalPhases,
-              });
-            }
-            break;
-          }
-
-          // ── 路由 ──────────────────────────────────
-          case "route_start": {
-            // 路由已启动 — 可选的状态指示器
-            break;
-          }
-          case "route_end": {
-            const mode = (data.route_mode as string) || "";
-            const skills = (data.skills_used as string[]) || [];
-            if (mode) {
-              S().appendBlock(assistantMsgId, {
-                type: "status",
-                label: _friendlyRouteMode(mode),
-                detail: skills.length > 0 ? skills.join(",") : undefined,
-                variant: "route",
-              });
-            }
-            break;
-          }
-
-          // ── 迭代 ──────────────────────────────
-          case "iteration_start": {
-            const iter = (data.iteration as number) || 0;
-            if (iter > 1) {
-              S().appendBlock(assistantMsgId, {
-                type: "iteration",
-                iteration: iter,
-              });
-            }
-            break;
-          }
-
-          // ── 思考 ───────────────────────────────
-          case "thinking_delta": {
-            S().setPipelineStatus(null);
-            const lastThinking = getLastBlockOfType("thinking");
-            if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              // 已有未关闭的思考 block — 批量缓冲增量
-              batcher.pushThinking((data.content as string) || "");
-            } else {
-              // 尚无未关闭的思考 block — 先刷新待处理的文本，
-              // 然后同步创建新的思考 block。
-              batcher.flush();
-              S().appendBlock(assistantMsgId, {
-                type: "thinking",
-                content: (data.content as string) || "",
-                startedAt: Date.now(),
-              });
-            }
-            thinkingInProgress = true;
-            break;
-          }
-
-          case "thinking": {
-            S().appendBlock(assistantMsgId, {
-              type: "thinking",
-              content: (data.content as string) || "",
-              duration: (data.duration as number) || undefined,
-              startedAt: Date.now(),
-            });
-            break;
-          }
-
-          case "retract_thinking": {
-            thinkingInProgress = false;
-            batcher.flush();
-            S().retractLastThinking(assistantMsgId);
-            break;
-          }
-
-          // ── 文本 ───────────────────────────────────
-          case "text_delta": {
-            S().setPipelineStatus(null);
-            // 确保存在文本 block 供批处理器追加内容。
-            const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-            const lastBlock = msg?.blocks[msg.blocks.length - 1];
-            if (!lastBlock || lastBlock.type !== "text") {
-              S().appendBlock(assistantMsgId, {
-                type: "text",
-                content: "",
-              });
-            }
-            batcher.pushText((data.content as string) || "");
-            break;
-          }
-
-          // ── 流式工具参数 delta ────────────────────
-          case "tool_call_args_delta": {
-            const adToolCallId = (data.tool_call_id as string) || "";
-            const adToolName = (data.tool_name as string) || "";
-            const adDelta = (data.args_delta as string) || "";
-            if (adToolCallId && adDelta) {
-              useExcelStore.getState().appendStreamingArgs(adToolCallId, adDelta);
-              // 如果还没有对应的 tool_call block，提前创建 streaming block
-              const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-              const hasBlock = msg?.blocks.some(
-                (b) => b.type === "tool_call" && b.toolCallId === adToolCallId,
-              );
-              if (!hasBlock && adToolName) {
-                S().setPipelineStatus(null);
-                S().appendBlock(assistantMsgId, {
-                  type: "tool_call",
-                  toolCallId: adToolCallId,
-                  name: adToolName,
-                  args: {},
-                  status: "streaming" as "running",
-                  iteration: undefined,
-                });
-              }
-            }
-            break;
-          }
-
-          // ── 工具调用 ─────────────────────────────
-          case "tool_call_start": {
-            S().setPipelineStatus(null);
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallId = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
-              ? toolCallIdRaw
-              : undefined;
-            // 如果 streaming block 已存在，升级为 running
-            const msgForStart = getLastAssistantMessage(S().messages, assistantMsgId);
-            const streamingExists = toolCallId && msgForStart?.blocks.some(
-              (b) => b.type === "tool_call" && b.toolCallId === toolCallId && b.status === ("streaming" as "running"),
-            );
-            if (streamingExists) {
-              S().updateToolCallBlock(assistantMsgId, toolCallId!, (b) => {
-                if (b.type === "tool_call") {
-                  return {
-                    ...b,
-                    args: (data.arguments as Record<string, unknown>) || b.args,
-                    status: "running",
-                    iteration: (data.iteration as number) || undefined,
-                  } as AssistantBlock;
-                }
-                return b;
-              });
-            } else {
-              S().appendBlock(assistantMsgId, {
-                type: "tool_call",
-                toolCallId,
-                name: (data.tool_name as string) || "",
-                args: (data.arguments as Record<string, unknown>) || {},
-                status: "running",
-                iteration: (data.iteration as number) || undefined,
-              });
-            }
-            break;
-          }
-
-          case "tool_call_end": {
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
-            // 清理流式参数缓存 + 工具进度
-            if (toolCallId) {
-              useExcelStore.getState().clearStreamingArgs(toolCallId);
-              S().clearToolProgress(toolCallId);
-            }
-            S().updateToolCallBlock(assistantMsgId, toolCallId, (b) => {
-              if (b.type === "tool_call") {
-                // 如果已为 pending（来自 pending_approval 事件），保持 pending 状态但更新结果
-                if (b.status === "pending") {
-                  return {
-                    ...b,
-                    result: (data.result as string) || undefined,
-                  } as AssistantBlock;
-                }
-                if (b.status === "running" || (b.status as string) === "streaming") {
-                  return {
-                    ...b,
-                    status: data.success ? "success" : "error",
-                    result: (data.result as string) || undefined,
-                    error: (data.error as string) || undefined,
-                  } as AssistantBlock;
-                }
-              }
-              return b;
-            });
-            break;
-          }
-
-          // ── 子代理 ───────────────────────────────
-          case "subagent_start": {
-            S().appendBlock(assistantMsgId, {
-              type: "subagent",
-              name: (data.name as string) || "",
-              reason: (data.reason as string) || "",
-              iterations: 0,
-              toolCalls: 0,
-              status: "running",
-              conversationId: (data.conversation_id as string) || "",
-              tools: [],
-            });
-            break;
-          }
-
-          case "subagent_iteration": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
-              if (b.type === "subagent" && b.status === "running") {
-                return {
-                  ...b,
-                  iterations: (data.iteration as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_tool_start": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
-              if (b.type !== "subagent" || b.status !== "running") return b;
-              const args = (data.arguments as Record<string, unknown>) || {};
-              const parts: string[] = [];
-              if (args.sheet) parts.push(String(args.sheet));
-              if (args.range) parts.push(String(args.range));
-              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
-              if (args.code_preview) parts.push(String(args.code_preview));
-              return {
-                ...b,
-                tools: [...(b.tools || []), {
-                  index: (data.tool_index as number) || 0,
-                  name: (data.tool_name as string) || "",
-                  argsSummary: parts.join(" \u00b7 "),
-                  status: "running" as const,
-                  args,
-                }],
+        if (sseEvent.event === "reply") {
+          // Token 统计：sendMessage 有延迟累加逻辑
+          const hasPendingInteraction =
+            S().pendingApproval !== null || S().pendingQuestion !== null;
+          const totalTokens = (data.total_tokens as number) || 0;
+          if (totalTokens > 0) {
+            if (hasPendingInteraction) {
+              _deferredTokenStats = {
+                promptTokens: (data.prompt_tokens as number) || 0,
+                completionTokens: (data.completion_tokens as number) || 0,
+                totalTokens,
+                iterations: (data.iterations as number) || 0,
               };
-            });
-            break;
-          }
-
-          case "subagent_tool_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
-              if (b.type !== "subagent") return b;
-              const tools = [...(b.tools || [])];
-              const toolName = (data.tool_name as string) || "";
-              const idx = tools.findLastIndex(
-                (t) => t.name === toolName && t.status === "running"
-              );
-              if (idx >= 0) {
-                tools[idx] = {
-                  ...tools[idx],
-                  status: (data.success as boolean) ? "success" : "error",
-                  result: (data.result as string) || undefined,
-                  error: (data.error as string) || undefined,
-                };
-              }
-              return { ...b, tools };
-            });
-            break;
-          }
-
-          case "subagent_summary": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  summary: (data.summary as string) || "",
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(assistantMsgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  status: "done",
-                  success: (data.success as boolean) ?? true,
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          // ── 交互 ────────────────────────────
-          case "user_question": {
-            S().setPendingQuestion({
-              id: (data.id as string) || "",
-              header: (data.header as string) || "",
-              text: (data.text as string) || "",
-              options: (data.options as { label: string; description: string }[]) || [],
-              multiSelect: Boolean(data.multi_select),
-            });
-            break;
-          }
-
-          case "pending_approval": {
-            // 将关联的 tool_call block 标记为 "pending"
-            const approvalToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(assistantMsgId, approvalToolCallId, (b) => {
-              if (b.type === "tool_call") {
-                return { ...b, status: "pending" as const } as AssistantBlock;
-              }
-              return b;
-            });
-            S().setPendingApproval({
-              id: (data.approval_id as string) || "",
-              toolName: (data.approval_tool_name as string) || "",
-              arguments: {},
-              riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
-              argsSummary: (data.args_summary as Record<string, string>) || {},
-            });
-            break;
-          }
-
-          case "approval_resolved": {
-            const toolName = (data.approval_tool_name as string) || "";
-            const approvalId = (data.approval_id as string) || "";
-            const success = Boolean(data.success);
-            const undoable = Boolean(data.undoable);
-            const hasChanges = Boolean(data.has_changes);
-            const arResult = (data.result as string) || undefined;
-
-            S().setPendingApproval(null);
-            // 将 pending 状态的 tool_call block 转换为 success/error 并附加结果
-            const arToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(assistantMsgId, arToolCallId, (b) => {
-              if (b.type === "tool_call" && b.status === "pending") {
-                return {
-                  ...b,
-                  status: success ? ("success" as const) : ("error" as const),
-                  result: arResult ?? b.result,
-                  error: success ? undefined : (arResult ?? b.error),
-                } as AssistantBlock;
-              }
-              return b;
-            });
-            S().appendBlock(assistantMsgId, {
-              type: "approval_action",
-              approvalId,
-              toolName,
-              success,
-              undoable,
-              hasChanges,
-            });
-            break;
-          }
-
-          // ── 任务列表 ──────────────────────────────
-          case "task_update": {
-            const payloadItems = normalizeTaskItems(data.task_list);
-            const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
-            const taskStatus = typeof data.task_status === "string" ? data.task_status : "";
-            const existingTaskList = getLastBlockOfType("task_list");
-
-            if (existingTaskList && existingTaskList.type === "task_list") {
-              S().updateBlockByType(assistantMsgId, "task_list", (b) => {
-                if (b.type !== "task_list") return b;
-                const baseItems = payloadItems.length > 0 ? payloadItems : b.items;
-                return {
-                  ...b,
-                  items: applyTaskStatusPatch(baseItems, taskIndex, taskStatus),
-                };
-              });
-            } else if (payloadItems.length > 0) {
+            } else {
               S().appendBlock(assistantMsgId, {
-                type: "task_list",
-                items: applyTaskStatusPatch(payloadItems, taskIndex, taskStatus),
+                type: "token_stats",
+                promptTokens: (data.prompt_tokens as number) || 0,
+                completionTokens: (data.completion_tokens as number) || 0,
+                totalTokens,
+                iterations: (data.iterations as number) || 0,
               });
             }
-            break;
           }
-
-          // ── Excel 预览 / 差异 ───────────────────
-          case "excel_preview": {
-            const epFilePath = (data.file_path as string) || "";
-            useExcelStore.getState().addPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: epFilePath,
-              sheet: (data.sheet as string) || "",
-              columns: (data.columns as string[]) || [],
-              rows: (data.rows as (string | number | null)[][]) || [],
-              totalRows: (data.total_rows as number) || 0,
-              truncated: Boolean(data.truncated),
-              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-            });
-            if (epFilePath) {
-              const epFilename = epFilePath.split("/").pop() || epFilePath;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath, filename: epFilename });
-            }
-            break;
-          }
-
-          case "excel_diff": {
-            const edFilePath = (data.file_path as string) || "";
-            useExcelStore.getState().addDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: edFilePath,
-              sheet: (data.sheet as string) || "",
-              affectedRange: (data.affected_range as string) || "",
-              changes: _mapDiffChanges(data.changes as unknown[]),
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-              timestamp: Date.now(),
-            });
-            if (edFilePath) {
-              const edFilename = edFilePath.split("/").pop() || edFilePath;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: edFilename });
-              S().addAffectedFiles(assistantMsgId, [edFilePath]);
-            }
-            break;
-          }
-
-          case "text_diff": {
-            const tdFilePath = (data.file_path as string) || "";
-            useExcelStore.getState().addTextDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: tdFilePath,
-              hunks: (data.hunks as string[]) || [],
-              additions: (data.additions as number) || 0,
-              deletions: (data.deletions as number) || 0,
-              truncated: !!data.truncated,
-              timestamp: Date.now(),
-            });
-            if (tdFilePath) {
-              S().addAffectedFiles(assistantMsgId, [tdFilePath]);
-            }
-            break;
-          }
-
-          case "text_preview": {
-            useExcelStore.getState().addTextPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: (data.file_path as string) || "",
-              content: (data.content as string) || "",
-              lineCount: (data.line_count as number) || 0,
-              truncated: !!data.truncated,
-            });
-            break;
-          }
-
-          case "verification_report": {
-            S().appendBlock(assistantMsgId, {
-              type: "verification_report",
-              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
-              confidence: (data.confidence as "high" | "medium" | "low") || "low",
-              checks: (data.checks as string[]) || [],
-              issues: (data.issues as string[]) || [],
-              mode: (data.mode as "advisory" | "blocking") || "advisory",
-            });
-            break;
-          }
-
-          case "files_changed": {
-            const changedFiles = (data.files as string[]) || [];
-            const excelStore = useExcelStore.getState();
-            for (const filePath of changedFiles) {
-              if (filePath) {
-                const filename = filePath.split("/").pop() || filePath;
-                excelStore.addRecentFileIfNotDismissed({ path: filePath, filename });
-              }
-            }
-            if (changedFiles.length > 0) {
-              S().addAffectedFiles(assistantMsgId, changedFiles);
-              excelStore.bumpWorkspaceFilesVersion();
-              // W7: 自动刷新备份列表
-              if (effectiveSessionId) {
-                excelStore.fetchBackups(effectiveSessionId);
-              }
-            }
-            break;
-          }
-
-          case "staging_updated": {
-            const stAction = (data.action as string) || "";
-            const stFiles = (data.files as { original_path: string; backup_path: string }[]) || [];
-            const stPending = (data.pending_count as number) ?? 0;
-            useExcelStore.getState().handleStagingUpdated(stAction, stFiles, stPending);
-            // finish_hint 时追加提示卡片
-            if (stAction === "finish_hint" && stPending > 0) {
-              S().appendBlock(assistantMsgId, {
-                type: "staging_hint",
-                pendingCount: stPending,
-                files: stFiles.map((f) => f.original_path),
-              });
-            }
-            // 刷新备份列表
-            if (effectiveSessionId) {
-              useExcelStore.getState().fetchBackups(effectiveSessionId);
-            }
-            break;
-          }
-
-          case "memory_extracted": {
-            const entries = (data.entries as { id: string; content: string; category: string }[]) || [];
-            const trigger = (data.trigger as string) || "session_end";
-            const count = (data.count as number) || entries.length;
-            if (count > 0) {
-              S().appendBlock(assistantMsgId, {
-                type: "memory_extracted",
-                entries,
-                trigger,
-                count,
-              });
-            }
-            break;
-          }
-
-          case "file_download": {
-            const dlFilePath = (data.file_path as string) || "";
-            const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
-            const dlDescription = (data.description as string) || "";
-            if (dlFilePath) {
-              S().appendBlock(assistantMsgId, {
-                type: "file_download",
-                toolCallId: (data.tool_call_id as string) || undefined,
-                filePath: dlFilePath,
-                filename: dlFilename,
-                description: dlDescription,
-              });
-            }
-            break;
-          }
-
-          // ── 回复与完成 ───────────────────────────
-          case "reply": {
-            const content = (data.content as string) || "";
-            // 存在待处理审批或问题时抑制回复文本
-            // — 文本已在工具调用卡片/面板中展示。
-            const hasPendingInteraction =
-              S().pendingApproval !== null || S().pendingQuestion !== null;
-            if (content && !hasPendingInteraction) {
-              const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-              // 如果已存在文本 block（由流式 text_delta 事件填充）则跳过
-              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
-              if (!hasTextBlock) {
-                S().appendBlock(assistantMsgId, { type: "text", content });
-              }
-            }
-            // 从 reply 同步模式状态
-            const uiReply = useUIStore.getState();
-            if (typeof data.full_access_enabled === "boolean") {
-              uiReply.setFullAccessEnabled(data.full_access_enabled);
-            }
-            if (typeof data.chat_mode === "string") {
-              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
-            }
-            // Token 统计处理
-            const totalTokens = (data.total_tokens as number) || 0;
-            if (totalTokens > 0) {
-              if (hasPendingInteraction) {
-                // 延迟 Token 统计 — 后续的 continuation 将展示累计总数。
-                _deferredTokenStats = {
-                  promptTokens: (data.prompt_tokens as number) || 0,
-                  completionTokens: (data.completion_tokens as number) || 0,
-                  totalTokens,
-                  iterations: (data.iterations as number) || 0,
-                };
-              } else {
-                S().appendBlock(assistantMsgId, {
-                  type: "token_stats",
-                  promptTokens: (data.prompt_tokens as number) || 0,
-                  completionTokens: (data.completion_tokens as number) || 0,
-                  totalTokens,
-                  iterations: (data.iterations as number) || 0,
-                });
-              }
-            }
-            break;
-          }
-
-          case "mode_changed": {
-            const uiMode = useUIStore.getState();
-            const modeName = data.mode_name as string;
-            const enabled = Boolean(data.enabled);
-            if (modeName === "full_access") {
-              uiMode.setFullAccessEnabled(enabled);
-            } else if (modeName === "chat_mode") {
-              uiMode.setChatMode(data.value as "write" | "read" | "plan");
-            }
-            // 在聊天中以状态 block 展示模式变更
-            const _modeLabelMap: Record<string, string> = { full_access: "Full Access", chat_mode: "Chat Mode" };
-            const modeLabel = _modeLabelMap[modeName] || modeName;
-            const modeAction = enabled ? "已开启" : "已关闭";
-            S().appendBlock(assistantMsgId, {
-              type: "status",
-              label: `${modeAction} ${modeLabel}`,
-              variant: "info",
-            });
-            break;
-          }
-
-          case "done": {
-            // 保存会话消息
-            S().setPipelineStatus(null);
-            S().saveCurrentSession();
-            S().setStreaming(false);
-            S().setAbortController(null);
-            break;
-          }
-
-          case "error": {
-            // 非致命错误：追加错误信息但不终止流式状态。
-            // SSE 连接可能仍会传递后续事件（工具调用、文本、done）。
-            // 清理由 "done" 事件或连接实际关闭时的 finally 块处理。
-            _hadStreamError = true;
-            S().setPipelineStatus(null);
-            const errMsg = (data.error as string) || "发生未知错误";
-            // 工作区已满：直接展示后端提供的格式化消息
-            if (data.error_code === "workspace_full") {
-              S().appendBlock(assistantMsgId, { type: "text", content: errMsg });
-              break;
-            }
+        } else if (sseEvent.event === "error") {
+          // sendMessage 有更丰富的错误分类（模型配置检测）
+          const errMsg = (data.error as string) || "发生未知错误";
+          if (data.error_code === "workspace_full") {
+            S().appendBlock(assistantMsgId, { type: "text", content: errMsg });
+          } else {
             const errLower = errMsg.toLowerCase();
-            // 检测模型配置相关错误，提供更友好的提示
             const isModelConfigError = [
               "unauthorized", "401", "403", "forbidden",
               "invalid api", "authentication", "api key",
@@ -1150,40 +412,44 @@ export async function sendMessage(
                 content: `⚠️ ${errMsg}`,
               });
             }
-            break;
           }
-
-          default:
-            // 静默忽略未知事件
-            break;
         }
       },
       abortController.signal
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
-      _hadStreamError = true;
+      sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, {
         type: "text",
         content: `⚠️ 连接错误: ${(err as Error).message}`,
       });
+    } else if (_connectionTimedOut) {
+      sseCtx.hadStreamError = true;
+      S().appendBlock(assistantMsgId, {
+        type: "text",
+        content:
+          "⚠️ **连接超时**\n\n" +
+          "未能在 30 秒内与服务端建立连接，可能的原因：\n" +
+          "- 模型 API 配置错误（API Key、Base URL 或模型名称）\n" +
+          "- 后端服务未启动或网络不可达\n\n" +
+          "> 请检查右上角 ⚙️ 设置中的模型配置，确认后重试。",
+      });
     }
   } finally {
+    clearTimeout(_connectionTimer);
     batcher.dispose();
     S().setPipelineStatus(null);
     S().saveCurrentSession();
     S().setStreaming(false);
     S().setAbortController(null);
 
-    // 自动恢复：如果流式传输期间发生错误，调度一次后端刷新，
-    // 使用户无需手动刷新页面即可看到权威的对话状态。
-    if (_hadStreamError && effectiveSessionId) {
+    if (sseCtx.hadStreamError && effectiveSessionId) {
       const sid = effectiveSessionId;
       setTimeout(async () => {
         try {
           const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
           const chat = useChatStore.getState();
-          // 仅在仍在同一会话且未在流式传输时刷新
           if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
             await refreshSessionMessagesFromBackend(sid);
           }
@@ -1206,7 +472,6 @@ export async function sendContinuation(
   const store = useChatStore.getState();
   if (store.isStreaming) return;
 
-  // 找到最后一条 assistant 消息复用其 ID
   const messages = store.messages;
   let assistantMsgId: string | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -1216,7 +481,6 @@ export async function sendContinuation(
     }
   }
   if (!assistantMsgId) {
-    // 无已有 assistant 消息，回退到普通发送
     return sendMessage(text, undefined, sessionId);
   }
 
@@ -1233,17 +497,15 @@ export async function sendContinuation(
   });
 
   const S = () => useChatStore.getState();
+  const msgId = assistantMsgId;
 
-  // 用于 continuation 流的 RAF 批量增量刷新器
   const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
     if (textDelta) {
       const msg = getLastAssistantMessage(S().messages, msgId);
       const lastBlock = msg?.blocks[msg.blocks.length - 1];
       if (lastBlock && lastBlock.type === "text") {
         S().updateLastBlock(msgId, (b) => {
-          if (b.type === "text") {
-            return { ...b, content: b.content + textDelta };
-          }
+          if (b.type === "text") return { ...b, content: b.content + textDelta };
           return b;
         });
       } else {
@@ -1252,724 +514,91 @@ export async function sendContinuation(
     }
     if (thinkingDelta) {
       S().updateBlockByType(msgId, "thinking", (b) => {
-        if (b.type === "thinking") {
-          return { ...b, content: b.content + thinkingDelta };
-        }
+        if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
         return b;
       });
     }
   });
 
-  const getLastBlockOfType = (type: string) => {
-    const msg = getLastAssistantMessage(S().messages, assistantMsgId!);
-    if (!msg) return null;
-    for (let i = msg.blocks.length - 1; i >= 0; i--) {
-      if (msg.blocks[i].type === type) return msg.blocks[i];
-    }
-    return null;
-  };
-
-  const normalizeTaskItems = (taskListPayload: unknown): TaskItem[] => {
-    let rawItems: unknown[] = [];
-    if (Array.isArray(taskListPayload)) {
-      rawItems = taskListPayload;
-    } else if (
-      taskListPayload
-      && typeof taskListPayload === "object"
-      && "items" in taskListPayload
-      && Array.isArray((taskListPayload as { items?: unknown[] }).items)
-    ) {
-      rawItems = (taskListPayload as { items: unknown[] }).items;
-    }
-    return rawItems.map((rawItem, i) => {
-      const item = rawItem as Record<string, unknown>;
-      return {
-        content:
-          (item.content as string)
-          || (item.title as string)
-          || (item.description as string)
-          || `任务 ${i + 1}`,
-        status: (item.status as string) || "pending",
-        index: typeof item.index === "number" ? item.index : i,
-        verification: (item.verification as string) || undefined,
-      };
-    });
-  };
-
-  const applyTaskStatusPatch = (
-    items: TaskItem[],
-    taskIndex: number | null,
-    taskStatus: string,
-  ): TaskItem[] => {
-    if (taskIndex === null || !taskStatus) return items;
-    return items.map((item) =>
-      item.index === taskIndex ? { ...item, status: taskStatus } : item
-    );
-  };
-
-  const msgId = assistantMsgId;
-  let thinkingInProgress = false;
-  let _hadStreamError = false;
-
-  const finalizeThinking = () => {
-    if (!thinkingInProgress) return;
-    thinkingInProgress = false;
-    batcher.flush();
-    S().updateBlockByType(msgId, "thinking", (b) => {
-      if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
-        return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
-      }
-      return b;
-    });
+  const sseCtx: SSEHandlerContext = {
+    assistantMsgId: msgId,
+    batcher: batcher as unknown as DeltaBatcherInterface,
+    effectiveSessionId: effectiveSessionId || "",
+    isFirstSend: false,
+    thinkingInProgress: false,
+    hadStreamError: false,
   };
 
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
-      {
-        message: text,
-        session_id: effectiveSessionId,
-      },
+      { message: text, session_id: effectiveSessionId },
       (event) => {
-        const data = event.data;
+        const sseEvent = event as SSEEvent;
+        preDispatch(sseEvent, sseCtx);
+        dispatchSSEEvent(sseEvent, sseCtx);
 
-        if (event.event !== "thinking_delta" && event.event !== "thinking") {
-          finalizeThinking();
-        }
-        // 在任何非增量事件前刷新缓冲的增量，以保持 block 顺序
-        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
-          batcher.flush();
-        }
-
-        switch (event.event) {
-          // 跳过 session_init — 会话已存在
-          case "session_init":
-            break;
-
-          case "pipeline_progress": {
-            const _stage2 = (data.stage as string) || "";
-            const _msg2 = (data.message as string) || "";
-            const _tcId2 = (data.tool_call_id as string) || "";
-            S().setPipelineStatus({
-              stage: _stage2,
-              message: _msg2,
-              startedAt: Date.now(),
-              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-              specPath: (data.spec_path as string) || undefined,
-              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
-              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
-            });
-            if (_tcId2) {
-              S().setToolProgress(_tcId2, {
-                stage: _stage2,
-                message: _msg2,
-                phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-                totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-              });
-            }
-            break;
-          }
-
-          case "route_end": {
-            const mode = (data.route_mode as string) || "";
-            const skills = (data.skills_used as string[]) || [];
-            if (mode) {
-              S().appendBlock(msgId, {
-                type: "status",
-                label: _friendlyRouteMode(mode),
-                detail: skills.length > 0 ? skills.join(",") : undefined,
-                variant: "route",
-              });
-            }
-            break;
-          }
-
-          case "iteration_start": {
-            const iter = (data.iteration as number) || 0;
-            if (iter > 1) {
-              S().appendBlock(msgId, { type: "iteration", iteration: iter });
-            }
-            break;
-          }
-
-          case "thinking_delta": {
-            S().setPipelineStatus(null);
-            const lastThinking = getLastBlockOfType("thinking");
-            if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              batcher.pushThinking((data.content as string) || "");
-            } else {
-              batcher.flush();
-              S().appendBlock(msgId, {
-                type: "thinking",
-                content: (data.content as string) || "",
-                startedAt: Date.now(),
-              });
-            }
-            thinkingInProgress = true;
-            break;
-          }
-
-          case "thinking": {
-            S().appendBlock(msgId, {
-              type: "thinking",
-              content: (data.content as string) || "",
-              duration: (data.duration as number) || undefined,
-              startedAt: Date.now(),
-            });
-            break;
-          }
-
-          case "text_delta": {
-            S().setPipelineStatus(null);
-            const msg = getLastAssistantMessage(S().messages, msgId);
-            const lastBlock = msg?.blocks[msg.blocks.length - 1];
-            if (!lastBlock || lastBlock.type !== "text") {
-              S().appendBlock(msgId, { type: "text", content: "" });
-            }
-            batcher.pushText((data.content as string) || "");
-            break;
-          }
-
-          case "tool_call_args_delta": {
-            const _adId = (data.tool_call_id as string) || "";
-            const _adName = (data.tool_name as string) || "";
-            const _adDelta = (data.args_delta as string) || "";
-            if (_adId && _adDelta) {
-              useExcelStore.getState().appendStreamingArgs(_adId, _adDelta);
-              const _adMsg = getLastAssistantMessage(S().messages, msgId);
-              const _adHas = _adMsg?.blocks.some(
-                (b) => b.type === "tool_call" && b.toolCallId === _adId,
-              );
-              if (!_adHas && _adName) {
-                S().setPipelineStatus(null);
-                S().appendBlock(msgId, {
-                  type: "tool_call",
-                  toolCallId: _adId,
-                  name: _adName,
-                  args: {},
-                  status: "streaming" as "running",
-                  iteration: undefined,
-                });
-              }
-            }
-            break;
-          }
-
-          case "tool_call_start": {
-            S().setPipelineStatus(null);
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallIdVal = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
-              ? toolCallIdRaw
-              : undefined;
-            const _sMsg = getLastAssistantMessage(S().messages, msgId);
-            const _sExists = toolCallIdVal && _sMsg?.blocks.some(
-              (b) => b.type === "tool_call" && b.toolCallId === toolCallIdVal && (b.status as string) === "streaming",
-            );
-            if (_sExists) {
-              S().updateToolCallBlock(msgId, toolCallIdVal!, (b) => {
-                if (b.type === "tool_call") {
-                  return {
-                    ...b,
-                    args: (data.arguments as Record<string, unknown>) || b.args,
-                    status: "running",
-                    iteration: (data.iteration as number) || undefined,
-                  } as AssistantBlock;
-                }
-                return b;
-              });
-            } else {
-              S().appendBlock(msgId, {
-                type: "tool_call",
-                toolCallId: toolCallIdVal,
-                name: (data.tool_name as string) || "",
-                args: (data.arguments as Record<string, unknown>) || {},
-                status: "running",
-                iteration: (data.iteration as number) || undefined,
-              });
-            }
-            break;
-          }
-
-          case "tool_call_end": {
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
-            if (toolCallId) {
-              useExcelStore.getState().clearStreamingArgs(toolCallId);
-              S().clearToolProgress(toolCallId);
-            }
-            S().updateToolCallBlock(msgId, toolCallId, (b) => {
-              if (b.type === "tool_call") {
-                if (b.status === "pending") {
-                  return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
-                }
-                if (b.status === "running" || (b.status as string) === "streaming") {
-                  return {
-                    ...b,
-                    status: data.success ? "success" : "error",
-                    result: (data.result as string) || undefined,
-                    error: (data.error as string) || undefined,
-                  } as AssistantBlock;
-                }
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_start": {
-            S().appendBlock(msgId, {
-              type: "subagent",
-              name: (data.name as string) || "",
-              reason: (data.reason as string) || "",
-              iterations: 0,
-              toolCalls: 0,
-              status: "running",
-              conversationId: (data.conversation_id as string) || "",
-              tools: [],
-            });
-            break;
-          }
-
-          case "subagent_iteration": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent" && b.status === "running") {
-                return {
-                  ...b,
-                  iterations: (data.iteration as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_tool_start": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type !== "subagent" || b.status !== "running") return b;
-              const args = (data.arguments as Record<string, unknown>) || {};
-              const parts: string[] = [];
-              if (args.sheet) parts.push(String(args.sheet));
-              if (args.range) parts.push(String(args.range));
-              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
-              if (args.code_preview) parts.push(String(args.code_preview));
-              return {
-                ...b,
-                tools: [...(b.tools || []), {
-                  index: (data.tool_index as number) || 0,
-                  name: (data.tool_name as string) || "",
-                  argsSummary: parts.join(" \u00b7 "),
-                  status: "running" as const,
-                  args,
-                }],
+        // ── sendContinuation 独有：reply 的 token 累加逻辑 ──
+        if (sseEvent.event === "reply") {
+          const data = event.data;
+          const hasPendingInteraction =
+            S().pendingApproval !== null || S().pendingQuestion !== null;
+          const totalTokens = (data.total_tokens as number) || 0;
+          if (totalTokens > 0) {
+            if (hasPendingInteraction) {
+              _deferredTokenStats = {
+                promptTokens: (data.prompt_tokens as number) || 0,
+                completionTokens: (data.completion_tokens as number) || 0,
+                totalTokens,
+                iterations: (data.iterations as number) || 0,
               };
-            });
-            break;
-          }
-
-          case "subagent_tool_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type !== "subagent") return b;
-              const tools = [...(b.tools || [])];
-              const toolName = (data.tool_name as string) || "";
-              const idx = tools.findLastIndex(
-                (t) => t.name === toolName && t.status === "running"
-              );
-              if (idx >= 0) {
-                tools[idx] = {
-                  ...tools[idx],
-                  status: (data.success as boolean) ? "success" : "error",
-                  result: (data.result as string) || undefined,
-                  error: (data.error as string) || undefined,
-                };
+            } else {
+              let accPrompt = (data.prompt_tokens as number) || 0;
+              let accCompletion = (data.completion_tokens as number) || 0;
+              let accTotal = totalTokens;
+              let accIterations = (data.iterations as number) || 0;
+              if (_deferredTokenStats) {
+                accPrompt += _deferredTokenStats.promptTokens;
+                accCompletion += _deferredTokenStats.completionTokens;
+                accTotal += _deferredTokenStats.totalTokens;
+                accIterations += _deferredTokenStats.iterations;
+                _deferredTokenStats = null;
               }
-              return { ...b, tools };
-            });
-            break;
-          }
-
-          case "subagent_summary": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  summary: (data.summary as string) || "",
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  status: "done",
-                  success: (data.success as boolean) ?? true,
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "pending_approval": {
-            const paToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(msgId, paToolCallId, (b) => {
-              if (b.type === "tool_call") {
-                return { ...b, status: "pending" as const } as AssistantBlock;
-              }
-              return b;
-            });
-            S().setPendingApproval({
-              id: (data.approval_id as string) || "",
-              toolName: (data.approval_tool_name as string) || "",
-              arguments: {},
-              riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
-              argsSummary: (data.args_summary as Record<string, string>) || {},
-            });
-            break;
-          }
-
-          case "user_question": {
-            S().setPendingQuestion({
-              id: (data.id as string) || "",
-              header: (data.header as string) || "",
-              text: (data.text as string) || "",
-              options: (data.options as { label: string; description: string }[]) || [],
-              multiSelect: Boolean(data.multi_select),
-            });
-            break;
-          }
-
-          case "approval_resolved": {
-            const toolName = (data.approval_tool_name as string) || "";
-            const approvalId = (data.approval_id as string) || "";
-            const success = Boolean(data.success);
-            const undoable = Boolean(data.undoable);
-            const hasChanges = Boolean(data.has_changes);
-            const arResult = (data.result as string) || undefined;
-            S().setPendingApproval(null);
-            // 将 pending 状态的 tool_call block 转换为 success/error 并附加结果
-            const arToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(msgId, arToolCallId, (b) => {
-              if (b.type === "tool_call" && b.status === "pending") {
-                return {
-                  ...b,
-                  status: success ? ("success" as const) : ("error" as const),
-                  result: arResult ?? b.result,
-                  error: success ? undefined : (arResult ?? b.error),
-                } as AssistantBlock;
-              }
-              return b;
-            });
-            S().appendBlock(msgId, {
-              type: "approval_action",
-              approvalId,
-              toolName,
-              success,
-              undoable,
-              hasChanges,
-            });
-            break;
-          }
-
-          case "task_update": {
-            const payloadItems = normalizeTaskItems(data.task_list);
-            const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
-            const taskStatus = typeof data.task_status === "string" ? data.task_status : "";
-            const existingTaskList = getLastBlockOfType("task_list");
-            if (existingTaskList && existingTaskList.type === "task_list") {
-              S().updateBlockByType(msgId, "task_list", (b) => {
-                if (b.type !== "task_list") return b;
-                const baseItems = payloadItems.length > 0 ? payloadItems : b.items;
-                return { ...b, items: applyTaskStatusPatch(baseItems, taskIndex, taskStatus) };
-              });
-            } else if (payloadItems.length > 0) {
-              S().appendBlock(msgId, {
-                type: "task_list",
-                items: applyTaskStatusPatch(payloadItems, taskIndex, taskStatus),
-              });
-            }
-            break;
-          }
-
-          case "excel_preview": {
-            const epFilePath2 = (data.file_path as string) || "";
-            useExcelStore.getState().addPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: epFilePath2,
-              sheet: (data.sheet as string) || "",
-              columns: (data.columns as string[]) || [],
-              rows: (data.rows as (string | number | null)[][]) || [],
-              totalRows: (data.total_rows as number) || 0,
-              truncated: Boolean(data.truncated),
-              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-            });
-            if (epFilePath2) {
-              const fn = epFilePath2.split("/").pop() || epFilePath2;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath2, filename: fn });
-            }
-            break;
-          }
-
-          case "excel_diff": {
-            const edFilePath2 = (data.file_path as string) || "";
-            useExcelStore.getState().addDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: edFilePath2,
-              sheet: (data.sheet as string) || "",
-              affectedRange: (data.affected_range as string) || "",
-              changes: _mapDiffChanges(data.changes as unknown[]),
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-              timestamp: Date.now(),
-            });
-            if (edFilePath2) {
-              const fn = edFilePath2.split("/").pop() || edFilePath2;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath2, filename: fn });
-              S().addAffectedFiles(msgId, [edFilePath2]);
-            }
-            break;
-          }
-
-          case "text_diff": {
-            const tdFilePath2 = (data.file_path as string) || "";
-            useExcelStore.getState().addTextDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: tdFilePath2,
-              hunks: (data.hunks as string[]) || [],
-              additions: (data.additions as number) || 0,
-              deletions: (data.deletions as number) || 0,
-              truncated: !!data.truncated,
-              timestamp: Date.now(),
-            });
-            if (tdFilePath2) {
-              S().addAffectedFiles(msgId, [tdFilePath2]);
-            }
-            break;
-          }
-
-          case "text_preview": {
-            useExcelStore.getState().addTextPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: (data.file_path as string) || "",
-              content: (data.content as string) || "",
-              lineCount: (data.line_count as number) || 0,
-              truncated: !!data.truncated,
-            });
-            break;
-          }
-
-          case "verification_report": {
-            S().appendBlock(msgId, {
-              type: "verification_report",
-              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
-              confidence: (data.confidence as "high" | "medium" | "low") || "low",
-              checks: (data.checks as string[]) || [],
-              issues: (data.issues as string[]) || [],
-              mode: (data.mode as "advisory" | "blocking") || "advisory",
-            });
-            break;
-          }
-
-          case "files_changed": {
-            const changedFiles2 = (data.files as string[]) || [];
-            const excelStore2 = useExcelStore.getState();
-            for (const filePath of changedFiles2) {
-              if (filePath) {
-                const filename = filePath.split("/").pop() || filePath;
-                excelStore2.addRecentFileIfNotDismissed({ path: filePath, filename });
-              }
-            }
-            if (changedFiles2.length > 0) {
-              S().addAffectedFiles(msgId, changedFiles2);
-              excelStore2.bumpWorkspaceFilesVersion();
-              // W7: 自动刷新备份列表
-              if (effectiveSessionId) {
-                excelStore2.fetchBackups(effectiveSessionId);
-              }
-            }
-            break;
-          }
-
-          case "staging_updated": {
-            const stAction2 = (data.action as string) || "";
-            const stFiles2 = (data.files as { original_path: string; backup_path: string }[]) || [];
-            const stPending2 = (data.pending_count as number) ?? 0;
-            useExcelStore.getState().handleStagingUpdated(stAction2, stFiles2, stPending2);
-            if (stAction2 === "finish_hint" && stPending2 > 0) {
-              S().appendBlock(msgId, {
-                type: "staging_hint",
-                pendingCount: stPending2,
-                files: stFiles2.map((f) => f.original_path),
-              });
-            }
-            if (effectiveSessionId) {
-              useExcelStore.getState().fetchBackups(effectiveSessionId);
-            }
-            break;
-          }
-
-          case "memory_extracted": {
-            const memEntries = (data.entries as { id: string; content: string; category: string }[]) || [];
-            const memTrigger = (data.trigger as string) || "session_end";
-            const memCount = (data.count as number) || memEntries.length;
-            if (memCount > 0) {
-              S().appendBlock(msgId, {
-                type: "memory_extracted",
-                entries: memEntries,
-                trigger: memTrigger,
-                count: memCount,
-              });
-            }
-            break;
-          }
-
-          case "file_download": {
-            const dlFilePath2 = (data.file_path as string) || "";
-            const dlFilename2 = (data.filename as string) || dlFilePath2.split("/").pop() || "download";
-            const dlDescription2 = (data.description as string) || "";
-            if (dlFilePath2) {
-              S().appendBlock(msgId, {
-                type: "file_download",
-                toolCallId: (data.tool_call_id as string) || undefined,
-                filePath: dlFilePath2,
-                filename: dlFilename2,
-                description: dlDescription2,
-              });
-            }
-            break;
-          }
-
-          case "mode_changed": {
-            const uiMode = useUIStore.getState();
-            const modeName = data.mode_name as string;
-            const enabled = Boolean(data.enabled);
-            if (modeName === "full_access") uiMode.setFullAccessEnabled(enabled);
-            else if (modeName === "chat_mode") uiMode.setChatMode(data.value as "write" | "read" | "plan");
-            S().appendBlock(msgId, {
-              type: "status",
-              label: `${enabled ? "已开启" : "已关闭"} ${modeName === "full_access" ? "Full Access" : modeName}`,
-              variant: "info",
-            });
-            break;
-          }
-
-          case "reply": {
-            const content = (data.content as string) || "";
-            const hasPendingInteraction =
-              S().pendingApproval !== null || S().pendingQuestion !== null;
-            if (content && !hasPendingInteraction) {
-              const msg = getLastAssistantMessage(S().messages, msgId);
-              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
-              if (!hasTextBlock) {
-                S().appendBlock(msgId, { type: "text", content });
-              }
-            }
-            const uiReply = useUIStore.getState();
-            if (typeof data.full_access_enabled === "boolean") {
-              uiReply.setFullAccessEnabled(data.full_access_enabled);
-            }
-            if (typeof data.chat_mode === "string") {
-              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
-            }
-            const totalTokens = (data.total_tokens as number) || 0;
-            if (totalTokens > 0) {
-              if (hasPendingInteraction) {
-                // 延迟 — 后续的 continuation 将展示累计总数。
-                _deferredTokenStats = {
-                  promptTokens: (data.prompt_tokens as number) || 0,
-                  completionTokens: (data.completion_tokens as number) || 0,
-                  totalTokens,
-                  iterations: (data.iterations as number) || 0,
-                };
-              } else {
-                // 累加：前次调用的延迟统计 + 剩余 block + 当前
-                let accPrompt = (data.prompt_tokens as number) || 0;
-                let accCompletion = (data.completion_tokens as number) || 0;
-                let accTotal = totalTokens;
-                let accIterations = (data.iterations as number) || 0;
-                if (_deferredTokenStats) {
-                  accPrompt += _deferredTokenStats.promptTokens;
-                  accCompletion += _deferredTokenStats.completionTokens;
-                  accTotal += _deferredTokenStats.totalTokens;
-                  accIterations += _deferredTokenStats.iterations;
-                  _deferredTokenStats = null;
-                }
-                const curMsg = getLastAssistantMessage(S().messages, msgId);
-                if (curMsg) {
-                  for (const b of curMsg.blocks) {
-                    if (b.type === "token_stats") {
-                      accPrompt += b.promptTokens;
-                      accCompletion += b.completionTokens;
-                      accTotal += b.totalTokens;
-                      accIterations += b.iterations;
-                    }
-                  }
-                  if (curMsg.blocks.some((b) => b.type === "token_stats")) {
-                    S().setMessages(
-                      S().messages.map((m) => {
-                        if (m.id !== msgId || m.role !== "assistant") return m;
-                        return { ...m, blocks: m.blocks.filter((b) => b.type !== "token_stats") };
-                      }),
-                    );
+              const curMsg = getLastAssistantMessage(S().messages, msgId);
+              if (curMsg) {
+                for (const b of curMsg.blocks) {
+                  if (b.type === "token_stats") {
+                    accPrompt += b.promptTokens;
+                    accCompletion += b.completionTokens;
+                    accTotal += b.totalTokens;
+                    accIterations += b.iterations;
                   }
                 }
-                S().appendBlock(msgId, {
-                  type: "token_stats",
-                  promptTokens: accPrompt,
-                  completionTokens: accCompletion,
-                  totalTokens: accTotal,
-                  iterations: accIterations,
-                });
+                if (curMsg.blocks.some((b) => b.type === "token_stats")) {
+                  S().setMessages(
+                    S().messages.map((m) => {
+                      if (m.id !== msgId || m.role !== "assistant") return m;
+                      return { ...m, blocks: m.blocks.filter((b) => b.type !== "token_stats") };
+                    }),
+                  );
+                }
               }
+              S().appendBlock(msgId, {
+                type: "token_stats",
+                promptTokens: accPrompt,
+                completionTokens: accCompletion,
+                totalTokens: accTotal,
+                iterations: accIterations,
+              });
             }
-            break;
           }
-
-          case "done": {
-            S().setPipelineStatus(null);
-            S().saveCurrentSession();
-            S().setStreaming(false);
-            S().setAbortController(null);
-            break;
-          }
-
-          case "error": {
-            _hadStreamError = true;
-            S().setPipelineStatus(null);
-            S().appendBlock(msgId, {
-              type: "text",
-              content: `⚠️ ${(data.error as string) || "发生未知错误"}`,
-            });
-            break;
-          }
-
-          default:
-            break;
         }
       },
       abortController.signal,
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
-      _hadStreamError = true;
+      sseCtx.hadStreamError = true;
       S().appendBlock(msgId, {
         type: "text",
         content: `⚠️ 连接错误: ${(err as Error).message}`,
@@ -1982,7 +611,7 @@ export async function sendContinuation(
     S().setStreaming(false);
     S().setAbortController(null);
 
-    if (_hadStreamError && effectiveSessionId) {
+    if (sseCtx.hadStreamError && effectiveSessionId) {
       const sid = effectiveSessionId;
       setTimeout(async () => {
         try {
@@ -1992,7 +621,7 @@ export async function sendContinuation(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // 静默处理 — SessionSync 轮询最终会恢复
+          // 静默处理
         }
       }, 1500);
     }
@@ -2230,11 +859,9 @@ let _activeSubscribeSessionId: string | null = null;
 export async function subscribeToSession(sessionId: string) {
   const store = useChatStore.getState();
 
-  // 防止重复的 subscribe 连接
   if (store.abortController) return;
   if (_activeSubscribeSessionId === sessionId) return;
 
-  // 查找最后一条 assistant 消息用于追加事件
   const messages = store.messages;
   let assistantMsgId: string | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -2243,7 +870,6 @@ export async function subscribeToSession(sessionId: string) {
       break;
     }
   }
-  // 如果尚无 assistant 消息，创建一条
   if (!assistantMsgId) {
     assistantMsgId = uuid();
     store.addAssistantMessage(assistantMsgId);
@@ -2269,9 +895,7 @@ export async function subscribeToSession(sessionId: string) {
       const lastBlock = msg?.blocks[msg.blocks.length - 1];
       if (lastBlock && lastBlock.type === "text") {
         S().updateLastBlock(msgId, (b) => {
-          if (b.type === "text") {
-            return { ...b, content: b.content + textDelta };
-          }
+          if (b.type === "text") return { ...b, content: b.content + textDelta };
           return b;
         });
       } else {
@@ -2280,73 +904,19 @@ export async function subscribeToSession(sessionId: string) {
     }
     if (thinkingDelta) {
       S().updateBlockByType(msgId, "thinking", (b) => {
-        if (b.type === "thinking") {
-          return { ...b, content: b.content + thinkingDelta };
-        }
+        if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
         return b;
       });
     }
   });
 
-  const getLastBlockOfType = (type: string) => {
-    const msg = getLastAssistantMessage(S().messages, msgId);
-    if (!msg) return null;
-    for (let i = msg.blocks.length - 1; i >= 0; i--) {
-      if (msg.blocks[i].type === type) return msg.blocks[i];
-    }
-    return null;
-  };
-
-  const normalizeTaskItems = (taskListPayload: unknown): TaskItem[] => {
-    let rawItems: unknown[] = [];
-    if (Array.isArray(taskListPayload)) {
-      rawItems = taskListPayload;
-    } else if (
-      taskListPayload
-      && typeof taskListPayload === "object"
-      && "items" in taskListPayload
-      && Array.isArray((taskListPayload as { items?: unknown[] }).items)
-    ) {
-      rawItems = (taskListPayload as { items: unknown[] }).items;
-    }
-    return rawItems.map((rawItem, i) => {
-      const item = rawItem as Record<string, unknown>;
-      return {
-        content:
-          (item.content as string)
-          || (item.title as string)
-          || (item.description as string)
-          || `任务 ${i + 1}`,
-        status: (item.status as string) || "pending",
-        index: typeof item.index === "number" ? item.index : i,
-        verification: (item.verification as string) || undefined,
-      };
-    });
-  };
-
-  const applyTaskStatusPatch = (
-    items: TaskItem[],
-    taskIndex: number | null,
-    taskStatus: string,
-  ): TaskItem[] => {
-    if (taskIndex === null || !taskStatus) return items;
-    return items.map((item) =>
-      item.index === taskIndex ? { ...item, status: taskStatus } : item
-    );
-  };
-
-  let thinkingInProgress = false;
-
-  const finalizeThinking = () => {
-    if (!thinkingInProgress) return;
-    thinkingInProgress = false;
-    batcher.flush();
-    S().updateBlockByType(msgId, "thinking", (b) => {
-      if (b.type === "thinking" && b.startedAt != null && b.duration == null) {
-        return { ...b, duration: (Date.now() - b.startedAt) / 1000 };
-      }
-      return b;
-    });
+  const sseCtx: SSEHandlerContext = {
+    assistantMsgId: msgId,
+    batcher: batcher as unknown as DeltaBatcherInterface,
+    effectiveSessionId: sessionId,
+    isFirstSend: false,
+    thinkingInProgress: false,
+    hadStreamError: false,
   };
 
   try {
@@ -2354,628 +924,25 @@ export async function subscribeToSession(sessionId: string) {
       buildApiUrl("/chat/subscribe", { direct: true }),
       { session_id: sessionId, skip_replay: true },
       (event) => {
-        const data = event.data;
+        const sseEvent = event as SSEEvent;
+        preDispatch(sseEvent, sseCtx);
+        dispatchSSEEvent(sseEvent, sseCtx);
 
-        if (event.event !== "thinking_delta" && event.event !== "thinking") {
-          finalizeThinking();
-        }
-        if (event.event !== "text_delta" && event.event !== "thinking_delta") {
-          batcher.flush();
-        }
-
-        switch (event.event) {
-          case "session_init":
-            break;
-
-          case "subscribe_resume": {
-            const status = (data.status as string) || "";
-            if (status === "reconnected") {
-              S().setPipelineStatus({
-                stage: "resuming",
-                message: "正在恢复事件流...",
-                startedAt: Date.now(),
-              });
-            }
-            break;
-          }
-
-          case "pipeline_progress": {
-            const stage = (data.stage as string) || "";
-            const pipelineMsg = (data.message as string) || "";
-            const _tcId3 = (data.tool_call_id as string) || "";
-            S().setPipelineStatus({
-              stage,
-              message: pipelineMsg,
-              startedAt: Date.now(),
-              phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-              totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-              specPath: (data.spec_path as string) || undefined,
-              diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
-              checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
-              // 批量任务相关字段
-              batchIndex: typeof data.batch_index === "number" ? data.batch_index : undefined,
-              batchTotal: typeof data.batch_total === "number" ? data.batch_total : undefined,
-            });
-            if (_tcId3) {
-              S().setToolProgress(_tcId3, {
-                stage,
-                message: pipelineMsg,
-                phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-                totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-              });
-            }
-            break;
-          }
-
-          case "batch_progress": {
-            // 批量任务进度事件
-            const batchIndex = typeof data.batch_index === "number" ? data.batch_index : 0;
-            const batchTotal = typeof data.batch_total === "number" ? data.batch_total : 1;
-            const batchItemName = (data.batch_item_name as string) || `任务 ${batchIndex + 1}`;
-            const batchStatus = ((data.batch_status as string) || "running") as "running" | "failed" | "completed";
-            const batchElapsed = typeof data.batch_elapsed_seconds === "number" ? data.batch_elapsed_seconds : 0;
-            const batchMsg = (data.message as string) || "";
-
-            S().setBatchProgress({
-              batchIndex,
-              batchTotal,
-              batchItemName,
-              batchStatus,
-              batchElapsed,
-              message: batchMsg,
-            });
-            break;
-          }
-
-          case "route_end": {
-            const mode = (data.route_mode as string) || "";
-            const skills = (data.skills_used as string[]) || [];
-            if (mode) {
-              S().appendBlock(msgId, {
-                type: "status",
-                label: _friendlyRouteMode(mode),
-                detail: skills.length > 0 ? skills.join(",") : undefined,
-                variant: "route",
-              });
-            }
-            break;
-          }
-
-          case "iteration_start": {
-            const iter = (data.iteration as number) || 0;
-            if (iter > 1) {
-              S().appendBlock(msgId, { type: "iteration", iteration: iter });
-            }
-            break;
-          }
-
-          case "thinking_delta": {
-            S().setPipelineStatus(null);
-            const lastThinking = getLastBlockOfType("thinking");
-            if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-              batcher.pushThinking((data.content as string) || "");
-            } else {
-              batcher.flush();
-              S().appendBlock(msgId, {
-                type: "thinking",
-                content: (data.content as string) || "",
-                startedAt: Date.now(),
-              });
-            }
-            thinkingInProgress = true;
-            break;
-          }
-
-          case "thinking": {
+        // ── subscribe 独有：reply 的简单 token 统计 ──
+        if (sseEvent.event === "reply") {
+          const data = event.data;
+          const hasPendingInteraction =
+            S().pendingApproval !== null || S().pendingQuestion !== null;
+          const totalTokens = (data.total_tokens as number) || 0;
+          if (totalTokens > 0 && !hasPendingInteraction) {
             S().appendBlock(msgId, {
-              type: "thinking",
-              content: (data.content as string) || "",
-              duration: (data.duration as number) || undefined,
-              startedAt: Date.now(),
+              type: "token_stats",
+              promptTokens: (data.prompt_tokens as number) || 0,
+              completionTokens: (data.completion_tokens as number) || 0,
+              totalTokens,
+              iterations: (data.iterations as number) || 0,
             });
-            break;
           }
-
-          case "text_delta": {
-            S().setPipelineStatus(null);
-            const msg = getLastAssistantMessage(S().messages, msgId);
-            const lastBlock = msg?.blocks[msg.blocks.length - 1];
-            if (!lastBlock || lastBlock.type !== "text") {
-              S().appendBlock(msgId, { type: "text", content: "" });
-            }
-            batcher.pushText((data.content as string) || "");
-            break;
-          }
-
-          case "tool_call_args_delta": {
-            const _adId = (data.tool_call_id as string) || "";
-            const _adName = (data.tool_name as string) || "";
-            const _adDelta = (data.args_delta as string) || "";
-            if (_adId && _adDelta) {
-              useExcelStore.getState().appendStreamingArgs(_adId, _adDelta);
-              const _adMsg = getLastAssistantMessage(S().messages, msgId);
-              const _adHas = _adMsg?.blocks.some(
-                (b) => b.type === "tool_call" && b.toolCallId === _adId,
-              );
-              if (!_adHas && _adName) {
-                S().setPipelineStatus(null);
-                S().appendBlock(msgId, {
-                  type: "tool_call",
-                  toolCallId: _adId,
-                  name: _adName,
-                  args: {},
-                  status: "streaming" as "running",
-                  iteration: undefined,
-                });
-              }
-            }
-            break;
-          }
-
-          case "tool_call_start": {
-            S().setPipelineStatus(null);
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallIdVal = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
-              ? toolCallIdRaw
-              : undefined;
-            const _sMsg = getLastAssistantMessage(S().messages, msgId);
-            const _sExists = toolCallIdVal && _sMsg?.blocks.some(
-              (b) => b.type === "tool_call" && b.toolCallId === toolCallIdVal && (b.status as string) === "streaming",
-            );
-            if (_sExists) {
-              S().updateToolCallBlock(msgId, toolCallIdVal!, (b) => {
-                if (b.type === "tool_call") {
-                  return {
-                    ...b,
-                    args: (data.arguments as Record<string, unknown>) || b.args,
-                    status: "running",
-                    iteration: (data.iteration as number) || undefined,
-                  } as AssistantBlock;
-                }
-                return b;
-              });
-            } else {
-              S().appendBlock(msgId, {
-                type: "tool_call",
-                toolCallId: toolCallIdVal,
-                name: (data.tool_name as string) || "",
-                args: (data.arguments as Record<string, unknown>) || {},
-                status: "running",
-                iteration: (data.iteration as number) || undefined,
-              });
-            }
-            break;
-          }
-
-          case "tool_call_end": {
-            const toolCallIdRaw = data.tool_call_id;
-            const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
-            if (toolCallId) {
-              useExcelStore.getState().clearStreamingArgs(toolCallId);
-              S().clearToolProgress(toolCallId);
-            }
-            S().updateToolCallBlock(msgId, toolCallId, (b) => {
-              if (b.type === "tool_call") {
-                if (b.status === "pending") {
-                  return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
-                }
-                if (b.status === "running" || (b.status as string) === "streaming") {
-                  return {
-                    ...b,
-                    status: data.success ? "success" : "error",
-                    result: (data.result as string) || undefined,
-                    error: (data.error as string) || undefined,
-                  } as AssistantBlock;
-                }
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_start": {
-            S().appendBlock(msgId, {
-              type: "subagent",
-              name: (data.name as string) || "",
-              reason: (data.reason as string) || "",
-              iterations: 0,
-              toolCalls: 0,
-              status: "running",
-              conversationId: (data.conversation_id as string) || "",
-              tools: [],
-            });
-            break;
-          }
-
-          case "subagent_iteration": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent" && b.status === "running") {
-                return {
-                  ...b,
-                  iterations: (data.iteration as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_tool_start": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type !== "subagent" || b.status !== "running") return b;
-              const args = (data.arguments as Record<string, unknown>) || {};
-              const parts: string[] = [];
-              if (args.sheet) parts.push(String(args.sheet));
-              if (args.range) parts.push(String(args.range));
-              if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
-              if (args.code_preview) parts.push(String(args.code_preview));
-              return {
-                ...b,
-                tools: [...(b.tools || []), {
-                  index: (data.tool_index as number) || 0,
-                  name: (data.tool_name as string) || "",
-                  argsSummary: parts.join(" \u00b7 "),
-                  status: "running" as const,
-                  args,
-                }],
-              };
-            });
-            break;
-          }
-
-          case "subagent_tool_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type !== "subagent") return b;
-              const tools = [...(b.tools || [])];
-              const toolName = (data.tool_name as string) || "";
-              const idx = tools.findLastIndex(
-                (t) => t.name === toolName && t.status === "running"
-              );
-              if (idx >= 0) {
-                tools[idx] = {
-                  ...tools[idx],
-                  status: (data.success as boolean) ? "success" : "error",
-                  result: (data.result as string) || undefined,
-                  error: (data.error as string) || undefined,
-                };
-              }
-              return { ...b, tools };
-            });
-            break;
-          }
-
-          case "subagent_summary": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  summary: (data.summary as string) || "",
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "subagent_end": {
-            const cid = (data.conversation_id as string) || null;
-            S().updateSubagentBlock(msgId, cid, (b) => {
-              if (b.type === "subagent") {
-                return {
-                  ...b,
-                  status: "done",
-                  success: (data.success as boolean) ?? true,
-                  iterations: (data.iterations as number) || b.iterations,
-                  toolCalls: (data.tool_calls as number) || b.toolCalls,
-                };
-              }
-              return b;
-            });
-            break;
-          }
-
-          case "pending_approval": {
-            const paToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(msgId, paToolCallId, (b) => {
-              if (b.type === "tool_call") {
-                return { ...b, status: "pending" as const } as AssistantBlock;
-              }
-              return b;
-            });
-            S().setPendingApproval({
-              id: (data.approval_id as string) || "",
-              toolName: (data.approval_tool_name as string) || "",
-              arguments: {},
-              riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
-              argsSummary: (data.args_summary as Record<string, string>) || {},
-            });
-            break;
-          }
-
-          case "user_question": {
-            S().setPendingQuestion({
-              id: (data.id as string) || "",
-              header: (data.header as string) || "",
-              text: (data.text as string) || "",
-              options: (data.options as { label: string; description: string }[]) || [],
-              multiSelect: Boolean(data.multi_select),
-            });
-            break;
-          }
-
-          case "approval_resolved": {
-            const toolName = (data.approval_tool_name as string) || "";
-            const approvalId = (data.approval_id as string) || "";
-            const success = Boolean(data.success);
-            const undoable = Boolean(data.undoable);
-            const hasChanges = Boolean(data.has_changes);
-            const arResult = (data.result as string) || undefined;
-            S().setPendingApproval(null);
-            const arToolCallId = (data.tool_call_id as string) || null;
-            S().updateToolCallBlock(msgId, arToolCallId, (b) => {
-              if (b.type === "tool_call" && b.status === "pending") {
-                return {
-                  ...b,
-                  status: success ? ("success" as const) : ("error" as const),
-                  result: arResult ?? b.result,
-                  error: success ? undefined : (arResult ?? b.error),
-                } as AssistantBlock;
-              }
-              return b;
-            });
-            S().appendBlock(msgId, {
-              type: "approval_action",
-              approvalId,
-              toolName,
-              success,
-              undoable,
-              hasChanges,
-            });
-            break;
-          }
-
-          case "task_update": {
-            const payloadItems = normalizeTaskItems(data.task_list);
-            const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
-            const taskStatus = typeof data.task_status === "string" ? data.task_status : "";
-            const existingTaskList = getLastBlockOfType("task_list");
-            if (existingTaskList && existingTaskList.type === "task_list") {
-              S().updateBlockByType(msgId, "task_list", (b) => {
-                if (b.type !== "task_list") return b;
-                const baseItems = payloadItems.length > 0 ? payloadItems : b.items;
-                return { ...b, items: applyTaskStatusPatch(baseItems, taskIndex, taskStatus) };
-              });
-            } else if (payloadItems.length > 0) {
-              S().appendBlock(msgId, {
-                type: "task_list",
-                items: applyTaskStatusPatch(payloadItems, taskIndex, taskStatus),
-              });
-            }
-            break;
-          }
-
-          case "excel_preview": {
-            const epFilePath = (data.file_path as string) || "";
-            useExcelStore.getState().addPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: epFilePath,
-              sheet: (data.sheet as string) || "",
-              columns: (data.columns as string[]) || [],
-              rows: (data.rows as (string | number | null)[][]) || [],
-              totalRows: (data.total_rows as number) || 0,
-              truncated: Boolean(data.truncated),
-              cellStyles: Array.isArray(data.cell_styles) ? data.cell_styles as ExcelPreviewData["cellStyles"] : undefined,
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-            });
-            if (epFilePath) {
-              const fn = epFilePath.split("/").pop() || epFilePath;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath, filename: fn });
-            }
-            break;
-          }
-
-          case "excel_diff": {
-            const edFilePath = (data.file_path as string) || "";
-            useExcelStore.getState().addDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: edFilePath,
-              sheet: (data.sheet as string) || "",
-              affectedRange: (data.affected_range as string) || "",
-              changes: _mapDiffChanges(data.changes as unknown[]),
-              mergeRanges: Array.isArray(data.merge_ranges) ? data.merge_ranges as MergeRange[] : undefined,
-              oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
-              metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
-              timestamp: Date.now(),
-            });
-            if (edFilePath) {
-              const fn = edFilePath.split("/").pop() || edFilePath;
-              useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
-              S().addAffectedFiles(msgId, [edFilePath]);
-            }
-            break;
-          }
-
-          case "text_diff": {
-            const tdFilePath3 = (data.file_path as string) || "";
-            useExcelStore.getState().addTextDiff({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: tdFilePath3,
-              hunks: (data.hunks as string[]) || [],
-              additions: (data.additions as number) || 0,
-              deletions: (data.deletions as number) || 0,
-              truncated: !!data.truncated,
-              timestamp: Date.now(),
-            });
-            if (tdFilePath3) {
-              S().addAffectedFiles(msgId, [tdFilePath3]);
-            }
-            break;
-          }
-
-          case "text_preview": {
-            useExcelStore.getState().addTextPreview({
-              toolCallId: (data.tool_call_id as string) || "",
-              filePath: (data.file_path as string) || "",
-              content: (data.content as string) || "",
-              lineCount: (data.line_count as number) || 0,
-              truncated: !!data.truncated,
-            });
-            break;
-          }
-
-          case "verification_report": {
-            S().appendBlock(msgId, {
-              type: "verification_report",
-              verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
-              confidence: (data.confidence as "high" | "medium" | "low") || "low",
-              checks: (data.checks as string[]) || [],
-              issues: (data.issues as string[]) || [],
-              mode: (data.mode as "advisory" | "blocking") || "advisory",
-            });
-            break;
-          }
-
-          case "files_changed": {
-            const changedFiles = (data.files as string[]) || [];
-            const excelStore = useExcelStore.getState();
-            for (const filePath of changedFiles) {
-              if (filePath) {
-                const filename = filePath.split("/").pop() || filePath;
-                excelStore.addRecentFileIfNotDismissed({ path: filePath, filename });
-              }
-            }
-            if (changedFiles.length > 0) {
-              S().addAffectedFiles(msgId, changedFiles);
-              excelStore.bumpWorkspaceFilesVersion();
-              // W7: 自动刷新备份列表
-              if (sessionId) {
-                excelStore.fetchBackups(sessionId);
-              }
-            }
-            break;
-          }
-
-          case "staging_updated": {
-            const stAction3 = (data.action as string) || "";
-            const stFiles3 = (data.files as { original_path: string; backup_path: string }[]) || [];
-            const stPending3 = (data.pending_count as number) ?? 0;
-            useExcelStore.getState().handleStagingUpdated(stAction3, stFiles3, stPending3);
-            if (stAction3 === "finish_hint" && stPending3 > 0) {
-              S().appendBlock(msgId, {
-                type: "staging_hint",
-                pendingCount: stPending3,
-                files: stFiles3.map((f) => f.original_path),
-              });
-            }
-            if (sessionId) {
-              useExcelStore.getState().fetchBackups(sessionId);
-            }
-            break;
-          }
-
-          case "memory_extracted": {
-            const memEntries = (data.entries as { id: string; content: string; category: string }[]) || [];
-            const memTrigger = (data.trigger as string) || "session_end";
-            const memCount = (data.count as number) || memEntries.length;
-            if (memCount > 0) {
-              S().appendBlock(msgId, {
-                type: "memory_extracted",
-                entries: memEntries,
-                trigger: memTrigger,
-                count: memCount,
-              });
-            }
-            break;
-          }
-
-          case "file_download": {
-            const dlFilePath = (data.file_path as string) || "";
-            const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
-            const dlDescription = (data.description as string) || "";
-            if (dlFilePath) {
-              S().appendBlock(msgId, {
-                type: "file_download",
-                toolCallId: (data.tool_call_id as string) || undefined,
-                filePath: dlFilePath,
-                filename: dlFilename,
-                description: dlDescription,
-              });
-            }
-            break;
-          }
-
-          case "mode_changed": {
-            const uiMode = useUIStore.getState();
-            const modeName = data.mode_name as string;
-            const enabled = Boolean(data.enabled);
-            if (modeName === "full_access") uiMode.setFullAccessEnabled(enabled);
-            else if (modeName === "chat_mode") uiMode.setChatMode(data.value as "write" | "read" | "plan");
-            S().appendBlock(msgId, {
-              type: "status",
-              label: `${enabled ? "已开启" : "已关闭"} ${modeName === "full_access" ? "Full Access" : modeName}`,
-              variant: "info",
-            });
-            break;
-          }
-
-          case "reply": {
-            const content = (data.content as string) || "";
-            const hasPendingInteraction =
-              S().pendingApproval !== null || S().pendingQuestion !== null;
-            if (content && !hasPendingInteraction) {
-              const msg = getLastAssistantMessage(S().messages, msgId);
-              const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
-              if (!hasTextBlock) {
-                S().appendBlock(msgId, { type: "text", content });
-              }
-            }
-            const uiReply = useUIStore.getState();
-            if (typeof data.full_access_enabled === "boolean") {
-              uiReply.setFullAccessEnabled(data.full_access_enabled);
-            }
-            if (typeof data.chat_mode === "string") {
-              uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
-            }
-            const totalTokens = (data.total_tokens as number) || 0;
-            if (totalTokens > 0 && !hasPendingInteraction) {
-              S().appendBlock(msgId, {
-                type: "token_stats",
-                promptTokens: (data.prompt_tokens as number) || 0,
-                completionTokens: (data.completion_tokens as number) || 0,
-                totalTokens,
-                iterations: (data.iterations as number) || 0,
-              });
-            }
-            break;
-          }
-
-          case "done": {
-            S().setPipelineStatus(null);
-            S().saveCurrentSession();
-            S().setStreaming(false);
-            S().setAbortController(null);
-            break;
-          }
-
-          case "error": {
-            S().setPipelineStatus(null);
-            S().appendBlock(msgId, {
-              type: "text",
-              content: `⚠️ ${(data.error as string) || "发生未知错误"}`,
-            });
-            break;
-          }
-
-          default:
-            break;
         }
       },
       abortController.signal,
@@ -2995,8 +962,6 @@ export async function subscribeToSession(sessionId: string) {
     S().setStreaming(false);
     S().setAbortController(null);
 
-    // 最终一致性：从后端加载权威消息，确保前端与后端状态完全同步。
-    // 延迟执行以确保后端 release_for_chat 已完成消息持久化。
     const sid = sessionId;
     setTimeout(async () => {
       try {
@@ -3010,10 +975,4 @@ export async function subscribeToSession(sessionId: string) {
       }
     }, 1500);
   }
-}
-
-function getLastAssistantMessage(messages: ReturnType<typeof useChatStore.getState>["messages"], id: string) {
-  const msg = messages.find((m) => m.id === id);
-  if (msg && msg.role === "assistant") return msg;
-  return null;
 }
