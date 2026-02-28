@@ -35,6 +35,8 @@ _SQLITE_USERS_DDL = [
         daily_token_limit   INTEGER DEFAULT 0,
         monthly_token_limit INTEGER DEFAULT 0,
         allowed_models   TEXT,
+        max_storage_mb   INTEGER DEFAULT 0,
+        max_files        INTEGER DEFAULT 0,
         is_active        INTEGER NOT NULL DEFAULT 1,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -77,6 +79,8 @@ _PG_USERS_DDL = [
         daily_token_limit   INTEGER DEFAULT 0,
         monthly_token_limit INTEGER DEFAULT 0,
         allowed_models   TEXT,
+        max_storage_mb   INTEGER DEFAULT 0,
+        max_files        INTEGER DEFAULT 0,
         is_active        INTEGER NOT NULL DEFAULT 1,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -119,6 +123,7 @@ class UserStore:
         self._conn.commit()
         # 迁移：为已有数据库添加 allowed_models 列
         self._migrate_allowed_models()
+        self._migrate_storage_quota()
 
     # ── CRUD ───────────────────────────────────────────────
 
@@ -134,6 +139,19 @@ class UserStore:
             except Exception:
                 pass  # 列已存在或其他错误
 
+    def _migrate_storage_quota(self) -> None:
+        """为已有数据库添加 max_storage_mb / max_files 列（幂等）。"""
+        for col in ("max_storage_mb", "max_files"):
+            try:
+                self._conn.execute(f"SELECT {col} FROM users LIMIT 1")
+            except Exception:
+                try:
+                    self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+                    self._conn.commit()
+                    logger.info("迁移：已添加 users.%s 列", col)
+                except Exception:
+                    pass
+
     def create_user(self, user: UserRecord) -> UserRecord:
         self._conn.execute(
             """INSERT INTO users
@@ -142,14 +160,16 @@ class UserStore:
                 llm_api_key, llm_base_url, llm_model,
                 daily_token_limit, monthly_token_limit,
                 allowed_models,
+                max_storage_mb, max_files,
                 is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 user.id, user.email, user.display_name, user.password_hash,
                 user.role, user.oauth_provider, user.oauth_id, user.avatar_url,
                 user.llm_api_key, user.llm_base_url, user.llm_model,
                 user.daily_token_limit, user.monthly_token_limit,
                 user.allowed_models,
+                user.max_storage_mb, user.max_files,
                 1 if user.is_active else 0,
                 user.created_at, user.updated_at,
             ),
@@ -189,6 +209,17 @@ class UserStore:
         values = list(fields.values()) + [user_id]
         cur = self._conn.execute(
             f"UPDATE users SET {set_clause} WHERE id = ?", values,
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def delete_user(self, user_id: str) -> bool:
+        """彻底删除用户及其 token 用量记录。"""
+        self._conn.execute(
+            "DELETE FROM user_token_usage WHERE user_id = ?", (user_id,)
+        )
+        cur = self._conn.execute(
+            "DELETE FROM users WHERE id = ?", (user_id,)
         )
         self._conn.commit()
         return cur.rowcount > 0

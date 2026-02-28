@@ -38,6 +38,7 @@ class UserRecord:
         "llm_api_key", "llm_base_url", "llm_model",
         "daily_token_limit", "monthly_token_limit",
         "allowed_models",
+        "max_storage_mb", "max_files",
         "is_active", "created_at", "updated_at",
     )
 
@@ -58,6 +59,8 @@ class UserRecord:
         daily_token_limit: int = 0,
         monthly_token_limit: int = 0,
         allowed_models: str | None = None,
+        max_storage_mb: int = 0,
+        max_files: int = 0,
         is_active: bool = True,
         created_at: str | None = None,
         updated_at: str | None = None,
@@ -77,6 +80,8 @@ class UserRecord:
         self.daily_token_limit = daily_token_limit
         self.monthly_token_limit = monthly_token_limit
         self.allowed_models = allowed_models
+        self.max_storage_mb = max_storage_mb
+        self.max_files = max_files
         self.is_active = is_active
         self.created_at = created_at or now
         self.updated_at = updated_at or now
