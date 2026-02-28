@@ -728,6 +728,18 @@ export interface PipelineStatus {
     summary: string;
   };
   checkpoint?: Record<string, unknown>;
+  // 批量任务相关字段
+  batchIndex?: number;
+  batchTotal?: number;
+}
+
+export interface BatchProgress {
+  batchIndex: number;
+  batchTotal: number;
+  batchItemName: string;
+  batchStatus: "running" | "completed" | "failed";
+  batchElapsed: number;
+  message: string;
 }
 
 interface ChatState {
@@ -740,6 +752,7 @@ interface ChatState {
   abortController: AbortController | null;
   pipelineStatus: PipelineStatus | null;
   vlmPhases: VlmPhaseEntry[];
+  batchProgress: BatchProgress | null;
   isLoadingMessages: boolean;
 
   setMessages: (messages: Message[]) => void;
@@ -766,6 +779,7 @@ interface ChatState {
   setPendingQuestion: (question: Question | null) => void;
   setAbortController: (controller: AbortController | null) => void;
   setPipelineStatus: (status: PipelineStatus | null) => void;
+  setBatchProgress: (progress: BatchProgress | null) => void;
   pushVlmPhase: (entry: VlmPhaseEntry) => void;
   clearVlmPhases: () => void;
   clearMessages: () => void;
@@ -785,6 +799,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   abortController: null,
   pipelineStatus: null,
   vlmPhases: [],
+  batchProgress: null,
   isLoadingMessages: false,
 
   setMessages: (messages) => set({ messages }),
@@ -935,6 +950,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPendingQuestion: (question) => set({ pendingQuestion: question }),
   setAbortController: (controller) => set({ abortController: controller }),
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
+  setBatchProgress: (progress) => set({ batchProgress: progress }),
   pushVlmPhase: (entry) =>
     set((state) => ({
       vlmPhases: [...state.vlmPhases.filter((p) => p.stage !== entry.stage), entry],
