@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excelmanus"
-version = "1.6.5"
+version = "1.6.6"
 description = "基于大语言模型的 Excel 智能代理框架，支持 CLI / API 双模式运行"
 readme = "README.md"
 requires-python = ">=3.10"
