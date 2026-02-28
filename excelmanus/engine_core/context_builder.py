@@ -324,6 +324,85 @@ class ContextBuilder:
 
         return "\n\n".join(parts)
 
+    def _build_scan_tool_hint(self) -> str:
+        """当工作区有 Excel 文件但无 explorer 缓存时，自动预扫描并注入缓存。
+
+        借鉴 Windsurf Fast Context（query-triggered auto-context）和
+        Cursor（upload-triggered indexing）的思路：
+        - 首次 chat 时检测到 Excel 文件且无缓存 → 自动调用 scan_excel_snapshot
+        - 将扫描结果转换为 explorer_report 格式注入 session_state.explorer_reports
+        - 同一轮的 _build_explorer_report_notice 即可接管展示
+        - 如果自动扫描失败，降级为文本提示
+
+        仅在第一轮（无缓存）时触发，后续轮次零开销。
+        """
+        e = self._engine
+        state = getattr(e, "_state", None)
+        if state is None:
+            return ""
+        if state.explorer_reports:
+            return ""
+        # 检查 FileRegistry 中是否有 Excel 文件
+        registry = state.file_registry
+        if registry is None:
+            return ""
+        excel_paths: list[str] = []
+        try:
+            entries = registry.list_entries() if hasattr(registry, "list_entries") else []
+            for ent in entries:
+                p = str(getattr(ent, "canonical_path", "") or getattr(ent, "path", "") or "")
+                if p.lower().endswith((".xlsx", ".xlsm", ".xls")):
+                    excel_paths.append(p)
+        except Exception:
+            pass
+        if not excel_paths:
+            return ""
+
+        # 尝试自动预扫描（最多扫描前 3 个文件，每个最多 500ms）
+        auto_scanned = self._try_auto_prescan(excel_paths[:3], state)
+        if auto_scanned:
+            # 扫描成功 → 结果已注入 explorer_reports，_build_explorer_report_notice 会接管
+            # 返回空字符串，不需要额外提示
+            return ""
+
+        # 自动扫描失败 → 降级为文本提示
+        return (
+            "## 💡 数据快速扫描提示\n"
+            "工作区有 Excel 文件但尚无数据概况缓存。"
+            "处理数据任务前，建议先调用 `scan_excel_snapshot` 一次性获取文件全貌"
+            "（schema、列统计、质量信号、跨 Sheet 关联），"
+            "或使用 `search_excel_values` 跨 Sheet 搜索特定值。"
+        )
+
+    @staticmethod
+    def _try_auto_prescan(excel_paths: list[str], state: Any) -> bool:
+        """尝试自动调用 scan_excel_snapshot 并将结果注入 explorer_reports。
+
+        Returns:
+            True 如果至少一个文件扫描成功并注入了缓存。
+        """
+        import json as _json
+        try:
+            from excelmanus.tools.data_tools import scan_excel_snapshot
+        except ImportError:
+            return False
+
+        any_success = False
+        for path in excel_paths:
+            try:
+                raw = scan_excel_snapshot(file_path=path, max_sample_rows=200)
+                scan = _json.loads(raw)
+                if "error" in scan:
+                    continue
+                # 转换为 explorer_report 格式
+                report = _convert_scan_to_explorer_report(scan, path)
+                if report:
+                    state.explorer_reports.append(report)
+                    any_success = True
+            except Exception:
+                continue
+        return any_success
+
     @staticmethod
     def _compute_reasoning_level_static(route_result: Any) -> str:
         """根据任务上下文计算推荐推理级别。"""
@@ -477,10 +556,17 @@ class ContextBuilder:
         if verification_fix_notice:
             base_prompt = base_prompt + "\n\n" + verification_fix_notice
 
+        # R7: 自动预扫描（必须在 R6 之前，以便注入缓存后被 R6 读取）
+        scan_hint = self._build_scan_tool_hint()
+
         # R6: 注入已缓存的 explorer 结构化报告摘要
         explorer_notice = self._build_explorer_report_notice()
         if explorer_notice:
             base_prompt = base_prompt + "\n\n" + explorer_notice
+
+        # R7 降级提示：自动扫描失败时的文本提示
+        if scan_hint:
+            base_prompt = base_prompt + "\n\n" + scan_hint
 
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
@@ -1118,4 +1204,113 @@ class ContextBuilder:
         if len(normalized) <= max_chars:
             return normalized
         return normalized[:max_chars]
+
+
+def _convert_scan_to_explorer_report(scan: dict, file_path: str) -> dict | None:
+    """将 scan_excel_snapshot 的输出转换为 explorer_report 格式。
+
+    explorer_report 格式 (兼容 _build_explorer_report_notice):
+    {
+        "summary": str,
+        "files": [{"path": str, "sheets": [{"name", "rows", "cols", "has_header"}]}],
+        "schema": {sheet_name: [{"column", "dtype", "nulls", "unique", "sample"}]},
+        "findings": [{"type", "severity", "detail"}],
+        "recommendation": str,
+    }
+    """
+    sheets = scan.get("sheets", [])
+    if not sheets:
+        return None
+
+    # files
+    files_entry = {
+        "path": file_path,
+        "sheets": [
+            {
+                "name": s.get("name", "?"),
+                "rows": s.get("rows", 0),
+                "cols": s.get("cols", 0),
+                "has_header": True,
+            }
+            for s in sheets
+        ],
+    }
+
+    # schema
+    schema: dict[str, list[dict]] = {}
+    for s in sheets:
+        sheet_name = s.get("name", "?")
+        cols = []
+        for c in s.get("columns", []):
+            entry: dict = {
+                "column": c.get("name", "?"),
+                "dtype": c.get("inferred_type", c.get("dtype", "?")),
+                "nulls": c.get("null_count", 0),
+                "unique": c.get("unique_count", 0),
+            }
+            sample = c.get("sample_values")
+            if sample:
+                entry["sample"] = sample[:3]
+            if "min" in c:
+                entry["min"] = c["min"]
+            if "max" in c:
+                entry["max"] = c["max"]
+            cols.append(entry)
+        if cols:
+            schema[sheet_name] = cols
+
+    # findings (from quality_signals + relationships)
+    findings: list[dict] = []
+    for sig in scan.get("quality_signals", []):
+        sig_type = sig.get("type", "quality")
+        mapped_type = "anomaly" if sig_type in ("missing_data", "empty_column", "outliers") else "quality"
+        if sig_type in ("candidate_foreign_key", "shared_column_name"):
+            mapped_type = "relationship"
+        findings.append({
+            "type": mapped_type,
+            "severity": sig.get("severity", "info"),
+            "detail": sig.get("detail", ""),
+        })
+    for rel in scan.get("relationships", []):
+        detail = ""
+        if rel.get("type") == "shared_column_name":
+            detail = f"共享列 {rel.get('columns', [])} 出现在 {rel.get('sheets', [])}"
+        elif rel.get("type") == "candidate_foreign_key":
+            src = rel.get("source", {})
+            tgt = rel.get("target", {})
+            detail = (
+                f"{src.get('sheet', '?')}.{src.get('column', '?')} → "
+                f"{tgt.get('sheet', '?')}.{tgt.get('column', '?')} "
+                f"(重叠率 {rel.get('overlap_rate', 0):.0%})"
+            )
+        if detail:
+            findings.append({
+                "type": "relationship",
+                "severity": "info",
+                "detail": detail,
+            })
+
+    # summary
+    total_sheets = len(sheets)
+    total_rows = sum(s.get("rows", 0) for s in sheets)
+    signal_count = len(scan.get("quality_signals", []))
+    summary = f"{file_path}: {total_sheets} 个 Sheet, 共 {total_rows} 行"
+    if signal_count > 0:
+        summary += f", {signal_count} 个质量信号"
+    summary += " (自动预扫描)"
+
+    # recommendation
+    high_signals = [s for s in scan.get("quality_signals", []) if s.get("severity") == "high"]
+    recommendation = ""
+    if high_signals:
+        types = list({s.get("type", "") for s in high_signals})
+        recommendation = f"检测到 {len(high_signals)} 个高优先级问题（{', '.join(types)}），建议优先处理"
+
+    return {
+        "summary": summary,
+        "files": [files_entry],
+        "schema": schema,
+        "findings": findings[:10],
+        "recommendation": recommendation,
+    }
 
