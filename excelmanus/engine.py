@@ -166,65 +166,25 @@ class AgentEngine:
         self._session_id: str | None = None
         self._history_snapshot_index: int = 0
         self._state = SessionState()
-        self._client = create_client(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            protocol=config.protocol,
-        )
-        # AUX：统一用于路由小模型 + 窗口感知顾问（未配置 aux_model 或 aux_enabled=False 时回退主模型）
-        _aux_effective = config.aux_enabled and bool(config.aux_model)
-        _aux_api_key = config.aux_api_key or config.api_key
-        _aux_base_url = config.aux_base_url or config.base_url
-        _aux_protocol = config.aux_protocol if _aux_effective else config.protocol
-        # 路由子代理：aux_model 已配置且启用则固定 aux；否则跟随主模型
-        if _aux_effective:
-            self._router_client = create_client(
-                api_key=_aux_api_key,
-                base_url=_aux_base_url,
-                protocol=_aux_protocol,
-            )
-            self._router_model = config.aux_model
-            self._router_follow_active_model = False
-        else:
-            self._router_client = self._client
-            self._router_model = config.model
-            self._router_follow_active_model = True
-        # 窗口感知顾问小模型：aux 启用时用 aux_*，否则回退主模型
-        _adv_api_key = _aux_api_key if _aux_effective else config.api_key
-        _adv_base_url = _aux_base_url if _aux_effective else config.base_url
-        _adv_model = (config.aux_model if _aux_effective else None) or config.model
-        _adv_protocol = _aux_protocol if _aux_effective else config.protocol
-        # 始终创建独立 client，避免与 _client 共享对象导致测试 mock 互相干扰
-        self._advisor_client = create_client(
-            api_key=_adv_api_key,
-            base_url=_adv_base_url,
-            protocol=_adv_protocol,
-        )
-        self._advisor_model = _adv_model
-        # adviser 是否跟随主模型切换：仅当未配置辅助模型时
-        self._advisor_follow_active_model = not _aux_effective
-        # VLM 独立客户端：vlm_enabled=False 时回退到主模型
-        _vlm_effective = config.vlm_enabled
-        _vlm_api_key = (config.vlm_api_key if _vlm_effective else None) or config.api_key
-        _vlm_base_url = (config.vlm_base_url if _vlm_effective else None) or config.base_url
-        _vlm_model = (config.vlm_model if _vlm_effective else None) or config.model
-        _vlm_protocol = config.vlm_protocol if _vlm_effective else config.protocol
-        if _vlm_effective and config.vlm_base_url:
-            self._vlm_client = create_client(
-                api_key=_vlm_api_key,
-                base_url=_vlm_base_url,
-                protocol=_vlm_protocol,
-            )
-        else:
-            self._vlm_client = self._client
-        self._vlm_model = _vlm_model
+        # ── LLM 客户端统一管理（main/aux/vlm/advisor 四套） ──
+        from excelmanus.engine_core.llm_client_manager import LLMClientManager
+        self._llm_clients = LLMClientManager(config)
+        self._client = self._llm_clients.main_client
+        self._router_client = self._llm_clients.router_client
+        self._router_model = self._llm_clients.router_model
+        self._router_follow_active_model = self._llm_clients.router_follow_active_model
+        self._advisor_client = self._llm_clients.advisor_client
+        self._advisor_model = self._llm_clients.advisor_model
+        self._advisor_follow_active_model = self._llm_clients.advisor_follow_active_model
+        self._vlm_client = self._llm_clients.vlm_client
+        self._vlm_model = self._llm_clients.vlm_model
         self._config = config
         # ── 视觉能力推断 ──
         self._is_vision_capable = self._infer_vision_capable(config, database)
         # B 通道可用条件：
         #   1. vlm_enhance 总开关开启
         #   2. 有独立 VLM 端点（vlm_base_url 且 vlm_enabled），或主模型本身有视觉能力可兼作 VLM
-        _has_independent_vlm = bool(_vlm_effective and config.vlm_base_url)
+        _has_independent_vlm = bool(config.vlm_enabled and config.vlm_base_url)
         self._vlm_enhance_available = (
             config.vlm_enhance
             and (_has_independent_vlm or self._is_vision_capable)
@@ -1367,7 +1327,6 @@ class AgentEngine:
         当前端通过 API 修改 AUX 配置时，由 SessionManager 广播调用，
         确保已存活的引擎实例不会使用过时的 AUX 快照。
         """
-        # 使用 replace 创建新 config 实例，保持 frozen 语义
         from dataclasses import replace as _dc_replace
         self._config = _dc_replace(
             self._config,
@@ -1376,42 +1335,20 @@ class AgentEngine:
             aux_api_key=aux_api_key,
             aux_base_url=aux_base_url,
         )
-
-        # 重建路由 / 窗口感知顾问的 client 与 model
-        _aux_effective = aux_enabled and bool(aux_model)
-        _aux_api_key = aux_api_key or self._config.api_key
-        _aux_base_url = aux_base_url or self._config.base_url
-        _aux_protocol = self._config.aux_protocol if _aux_effective else self._active_protocol
-        if _aux_effective:
-            self._router_client = create_client(
-                api_key=_aux_api_key,
-                base_url=_aux_base_url,
-                protocol=_aux_protocol,
-            )
-            self._router_model = aux_model
-            self._router_follow_active_model = False
-        else:
-            self._router_client = self._client
-            self._router_model = self._active_model
-            self._router_follow_active_model = True
-
-        _adv_api_key = _aux_api_key if _aux_effective else self._config.api_key
-        _adv_base_url = _aux_base_url if _aux_effective else self._config.base_url
-        _adv_model = (aux_model if _aux_effective else None) or self._active_model
-        _adv_protocol = _aux_protocol if _aux_effective else self._active_protocol
-        self._advisor_client = create_client(
-            api_key=_adv_api_key,
-            base_url=_adv_base_url,
-            protocol=_adv_protocol,
+        self._llm_clients.update_aux(
+            self._config,
+            aux_enabled=aux_enabled,
+            aux_model=aux_model,
+            aux_api_key=aux_api_key,
+            aux_base_url=aux_base_url,
         )
-        self._advisor_model = _adv_model
-        self._advisor_follow_active_model = not _aux_effective
-        logger.info(
-            "AUX 配置热更新: enabled=%s, model=%s, base_url=%s",
-            aux_enabled,
-            aux_model or "(跟随主模型)",
-            aux_base_url or "(跟随主模型)",
-        )
+        # 同步到兼容属性
+        self._router_client = self._llm_clients.router_client
+        self._router_model = self._llm_clients.router_model
+        self._router_follow_active_model = self._llm_clients.router_follow_active_model
+        self._advisor_client = self._llm_clients.advisor_client
+        self._advisor_model = self._llm_clients.advisor_model
+        self._advisor_follow_active_model = self._llm_clients.advisor_follow_active_model
 
     def get_compaction_status(self) -> dict[str, Any]:
         """返回上下文压缩状态，供 API 层查询。"""
@@ -3316,8 +3253,11 @@ class AgentEngine:
 
             tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
 
-            # 图片降级：本轮 LLM 已收到完整 base64，后续轮次降级为文本引用
-            self._memory.mark_images_sent()
+            # 图片生命周期：视觉模型保留图片利用 Provider 缓存，非视觉模型立即降级
+            if self._is_vision_capable:
+                self._memory.manage_image_lifecycle()
+            else:
+                self._memory.mark_images_sent()
 
             # 累计 token 使用量
             if usage is not None:
