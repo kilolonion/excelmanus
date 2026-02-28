@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X, MailCheck } from "lucide-react";
+import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X, MailCheck, Shield, FileSpreadsheet, Sparkles, Bot, BarChart3 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { register, verifyEmail, resendCode, getOAuthUrl } from "@/lib/auth-api";
@@ -13,6 +13,22 @@ const cardVariants = {
   hidden: { opacity: 0, y: 24 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: "easeOut" as const } },
 };
+
+const featureVariants = {
+  hidden: { opacity: 0, x: -20 },
+  visible: (i: number) => ({
+    opacity: 1,
+    x: 0,
+    transition: { duration: 0.4, delay: 0.2 + i * 0.1, ease: "easeOut" as const },
+  }),
+};
+
+const FEATURES = [
+  { icon: FileSpreadsheet, title: "智能读写", desc: "自然语言驱动 Excel 操作" },
+  { icon: BarChart3, title: "数据分析", desc: "自动洞察趋势与异常" },
+  { icon: Bot, title: "AI 代理", desc: "多步骤任务自主规划执行" },
+  { icon: Sparkles, title: "公式生成", desc: "用自然语言描述即可生成" },
+];
 
 function getPasswordStrength(pw: string): { score: number; label: string; color: string } {
   if (!pw) return { score: 0, label: "", color: "" };
@@ -310,6 +326,10 @@ export default function RegisterPage() {
   }, [email, password, confirmPassword, displayName, router]);
 
   const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
+    if (!agreed) {
+      setError("请先同意用户服务协议和隐私政策");
+      return;
+    }
     setOauthLoading(provider);
     setError("");
     try {
@@ -320,30 +340,105 @@ export default function RegisterPage() {
       setError(`${names[provider]} 登录暂不可用`);
       setOauthLoading(null);
     }
-  }, []);
+  }, [agreed]);
 
   // 验证步骤
   if (pendingEmail) {
     return (
-      <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto">
+      <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto relative overflow-x-hidden">
+        <div className="auth-bg-orb auth-bg-orb-1" />
+        <div className="auth-bg-orb auth-bg-orb-2" />
         <VerifyStep email={pendingEmail} onBack={() => setPendingEmail(null)} />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-start sm:items-center justify-center bg-gradient-to-b from-background to-muted/30 px-4 py-8 overflow-y-auto">
+    <div className="h-screen flex bg-gradient-to-b from-background to-muted/30 relative overflow-hidden">
+      <div className="auth-bg-orb auth-bg-orb-1" />
+      <div className="auth-bg-orb auth-bg-orb-2" />
+
+      {/* ── Left: Brand showcase (desktop only) ── */}
+      <div className="hidden lg:flex lg:w-[45%] xl:w-[48%] relative z-10 flex-col justify-center px-12 xl:px-16">
+        <div className="absolute inset-0 login-left-bg" />
+        <motion.div
+          initial={{ opacity: 0, x: -30 }}
+          animate={{ opacity: 1, x: 0 }}
+          transition={{ duration: 0.5, ease: "easeOut" }}
+          className="max-w-md relative"
+        >
+          <div className="flex items-center gap-3.5 mb-10">
+            <div className="w-11 h-11 rounded-xl bg-[var(--em-primary)] flex items-center justify-center shadow-md">
+              <img src="/brand-icon.svg" alt="" className="h-7 w-7 brightness-0 invert" />
+            </div>
+            <span className="text-2xl font-bold tracking-tight">ExcelManus</span>
+          </div>
+
+          <h2 className="text-3xl xl:text-4xl font-bold tracking-tight leading-tight mb-4">
+            让 AI 成为你的<br />
+            <span className="login-brand-gradient">Excel 超能力</span>
+          </h2>
+          <p className="text-muted-foreground text-base leading-relaxed mb-10">
+            基于大语言模型的智能代理，用自然语言完成复杂 Excel 任务。<br className="hidden xl:inline" />
+            无需公式，无需 VBA，只需描述你的需求。
+          </p>
+
+          <div className="grid grid-cols-2 gap-3.5">
+            {FEATURES.map((f, i) => (
+              <motion.div
+                key={f.title}
+                custom={i}
+                variants={featureVariants}
+                initial="hidden"
+                animate="visible"
+                className="flex items-start gap-3 p-3.5 rounded-xl login-feature-card transition-all duration-200"
+              >
+                <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-[var(--em-primary-alpha-15)] flex items-center justify-center">
+                  <f.icon className="h-[18px] w-[18px] text-[var(--em-primary)]" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-foreground">{f.title}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{f.desc}</p>
+                </div>
+              </motion.div>
+            ))}
+          </div>
+
+          <div className="mt-12 flex items-center gap-6 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+              开源免费
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+              支持私有部署
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              多模型兼容
+            </span>
+          </div>
+        </motion.div>
+      </div>
+
+      {/* ── Right: Register form ── */}
+      <div className="flex-1 flex items-start sm:items-center justify-center px-4 py-8 overflow-y-auto relative z-10">
       <motion.div
-        className="w-full max-w-[400px] space-y-5 my-auto sm:my-0"
+        className="w-full max-w-[420px] auth-card my-6 sm:my-8"
         variants={cardVariants}
         initial="hidden"
         animate="visible"
       >
+        <div className="space-y-5">
         {/* Header */}
-        <div className="text-center space-y-2">
-          <img src="/logo.svg" alt="ExcelManus" className="h-12 w-auto mx-auto" />
-          <h1 className="text-2xl font-bold tracking-tight">注册 ExcelManus</h1>
-          <p className="text-muted-foreground text-sm">创建账号，开始智能处理 Excel</p>
+        <div className="text-center space-y-3">
+          <div className="auth-logo-glow inline-block lg:hidden">
+            <img src="/logo.svg" alt="ExcelManus" className="h-14 w-auto mx-auto relative" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">注册 ExcelManus</h1>
+            <p className="text-muted-foreground text-sm mt-1">创建账号，开始智能处理 Excel</p>
+          </div>
         </div>
 
         {/* Error */}
@@ -371,7 +466,7 @@ export default function RegisterPage() {
               autoComplete="name"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              className="w-full h-11 rounded-lg border border-border bg-background px-3 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+              className="auth-input w-full h-11 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none placeholder:text-muted-foreground/50"
               placeholder="显示名称"
             />
           </div>
@@ -387,7 +482,7 @@ export default function RegisterPage() {
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className={`w-full h-11 rounded-lg border bg-background px-3 pr-9 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50 ${
+                className={`auth-input w-full h-11 rounded-lg border bg-background px-3 pr-9 text-sm focus:outline-none placeholder:text-muted-foreground/50 ${
                   validEmail === false ? "border-destructive" : "border-border"
                 }`}
                 placeholder="you@example.com"
@@ -415,7 +510,7 @@ export default function RegisterPage() {
                 minLength={8}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full h-11 rounded-lg border border-border bg-background px-3 pr-10 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+                className="auth-input w-full h-11 rounded-lg border border-border bg-background px-3 pr-10 text-sm focus:outline-none placeholder:text-muted-foreground/50"
                 placeholder="至少 8 个字符"
               />
               <button
@@ -460,7 +555,7 @@ export default function RegisterPage() {
                 autoComplete="new-password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className={`w-full h-11 rounded-lg border bg-background px-3 pr-10 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50 ${
+                className={`auth-input w-full h-11 rounded-lg border bg-background px-3 pr-10 text-sm focus:outline-none placeholder:text-muted-foreground/50 ${
                   passwordsMismatch ? "border-destructive" : "border-border"
                 }`}
                 placeholder="再次输入密码"
@@ -487,26 +582,25 @@ export default function RegisterPage() {
           </div>
 
           {/* Terms */}
-          <label className="flex items-start gap-2 cursor-pointer group py-1">
+          <label className="flex items-start gap-2.5 cursor-pointer group py-1">
             <input
               type="checkbox"
               checked={agreed}
               onChange={(e) => setAgreed(e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded border-border accent-[var(--em-primary)]"
+              className="auth-checkbox mt-0.5"
             />
             <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
               我已阅读并同意{" "}
-              <span className="text-[var(--em-primary)] cursor-pointer hover:underline">服务条款</span>{" "}
+              <Link href="/terms" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>服务条款</Link>{" "}
               和{" "}
-              <span className="text-[var(--em-primary)] cursor-pointer hover:underline">隐私政策</span>
+              <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
             </span>
           </label>
 
           <Button
             type="submit"
             disabled={!canSubmit}
-            className="w-full h-11 text-white font-medium transition-all"
-            style={{ backgroundColor: "var(--em-primary)" }}
+            className="auth-btn-primary w-full h-11 text-white font-medium border-0"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "创建账号"}
           </Button>
@@ -516,10 +610,10 @@ export default function RegisterPage() {
         {showOAuthSection && (
           <div className="relative">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
+              <div className="w-full auth-divider-line" />
             </div>
             <div className="relative flex justify-center text-xs">
-              <span className="bg-gradient-to-b from-background to-muted/30 px-3 text-muted-foreground">
+              <span className="bg-transparent px-3 text-muted-foreground backdrop-blur-sm">
                 或使用第三方账号
               </span>
             </div>
@@ -532,8 +626,8 @@ export default function RegisterPage() {
             {githubEnabled && (
               <Button
                 variant="outline"
-                className="h-11 font-normal"
-                disabled={oauthLoading !== null}
+                className="auth-oauth-btn h-11 font-normal"
+                disabled={oauthLoading !== null || !agreed}
                 onClick={() => handleOAuth("github")}
               >
                 {oauthLoading === "github" ? (
@@ -549,8 +643,8 @@ export default function RegisterPage() {
             {googleEnabled && (
               <Button
                 variant="outline"
-                className="h-11 font-normal"
-                disabled={oauthLoading !== null}
+                className="auth-oauth-btn h-11 font-normal"
+                disabled={oauthLoading !== null || !agreed}
                 onClick={() => handleOAuth("google")}
               >
                 {oauthLoading === "google" ? (
@@ -566,8 +660,8 @@ export default function RegisterPage() {
             {qqEnabled && (
               <Button
                 variant="outline"
-                className="h-11 font-normal"
-                disabled={oauthLoading !== null}
+                className="auth-oauth-btn h-11 font-normal"
+                disabled={oauthLoading !== null || !agreed}
                 onClick={() => handleOAuth("qq")}
               >
                 {oauthLoading === "qq" ? (
@@ -584,13 +678,26 @@ export default function RegisterPage() {
         )}
 
         {/* Footer */}
-        <p className="text-center text-sm text-muted-foreground">
-          已有账号？{" "}
-          <Link href="/login" className="text-[var(--em-primary)] hover:underline font-medium">
-            登录
-          </Link>
-        </p>
+        <div className="space-y-3">
+          <p className="text-center text-sm text-muted-foreground">
+            已有账号？{" "}
+            <Link href="/login" className="text-[var(--em-primary)] hover:underline font-medium">
+              登录
+            </Link>
+          </p>
+          <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
+            <Link href="/terms" target="_blank" className="hover:text-[var(--em-primary)] transition-colors">
+              服务条款
+            </Link>
+            <span className="text-border">|</span>
+            <Link href="/privacy" target="_blank" className="hover:text-[var(--em-primary)] transition-colors">
+              隐私政策
+            </Link>
+          </div>
+        </div>
+        </div>
       </motion.div>
+      </div>
     </div>
   );
 }

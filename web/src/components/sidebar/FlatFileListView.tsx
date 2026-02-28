@@ -2,7 +2,6 @@
 
 import { useMemo } from "react";
 import {
-  FileSpreadsheet,
   Ellipsis,
   CheckSquare,
   Square,
@@ -90,10 +89,8 @@ export function FlatFileListView(props: FlatFileListViewProps) {
               ) : (
                 <Square className="h-4.5 w-4.5 flex-shrink-0 text-muted-foreground/50" />
               )
-            ) : excel ? (
-              <FileSpreadsheet className="h-4.5 w-4.5 flex-shrink-0" style={{ color: isFileActive ? "var(--em-primary)" : "var(--em-primary-light)" }} />
             ) : (
-              <FileTypeIcon filename={file.filename} className="h-4.5 w-4.5 flex-shrink-0" />
+              <FileTypeIcon filename={file.filename} className={`h-4.5 w-4.5 flex-shrink-0${isFileActive ? " opacity-100" : ""}`} />
             )}
 
             <div className="flex-1 min-w-0">

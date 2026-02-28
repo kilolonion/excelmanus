@@ -12,11 +12,13 @@ import {
   Brain,
   Download,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Layers,
   CheckCircle2,
   XCircle,
   Wrench,
+  Upload,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,7 +29,9 @@ import { SubagentBlock } from "./SubagentBlock";
 import { TaskList } from "./TaskList";
 import { UndoableCard } from "./UndoableCard";
 import { PipelineStepper } from "./PipelineStepper";
+import { ApplyPanel } from "./ApplyPanel";
 import { baseMarkdownComponents } from "./MarkdownComponents";
+import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import { MessageActions } from "./MessageActions";
 import { VlmPipelineCard } from "./VlmPipelineCard";
 import VerificationCard from "./VerificationCard";
@@ -103,9 +107,23 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   li({ children }) {
     return <li>{processChildren(children)}</li>;
   },
-  // 拦截链接：工作区文件链接 → 下载按钮，其他 → 普通 <a>
+  // 拦截链接：工作区文件链接 → 预览/下载按钮，其他 → 普通 <a>
   a({ href, children }) {
     if (href && isWorkspaceFileLink(href)) {
+      // 代码/文本文件 → 点击弹出预览
+      if (isCodeFile(href)) {
+        const filename = href.split("/").pop() || href;
+        const trigger = (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)] text-[var(--em-primary)]"
+            title={`预览 ${filename}`}
+          >
+            <span className="break-all">{children}</span>
+          </button>
+        );
+        return <CodePreviewModal filePath={href} filename={filename} trigger={trigger} />;
+      }
       return <FileDownloadLink href={href}>{children}</FileDownloadLink>;
     }
     return (
@@ -385,6 +403,25 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
   const totalTools = stats.totalTools;
   const iterations = stats.iterations;
 
+  // 将 verification_report 内联到紧邻的前一个 verifier subagent block
+  const { verificationMap, skipIndices } = useMemo(() => {
+    const vMap = new Map<number, { verdict: "pass" | "fail" | "unknown"; confidence: "high" | "medium" | "low"; checks: string[]; issues: string[]; mode: "advisory" | "blocking" }>();
+    const skip = new Set<number>();
+    for (let i = 1; i < blocks.length; i++) {
+      const cur = blocks[i];
+      const prev = blocks[i - 1];
+      if (
+        cur.type === "verification_report" &&
+        prev.type === "subagent" &&
+        prev.name === "verifier"
+      ) {
+        vMap.set(i - 1, { verdict: cur.verdict, confidence: cur.confidence, checks: cur.checks, issues: cur.issues, mode: cur.mode });
+        skip.add(i);
+      }
+    }
+    return { verificationMap: vMap, skipIndices: skip };
+  }, [blocks]);
+
   // 流式时始终显示 pipeline 进度，不限于 blocks 为空时。保证多轮阶段（准备上下文、调用 LLM 等）在首个 thinking/text 块到达后仍可见。
   const showPipeline = isStreaming && (blocks.length === 0 || pipelineStatus !== null);
 
@@ -404,7 +441,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
       >
         <FileSpreadsheet className="h-3.5 w-3.5" />
       </div>
-      <div className="flex-1 min-w-0 border-l-[1.5px] pl-3 relative" style={{ borderColor: "var(--em-primary)" }}>
+      <div className="flex-1 min-w-0 border-l-[1.5px] pl-3 relative assistant-border-gradient">
 
         <AnimatePresence mode="wait" initial={false}>
           {collapsed && ((totalTools > 0 && hasChain) || (totalTools === 0 && tailBlocks.length > 0)) ? (
@@ -433,8 +470,10 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
                   messageId={messageId}
                   isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
                   isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
-                  showCollapseButton={origIndex === 0 && iterations > 0 && ((totalTools > 0 && hasChain && tailBlocks.length > 0) || (totalTools === 0 && tailBlocks.length > 0))}
+                  showCollapseButton={origIndex === 0 && totalTools > 0 && hasChain}
                   onCollapse={() => setCollapsed(true)}
+                  verificationReport={verificationMap.get(origIndex)}
+                  skipRender={skipIndices.has(origIndex)}
                 />
               ))}
             </motion.div>
@@ -449,9 +488,11 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
             messageId={messageId}
             isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
             isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
-            showCollapseButton={origIndex === tailBlocks[0]?.origIndex && iterations > 0 && totalTools === 0 && tailBlocks.length > 1}
-            onCollapse={origIndex === tailBlocks[0]?.origIndex && iterations > 0 && totalTools === 0 && tailBlocks.length > 1 ? () => setCollapsed(true) : undefined}
+            showCollapseButton={false}
+            onCollapse={undefined}
             defaultExpanded={block.type === "text"}
+            verificationReport={verificationMap.get(origIndex)}
+            skipRender={skipIndices.has(origIndex)}
           />
         ))}
 
@@ -492,7 +533,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
     [files],
   );
 
-  const handleClick = useCallback(
+  const handleExcelClick = useCallback(
     (filePath: string) => {
       const normalized = normalizeExcelPath(filePath);
       const filename = normalized.split("/").pop() || normalized;
@@ -511,6 +552,12 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
 
   if (validFiles.length === 0) return null;
 
+  const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv", ".tsv"]);
+  const isExcel = (name: string) => {
+    const dot = name.lastIndexOf(".");
+    return dot >= 0 && EXCEL_EXTS.has(name.slice(dot).toLowerCase());
+  };
+
   return (
     <motion.div
       className="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-border/30"
@@ -524,19 +571,36 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
       <span className="text-[10px] text-muted-foreground mr-0.5">涉及文件</span>
       {validFiles.map((filePath) => {
         const filename = filePath.split("/").pop() || filePath;
+        const excel = isExcel(filePath);
+        const previewable = !excel && isCodeFile(filePath);
         return (
           <motion.span
             key={filePath}
             className="inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
             variants={{ hidden: { opacity: 0, scale: 0.8 }, show: { opacity: 1, scale: 1, transition: { duration: 0.2, ease: "easeOut" } } }}
           >
-            <button
-              type="button"
-              onClick={() => handleClick(filePath)}
-              className="hover:underline cursor-pointer transition-colors"
-            >
-              {filename}
-            </button>
+            {previewable ? (
+              <CodePreviewModal
+                filePath={filePath}
+                filename={filename}
+                trigger={
+                  <button
+                    type="button"
+                    className="hover:underline cursor-pointer transition-colors"
+                  >
+                    {filename}
+                  </button>
+                }
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => excel ? handleExcelClick(filePath) : downloadFile(filePath, filename, activeSessionId ?? undefined).catch(() => {})}
+                className="hover:underline cursor-pointer transition-colors"
+              >
+                {filename}
+              </button>
+            )}
             <button
               type="button"
               onClick={() =>
@@ -591,7 +655,9 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   isStreamingText,
   showCollapseButton,
   onCollapse,
-  defaultExpanded
+  defaultExpanded,
+  verificationReport,
+  skipRender,
 }: { 
   block: AssistantBlock; 
   blockIndex: number; 
@@ -601,7 +667,10 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   showCollapseButton?: boolean;
   onCollapse?: () => void;
   defaultExpanded?: boolean;
+  verificationReport?: { verdict: "pass" | "fail" | "unknown"; confidence: "high" | "medium" | "low"; checks: string[]; issues: string[]; mode: "advisory" | "blocking" };
+  skipRender?: boolean;
 }) {
+  if (skipRender) return null;
   switch (block.type) {
     case "thinking":
       return (
@@ -649,6 +718,7 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
           summary={block.summary}
           success={block.success}
           tools={block.tools}
+          verificationReport={verificationReport}
         />
       );
     case "task_list":
@@ -736,7 +806,7 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       );
     case "token_stats":
       return (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground">
+        <div className="flex items-center gap-x-3 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground whitespace-nowrap overflow-x-auto">
           <Zap className="h-3 w-3" />
           <span>{block.iterations} 轮迭代</span>
           <span>·</span>
@@ -752,9 +822,12 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
     case "file_download":
       return <FileDownloadCard block={block} />;
     case "verification_report":
+      // If skipRender was not set (standalone), render the card normally
       return <VerificationCard verdict={block.verdict} confidence={block.confidence} checks={block.checks} issues={block.issues} mode={block.mode} />;
     case "config_error":
       return <ConfigErrorCard items={block.items} />;
+    case "staging_hint":
+      return <StagingHintCard pendingCount={block.pendingCount} files={block.files} />;
     default:
       return null;
   }
@@ -887,26 +960,82 @@ function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { type: "f
     <button
       type="button"
       onClick={handleDownload}
-      className="group flex items-center gap-3 w-full my-2 rounded-lg px-3 py-2.5 text-left cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)]"
+      className="group/card flex items-center gap-0 w-full my-1 rounded-lg text-left cursor-pointer transition-all duration-200 border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:shadow-sm overflow-hidden"
       title={`下载 ${block.filename}`}
     >
-      <div className="flex-shrink-0 h-8 w-8 rounded-md flex items-center justify-center bg-[var(--em-primary-alpha-15)] group-hover:bg-[var(--em-primary-alpha-20)] transition-colors">
-        <Download className="h-4 w-4 text-[var(--em-primary)]" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-[var(--em-primary)] break-all">
+      {/* 左侧强调条 */}
+      <div className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg" style={{ backgroundColor: "var(--em-primary)" }} />
+
+      <div className="flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5">
+        {/* 圆形图标徽章 */}
+        <span className="flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 bg-[var(--em-primary-alpha-15)]">
+          <Download className="h-3 w-3 text-[var(--em-primary)]" />
+        </span>
+
+        {/* 文件名胶囊 */}
+        <span className="inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium flex-shrink-0 bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]">
           {block.filename}
         </span>
+
+        {/* 描述预览 */}
         {block.description && (
-          <span className="block text-xs text-muted-foreground mt-0.5 line-clamp-1">
+          <span className="text-[10px] text-muted-foreground/70 truncate min-w-0">
             {block.description}
           </span>
         )}
+
+        {/* 右侧 */}
+        <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
+          <span className="text-[10px] text-muted-foreground opacity-0 group-hover/card:opacity-100 transition-opacity">
+            点击下载
+          </span>
+          <ChevronDown className="h-3 w-3 text-muted-foreground/50 group-hover/card:text-muted-foreground/70 transition-colors" />
+        </span>
       </div>
-      <span className="text-[10px] text-muted-foreground flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        点击下载
-      </span>
     </button>
   );
 }
 
+function StagingHintCard({ pendingCount, files }: { pendingCount: number; files: string[] }) {
+  const [panelOpen, setPanelOpen] = useState(false);
+  const fileName = (p: string) => p.split("/").pop() || p;
+
+  return (
+    <>
+      <button
+        onClick={() => setPanelOpen(true)}
+        className="group/card flex items-center gap-0 w-full my-1 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 text-sm hover:bg-blue-100/60 dark:hover:bg-blue-900/30 hover:shadow-sm transition-all duration-200 overflow-hidden cursor-pointer"
+      >
+        {/* 左侧强调条 */}
+        <div className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg bg-blue-500" />
+
+        <div className="flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5">
+          {/* 圆形图标徽章 */}
+          <span className="flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 bg-blue-500/10 dark:bg-blue-400/15">
+            <Upload className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+          </span>
+
+          {/* 数量胶囊 */}
+          <span className="inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium flex-shrink-0 bg-blue-500/8 dark:bg-blue-400/10 text-blue-700 dark:text-blue-300">
+            {pendingCount} 个文件待应用
+          </span>
+
+          {/* 文件名预览 */}
+          <span className="text-[10px] text-blue-600/60 dark:text-blue-400/50 truncate min-w-0">
+            {files.slice(0, 2).map(fileName).join("、")}
+            {files.length > 2 && ` 等${files.length}个`}
+          </span>
+
+          {/* 右侧 */}
+          <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
+            <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400">
+              查看
+            </span>
+            <ChevronRight className="h-3 w-3 text-blue-400/50 group-hover/card:translate-x-0.5 transition-transform" />
+          </span>
+        </div>
+      </button>
+      <ApplyPanel open={panelOpen} onOpenChange={setPanelOpen} />
+    </>
+  );
+}

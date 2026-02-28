@@ -4,7 +4,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { WelcomePage } from "@/components/welcome/WelcomePage";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageStream } from "@/components/chat/MessageStream";
-import { QuestionPanel } from "@/components/modals/QuestionPanel";
 import { CommandResultDialog, useCommandResult } from "@/components/modals/CommandResultDialog";
 import { ExcelFullView } from "@/components/excel/ExcelFullView";
 import { useChatStore } from "@/stores/chat-store";
@@ -21,7 +20,6 @@ export default function Home() {
   const isStreaming = useChatStore((s) => s.isStreaming);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
-  const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const addSession = useSessionStore((s) => s.addSession);
@@ -63,11 +61,11 @@ export default function Home() {
               onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
                 rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);
               }}
-              onRetry={(assistantMessageId: string) => {
-                retryAssistantMessage(assistantMessageId, activeSessionId);
+              onRetry={(assistantMessageId: string, rollbackFiles?: boolean) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId, undefined, rollbackFiles);
               }}
-              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-                retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
+              onRetryWithModel={(assistantMessageId: string, modelName: string, rollbackFiles?: boolean) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId, modelName, rollbackFiles);
               }}
             />
           </motion.div>
@@ -82,7 +80,6 @@ export default function Home() {
 
       <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
         <div className="max-w-3xl mx-auto pointer-events-auto">
-          {pendingQuestion && <QuestionPanel />}
           <ChatInput
             onSend={handleSend}
             onCommandResult={cmdResult.show}

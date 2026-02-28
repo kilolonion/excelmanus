@@ -94,23 +94,29 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
 
   return (
     <motion.div
-      className="flex-1 min-h-0 flex flex-col items-center justify-center px-4 overflow-y-auto"
+      className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-4 overflow-y-auto"
       variants={containerVariants}
       initial="hidden"
       animate="show"
     >
+      {/* Decorative background */}
+      <div className="absolute inset-0 welcome-bg-grid pointer-events-none" />
+      <div className="welcome-orb welcome-orb-1" />
+      <div className="welcome-orb welcome-orb-2" />
+
       {/* Logo */}
-      <motion.div className="flex items-center gap-3 mb-3" variants={logoVariant}>
+      <motion.div className="relative flex items-center gap-3 mb-4" variants={logoVariant}>
+        <div className="absolute inset-0 -m-4 rounded-full bg-[var(--em-primary-alpha-06)] blur-xl" />
         <img
           src="/logo.svg"
           alt="ExcelManus"
-          className="h-12 w-auto"
+          className="relative h-12 w-auto drop-shadow-sm"
         />
       </motion.div>
 
       {/* Greeting */}
-      <motion.h1 className="text-xl font-semibold mb-1" variants={fadeUp}>你好！我是你的 Excel 智能助手</motion.h1>
-      <motion.p className="text-sm text-muted-foreground mb-8" variants={fadeUp}>上传文件或输入任务，我来帮你处理</motion.p>
+      <motion.h1 className="relative text-xl font-semibold mb-1" variants={fadeUp}>你好！我是你的 Excel 智能助手</motion.h1>
+      <motion.p className="relative text-sm text-muted-foreground mb-8" variants={fadeUp}>上传文件或输入任务，我来帮你处理</motion.p>
 
       {/* Suggestion cards */}
       <motion.div
@@ -126,9 +132,8 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
               whileHover={{ y: -2, transition: { duration: 0.15 } }}
               whileTap={{ scale: 0.97 }}
               onClick={() => handleClick(suggestion)}
-              className="group flex items-center gap-3 rounded-xl border border-border/60 bg-card p-4 text-left text-sm
-                hover:border-[var(--em-primary-alpha-20)] hover:bg-[var(--em-primary-alpha-06)]
-                hover:shadow-[0_0_12px_var(--em-primary-alpha-10)]
+              className="group flex items-center gap-3 rounded-xl welcome-card-glass p-4 text-left text-sm
+                hover:bg-[var(--em-primary-alpha-06)]
                 active:bg-[var(--em-primary-alpha-10)] transition-[border-color,background-color,box-shadow,color] duration-200 cursor-pointer min-h-[44px]"
             >
               <span className="flex-shrink-0 h-8 w-8 rounded-lg bg-[var(--em-primary-alpha-06)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">

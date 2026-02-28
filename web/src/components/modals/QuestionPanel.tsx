@@ -1,155 +1,106 @@
 "use client";
 
-import { useState } from "react";
-import { HelpCircle, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { MessageCircleQuestion, X, Check } from "lucide-react";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
-import { answerQuestion, abortChat } from "@/lib/api";
-import { motion, AnimatePresence } from "framer-motion";
+import { abortChat } from "@/lib/api";
+import { motion } from "framer-motion";
+import type { Question } from "@/lib/types";
 
-export function QuestionPanel() {
-  const pendingQuestion = useChatStore((s) => s.pendingQuestion);
+/** Options with these labels are treated as "free-text fallback" and hidden from chips. */
+const OTHER_LABELS = new Set(["Other", "其他", "other"]);
+
+interface InlineQuestionBannerProps {
+  question: Question;
+  selected: Set<string>;
+  onToggle: (label: string) => void;
+}
+
+/**
+ * Inline question banner rendered inside ChatInput.
+ * Shows question header/text + horizontal option chips.
+ * "Other/其他" options are filtered out — the user types directly in the textarea.
+ */
+export function InlineQuestionBanner({ question, selected, onToggle }: InlineQuestionBannerProps) {
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [freeText, setFreeText] = useState("");
 
-  if (!pendingQuestion) return null;
-
-  const hasOptions = pendingQuestion.options.length > 0;
-  const otherSelected = selected.has("Other") || selected.has("其他");
-
-  const handleSubmit = () => {
-    let answer: string;
-    if (hasOptions) {
-      if (otherSelected && freeText.trim()) {
-        const others = Array.from(selected).filter((s) => s !== "Other" && s !== "其他");
-        answer = others.length > 0 ? `${others.join(", ")}\n${freeText.trim()}` : freeText.trim();
-      } else {
-        answer = Array.from(selected).join(", ");
-      }
-    } else {
-      answer = freeText;
-    }
-    if (!answer.trim()) return;
-    const questionId = pendingQuestion.id;
-    const sessionId = useSessionStore.getState().activeSessionId;
-    setPendingQuestion(null);
-    setSelected(new Set());
-    setFreeText("");
-    if (sessionId && questionId) {
-      answerQuestion(sessionId, questionId, answer).catch((err) =>
-        console.error("[QuestionPanel] answerQuestion failed:", err),
-      );
-    }
-  };
-
-  const toggleOption = (label: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (pendingQuestion.multiSelect) {
-        if (next.has(label)) next.delete(label);
-        else next.add(label);
-      } else {
-        next.clear();
-        next.add(label);
-      }
-      return next;
-    });
-  };
+  const visibleOptions = question.options.filter((o) => !OTHER_LABELS.has(o.label));
 
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ y: 20, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        exit={{ y: 20, opacity: 0 }}
-        className="bg-card border border-border rounded-xl shadow-sm p-4 mb-3"
-      >
-        <div className="flex items-center gap-2 mb-2">
-          <HelpCircle className="h-4 w-4" style={{ color: "var(--em-cyan)" }} />
-          <span className="font-semibold text-sm flex-1">
-            {pendingQuestion.header || "请回答问题"}
-          </span>
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: "auto" }}
+      exit={{ opacity: 0, height: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+      className="overflow-hidden"
+    >
+      <div className="mx-3 mt-2.5 mb-1">
+        {/* Header row */}
+        <div className="flex items-start gap-2.5 mb-2">
+          <div className="flex items-center justify-center w-6 h-6 rounded-full shrink-0 mt-0.5"
+            style={{ backgroundColor: "color-mix(in srgb, var(--em-primary) 12%, transparent)" }}
+          >
+            <MessageCircleQuestion className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-semibold text-foreground leading-snug">
+              {question.header || "请回答问题"}
+            </p>
+            {question.text && (
+              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                {question.text}
+              </p>
+            )}
+          </div>
           <button
             onClick={() => {
               const sid = useSessionStore.getState().activeSessionId;
               setPendingQuestion(null);
-              setSelected(new Set());
-              setFreeText("");
               if (sid) abortChat(sid).catch(() => {});
             }}
-            className="text-muted-foreground hover:text-foreground transition-colors p-0.5 rounded"
+            className="shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors p-1 rounded-lg hover:bg-muted/60"
             title="取消并终止任务"
           >
-            <X className="h-4 w-4" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
 
-        {pendingQuestion.text && (
-          <p className="text-sm text-muted-foreground mb-3">{pendingQuestion.text}</p>
-        )}
-
-        {hasOptions ? (
-          <div className="space-y-1.5 mb-3">
-            {pendingQuestion.options.map((opt) => (
-              <button
-                key={opt.label}
-                onClick={() => toggleOption(opt.label)}
-                className={`w-full text-left px-3 py-3 rounded-lg border text-sm transition-colors min-h-[44px] ${
-                  selected.has(opt.label)
-                    ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5"
-                    : "border-border hover:bg-muted/30 active:bg-muted/50"
-                }`}
-              >
-                <span className="font-medium">{opt.label}</span>
-                {opt.description && (
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    {opt.description}
-                  </span>
-                )}
-              </button>
-            ))}
-            {otherSelected && (
-              <Input
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSubmit();
-                }}
-                placeholder="输入自定义回答..."
-                className="mt-1.5"
-                autoFocus
-              />
-            )}
+        {/* Option chips */}
+        {visibleOptions.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1">
+            {visibleOptions.map((opt) => {
+              const isSelected = selected.has(opt.label);
+              return (
+                <button
+                  key={opt.label}
+                  onClick={() => onToggle(opt.label)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-150 border ${
+                    isSelected
+                      ? "border-[var(--em-primary)] text-[var(--em-primary)] shadow-sm"
+                      : "border-border/60 text-muted-foreground hover:border-border hover:text-foreground hover:bg-muted/40"
+                  }`}
+                  style={isSelected ? {
+                    backgroundColor: "color-mix(in srgb, var(--em-primary) 8%, transparent)",
+                  } : undefined}
+                >
+                  {isSelected && <Check className="h-3 w-3 shrink-0" />}
+                  <span>{opt.label}</span>
+                  {opt.description && (
+                    <span className={`text-[11px] hidden sm:inline ${
+                      isSelected ? "text-[var(--em-primary)]/60" : "text-muted-foreground/60"
+                    }`}>
+                      {opt.description}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
-        ) : (
-          <Input
-            value={freeText}
-            onChange={(e) => setFreeText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleSubmit();
-            }}
-            placeholder="输入回答..."
-            className="mb-3"
-          />
         )}
+      </div>
 
-        <Button
-          size="sm"
-          className="w-full text-white"
-          style={{ backgroundColor: "var(--em-primary)" }}
-          onClick={handleSubmit}
-          disabled={
-            hasOptions
-              ? selected.size === 0 || (otherSelected && !freeText.trim() && selected.size === 1)
-              : !freeText.trim()
-          }
-        >
-          提交回答
-        </Button>
-      </motion.div>
-    </AnimatePresence>
+      {/* Subtle separator */}
+      <div className="h-px mx-3" style={{ backgroundColor: "color-mix(in srgb, var(--em-primary) 10%, transparent)" }} />
+    </motion.div>
   );
 }

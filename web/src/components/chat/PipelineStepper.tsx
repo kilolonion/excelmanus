@@ -34,6 +34,8 @@ const STAGES = [
   { key: "vlm_extract_data", label: "提取数据", icon: Database },
   { key: "vlm_extract_style", label: "提取样式", icon: Palette },
   { key: "vlm_extract_verification", label: "自校验", icon: ShieldCheck },
+  // B 通道 VLM 描述
+  { key: "vlm_describe", label: "图片描述", icon: FileSearch },
 ] as const;
 
 type StageKey = (typeof STAGES)[number]["key"];

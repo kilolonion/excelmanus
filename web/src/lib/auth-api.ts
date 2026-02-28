@@ -301,6 +301,10 @@ export async function handleOAuthCallback(
 export function logout() {
   useAuthStore.getState().logout();
   _clearUserSpecificStores();
+  // 阻止登录页自动登录 —— 用户主动退出不应立刻被自动登录回去
+  if (typeof window !== "undefined") {
+    sessionStorage.setItem("suppress-auto-login", "1");
+  }
 }
 
 // ── Set password (OAuth users) ────────────────────────────
@@ -415,7 +419,17 @@ export interface AdminUser {
   monthly_token_limit: number;
   daily_tokens_used: number;
   monthly_tokens_used: number;
+  max_storage_mb: number;
+  max_files: number;
   workspace: WorkspaceUsage;
+}
+
+export interface AdminSession {
+  id: string;
+  title: string;
+  message_count: number;
+  status: string;
+  updated_at: string;
 }
 
 export async function fetchAdminUsers(): Promise<{ users: AdminUser[]; total: number }> {
@@ -473,6 +487,68 @@ export async function adminEnforceQuota(userId: string): Promise<{ deleted: stri
     throw new Error(data.detail || data.error || `执行失败: ${res.status}`);
   }
   return res.json();
+}
+
+export async function adminDeleteUser(
+  userId: string,
+): Promise<{ deleted_files: number; deleted_sessions: number }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/admin/users/${userId}`), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `删除失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function adminListUserSessions(
+  userId: string,
+): Promise<{ sessions: AdminSession[]; total: number }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/admin/users/${userId}/sessions`), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `获取会话列表失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function adminDeleteUserSessions(
+  userId: string,
+): Promise<{ deleted_sessions: number }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/admin/users/${userId}/sessions`), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `删除会话失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function adminDeleteUserSession(
+  userId: string,
+  sessionId: string,
+): Promise<void> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(
+    buildApiUrl(`/auth/admin/users/${userId}/sessions/${sessionId}`),
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `删除会话失败: ${res.status}`);
+  }
 }
 
 // ── Admin Login Config API ────────────────────────────────

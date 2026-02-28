@@ -351,15 +351,15 @@ export function MCPTab() {
       {/* Create / Edit form */}
       {(showCreate || editingServer) && (
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-medium">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium truncate min-w-0">
               {editingServer ? `编辑: ${editingServer}` : "新增 MCP Server"}
             </span>
-            <div className="ml-auto flex gap-1">
+            <div className="flex gap-1 shrink-0">
               <Button
                 size="sm"
                 variant={createMode === "form" ? "default" : "ghost"}
-                className="h-6 text-[10px] px-2"
+                className="h-7 sm:h-6 text-[11px] sm:text-[10px] px-2.5 sm:px-2"
                 onClick={() => setCreateMode("form")}
               >
                 表单
@@ -367,7 +367,7 @@ export function MCPTab() {
               <Button
                 size="sm"
                 variant={createMode === "json" ? "default" : "ghost"}
-                className="h-6 text-[10px] px-2"
+                className="h-7 sm:h-6 text-[11px] sm:text-[10px] px-2.5 sm:px-2"
                 onClick={() => setCreateMode("json")}
               >
                 JSON
@@ -397,7 +397,7 @@ export function MCPTab() {
                         transport: e.target.value as "stdio" | "sse" | "streamable_http",
                       }))
                     }
-                    className="w-full h-7 rounded-md border border-input bg-background px-2 text-xs"
+                    className="w-full h-9 sm:h-7 rounded-md border border-input bg-background px-2 text-xs"
                   >
                     <option value="stdio">stdio</option>
                     <option value="sse">SSE</option>

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { Trash2, Loader2, Brain, ChevronDown, ChevronRight } from "lucide-react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { Trash2, Loader2, Brain, ChevronRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiDelete } from "@/lib/api";
@@ -16,21 +16,22 @@ interface MemoryEntry {
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
+  all: "全部",
   file_pattern: "文件结构",
   user_pref: "用户偏好",
-  error_solution: "错误解决方案",
+  error_solution: "错误方案",
   general: "通用",
 };
 
 const CATEGORY_COLORS: Record<string, string> = {
-  file_pattern: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
-  user_pref: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
-  error_solution: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
-  general: "bg-gray-100 text-gray-700 dark:bg-gray-900 dark:text-gray-300",
+  file_pattern: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  user_pref: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
+  error_solution: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
+  general: "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400",
 };
 
 const CATEGORIES = ["file_pattern", "user_pref", "error_solution", "general"] as const;
-const CONTENT_PREVIEW_LEN = 80;
+const CONTENT_PREVIEW_LEN = 100;
 
 function formatTimestamp(ts: string): string {
   try {
@@ -54,8 +55,14 @@ export function MemoryTab() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: entries.length };
+    for (const e of entries) counts[e.category] = (counts[e.category] || 0) + 1;
+    return counts;
+  }, [entries]);
+
   const fetchEntries = useCallback(async (force = false) => {
-    const url = categoryFilter ? `/memory?category=${encodeURIComponent(categoryFilter)}` : "/memory";
+    const url = "/memory";
     if (!force) {
       const cached = settingsCache.get<MemoryEntry[]>(url);
       if (cached) { setEntries(cached); return; }
@@ -63,15 +70,15 @@ export function MemoryTab() {
     setLoading(true);
     try {
       const data = await apiGet<MemoryEntry[]>(url);
-      const entries = Array.isArray(data) ? data : [];
-      settingsCache.set(url, entries);
-      setEntries(entries);
+      const items = Array.isArray(data) ? data : [];
+      settingsCache.set(url, items);
+      setEntries(items);
     } catch {
       setEntries([]);
     } finally {
       setLoading(false);
     }
-  }, [categoryFilter]);
+  }, []);
 
   useEffect(() => {
     fetchEntries();
@@ -96,7 +103,7 @@ export function MemoryTab() {
     }
   };
 
-  const filteredEntries = entries;
+  const filteredEntries = categoryFilter ? entries.filter((e) => e.category === categoryFilter) : entries;
   const groupedByCategory = categoryFilter
     ? { [categoryFilter]: filteredEntries }
     : filteredEntries.reduce<Record<string, MemoryEntry[]>>((acc, e) => {
@@ -115,57 +122,58 @@ export function MemoryTab() {
   }
 
   return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-xs text-muted-foreground">查看与管理 Agent 持久记忆</p>
+    <div className="space-y-3">
+
+      {/* ── Category filter pills ── */}
+      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none">
+        {([null, ...CATEGORIES] as const).map((cat) => {
+          const key = cat ?? "all";
+          const isActive = categoryFilter === cat;
+          const count = cat ? (categoryCounts[cat] || 0) : categoryCounts.all;
+          if (cat && count === 0) return null;
+          return (
+            <button
+              key={key}
+              type="button"
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
+                isActive
+                  ? "text-white border-transparent"
+                  : "border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              }`}
+              style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
+              onClick={() => setCategoryFilter(cat)}
+            >
+              {CATEGORY_LABELS[key] ?? key}
+              <span className={`text-[10px] ${isActive ? "text-white/70" : "text-muted-foreground/60"}`}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
-      {/* Category filter — segmented control */}
-      <div className="inline-flex items-center rounded-lg bg-muted p-0.5 overflow-x-auto scrollbar-none">
-        <button
-          className={`whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-            categoryFilter === null
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-          onClick={() => setCategoryFilter(null)}
-        >
-          全部
-        </button>
-        {CATEGORIES.map((cat) => (
-          <button
-            key={cat}
-            className={`whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-              categoryFilter === cat
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-            onClick={() => setCategoryFilter(cat)}
-          >
-            {CATEGORY_LABELS[cat] ?? cat}
-          </button>
-        ))}
-      </div>
-
-      {/* Memory list grouped by category */}
+      {/* ── Memory list grouped by category ── */}
       <div className="space-y-3">
         {orderedCategories.length === 0 && (
-          <p className="text-xs text-muted-foreground text-center py-8">
-            Agent 尚未记录任何记忆
-          </p>
+          <div className="text-center py-8">
+            <Brain className="h-8 w-8 mx-auto mb-2 text-muted-foreground/30" />
+            <p className="text-xs text-muted-foreground">
+              {categoryFilter ? `暂无「${CATEGORY_LABELS[categoryFilter] ?? categoryFilter}」类记忆` : "Agent 尚未记录任何记忆"}
+            </p>
+          </div>
         )}
         {orderedCategories.map((cat) => (
           <div key={cat} className="space-y-1.5">
             {!categoryFilter && (
-              <div className="flex items-center gap-1.5 px-1">
+              <div className="flex items-center gap-1.5 px-0.5 pt-1">
                 <Badge
-                  className={`text-[10px] px-1.5 py-0 ${CATEGORY_COLORS[cat] ?? ""}`}
+                  className={`text-[10px] px-1.5 py-0 border-0 ${CATEGORY_COLORS[cat] ?? "bg-muted text-muted-foreground"}`}
                   variant="secondary"
                 >
                   {CATEGORY_LABELS[cat] ?? cat}
                 </Badge>
-                <span className="text-[10px] text-muted-foreground">
-                  ({groupedByCategory[cat]?.length ?? 0})
+                <span className="text-[10px] text-muted-foreground/60">
+                  {groupedByCategory[cat]?.length ?? 0}
                 </span>
               </div>
             )}
@@ -177,55 +185,56 @@ export function MemoryTab() {
               return (
                 <div
                   key={entry.id}
-                  className="rounded-lg border border-border"
+                  className="rounded-lg border border-border overflow-hidden"
                 >
+                  {/* ── Summary row ── */}
                   <div
-                    className="flex items-start gap-2 px-3 py-3 sm:py-2.5 cursor-pointer hover:bg-muted/50 active:bg-muted/60 transition-colors"
+                    className="flex items-start gap-2 px-3 py-2.5 cursor-pointer hover:bg-muted/30 transition-colors"
                     onClick={() => toggleExpand(entry.id)}
                   >
-                    {isLong ? (
-                      isExpanded ? (
-                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0 mt-0.5" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0 mt-0.5" />
-                      )
-                    ) : (
-                      <Brain className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" style={{ color: "var(--em-primary)" }} />
-                    )}
+                    <span
+                      className="text-muted-foreground transition-transform flex-shrink-0 mt-0.5"
+                      style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}
+                    >
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </span>
+                    <Brain className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" style={{ color: "var(--em-primary)" }} />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-foreground">
+                      <p className="text-[13px] text-foreground leading-relaxed">
                         {isExpanded ? entry.content : preview}
                       </p>
-                      <div className="flex items-center gap-2 mt-1 flex-wrap">
-                        <span className="text-[10px] text-muted-foreground">
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <span className="text-[10px] text-muted-foreground/70">
                           {formatTimestamp(entry.timestamp)}
                         </span>
                         {categoryFilter && (
                           <Badge
-                            className={`text-[10px] px-1.5 py-0 ${CATEGORY_COLORS[entry.category] ?? ""}`}
+                            className={`text-[9px] px-1.5 py-0 border-0 ${CATEGORY_COLORS[entry.category] ?? "bg-muted text-muted-foreground"}`}
                             variant="secondary"
                           >
                             {CATEGORY_LABELS[entry.category] ?? entry.category}
                           </Badge>
                         )}
                         {entry.source && (
-                          <span className="text-[10px] text-muted-foreground">{entry.source}</span>
+                          <span className="text-[10px] text-muted-foreground/50 font-mono">{entry.source}</span>
                         )}
                       </div>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-destructive flex-shrink-0"
-                      disabled={deletingId === entry.id}
-                      onClick={(e) => handleDelete(e, entry.id)}
-                    >
-                      {deletingId === entry.id ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3 w-3" />
-                      )}
-                    </Button>
+                    <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-destructive"
+                        disabled={deletingId === entry.id}
+                        onClick={(e) => handleDelete(e, entry.id)}
+                      >
+                        {deletingId === entry.id ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-3 w-3" />
+                        )}
+                      </Button>
+                    </div>
                   </div>
                 </div>
               );

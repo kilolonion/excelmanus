@@ -1,5 +1,5 @@
 import { consumeSSE } from "./sse";
-import { buildApiUrl } from "./api";
+import { buildApiUrl, fetchWorkspaceStorage } from "./api";
 import { uuid } from "@/lib/utils";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -173,6 +173,32 @@ export async function sendMessage(
     });
     store.saveCurrentSession();
     return;
+  }
+
+  // 工作区配额前置检查：超限时直接在聊天中显示提示，避免 SSE 往返
+  try {
+    const wsStorage = await fetchWorkspaceStorage();
+    if (wsStorage && (wsStorage.over_files || wsStorage.over_size)) {
+      const parts: string[] = [];
+      if (wsStorage.over_files) parts.push(`文件数 ${wsStorage.file_count}/${wsStorage.max_files}`);
+      if (wsStorage.over_size) parts.push(`存储 ${wsStorage.size_mb.toFixed(1)} MB/${wsStorage.max_size_mb.toFixed(1)} MB`);
+      const userMsgId = uuid();
+      store.addUserMessage(userMsgId, text);
+      const assistantMsgId = uuid();
+      store.addAssistantMessage(assistantMsgId);
+      store.appendBlock(assistantMsgId, {
+        type: "text",
+        content:
+          `⚠️ **工作区已满**（${parts.join("、")}），无法继续对话。\n\n` +
+          "请先清理工作区文件后再试：\n" +
+          "- 在左侧文件列表中删除不需要的文件\n" +
+          "- 或联系管理员调整配额",
+      });
+      store.saveCurrentSession();
+      return;
+    }
+  } catch {
+    // 配额检查失败不阻断发送，交由后端兜底
   }
 
   // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
@@ -452,11 +478,17 @@ export async function sendMessage(
             const specPath = (data.spec_path as string) || undefined;
             const diff = (data.diff as PipelineStatus["diff"]) ?? undefined;
             const checkpoint = (data.checkpoint as Record<string, unknown>) ?? undefined;
+            const progressToolCallId = (data.tool_call_id as string) || "";
 
             S().setPipelineStatus({
               stage, message: pipelineMsg, startedAt: Date.now(),
               phaseIndex, totalPhases, specPath, diff, checkpoint,
             });
+
+            // 工具级进度：绑定到对应的 ToolCallCard
+            if (progressToolCallId) {
+              S().setToolProgress(progressToolCallId, { stage, message: pipelineMsg, phaseIndex, totalPhases });
+            }
 
             // 累积 VLM 提取阶段用于时间线卡片
             if (stage.startsWith("vlm_extract_") && phaseIndex != null && totalPhases != null) {
@@ -625,9 +657,10 @@ export async function sendMessage(
           case "tool_call_end": {
             const toolCallIdRaw = data.tool_call_id;
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
-            // 清理流式参数缓存
+            // 清理流式参数缓存 + 工具进度
             if (toolCallId) {
               useExcelStore.getState().clearStreamingArgs(toolCallId);
+              S().clearToolProgress(toolCallId);
             }
             S().updateToolCallBlock(assistantMsgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
@@ -910,6 +943,17 @@ export async function sendMessage(
             break;
           }
 
+          case "text_preview": {
+            useExcelStore.getState().addTextPreview({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: (data.file_path as string) || "",
+              content: (data.content as string) || "",
+              lineCount: (data.line_count as number) || 0,
+              truncated: !!data.truncated,
+            });
+            break;
+          }
+
           case "verification_report": {
             S().appendBlock(assistantMsgId, {
               type: "verification_report",
@@ -938,6 +982,26 @@ export async function sendMessage(
               if (effectiveSessionId) {
                 excelStore.fetchBackups(effectiveSessionId);
               }
+            }
+            break;
+          }
+
+          case "staging_updated": {
+            const stAction = (data.action as string) || "";
+            const stFiles = (data.files as { original_path: string; backup_path: string }[]) || [];
+            const stPending = (data.pending_count as number) ?? 0;
+            useExcelStore.getState().handleStagingUpdated(stAction, stFiles, stPending);
+            // finish_hint 时追加提示卡片
+            if (stAction === "finish_hint" && stPending > 0) {
+              S().appendBlock(assistantMsgId, {
+                type: "staging_hint",
+                pendingCount: stPending,
+                files: stFiles.map((f) => f.original_path),
+              });
+            }
+            // 刷新备份列表
+            if (effectiveSessionId) {
+              useExcelStore.getState().fetchBackups(effectiveSessionId);
             }
             break;
           }
@@ -1057,6 +1121,11 @@ export async function sendMessage(
             _hadStreamError = true;
             S().setPipelineStatus(null);
             const errMsg = (data.error as string) || "发生未知错误";
+            // 工作区已满：直接展示后端提供的格式化消息
+            if (data.error_code === "workspace_full") {
+              S().appendBlock(assistantMsgId, { type: "text", content: errMsg });
+              break;
+            }
             const errLower = errMsg.toLowerCase();
             // 检测模型配置相关错误，提供更友好的提示
             const isModelConfigError = [
@@ -1278,9 +1347,12 @@ export async function sendContinuation(
             break;
 
           case "pipeline_progress": {
+            const _stage2 = (data.stage as string) || "";
+            const _msg2 = (data.message as string) || "";
+            const _tcId2 = (data.tool_call_id as string) || "";
             S().setPipelineStatus({
-              stage: (data.stage as string) || "",
-              message: (data.message as string) || "",
+              stage: _stage2,
+              message: _msg2,
               startedAt: Date.now(),
               phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
               totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
@@ -1288,6 +1360,14 @@ export async function sendContinuation(
               diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
               checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
             });
+            if (_tcId2) {
+              S().setToolProgress(_tcId2, {
+                stage: _stage2,
+                message: _msg2,
+                phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
+                totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
+              });
+            }
             break;
           }
 
@@ -1416,6 +1496,7 @@ export async function sendContinuation(
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
             if (toolCallId) {
               useExcelStore.getState().clearStreamingArgs(toolCallId);
+              S().clearToolProgress(toolCallId);
             }
             S().updateToolCallBlock(msgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
@@ -1684,6 +1765,17 @@ export async function sendContinuation(
             break;
           }
 
+          case "text_preview": {
+            useExcelStore.getState().addTextPreview({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: (data.file_path as string) || "",
+              content: (data.content as string) || "",
+              lineCount: (data.line_count as number) || 0,
+              truncated: !!data.truncated,
+            });
+            break;
+          }
+
           case "verification_report": {
             S().appendBlock(msgId, {
               type: "verification_report",
@@ -1712,6 +1804,24 @@ export async function sendContinuation(
               if (effectiveSessionId) {
                 excelStore2.fetchBackups(effectiveSessionId);
               }
+            }
+            break;
+          }
+
+          case "staging_updated": {
+            const stAction2 = (data.action as string) || "";
+            const stFiles2 = (data.files as { original_path: string; backup_path: string }[]) || [];
+            const stPending2 = (data.pending_count as number) ?? 0;
+            useExcelStore.getState().handleStagingUpdated(stAction2, stFiles2, stPending2);
+            if (stAction2 === "finish_hint" && stPending2 > 0) {
+              S().appendBlock(msgId, {
+                type: "staging_hint",
+                pendingCount: stPending2,
+                files: stFiles2.map((f) => f.original_path),
+              });
+            }
+            if (effectiveSessionId) {
+              useExcelStore.getState().fetchBackups(effectiveSessionId);
             }
             break;
           }
@@ -1987,6 +2097,7 @@ export async function retryAssistantMessage(
   assistantMessageId: string,
   sessionId: string | null,
   switchToModel?: string,
+  rollbackFiles?: boolean,
 ) {
   const store = useChatStore.getState();
   if (store.isStreaming) return;
@@ -2036,7 +2147,7 @@ export async function retryAssistantMessage(
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
-      rollbackFiles: false,
+      rollbackFiles: rollbackFiles ?? false,
       resendMode: true,
     });
   } catch (err) {
@@ -2271,6 +2382,7 @@ export async function subscribeToSession(sessionId: string) {
           case "pipeline_progress": {
             const stage = (data.stage as string) || "";
             const pipelineMsg = (data.message as string) || "";
+            const _tcId3 = (data.tool_call_id as string) || "";
             S().setPipelineStatus({
               stage,
               message: pipelineMsg,
@@ -2284,6 +2396,14 @@ export async function subscribeToSession(sessionId: string) {
               batchIndex: typeof data.batch_index === "number" ? data.batch_index : undefined,
               batchTotal: typeof data.batch_total === "number" ? data.batch_total : undefined,
             });
+            if (_tcId3) {
+              S().setToolProgress(_tcId3, {
+                stage,
+                message: pipelineMsg,
+                phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
+                totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
+              });
+            }
             break;
           }
 
@@ -2292,7 +2412,7 @@ export async function subscribeToSession(sessionId: string) {
             const batchIndex = typeof data.batch_index === "number" ? data.batch_index : 0;
             const batchTotal = typeof data.batch_total === "number" ? data.batch_total : 1;
             const batchItemName = (data.batch_item_name as string) || `任务 ${batchIndex + 1}`;
-            const batchStatus = (data.batch_status as string) || "running";
+            const batchStatus = ((data.batch_status as string) || "running") as "running" | "failed" | "completed";
             const batchElapsed = typeof data.batch_elapsed_seconds === "number" ? data.batch_elapsed_seconds : 0;
             const batchMsg = (data.message as string) || "";
 
@@ -2432,6 +2552,7 @@ export async function subscribeToSession(sessionId: string) {
             const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
             if (toolCallId) {
               useExcelStore.getState().clearStreamingArgs(toolCallId);
+              S().clearToolProgress(toolCallId);
             }
             S().updateToolCallBlock(msgId, toolCallId, (b) => {
               if (b.type === "tool_call") {
@@ -2699,6 +2820,17 @@ export async function subscribeToSession(sessionId: string) {
             break;
           }
 
+          case "text_preview": {
+            useExcelStore.getState().addTextPreview({
+              toolCallId: (data.tool_call_id as string) || "",
+              filePath: (data.file_path as string) || "",
+              content: (data.content as string) || "",
+              lineCount: (data.line_count as number) || 0,
+              truncated: !!data.truncated,
+            });
+            break;
+          }
+
           case "verification_report": {
             S().appendBlock(msgId, {
               type: "verification_report",
@@ -2727,6 +2859,24 @@ export async function subscribeToSession(sessionId: string) {
               if (sessionId) {
                 excelStore.fetchBackups(sessionId);
               }
+            }
+            break;
+          }
+
+          case "staging_updated": {
+            const stAction3 = (data.action as string) || "";
+            const stFiles3 = (data.files as { original_path: string; backup_path: string }[]) || [];
+            const stPending3 = (data.pending_count as number) ?? 0;
+            useExcelStore.getState().handleStagingUpdated(stAction3, stFiles3, stPending3);
+            if (stAction3 === "finish_hint" && stPending3 > 0) {
+              S().appendBlock(msgId, {
+                type: "staging_hint",
+                pendingCount: stPending3,
+                files: stFiles3.map((f) => f.original_path),
+              });
+            }
+            if (sessionId) {
+              useExcelStore.getState().fetchBackups(sessionId);
             }
             break;
           }

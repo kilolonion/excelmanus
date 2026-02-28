@@ -200,6 +200,28 @@
     0 0 12px var(--em-primary-alpha-15);
 }
 
+/* 会话卡片悬停微抬 */
+.session-card {
+  will-change: transform;
+}
+
+.session-card:hover {
+  transform: translateX(2px);
+}
+
+.session-card:active {
+  transform: scale(0.99);
+}
+
+/* 重命名输入框动画 */
+.session-rename-input {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.session-rename-input:focus {
+  box-shadow: 0 0 0 2px var(--em-primary-alpha-15), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
 /* 确保 Univer Excel 预览区域不透明：
    workbench-layout 容器需有实色背景，以便表格画布与网格线始终可见。 */
 [data-u-comp="workbench-layout"] {
@@ -1127,6 +1149,281 @@ button:active:not(:disabled),
   }
 }
 
+/* ── Auth Page Styles ── */
+
+/* Auth page background decorative orbs */
+.auth-bg-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.auth-bg-orb-1 {
+  width: 320px;
+  height: 320px;
+  background: radial-gradient(circle, var(--em-primary-alpha-15) 0%, transparent 70%);
+  top: -80px;
+  right: -60px;
+  animation: auth-orb-float 8s ease-in-out infinite;
+}
+
+.auth-bg-orb-2 {
+  width: 240px;
+  height: 240px;
+  background: radial-gradient(circle, var(--em-primary-alpha-10) 0%, transparent 70%);
+  bottom: -40px;
+  left: -80px;
+  animation: auth-orb-float 10s ease-in-out infinite reverse;
+}
+
+.dark .auth-bg-orb { opacity: 0.3; }
+
+@keyframes auth-orb-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(12px, -8px) scale(1.05); }
+  66% { transform: translate(-8px, 6px) scale(0.97); }
+}
+
+/* Auth card glassmorphism */
+.auth-card {
+  background: oklch(1 0 0 / 70%);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid var(--em-primary-alpha-10);
+  border-radius: 1rem;
+  box-shadow:
+    0 0 0 1px oklch(1 0 0 / 5%),
+    0 4px 24px -4px oklch(0 0 0 / 6%),
+    0 0 48px -8px var(--em-primary-alpha-06);
+  padding: 2rem;
+}
+
+.dark .auth-card {
+  background: oklch(0.18 0 0 / 70%);
+  border-color: var(--em-primary-alpha-15);
+  box-shadow:
+    0 0 0 1px oklch(1 0 0 / 3%),
+    0 4px 24px -4px oklch(0 0 0 / 30%),
+    0 0 48px -8px var(--em-primary-alpha-10);
+}
+
+/* Auth input enhanced */
+.auth-input {
+  transition: border-color 200ms ease, box-shadow 200ms ease, background-color 200ms ease;
+}
+
+.auth-input:hover:not(:focus) {
+  border-color: var(--em-primary-alpha-25);
+  background-color: var(--em-primary-alpha-06);
+}
+
+.auth-input:focus {
+  border-color: var(--em-primary);
+  box-shadow: 0 0 0 3px var(--em-primary-alpha-15);
+}
+
+/* Custom green checkbox for auth pages */
+.auth-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-radius: 5px;
+  background: var(--background);
+  cursor: pointer;
+  position: relative;
+  transition: all 200ms ease;
+  flex-shrink: 0;
+}
+
+.auth-checkbox:hover {
+  border-color: var(--em-primary-alpha-25);
+  background: var(--em-primary-alpha-06);
+}
+
+.auth-checkbox:checked {
+  background: var(--em-primary);
+  border-color: var(--em-primary);
+}
+
+.auth-checkbox:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.auth-checkbox:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--em-primary-alpha-20);
+}
+
+/* Green gradient button */
+.auth-btn-primary {
+  background: linear-gradient(135deg, var(--em-primary) 0%, var(--em-primary-dark) 100%);
+  box-shadow: 0 2px 8px -2px var(--em-primary-alpha-25);
+  transition: all 200ms ease;
+}
+
+.auth-btn-primary:hover:not(:disabled) {
+  box-shadow: 0 4px 16px -2px var(--em-primary-alpha-25);
+  filter: brightness(1.08);
+  transform: translateY(-0.5px);
+}
+
+.auth-btn-primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.98) !important;
+  filter: brightness(0.95);
+}
+
+.auth-btn-primary:disabled {
+  opacity: 0.5;
+  filter: grayscale(0.3);
+}
+
+/* Logo glow ring */
+.auth-logo-glow {
+  position: relative;
+}
+
+.auth-logo-glow::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--em-primary-alpha-15) 0%, transparent 70%);
+  animation: auth-logo-pulse 3s ease-in-out infinite;
+}
+
+@keyframes auth-logo-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+
+/* OAuth button hover with green accent */
+.auth-oauth-btn {
+  transition: all 200ms ease;
+}
+
+.auth-oauth-btn:hover:not(:disabled) {
+  border-color: var(--em-primary-alpha-25) !important;
+  background: var(--em-primary-alpha-06) !important;
+}
+
+/* Login brand gradient text */
+.login-brand-gradient {
+  background: linear-gradient(135deg, var(--em-primary) 0%, var(--em-primary-light) 50%, var(--em-accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Login left panel subtle background */
+.login-left-bg {
+  background: linear-gradient(160deg, var(--em-primary-alpha-06) 0%, transparent 50%, var(--em-primary-alpha-06) 100%);
+  border-right: 1px solid var(--em-primary-alpha-10);
+}
+
+.dark .login-left-bg {
+  background: linear-gradient(160deg, oklch(0.18 0 0 / 60%) 0%, transparent 50%, oklch(0.18 0 0 / 40%) 100%);
+  border-right-color: oklch(1 0 0 / 6%);
+}
+
+/* Login feature card */
+.login-feature-card {
+  background: oklch(1 0 0 / 50%);
+  border: 1px solid var(--em-primary-alpha-10);
+  backdrop-filter: blur(4px);
+}
+
+.login-feature-card:hover {
+  background: var(--em-primary-alpha-06);
+  border-color: var(--em-primary-alpha-20);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px -2px var(--em-primary-alpha-10);
+}
+
+.dark .login-feature-card {
+  background: oklch(0.2 0 0 / 50%);
+  border-color: oklch(1 0 0 / 8%);
+}
+
+.dark .login-feature-card:hover {
+  background: var(--em-primary-alpha-10);
+  border-color: var(--em-primary-alpha-20);
+}
+
+/* Auth divider with green gradient */
+.auth-divider-line {
+  background: linear-gradient(90deg, transparent, var(--em-primary-alpha-15) 30%, var(--em-primary-alpha-15) 70%, transparent);
+  height: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-bg-orb-1,
+  .auth-bg-orb-2,
+  .auth-logo-glow::before {
+    animation: none;
+  }
+}
+
+/* ── Approval Modal ── */
+
+/* Glassmorphism card */
+.approval-card {
+  background: oklch(1 0 0 / 85%);
+  backdrop-filter: blur(24px) saturate(1.8);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  border: 1px solid oklch(0 0 0 / 6%);
+  box-shadow:
+    0 0 0 1px oklch(1 0 0 / 8%),
+    0 24px 80px -12px oklch(0 0 0 / 18%),
+    0 8px 24px -4px oklch(0 0 0 / 8%);
+}
+
+.dark .approval-card {
+  background: oklch(0.16 0 0 / 88%);
+  border-color: oklch(1 0 0 / 10%);
+  box-shadow:
+    0 0 0 1px oklch(1 0 0 / 5%),
+    0 24px 80px -12px oklch(0 0 0 / 50%),
+    0 8px 24px -4px oklch(0 0 0 / 25%);
+}
+
+/* Icon pulse ring */
+@keyframes approval-icon-pulse-anim {
+  0%, 100% { transform: scale(1); opacity: 0.2; }
+  50% { transform: scale(1.6); opacity: 0; }
+}
+
+.approval-icon-pulse {
+  animation: approval-icon-pulse-anim 2s ease-in-out infinite;
+}
+
+/* Accept button hover glow */
+.approval-btn-accept:hover:not(:disabled) {
+  box-shadow: 0 6px 20px -4px var(--em-primary-alpha-25);
+  transform: translateY(-1px);
+}
+
+.approval-btn-accept:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approval-icon-pulse {
+    animation: none;
+  }
+}
+
 /* ── Chat Input Focus Ring ── */
 .chat-input-ring {
   transition: box-shadow 200ms ease, border-color 200ms ease;
@@ -1134,7 +1431,179 @@ button:active:not(:disabled),
 
 .chat-input-ring:focus-within {
   border-color: var(--em-primary);
-  box-shadow: 0 0 0 2px var(--em-primary-alpha-15);
+  box-shadow: 0 0 0 2px var(--em-primary-alpha-15), 0 0 20px -4px var(--em-primary-alpha-10);
+}
+
+/* ── Model Selector Dropdown Scrollbar ── */
+.model-selector-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--em-primary-alpha-15) transparent;
+}
+
+.model-selector-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.model-selector-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.model-selector-scroll::-webkit-scrollbar-thumb {
+  background: var(--em-primary-alpha-15);
+  border-radius: 4px;
+}
+
+.model-selector-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--em-primary-alpha-25);
+}
+
+/* ── TopBar Glassmorphism ── */
+.topbar-glass {
+  background: oklch(1 0 0 / 80%);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+  border-bottom: 1px solid oklch(0 0 0 / 6%);
+}
+
+.dark .topbar-glass {
+  background: oklch(0.145 0 0 / 80%);
+  border-bottom-color: oklch(1 0 0 / 8%);
+}
+
+/* ── Welcome Page Background Grid ── */
+.welcome-bg-grid {
+  background-image:
+    linear-gradient(var(--em-primary-alpha-06) 1px, transparent 1px),
+    linear-gradient(90deg, var(--em-primary-alpha-06) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 30%, transparent 80%);
+}
+
+/* ── Welcome Orb (decorative background glow) ── */
+.welcome-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+}
+
+.welcome-orb-1 {
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, var(--em-primary-alpha-15) 0%, transparent 70%);
+  top: -120px;
+  right: 10%;
+  animation: auth-orb-float 10s ease-in-out infinite;
+  opacity: 0.4;
+}
+
+.welcome-orb-2 {
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, var(--em-primary-alpha-10) 0%, transparent 70%);
+  bottom: 10%;
+  left: 5%;
+  animation: auth-orb-float 12s ease-in-out infinite reverse;
+  opacity: 0.3;
+}
+
+.dark .welcome-orb { opacity: 0.2; }
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-orb-1, .welcome-orb-2 { animation: none; }
+}
+
+/* ── Welcome Card Glass ── */
+.welcome-card-glass {
+  background: oklch(1 0 0 / 60%);
+  backdrop-filter: blur(8px) saturate(1.2);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  border: 1px solid oklch(0 0 0 / 6%);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 4%), 0 0 0 1px oklch(1 0 0 / 5%);
+}
+
+.dark .welcome-card-glass {
+  background: oklch(0.2 0 0 / 50%);
+  border-color: oklch(1 0 0 / 8%);
+  box-shadow: 0 1px 3px oklch(0 0 0 / 20%), 0 0 0 1px oklch(1 0 0 / 3%);
+}
+
+.welcome-card-glass:hover {
+  box-shadow: 0 4px 16px oklch(0 0 0 / 8%), 0 0 24px -4px var(--em-primary-alpha-10);
+  border-color: var(--em-primary-alpha-20);
+}
+
+.dark .welcome-card-glass:hover {
+  box-shadow: 0 4px 16px oklch(0 0 0 / 30%), 0 0 24px -4px var(--em-primary-alpha-15);
+}
+
+/* ── User Message Bubble ── */
+.user-bubble {
+  box-shadow: 0 1px 4px oklch(0 0 0 / 4%);
+  transition: box-shadow 200ms ease, border-color 200ms ease, background-color 200ms ease;
+}
+
+.user-bubble:hover {
+  box-shadow: 0 2px 8px oklch(0 0 0 / 8%), 0 0 0 1px var(--em-primary-alpha-10);
+}
+
+.dark .user-bubble {
+  box-shadow: 0 1px 4px oklch(0 0 0 / 20%);
+}
+
+.dark .user-bubble:hover {
+  box-shadow: 0 2px 8px oklch(0 0 0 / 30%), 0 0 0 1px var(--em-primary-alpha-15);
+}
+
+/* ── Assistant Message Gradient Border ── */
+.assistant-border-gradient {
+  border-image: linear-gradient(180deg, var(--em-primary) 0%, var(--em-primary-light) 100%) 1;
+}
+
+/* ── Send Button Glow ── */
+.send-btn-glow {
+  transition: box-shadow 200ms ease, transform 150ms ease;
+}
+
+.send-btn-glow:hover:not(:disabled) {
+  box-shadow: 0 0 16px -2px var(--em-primary-alpha-25);
+}
+
+/* ── Sidebar Session Card Enhanced ── */
+.session-card-enhanced {
+  transition: all 180ms ease;
+}
+
+.session-card-enhanced:hover {
+  background: var(--em-primary-alpha-06);
+  transform: translateX(2px);
+}
+
+.session-card-enhanced:active {
+  transform: scale(0.99);
+}
+
+/* ── Tool Success Confetti ── */
+@keyframes tool-success-sparkle {
+  0% { opacity: 0; transform: scale(0) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.2) rotate(180deg); }
+  100% { opacity: 0; transform: scale(0.8) rotate(360deg); }
+}
+
+.tool-success-sparkle::after {
+  content: "✦";
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  font-size: 10px;
+  color: var(--em-primary);
+  animation: tool-success-sparkle 0.6s ease-out forwards;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-success-sparkle::after { animation: none; display: none; }
 }
 
 /* ── Highlight.js Syntax Theme (Light) ── */

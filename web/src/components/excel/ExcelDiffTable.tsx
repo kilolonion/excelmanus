@@ -6,6 +6,7 @@ import type { ExcelDiffEntry, ExcelCellDiff, CellStyle, MergeRange } from "@/sto
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, type MergeSpan } from "./merge-utils";
+import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
 
 // ── 阈值 ────────────────────────────────────────────────
 const INLINE_THRESHOLD = 5;
@@ -161,7 +162,7 @@ function ChangeBadge({ type, size = "sm" }: { type: ChangeType; size?: "sm" | "x
 function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
   const sorted = useMemo(() => [...changes].sort(excelCellCompare), [changes]);
   return (
-    <div className="overflow-x-auto max-h-[320px] overflow-y-auto text-[11px] leading-[1.6]" style={{ touchAction: "pan-x pan-y" }}>
+    <div className="overflow-x-auto text-[11px] leading-[1.6]">
       <div className="flex items-center bg-muted/60 border-b border-border text-[10px] text-muted-foreground font-medium sticky top-0 z-10 backdrop-blur-sm">
         <span className="w-14 flex-shrink-0 px-1 text-center">单元格</span>
         <span className="flex-1 px-2 text-center border-l border-border/40">修改前</span>
@@ -197,7 +198,7 @@ function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
 function InlineVerticalView({ changes }: { changes: ExcelCellDiff[] }) {
   const sorted = useMemo(() => [...changes].sort(excelCellCompare), [changes]);
   return (
-    <div className="overflow-x-auto max-h-[320px] overflow-y-auto text-[11px] leading-[1.6]" style={{ touchAction: "pan-x pan-y" }}>
+    <div className="overflow-x-auto text-[11px] leading-[1.6]">
       {sorted.map((change, i) => {
         const type = classifyChange(change);
         return (
@@ -410,7 +411,7 @@ function GridSingleView({
   );
 
   return (
-    <div className="max-h-[360px] overflow-y-auto overflow-x-auto" style={{ touchAction: "pan-x pan-y" }}>
+    <div className="overflow-x-auto">
       <GridHalfTable
         label={label}
         side={side}
@@ -454,7 +455,7 @@ function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }:
 
   return (
     <div
-      className={`max-h-[420px] overflow-y-auto ${
+      className={`${
         isVertical ? "flex flex-col gap-0" : "flex flex-row gap-0"
       }`}
       style={{ touchAction: "pan-x pan-y" }}
@@ -584,11 +585,13 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
       </div>
 
       {/* Diff 内容区 */}
-      {useInline ? (
-        <InlineDiffView changes={data.changes} layout={layout} />
-      ) : (
-        <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} oldMergeRanges={data.oldMergeRanges} />
-      )}
+      <ScrollablePreview collapsedHeight={160} expandedHeight={420}>
+        {useInline ? (
+          <InlineDiffView changes={data.changes} layout={layout} />
+        ) : (
+          <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} oldMergeRanges={data.oldMergeRanges} />
+        )}
+      </ScrollablePreview>
 
       {/* Footer */}
       <div className="px-3 py-1 bg-muted/30 border-t border-border/50 text-[10px] text-muted-foreground/70 flex flex-wrap items-center gap-x-3 gap-y-0.5">

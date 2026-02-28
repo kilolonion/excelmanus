@@ -63,11 +63,13 @@ export default function VerificationCard({
         <span className={`font-medium ${config.labelColor}`}>
           {config.label}
         </span>
-        <span
-          className={`rounded-full px-2 py-0.5 text-xs font-medium ${confidenceBadge[confidence] || confidenceBadge.low}`}
-        >
-          {{ high: "高", medium: "中", low: "低" }[confidence] || confidence}
-        </span>
+        {({ high: "高", medium: "中", low: "低" } as Record<string, string>)[confidence] && (
+          <span
+            className={`rounded-full px-2 py-0.5 text-xs font-medium ${confidenceBadge[confidence] || confidenceBadge.low}`}
+          >
+            {({ high: "高", medium: "中", low: "低" } as Record<string, string>)[confidence]}
+          </span>
+        )}
         {mode === "blocking" && (
           <span className="flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300">
             <Shield className="h-3 w-3" />

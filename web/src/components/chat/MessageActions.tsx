@@ -1,14 +1,11 @@
 "use client";
 
 import React, { useCallback, useState } from "react";
-import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, ArrowRightLeft } from "lucide-react";
+import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, ArrowRightLeft, Loader2, RefreshCw } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
-  DropdownMenuSeparator,
-  DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import { apiGet } from "@/lib/api";
 import { useUIStore } from "@/stores/ui-store";
@@ -45,6 +42,49 @@ function extractProvider(baseUrl: string | undefined): string {
   }
 }
 
+/** Provider brand colors — keep in sync with TopModelSelector */
+const PROVIDER_COLORS: Record<string, string> = {
+  openai: "#10a37f",
+  deepseek: "#4d6bfe",
+  aliyuncs: "#ff6a00",
+  dashscope: "#ff6a00",
+  anthropic: "#d4a574",
+  google: "#4285f4",
+  moonshot: "#7c3aed",
+  zhipu: "#2563eb",
+  baidu: "#2932e1",
+  groq: "#f55036",
+  mistral: "#ff7000",
+  together: "#6366f1",
+  cohere: "#39594d",
+  siliconflow: "#06b6d4",
+};
+
+const PROVIDER_DISPLAY: Record<string, string> = {
+  openai: "OpenAI",
+  deepseek: "DeepSeek",
+  aliyuncs: "阿里云",
+  dashscope: "DashScope",
+  anthropic: "Anthropic",
+  google: "Google",
+  moonshot: "Moonshot",
+  zhipu: "智谱",
+  baidu: "百度",
+  groq: "Groq",
+  mistral: "Mistral",
+  together: "Together",
+  cohere: "Cohere",
+  siliconflow: "SiliconFlow",
+};
+
+function getProviderColor(provider: string): string {
+  return PROVIDER_COLORS[provider] || "#888";
+}
+
+function getProviderDisplayName(provider: string): string {
+  return PROVIDER_DISPLAY[provider] || provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
 interface ProviderGroup {
   provider: string;
   models: ModelInfo[];
@@ -63,6 +103,10 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
   }));
 }
 
+function displayLabel(m: ModelInfo): string {
+  return m.name === "default" ? m.model : m.name;
+}
+
 export const MessageActions = React.memo(function MessageActions({
   blocks,
   onRetry,
@@ -73,6 +117,7 @@ export const MessageActions = React.memo(function MessageActions({
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const currentModel = useUIStore((s) => s.currentModel);
 
   const handleCopy = useCallback(() => {
@@ -105,7 +150,7 @@ export const MessageActions = React.memo(function MessageActions({
 
   return (
     <div
-      className="flex items-center gap-1 mt-1.5 opacity-0 group-hover/msg:opacity-100 transition-opacity duration-200 touch-show"
+      className={`flex items-center gap-1 mt-1.5 transition-opacity duration-200 touch-show ${dropdownOpen ? "opacity-100" : "opacity-0 group-hover/msg:opacity-100"}`}
       role="toolbar"
       aria-label="消息操作"
     >
@@ -130,7 +175,7 @@ export const MessageActions = React.memo(function MessageActions({
       )}
 
       {canRetry && onRetryWithModel && (
-        <DropdownMenu onOpenChange={(open) => { if (open) fetchModelsOnce(); }}>
+        <DropdownMenu onOpenChange={(open) => { setDropdownOpen(open); if (open) fetchModelsOnce(); }}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
@@ -141,40 +186,98 @@ export const MessageActions = React.memo(function MessageActions({
               <ArrowRightLeft className="h-3.5 w-3.5" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-64 max-h-[40vh] overflow-y-auto">
-            <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
-              选择模型重试
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            {groups.map((group, gi) => (
-              <div key={group.provider}>
-                {gi > 0 && <DropdownMenuSeparator />}
-                <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-normal">
-                  {group.provider}
-                </DropdownMenuLabel>
-                {group.models.map((m) => (
-                  <DropdownMenuItem
-                    key={m.name}
-                    onClick={() => onRetryWithModel(m.name)}
-                    className="flex items-center gap-2 py-1.5 cursor-pointer"
-                  >
-                    <span className={`text-sm flex-1 truncate ${
-                      m.name === currentModel ? "font-semibold" : ""
-                    }`}>
-                      {m.name}
-                    </span>
-                    {m.name === currentModel && (
-                      <span className="text-[10px] text-muted-foreground">当前</span>
-                    )}
-                  </DropdownMenuItem>
-                ))}
+          <DropdownMenuContent align="start" className="w-72 max-w-[calc(100vw-2rem)] p-0 overflow-hidden">
+            {/* Header */}
+            <div className="px-3 pt-2.5 pb-2 border-b border-border/50">
+              <div className="flex items-center gap-2">
+                <RefreshCw className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
+                <span className="text-xs font-medium text-foreground/70">选择模型重试</span>
+                <span className="text-[10px] text-muted-foreground/50 ml-auto tabular-nums">
+                  {models.length} 个可用
+                </span>
               </div>
-            ))}
-            {models.length === 0 && (
-              <DropdownMenuItem disabled className="text-xs">
-                加载中...
-              </DropdownMenuItem>
-            )}
+            </div>
+            {/* Model list */}
+            <div className="max-h-[40vh] overflow-y-auto py-1 model-selector-scroll">
+              {groups.map((group, gi) => {
+                const color = getProviderColor(group.provider);
+                return (
+                  <div key={group.provider}>
+                    {gi > 0 && <div className="h-px mx-3 my-1 bg-border/30" />}
+                    <div className="flex items-center gap-2 px-3 pt-2.5 pb-1">
+                      <span
+                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: color }}
+                      />
+                      <span
+                        className="text-[10px] font-semibold uppercase tracking-widest"
+                        style={{ color }}
+                      >
+                        {getProviderDisplayName(group.provider)}
+                      </span>
+                    </div>
+                    {group.models.map((m) => {
+                      const isCurrent = m.name === currentModel;
+                      return (
+                        <button
+                          key={m.name}
+                          onClick={() => onRetryWithModel(m.name)}
+                          className={[
+                            "w-full text-left px-3 py-2 flex items-center gap-3",
+                            "transition-all duration-150 ease-out cursor-pointer",
+                            "border-l-[3px] border-l-transparent",
+                            "hover:bg-accent/50 hover:border-l-[color:var(--em-primary-alpha-25)]",
+                            isCurrent ? "bg-[var(--em-primary-alpha-06)] !border-l-[var(--em-primary)]" : "",
+                          ].join(" ")}
+                        >
+                          <span
+                            className="h-2 w-2 rounded-full shrink-0"
+                            style={{ backgroundColor: color, opacity: 0.6 }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`text-sm leading-tight ${isCurrent ? "font-semibold" : "font-medium"}`}>
+                                {displayLabel(m)}
+                              </span>
+                              {isCurrent && (
+                                <span
+                                  className="text-[9px] px-1.5 py-px rounded-full font-medium"
+                                  style={{
+                                    backgroundColor: "var(--em-primary-alpha-10)",
+                                    color: "var(--em-primary)",
+                                  }}
+                                >
+                                  当前
+                                </span>
+                              )}
+                            </div>
+                            {m.name !== "default" && m.name !== m.model && (
+                              <span className="text-[10px] text-muted-foreground/50 font-mono truncate block mt-0.5">
+                                {m.model}
+                              </span>
+                            )}
+                          </div>
+                          {isCurrent && (
+                            <span
+                              className="h-5 w-5 rounded-full flex items-center justify-center shrink-0"
+                              style={{ backgroundColor: "var(--em-primary-alpha-15)" }}
+                            >
+                              <Check className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+              {models.length === 0 && (
+                <div className="px-3 py-6 text-center">
+                  <Loader2 className="h-4 w-4 text-muted-foreground/25 mx-auto mb-1.5 animate-spin" />
+                  <p className="text-xs text-muted-foreground/40">加载模型列表...</p>
+                </div>
+              )}
+            </div>
           </DropdownMenuContent>
         </DropdownMenu>
       )}

@@ -12,6 +12,22 @@ import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
 import type { Session, AssistantBlock } from "@/lib/types";
 
+/** 将后端 route_mode 映射为用户友好的中文标签（与 chat-actions.ts 保持一致） */
+const _ROUTE_MODE_LABELS: Record<string, string> = {
+  all_tools: "智能路由",
+  control_command: "控制命令",
+  slash_direct: "技能指令",
+  slash_not_found: "技能未找到",
+  slash_not_user_invocable: "技能不可用",
+  no_skillpack: "基础模式",
+  fallback: "回退模式",
+  hidden: "路由",
+};
+
+function _friendlyRouteMode(mode: string): string {
+  return _ROUTE_MODE_LABELS[mode] || mode;
+}
+
 /**
  * 刷新后恢复路由状态 block：在最后一个 assistant 消息的 blocks 开头注入路由信息，
  * 仅当该消息尚未包含 route variant 的 status block 时执行。
@@ -28,8 +44,8 @@ function _injectRouteBlock(
     if (m.blocks.some((b) => b.type === "status" && b.variant === "route")) return;
     const routeBlock: AssistantBlock = {
       type: "status",
-      label: `路由: ${route.routeMode}`,
-      detail: route.skillsUsed.length > 0 ? `技能: ${route.skillsUsed.join(", ")}` : undefined,
+      label: _friendlyRouteMode(route.routeMode),
+      detail: route.skillsUsed.length > 0 ? route.skillsUsed.join(",") : undefined,
       variant: "route",
     };
     const updatedBlocks = [routeBlock, ...m.blocks];

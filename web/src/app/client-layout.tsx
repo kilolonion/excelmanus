@@ -10,6 +10,8 @@ import { SessionSync } from "@/components/providers/SessionSync";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
+import { ProfilePanel } from "@/components/profile/ProfilePanel";
+import { AdminPanel } from "@/components/admin/AdminPanel";
 
 const ExcelSidePanel = dynamic(
   () => import("@/components/excel/ExcelSidePanel").then((m) => ({ default: m.ExcelSidePanel })),
@@ -27,7 +29,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* 顶栏 — 模型选择器 */}
-        <div className="flex items-center h-12 px-3 flex-shrink-0 border-b border-border/60">
+        <div className="flex items-center h-12 px-3 flex-shrink-0 topbar-glass">
           {/* 左侧：导航 + 模型 */}
           <SidebarToggle />
           <TopModelSelector />
@@ -53,6 +55,8 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
       <ExcelDataRecovery />
       <PlaceholderAlert />
       <SettingsDialog />
+      <ProfilePanel />
+      <AdminPanel />
     </div>
   );
 }

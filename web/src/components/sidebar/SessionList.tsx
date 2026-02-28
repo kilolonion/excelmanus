@@ -13,6 +13,7 @@ import {
   Zap,
   MessageSquarePlus,
   Pencil,
+  Check,
   type LucideIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -30,6 +31,20 @@ import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
 import { listItemVariants } from "@/lib/sidebar-motion";
+
+function relativeTime(iso: string | undefined): string {
+  if (!iso) return "";
+  const now = Date.now();
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return "";
+  const diff = now - then;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}小时前`;
+  if (diff < 172_800_000) return "昨天";
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}天前`;
+  return new Date(iso).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+}
 
 type SessionView = "all" | "active" | "archived";
 
@@ -303,6 +318,9 @@ export function SessionList() {
               const isArchived =
                 (session.status ?? "active") === "archived";
 
+              const timeAgo = relativeTime(session.updatedAt);
+              const isEditing = editingSessionId === session.id;
+
               return (
                 <motion.div
                   key={session.id}
@@ -311,12 +329,11 @@ export function SessionList() {
                   animate="animate"
                   exit="exit"
                   layout
-                  className={`group relative flex items-center gap-2 rounded-lg px-2.5 py-1 md:py-2 min-h-[1.75rem] md:min-h-[2.25rem] text-sm cursor-pointer transition-colors duration-150 ease-out ${
+                  className={`session-card session-card-enhanced group relative flex items-start gap-2.5 rounded-xl px-3 py-2.5 cursor-pointer transition-all duration-200 ease-out ${
                     isActive
-                      ? "bg-accent/60 ring-1 ring-[var(--em-primary)]/25"
-                      : "hover:bg-accent/40"
+                      ? "card-selected-glow bg-[var(--em-primary-alpha-06)]"
+                      : "hover:bg-accent/50"
                   }`}
-                  style={isActive ? { borderLeft: "2.5px solid var(--em-primary)" } : undefined}
                   tabIndex={0}
                   role="button"
                   onClick={() => {
@@ -329,111 +346,192 @@ export function SessionList() {
                     }
                   }}
                 >
-                  <MessageSquare
-                    className="h-3.5 w-3.5 flex-shrink-0"
-                    style={{
-                      color: isActive
-                        ? "var(--em-primary)"
-                        : "var(--muted-foreground)",
-                    }}
-                  />
-                  {editingSessionId === session.id ? (
-                    <input
-                      ref={editInputRef}
-                      type="text"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          void handleFinishEdit(session.id);
-                        } else if (e.key === "Escape") {
-                          handleCancelEdit();
-                        }
-                        e.stopPropagation();
-                      }}
-                      onBlur={() => void handleFinishEdit(session.id)}
-                      onClick={(e) => e.stopPropagation()}
-                      className="flex-1 min-w-0 text-sm bg-transparent border-b border-[var(--em-primary)] outline-none px-0 py-0"
+                  {/* Active indicator bar */}
+                  {isActive && (
+                    <motion.div
+                      layoutId="session-active-indicator"
+                      className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r-full card-indicator-enter"
+                      style={{ backgroundColor: "var(--em-primary)" }}
+                      transition={{ type: "spring", stiffness: 400, damping: 30 }}
                     />
-                  ) : (
-                    <span
-                      className={`flex-1 min-w-0 truncate ${
-                        isActive
-                          ? "font-medium text-foreground"
-                          : "text-foreground/80"
-                      }`}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        handleStartEdit(session.id, session.title);
-                      }}
-                    >
-                      {session.title}
-                    </span>
                   )}
 
+                  {/* Icon */}
+                  <div
+                    className={`mt-0.5 flex-shrink-0 h-7 w-7 rounded-lg flex items-center justify-center transition-colors duration-200 ${
+                      isActive ? "" : ""
+                    }`}
+                    style={{
+                      backgroundColor: isActive ? "var(--em-primary-alpha-15)" : "var(--em-primary-alpha-06)",
+                    }}
+                  >
+                    <MessageSquare
+                      className="h-3.5 w-3.5"
+                      style={{
+                        color: isActive
+                          ? "var(--em-primary)"
+                          : "var(--muted-foreground)",
+                      }}
+                    />
+                  </div>
+
+                  {/* Content */}
+                  <div className="flex-1 min-w-0">
+                    <AnimatePresence mode="wait">
+                      {isEditing ? (
+                        <motion.div
+                          key="edit"
+                          initial={{ opacity: 0, scale: 0.97 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.97 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            ref={editInputRef}
+                            type="text"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void handleFinishEdit(session.id);
+                              } else if (e.key === "Escape") {
+                                handleCancelEdit();
+                              }
+                              e.stopPropagation();
+                            }}
+                            className="session-rename-input flex-1 min-w-0 h-7 text-[13px] bg-background/90 text-foreground rounded-lg px-2 outline-none border border-[var(--em-primary)]/40 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200"
+                          />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleFinishEdit(session.id);
+                            }}
+                            className="flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-white transition-colors duration-150 hover:opacity-90"
+                            style={{ backgroundColor: "var(--em-primary)" }}
+                            title="确认"
+                          >
+                            <Check className="h-3 w-3" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCancelEdit();
+                            }}
+                            className="flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground bg-muted hover:bg-muted-foreground/20 hover:text-foreground transition-colors duration-150"
+                            title="取消"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="display"
+                          initial={false}
+                          animate={{ opacity: 1 }}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`flex-1 min-w-0 truncate text-[13px] leading-snug ${
+                                isActive
+                                  ? "font-semibold text-foreground"
+                                  : "font-medium text-foreground/80"
+                              }`}
+                              onDoubleClick={(e) => {
+                                e.stopPropagation();
+                                handleStartEdit(session.id, session.title);
+                              }}
+                            >
+                              {session.title}
+                            </span>
+                            {isArchived && (
+                              <span
+                                className="flex-shrink-0 text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                                style={{
+                                  backgroundColor: "var(--em-primary-alpha-10)",
+                                  color: "var(--em-primary)",
+                                }}
+                              >
+                                归档
+                              </span>
+                            )}
+                          </div>
+                          {timeAgo && (
+                            <p className="text-[11px] text-muted-foreground/60 mt-0.5 leading-none">
+                              {timeAgo}
+                            </p>
+                          )}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
                   {/* Three-dot menu — visible on hover or when active */}
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        className={`flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] ${
-                          isActive
-                            ? "opacity-100"
-                            : "opacity-0 group-hover:opacity-100 touch-show"
-                        }`}
-                        onClick={(e) => e.stopPropagation()}
+                  {!isEditing && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className={`flex-shrink-0 mt-0.5 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground transition-all duration-150 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] ${
+                            isActive
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-100 touch-show"
+                          }`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Ellipsis className="h-4 w-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent
+                        side="right"
+                        align="start"
+                        className="w-40"
                       >
-                        <Ellipsis className="h-4 w-4" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      side="right"
-                      align="start"
-                      className="w-40"
-                    >
-                      <DropdownMenuItem
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleStartEdit(session.id, session.title);
-                        }}
-                      >
-                        <Pencil className="h-4 w-4" />
-                        重命名
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleArchiveToggle(
-                            session.id,
-                            isArchived
-                          );
-                        }}
-                      >
-                        {isArchived ? (
-                          <>
-                            <ArchiveRestore className="h-4 w-4" />
-                            取消归档
-                          </>
-                        ) : (
-                          <>
-                            <Archive className="h-4 w-4" />
-                            归档
-                          </>
-                        )}
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(session.id);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        删除
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStartEdit(session.id, session.title);
+                          }}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          重命名
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleArchiveToggle(
+                              session.id,
+                              isArchived
+                            );
+                          }}
+                        >
+                          {isArchived ? (
+                            <>
+                              <ArchiveRestore className="h-4 w-4" />
+                              取消归档
+                            </>
+                          ) : (
+                            <>
+                              <Archive className="h-4 w-4" />
+                              归档
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(session.id);
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          删除
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
                 </motion.div>
               );
             })}

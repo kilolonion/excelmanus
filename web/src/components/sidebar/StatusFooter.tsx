@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings, UserCircle } from "lucide-react";
 import { apiGet, proxyAvatarUrl } from "@/lib/api";
@@ -168,12 +170,19 @@ export function StatusFooter() {
           </Tooltip>
         </TooltipProvider>
 
-        {/* Right: user badge (compact, only when full badge not shown) */}
-        {!showFullBadge && (
-          <div className="flex items-center gap-1 flex-shrink-0">
-            <UserBadge compact />
-          </div>
-        )}
+        {/* Right: settings gear (desktop) + user badge (compact, only when full badge not shown) */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {!isMobile && (
+            <button
+              onClick={() => useUIStore.getState().openSettings("model")}
+              className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title="设置"
+            >
+              <Settings className="h-4 w-4" />
+            </button>
+          )}
+          {!showFullBadge && <UserBadge compact />}
+        </div>
       </div>
     </>
   );
@@ -224,24 +233,52 @@ function WorkspaceIndicator({ usage }: { usage: WorkspaceUsage | null }) {
     ? Math.min((usage.size_mb / usage.max_size_mb) * 100, 100)
     : 0;
   const isOver = usage.over_size || usage.over_files;
-  const color = isOver ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "bg-[var(--em-primary)]";
+  const barColor = isOver ? "bg-red-500" : pct > 80 ? "bg-amber-500" : "";
+  const barStyle = !isOver && pct <= 80 ? { backgroundColor: "var(--em-primary)" } : undefined;
 
   return (
-    <div className="px-3 py-1.5">
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1">
-        <HardDrive className="h-3 w-3" />
-        <span>工作空间</span>
-        <span className="ml-auto">
-          {usage.size_mb.toFixed(1)} / {usage.max_size_mb} MB · {usage.file_count} / {usage.max_files} 文件
+    <div className="px-4 py-2.5">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-1.5">
+        <HardDrive className="h-3 w-3 flex-shrink-0" />
+        <span className="font-medium">工作空间</span>
+        <span className="ml-auto tabular-nums">
+          {usage.size_mb.toFixed(1)} / {usage.max_size_mb} MB
         </span>
       </div>
-      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${color}`}
-          style={{ width: `${pct}%` }}
+      <div className="h-[5px] rounded-full bg-muted overflow-hidden">
+        <motion.div
+          className={`h-full rounded-full ${barColor}`}
+          style={barStyle}
+          initial={{ width: 0 }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.8, ease: "easeOut" }}
         />
       </div>
+      <p className="text-[10px] text-muted-foreground/50 mt-1 tabular-nums">
+        {usage.file_count} / {usage.max_files} 文件
+      </p>
     </div>
+  );
+}
+
+function MenuButton({ icon: Icon, label, onClick, destructive = false }: {
+  icon: typeof Settings;
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-2.5 w-full px-2.5 py-2 rounded-lg text-[13px] transition-colors cursor-pointer ${
+        destructive
+          ? "text-destructive hover:bg-destructive/8"
+          : "hover:bg-muted/70"
+      }`}
+    >
+      <Icon className={`h-4 w-4 flex-shrink-0 ${destructive ? "" : "text-muted-foreground"}`} />
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -253,14 +290,17 @@ function UserBadge({ compact = false }: { compact?: boolean }) {
   const recentAccounts = useRecentAccountsStore((s) => s.accounts);
   const removeAccount = useRecentAccountsStore((s) => s.removeAccount);
   const [wsUsage, setWsUsage] = useState<WorkspaceUsage | null>(null);
+  const isMobile = useIsMobile();
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     if (!authEnabled || !user) return;
     fetchMyWorkspaceUsage().then(setWsUsage).catch(() => {});
   }, [authEnabled, user]);
 
-  // compact mode without auth or user: plain settings gear
+  // compact mode without auth or user: on desktop, settings button is in footer; on mobile, show gear
   if (compact && (!authEnabled || !user)) {
+    if (!isMobile) return null;
     return (
       <button
         onClick={() => openSettings("model")}
@@ -287,32 +327,182 @@ function UserBadge({ compact = false }: { compact?: boolean }) {
 
   const displayLabel = user.displayName || user.email.split("@")[0];
   const otherAccounts = recentAccounts.filter((a) => a.email !== user.email);
+  const close = () => setOpen(false);
 
-  const handleSwitchTo = (account: RecentAccount) => {
-    logout();
-    router.push(`/login?email=${encodeURIComponent(account.email)}`);
-  };
+  const handleSwitchTo = (account: RecentAccount) => { close(); logout(); router.push(`/login?email=${encodeURIComponent(account.email)}`); };
+  const handleSwitchNew = () => { close(); logout(); router.push("/login"); };
+  const handleLogout = () => { close(); logout(); router.push("/login"); };
+  const handleNav = (path: string) => { close(); router.push(path); };
 
-  const handleSwitchNew = () => {
-    logout();
-    router.push("/login");
-  };
+  const gradientDivider = (
+    <div className="h-px mx-3" style={{ background: "linear-gradient(to right, transparent, var(--border), transparent)" }} />
+  );
 
-  const handleLogout = () => {
-    logout();
-    router.push("/login");
-  };
+  /* ── Shared menu content ── */
+  const menuContent = (
+    <>
+      {/* ── Profile Card ── */}
+      <div className="relative overflow-hidden">
+        <div
+          className="absolute inset-0"
+          style={{
+            background: `radial-gradient(ellipse at 20% -20%, var(--em-primary-alpha-15) 0%, transparent 70%),
+                          radial-gradient(ellipse at 90% 120%, var(--em-primary-alpha-10) 0%, transparent 50%)`,
+          }}
+        />
+        <div className="relative px-4 pt-4 pb-3.5 flex items-center gap-3">
+          <div className="relative flex-shrink-0">
+            <div
+              className="rounded-full p-[2px]"
+              style={{ background: "linear-gradient(135deg, var(--em-primary), var(--em-primary-light))" }}
+            >
+              <div className="rounded-full p-[1.5px]" style={{ backgroundColor: "var(--popover)" }}>
+                <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={9} />
+              </div>
+            </div>
+            <span
+              className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-[2px]"
+              style={{ backgroundColor: "#22c55e", borderColor: "var(--popover)" }}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-semibold truncate leading-snug">
+              {user.displayName || user.email.split("@")[0]}
+            </p>
+            <p className="text-[11px] text-muted-foreground truncate mt-0.5 leading-snug">{user.email}</p>
+          </div>
+        </div>
+      </div>
 
+      {gradientDivider}
+
+      {/* ── Recent Accounts ── */}
+      {otherAccounts.length > 0 && (
+        <div className="px-1.5 pt-1.5 pb-0.5">
+          <p className="px-2.5 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60 flex items-center gap-1.5">
+            <Clock className="h-2.5 w-2.5" />
+            最近账号
+          </p>
+          {otherAccounts.map((account) => (
+            <button
+              key={account.email}
+              onClick={() => handleSwitchTo(account)}
+              className="flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-lg hover:bg-muted/60 transition-colors group/acct cursor-pointer"
+            >
+              <Avatar src={account.avatarUrl} name={account.displayName || account.email} size={6} />
+              <div className="min-w-0 flex-1 text-left">
+                <p className="text-[13px] truncate">{account.displayName || account.email.split("@")[0]}</p>
+                <p className="text-[10px] text-muted-foreground truncate">{account.email}</p>
+              </div>
+              <span
+                onClick={(e: React.MouseEvent) => { e.stopPropagation(); removeAccount(account.email); }}
+                className="p-1 rounded-md hover:bg-muted text-muted-foreground/40 hover:text-muted-foreground opacity-0 group-hover/acct:opacity-100 transition-all flex-shrink-0 cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+              </span>
+            </button>
+          ))}
+          {gradientDivider}
+        </div>
+      )}
+
+      {/* ── Workspace Usage ── */}
+      <WorkspaceIndicator usage={wsUsage} />
+      {wsUsage && gradientDivider}
+
+      {/* ── Navigation ── */}
+      <div className="px-1.5 py-1">
+        {user.role === "admin" && (
+          <MenuButton icon={Users} label="用户管理" onClick={() => { close(); useUIStore.getState().openAdmin(); }} />
+        )}
+        <MenuButton icon={UserCircle} label="个人中心" onClick={() => { close(); useUIStore.getState().openProfile(); }} />
+        {isMobile && (
+          <MenuButton icon={Settings} label="设置" onClick={() => { close(); openSettings("model"); }} />
+        )}
+        <MenuButton icon={ArrowRightLeft} label={otherAccounts.length > 0 ? "使用其他账号" : "切换账号"} onClick={handleSwitchNew} />
+      </div>
+
+      {gradientDivider}
+
+      {/* ── Logout ── */}
+      <div className="px-1.5 py-1">
+        <MenuButton icon={LogOut} label="退出登录" onClick={handleLogout} destructive />
+      </div>
+    </>
+  );
+
+  /* ── Mobile: Bottom Sheet Drawer ── */
+  if (isMobile) {
+    const drawer = (
+      <AnimatePresence>
+        {open && (
+          <>
+            <motion.div
+              key="userbadge-backdrop"
+              className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-[2px]"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              onClick={close}
+            />
+            <motion.div
+              key="userbadge-sheet"
+              className="fixed bottom-0 left-0 right-0 z-[101] bg-popover text-popover-foreground rounded-t-2xl overflow-hidden"
+              style={{ boxShadow: "0 -8px 30px rgba(0,0,0,0.12)" }}
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", damping: 30, stiffness: 350 }}
+              drag="y"
+              dragConstraints={{ top: 0, bottom: 0 }}
+              dragElastic={{ top: 0, bottom: 0.6 }}
+              onDragEnd={(_, info) => {
+                if (info.offset.y > 80 || info.velocity.y > 400) close();
+              }}
+            >
+              {/* Drag handle */}
+              <div className="flex justify-center pt-3 pb-1 cursor-grab active:cursor-grabbing">
+                <div className="w-9 h-1 rounded-full bg-muted-foreground/20" />
+              </div>
+              {menuContent}
+              <div style={{ height: "max(12px, env(safe-area-inset-bottom, 12px))" }} />
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+    );
+
+    return (
+      <>
+        <button
+          onClick={() => setOpen(true)}
+          className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+        >
+          <Settings className="h-4 w-4" />
+        </button>
+        {typeof document !== "undefined" && createPortal(drawer, document.body)}
+      </>
+    );
+  }
+
+  /* ── Desktop: Enhanced Dropdown ── */
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         {compact ? (
           <button className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
             <Settings className="h-4 w-4" />
           </button>
         ) : (
-          <button className="flex items-center gap-2 w-full rounded-lg px-2 py-1.5 text-left hover:bg-muted/60 transition-colors outline-none group">
-            <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={7} />
+          <button className="flex items-center gap-2.5 w-full rounded-xl px-2 py-1.5 text-left hover:bg-muted/50 transition-all outline-none group">
+            <div className="relative flex-shrink-0">
+              <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={7} />
+              <span
+                className="absolute -bottom-px -right-px h-2 w-2 rounded-full border-[1.5px]"
+                style={{ backgroundColor: "#22c55e", borderColor: "var(--em-sidebar-bg)" }}
+              />
+            </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate leading-tight">{displayLabel}</p>
               <p className="text-[11px] text-muted-foreground truncate leading-tight">{user.email}</p>
@@ -321,103 +511,12 @@ function UserBadge({ compact = false }: { compact?: boolean }) {
           </button>
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="start" className="w-64 mb-1">
-        <DropdownMenuLabel className="font-normal">
-          <div className="flex items-center gap-2.5">
-            <Avatar src={user.avatarUrl} name={user.displayName || user.email} size={8} />
-            <div className="min-w-0">
-              <p className="text-sm font-medium truncate">{user.displayName || user.email.split("@")[0]}</p>
-              <p className="text-xs text-muted-foreground truncate">{user.email}</p>
-            </div>
-          </div>
-        </DropdownMenuLabel>
-
-        <DropdownMenuSeparator />
-
-        {otherAccounts.length > 0 && (
-          <>
-            <DropdownMenuLabel className="text-[11px] text-muted-foreground font-normal flex items-center gap-1.5 py-1">
-              <Clock className="h-3 w-3" />
-              最近使用的账号
-            </DropdownMenuLabel>
-            <DropdownMenuGroup>
-              {otherAccounts.map((account) => (
-                <DropdownMenuItem
-                  key={account.email}
-                  onClick={() => handleSwitchTo(account)}
-                  className="cursor-pointer py-2"
-                >
-                  <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                    <Avatar src={account.avatarUrl} name={account.displayName || account.email} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm truncate">{account.displayName || account.email.split("@")[0]}</p>
-                      <p className="text-[11px] text-muted-foreground truncate">{account.email}</p>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeAccount(account.email);
-                      }}
-                      className="p-0.5 rounded hover:bg-muted-foreground/20 text-muted-foreground opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity flex-shrink-0 touch-show"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
-          </>
-        )}
-
-        <WorkspaceIndicator usage={wsUsage} />
-        <DropdownMenuSeparator />
-
-        {user.role === "admin" && (
-          <>
-            <DropdownMenuItem
-              onClick={() => router.push("/admin")}
-              className="gap-2 cursor-pointer"
-            >
-              <Users className="h-4 w-4" />
-              用户管理
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
-        )}
-
-        <DropdownMenuItem onClick={handleSwitchNew} className="gap-2 cursor-pointer">
-          <ArrowRightLeft className="h-4 w-4" />
-          {otherAccounts.length > 0 ? "使用其他账号登录" : "切换账号"}
-        </DropdownMenuItem>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuItem
-          onClick={() => router.push("/profile")}
-          className="gap-2 cursor-pointer"
-        >
-          <UserCircle className="h-4 w-4" />
-          个人中心
-        </DropdownMenuItem>
-
-        <DropdownMenuItem
-          onClick={() => openSettings("model")}
-          className="gap-2 cursor-pointer"
-        >
-          <Settings className="h-4 w-4" />
-          设置
-        </DropdownMenuItem>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuItem
-          onClick={handleLogout}
-          className="gap-2 cursor-pointer text-destructive focus:text-destructive"
-        >
-          <LogOut className="h-4 w-4" />
-          退出登录
-        </DropdownMenuItem>
+      <DropdownMenuContent
+        side="top"
+        align="start"
+        className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[200px] max-w-[280px] p-0 rounded-xl shadow-xl border-border/50 overflow-hidden mb-1"
+      >
+        {menuContent}
       </DropdownMenuContent>
     </DropdownMenu>
   );

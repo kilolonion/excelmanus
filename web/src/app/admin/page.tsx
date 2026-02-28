@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
 import {
-  ArrowLeft,
   Users,
   Shield,
   ShieldCheck,
@@ -21,8 +19,10 @@ import {
   AlertCircle,
   CheckCircle,
   X,
-  Settings2,
   LogIn,
+  Save,
+  MessageSquare,
+  UserX,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -40,7 +40,12 @@ import {
   adminUpdateUser,
   adminClearWorkspace,
   adminEnforceQuota,
+  adminDeleteUser,
+  adminListUserSessions,
+  adminDeleteUserSessions,
+  adminDeleteUserSession,
   type AdminUser,
+  type AdminSession,
 } from "@/lib/auth-api";
 import { proxyAvatarUrl } from "@/lib/api";
 import LoginConfigTab from "@/components/admin/LoginConfigTab";
@@ -78,7 +83,7 @@ function AdminAvatar({ url, name }: { url?: string | null; name: string }) {
       <img
         src={proxied}
         alt=""
-        className="h-10 w-10 rounded-full"
+        className="h-10 w-10 rounded-full ring-2 ring-border/50 shadow-sm object-cover"
         referrerPolicy="no-referrer"
         onError={() => setFailed(true)}
       />
@@ -86,8 +91,8 @@ function AdminAvatar({ url, name }: { url?: string | null; name: string }) {
   }
   return (
     <span
-      className="h-10 w-10 rounded-full flex items-center justify-center text-sm font-medium text-white"
-      style={{ backgroundColor: "var(--em-primary)" }}
+      className="h-10 w-10 rounded-full flex items-center justify-center text-sm font-semibold text-white shadow-sm"
+      style={{ background: "linear-gradient(135deg, var(--em-primary), var(--em-primary-light))" }}
     >
       {name[0]?.toUpperCase() || "U"}
     </span>
@@ -169,6 +174,37 @@ interface Toast {
   message: string;
 }
 
+function QuotaInput({
+  label,
+  value,
+  onChange,
+  placeholder,
+  suffix,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  placeholder?: string;
+  suffix?: string;
+}) {
+  return (
+    <div>
+      <label className="block text-[11px] text-muted-foreground mb-0.5">{label}</label>
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min={0}
+          value={value || ""}
+          onChange={(e) => onChange(Number(e.target.value) || 0)}
+          placeholder={placeholder || "0 = 默认"}
+          className="w-full h-7 rounded-md border border-border bg-background px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/40 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+        />
+        {suffix && <span className="text-[11px] text-muted-foreground flex-shrink-0">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
 function UserRow({
   user,
   currentUserId,
@@ -186,10 +222,38 @@ function UserRow({
   const [editingModels, setEditingModels] = useState(false);
   const [modelDraft, setModelDraft] = useState<string[]>(user.allowed_models ?? []);
 
+  // Quota editing state
+  const [editingQuota, setEditingQuota] = useState(false);
+  const [quotaDraft, setQuotaDraft] = useState({
+    max_storage_mb: user.max_storage_mb ?? 0,
+    max_files: user.max_files ?? 0,
+    daily_token_limit: user.daily_token_limit ?? 0,
+    monthly_token_limit: user.monthly_token_limit ?? 0,
+  });
+
+  // Session management state
+  const [sessions, setSessions] = useState<AdminSession[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const [showSessions, setShowSessions] = useState(false);
+
   const handleAction = async (action: string, payload?: Record<string, unknown>) => {
     setLoading(action);
     try {
       await onAction(user.id, action, payload);
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const loadSessions = async () => {
+    setLoading("load_sessions");
+    try {
+      const data = await adminListUserSessions(user.id);
+      setSessions(data.sessions);
+      setSessionsLoaded(true);
+      setShowSessions(true);
+    } catch {
+      // handled by parent
     } finally {
       setLoading(null);
     }
@@ -200,8 +264,8 @@ function UserRow({
       layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`rounded-xl border transition-colors ${
-        !user.is_active ? "border-red-500/20 bg-red-500/5" : "border-border bg-card"
+      className={`group/card rounded-xl border transition-all duration-200 hover:shadow-lg hover:shadow-black/[0.04] dark:hover:shadow-black/20 ${
+        !user.is_active ? "border-red-500/20 bg-red-500/5" : "border-border bg-card hover:border-[var(--em-primary-alpha-20)]"
       }`}
     >
       <div className="p-4 flex items-start gap-3">
@@ -250,10 +314,10 @@ function UserRow({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="h-8 w-8 rounded-lg hover:bg-[var(--em-primary-alpha-10)] transition-all"
             onClick={() => setExpanded(!expanded)}
           >
-            {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
           </Button>
         </div>
       </div>
@@ -280,7 +344,7 @@ function UserRow({
             transition={{ duration: 0.2 }}
             className="overflow-hidden"
           >
-            <div className="px-4 pb-4 border-t border-border pt-3">
+            <div className="px-5 pb-5 border-t border-border/60 pt-4 bg-muted/20 dark:bg-muted/10">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Token usage */}
                 <div className="space-y-2">
@@ -335,8 +399,128 @@ function UserRow({
                 </div>
               </div>
 
+              {/* Quota & limits editing */}
+              <div className="mt-5 pt-4 border-t border-border/50">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    配额与限额
+                  </h4>
+                  {!editingQuota ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-[11px] gap-1"
+                      onClick={() => {
+                        setQuotaDraft({
+                          max_storage_mb: user.max_storage_mb ?? 0,
+                          max_files: user.max_files ?? 0,
+                          daily_token_limit: user.daily_token_limit ?? 0,
+                          monthly_token_limit: user.monthly_token_limit ?? 0,
+                        });
+                        setEditingQuota(true);
+                      }}
+                    >
+                      编辑
+                    </Button>
+                  ) : (
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-[11px] gap-1"
+                        onClick={() => setEditingQuota(false)}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-6 text-[11px] gap-1 text-white"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        disabled={loading !== null}
+                        onClick={async () => {
+                          await handleAction("update_quota", quotaDraft);
+                          setEditingQuota(false);
+                        }}
+                      >
+                        {loading === "update_quota" && (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        )}
+                        <Save className="h-3 w-3" />
+                        保存
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {!editingQuota ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div>
+                      <span className="text-muted-foreground">存储上限</span>
+                      <p className="font-medium">
+                        {(user.max_storage_mb ?? 0) > 0
+                          ? `${user.max_storage_mb} MB`
+                          : "默认"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">文件数上限</span>
+                      <p className="font-medium">
+                        {(user.max_files ?? 0) > 0
+                          ? `${user.max_files}`
+                          : "默认"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">日 Token 限额</span>
+                      <p className="font-medium">
+                        {user.daily_token_limit > 0
+                          ? user.daily_token_limit.toLocaleString()
+                          : "不限"}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">月 Token 限额</span>
+                      <p className="font-medium">
+                        {user.monthly_token_limit > 0
+                          ? user.monthly_token_limit.toLocaleString()
+                          : "不限"}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground">
+                      设为 0 表示使用全局默认值（存储/文件数）或不限制（Token）。
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <QuotaInput
+                        label="存储上限"
+                        value={quotaDraft.max_storage_mb}
+                        onChange={(v) => setQuotaDraft((d) => ({ ...d, max_storage_mb: v }))}
+                        suffix="MB"
+                      />
+                      <QuotaInput
+                        label="文件数上限"
+                        value={quotaDraft.max_files}
+                        onChange={(v) => setQuotaDraft((d) => ({ ...d, max_files: v }))}
+                        suffix="个"
+                      />
+                      <QuotaInput
+                        label="日 Token 限额"
+                        value={quotaDraft.daily_token_limit}
+                        onChange={(v) => setQuotaDraft((d) => ({ ...d, daily_token_limit: v }))}
+                      />
+                      <QuotaInput
+                        label="月 Token 限额"
+                        value={quotaDraft.monthly_token_limit}
+                        onChange={(v) => setQuotaDraft((d) => ({ ...d, monthly_token_limit: v }))}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Model permissions */}
-              <div className="mt-4 pt-3 border-t border-border">
+              <div className="mt-5 pt-4 border-t border-border/50">
                 <div className="flex items-center justify-between mb-2">
                   <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                     模型权限
@@ -425,8 +609,105 @@ function UserRow({
                 )}
               </div>
 
+              {/* Session management */}
+              <div className="mt-5 pt-4 border-t border-border/50">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    会话管理
+                  </h4>
+                  <div className="flex gap-1">
+                    {!showSessions ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-[11px] gap-1"
+                        disabled={loading !== null}
+                        onClick={loadSessions}
+                      >
+                        {loading === "load_sessions" ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <MessageSquare className="h-3 w-3" />
+                        )}
+                        查看会话
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-[11px] gap-1"
+                          onClick={() => setShowSessions(false)}
+                        >
+                          收起
+                        </Button>
+                        {sessions.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 text-[11px] gap-1 text-destructive"
+                            disabled={loading !== null}
+                            onClick={() => {
+                              if (window.confirm(`确定删除 ${user.display_name || user.email} 的所有 ${sessions.length} 个会话？`)) {
+                                handleAction("delete_all_sessions").then(() => {
+                                  setSessions([]);
+                                });
+                              }
+                            }}
+                          >
+                            {loading === "delete_all_sessions" ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3 w-3" />
+                            )}
+                            全部删除
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+                {showSessions && (
+                  sessions.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">暂无会话</p>
+                  ) : (
+                    <div className="space-y-1 max-h-40 overflow-y-auto">
+                      {sessions.map((s) => (
+                        <div
+                          key={s.id}
+                          className="flex items-center gap-2 text-xs py-1 px-2 rounded-md hover:bg-muted/50"
+                        >
+                          <MessageSquare className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                          <span className="truncate flex-1">{s.title || `会话 ${s.id.slice(0, 8)}`}</span>
+                          <span className="text-muted-foreground flex-shrink-0">
+                            {s.message_count} 条
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 text-muted-foreground hover:text-destructive flex-shrink-0"
+                            disabled={loading !== null}
+                            onClick={() => {
+                              handleAction("delete_session", { session_id: s.id }).then(() => {
+                                setSessions((prev) => prev.filter((x) => x.id !== s.id));
+                              });
+                            }}
+                          >
+                            {loading === "delete_session" ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <X className="h-3 w-3" />
+                            )}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                )}
+              </div>
+
               {/* Action buttons */}
-              <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-border">
+              <div className="flex flex-wrap gap-2 mt-5 pt-4 border-t border-border/50">
                 {!isSelf && (
                   <>
                     {user.is_active ? (
@@ -530,6 +811,27 @@ function UserRow({
                     清空工作空间
                   </Button>
                 )}
+
+                {!isSelf && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/10"
+                    disabled={loading !== null}
+                    onClick={() => {
+                      if (window.confirm(`确定彻底删除用户 ${user.display_name || user.email}？\n\n此操作将删除该用户的：\n- 所有工作空间文件\n- 所有会话记录\n- 用户账户\n\n此操作不可撤销！`)) {
+                        handleAction("delete_user");
+                      }
+                    }}
+                  >
+                    {loading === "delete_user" ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <UserX className="h-3 w-3" />
+                    )}
+                    删除用户
+                  </Button>
+                )}
               </div>
             </div>
           </motion.div>
@@ -540,7 +842,6 @@ function UserRow({
 }
 
 export default function AdminPage() {
-  const router = useRouter();
   const currentUser = useAuthStore((s) => s.user);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -573,10 +874,7 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    if (currentUser?.role !== "admin") {
-      router.replace("/");
-      return;
-    }
+    if (currentUser?.role !== "admin") return;
     loadUsers();
     // 获取权限编辑器可用的模型名
     import("@/lib/api").then(({ apiGet }) => {
@@ -584,7 +882,7 @@ export default function AdminPage() {
         .then((data) => setAllModelNames(data.models.map((m) => m.name)))
         .catch(() => {});
     });
-  }, [currentUser, router, loadUsers]);
+  }, [currentUser, loadUsers]);
 
   const handleAction = useCallback(
     async (userId: string, action: string, payload?: Record<string, unknown>) => {
@@ -617,6 +915,30 @@ export default function AdminPage() {
             await adminUpdateUser(userId, { allowed_models: payload?.allowed_models ?? [] });
             addToast("success", "模型权限已更新");
             break;
+          case "update_quota":
+            await adminUpdateUser(userId, payload ?? {});
+            addToast("success", "配额已更新");
+            break;
+          case "delete_user": {
+            const delResult = await adminDeleteUser(userId);
+            addToast(
+              "success",
+              `用户已删除（${delResult.deleted_files} 文件, ${delResult.deleted_sessions} 会话）`,
+            );
+            break;
+          }
+          case "delete_all_sessions": {
+            const sessResult = await adminDeleteUserSessions(userId);
+            addToast("success", `已删除 ${sessResult.deleted_sessions} 个会话`);
+            break;
+          }
+          case "delete_session": {
+            if (payload?.session_id) {
+              await adminDeleteUserSession(userId, payload.session_id as string);
+              addToast("success", "会话已删除");
+            }
+            break;
+          }
         }
         await loadUsers();
       } catch (err) {
@@ -674,28 +996,26 @@ export default function AdminPage() {
   if (currentUser?.role !== "admin") return null;
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
-      {/* Header */}
-      <div className="sticky top-0 z-30 backdrop-blur-xl bg-background/80 border-b border-border">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex items-center gap-3">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => router.push("/")}
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
+    <div className="h-full">
+      <div className="px-5 py-5 space-y-4">
+        {/* Tab navigation + refresh */}
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "users" | "login")}>
           <div className="flex items-center gap-2">
-            <Settings2 className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
-            <h1 className="text-lg font-semibold">管理中心</h1>
-          </div>
-          <div className="flex-1" />
+          <TabsList className="flex-1 sm:flex-none w-full sm:w-auto">
+            <TabsTrigger value="users" className="gap-1.5 text-xs">
+              <Users className="h-3.5 w-3.5" />
+              用户管理
+            </TabsTrigger>
+            <TabsTrigger value="login" className="gap-1.5 text-xs">
+              <LogIn className="h-3.5 w-3.5" />
+              登录设置
+            </TabsTrigger>
+          </TabsList>
           {activeTab === "users" && (
             <Button
               variant="outline"
               size="sm"
-              className="gap-1.5 text-xs"
+              className="gap-1.5 text-xs h-8"
               onClick={loadUsers}
               disabled={loading}
             >
@@ -707,62 +1027,61 @@ export default function AdminPage() {
               刷新
             </Button>
           )}
-        </div>
-      </div>
-
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* Tab navigation */}
-        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "users" | "login")}>
-          <TabsList className="w-full sm:w-auto">
-            <TabsTrigger value="users" className="gap-1.5 text-xs">
-              <Users className="h-3.5 w-3.5" />
-              用户管理
-            </TabsTrigger>
-            <TabsTrigger value="login" className="gap-1.5 text-xs">
-              <LogIn className="h-3.5 w-3.5" />
-              登录设置
-            </TabsTrigger>
-          </TabsList>
+          </div>
 
           <TabsContent value="login">
             <LoginConfigTab />
           </TabsContent>
 
-          <TabsContent value="users" className="space-y-6">
+          <TabsContent value="users" className="space-y-4 sm:space-y-6">
         {/* Stats cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="rounded-xl border border-border bg-card p-3">
-            <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
-              <Users className="h-3.5 w-3.5" />
-              总用户数
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
+          <div className="relative overflow-hidden rounded-xl border border-border bg-card px-2.5 py-2 sm:px-4 sm:py-3 transition-all duration-200 hover:shadow-md hover:border-[var(--em-primary-alpha-20)] group/stat">
+            <div className="hidden sm:block absolute -top-6 -right-6 h-20 w-20 rounded-full bg-[var(--em-primary-alpha-06)] group-hover/stat:scale-125 transition-transform duration-500" />
+            <div className="relative">
+              <div className="hidden sm:flex h-7 w-7 items-center justify-center rounded-md mb-2" style={{ backgroundColor: 'var(--em-primary-alpha-10)' }}>
+                <Users className="h-4 w-4" style={{ color: 'var(--em-primary)' }} />
+              </div>
+              <p className="text-lg sm:text-2xl font-bold tracking-tight">{users.length}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">总用户数</p>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                <span className="text-green-600 dark:text-green-400 font-medium">{activeCount}</span> 活跃
+                {" · "}
+                {users.length - activeCount} 禁用
+              </p>
             </div>
-            <p className="text-2xl font-bold">{users.length}</p>
-            <p className="text-[11px] text-muted-foreground">
-              {activeCount} 活跃 / {users.length - activeCount} 禁用
-            </p>
           </div>
-          <div className="rounded-xl border border-border bg-card p-3">
-            <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
-              <HardDrive className="h-3.5 w-3.5" />
-              总存储
+          <div className="relative overflow-hidden rounded-xl border border-border bg-card px-2.5 py-2 sm:px-4 sm:py-3 transition-all duration-200 hover:shadow-md hover:border-blue-500/20 group/stat">
+            <div className="hidden sm:block absolute -top-6 -right-6 h-20 w-20 rounded-full bg-blue-500/[0.06] group-hover/stat:scale-125 transition-transform duration-500" />
+            <div className="relative">
+              <div className="hidden sm:flex h-7 w-7 items-center justify-center rounded-md mb-2 bg-blue-500/10">
+                <HardDrive className="h-4 w-4 text-blue-500" />
+              </div>
+              <p className="text-lg sm:text-2xl font-bold tracking-tight">{formatBytes(totalStorage)}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">总存储</p>
             </div>
-            <p className="text-2xl font-bold">{formatBytes(totalStorage)}</p>
           </div>
-          <div className="rounded-xl border border-border bg-card p-3">
-            <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
-              <FileText className="h-3.5 w-3.5" />
-              总文件数
+          <div className="relative overflow-hidden rounded-xl border border-border bg-card px-2.5 py-2 sm:px-4 sm:py-3 transition-all duration-200 hover:shadow-md hover:border-amber-500/20 group/stat">
+            <div className="hidden sm:block absolute -top-6 -right-6 h-20 w-20 rounded-full bg-amber-500/[0.06] group-hover/stat:scale-125 transition-transform duration-500" />
+            <div className="relative">
+              <div className="hidden sm:flex h-7 w-7 items-center justify-center rounded-md mb-2 bg-amber-500/10">
+                <FileText className="h-4 w-4 text-amber-500" />
+              </div>
+              <p className="text-lg sm:text-2xl font-bold tracking-tight">{totalFiles}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">总文件数</p>
             </div>
-            <p className="text-2xl font-bold">{totalFiles}</p>
           </div>
-          <div className="rounded-xl border border-border bg-card p-3">
-            <div className="flex items-center gap-2 text-muted-foreground text-xs mb-1">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              管理员
+          <div className="relative overflow-hidden rounded-xl border border-border bg-card px-2.5 py-2 sm:px-4 sm:py-3 transition-all duration-200 hover:shadow-md hover:border-violet-500/20 group/stat">
+            <div className="hidden sm:block absolute -top-6 -right-6 h-20 w-20 rounded-full bg-violet-500/[0.06] group-hover/stat:scale-125 transition-transform duration-500" />
+            <div className="relative">
+              <div className="hidden sm:flex h-7 w-7 items-center justify-center rounded-md mb-2 bg-violet-500/10">
+                <ShieldCheck className="h-4 w-4 text-violet-500" />
+              </div>
+              <p className="text-lg sm:text-2xl font-bold tracking-tight">
+                {users.filter((u) => u.role === "admin").length}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">管理员</p>
             </div>
-            <p className="text-2xl font-bold">
-              {users.filter((u) => u.role === "admin").length}
-            </p>
           </div>
         </div>
 
@@ -774,7 +1093,7 @@ export default function AdminPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索用户邮箱或名称..."
-            className="w-full h-9 rounded-lg border border-border bg-background pl-9 pr-24 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/50"
+            className="w-full h-9 rounded-xl border border-border bg-card pl-9 pr-24 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent placeholder:text-muted-foreground/40 transition-all hover:border-[var(--em-primary-alpha-20)]"
           />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -834,7 +1153,7 @@ export default function AdminPage() {
             {search ? "未找到匹配的用户" : "暂无用户"}
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {sorted.map((user) => (
               <UserRow
                 key={user.id}
