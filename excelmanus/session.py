@@ -987,6 +987,18 @@ class SessionManager:
         results: list[dict] = []
         now = time.monotonic()
 
+        # 预取 SQLite 会话，用于内存会话标题优先级判断和历史合并
+        db_sessions_map: dict[str, dict] = {}
+        if self._chat_history is not None:
+            try:
+                for ds in self._chat_history.list_sessions(
+                    include_archived=include_archived,
+                    user_id=user_id,
+                ):
+                    db_sessions_map[ds["id"]] = ds
+            except Exception:
+                logger.warning("预取 SQLite 会话列表失败", exc_info=True)
+
         async with self._lock:
             for sid, entry in self._sessions.items():
                 if user_id is not None and entry.user_id != user_id:
@@ -994,14 +1006,23 @@ class SessionManager:
                 in_memory_ids.add(sid)
                 engine = entry.engine
                 msg_count = len(engine.raw_messages) if hasattr(engine, "raw_messages") else 0
-                title = ""
+                # 规则标题：从第一条用户消息截取
+                rule_title = ""
                 if msg_count > 0:
                     for msg in engine.raw_messages:
                         if isinstance(msg, dict) and msg.get("role") == "user":
                             content = msg.get("content", "")
                             if isinstance(content, str):
-                                title = content[:80]
+                                rule_title = content[:80]
                             break
+                # 优先使用 SQLite 中持久化的非 fallback 标题（LLM 或用户手动设置）
+                db_info = db_sessions_map.get(sid, {})
+                db_title = db_info.get("title", "")
+                fallback = f"会话 {sid[:8]}"
+                if db_title and db_title != fallback:
+                    title = db_title
+                else:
+                    title = rule_title or fallback
                 # 将 monotonic last_access 转换为 wall-clock ISO 时间戳
                 # monotonic 不可直接转 wall-clock，需用当前两者的差值推算
                 wall_updated = time.time() - (now - entry.last_access)
@@ -1010,7 +1031,7 @@ class SessionManager:
                 ).isoformat()
                 results.append({
                     "id": sid,
-                    "title": title or f"会话 {sid[:8]}",
+                    "title": title,
                     "message_count": msg_count,
                     "in_flight": entry.in_flight,
                     "status": "active",
@@ -1018,24 +1039,16 @@ class SessionManager:
                 })
 
         # 合并 SQLite 中的历史会话（排除已在内存中的）
-        if self._chat_history is not None:
-            try:
-                db_sessions = self._chat_history.list_sessions(
-                    include_archived=include_archived,
-                    user_id=user_id,
-                )
-                for ds in db_sessions:
-                    if ds["id"] not in in_memory_ids:
-                        results.append({
-                            "id": ds["id"],
-                            "title": ds.get("title") or f"会话 {ds['id'][:8]}",
-                            "message_count": ds.get("message_count", 0),
-                            "in_flight": False,
-                            "status": ds.get("status", "active"),
-                            "updated_at": ds.get("updated_at", ""),
-                        })
-            except Exception:
-                logger.warning("合并 SQLite 会话列表失败", exc_info=True)
+        for ds_id, ds in db_sessions_map.items():
+            if ds_id not in in_memory_ids:
+                results.append({
+                    "id": ds_id,
+                    "title": ds.get("title") or f"会话 {ds_id[:8]}",
+                    "message_count": ds.get("message_count", 0),
+                    "in_flight": False,
+                    "status": ds.get("status", "active"),
+                    "updated_at": ds.get("updated_at", ""),
+                })
 
         # F6: 全局按 updated_at 降序排序，保证前端收到的列表顺序一致
         results.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
