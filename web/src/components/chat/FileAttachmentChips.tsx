@@ -27,7 +27,7 @@ export function FileAttachmentChips({
   if (files.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-1 px-4 sm:px-14 pt-2.5 pb-0">
+    <div className="flex flex-col gap-1 px-4 sm:px-14 pt-1.5 pb-0">
       {/* 视觉能力不可用警告 */}
       {files.some((af) => isImageFile(af.file.name)) && !visionCapable && (
         <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-md px-2 py-1">
@@ -35,7 +35,7 @@ export function FileAttachmentChips({
           <span>当前模型不支持图片识别，图片将无法被分析</span>
         </div>
       )}
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-1">
         {files.map((af) =>
           isImageFile(af.file.name) ? (
             /* Image thumbnail chip */
@@ -51,7 +51,7 @@ export function FileAttachmentChips({
               <img
                 src={getPreviewUrl(af.file)}
                 alt={af.file.name}
-                className={`h-14 w-full object-cover ${af.status === "failed" ? "opacity-50" : ""}`}
+                className={`h-12 w-full object-cover ${af.status === "failed" ? "opacity-50" : ""}`}
               />
               {af.status === "uploading" && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/30">
