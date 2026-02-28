@@ -922,12 +922,81 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ── 全局异常处理 ──────────────────────────────────────────
 
 
+# 错误消息映射表：将内部错误类型/消息映射为友好用户消息
+_ERROR_MESSAGE_MAP: dict[str, str] = {
+    # 会话相关错误
+    "SessionNotFoundError": "会话已过期或不存在，请刷新页面重新开始。",
+    "SessionLimitExceededError": "系统繁忙，会话数量已达上限，请稍后再试。",
+    "SessionBusyError": "会话正在处理中，请稍等片刻再提交新请求。",
+    # 配置相关错误
+    "ConfigError": "配置错误，请检查设置后重试。",
+    # 工具执行错误
+    "ToolNotFoundError": "请求的工具不可用，请刷新页面后重试。",
+    "ToolExecutionError": "工具执行失败，请稍后重试。",
+    "ToolNotAllowedError": "当前操作不被允许，请尝试其他方式。",
+    # Skillpack 错误
+    "SkillpackNotFoundError": "技能包不存在，请刷新页面后重试。",
+    "SkillpackManagerError": "技能包加载失败，请稍后重试。",
+    # 安全相关错误
+    "SecurityViolationError": "安全检查未通过，请检查输入后重试。",
+    # 数据库错误
+    "database": "数据库操作失败，请稍后重试。",
+    "sqlite": "数据存储失败，请稍后重试。",
+    # 网络/API 错误
+    "timeout": "请求超时，请稍后重试。",
+    "TimeoutError": "请求超时，请稍后重试。",
+    "ConnectionError": "网络连接失败，请检查网络后重试。",
+    "ConnectionRefusedError": "服务暂不可用，请稍后重试。",
+    # 认证错误
+    "AuthenticationError": "认证失败，请重新登录。",
+    "UnauthorizedError": "登录已过期，请重新登录。",
+    "PermissionError": "权限不足，无法执行此操作。",
+    # 文件相关错误
+    "FileNotFoundError": "文件不存在，请检查路径后重试。",
+    "PermissionError": "没有文件访问权限，请检查权限设置。",
+    # 内存/资源错误
+    "MemoryError": "内存不足，请减少操作范围后重试。",
+    "out of memory": "内存不足，请减少操作范围后重试。",
+    # 默认内部错误（当无法映射时）
+    "internal_error": "服务内部错误，请联系管理员。",
+}
+
+
+def _get_friendly_error_message(
+    exc: Exception, friendly_enabled: bool
+) -> str:
+    """获取友好的错误消息。
+
+    如果 friendly_error_messages 功能开启，则尝试将内部错误映射为友好消息；
+    否则返回原始错误消息或通用内部错误消息。
+    """
+    if not friendly_enabled:
+        # 功能关闭时，返回原始错误消息
+        return str(exc)
+
+    # 尝试匹配错误类型名
+    exc_type_name = type(exc).__name__
+    if exc_type_name in _ERROR_MESSAGE_MAP:
+        return _ERROR_MESSAGE_MAP[exc_type_name]
+
+    # 尝试匹配错误消息中的关键词
+    exc_message = str(exc).lower()
+    for key, friendly_msg in _ERROR_MESSAGE_MAP.items():
+        if key in exc_message:
+            return friendly_msg
+
+    # 无法映射时返回通用友好消息
+    return "服务处理出现异常，请稍后重试。如问题持续，请联系管理员。"
+
+
 async def _handle_session_not_found(
     request: Request, exc: SessionNotFoundError
 ) -> JSONResponse:
     """会话不存在 → 404。"""
     error_id = str(uuid.uuid4())
-    body = ErrorResponse(error=str(exc), error_id=error_id)
+    friendly_enabled = _config.friendly_error_messages if _config else False
+    error_msg = _get_friendly_error_message(exc, friendly_enabled)
+    body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=404, content=body.model_dump())
 
 
@@ -936,7 +1005,9 @@ async def _handle_session_limit(
 ) -> JSONResponse:
     """会话数量超限 → 429。"""
     error_id = str(uuid.uuid4())
-    body = ErrorResponse(error=str(exc), error_id=error_id)
+    friendly_enabled = _config.friendly_error_messages if _config else False
+    error_msg = _get_friendly_error_message(exc, friendly_enabled)
+    body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=429, content=body.model_dump())
 
 
@@ -945,7 +1016,9 @@ async def _handle_session_busy(
 ) -> JSONResponse:
     """会话正在处理中 → 409。"""
     error_id = str(uuid.uuid4())
-    body = ErrorResponse(error=str(exc), error_id=error_id)
+    friendly_enabled = _config.friendly_error_messages if _config else False
+    error_msg = _get_friendly_error_message(exc, friendly_enabled)
+    body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=409, content=body.model_dump())
 
 
@@ -957,7 +1030,9 @@ async def _handle_unexpected(
     logger.error(
         "未预期异常 [error_id=%s]: %s", error_id, exc, exc_info=True
     )
-    body = ErrorResponse(error="服务内部错误，请联系管理员。", error_id=error_id)
+    friendly_enabled = _config.friendly_error_messages if _config else False
+    error_msg = _get_friendly_error_message(exc, friendly_enabled)
+    body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=500, content=body.model_dump())
 
 
@@ -1227,8 +1302,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             except Exception as exc:
                 error_id = str(uuid.uuid4())
                 logger.error("SSE /save 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True)
+                friendly_enabled = _config.friendly_error_messages if _config else False
+                error_msg = _get_friendly_error_message(exc, friendly_enabled)
                 yield _sse_format("error", {
-                    "error": "保存对话失败，请联系管理员。",
+                    "error": error_msg,
                     "error_id": error_id,
                 })
             else:
@@ -1415,8 +1492,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             logger.error(
                 "SSE 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True
             )
+            friendly_enabled = _config.friendly_error_messages if _config else False
+            error_msg = _get_friendly_error_message(exc, friendly_enabled)
             yield _sse_format("error", {
-                "error": "服务内部错误，请联系管理员。",
+                "error": error_msg,
                 "error_id": error_id,
             })
             # 确保 chat 任务被取消
@@ -1926,8 +2005,10 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             logger.error(
                 "SSE subscribe 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True
             )
+            friendly_enabled = _config.friendly_error_messages if _config else False
+            error_msg = _get_friendly_error_message(exc, friendly_enabled)
             yield _sse_format("error", {
-                "error": "服务内部错误，请联系管理员。",
+                "error": error_msg,
                 "error_id": error_id,
             })
         finally:
@@ -2333,6 +2414,12 @@ def _sse_event_to_sse(
         data = {
             "stage": sanitize_external_text(event.pipeline_stage, max_len=60),
             "message": sanitize_external_text(event.pipeline_message, max_len=200),
+            "phase_index": event.pipeline_phase_index,
+            "total_phases": event.pipeline_total_phases,
+            # 前端期望 spec_path 字段名
+            "spec_path": event.pipeline_spec_path,
+            "diff": event.pipeline_diff,
+            "checkpoint": event.pipeline_checkpoint,
         }
     elif event.event_type == EventType.MEMORY_EXTRACTED:
         data = {
@@ -2999,6 +3086,7 @@ async def get_image_file(request: Request) -> StreamingResponse:
     assert _config is not None, "服务未初始化"
 
     path = request.query_params.get("path", "")
+    session_id = request.query_params.get("session_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
@@ -3006,9 +3094,14 @@ async def get_image_file(request: Request) -> StreamingResponse:
     import mimetypes
 
     ws_root = _resolve_workspace_root(request)
-    file_path = _Path(path)
-    if not file_path.is_absolute():
-        file_path = _Path(ws_root) / file_path
+    _iso_uid = _get_isolation_user_id(request)
+    
+    # 使用与下载相同的路径解析逻辑
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
+    if resolved is None:
+        return _error_json_response(404, f"图片文件不存在: {path}")  # type: ignore[return-value]
+    
+    file_path = _Path(resolved)
 
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
     if not file_path.is_file() or file_path.suffix.lower() not in _IMAGE_EXTENSIONS:
@@ -3026,6 +3119,56 @@ async def get_image_file(request: Request) -> StreamingResponse:
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@_router.get("/api/v1/files/read")
+async def read_text_file(request: Request) -> JSONResponse:
+    """返回 workspace 内文本文件的内容（供代码/MD 预览）。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    session_id = request.query_params.get("session_id")
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    
+    # 使用与下载相同的路径解析逻辑
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
+    if resolved is None:
+        return _error_json_response(404, f"文本文件不存在: {path}")  # type: ignore[return-value]
+    
+    file_path = _Path(resolved)
+
+    # 支持的文本文件扩展名
+    _TEXT_EXTENSIONS = {
+        ".txt", ".md", ".markdown", ".json", ".js", ".jsx", ".ts", ".tsx",
+        ".py", ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
+        ".cs", ".php", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh",
+        ".sql", ".html", ".css", ".scss", ".less", ".xml", ".yaml", ".yml",
+        ".toml", ".ini", ".cfg", ".conf", ".log", ".env", ".gitignore",
+        ".dockerignore", ".graphql", ".gql", ".vue", ".svelte", ".ex",
+        ".exs", ".erl", ".hs", ".ml", ".fs", ".clj", ".lua", ".r", ".dart",
+        ".groovy", ".txt", ".csv", ".tsv",
+    }
+
+    if not file_path.is_file() or file_path.suffix.lower() not in _TEXT_EXTENSIONS:
+        return _error_json_response(404, f"文本文件不存在: {path}")  # type: ignore[return-value]
+
+    # 限制文件大小（最大 1MB）
+    if file_path.stat().st_size > 1024 * 1024:
+        return _error_json_response(400, "文件过大，无法预览")  # type: ignore[return-value]
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        return JSONResponse(content={"content": content})
+    except UnicodeDecodeError:
+        return _error_json_response(400, "文件编码不支持，请使用 UTF-8 编码")  # type: ignore[return-value]
+    except Exception as exc:
+        return _error_json_response(500, f"读取文件失败: {exc}")  # type: ignore[return-value]
 
 
 @_router.get("/api/v1/files/download")
@@ -5093,6 +5236,8 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "parallel_subagent_max": "EXCELMANUS_PARALLEL_SUBAGENT_MAX",
     "prompt_cache_key_enabled": "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
     "auth_enabled": "EXCELMANUS_AUTH_ENABLED",
+    # 友好错误消息
+    "friendly_error_messages": "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
 }
 
 
@@ -5138,6 +5283,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "subagent_timeout_seconds": _config.subagent_timeout_seconds,
         "parallel_subagent_max": _config.parallel_subagent_max,
         "prompt_cache_key_enabled": _config.prompt_cache_key_enabled,
+        "friendly_error_messages": _config.friendly_error_messages,
     })
 
 
@@ -5177,6 +5323,7 @@ class RuntimeConfigUpdate(BaseModel):
     parallel_subagent_max: int | None = Field(default=None, gt=0)
     prompt_cache_key_enabled: bool | None = None
     auth_enabled: bool | None = None
+    friendly_error_messages: bool | None = None
 
 
 @_router.put("/api/v1/config/runtime")

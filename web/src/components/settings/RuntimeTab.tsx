@@ -72,6 +72,7 @@ interface RuntimeConfig {
   subagent_timeout_seconds: number;
   parallel_subagent_max: number;
   prompt_cache_key_enabled: boolean;
+  friendly_error_messages: boolean;
 }
 
 interface SelectOption {
@@ -181,6 +182,13 @@ const BASIC_GROUPS: ItemGroup[] = [
           { value: "off", label: "关闭 (off)" },
           { value: "soft", label: "软提示 (soft)" },
         ],
+      },
+      {
+        key: "friendly_error_messages",
+        label: "友好错误消息",
+        desc: "将内部错误映射为更友好的用户可见消息",
+        icon: <AlertCircle className="h-4 w-4" />,
+        type: "bool",
       },
     ],
   },
