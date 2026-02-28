@@ -45,7 +45,7 @@ from excelmanus.auth.security import (
     verify_password,
 )
 from excelmanus.auth.store import UserStore
-from excelmanus.workspace import IsolatedWorkspace
+from excelmanus.workspace import IsolatedWorkspace, QuotaPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -833,7 +833,9 @@ async def admin_list_users(
     result = []
     for u in users:
         pub = UserPublic.from_record(u)
+        user_quota = QuotaPolicy.for_user(u)
         ws = IsolatedWorkspace.resolve(ws_root, user_id=u.id, auth_enabled=True)
+        ws._quota = user_quota
         usage = ws.get_usage()
         daily = store.get_daily_usage(u.id)
         monthly = store.get_monthly_usage(u.id)
@@ -844,6 +846,8 @@ async def admin_list_users(
             "monthly_token_limit": u.monthly_token_limit,
             "daily_tokens_used": daily,
             "monthly_tokens_used": monthly,
+            "max_storage_mb": getattr(u, "max_storage_mb", 0) or 0,
+            "max_files": getattr(u, "max_files", 0) or 0,
             "workspace": usage.to_dict(),
         })
 
@@ -862,7 +866,7 @@ async def admin_update_user(
     if target is None:
         raise HTTPException(404, "用户不存在")
 
-    allowed_fields = {"role", "is_active", "daily_token_limit", "monthly_token_limit", "display_name", "allowed_models"}
+    allowed_fields = {"role", "is_active", "daily_token_limit", "monthly_token_limit", "display_name", "allowed_models", "max_storage_mb", "max_files"}
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if not updates:
         raise HTTPException(400, "无有效更新字段")
@@ -929,10 +933,152 @@ async def admin_enforce_user_quota(
         raise HTTPException(404, "用户不存在")
 
     ws_root = _get_workspace_root(request)
+    user_quota = QuotaPolicy.for_user(target)
     ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    ws._quota = user_quota
     deleted = ws.enforce_quota()
     usage = ws.get_usage()
     return {"status": "ok", "deleted": deleted, "workspace": usage.to_dict()}
+
+
+@router.delete("/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """彻底删除用户：清空工作空间、删除所有会话、删除用户记录。"""
+    if user_id == _admin.id:
+        raise HTTPException(400, "不能删除自己的账户")
+
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    # 1) 清空工作空间
+    ws_root = _get_workspace_root(request)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    import shutil
+    ws_path = ws.root_dir
+    deleted_files = 0
+    if ws_path.is_dir():
+        for item in list(ws_path.rglob("*")):
+            if item.is_file():
+                deleted_files += 1
+        shutil.rmtree(ws_path, ignore_errors=True)
+
+    # 2) 删除所有会话（内存 + SQLite）
+    deleted_sessions = 0
+    session_mgr = getattr(request.app.state, "session_manager", None)
+    if session_mgr is not None:
+        try:
+            sessions = await session_mgr.list_sessions(include_archived=True, user_id=user_id)
+            for s in sessions:
+                try:
+                    await session_mgr.delete(s["id"], user_id=user_id)
+                    deleted_sessions += 1
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning("删除用户 %s 会话失败", user_id, exc_info=True)
+
+    # 3) 删除用户记录（含 token 用量）
+    store.delete_user(user_id)
+
+    logger.info(
+        "Admin deleted user %s: %d files, %d sessions removed",
+        user_id, deleted_files, deleted_sessions,
+    )
+    return {
+        "status": "ok",
+        "deleted_files": deleted_files,
+        "deleted_sessions": deleted_sessions,
+    }
+
+
+@router.get("/admin/users/{user_id}/sessions")
+async def admin_list_user_sessions(
+    user_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """列出用户的所有会话（仅元数据，不含消息内容）。"""
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    session_mgr = getattr(request.app.state, "session_manager", None)
+    if session_mgr is None:
+        return {"sessions": [], "total": 0}
+
+    sessions = await session_mgr.list_sessions(include_archived=True, user_id=user_id)
+    # 仅返回元数据：id, title, message_count, status, updated_at
+    safe_sessions = [
+        {
+            "id": s.get("id"),
+            "title": s.get("title", ""),
+            "message_count": s.get("message_count", 0),
+            "status": s.get("status", "active"),
+            "updated_at": s.get("updated_at", ""),
+        }
+        for s in sessions
+    ]
+    return {"sessions": safe_sessions, "total": len(safe_sessions)}
+
+
+@router.delete("/admin/users/{user_id}/sessions")
+async def admin_delete_user_sessions(
+    user_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """删除用户的所有会话。"""
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    session_mgr = getattr(request.app.state, "session_manager", None)
+    if session_mgr is None:
+        return {"status": "ok", "deleted_sessions": 0}
+
+    deleted = 0
+    sessions = await session_mgr.list_sessions(include_archived=True, user_id=user_id)
+    for s in sessions:
+        try:
+            await session_mgr.delete(s["id"], user_id=user_id)
+            deleted += 1
+        except Exception:
+            logger.warning("删除会话 %s 失败", s.get("id"), exc_info=True)
+
+    logger.info("Admin deleted %d sessions for user %s", deleted, user_id)
+    return {"status": "ok", "deleted_sessions": deleted}
+
+
+@router.delete("/admin/users/{user_id}/sessions/{session_id}")
+async def admin_delete_user_session(
+    user_id: str,
+    session_id: str,
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """删除用户的单个会话。"""
+    store = _get_store(request)
+    target = store.get_by_id(user_id)
+    if target is None:
+        raise HTTPException(404, "用户不存在")
+
+    session_mgr = getattr(request.app.state, "session_manager", None)
+    if session_mgr is None:
+        raise HTTPException(503, "会话管理器未初始化")
+
+    result = await session_mgr.delete(session_id, user_id=user_id)
+    if not result:
+        raise HTTPException(404, "会话不存在或不属于该用户")
+
+    return {"status": "ok"}
 
 
 # ── 管理员：登录配置 ────────────────────────────────
