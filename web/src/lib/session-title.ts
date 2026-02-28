@@ -19,7 +19,7 @@ export function deriveSessionTitleFromMessages(messages: Message[]): string {
   for (const message of messages) {
     if (message.role !== "user") continue;
     const content = message.content.trim();
-    if (content) return content.slice(0, 60);
+    if (content) return content.slice(0, 20);
   }
   return "";
 }
