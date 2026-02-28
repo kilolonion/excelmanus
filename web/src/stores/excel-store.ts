@@ -7,9 +7,12 @@ import {
   discardBackup,
   undoBackup,
   normalizeExcelPath,
+  fetchOperations,
+  undoOperation as apiUndoOperation,
   type BackupFile,
   type AppliedFile,
   type ExcelFileListItem,
+  type OperationRecord,
 } from "@/lib/api";
 
 /** Univer 兼容的单元格样式（轻量子集） */
@@ -163,6 +166,11 @@ interface ExcelState {
   /** 最近 apply 的文件列表（支持 undo） */
   undoableApplies: AppliedFile[];
 
+  // 操作历史时间线
+  operations: OperationRecord[];
+  operationsLoading: boolean;
+  operationsLoaded: boolean;
+
   // 操作
   openPanel: (filePath: string, sheet?: string) => void;
   closePanel: () => void;
@@ -203,6 +211,9 @@ interface ExcelState {
   toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
   refreshWorkspaceFiles: () => Promise<void>;
+  fetchOperationHistory: (sessionId: string) => Promise<void>;
+  undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
+  appendOperation: (op: OperationRecord) => void;
   clearSession: () => void;
 }
 
@@ -236,6 +247,9 @@ export const useExcelStore = create<ExcelState>()(
   backupInFlight: false,
   appliedPaths: new Set<string>(),
   undoableApplies: [],
+  operations: [],
+  operationsLoading: false,
+  operationsLoaded: false,
 
   openPanel: (filePath, sheet) =>
     set({
@@ -574,6 +588,47 @@ export const useExcelStore = create<ExcelState>()(
     }
   },
 
+  fetchOperationHistory: async (sessionId) => {
+    set({ operationsLoading: true });
+    try {
+      const data = await fetchOperations(sessionId, { limit: 100 });
+      set({
+        operations: data.operations,
+        operationsLoaded: true,
+        operationsLoading: false,
+      });
+    } catch {
+      set({ operationsLoading: false });
+    }
+  },
+
+  undoOperationById: async (sessionId, approvalId) => {
+    try {
+      const result = await apiUndoOperation(sessionId, approvalId);
+      if (result.status === "ok") {
+        set((state) => ({
+          operations: state.operations.map((op) =>
+            op.approval_id === approvalId
+              ? { ...op, undoable: false }
+              : op
+          ),
+          refreshCounter: state.refreshCounter + 1,
+        }));
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  },
+
+  appendOperation: (op) =>
+    set((state) => {
+      const exists = state.operations.some((o) => o.approval_id === op.approval_id);
+      if (exists) return state;
+      return { operations: [op, ...state.operations] };
+    }),
+
   clearSession: () =>
     set({
       diffs: [],
@@ -592,6 +647,9 @@ export const useExcelStore = create<ExcelState>()(
       backupInFlight: false,
       appliedPaths: new Set<string>(),
       undoableApplies: [],
+      operations: [],
+      operationsLoading: false,
+      operationsLoaded: false,
     }),
     }),
     {

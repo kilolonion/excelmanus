@@ -369,6 +369,60 @@ export async function fetchSessionExcelEvents(
   }
 }
 
+// ── Session Export / Import ──────────────────────────
+
+export type ExportFormat = "md" | "txt" | "emx";
+
+/**
+ * 导出会话为指定格式，触发浏览器下载。
+ */
+export async function exportSession(
+  sessionId: string,
+  format: ExportFormat = "md",
+): Promise<void> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`,
+  );
+  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `导出失败: ${res.status}`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
+  const filename = filenameMatch?.[1] || `session.${format}`;
+
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 100);
+}
+
+/**
+ * 从 EMX JSON 导入会话。
+ */
+export async function importSession(
+  emxData: unknown,
+): Promise<{ status: string; session_id: string; title: string; message_count: number }> {
+  const url = buildApiUrl("/sessions/import");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify(emxData),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `导入失败: ${res.status}`);
+  }
+  return res.json();
+}
+
 export interface ApprovalRecord {
   id: string;
   tool_name: string;
@@ -631,9 +685,16 @@ export interface WorkspaceStorage {
 
 export async function fetchWorkspaceStorage(): Promise<WorkspaceStorage | null> {
   const url = buildApiUrl("/files/workspace/storage");
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    const res = await fetch(url, {
+      headers: { ...getAuthHeaders() },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 // ── FileRegistry API ─────────────────────────────────────
@@ -1006,6 +1067,83 @@ export async function undoBackup(opts: {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || data.detail || `Undo error: ${res.status}`);
   }
+  return res.json();
+}
+
+// ── 操作历史时间线 API ────────────────────────────────────
+
+export interface OperationChange {
+  path: string;
+  change_type: "added" | "modified" | "deleted";
+  before_size: number | null;
+  after_size: number | null;
+  is_binary: boolean;
+}
+
+export interface OperationRecord {
+  approval_id: string;
+  tool_name: string;
+  arguments_summary: Record<string, string>;
+  session_turn: number | null;
+  created_at_utc: string;
+  applied_at_utc: string;
+  execution_status: "success" | "failed";
+  undoable: boolean;
+  result_preview: string;
+  changes: OperationChange[];
+}
+
+export interface OperationDetail extends OperationRecord {
+  arguments: Record<string, unknown>;
+  patch_content: string | null;
+  error_type: string | null;
+  error_message: string | null;
+}
+
+export interface OperationsListResponse {
+  operations: OperationRecord[];
+  total: number;
+  has_more: boolean;
+}
+
+export async function fetchOperations(
+  sessionId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<OperationsListResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const qs = params.toString() ? `?${params}` : "";
+  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/operations${qs}`);
+  const res = await fetch(url, { headers: getAuthHeaders() });
+  if (!res.ok) await handleAuthError(res);
+  return res.json();
+}
+
+export async function fetchOperationDetail(
+  sessionId: string,
+  approvalId: string,
+): Promise<OperationDetail> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}`,
+  );
+  const res = await fetch(url, { headers: getAuthHeaders() });
+  if (!res.ok) await handleAuthError(res);
+  return res.json();
+}
+
+export async function undoOperation(
+  sessionId: string,
+  approvalId: string,
+): Promise<{ status: string; message: string; approval_id: string }> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}/undo`,
+  );
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+  });
+  if (!res.ok) await handleAuthError(res);
   return res.json();
 }
 
