@@ -2752,6 +2752,29 @@ async def archive_session(session_id: str, request: Request) -> dict:
     }
 
 
+@_router.patch("/api/v1/sessions/{session_id}/title", responses={
+    404: _error_responses[404],
+    500: _error_responses[500],
+})
+async def update_session_title_api(session_id: str, request: Request) -> JSONResponse:
+    """用户手动更新会话标题。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    body = await request.json()
+    title = (body.get("title") or "").strip()
+    if not title:
+        return _error_json_response(400, "标题不能为空")
+    if len(title) > 100:
+        return _error_json_response(400, "标题长度不能超过 100 字符")
+    user_id = _get_isolation_user_id(request)
+    ok = await _session_manager.update_session_title(
+        session_id, title, user_id=user_id
+    )
+    if not ok:
+        return _error_json_response(404, "会话不存在")
+    return JSONResponse(content={"status": "ok", "title": title})
+
+
 # ── Approvals / Undo ─────────────────────────────────────
 
 
