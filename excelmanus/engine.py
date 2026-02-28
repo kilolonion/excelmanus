@@ -391,6 +391,8 @@ class AgentEngine:
         self._checkpoint_enabled: bool = config.checkpoint_enabled
         self._turn_dirty_files: set[str] = set()  # 当前轮次被写的文件路径
         self._bench_mode: bool = False
+        # PlanInterceptHandler 需要此属性（尽管 plan 模式已废弃，handler 仍可能被调用）
+        self._plan_intercept_task_create: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
         self._current_chat_mode: str = "write"
         self._window_perception = WindowPerceptionManager(
@@ -1612,8 +1614,13 @@ class AgentEngine:
         return self._interaction_handler.enqueue_subagent_approval_question(**kwargs)
 
     async def intercept_task_create_with_plan(self, **kwargs: Any) -> Any:
-        """拦截 task_create 生成计划（Protocol: ToolExecutionContext）。"""
-        return await self._intercept_task_create_with_plan(**kwargs)
+        """拦截 task_create 生成计划（Protocol: ToolExecutionContext）。
+
+        注意：plan 模式已废弃，此方法返回错误提示。
+        """
+        # Plan 模式已废弃，直接返回错误
+        error_msg = "Plan mode has been deprecated. Please use normal task creation."
+        return None, None, error_msg
 
     def enable_bench_sandbox(self) -> None:
         """启用 benchmark 沙盒模式：解除所有交互式阻塞。
@@ -1982,6 +1989,7 @@ class AgentEngine:
             raw_args=effective_raw_args if effective_slash_command else None,
             chat_mode=chat_mode,
             on_event=on_event,
+            images=normalized_images if normalized_images else None,
         )
 
         route_result, user_message = await self._adapt_guidance_only_slash_route(
@@ -4647,6 +4655,7 @@ class AgentEngine:
         write_hint: str | None = None,
         chat_mode: str = "write",
         on_event: EventCallback | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> SkillMatchResult:
         if self._skill_router is None:
             return SkillMatchResult(
@@ -4668,6 +4677,7 @@ class AgentEngine:
             write_hint=write_hint,
             chat_mode=chat_mode,
             on_event=on_event,
+            images=images,
         )
 
     @staticmethod
