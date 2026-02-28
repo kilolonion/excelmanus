@@ -472,6 +472,8 @@ class ExcelManusConfig:
     # Thinking（推理深度）配置
     thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh
     thinking_budget: int = 0  # 精确 token 预算（>0 时覆盖 effort 换算值）
+    # 友好错误消息：将内部错误映射为更友好的用户可见消息
+    friendly_error_messages: bool = True
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
