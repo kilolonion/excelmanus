@@ -233,6 +233,41 @@ class ContextBuilder:
 
         return "## 进展反思\n" + "\n".join(parts)
 
+    def _build_playbook_notice(self) -> str:
+        """检索并构建 Playbook 历史经验注入文本。
+
+        根据当前用户消息 + task_tags 语义检索最相关的 playbook bullets，
+        格式化为 system prompt 注入段落。无 playbook 或未启用时零开销。
+        """
+        e = self._engine
+        _store = getattr(e, "_playbook_store", None)
+        if _store is None:
+            return ""
+        _config = getattr(e, "_config", None)
+        if _config is None or not getattr(_config, "playbook_enabled", False):
+            return ""
+
+        try:
+            bullets = _store.list_all(limit=getattr(_config, "playbook_inject_top_k", 5))
+        except Exception:
+            return ""
+
+        if not bullets:
+            return ""
+
+        lines = ["## 历史经验参考（基于过往成功经验自动检索）"]
+        for b in bullets:
+            lines.append(f"- **[{b.category}]** {b.content}")
+        return "\n".join(lines)
+
+    def _build_verification_fix_notice(self) -> str:
+        """读取验证门控的待注入修复提示。正常情况零开销。"""
+        e = self._engine
+        gate = getattr(e, "_verification_gate", None)
+        if gate is None:
+            return ""
+        return gate.pending_fix_notice
+
     def _build_explorer_report_notice(self) -> str:
         """将已缓存的 explorer 结构化报告格式化为 system prompt 注入文本。
 
@@ -408,6 +443,11 @@ class ContextBuilder:
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
 
+        # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
+        playbook_notice = self._build_playbook_notice()
+        if playbook_notice:
+            base_prompt = base_prompt + "\n\n" + playbook_notice
+
         # ── 动态内容（放在最末尾，Provider cache 前缀到此为止） ──
 
         _hook_context_captured = ""
@@ -431,6 +471,11 @@ class ContextBuilder:
         meta_cognition = self._build_meta_cognition_notice()
         if meta_cognition:
             base_prompt = base_prompt + "\n\n" + meta_cognition
+
+        # 验证门控修复提示（验证失败时注入，正常情况零开销）
+        verification_fix_notice = self._build_verification_fix_notice()
+        if verification_fix_notice:
+            base_prompt = base_prompt + "\n\n" + verification_fix_notice
 
         # R6: 注入已缓存的 explorer 结构化报告摘要
         explorer_notice = self._build_explorer_report_notice()
@@ -463,6 +508,10 @@ class ContextBuilder:
             _snapshot_components["hook_context"] = _hook_context_captured
         if task_plan_notice:
             _snapshot_components["task_plan_notice"] = task_plan_notice
+        if playbook_notice:
+            _snapshot_components["playbook_notice"] = playbook_notice
+        if verification_fix_notice:
+            _snapshot_components["verification_fix_notice"] = verification_fix_notice
         if explorer_notice:
             _snapshot_components["explorer_report_notice"] = explorer_notice
         if window_perception_context:
@@ -643,17 +692,31 @@ class ContextBuilder:
         on_event: EventCallback | None,
         initial_result: ChatResult,
     ) -> ChatResult:
-        """计划审批后自动续跑：若任务清单仍有未完成子任务，自动注入续跑消息。"""
+        """计划审批后自动续跑：若任务清单仍有未完成子任务，自动注入续跑消息。
+
+        集成 Fix-Verify 循环：验证失败时尝试修复→重跑→重验，
+        而非直接阻断。修复次数用尽后才真正阻断。
+        """
         from excelmanus.engine import ChatResult
         e = self._engine
         result = initial_result
         for attempt in range(_MAX_PLAN_AUTO_CONTINUE):
             if not self._has_incomplete_tasks():
                 break
-            # 验证失败阻断：带验证条件的任务失败时停止续跑
+
+            # ── Fix-Verify 循环：验证失败时尝试修复 ──
             if self._has_verification_failed_blocking_task():
-                logger.info("自动续跑停止：检测到带验证条件的任务失败")
+                fix_result = await self._attempt_fix_verify(
+                    route_result, on_event, result,
+                )
+                if fix_result is not None:
+                    result = fix_result
+                    # 修复后重新检查：可能还有未完成任务需要继续
+                    continue
+                # 修复失败或次数用尽，阻断
+                logger.info("自动续跑停止：验证失败且修复次数已耗尽")
                 break
+
             # 遇到待确认/待回答/待审批时不续跑，交还用户控制
             if e.approval.has_pending():
                 break
@@ -685,6 +748,74 @@ class ContextBuilder:
                 total_tokens=result.total_tokens + resumed.total_tokens,
             )
         return result
+
+    async def _attempt_fix_verify(
+        self,
+        route_result: "SkillMatchResult",
+        on_event: EventCallback | None,
+        current_result: ChatResult,
+    ) -> ChatResult | None:
+        """尝试一次 Fix-Verify 修复循环。
+
+        Returns:
+            ChatResult — 修复成功后的累积结果
+            None — 无法修复（次数用尽或无修复目标）
+        """
+        from excelmanus.engine import ChatResult
+        e = self._engine
+        gate = getattr(e, "_verification_gate", None)
+        if gate is None:
+            return None
+
+        task_index, criteria = gate.get_failed_verification_task()
+        if task_index < 0 or criteria is None:
+            return None
+
+        if not gate.can_fix_verify(task_index):
+            logger.info("任务 #%d 修复次数已耗尽", task_index)
+            return None
+
+        # 构建修复消息并注入
+        fix_msg = gate.prepare_fix_message(task_index, criteria)
+        gate.record_fix_attempt(task_index)
+
+        logger.info(
+            "Fix-Verify: 任务 #%d 开始修复尝试 (%s)",
+            task_index, criteria.check_type,
+        )
+
+        # 将失败任务重置为 IN_PROGRESS（允许 agent 重试）
+        task_list = e._task_store.current
+        if task_list is not None and task_index < len(task_list.items):
+            task_list.items[task_index].force_retry()
+
+        e.memory.add_user_message(fix_msg)
+        e._set_window_perception_turn_hints(
+            user_message=fix_msg,
+            is_new_task=False,
+        )
+
+        resumed = await e._tool_calling_loop(route_result, on_event)
+        merged = ChatResult(
+            reply=f"{current_result.reply}\n\n{resumed.reply}",
+            tool_calls=list(current_result.tool_calls) + list(resumed.tool_calls),
+            iterations=current_result.iterations + resumed.iterations,
+            truncated=resumed.truncated,
+            prompt_tokens=current_result.prompt_tokens + resumed.prompt_tokens,
+            completion_tokens=current_result.completion_tokens + resumed.completion_tokens,
+            total_tokens=current_result.total_tokens + resumed.total_tokens,
+        )
+
+        # 检查修复后任务是否仍为 FAILED
+        if task_list is not None and task_index < len(task_list.items):
+            if task_list.items[task_index].status == TaskStatus.FAILED:
+                logger.info("Fix-Verify: 任务 #%d 修复后仍失败", task_index)
+                if not gate.can_fix_verify(task_index):
+                    return None  # 次数用尽
+                # 还有修复机会，返回累积结果让外层循环再试
+                return merged
+
+        return merged
 
     # 对原始文件本身执行破坏性操作的工具。
     # 这些工具绕过备份重定向 — 审批门禁已提供安全保障，
