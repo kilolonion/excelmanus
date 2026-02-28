@@ -152,6 +152,7 @@ class SkillRouter:
         write_hint: str | None = None,
         chat_mode: str = "write",
         on_event: EventCallback | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> SkillMatchResult:
         """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
         skillpacks = self._loader.get_skillpacks()
@@ -238,6 +239,22 @@ class SkillRouter:
         # ── 2. 非斜杠消息：chat_mode 直接映射 write_hint，词法推断 task_tags ──
         classified_hint = write_hint or self._MODE_TO_HINT.get(chat_mode, "may_write")
         lexical_tags = list(self._classify_task_tags_lexical(user_message))
+
+        # 如果用户上传了图片附件，自动添加 image_replica 标签
+        # 这确保了即使消息中没有明确说明"复刻"，只要上传了图片就会触发图片复刻策略
+        if images and len(images) > 0:
+            if "image_replica" not in lexical_tags:
+                lexical_tags.append("image_replica")
+                logger.debug("检测到图片附件，自动添加 image_replica 标签")
+
+        # 检查图片复刻任务是否需要询问用户模式选择
+        if "image_replica" in lexical_tags:
+            if not self._has_explicit_mode_intent(user_message):
+                # 用户没有明确模式意图，添加待确认标签
+                if "image_replica_mode_pending" not in lexical_tags:
+                    lexical_tags.append("image_replica_mode_pending")
+                    logger.debug("图片复刻任务：用户未明确模式，标记为待确认")
+
         if chat_mode == "plan":
             if self._is_plan_worthy(
                 user_message=user_message,
@@ -259,6 +276,35 @@ class SkillRouter:
             write_hint=classified_hint,
             task_tags=deduped_tags,
         )
+
+    @staticmethod
+    def _has_explicit_mode_intent(user_message: str) -> bool:
+        """检测用户消息是否已明确表达了快速或精细模式意图。
+
+        Returns:
+            True 如果用户消息中包含了明确的模式关键词
+        """
+        text = str(user_message or "").lower()
+
+        # 快速意图关键词
+        quick_keywords = [
+            "快速", "快速做", "快速生成", "赶时间", "先出个大致的",
+            "不需要精准样式", "样式不重要", "格式随意", "大概就行",
+            "随便做做", "先弄个差不多的", "不用太讲究", "快一点",
+            "quick", "fast", "quickly"
+        ]
+
+        # 精细意图关键词
+        quality_keywords = [
+            "精准还原", "像素级", "完全一致", "高质量", "精确复刻",
+            "一模一样", "尽量还原", "精细", "精细模式", "高质量模式",
+            "精准", "accurate", "precise", "quality", "high quality"
+        ]
+
+        for kw in quick_keywords + quality_keywords:
+            if kw.lower() in text:
+                return True
+        return False
 
     @staticmethod
     def _is_plan_worthy(
