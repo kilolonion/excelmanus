@@ -7,7 +7,7 @@ import { AuthProvider } from "@/components/providers/AuthProvider";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 
-const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback"];
+const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password"];
 const STANDALONE_PATHS = ["/admin"];
 const RETRY_INTERVAL_MS = 3000;
 
