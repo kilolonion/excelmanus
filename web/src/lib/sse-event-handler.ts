@@ -602,6 +602,13 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         undoable,
         hasChanges,
       });
+      // 实时刷新操作历史时间线
+      if (success && hasChanges) {
+        const sid = useSessionStore.getState().activeSessionId;
+        if (sid) {
+          useExcelStore.getState().fetchOperationHistory(sid);
+        }
+      }
       break;
     }
 

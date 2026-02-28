@@ -21,6 +21,9 @@
 - GET    /api/v1/files/excel/snapshot         返回 Excel 轻量 JSON 快照（聊天内嵌预览）
 - POST   /api/v1/files/excel/write            侧边面板编辑回写单元格
 - DELETE /api/v1/sessions/{session_id}        删除会话
+- GET    /api/v1/sessions/{sid}/operations     操作历史时间线列表
+- GET    /api/v1/sessions/{sid}/operations/{id} 操作详情（含 diff）
+- POST   /api/v1/sessions/{sid}/operations/{id}/undo 回滚指定操作
 - GET    /api/v1/health                       健康检查
 """
 
@@ -56,7 +59,7 @@ from typing import Annotated, Any, AsyncIterator, Literal
 import uvicorn
 from fastapi import APIRouter, FastAPI, Request, UploadFile, File as FastAPIFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
 
 import excelmanus
@@ -93,6 +96,11 @@ from excelmanus.skillpacks import (
 )
 from excelmanus.skillpacks.importer import SkillImportError
 from excelmanus.tools import ToolRegistry
+from excelmanus.api.sse import (
+    SessionStreamState as _SessionStreamState,
+    sse_event_to_sse as _sse_event_to_sse_impl,
+    sse_format as _sse_format,
+)
 
 logger = get_logger("api")
 
@@ -265,46 +273,6 @@ _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _config: ExcelManusConfig | None = None
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
-
-
-class _SessionStreamState:
-    """管理单个会话的 SSE 事件流状态，支持断连后缓冲与重连。
-
-    当客户端断开时（如页面刷新），事件被缓冲到 event_buffer；
-    新客户端通过 /chat/subscribe 重连时，先重放缓冲事件，再接收实时事件。
-    """
-
-    __slots__ = ("event_buffer", "subscriber_queue", "_buffer_limit")
-
-    def __init__(self, buffer_limit: int = 500) -> None:
-        self.event_buffer: list[ToolCallEvent] = []
-        self.subscriber_queue: asyncio.Queue[ToolCallEvent | None] | None = None
-        self._buffer_limit = buffer_limit
-
-    def deliver(self, event: ToolCallEvent) -> None:
-        """投递事件：有订阅者时入队，否则缓冲。"""
-        q = self.subscriber_queue
-        if q is not None:
-            q.put_nowait(event)
-        else:
-            if len(self.event_buffer) < self._buffer_limit:
-                self.event_buffer.append(event)
-
-    def attach(self) -> asyncio.Queue[ToolCallEvent | None]:
-        """创建新订阅者队列并附着。返回新队列。"""
-        q: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
-        self.subscriber_queue = q
-        return q
-
-    def detach(self) -> None:
-        """断开当前订阅者，后续事件进入缓冲。"""
-        self.subscriber_queue = None
-
-    def drain_buffer(self) -> list[ToolCallEvent]:
-        """取出并清空缓冲区。"""
-        buf = self.event_buffer
-        self.event_buffer = []
-        return buf
 
 
 _session_stream_states: dict[str, _SessionStreamState] = {}
@@ -1277,10 +1245,16 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
 
 @_router.post("/api/v1/chat/stream", responses=_error_responses)
 async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingResponse:
-    """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。"""
+    """SSE 流式对话接口：实时推送思考过程、工具调用、最终回复。
+
+    延迟初始化架构：SSE 连接立即建立并推送进度事件，
+    会话获取、配额检查、@引用解析等阻塞操作在流内部执行，
+    实现毫秒级首次视觉反馈。
+    """
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
 
+    # ── 仅保留纯内存操作在流外部（微秒级） ──
     from excelmanus.auth.dependencies import extract_user_id
     auth_user_id = extract_user_id(raw_request)
     isolation_user_id = _get_isolation_user_id(raw_request)
@@ -1289,174 +1263,22 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     if rate_limiter is not None and auth_user_id:
         rate_limiter.check_chat(auth_user_id)
 
-    session_id, engine = await _session_manager.acquire_for_chat(
-        request.session_id, user_id=isolation_user_id,
-    )
-
-    # ── 工作区配额前置检查：超限时阻止对话 ──────────────
-    _auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
-    if _auth_enabled:
-        _ws = _resolve_workspace(raw_request)
-        _usage = _ws.get_usage()
-        if _usage.over_files or _usage.over_size:
-            await _session_manager.release_for_chat(session_id)
-            _parts: list[str] = []
-            if _usage.over_files:
-                _parts.append(f"文件数 {_usage.file_count}/{_usage.max_files}")
-            if _usage.over_size:
-                _parts.append(f"存储 {_usage.size_mb} MB/{_usage.max_size_mb} MB")
-            _detail = "、".join(_parts)
-            _quota_msg = (
-                f"⚠️ **工作区已满**（{_detail}），无法继续对话。\n\n"
-                "请先清理工作区文件后再试：\n"
-                "- 在左侧文件列表中删除不需要的文件\n"
-                "- 或联系管理员调整配额"
-            )
-
-            async def _quota_error_stream() -> AsyncIterator[str]:
-                yield _sse_format("session_init", {"session_id": session_id})
-                yield _sse_format("error", {"error": _quota_msg, "error_code": "workspace_full"})
-                yield _sse_format("done", {})
-
-            return StreamingResponse(
-                _quota_error_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-    if _is_save_command(request.message):
-        async def _save_stream() -> AsyncIterator[str]:
-            yield _sse_format("session_init", {"session_id": session_id})
-            try:
-                reply_text = await _handle_save_command(
-                    _session_manager, session_id, engine, request.message
-                )
-                yield _sse_format("reply", {
-                    "content": guard_public_reply(reply_text),
-                    "skills_used": [],
-                    "tool_scope": [],
-                    "route_mode": "control_command",
-                    "iterations": 0,
-                    "truncated": False,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                })
-            except Exception as exc:
-                error_id = str(uuid.uuid4())
-                logger.error("SSE /save 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True)
-                friendly_enabled = _config.friendly_error_messages if _config else False
-                error_msg = _get_friendly_error_message(exc, friendly_enabled)
-                yield _sse_format("error", {
-                    "error": error_msg,
-                    "error_id": error_id,
-                })
-            else:
-                yield _sse_format("done", {})
-            finally:
-                # R1: 必须释放 in_flight 锁，否则会话永久不可用
-                await _session_manager.release_for_chat(session_id)
-
-        return StreamingResponse(
-            _save_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    # 用 _SessionStreamState 管理事件缓冲与订阅者队列，支持断连重连
-    stream_state = _SessionStreamState()
-    _session_stream_states[session_id] = stream_state
-    event_queue = stream_state.attach()
-
-    def _on_event(event: ToolCallEvent) -> None:
-        """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
-
-        F4: 在 TOOL_CALL_END 事件后增量持久化消息到 SQLite，
-        防止流式传输中途刷新或进程重启导致消息丢失。
-        """
-        stream_state.deliver(event)
-        _persist_excel_event(session_id, event)
-        if (
-            event.event_type == EventType.TOOL_CALL_END
-            and _session_manager is not None
-        ):
-            _session_manager.flush_messages_sync(session_id)
-
-    display_text, mention_contexts = await _resolve_mentions(
-        request.message, engine,
-    )
-
-    if request.images:
-        logger.info(
-            "chat_stream 收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
-            len(request.images),
-            [img.media_type for img in request.images],
-            [len(img.data) for img in request.images],
-        )
-
-    async def _run_chat() -> ChatResult:
-        """后台执行 engine.chat，完成后向队列发送结束信号。"""
-        try:
-            result = await engine.chat(
-                display_text,
-                on_event=_on_event,
-                mention_contexts=mention_contexts,
-                images=_serialize_images(request.images),
-                chat_mode=request.chat_mode,
-            )
-            return _normalize_chat_result(result)
-        except Exception:
-            raise
-        finally:
-            await _session_manager.release_for_chat(session_id)
-
     async def _event_generator() -> AsyncIterator[str]:
-        """SSE 事件生成器：从队列消费事件并格式化为 SSE 文本。"""
+        """SSE 事件生成器：所有阻塞操作在首个 yield 之后执行。
+
+        延迟初始化架构：SSE 连接立即建立并推送进度事件，
+        会话获取、配额检查、@引用解析等阻塞操作在流内部执行，
+        实现毫秒级首次视觉反馈。
+        """
         safe_mode = _is_external_safe_mode()
-        # 先推送 session_id
-        yield _sse_format("session_init", {"session_id": session_id})
-        # 立即推送初始进度，让前端在 chat 任务启动前就有视觉反馈
-        yield _sse_format("pipeline_progress", {
-            "stage": "initializing",
-            "message": "正在初始化会话...",
-        })
 
-        # 启动 chat 任务
-        chat_task = asyncio.create_task(_run_chat())
-        _active_chat_tasks[session_id] = chat_task
-
-        def _cleanup_active_chat_task(done_task: asyncio.Task[Any]) -> None:
-            """后台 chat 任务完成后清理活跃任务映射与流状态。"""
-            if _active_chat_tasks.get(session_id) is done_task:
-                _active_chat_tasks.pop(session_id, None)
-            # 任务完成后，清理 stream state（如果没有活跃订阅者）
-            ss = _session_stream_states.get(session_id)
-            if ss is not None and ss.subscriber_queue is None:
-                _session_stream_states.pop(session_id, None)
-            try:
-                done_task.result()
-            except asyncio.CancelledError:
-                # 用户手动停止或 abort 取消属于预期路径。
-                pass
-            except Exception:
-                logger.warning(
-                    "会话 %s 的后台聊天任务异常结束",
-                    session_id,
-                    exc_info=True,
-                )
-
-        chat_task.add_done_callback(_cleanup_active_chat_task)
-        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = asyncio.create_task(
-            event_queue.get()
-        )
+        # ── 所有可能在 finally 中引用的变量预初始化 ──
+        session_id: str | None = None
+        engine: AgentEngine | None = None
+        acquired = False
+        stream_state: _SessionStreamState | None = None
+        chat_task: asyncio.Task[Any] | None = None
+        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = None
 
         async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
             if task is None or task.done():
@@ -1468,6 +1290,164 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 pass
 
         try:
+            # ── 立即推送进度，让前端在任何阻塞操作前就有视觉反馈 ──
+            yield _sse_format("pipeline_progress", {
+                "stage": "initializing",
+                "message": "正在初始化...",
+            })
+
+            # ── 延迟初始化：会话获取（可能创建 Engine + MCP sync） ──
+            try:
+                session_id, engine = await _session_manager.acquire_for_chat(
+                    request.session_id, user_id=isolation_user_id,
+                )
+                acquired = True
+            except Exception as exc:
+                _sid = request.session_id or "unknown"
+                error_id = str(uuid.uuid4())
+                logger.error(
+                    "会话获取失败 [session=%s, error_id=%s]: %s",
+                    _sid, error_id, exc, exc_info=True,
+                )
+                friendly_enabled = _config.friendly_error_messages if _config else False
+                yield _sse_format("error", {
+                    "error": _get_friendly_error_message(exc, friendly_enabled),
+                    "error_id": error_id,
+                })
+                yield _sse_format("done", {})
+                return
+
+            assert session_id is not None and engine is not None
+            yield _sse_format("session_init", {"session_id": session_id})
+
+            # ── 工作区配额检查 ──
+            _auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
+            if _auth_enabled:
+                try:
+                    _ws = _resolve_workspace(raw_request)
+                    _usage = _ws.get_usage()
+                    if _usage.over_files or _usage.over_size:
+                        _parts: list[str] = []
+                        if _usage.over_files:
+                            _parts.append(f"文件数 {_usage.file_count}/{_usage.max_files}")
+                        if _usage.over_size:
+                            _parts.append(f"存储 {_usage.size_mb} MB/{_usage.max_size_mb} MB")
+                        _detail = "、".join(_parts)
+                        yield _sse_format("error", {
+                            "error": (
+                                f"⚠️ **工作区已满**（{_detail}），无法继续对话。\n\n"
+                                "请先清理工作区文件后再试：\n"
+                                "- 在左侧文件列表中删除不需要的文件\n"
+                                "- 或联系管理员调整配额"
+                            ),
+                            "error_code": "workspace_full",
+                        })
+                        yield _sse_format("done", {})
+                        return
+                except Exception:
+                    logger.debug("配额检查异常，跳过", exc_info=True)
+
+            # ── 保存命令快速路径 ──
+            if _is_save_command(request.message):
+                try:
+                    reply_text = await _handle_save_command(
+                        _session_manager, session_id, engine, request.message
+                    )
+                    yield _sse_format("reply", {
+                        "content": guard_public_reply(reply_text),
+                        "skills_used": [],
+                        "tool_scope": [],
+                        "route_mode": "control_command",
+                        "iterations": 0,
+                        "truncated": False,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    })
+                except Exception as exc:
+                    error_id = str(uuid.uuid4())
+                    logger.error("SSE /save 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True)
+                    friendly_enabled = _config.friendly_error_messages if _config else False
+                    yield _sse_format("error", {
+                        "error": _get_friendly_error_message(exc, friendly_enabled),
+                        "error_id": error_id,
+                    })
+                else:
+                    yield _sse_format("done", {})
+                return
+
+            # ── @引用解析 + 图片日志 ──
+            display_text, mention_contexts = await _resolve_mentions(
+                request.message, engine,
+            )
+
+            if request.images:
+                logger.info(
+                    "chat_stream 收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
+                    len(request.images),
+                    [img.media_type for img in request.images],
+                    [len(img.data) for img in request.images],
+                )
+
+            # ── 设置事件流管道 ──
+            stream_state = _SessionStreamState()
+            _session_stream_states[session_id] = stream_state
+            event_queue = stream_state.attach()
+
+            def _on_event(event: ToolCallEvent) -> None:
+                """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。"""
+                stream_state.deliver(event)
+                _persist_excel_event(session_id, event)
+                if (
+                    event.event_type == EventType.TOOL_CALL_END
+                    and _session_manager is not None
+                ):
+                    _session_manager.flush_messages_sync(session_id)
+
+            async def _run_chat_inner() -> ChatResult:
+                """后台执行 engine.chat，完成后释放会话锁。"""
+                try:
+                    result = await engine.chat(
+                        display_text,
+                        on_event=_on_event,
+                        mention_contexts=mention_contexts,
+                        images=_serialize_images(request.images),
+                        chat_mode=request.chat_mode,
+                    )
+                    return _normalize_chat_result(result)
+                except Exception:
+                    raise
+                finally:
+                    await _session_manager.release_for_chat(session_id)
+                    nonlocal acquired
+                    acquired = False
+
+            # ── 启动 chat 任务 ──
+            chat_task = asyncio.create_task(_run_chat_inner())
+            _active_chat_tasks[session_id] = chat_task
+
+            def _cleanup_active_chat_task(done_task: asyncio.Task[Any]) -> None:
+                """后台 chat 任务完成后清理活跃任务映射与流状态。"""
+                if _active_chat_tasks.get(session_id) is done_task:
+                    _active_chat_tasks.pop(session_id, None)
+                ss = _session_stream_states.get(session_id)
+                if ss is not None and ss.subscriber_queue is None:
+                    _session_stream_states.pop(session_id, None)
+                try:
+                    done_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.warning(
+                        "会话 %s 的后台聊天任务异常结束",
+                        session_id,
+                        exc_info=True,
+                    )
+
+            chat_task.add_done_callback(_cleanup_active_chat_task)
+            queue_get_task = asyncio.create_task(event_queue.get())
+
+            # ── 事件消费循环 ──
             while True:
                 assert queue_get_task is not None
                 done, _ = await asyncio.wait(
@@ -1544,9 +1524,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
         except (asyncio.CancelledError, GeneratorExit):
             # 客户端断开（如页面刷新）时允许 chat 在后台继续。
-            # 分离订阅者，后续事件进入缓冲，供 /chat/subscribe 重连时重放。
-            stream_state.detach()
-            logger.info("会话 %s 的流式连接已断开，后台任务继续执行", session_id)
+            if stream_state is not None:
+                stream_state.detach()
+            if session_id is not None:
+                logger.info("会话 %s 的流式连接已断开，后台任务继续执行", session_id)
         except Exception as exc:
             error_id = str(uuid.uuid4())
             logger.error(
@@ -1559,19 +1540,26 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 "error_id": error_id,
             })
             # 确保 chat 任务被取消
-            if not chat_task.done():
+            if chat_task is not None and not chat_task.done():
                 chat_task.cancel()
                 try:
                     await chat_task
                 except (asyncio.CancelledError, Exception):
                     pass
         finally:
-            stream_state.detach()
-            if chat_task.done():
+            if stream_state is not None:
+                stream_state.detach()
+            if chat_task is not None and chat_task.done():
                 if _active_chat_tasks.get(session_id) is chat_task:
                     _active_chat_tasks.pop(session_id, None)
                 _session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
+            # 安全网：确保 in_flight 锁被释放（正常路径已在 _run_chat_inner 中释放）
+            if acquired and session_id is not None:
+                try:
+                    await _session_manager.release_for_chat(session_id)
+                except Exception:
+                    logger.debug("安全网 release_for_chat 异常", exc_info=True)
 
     return StreamingResponse(
         _event_generator(),
@@ -1657,7 +1645,10 @@ async def backup_list(session_id: str, request: Request) -> JSONResponse:
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
-        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+        # 区分: session 属于其他用户 → 404（安全隔离）; session 不存在 → 200 空默认值（local-first）
+        if user_id and _session_manager.get_engine(session_id) is not None:
+            return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+        return JSONResponse(status_code=200, content={"files": [], "backup_enabled": False})
     tx = engine.transaction
     if tx is None:
         return JSONResponse(status_code=200, content={"files": [], "backup_enabled": False})
@@ -2238,11 +2229,6 @@ async def chat_approve(
     return JSONResponse(status_code=200, content={"status": "resolved"})
 
 
-def _sse_format(event_type: str, data: dict) -> str:
-    """将事件格式化为 SSE 文本行。"""
-    payload = json.dumps(data, ensure_ascii=False)
-    return f"event: {event_type}\ndata: {payload}\n\n"
-
 
 async def _generate_session_title_with_timeout(
     *,
@@ -2297,341 +2283,12 @@ def _sse_event_to_sse(
     *,
     safe_mode: bool,
 ) -> str | None:
-    """将 ToolCallEvent 转换为 SSE 文本。"""
-    if safe_mode and event.event_type in {
-        EventType.THINKING,
-        EventType.THINKING_DELTA,
-        EventType.TOOL_CALL_START,
-        EventType.TOOL_CALL_END,
-        EventType.ITERATION_START,
-        EventType.SUBAGENT_START,
-        EventType.SUBAGENT_ITERATION,
-        EventType.SUBAGENT_SUMMARY,
-        EventType.SUBAGENT_END,
-        EventType.SUBAGENT_TOOL_START,
-        EventType.SUBAGENT_TOOL_END,
-        EventType.PENDING_APPROVAL,  # 新增：safe_mode 下过滤审批事件
-        EventType.APPROVAL_RESOLVED,
-        EventType.RETRACT_THINKING,
-    }:
-        return None
-
-    event_map = {
-        EventType.THINKING: "thinking",
-        EventType.TOOL_CALL_START: "tool_call_start",
-        EventType.TOOL_CALL_END: "tool_call_end",
-        EventType.ITERATION_START: "iteration_start",
-        EventType.SUBAGENT_START: "subagent_start",
-        EventType.SUBAGENT_ITERATION: "subagent_iteration",
-        EventType.SUBAGENT_SUMMARY: "subagent_summary",
-        EventType.SUBAGENT_END: "subagent_end",
-        EventType.SUBAGENT_TOOL_START: "subagent_tool_start",
-        EventType.SUBAGENT_TOOL_END: "subagent_tool_end",
-        EventType.USER_QUESTION: "user_question",
-        EventType.THINKING_DELTA: "thinking_delta",
-        EventType.TEXT_DELTA: "text_delta",
-        EventType.TOOL_CALL_ARGS_DELTA: "tool_call_args_delta",
-        EventType.EXCEL_PREVIEW: "excel_preview",
-        EventType.EXCEL_DIFF: "excel_diff",
-        EventType.TEXT_DIFF: "text_diff",
-        EventType.TEXT_PREVIEW: "text_preview",
-        EventType.FILES_CHANGED: "files_changed",
-        EventType.PIPELINE_PROGRESS: "pipeline_progress",
-        EventType.MEMORY_EXTRACTED: "memory_extracted",
-        EventType.FILE_DOWNLOAD: "file_download",
-        EventType.VERIFICATION_REPORT: "verification_report",
-        EventType.RETRACT_THINKING: "retract_thinking",
-        EventType.STAGING_UPDATED: "staging_updated",
-    }
-    sse_type = event_map.get(event.event_type, event.event_type.value)
-
-    if event.event_type == EventType.THINKING:
-        data = {
-            "content": sanitize_external_text(event.thinking, max_len=2000),
-            "iteration": event.iteration,
-        }
-    elif event.event_type == EventType.TOOL_CALL_START:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "tool_name": event.tool_name,
-            "arguments": sanitize_external_data(
-                event.arguments if isinstance(event.arguments, dict) else {},
-                max_len=1000,
-            ),
-            "iteration": event.iteration,
-        }
-    elif event.event_type == EventType.TOOL_CALL_END:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "tool_name": event.tool_name,
-            "success": event.success,
-            "result": sanitize_external_text(
-                event.result[:500] if event.result else "",
-                max_len=500,
-            ),
-            "error": (
-                sanitize_external_text(event.error, max_len=300)
-                if event.error
-                else None
-            ),
-            "iteration": event.iteration,
-        }
-    elif event.event_type == EventType.ITERATION_START:
-        data = {"iteration": event.iteration}
-    elif event.event_type == EventType.SUBAGENT_START:
-        data = {
-            "name": sanitize_external_text(event.subagent_name, max_len=100),
-            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
-            "tools": event.subagent_tools,
-            "permission_mode": sanitize_external_text(
-                event.subagent_permission_mode,
-                max_len=40,
-            ),
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-        }
-    elif event.event_type == EventType.SUBAGENT_ITERATION:
-        data = {
-            "name": sanitize_external_text(event.subagent_name, max_len=100),
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-            "iteration": event.subagent_iterations,
-            "tool_calls": event.subagent_tool_calls,
-        }
-    elif event.event_type == EventType.SUBAGENT_SUMMARY:
-        data = {
-            "name": sanitize_external_text(event.subagent_name, max_len=100),
-            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
-            "summary": sanitize_external_text(event.subagent_summary, max_len=4000),
-            "tools": event.subagent_tools,
-            "permission_mode": sanitize_external_text(
-                event.subagent_permission_mode,
-                max_len=40,
-            ),
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-            "iterations": event.subagent_iterations,
-            "tool_calls": event.subagent_tool_calls,
-        }
-    elif event.event_type == EventType.SUBAGENT_END:
-        data = {
-            "name": sanitize_external_text(event.subagent_name, max_len=100),
-            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
-            "success": event.subagent_success,
-            "tools": event.subagent_tools,
-            "permission_mode": sanitize_external_text(
-                event.subagent_permission_mode,
-                max_len=40,
-            ),
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-            "iterations": event.subagent_iterations,
-            "tool_calls": event.subagent_tool_calls,
-        }
-    elif event.event_type == EventType.SUBAGENT_TOOL_START:
-        data = {
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-            "tool_name": event.tool_name,
-            "arguments": sanitize_external_data(
-                event.arguments if isinstance(event.arguments, dict) else {},
-                max_len=500,
-            ),
-            "tool_index": event.subagent_tool_index,
-        }
-    elif event.event_type == EventType.SUBAGENT_TOOL_END:
-        data = {
-            "conversation_id": sanitize_external_text(
-                event.subagent_conversation_id,
-                max_len=120,
-            ),
-            "tool_name": event.tool_name,
-            "success": event.success,
-            "result": sanitize_external_text(
-                event.result[:300] if event.result else "",
-                max_len=300,
-            ),
-            "error": (
-                sanitize_external_text(event.error, max_len=200)
-                if event.error
-                else None
-            ),
-            "tool_index": event.subagent_tool_index,
-        }
-    elif event.event_type == EventType.USER_QUESTION:
-        options: list[dict[str, str]] = []
-        for option in event.question_options:
-            if not isinstance(option, dict):
-                continue
-            options.append(
-                {
-                    "label": sanitize_external_text(
-                        str(option.get("label", "") or ""),
-                        max_len=80,
-                    ),
-                    "description": sanitize_external_text(
-                        str(option.get("description", "") or ""),
-                        max_len=500,
-                    ),
-                }
-            )
-        data = {
-            "id": sanitize_external_text(event.question_id or "", max_len=120),
-            "header": sanitize_external_text(event.question_header or "", max_len=80),
-            "text": sanitize_external_text(event.question_text or "", max_len=2000),
-            "options": options,
-            "multi_select": bool(event.question_multi_select),
-            "queue_size": int(event.question_queue_size or 0),
-        }
-    elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
-        data = {
-            "task_list": event.task_list_data,
-            "task_index": event.task_index,
-            "task_status": event.task_status,
-        }
-        sse_type = "task_update"
-    elif event.event_type == EventType.THINKING_DELTA:
-        data = {
-            "content": event.thinking_delta,
-            "iteration": event.iteration,
-        }
-    elif event.event_type == EventType.TEXT_DELTA:
-        data = {
-            "content": event.text_delta,
-            "iteration": event.iteration,
-        }
-    elif event.event_type == EventType.TOOL_CALL_ARGS_DELTA:
-        data = {
-            "tool_call_id": event.tool_call_id,
-            "tool_name": event.tool_name,
-            "args_delta": event.args_delta,
-        }
-    elif event.event_type == EventType.PENDING_APPROVAL:
-        data = {
-            "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
-            "approval_tool_name": sanitize_external_text(event.approval_tool_name or "", max_len=100),
-            "tool_call_id": sanitize_external_text(event.tool_call_id or "", max_len=160),
-            "risk_level": sanitize_external_text(event.approval_risk_level or "high", max_len=20),
-            "args_summary": sanitize_external_data(
-                event.approval_args_summary if isinstance(event.approval_args_summary, dict) else {},
-                max_len=1000,
-            ),
-        }
-    elif event.event_type == EventType.APPROVAL_RESOLVED:
-        data = {
-            "approval_id": sanitize_external_text(event.approval_id or "", max_len=120),
-            "approval_tool_name": sanitize_external_text(event.approval_tool_name or "", max_len=100),
-            "tool_call_id": sanitize_external_text(event.tool_call_id or "", max_len=160),
-            "result": sanitize_external_text(event.result or "", max_len=2000),
-            "success": event.success,
-            "undoable": event.approval_undoable,
-            "has_changes": event.approval_has_changes,
-        }
-        sse_type = "approval_resolved"
-    elif event.event_type == EventType.EXCEL_PREVIEW:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": _public_excel_path(event.excel_file_path, safe_mode=safe_mode),
-            "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
-            "columns": event.excel_columns[:100],
-            "rows": event.excel_rows[:50],
-            "total_rows": event.excel_total_rows,
-            "truncated": event.excel_truncated,
-            "cell_styles": event.excel_cell_styles[:51] if event.excel_cell_styles else [],
-            "merge_ranges": event.excel_merge_ranges[:200] if event.excel_merge_ranges else [],
-            "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
-        }
-    elif event.event_type == EventType.EXCEL_DIFF:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": _public_excel_path(event.excel_file_path, safe_mode=safe_mode),
-            "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
-            "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
-            "changes": event.excel_changes[:200],
-            "merge_ranges": event.excel_merge_ranges[:200] if event.excel_merge_ranges else [],
-            "old_merge_ranges": event.excel_old_merge_ranges[:200] if event.excel_old_merge_ranges else [],
-            "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
-        }
-    elif event.event_type == EventType.TEXT_DIFF:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": sanitize_external_text(event.text_diff_file_path, max_len=500),
-            "hunks": event.text_diff_hunks[:300],
-            "additions": event.text_diff_additions,
-            "deletions": event.text_diff_deletions,
-            "truncated": event.text_diff_truncated,
-        }
-    elif event.event_type == EventType.TEXT_PREVIEW:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": sanitize_external_text(event.text_preview_file_path, max_len=500),
-            "content": event.text_preview_content[:20000],
-            "line_count": event.text_preview_line_count,
-            "truncated": event.text_preview_truncated,
-        }
-    elif event.event_type == EventType.FILES_CHANGED:
-        data = {
-            "files": [
-                _public_excel_path(f, safe_mode=safe_mode)
-                for f in (event.changed_files or [])[:50]
-            ],
-        }
-    elif event.event_type == EventType.PIPELINE_PROGRESS:
-        data = {
-            "stage": sanitize_external_text(event.pipeline_stage, max_len=60),
-            "message": sanitize_external_text(event.pipeline_message, max_len=200),
-            "phase_index": event.pipeline_phase_index,
-            "total_phases": event.pipeline_total_phases,
-            # 前端期望 spec_path 字段名
-            "spec_path": event.pipeline_spec_path,
-            "diff": event.pipeline_diff,
-            "checkpoint": event.pipeline_checkpoint,
-        }
-        if event.tool_call_id:
-            data["tool_call_id"] = sanitize_external_text(event.tool_call_id, max_len=160)
-    elif event.event_type == EventType.MEMORY_EXTRACTED:
-        data = {
-            "entries": (event.memory_entries or [])[:50],
-            "trigger": event.memory_trigger or "session_end",
-            "count": len(event.memory_entries or []),
-        }
-    elif event.event_type == EventType.FILE_DOWNLOAD:
-        data = {
-            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": _public_excel_path(event.download_file_path, safe_mode=safe_mode),
-            "filename": sanitize_external_text(event.download_filename, max_len=260),
-            "description": sanitize_external_text(event.download_description, max_len=500),
-        }
-    elif event.event_type == EventType.VERIFICATION_REPORT:
-        data = {
-            "verdict": event.verification_verdict,
-            "confidence": event.verification_confidence,
-            "checks": event.verification_checks[:10],
-            "issues": event.verification_issues[:10],
-            "mode": event.verification_mode,
-        }
-    elif event.event_type == EventType.RETRACT_THINKING:
-        data = {"iteration": event.iteration}
-    elif event.event_type == EventType.STAGING_UPDATED:
-        data = {
-            "action": event.staging_action,
-            "files": event.staging_files[:50],
-            "pending_count": event.staging_pending_count,
-        }
-    else:
-        data = event.to_dict()
-
-    return _sse_format(sse_type, data)
+    """将 ToolCallEvent 转换为 SSE 文本（委托到 api/sse.py）。"""
+    return _sse_event_to_sse_impl(
+        event,
+        safe_mode=safe_mode,
+        public_path_fn=lambda path, sm: _public_excel_path(path, safe_mode=sm),
+    )
 
 
 @_router.get(
@@ -2958,6 +2615,193 @@ async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
 
     if engine is None:
         return _error_json_response(404, "没有活跃会话。")
+
+    result_msg = engine._approval.undo(approval_id)
+    success = "已回滚" in result_msg
+    return JSONResponse(content={
+        "status": "ok" if success else "error",
+        "message": result_msg,
+        "approval_id": approval_id,
+    })
+
+
+# ── 操作历史时间线 API ────────────────────────────────────
+
+
+def _change_type(before_exists: bool, after_exists: bool) -> str:
+    """从 before/after 存在状态推导变更类型。"""
+    if not before_exists and after_exists:
+        return "added"
+    if before_exists and not after_exists:
+        return "deleted"
+    return "modified"
+
+
+@_router.get("/api/v1/sessions/{session_id}/operations")
+async def list_operations(
+    session_id: str,
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+) -> JSONResponse:
+    """列出指定会话的写入操作历史（时间线）。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    if not await _has_session_access(session_id, request):
+        return _error_json_response(404, f"会话 '{session_id}' 不存在。")
+    user_id = _get_isolation_user_id(request)
+    engine = _session_manager.get_engine(session_id, user_id=user_id)
+
+    if engine is None:
+        return JSONResponse(content={"operations": [], "total": 0, "has_more": False})
+
+    from excelmanus.tools.policy import sanitize_approval_args_summary
+
+    # 获取比请求多 1 条以判断 has_more
+    records = engine._approval.list_applied(
+        limit=offset + limit + 1,
+        session_id=session_id,
+    )
+    total = len(records)
+    has_more = total > offset + limit
+    page = records[offset : offset + limit]
+
+    items = []
+    safe_mode = _is_external_safe_mode()
+    for rec in page:
+        changes = []
+        for c in rec.changes or []:
+            changes.append({
+                "path": c.path,
+                "change_type": _change_type(c.before_exists, c.after_exists),
+                "before_size": c.before_size,
+                "after_size": c.after_size,
+                "is_binary": c.is_binary,
+            })
+        item: dict[str, Any] = {
+            "approval_id": rec.approval_id,
+            "tool_name": rec.tool_name,
+            "arguments_summary": (
+                sanitize_approval_args_summary(rec.arguments)
+                if not safe_mode else {}
+            ),
+            "session_turn": rec.session_turn,
+            "created_at_utc": rec.created_at_utc,
+            "applied_at_utc": rec.applied_at_utc,
+            "execution_status": rec.execution_status,
+            "undoable": rec.undoable,
+            "changes": changes,
+            "result_preview": sanitize_external_text(
+                rec.result_preview or "", max_len=300,
+            ),
+        }
+        items.append(item)
+
+    return JSONResponse(content={
+        "operations": items,
+        "total": total,
+        "has_more": has_more,
+    })
+
+
+@_router.get("/api/v1/sessions/{session_id}/operations/{approval_id}")
+async def get_operation_detail(
+    session_id: str,
+    approval_id: str,
+    request: Request,
+) -> JSONResponse:
+    """获取单条操作的详情（含 diff 内容）。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    if not await _has_session_access(session_id, request):
+        return _error_json_response(404, f"会话 '{session_id}' 不存在。")
+    user_id = _get_isolation_user_id(request)
+    engine = _session_manager.get_engine(session_id, user_id=user_id)
+
+    if engine is None:
+        return _error_json_response(404, "没有活跃会话。")
+
+    rec = engine._approval.get_applied(approval_id)
+    if rec is None:
+        return _error_json_response(404, f"操作 '{approval_id}' 不存在。")
+    if rec.session_id and rec.session_id != session_id:
+        return _error_json_response(404, f"操作 '{approval_id}' 不属于此会话。")
+
+    from excelmanus.tools.policy import sanitize_approval_args_summary
+
+    safe_mode = _is_external_safe_mode()
+
+    changes = []
+    for c in rec.changes or []:
+        changes.append({
+            "path": c.path,
+            "change_type": _change_type(c.before_exists, c.after_exists),
+            "before_size": c.before_size,
+            "after_size": c.after_size,
+            "is_binary": c.is_binary,
+        })
+
+    # 读取 patch 文件内容（如果存在）
+    patch_content: str | None = None
+    if rec.patch_file and not safe_mode:
+        patch_path = Path(engine._config.workspace_root) / rec.patch_file
+        if patch_path.is_file():
+            try:
+                patch_content = patch_path.read_text(encoding="utf-8")[:50000]
+            except OSError:
+                pass
+
+    result: dict[str, Any] = {
+        "approval_id": rec.approval_id,
+        "tool_name": rec.tool_name,
+        "arguments_summary": (
+            sanitize_approval_args_summary(rec.arguments)
+            if not safe_mode else {}
+        ),
+        "arguments": (
+            sanitize_external_data(rec.arguments) if not safe_mode else {}
+        ),
+        "session_turn": rec.session_turn,
+        "created_at_utc": rec.created_at_utc,
+        "applied_at_utc": rec.applied_at_utc,
+        "execution_status": rec.execution_status,
+        "undoable": rec.undoable,
+        "changes": changes,
+        "result_preview": sanitize_external_text(
+            rec.result_preview or "", max_len=1000,
+        ),
+        "patch_content": patch_content,
+        "error_type": rec.error_type,
+        "error_message": rec.error_message,
+    }
+    return JSONResponse(content=result)
+
+
+@_router.post("/api/v1/sessions/{session_id}/operations/{approval_id}/undo")
+async def undo_operation(
+    session_id: str,
+    approval_id: str,
+    request: Request,
+) -> JSONResponse:
+    """回滚指定操作。"""
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    if not await _has_session_access(session_id, request):
+        return _error_json_response(404, f"会话 '{session_id}' 不存在。")
+    user_id = _get_isolation_user_id(request)
+    engine = await _session_manager.get_or_restore_engine(
+        session_id, user_id=user_id,
+    )
+
+    if engine is None:
+        return _error_json_response(404, "没有活跃会话。")
+
+    # 验证操作属于此会话
+    rec = engine._approval.get_applied(approval_id)
+    if rec is None:
+        return _error_json_response(404, f"操作 '{approval_id}' 不存在。")
+    if rec.session_id and rec.session_id != session_id:
+        return _error_json_response(404, f"操作 '{approval_id}' 不属于此会话。")
 
     result_msg = engine._approval.undo(approval_id)
     success = "已回滚" in result_msg
@@ -3734,7 +3578,6 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
         return _error_json_response(500, f"写入失败: {exc}")
 
 
-_ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
 
 
 def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
@@ -3769,9 +3612,6 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         return _error_json_response(400, f"缺少 file 字段 (got {type(file).__name__})")
 
     filename = file.filename or "unnamed"
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
-        return _error_json_response(400, f"不支持的文件格式: {ext}")
 
     from excelmanus.auth.dependencies import extract_user_id
     user_id = extract_user_id(raw_request)
@@ -3862,10 +3702,6 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     raw_filename = url_path.split("/")[-1] if "/" in url_path else ""
     if not raw_filename or "." not in raw_filename:
         return _error_json_response(400, "无法从 URL 推断文件名（需带扩展名，如 .xlsx/.csv/.png）")
-
-    ext = os.path.splitext(raw_filename)[1].lower()
-    if ext not in _ALLOWED_UPLOAD_EXTENSIONS:
-        return _error_json_response(400, f"不支持的文件格式: {ext}")
 
     # 下载文件（限制大小）
     max_download = _UPLOAD_MAX_PART_SIZE  # 复用上传限制
@@ -4155,6 +3991,150 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
     })
 
 
+@_router.get("/api/v1/sessions/{session_id}/export")
+async def export_session(session_id: str, request: Request) -> Response:
+    """导出会话为 Markdown / 纯文本 / EMX 格式。
+
+    Query params:
+        format: md | txt | emx (默认 md)
+    """
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    user_id = _get_isolation_user_id(request)
+    fmt = (request.query_params.get("format") or "md").lower().strip()
+    if fmt not in ("md", "txt", "emx"):
+        return JSONResponse(status_code=400, content={"detail": f"不支持的格式: {fmt}，可选: md, txt, emx"})
+
+    from excelmanus.session_export import export_markdown, export_text, export_emx
+
+    # 获取消息
+    messages = await _session_manager.get_session_messages(
+        session_id, limit=100000, offset=0, user_id=user_id,
+    )
+    if not messages:
+        return _error_json_response(404, f"会话 '{session_id}' 不存在或无消息")
+
+    # 获取元数据
+    ch = _session_manager.chat_history
+    session_meta: dict[str, Any] = {"id": session_id, "title": "未命名会话", "created_at": "", "updated_at": ""}
+    if ch is not None:
+        meta = ch.get_session_meta(session_id)
+        if meta:
+            session_meta.update(meta)
+
+    # Excel 事件数据（md 和 emx 需要）
+    excel_diffs: list[dict] = []
+    excel_previews: list[dict] = []
+    affected_files: list[str] = []
+    if ch is not None and fmt in ("md", "emx"):
+        excel_diffs = ch.load_excel_diffs(session_id)
+        excel_previews = ch.load_excel_previews(session_id)
+        affected_files = ch.load_affected_files(session_id)
+
+    raw_title = session_meta.get("title", "session") or "session"
+    # ASCII fallback 文件名
+    ascii_title = "".join(c for c in raw_title if c.isascii() and (c.isalnum() or c in " _-")).strip()[:50] or "session"
+    # RFC 5987 编码支持中文
+    from urllib.parse import quote
+    utf8_title = "".join(c for c in raw_title if c.isalnum() or c in " _-").strip()[:50] or "session"
+
+    def _cd(ext: str) -> str:
+        return (
+            f"attachment; filename=\"{ascii_title}.{ext}\"; "
+            f"filename*=UTF-8''{quote(utf8_title)}.{ext}"
+        )
+
+    if fmt == "md":
+        content = export_markdown(session_meta, messages, excel_diffs, excel_previews, affected_files)
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": _cd("md")},
+        )
+    elif fmt == "txt":
+        content = export_text(session_meta, messages)
+        return Response(
+            content=content.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": _cd("txt")},
+        )
+    else:  # emx
+        data = export_emx(session_meta, messages, excel_diffs, excel_previews, affected_files)
+        return Response(
+            content=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": _cd("emx")},
+        )
+
+
+@_router.post("/api/v1/sessions/import")
+async def import_session(request: Request) -> JSONResponse:
+    """从 EMX (.emx) 文件导入会话。
+
+    接收 JSON body（EMX 格式），创建新会话并写入消息。
+    """
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.session_export import parse_emx, EMXImportError
+
+    user_id = _get_isolation_user_id(request)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "无法解析 JSON body"})
+
+    try:
+        parsed = parse_emx(body)
+    except EMXImportError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    ch = _session_manager.chat_history
+    if ch is None:
+        return _error_json_response(503, "聊天记录存储未启用，无法导入")
+
+    import uuid as _uuid
+    new_session_id = str(_uuid.uuid4())
+    meta = parsed["session_meta"]
+    title = meta.get("title") or "导入的会话"
+
+    # 创建会话并写入消息 + Excel 事件数据
+    try:
+        ch.create_session(new_session_id, title, user_id=user_id)
+        messages = parsed["messages"]
+        if messages:
+            ch.save_turn_messages(new_session_id, messages, turn_number=0)
+        # 恢复 Excel 事件数据
+        for diff in parsed.get("excel_diffs") or []:
+            try:
+                ch.save_excel_diff(
+                    new_session_id,
+                    diff.get("tool_call_id", ""),
+                    diff.get("file_path", ""),
+                    diff.get("sheet", ""),
+                    diff.get("affected_range", ""),
+                    diff.get("changes", []),
+                )
+            except Exception:
+                pass  # 非关键，静默跳过
+        for fp in parsed.get("affected_files") or []:
+            try:
+                ch.save_affected_file(new_session_id, fp)
+            except Exception:
+                pass
+    except Exception:
+        logger.warning("导入会话失败", exc_info=True)
+        return _error_json_response(500, "导入失败")
+
+    return JSONResponse(content={
+        "status": "ok",
+        "session_id": new_session_id,
+        "title": title,
+        "message_count": len(parsed["messages"]),
+    })
+
+
 @_router.get("/api/v1/sessions/{session_id}/status")
 async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     """获取会话运行时状态（上下文压缩 + 文件注册表）。"""
@@ -4188,14 +4168,14 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     )
 
     if engine is None:
-        if can_restore:
-            _idle = _normalize_registry_status({"state": "idle"})
-            return JSONResponse(content={
-                "session_id": session_id,
-                "compaction": {"enabled": False},
-                "registry": _idle,
-            })
-        return _error_json_response(404, f"会话不存在: {session_id}")
+        # 会话可能尚未在后端创建（前端 local-first 乐观创建）或可从历史恢复，
+        # 统一返回 idle 默认值，避免 404 日志噪音。
+        _idle = _normalize_registry_status({"state": "idle"})
+        return JSONResponse(content={
+            "session_id": session_id,
+            "compaction": {"enabled": False},
+            "registry": _idle,
+        })
 
     # 上下文压缩状态
     compaction: dict[str, Any] = {"enabled": False}
@@ -4346,7 +4326,24 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(request)
-    detail = await _session_manager.get_session_detail(session_id, user_id=user_id)
+    try:
+        detail = await _session_manager.get_session_detail(session_id, user_id=user_id)
+    except SessionNotFoundError:
+        # 会话可能尚未在后端创建（前端 local-first 乐观创建），返回空默认值。
+        return JSONResponse(content={
+            "id": session_id,
+            "message_count": 0,
+            "in_flight": False,
+            "messages": [],
+            "full_access_enabled": False,
+            "chat_mode": "write",
+            "current_model": None,
+            "current_model_name": None,
+            "vision_capable": False,
+            "pending_approval": None,
+            "pending_question": None,
+            "last_route": None,
+        })
     return JSONResponse(content=detail)
 
 
@@ -4991,7 +4988,7 @@ async def import_model_config(
                 continue
 
             updated_fields: list[str] = []
-            for field_name in ("api_key", "base_url", "model"):
+            for field_name in ("api_key", "base_url", "model", "protocol"):
                 val = section_data.get(field_name)
                 if val is None or not isinstance(val, str):
                     continue
@@ -4999,7 +4996,6 @@ async def import_model_config(
                 if not env_key:
                     continue
                 lines = _update_env_var(lines, env_key, val)
-                os.environ[env_key] = val if val else os.environ.get(env_key, "")
                 if val:
                     os.environ[env_key] = val
                 elif env_key in os.environ:
@@ -5009,9 +5005,9 @@ async def import_model_config(
 
             if _config is not None and updated_fields:
                 field_map = {
-                    "main": {"api_key": "api_key", "base_url": "base_url", "model": "model"},
-                    "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model"},
-                    "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model"},
+                    "main": {"api_key": "api_key", "base_url": "base_url", "model": "model", "protocol": "protocol"},
+                    "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "protocol": "aux_protocol"},
+                    "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model", "protocol": "vlm_protocol"},
                 }.get(section_key, {})
                 for f in updated_fields:
                     config_attr = field_map.get(f)
@@ -5042,6 +5038,7 @@ async def import_model_config(
                         api_key=p.get("api_key", ""),
                         base_url=p.get("base_url", ""),
                         description=p.get("description", ""),
+                        protocol=p.get("protocol", "auto"),
                     )
                 else:
                     _config_store.add_profile(
@@ -5050,6 +5047,7 @@ async def import_model_config(
                         api_key=p.get("api_key", ""),
                         base_url=p.get("base_url", ""),
                         description=p.get("description", ""),
+                        protocol=p.get("protocol", "auto"),
                     )
                 profile_names.append(name)
             if profile_names:
@@ -6336,6 +6334,7 @@ async def health(request: Request) -> dict:
         "google_enabled": True,
         "qq_enabled": False,
         "email_verify_required": False,
+        "require_agreement": True,
     }
     if auth_enabled:
         try:
@@ -6345,6 +6344,7 @@ async def health(request: Request) -> dict:
             login_methods["google_enabled"] = lc.get("login_google_enabled", True)
             login_methods["qq_enabled"] = lc.get("login_qq_enabled", False)
             login_methods["email_verify_required"] = lc.get("email_verify_required", False)
+            login_methods["require_agreement"] = lc.get("require_agreement", True)
         except Exception:
             pass
 
