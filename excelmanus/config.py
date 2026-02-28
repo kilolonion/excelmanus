@@ -456,6 +456,11 @@ class ExcelManusConfig:
     memory_semantic_top_k: int = 10
     memory_semantic_threshold: float = 0.3
     memory_semantic_fallback_recent: int = 5
+    # Playbook（自进化战术手册）配置
+    playbook_enabled: bool = False  # 默认关闭，渐进开启
+    playbook_db_path: str = ""  # 空 = 使用 db_path 同目录下 playbook.db
+    playbook_max_bullets: int = 500  # 条目上限，超出时按 helpful_ratio 淘汰
+    playbook_inject_top_k: int = 5  # 每轮注入的最大条目数
     registry_semantic_top_k: int = 5
     registry_semantic_threshold: float = 0.25
     # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
@@ -1350,6 +1355,24 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
         5,
     )
+    # Playbook（自进化战术手册）配置
+    playbook_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_PLAYBOOK_ENABLED"),
+        "EXCELMANUS_PLAYBOOK_ENABLED",
+        False,
+    )
+    playbook_db_path = os.environ.get("EXCELMANUS_PLAYBOOK_DB_PATH", "")
+    playbook_max_bullets = _parse_int(
+        os.environ.get("EXCELMANUS_PLAYBOOK_MAX_BULLETS"),
+        "EXCELMANUS_PLAYBOOK_MAX_BULLETS",
+        500,
+    )
+    playbook_inject_top_k = _parse_int(
+        os.environ.get("EXCELMANUS_PLAYBOOK_INJECT_TOP_K"),
+        "EXCELMANUS_PLAYBOOK_INJECT_TOP_K",
+        5,
+    )
+
     registry_semantic_top_k = _parse_int(
         os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_TOP_K"),
         "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
@@ -1513,6 +1536,10 @@ def load_config() -> ExcelManusConfig:
         memory_semantic_top_k=memory_semantic_top_k,
         memory_semantic_threshold=memory_semantic_threshold,
         memory_semantic_fallback_recent=memory_semantic_fallback_recent,
+        playbook_enabled=playbook_enabled,
+        playbook_db_path=playbook_db_path,
+        playbook_max_bullets=playbook_max_bullets,
+        playbook_inject_top_k=playbook_inject_top_k,
         registry_semantic_top_k=registry_semantic_top_k,
         registry_semantic_threshold=registry_semantic_threshold,
         db_path=db_path,

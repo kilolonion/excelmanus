@@ -114,7 +114,27 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                                     "type": "object",
                                     "properties": {
                                         "title": {"type": "string", "description": "子任务标题"},
-                                        "verification": {"type": "string", "description": "该步骤的验证条件"},
+                                        "verification": {
+                                            "oneOf": [
+                                                {"type": "string", "description": "自由文本验证条件"},
+                                                {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "check_type": {
+                                                            "type": "string",
+                                                            "enum": ["row_count", "value_match", "formula_exists", "sheet_exists", "custom"],
+                                                            "description": "验证类型",
+                                                        },
+                                                        "target_file": {"type": "string", "description": "目标文件路径"},
+                                                        "target_sheet": {"type": "string", "description": "目标 sheet 名"},
+                                                        "target_range": {"type": "string", "description": "目标范围（如 A1:C100）"},
+                                                        "expected": {"type": "string", "description": "期望值（如 '38', '>0', '非空'）"},
+                                                    },
+                                                    "required": ["check_type"],
+                                                },
+                                            ],
+                                            "description": "验证条件：字符串或结构化对象",
+                                        },
                                     },
                                     "required": ["title"],
                                 },

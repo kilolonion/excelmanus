@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Union
 
 
 class TaskStatus(Enum):
@@ -27,13 +27,87 @@ VALID_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
 
 
 @dataclass
+class VerificationCriteria:
+    """结构化验证条件。
+
+    check_type 取值：
+      - row_count: 验证目标 sheet 行数
+      - value_match: 验证目标范围值
+      - formula_exists: 验证公式存在
+      - sheet_exists: 验证 sheet 存在
+      - custom: 自由文本条件（需 LLM 判断）
+    """
+
+    check_type: str
+    target_file: str = ""
+    target_sheet: str = ""
+    target_range: str = ""
+    expected: str = ""
+    actual: str | None = None
+    passed: bool | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典。"""
+        d: dict[str, Any] = {"check_type": self.check_type}
+        if self.target_file:
+            d["target_file"] = self.target_file
+        if self.target_sheet:
+            d["target_sheet"] = self.target_sheet
+        if self.target_range:
+            d["target_range"] = self.target_range
+        if self.expected:
+            d["expected"] = self.expected
+        if self.actual is not None:
+            d["actual"] = self.actual
+        if self.passed is not None:
+            d["passed"] = self.passed
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> VerificationCriteria:
+        """从字典反序列化。"""
+        return cls(
+            check_type=str(data.get("check_type", "custom")),
+            target_file=str(data.get("target_file", "")),
+            target_sheet=str(data.get("target_sheet", "")),
+            target_range=str(data.get("target_range", "")),
+            expected=str(data.get("expected", "")),
+            actual=data.get("actual"),
+            passed=data.get("passed"),
+        )
+
+
+def _parse_verification(
+    raw: Union[str, dict, "VerificationCriteria", None],
+) -> VerificationCriteria | None:
+    """将各种验证条件格式统一解析为 VerificationCriteria。
+
+    支持：
+      - None → None
+      - str → VerificationCriteria(check_type="custom", expected=str)
+      - dict → VerificationCriteria.from_dict(dict)
+      - VerificationCriteria → 原样返回
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, VerificationCriteria):
+        return raw
+    if isinstance(raw, dict):
+        return VerificationCriteria.from_dict(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    return VerificationCriteria(check_type="custom", expected=text)
+
+
+@dataclass
 class TaskItem:
     """单个任务项。"""
 
     title: str
     status: TaskStatus = TaskStatus.PENDING
     result: str | None = None
-    verification_criteria: str | None = None
+    verification_criteria: VerificationCriteria | None = None
 
     def transition(self, new_status: TaskStatus) -> None:
         """执行状态转换，非法转换抛出 ValueError。"""
@@ -43,23 +117,33 @@ class TaskItem:
             )
         self.status = new_status
 
+    def force_retry(self) -> None:
+        """强制将 FAILED 任务重置为 IN_PROGRESS（仅 Fix-Verify 循环使用）。
+
+        绕过 VALID_TRANSITIONS 约束。仅当 status == FAILED 时生效，
+        其他状态调用无操作。
+        """
+        if self.status == TaskStatus.FAILED:
+            self.status = TaskStatus.IN_PROGRESS
+
     def to_dict(self) -> dict:
         """序列化为字典。"""
         d = {"title": self.title, "status": self.status.value}
         if self.result is not None:
             d["result"] = self.result
         if self.verification_criteria is not None:
-            d["verification"] = self.verification_criteria
+            d["verification"] = self.verification_criteria.to_dict()
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> TaskItem:
-        """从字典反序列化。"""
+        """从字典反序列化。兼容旧格式（str）和新格式（dict）。"""
+        raw_v = data.get("verification")
         return cls(
             title=data["title"],
             status=TaskStatus(data["status"]),
             result=data.get("result"),
-            verification_criteria=data.get("verification"),
+            verification_criteria=_parse_verification(raw_v),
         )
 
 
@@ -150,7 +234,7 @@ class TaskStore:
         for entry in subtask_titles:
             if isinstance(entry, dict):
                 t = str(entry.get("title", "")).strip()
-                v = (entry.get("verification") or "").strip() or None
+                v = _parse_verification(entry.get("verification"))
                 items.append(TaskItem(title=t, verification_criteria=v))
             else:
                 items.append(TaskItem(title=str(entry)))
