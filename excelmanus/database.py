@@ -304,6 +304,9 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     15: [
         "ALTER TABLE model_profiles ADD COLUMN protocol TEXT DEFAULT 'auto'",
     ],
+    16: [
+        "ALTER TABLE sessions ADD COLUMN title_source TEXT DEFAULT 'auto'",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -588,6 +591,9 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
     ],
     15: [
         "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS protocol TEXT DEFAULT 'auto'",
+    ],
+    16: [
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title_source TEXT DEFAULT 'auto'",
     ],
 }
 
