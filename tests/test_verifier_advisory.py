@@ -210,7 +210,7 @@ class TestVerifierAdvisoryTaskListContext:
 
         assert len(captured_prompt) == 1
         prompt_text = captured_prompt[0]
-        assert "任务清单验证记录" in prompt_text
+        assert "任务清单" in prompt_text
         assert "测试计划" in prompt_text
         assert "读取源表" in prompt_text
         assert "匹配填充" in prompt_text

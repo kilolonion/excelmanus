@@ -107,3 +107,79 @@ async def test_generate_title_returns_none_on_none_content():
         model="gpt-4o-mini",
     )
     assert result is None
+
+
+# ── _sync_title 保护逻辑回归测试 ──────────────────────────────
+
+class TestSyncTitleProtection:
+    """验证 _sync_title 不会覆盖 LLM 或用户设置的标题。"""
+
+    @pytest.fixture
+    def persistence(self, tmp_path):
+        from excelmanus.conversation_persistence import ConversationPersistence
+        from excelmanus.database import Database
+        from excelmanus.chat_history import ChatHistoryStore
+
+        db = Database(str(tmp_path / "test.db"))
+        ch = ChatHistoryStore(db)
+        return ConversationPersistence(ch), ch
+
+    def test_sync_title_skips_when_auto_title_set(self, persistence):
+        """title_source='auto' 时 _sync_title 不应覆盖标题。"""
+        cp, ch = persistence
+        ch.create_session("s1", "LLM生成的标题")
+        ch.update_session("s1", title_source="auto")
+
+        messages = [{"role": "user", "content": "帮我分析Q3营收报表"}]
+        cp._sync_title("s1", messages)
+
+        sessions = ch.list_sessions()
+        assert sessions[0]["title"] == "LLM生成的标题"
+
+    def test_sync_title_skips_when_user_title_set(self, persistence):
+        """title_source='user' 时 _sync_title 不应覆盖标题。"""
+        cp, ch = persistence
+        ch.create_session("s1", "用户自定义标题")
+        ch.update_session("s1", title_source="user")
+
+        messages = [{"role": "user", "content": "帮我分析Q3营收报表"}]
+        cp._sync_title("s1", messages)
+
+        sessions = ch.list_sessions()
+        assert sessions[0]["title"] == "用户自定义标题"
+
+    def test_sync_title_updates_when_no_title_source(self, persistence):
+        """title_source 未设置（默认）时 _sync_title 应正常更新。"""
+        cp, ch = persistence
+        ch.create_session("s1", "")
+
+        messages = [{"role": "user", "content": "帮我分析Q3营收报表"}]
+        cp._sync_title("s1", messages)
+
+        sessions = ch.list_sessions()
+        assert sessions[0]["title"] == "帮我分析Q3营收报表"
+
+    def test_full_flow_title_preserved_after_second_turn(self, persistence):
+        """模拟完整流程：首轮 LLM 标题 → 第二轮 _sync_title 不覆盖。"""
+        cp, ch = persistence
+
+        # 首轮：创建会话，_sync_title 先写入原始消息
+        ch.create_session("s1", "")
+        msgs_turn1 = [
+            {"role": "user", "content": "帮我分析Q3营收报表"},
+            {"role": "assistant", "content": "好的，我来分析。"},
+        ]
+        cp._sync_title("s1", msgs_turn1)
+        assert ch.list_sessions()[0]["title"] == "帮我分析Q3营收报表"
+
+        # LLM 标题生成后覆盖
+        ch.update_session("s1", title="Q3营收分析", title_source="auto")
+        assert ch.list_sessions()[0]["title"] == "Q3营收分析"
+
+        # 第二轮：_sync_title 不应覆盖 LLM 标题
+        msgs_turn2 = msgs_turn1 + [
+            {"role": "user", "content": "再帮我做个图表"},
+            {"role": "assistant", "content": "好的。"},
+        ]
+        cp._sync_title("s1", msgs_turn2)
+        assert ch.list_sessions()[0]["title"] == "Q3营收分析"

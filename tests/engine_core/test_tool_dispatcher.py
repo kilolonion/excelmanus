@@ -35,8 +35,6 @@ def _make_engine(tool_result: str = "ok") -> MagicMock:
     engine.approval.is_audit_only_tool = MagicMock(return_value=False)
     engine.approval.is_high_risk_tool = MagicMock(return_value=False)
     engine.full_access_enabled = False
-    engine._plan_intercept_task_create = False
-    engine._suspend_task_create_plan_once = False
     return engine
 
 

@@ -3113,7 +3113,7 @@ class TestToolCallingLoopApprovalResolver:
             assert _pending.approval_id == pending.approval_id
             return "accept"
 
-        async def _execute_approved_pending(_pending, *, on_event=None):
+        async def _execute_approved_pending(_pending, *, on_event=None, tool_call_id=None):
             assert _pending.approval_id == pending.approval_id
             engine._approval.clear_pending()
             return True, "已执行 run_shell", None
