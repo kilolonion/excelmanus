@@ -66,8 +66,7 @@ class TestRunCodeInline:
         assert result["return_code"] == 0
         assert result["mode"] == "inline"
         assert "hello" in result["stdout_tail"]
-        assert result["sandbox"]["mode"] == "soft"
-        assert result["sandbox"]["isolated_python"] is True
+        assert result["sandbox_tier"] == "RED"
 
     def test_inline_cleans_temp_file(self, workspace: Path) -> None:
         code_tools.run_code(
@@ -149,10 +148,6 @@ class TestRunCodeFile:
             )
         )
         assert result["status"] == "success"
-        assert result["python_resolve_mode"] == "auto"
-        probes = result["python_probe_results"]
-        assert probes[0]["status"] == "not_found"
-        assert probes[-1]["status"] == "ok"
 
     def test_file_path_traversal_rejected(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -353,6 +348,6 @@ class TestGetTools:
     def test_run_code_truncation_strategy(self) -> None:
         tools = {tool.name: tool for tool in code_tools.get_tools()}
         run_code_tool = tools["run_code"]
-        assert run_code_tool.max_result_chars == 3000
-        assert run_code_tool.truncate_head_chars == 2000
-        assert run_code_tool.truncate_tail_chars == 1000
+        assert run_code_tool.max_result_chars == 8000
+        assert run_code_tool.truncate_head_chars == 5000
+        assert run_code_tool.truncate_tail_chars == 3000

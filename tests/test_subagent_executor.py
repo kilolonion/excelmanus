@@ -146,6 +146,12 @@ def _registry_with_tools(tmp_path: Path) -> ToolRegistry:
         path.write_text("copied", encoding="utf-8")
         return f"复制完成: {destination}"
 
+    def delete_file(file_path: str) -> str:
+        path = Path(tmp_path) / file_path
+        if path.exists():
+            path.unlink()
+        return f"已删除: {file_path}"
+
     registry.register_tools(
         [
             ToolDef(
@@ -153,6 +159,19 @@ def _registry_with_tools(tmp_path: Path) -> ToolRegistry:
                 description="读取",
                 input_schema={"type": "object", "properties": {}},
                 func=read_excel,
+            ),
+            ToolDef(
+                name="delete_file",
+                description="删除文件",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                    },
+                    "required": ["file_path"],
+                    "additionalProperties": False,
+                },
+                func=delete_file,
             ),
             ToolDef(
                 name="write_text_file",
@@ -288,7 +307,7 @@ async def test_default_mode_creates_pending_and_stops(tmp_path: Path) -> None:
     sub_cfg = SubagentConfig(
         name="writer",
         description="默认权限测试",
-        allowed_tools=["write_text_file"],
+        allowed_tools=["delete_file"],
         permission_mode="default",
         max_iterations=2,
         max_consecutive_failures=1,
@@ -301,8 +320,8 @@ async def test_default_mode_creates_pending_and_stops(tmp_path: Path) -> None:
                     side_effect=[
                         _response_from_message(
                             _tool_call_message(
-                                "write_text_file",
-                                {"file_path": "a.txt", "content": "x"},
+                                "delete_file",
+                                {"file_path": "a.txt"},
                             )
                         )
                     ]
@@ -312,7 +331,7 @@ async def test_default_mode_creates_pending_and_stops(tmp_path: Path) -> None:
     )
 
     with patch("excelmanus.subagent.executor.openai.AsyncOpenAI", return_value=fake_client):
-        result = await executor.run(config=sub_cfg, prompt="测试写入")
+        result = await executor.run(config=sub_cfg, prompt="测试删除")
 
     assert result.success is False
     assert result.pending_approval_id is not None
@@ -332,7 +351,7 @@ async def test_pending_approval_backfills_remaining_tool_results(tmp_path: Path)
     sub_cfg = SubagentConfig(
         name="writer",
         description="pending 回填测试",
-        allowed_tools=["write_text_file", "read_excel"],
+        allowed_tools=["delete_file", "read_excel"],
         permission_mode="default",
         max_iterations=2,
         max_consecutive_failures=2,
@@ -345,7 +364,7 @@ async def test_pending_approval_backfills_remaining_tool_results(tmp_path: Path)
                     side_effect=[
                         _response_from_message(
                             _multi_tool_call_message([
-                                ("call_1", "write_text_file", {"file_path": "a.txt", "content": "x"}),
+                                ("call_1", "delete_file", {"file_path": "a.txt"}),
                                 ("call_2", "read_excel", {}),
                             ])
                         )

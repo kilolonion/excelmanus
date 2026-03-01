@@ -272,19 +272,19 @@ class TestB1RegistryRefreshOnExit:
     def test_property2_run_code_sets_refresh_needed(self) -> None:
         """run_code 写入信号通过 _record_write_action 统一置位刷新标记。"""
         from excelmanus.engine import AgentEngine
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
+        from excelmanus.engine_core import tool_handlers as th_mod
         import inspect
         source = inspect.getsource(AgentEngine._tool_calling_loop)
         source_engine = inspect.getsource(AgentEngine)
-        source_dispatcher = inspect.getsource(ToolDispatcher._dispatch_tool_execution)
+        source_handlers = inspect.getsource(th_mod)
 
         # _record_workspace_write_action 负责置位 _registry_refresh_needed
         record_block = source_engine[source_engine.find("def _record_workspace_write_action"):]
         assert "_registry_refresh_needed = True" in record_block
         # 循环内写入工具走统一写入记录（_record_workspace_write_action / _record_external_write_action）
         assert "_record_workspace_write_action()" in source or "_record_external_write_action()" in source
-        # run_code 路径在 dispatcher 的 _dispatch_tool_execution 中同样走统一写入记录
-        assert "e.record_write_action()" in source_dispatcher
+        # run_code 路径在 tool_handlers 中通过 e.record_write_action() 走统一写入记录
+        assert "e.record_write_action()" in source_handlers
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:
         """Preservation: max_iter 路径仍然调用 _try_refresh_registry（原有行为不变）。"""
