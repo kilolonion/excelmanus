@@ -230,7 +230,7 @@ if (-not $SkipDeps) {
     $venvPy = Join-Path $Script:PROJECT_ROOT ".venv" "Scripts" "python.exe"
     if (-not (Test-Path $venvPy)) { $venvPy = "python" }
 
-    $pipArgs = @("-m", "pip", "install", "-e", $Script:PROJECT_ROOT, "--quiet")
+    $pipArgs = @("-m", "pip", "install", "-e", "$($Script:PROJECT_ROOT)[all]", "--quiet")
     if ($Mirror) { $pipArgs += @("-i", "https://pypi.tuna.tsinghua.edu.cn/simple") }
 
     try {
@@ -239,7 +239,7 @@ if (-not $SkipDeps) {
     } catch {
         Write-Warn "pip 失败，尝试清华镜像..."
         try {
-            & $venvPy -m pip install -e $Script:PROJECT_ROOT -i "https://pypi.tuna.tsinghua.edu.cn/simple" --quiet 2>$null
+            & $venvPy -m pip install -e "$($Script:PROJECT_ROOT)[all]" -i "https://pypi.tuna.tsinghua.edu.cn/simple" --quiet 2>$null
             Write-Log "后端依赖已更新"
         } catch {
             Write-Err "后端依赖安装失败"

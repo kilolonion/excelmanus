@@ -43,7 +43,7 @@ jobs:
       - name: Extract version from pyproject.toml
         id: version
         run: |
-          VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' pyproject.toml)
+          VERSION=$(sed -n 's/^version *= *"\([^"]*\)"/\1/p' pyproject.toml | head -1)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (multi-arch emulation)

@@ -2,7 +2,8 @@
  * ExcelManus - Web UI (Project-Style Light Theme)
  * C# exe with embedded HTTP server + browser-rendered HTML/CSS UI
  * Zero external dependencies - uses built-in .NET Framework
- * Compile: csc.exe /langversion:5 /target:winexe /out:ExcelManus.exe ExcelManusSetup.cs
+ * Compile: csc.exe /langversion:5 /target:winexe /out:ExcelManusSetup.exe ExcelManusSetup.cs EmbeddedAssets.cs
+ * Fallback (no Vite UI): csc.exe /langversion:5 /target:winexe /out:ExcelManusSetup.exe ExcelManusSetup.cs
  */
 using System;
 using System.Collections.Generic;
@@ -583,6 +584,7 @@ public class Engine
     private int _progress;
 
     private string _bePort, _fePort;
+    private string _pythonExe = "python";
 
     public LogStore Log { get { return _log; } }
 
@@ -636,13 +638,52 @@ public class Engine
     }
 
     private string EnvPath { get { return Path.Combine(_root, ".env"); } }
+    private string InstallCompletePath { get { return Path.Combine(_root, ".install_complete"); } }
+
+    private void WriteInstallComplete()
+    {
+        try
+        {
+            string ver = ReadVersionFromToml(Path.Combine(_root, "pyproject.toml"));
+            File.WriteAllText(InstallCompletePath, ver, new UTF8Encoding(false));
+            _log.Ok(string.Format("安装完成标记已写入 (v{0})", ver));
+        }
+        catch { }
+    }
+
+    private bool IsInstallComplete()
+    {
+        return File.Exists(InstallCompletePath);
+    }
+
+    private string GetInstalledVersion()
+    {
+        try
+        {
+            if (File.Exists(InstallCompletePath))
+                return File.ReadAllText(InstallCompletePath).Trim();
+        }
+        catch { }
+        return null;
+    }
 
     private void LoadConfig()
     {
         if (!File.Exists(EnvPath)) return;
         try
         {
-            _log.Info("已加载 .env 配置");
+            foreach (string raw in File.ReadAllLines(EnvPath))
+            {
+                string ln = raw.Trim();
+                if (string.IsNullOrEmpty(ln) || ln.StartsWith("#")) continue;
+                int eq = ln.IndexOf('=');
+                if (eq <= 0) continue;
+                string k = ln.Substring(0, eq).Trim();
+                string v = ln.Substring(eq + 1).Trim().Trim('"');
+                if (k == "EXCELMANUS_BACKEND_PORT") _bePort = ValidatePort(v, _bePort);
+                else if (k == "EXCELMANUS_FRONTEND_PORT") _fePort = ValidatePort(v, _fePort);
+            }
+            _log.Info(string.Format("已加载 .env 配置 (后端端口={0}, 前端端口={1})", _bePort, _fePort));
         }
         catch (Exception ex) { _log.Warn(string.Format("读取 .env 失败: {0}", ex.Message)); }
     }
@@ -690,7 +731,8 @@ public class Engine
             AppendIfMissing(lines, seenKeys, "EXCELMANUS_AUTH_ENABLED", "false");
             AppendIfMissing(lines, seenKeys, "EXCELMANUS_EXTERNAL_SAFE_MODE", "false");
 
-            File.WriteAllLines(EnvPath, lines.ToArray(), Encoding.UTF8);
+            // E37: use UTF-8 without BOM so python-dotenv can parse the first line correctly
+            File.WriteAllLines(EnvPath, lines.ToArray(), new UTF8Encoding(false));
             _log.Ok("已保存 .env");
         }
         catch (Exception ex) { _log.Err(string.Format("保存 .env 失败: {0}", ex.Message)); }
@@ -700,8 +742,7 @@ public class Engine
     {
         if (key == "EXCELMANUS_CORS_ALLOW_ORIGINS")
             return string.Format("http://localhost:{0},http://localhost:5173", _fePort);
-        if (key == "EXCELMANUS_AUTH_ENABLED") return "false";
-        if (key == "EXCELMANUS_EXTERNAL_SAFE_MODE") return "false";
+        // Do not override AUTH_ENABLED / EXTERNAL_SAFE_MODE if user already set them
         return null;
     }
 
@@ -731,6 +772,15 @@ public class Engine
     {
         if (_needsClone) return false;
         if (!File.Exists(EnvPath)) return false;
+        if (!IsInstallComplete()) return false;
+        // E35/E40: version consistency check
+        string installedVer = GetInstalledVersion();
+        string currentVer = ReadVersionFromToml(Path.Combine(_root, "pyproject.toml"));
+        if (installedVer != null && currentVer != null && installedVer != currentVer)
+        {
+            _log.Warn(string.Format("\u7248\u672c\u4e0d\u4e00\u81f4: \u5df2\u5b89\u88c5={0}, \u5f53\u524d\u4ee3\u7801={1}\uff0c\u9700\u8981\u91cd\u65b0\u90e8\u7f72", installedVer, currentVer));
+            return false;
+        }
         string vpy = Path.Combine(_root, ".venv", "Scripts", "python.exe");
         if (!File.Exists(vpy)) return false;
         string nodeModules = Path.Combine(_root, "web", "node_modules");
@@ -875,18 +925,51 @@ public class Engine
         return ok ? ver : null;
     }
 
+    // E6: parse major version from strings like "v20.11.0" or "v18.0.0"
+    private int ParseMajorVersion(string ver)
+    {
+        if (string.IsNullOrEmpty(ver)) return -1;
+        string s = ver.Trim();
+        if (s.StartsWith("v") || s.StartsWith("V")) s = s.Substring(1);
+        int dot = s.IndexOf('.');
+        if (dot > 0) s = s.Substring(0, dot);
+        int major;
+        if (int.TryParse(s, out major)) return major;
+        return -1;
+    }
+
     private void RunCheckEnv()
     {
-        // Python
+        // Python (E2: try "python" first, then "py -3" as fallback)
         string pyV = CheckToolVersion("Python", "python", "--version", "Python.Python.3.11", "Python 3");
         bool pyOk = pyV != null;
+        if (pyOk) { _pythonExe = "python"; }
+        else
+        {
+            // E2: try py launcher
+            string pyLV = CmdRun("py", "-3 --version");
+            if (!string.IsNullOrEmpty(pyLV) && pyLV.Contains("Python 3"))
+            {
+                pyV = pyLV; pyOk = true; _pythonExe = "py";
+                _log.Info("通过 py launcher 检测到 Python");
+            }
+        }
         lock (_lock) { _checks["python"] = pyOk ? 1 : 2; _details["python"] = pyOk ? pyV.Replace("Python ", "v") : "未找到"; }
         LogCk("Python", pyOk, pyV);
 
-        // Node.js (includes npm)
+        // Node.js (includes npm) — E6: require major >= 18
         string ndV = CheckToolVersion("Node.js", "node", "--version", "OpenJS.NodeJS.LTS", null);
         bool ndOk = ndV != null;
-        lock (_lock) { _checks["node"] = ndOk ? 1 : 2; _details["node"] = ndOk ? ndV : "未找到"; }
+        if (ndOk)
+        {
+            int ndMajor = ParseMajorVersion(ndV);
+            if (ndMajor >= 0 && ndMajor < 18)
+            {
+                _log.Warn(string.Format("Node.js {0} \u7248\u672c\u8fc7\u4f4e\uff0c\u9700\u8981 v18+\uff08\u5f53\u524d: {1}\uff09", ndV, ndMajor));
+                ndOk = false;
+            }
+        }
+        lock (_lock) { _checks["node"] = ndOk ? 1 : 2; _details["node"] = ndOk ? ndV : (ndV != null ? ndV + " (版本过低, 需 v18+)" : "未找到"); }
         LogCk("Node.js", ndOk, ndV);
 
         // Git
@@ -937,15 +1020,34 @@ public class Engine
             }
         };
 
-        // ── Python ──
+        // ── Python (E2: try "python" first, then "py -3" as fallback) ──
         string pyV = CheckToolVersion("Python", "python", "--version", "Python.Python.3.11", "Python 3");
         bool pyOk = pyV != null;
+        if (pyOk) { _pythonExe = "python"; }
+        else
+        {
+            string pyLV = CmdRun("py", "-3 --version");
+            if (!string.IsNullOrEmpty(pyLV) && pyLV.Contains("Python 3"))
+            {
+                pyV = pyLV; pyOk = true; _pythonExe = "py";
+                _log.Info("通过 py launcher 检测到 Python");
+            }
+        }
         setCk("python", pyOk, pyOk ? pyV.Replace("Python ", "v") : null);
         LogCk("Python", pyOk, pyV);
 
-        // ── Node.js + npm ──
+        // ── Node.js + npm (E6: require major >= 18) ──
         string ndV = CheckToolVersion("Node.js", "node", "--version", "OpenJS.NodeJS.LTS", null);
         bool ndOk = ndV != null;
+        if (ndOk)
+        {
+            int ndMajor = ParseMajorVersion(ndV);
+            if (ndMajor >= 0 && ndMajor < 18)
+            {
+                _log.Warn(string.Format("Node.js \u7248\u672c\u8fc7\u4f4e\uff0c\u9700\u8981 v18+ (\u5f53\u524d: v{0})", ndMajor));
+                ndOk = false;
+            }
+        }
         string npV = CmdRun("npm", "--version");
         bool npOk = !string.IsNullOrEmpty(npV);
         setCk("node", ndOk, ndOk ? ndV : null);
@@ -1002,6 +1104,7 @@ public class Engine
         setCk("frontend", feOk, feOk ? "就绪" : "失败");
         if (!feOk) { lock (_lock) { _deploying = false; } return; }
 
+        WriteInstallComplete();
         lock (_lock) { _progress = 100; _deploying = false; }
         StartServices();
     }
@@ -1021,6 +1124,17 @@ public class Engine
             _log.Hl(string.Format("项目根目录已更新: {0}", _root));
             LoadConfig();
             return true;
+        }
+
+        // E17: clean up incomplete clone (directory exists but no pyproject.toml)
+        if (Directory.Exists(target))
+        {
+            _log.Warn(string.Format("发现不完整的目录: {0}，清理后重新克隆...", target));
+            try { Directory.Delete(target, true); } catch (Exception ex)
+            {
+                _log.Err(string.Format("无法清理目录: {0}", ex.Message));
+                return false;
+            }
         }
 
         _log.Hl(string.Format("正在从 Gitee 克隆仓库到: {0}", target));
@@ -1067,7 +1181,7 @@ public class Engine
     private static ProcessStartInfo MakeHiddenCmd(string exe, string args)
     {
         ProcessStartInfo si = new ProcessStartInfo("cmd.exe",
-            string.Format("/c \"\"{0}\"\" {1}", exe, args));
+            string.Format("/S /C \"\"{0}\" {1}\"", exe, args));
         si.RedirectStandardOutput = true;
         si.RedirectStandardError = true;
         si.UseShellExecute = false;
@@ -1232,8 +1346,12 @@ public class Engine
         if (!Directory.Exists(vd))
         {
             _log.Info("创建 Python 虚拟环境 (.venv)...");
-            CmdRun("python", string.Format("-m venv \"{0}\"", vd));
-            if (!File.Exists(vpy)) { _log.Err("虚拟环境创建失败"); return false; }
+            // E2: use detected python executable (may be "py" launcher)
+            string venvArgs = _pythonExe == "py"
+                ? string.Format("-3 -m venv \"{0}\"", vd)
+                : string.Format("-m venv \"{0}\"", vd);
+            bool venvOk = RunStreamCmd(_pythonExe, venvArgs, "venv");
+            if (!venvOk || !File.Exists(vpy)) { _log.Err("虚拟环境创建失败"); return false; }
             _log.Ok("虚拟环境已创建");
         }
         else
@@ -1396,6 +1514,8 @@ public class Engine
             si.StandardErrorEncoding = Encoding.UTF8;
             si.EnvironmentVariables["BACKEND_INTERNAL_URL"] = string.Format("http://127.0.0.1:{0}", _bePort);
             si.EnvironmentVariables["NEXT_PUBLIC_BACKEND_ORIGIN"] = string.Format("http://localhost:{0}", _bePort);
+            // E38: prevent OOM during Next.js build on low-memory machines
+            si.EnvironmentVariables["NODE_OPTIONS"] = "--max-old-space-size=4096";
             Process p = Process.Start(si);
             p.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) {
                 if (ev.Data != null && ev.Data.Trim().Length > 0)
@@ -1432,6 +1552,7 @@ public class Engine
     private void StartServices()
     {
         _log.Hl("启动后端服务...");
+        CleanupStalePids();
         KillPort(_bePort); KillPort(_fePort);
 
         ThreadPool.QueueUserWorkItem(delegate
@@ -1457,10 +1578,13 @@ public class Engine
                 si.EnvironmentVariables["EXCELMANUS_AUTH_ENABLED"] = "false";
                 si.EnvironmentVariables["EXCELMANUS_EXTERNAL_SAFE_MODE"] = "false";
                 _procBE = Process.Start(si);
+                _procBE.EnableRaisingEvents = true;
+                _procBE.Exited += delegate { OnServiceCrash("后端"); };
                 _procBE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
                 _procBE.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
                 _procBE.BeginOutputReadLine();
                 _procBE.BeginErrorReadLine();
+                SavePid(_procBE.Id, "backend");
                 _log.Ok(string.Format("后端已启动 → http://localhost:{0}", _bePort));
             }
             catch (Exception ex) { _log.Err(string.Format("后端启动失败: {0}", ex.Message)); }
@@ -1518,10 +1642,13 @@ public class Engine
                 si.EnvironmentVariables["BACKEND_INTERNAL_URL"] = string.Format("http://127.0.0.1:{0}", _bePort);
                 si.EnvironmentVariables["NEXT_PUBLIC_BACKEND_ORIGIN"] = string.Format("http://localhost:{0}", _bePort);
                 _procFE = Process.Start(si);
+                _procFE.EnableRaisingEvents = true;
+                _procFE.Exited += delegate { OnServiceCrash("前端"); };
                 _procFE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
                 _procFE.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
                 _procFE.BeginOutputReadLine();
                 _procFE.BeginErrorReadLine();
+                SavePid(_procFE.Id, "frontend");
                 _log.Info(string.Format("等待前端就绪 (http://localhost:{0})...", _fePort));
                 bool frontendReady = false;
                 for (int fa = 0; fa < 30; fa++)
@@ -1549,8 +1676,11 @@ public class Engine
                 if (!frontendReady)
                 {
                     _log.Err("前端在 60 秒内未就绪，请检查日志排查问题");
+                    _log.Warn("清理前端和后端进程...");
                     KillProc(_procFE); _procFE = null;
                     KillPort(_fePort);
+                    KillProc(_procBE); _procBE = null;
+                    KillPort(_bePort);
                     return;
                 }
                 _log.Ok(string.Format("前端已就绪 → http://localhost:{0}", _fePort));
@@ -1615,12 +1745,78 @@ public class Engine
         }
     }
 
+    private void OnServiceCrash(string name)
+    {
+        bool wasRunning;
+        lock (_lock) { wasRunning = _running; _running = false; }
+        if (wasRunning)
+        {
+            _log.Err(string.Format("{0}服务异常退出！", name));
+            _log.Warn("所有服务已停止，请检查日志排查问题后重新部署");
+            // Kill the other process too
+            try
+            {
+                if (name == "后端") { KillProc(_procFE); _procFE = null; KillPort(_fePort); }
+                else { KillProc(_procBE); _procBE = null; KillPort(_bePort); }
+            }
+            catch { }
+        }
+        ClearPidFiles();
+    }
+
+    private string PidDir { get { return Path.Combine(_root, ".pids"); } }
+
+    private void SavePid(int pid, string name)
+    {
+        try
+        {
+            Directory.CreateDirectory(PidDir);
+            File.WriteAllText(Path.Combine(PidDir, name + ".pid"), pid.ToString());
+        }
+        catch { }
+    }
+
+    private void ClearPidFiles()
+    {
+        try
+        {
+            if (Directory.Exists(PidDir))
+                Directory.Delete(PidDir, true);
+        }
+        catch { }
+    }
+
+    private void CleanupStalePids()
+    {
+        if (!Directory.Exists(PidDir)) return;
+        foreach (string f in Directory.GetFiles(PidDir, "*.pid"))
+        {
+            try
+            {
+                int pid;
+                if (int.TryParse(File.ReadAllText(f).Trim(), out pid) && pid > 0)
+                {
+                    _log.Warn(string.Format("发现上次残留进程 PID={0}，正在清理...", pid));
+                    ProcessStartInfo si = new ProcessStartInfo("cmd.exe",
+                        string.Format("/c taskkill /T /F /PID {0} 2>nul", pid));
+                    si.CreateNoWindow = true;
+                    si.UseShellExecute = false;
+                    Process tk = Process.Start(si);
+                    tk.WaitForExit(5000);
+                }
+            }
+            catch { }
+        }
+        ClearPidFiles();
+    }
+
     public void StopServices()
     {
         _log.Warn("正在停止服务...");
         KillProc(_procBE); KillProc(_procFE);
         _procBE = null; _procFE = null;
         KillPort(_bePort); KillPort(_fePort);
+        ClearPidFiles();
         lock (_lock) { _running = false; _deploying = false; }
         _log.Ok("所有服务已停止");
     }
@@ -1678,6 +1874,11 @@ public class Engine
 
     public bool IsRunning { get { lock (_lock) { return _running; } } }
 
+    public string GetVersion()
+    {
+        return ReadVersionFromToml(Path.Combine(_root, "pyproject.toml"));
+    }
+
     #endregion
 
     #region Update & Shortcut
@@ -1705,8 +1906,16 @@ public class Engine
 
     private string CheckUpdateInternal(int fetchTimeoutMs)
     {
+        // E48: use --depth=50 instead of --unshallow to avoid timeout on large repos
+        string shallowFile = Path.Combine(_root, ".git", "shallow");
+        string fetchArgs = File.Exists(shallowFile)
+            ? string.Format("-C \"{0}\" fetch origin --depth=50 --tags", _root)
+            : string.Format("-C \"{0}\" fetch origin --tags", _root);
+        if (File.Exists(shallowFile))
+            _log.Info("检测到浅克隆，使用增量获取 (depth=50)...");
+
         // git fetch (with timeout)
-        string fetchOut = CmdRunTimeout("git", string.Format("-C \"{0}\" fetch origin --tags", _root), fetchTimeoutMs);
+        string fetchOut = CmdRunTimeout("git", fetchArgs, fetchTimeoutMs);
         if (fetchOut == null)
             return string.Format("{{\"has_update\":false,\"timeout\":true,\"current\":\"{0}\"}}", JE(ReadVersionFromToml(Path.Combine(_root, "pyproject.toml"))));
 
@@ -1714,9 +1923,9 @@ public class Engine
         string tomlPath = Path.Combine(_root, "pyproject.toml");
         string currentVer = ReadVersionFromToml(tomlPath);
 
-        // branch
+        // branch (E50: detached HEAD returns "HEAD", fallback to main)
         string branch = CmdRun("git", string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", _root));
-        if (string.IsNullOrEmpty(branch)) branch = "main";
+        if (string.IsNullOrEmpty(branch) || branch == "HEAD") branch = "main";
 
         // commits behind
         string countStr = CmdRun("git", string.Format("-C \"{0}\" rev-list --count HEAD..origin/{1}", _root, branch));
@@ -1788,11 +1997,15 @@ public class Engine
                 _log.Ok("备份 .env");
             }
 
+            // E35: delete install marker so QuickStart detects version mismatch
+            try { if (File.Exists(InstallCompletePath)) File.Delete(InstallCompletePath); } catch { }
+
             // git stash + pull
             _log.Info("拉取最新代码...");
             CmdRun("git", string.Format("-C \"{0}\" stash --include-untracked", _root));
             string branch = CmdRun("git", string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", _root));
-            if (string.IsNullOrEmpty(branch)) branch = "main";
+            // E50: detached HEAD returns "HEAD", fallback to main
+            if (string.IsNullOrEmpty(branch) || branch == "HEAD") branch = "main";
 
             string pullResult = CmdRun("git", string.Format("-C \"{0}\" pull origin {1} --ff-only", _root, branch));
             if (string.IsNullOrEmpty(pullResult) || pullResult.Contains("fatal"))
@@ -1822,6 +2035,9 @@ public class Engine
 
             // read new version
             string newVer = ReadVersionFromToml(tomlPath);
+
+            // E35: write new install marker after successful update
+            WriteInstallComplete();
 
             _log.Hl(string.Format("更新成功！{0} → {1}", oldVer, newVer));
             _log.Info("请重启服务以应用更新（数据库迁移将在启动时自动执行）");
@@ -1965,7 +2181,12 @@ public class WebServer
             string method = ctx.Request.HttpMethod;
 
             if (path == "/" && method == "GET")
-                Respond(ctx, 200, "text/html; charset=utf-8", Html.Page);
+            {
+                string html;
+                try { html = EmbeddedAssets.IndexHtml; }
+                catch { html = Html.Page; }
+                Respond(ctx, 200, "text/html; charset=utf-8", html);
+            }
             else if (path == "/api/config" && method == "GET")
                 Respond(ctx, 200, "application/json", _engine.GetConfigJson());
             else if (path == "/api/status" && method == "GET")
@@ -2295,8 +2516,9 @@ public class AppTray : ApplicationContext
         headerItem.Padding = new Padding(6, 8, 6, 0);
         menu.Items.Add(headerItem);
 
-        // Subtitle with version
-        ToolStripMenuItem subItem = new ToolStripMenuItem("\u2009\u2009\u2009\u2009v2.0 \u00B7 \u90E8\u7F72\u5DE5\u5177");
+        // Subtitle with version (dynamic from pyproject.toml)
+        string ver = _engine.GetVersion();
+        ToolStripMenuItem subItem = new ToolStripMenuItem(string.Format("\u2009\u2009\u2009\u2009v{0} \u00B7 \u90E8\u7F72\u5DE5\u5177", ver));
         subItem.Tag = "subtitle";
         subItem.Enabled = false;
         subItem.Padding = new Padding(6, 0, 6, 4);

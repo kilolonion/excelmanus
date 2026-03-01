@@ -202,9 +202,10 @@ pm2 logs excelmanus-api --lines 50 --nostream
 # Live logs
 pm2 logs excelmanus-api
 
-# Manually update code
+# Manually update code (Gitee preferred, GitHub fallback)
 cd /www/wwwroot/excelmanus
-git fetch https://github.com/kilolonion/excelmanus main
+git fetch https://gitee.com/kilolonion/excelmanus main
+# or: git fetch https://github.com/kilolonion/excelmanus main
 git reset --hard FETCH_HEAD
 source venv/bin/activate
 pip install -e '.[all]' -q
@@ -471,7 +472,9 @@ npm install -g pm2
 
 # 4. Clone the repository
 mkdir -p /www/wwwroot
-git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
+# Gitee (faster for China users)
+git clone https://gitee.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
+# or: git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 cd /www/wwwroot/excelmanus
 
 # 5. Create venv and install dependencies

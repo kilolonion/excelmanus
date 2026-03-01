@@ -1,3 +1,8 @@
+# ⚠️  安全提醒：部署前必须设置以下环境变量（或创建 .env 文件）：
+#   PG_PASSWORD=<强随机密码>
+#   EXCELMANUS_JWT_SECRET=<至少32字符随机字符串>
+# 示例生成：openssl rand -base64 32
+
 services:
   # ── PostgreSQL ──
   postgres:
@@ -7,7 +12,7 @@ services:
     environment:
       POSTGRES_DB: excelmanus
       POSTGRES_USER: ${PG_USER:-excelmanus}
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-excelmanus}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?请设置 PG_PASSWORD 环境变量}
     volumes:
       - pg_data:/var/lib/postgresql/data
     ports:
@@ -28,8 +33,8 @@ services:
     env_file: ../.env
     environment:
       - EXCELMANUS_AUTH_ENABLED=${EXCELMANUS_AUTH_ENABLED:-true}
-      - EXCELMANUS_JWT_SECRET=${EXCELMANUS_JWT_SECRET:-}
-      - EXCELMANUS_DATABASE_URL=postgresql://${PG_USER:-excelmanus}:${PG_PASSWORD:-excelmanus}@postgres:5432/excelmanus
+      - EXCELMANUS_JWT_SECRET=${EXCELMANUS_JWT_SECRET:?请设置 EXCELMANUS_JWT_SECRET 环境变量}
+      - EXCELMANUS_DATABASE_URL=postgresql://${PG_USER:-excelmanus}:${PG_PASSWORD:?}@postgres:5432/excelmanus
       - EXCELMANUS_WORKSPACE_ROOT=/workspace
       - EXCELMANUS_DB_PATH=/data/excelmanus.db
       - EXCELMANUS_CORS_ALLOW_ORIGINS=${EXCELMANUS_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost}
@@ -59,12 +64,8 @@ services:
     environment:
       - BACKEND_INTERNAL_URL=http://backend:8000
     # 默认 NEXT_PUBLIC_BACKEND_ORIGIN 留空 → 前端自动回退 http://{hostname}:8000 直连后端
-    # 生产环境使用 Nginx 时，取消下方注释以走同源：
-    # build:
-    #   context: ../web
-    #   dockerfile: Dockerfile
-    #   args:
-    #     NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
+    # 生产环境使用 Nginx 时，在 frontend.build.args 中添加：
+    #   NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     depends_on:

@@ -6,6 +6,7 @@ if /I "%~1"=="/auto" set "AUTO=1"
 
 set "SCRIPT_DIR=%~dp0"
 set "SRC=%SCRIPT_DIR%ExcelManusSetup.cs"
+set "EMBED_SRC=%SCRIPT_DIR%EmbeddedAssets.cs"
 set "OUT=%SCRIPT_DIR%ExcelManus.exe"
 
 REM Find csc.exe (prefer x64)
@@ -24,9 +25,24 @@ if "%CSC%"=="" (
 )
 
 echo [OK] Compiler: %CSC%
-echo [..] Building EXE...
 
-"%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /win32icon:"%SCRIPT_DIR%icon.ico" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
+REM Auto-generate EmbeddedAssets.cs from setup-ui dist if needed
+if not exist "%EMBED_SRC%" (
+    if exist "%SCRIPT_DIR%setup-ui\dist\index.html" (
+        echo [..] Generating EmbeddedAssets.cs from setup-ui dist...
+        python "%SCRIPT_DIR%embed_static.py"
+    )
+)
+
+REM Compile with EmbeddedAssets.cs if available
+if exist "%EMBED_SRC%" (
+    echo [..] Building EXE with embedded React UI...
+    "%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /win32icon:"%SCRIPT_DIR%icon.ico" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%" "%EMBED_SRC%"
+) else (
+    echo [WARN] EmbeddedAssets.cs not found, building with fallback HTML UI.
+    echo [..] Building EXE...
+    "%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /win32icon:"%SCRIPT_DIR%icon.ico" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
+)
 
 if errorlevel 1 (
     echo [ERR] Build failed.

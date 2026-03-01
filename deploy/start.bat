@@ -139,13 +139,15 @@ if "%BACKEND_ONLY%"=="1" if "%FRONTEND_ONLY%"=="1" (
     goto :exit_with_pause
 )
 
-REM -- Load .env if exists --
+REM -- Load .env if exists (strip surrounding quotes from values) --
 if exist "%PROJECT_ROOT%\.env" (
     for /f "usebackq tokens=1,* delims==" %%a in ("%PROJECT_ROOT%\.env") do (
         set "line=%%a"
         if not "!line:~0,1!"=="#" (
             if not "%%a"=="" if not "%%b"=="" (
-                set "%%a=%%b"
+                set "_envval=%%b"
+                if "!_envval:~0,1!"==""^""" if "!_envval:~-1!"==""^""" set "_envval=!_envval:~1,-1!"
+                set "%%a=!_envval!"
             )
         )
     )
@@ -155,7 +157,9 @@ if exist "%PROJECT_ROOT%\.env.local" (
         set "line=%%a"
         if not "!line:~0,1!"=="#" (
             if not "%%a"=="" if not "%%b"=="" (
-                set "%%a=%%b"
+                set "_envval=%%b"
+                if "!_envval:~0,1!"==""^""" if "!_envval:~-1!"==""^""" set "_envval=!_envval:~1,-1!"
+                set "%%a=!_envval!"
             )
         )
     )
@@ -395,9 +399,9 @@ if defined PIP_MIRROR (
 exit /b %errorlevel%
 
 :kill_port
-REM Kill process on specified port
+REM Kill process on specified port (exact match to avoid killing unrelated ports)
 set "_port=%~1"
-for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":%_port% " ^| findstr "LISTENING"') do (
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr /R ":%_port%[^0-9]" ^| findstr "LISTENING"') do (
     if not "%%p"=="0" (
         echo [!!] 端口 %_port% 被占用 [PID %%p], 正在清理...
         taskkill /PID %%p /F >nul 2>&1

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 REPO_URL = "https://gitee.com/kilolonion/excelmanus.git"
 REPO_URL_GITHUB = "https://github.com/kilolonion/excelmanus.git"
+GITEE_API_TAGS = "https://gitee.com/api/v5/repos/kilolonion/excelmanus/tags"
 GITHUB_API_TAGS = "https://api.github.com/repos/kilolonion/excelmanus/tags"
 _BACKUP_DIR_NAME = "backups"
 _DATA_PATHS_TO_BACKUP = [".env", "users", "outputs", "uploads"]
@@ -68,6 +69,33 @@ class UpdateResult:
     needs_restart: bool = False
 
 
+def _read_version_from_disk(project_root: Path) -> str:
+    """从磁盘文件直接读取版本号，绕过 Python 模块缓存。
+
+    优先读 excelmanus/__init__.py 中的 __version__，
+    回退到 pyproject.toml 中的 version 字段。
+    """
+    init_py = project_root / "excelmanus" / "__init__.py"
+    if init_py.is_file():
+        try:
+            for line in init_py.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("__version__"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    toml_path = project_root / "pyproject.toml"
+    if toml_path.is_file():
+        try:
+            for line in toml_path.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("version") and "=" in line:
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return "unknown"
+
+
 def get_current_version(project_root: str | Path | None = None) -> str:
     try:
         from excelmanus import __version__
@@ -75,11 +103,7 @@ def get_current_version(project_root: str | Path | None = None) -> str:
     except ImportError:
         pass
     if project_root:
-        toml_path = Path(project_root) / "pyproject.toml"
-        if toml_path.exists():
-            for line in toml_path.read_text(encoding="utf-8").splitlines():
-                if line.strip().startswith("version") and "=" in line:
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        return _read_version_from_disk(Path(project_root))
     return "unknown"
 
 
@@ -170,11 +194,18 @@ def check_for_updates(project_root: str | Path | None = None) -> VersionInfo:
     if _is_git_repo(project_root):
         info.check_method = "git"
         rc, _, _ = _run_cmd(["git", "fetch", "origin", "--tags"], cwd=project_root, timeout=30)
+        # origin 失败时尝试 GitHub 备用源
+        git_remote = "origin"
+        if rc != 0:
+            _ensure_github_remote(project_root)
+            rc, _, _ = _run_cmd(["git", "fetch", "github", "--tags"], cwd=project_root, timeout=30)
+            if rc == 0:
+                git_remote = "github"
         if rc == 0:
             _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
             branch = branch or "main"
             _, count_str, _ = _run_cmd(
-                ["git", "rev-list", "--count", f"HEAD..origin/{branch}"], cwd=project_root,
+                ["git", "rev-list", "--count", f"HEAD..{git_remote}/{branch}"], cwd=project_root,
             )
             try:
                 info.commits_behind = int(count_str)
@@ -183,11 +214,11 @@ def check_for_updates(project_root: str | Path | None = None) -> VersionInfo:
             info.has_update = info.commits_behind > 0
             if info.has_update:
                 _, log_out, _ = _run_cmd(
-                    ["git", "log", f"HEAD..origin/{branch}", "--oneline", "-20"], cwd=project_root,
+                    ["git", "log", f"HEAD..{git_remote}/{branch}", "--oneline", "-20"], cwd=project_root,
                 )
                 info.release_notes = log_out
                 _, remote_toml, _ = _run_cmd(
-                    ["git", "show", f"origin/{branch}:pyproject.toml"], cwd=project_root,
+                    ["git", "show", f"{git_remote}/{branch}:pyproject.toml"], cwd=project_root,
                 )
                 for line in remote_toml.splitlines():
                     if line.strip().startswith("version") and "=" in line:
@@ -197,25 +228,40 @@ def check_for_updates(project_root: str | Path | None = None) -> VersionInfo:
             info.latest = info.current
         return info
 
-    # GitHub API fallback
-    info.check_method = "github_api"
-    try:
-        import urllib.request
-        req = urllib.request.Request(
+    # Gitee API 优先，GitHub API 备用
+    import urllib.request
+
+    def _fetch_latest_tag(api_url: str, headers: dict) -> str | None:
+        try:
+            req = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if data and isinstance(data, list):
+                    return data[0].get("name", "").lstrip("v")
+        except Exception:
+            return None
+        return None
+
+    # 1) 先尝试 Gitee
+    info.check_method = "gitee_api"
+    latest_tag = _fetch_latest_tag(
+        GITEE_API_TAGS, {"User-Agent": "ExcelManus-Updater"},
+    )
+    # 2) Gitee 失败则回退 GitHub
+    if not latest_tag:
+        info.check_method = "github_api"
+        latest_tag = _fetch_latest_tag(
             GITHUB_API_TAGS,
-            headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "ExcelManus-Updater"},
+            {"Accept": "application/vnd.github.v3+json", "User-Agent": "ExcelManus-Updater"},
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data and isinstance(data, list):
-                latest_tag = data[0].get("name", "").lstrip("v")
-                info.latest = latest_tag
-                info.has_update = (
-                    _parse_version_tuple(latest_tag)
-                    > _parse_version_tuple(info.current)
-                )
-    except Exception as e:
-        logger.warning("GitHub API 检查更新失败: %s", e)
+    if latest_tag:
+        info.latest = latest_tag
+        info.has_update = (
+            _parse_version_tuple(latest_tag)
+            > _parse_version_tuple(info.current)
+        )
+    else:
+        logger.warning("Gitee/GitHub API 检查更新均失败")
         info.latest = info.current
     return info
 
@@ -267,6 +313,9 @@ def backup_user_data(
     except Exception as e:
         result.error = str(e)
         logger.error("备份失败: %s", e, exc_info=True)
+        # 清理部分失败的备份目录，避免残留
+        if backup_dir.is_dir():
+            shutil.rmtree(str(backup_dir), ignore_errors=True)
     return result
 
 
@@ -392,11 +441,12 @@ def _build_pip_cmd(
 def verify_database_migration(
     project_root: str | Path | None = None,
 ) -> tuple[bool, str]:
-    """预验证数据库迁移是否可以成功执行。
+    """预检数据库连接与 schema 版本，判断启动时是否需要自动迁移。
 
-    在更新代码后、重启服务前调用，尝试打开数据库并执行迁移。
+    在更新代码后、重启服务前调用。仅检查数据库可达性和当前 schema 版本，
+    不实际执行迁移 SQL（迁移在服务启动时由 Database 构造函数自动完成）。
     Returns:
-        (success, message) — True 表示迁移成功或无需迁移。
+        (success, message) — True 表示数据库可达；False 表示连接失败。
     """
     if project_root is None:
         project_root = Path(__file__).resolve().parent.parent
@@ -495,9 +545,13 @@ def perform_update(
     _p("正在拉取最新代码...", 30)
     # 检测是否有本地修改需要暂存
     _, status_out, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
-    has_stash = bool(status_out.strip())
-    if has_stash:
-        _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
+    has_stash = False
+    if status_out.strip():
+        rc_stash, _, stash_err = _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
+        if rc_stash == 0:
+            has_stash = True
+        else:
+            _p(f"警告: git stash 失败 ({stash_err})，跳过本地修改暂存", 31)
     _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
     branch = branch or "main"
     git_remote = "origin"
@@ -519,7 +573,8 @@ def perform_update(
         rc, _, err = _run_cmd(["git", "reset", "--hard", f"{git_remote}/{branch}"], cwd=project_root)
         if rc != 0:
             result.error = f"代码更新失败: {err}"
-            _run_cmd(["git", "stash", "pop"], cwd=project_root)
+            if has_stash:
+                _run_cmd(["git", "stash", "pop"], cwd=project_root)
             return result
     result.steps_completed.append("git_pull")
     # 恢复暂存的本地修改（成功路径）
@@ -589,9 +644,9 @@ def perform_update(
     else:
         _p(f"数据库迁移预验证警告: {db_msg}（将在启动时自动重试）", 90)
 
-    # Step 6: 验证
+    # Step 6: 验证（从磁盘读取，绕过模块缓存以获取 git pull 后的真实版本）
     _p("正在验证...", 95)
-    result.new_version = get_current_version(project_root)
+    result.new_version = _read_version_from_disk(project_root)
     result.success = True
     result.needs_restart = True
     result.steps_completed.append("verified")
