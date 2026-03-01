@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, X, Clock, Shield, FileSpreadsheet, Sparkles, Bot, BarChart3 } from "lucide-react";
+import { Loader2, Github, Eye, EyeOff, AlertCircle, X, Clock, Shield, FileSpreadsheet, Sparkles, Bot, BarChart3 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { login, getOAuthUrl } from "@/lib/auth-api";
 import { proxyAvatarUrl } from "@/lib/api";
 import { useRecentAccountsStore, canAutoLogin, type RecentAccount } from "@/stores/recent-accounts-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { encryptCredential, decryptCredential } from "@/lib/credential-crypto";
 
 const cardVariants = {
   hidden: { opacity: 0, y: 24 },
@@ -72,10 +73,11 @@ function LoginForm() {
     return shouldSkip;
   })[0];
   const loginMethods = useAuthConfigStore((s) => s.loginMethods);
+  const authConfigChecked = useAuthConfigStore((s) => s.checked);
   const githubEnabled = loginMethods.github_enabled;
   const googleEnabled = loginMethods.google_enabled;
   const qqEnabled = loginMethods.qq_enabled;
-  const showOAuthSection = githubEnabled || googleEnabled || qqEnabled;
+  const showOAuthSection = authConfigChecked && (githubEnabled || googleEnabled || qqEnabled);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -86,7 +88,16 @@ function LoginForm() {
   const [showRecentList, setShowRecentList] = useState(true);
   const [rememberMe, setRememberMe] = useState(false);
   const [autoLoggingIn, setAutoLoggingIn] = useState(false);
-  const [oauthAgreed, setOauthAgreed] = useState(false);
+  const autoLoginAttemptedRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const requireAgreement = loginMethods.require_agreement;
+  const [agreed, setAgreed] = useState(false);
+  const [agreementShake, setAgreementShake] = useState(false);
 
   useEffect(() => {
     const prefill = searchParams.get("email");
@@ -106,26 +117,36 @@ function LoginForm() {
 
   // 自动登录逻辑：检查最近账号是否有保存的密码且未过期
   useEffect(() => {
+    // 仅尝试一次自动登录，防止清空邮箱后重触发
+    if (autoLoginAttemptedRef.current) return;
     // 如果有 email 参数，不自动登录
     if (searchParams.get("email")) return;
     // 用户刚主动退出：本次页面生命周期内禁止自动登录
-    if (skipAutoLoginAfterLogout) {
-      return;
-    }
+    if (skipAutoLoginAfterLogout) return;
     // 如果已经有最近账号，尝试自动登录第一个可用的
-    if (recentAccounts.length > 0 && !email && !autoLoggingIn) {
+    if (recentAccounts.length > 0 && !autoLoggingIn) {
       const account = recentAccounts.find(canAutoLogin);
       if (account && account.savedPassword) {
+        autoLoginAttemptedRef.current = true;
         setAutoLoggingIn(true);
         setEmail(account.email);
-        setPassword(account.savedPassword);
         setShowRecentList(false);
-        setTimeout(async () => {
+        const timer = setTimeout(async () => {
+          if (!mountedRef.current) return;
           try {
             setError("");
-            await login(account.email, account.savedPassword!);
+            const plainPwd = await decryptCredential(account.savedPassword!);
+            if (!mountedRef.current) return;
+            if (!plainPwd) {
+              setAutoLoggingIn(false);
+              setError("保存的密码已失效，请重新输入");
+              return;
+            }
+            await login(account.email, plainPwd);
+            if (!mountedRef.current) return;
             router.push("/");
           } catch (err) {
+            if (!mountedRef.current) return;
             console.error("自动登录失败:", err);
             setAutoLoggingIn(false);
             setEmail(account.email);
@@ -133,24 +154,36 @@ function LoginForm() {
             setError("自动登录失败，请重新输入密码");
           }
         }, 100);
+        return () => clearTimeout(timer);
       }
     }
-  }, [recentAccounts, searchParams, email, autoLoggingIn, router, skipAutoLoginAfterLogout]);
+  }, [recentAccounts, searchParams, autoLoggingIn, router, skipAutoLoginAfterLogout]);
 
-  const canSubmit = email.trim().length > 0 && password.length > 0 && !loading;
+  const canSubmit = email.trim().length > 0 && password.length > 0 && !loading && (!requireAgreement || agreed);
+
+  const triggerAgreementShake = useCallback(() => {
+    setAgreementShake(true);
+    setTimeout(() => setAgreementShake(false), 600);
+  }, []);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
+    if (requireAgreement && !agreed) {
+      setError("请先阅读并同意《服务条款》和《隐私政策》后再登录");
+      triggerAgreementShake();
+      return;
+    }
     setError("");
     setLoading(true);
     try {
       await login(email.trim(), password);
-      // 登录成功后，记录到最近账号（如果选择了记住我，保存密码）
+      // 登录成功后，记录到最近账号（如果选择了记住我，加密保存密码）
+      const encPwd = rememberMe ? await encryptCredential(password) : undefined;
       recordLogin({
         email: email.trim(),
         displayName: "",
         avatarUrl: null,
-        password: rememberMe ? password : undefined,
+        password: encPwd,
         rememberMe,
       });
       router.push("/");
@@ -159,11 +192,12 @@ function LoginForm() {
     } finally {
       setLoading(false);
     }
-  }, [email, password, router, rememberMe, recordLogin]);
+  }, [email, password, router, rememberMe, recordLogin, requireAgreement, agreed, triggerAgreementShake]);
 
   const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
-    if (!oauthAgreed) {
-      setError("请先同意用户服务协议和隐私政策");
+    if (requireAgreement && !agreed) {
+      setError("请先阅读并同意《服务条款》和《隐私政策》后再登录");
+      triggerAgreementShake();
       return;
     }
     setOauthLoading(provider);
@@ -176,17 +210,30 @@ function LoginForm() {
       setError(`${names[provider]} 登录暂不可用`);
       setOauthLoading(null);
     }
-  }, [oauthAgreed]);
+  }, [requireAgreement, agreed, triggerAgreementShake]);
 
   const handlePickAccount = useCallback(async (account: RecentAccount) => {
     setError("");
     // 如果账号有保存的密码且未过期，直接自动登录
     if (canAutoLogin(account) && account.savedPassword) {
+      if (requireAgreement && !agreed) {
+        setError("请先阅读并同意《服务条款》和《隐私政策》后再登录");
+        triggerAgreementShake();
+        return;
+      }
       setAutoLoggingIn(true);
       setEmail(account.email);
       setShowRecentList(false);
       try {
-        await login(account.email, account.savedPassword);
+        const plainPwd = await decryptCredential(account.savedPassword);
+        if (!plainPwd) {
+          setAutoLoggingIn(false);
+          setError("保存的密码已失效，请重新输入");
+          setShowRecentList(false);
+          setTimeout(() => document.getElementById("password")?.focus(), 50);
+          return;
+        }
+        await login(account.email, plainPwd);
         router.push("/");
       } catch (err) {
         console.error("快捷登录失败:", err);
@@ -203,12 +250,12 @@ function LoginForm() {
     setEmail(account.email);
     setShowRecentList(false);
     setTimeout(() => document.getElementById("password")?.focus(), 50);
-  }, [router]);
+  }, [router, requireAgreement, agreed, triggerAgreementShake]);
 
   const showRecent = showRecentList && recentAccounts.length > 0 && !email;
 
   return (
-    <div className="h-screen flex bg-gradient-to-b from-background to-muted/30 relative overflow-hidden">
+    <div className="h-viewport flex bg-gradient-to-b from-background to-muted/30 relative overflow-hidden">
       {/* Decorative background orbs */}
       <div className="auth-bg-orb auth-bg-orb-1" />
       <div className="auth-bg-orb auth-bg-orb-2" />
@@ -278,7 +325,7 @@ function LoginForm() {
       </div>
 
       {/* ── Right: Login form ── */}
-      <div className="flex-1 flex items-center justify-center px-4 py-8 overflow-y-auto relative z-10">
+      <div className="flex-1 flex items-center justify-center px-4 py-8 overflow-y-auto relative z-10 scroll-pb-24">
         <motion.div
           className="w-full max-w-[420px] auth-card"
           variants={cardVariants}
@@ -302,6 +349,13 @@ function LoginForm() {
             <div className="flex flex-col items-center gap-3 py-6">
               <Loader2 className="h-6 w-6 animate-spin text-[var(--em-primary)]" />
               <p className="text-sm text-muted-foreground">正在自动登录…</p>
+              <button
+                type="button"
+                onClick={() => { setAutoLoggingIn(false); setEmail(""); setShowRecentList(true); }}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-1"
+              >
+                取消
+              </button>
             </div>
           )}
 
@@ -380,6 +434,28 @@ function LoginForm() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Agreement checkbox — shown alongside quick login cards */}
+          {showRecent && !autoLoggingIn && requireAgreement && (
+            <label
+              className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-all ${
+                agreementShake ? "animate-shake bg-destructive/5 ring-1 ring-destructive/30" : ""
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={agreed}
+                onChange={(e) => { setAgreed(e.target.checked); if (e.target.checked) setError(""); }}
+                className="auth-checkbox mt-0.5"
+              />
+              <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
+                我已阅读并同意{" "}
+                <Link href="/terms" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>服务条款</Link>{" "}
+                和{" "}
+                <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
+              </span>
+            </label>
+          )}
 
           {/* Form - shown when no recent accounts picked or user wants manual entry */}
           {!showRecent && !autoLoggingIn && (
@@ -466,6 +542,28 @@ function LoginForm() {
                 </label>
               </div>
 
+              {/* Agreement checkbox — inside form, visible for email/password login */}
+              {requireAgreement && (
+                <label
+                  className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-all ${
+                    agreementShake ? "animate-shake bg-destructive/5 ring-1 ring-destructive/30" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={agreed}
+                    onChange={(e) => { setAgreed(e.target.checked); if (e.target.checked) setError(""); }}
+                    className="auth-checkbox mt-0.5"
+                  />
+                  <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
+                    我已阅读并同意{" "}
+                    <Link href="/terms" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>服务条款</Link>{" "}
+                    和{" "}
+                    <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
+                  </span>
+                </label>
+              )}
+
               <Button
                 type="submit"
                 disabled={!canSubmit}
@@ -490,24 +588,6 @@ function LoginForm() {
             </div>
           )}
 
-          {/* OAuth agreement */}
-          {showOAuthSection && !autoLoggingIn && (
-            <label className="flex items-start gap-2.5 cursor-pointer group py-0.5">
-              <input
-                type="checkbox"
-                checked={oauthAgreed}
-                onChange={(e) => { setOauthAgreed(e.target.checked); if (e.target.checked) setError(""); }}
-                className="auth-checkbox mt-0.5"
-              />
-              <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
-                我已阅读并同意{" "}
-                <Link href="/terms" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>服务条款</Link>{" "}
-                和{" "}
-                <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
-              </span>
-            </label>
-          )}
-
           {/* OAuth */}
           {showOAuthSection && !autoLoggingIn && (
             <div className={`grid gap-3 ${[githubEnabled, googleEnabled, qqEnabled].filter(Boolean).length >= 2 ? "grid-cols-2" : "grid-cols-1"}`}>
@@ -515,7 +595,7 @@ function LoginForm() {
                 <Button
                   variant="outline"
                   className="auth-oauth-btn h-11 font-normal"
-                  disabled={oauthLoading !== null || !oauthAgreed}
+                  disabled={oauthLoading !== null}
                   onClick={() => handleOAuth("github")}
                 >
                   {oauthLoading === "github" ? (
@@ -532,14 +612,19 @@ function LoginForm() {
                 <Button
                   variant="outline"
                   className="auth-oauth-btn h-11 font-normal"
-                  disabled={oauthLoading !== null || !oauthAgreed}
+                  disabled={oauthLoading !== null}
                   onClick={() => handleOAuth("google")}
                 >
                   {oauthLoading === "google" ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <>
-                      <Mail className="h-4 w-4 mr-2" />
+                      <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                      </svg>
                       Google
                     </>
                   )}
@@ -549,7 +634,7 @@ function LoginForm() {
                 <Button
                   variant="outline"
                   className="auth-oauth-btn h-11 font-normal"
-                  disabled={oauthLoading !== null || !oauthAgreed}
+                  disabled={oauthLoading !== null}
                   onClick={() => handleOAuth("qq")}
                 >
                   {oauthLoading === "qq" ? (
@@ -574,6 +659,7 @@ function LoginForm() {
                 注册
               </Link>
             </p>
+            {!requireAgreement && (
             <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
               <Link href="/terms" target="_blank" className="hover:text-[var(--em-primary)] transition-colors">
                 服务条款
@@ -583,6 +669,7 @@ function LoginForm() {
                 隐私政策
               </Link>
             </div>
+            )}
           </div>
           )}
           </div>

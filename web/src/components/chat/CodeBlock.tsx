@@ -70,13 +70,13 @@ export const CodeBlock = React.memo(function CodeBlock({
           {highlightedHtml ? (
             <code
               ref={codeRef}
-              className={`hljs text-[12.5px] leading-relaxed font-mono ${language ? `language-${language}` : ""}`}
+              className={`hljs text-[11px] sm:text-[12.5px] leading-relaxed font-mono ${language ? `language-${language}` : ""}`}
               dangerouslySetInnerHTML={{ __html: highlightedHtml }}
             />
           ) : (
             <code
               ref={codeRef}
-              className="text-[12.5px] leading-relaxed font-mono text-foreground"
+              className="text-[11px] sm:text-[12.5px] leading-relaxed font-mono text-foreground"
             >
               {code}
             </code>

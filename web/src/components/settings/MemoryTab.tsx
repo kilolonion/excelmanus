@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Trash2, Loader2, Brain, ChevronRight, Sparkles } from "lucide-react";
+import { Trash2, Loader2, Brain, ChevronRight, Sparkles, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
+import { isSettingsDemoActive, onSettingsDemoChange, DEMO_MEMORIES } from "@/components/onboarding/demo-settings";
 
 interface MemoryEntry {
   id: string;
@@ -46,6 +47,41 @@ function formatTimestamp(ts: string): string {
   } catch {
     return ts;
   }
+}
+
+function DemoMemoryBanner() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    setActive(isSettingsDemoActive());
+    return onSettingsDemoChange(() => setActive(isSettingsDemoActive()));
+  }, []);
+  if (!active) return null;
+  return (
+    <div className="space-y-1.5 mb-2">
+      {DEMO_MEMORIES.map((mem) => (
+        <div
+          key={mem.id}
+          className="rounded-lg border border-dashed border-[var(--em-primary-alpha-25)] bg-[var(--em-primary-alpha-06)] overflow-hidden settings-tour-demo-item"
+        >
+          <div className="flex items-start gap-2 px-3 py-2.5">
+            <Star className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" style={{ color: "var(--em-primary)" }} />
+            <div className="flex-1 min-w-0">
+              <p className="text-[13px] text-foreground leading-relaxed">{mem.content}</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                <Badge
+                  className={`text-[9px] px-1.5 py-0 border-0 ${CATEGORY_COLORS[mem.category] ?? "bg-muted text-muted-foreground"}`}
+                  variant="secondary"
+                >
+                  {CATEGORY_LABELS[mem.category] ?? mem.category}
+                </Badge>
+                <span className="text-[10px] text-muted-foreground/50">示例记忆</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function MemoryTab() {
@@ -125,7 +161,7 @@ export function MemoryTab() {
     <div className="space-y-3">
 
       {/* ── Category filter pills ── */}
-      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none">
+      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none" data-coach-id="coach-settings-memory-filters">
         {([null, ...CATEGORIES] as const).map((cat) => {
           const key = cat ?? "all";
           const isActive = categoryFilter === cat;
@@ -153,8 +189,9 @@ export function MemoryTab() {
       </div>
 
       {/* ── Memory list grouped by category ── */}
-      <div className="space-y-3">
-        {orderedCategories.length === 0 && (
+      <div className="space-y-3" data-coach-id="coach-settings-memory-list">
+        <DemoMemoryBanner />
+        {orderedCategories.length === 0 && !isSettingsDemoActive() && (
           <div className="text-center py-8">
             <Brain className="h-8 w-8 mx-auto mb-2 text-muted-foreground/30" />
             <p className="text-xs text-muted-foreground">

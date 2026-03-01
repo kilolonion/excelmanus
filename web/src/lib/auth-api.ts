@@ -260,6 +260,7 @@ export async function refreshAccessToken(): Promise<boolean> {
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
     if (!res.ok) {
+      // 服务端明确拒绝（401/403 等）→ token 已失效，执行登出
       logout();
       _clearSessionCookie();
       return false;
@@ -267,9 +268,10 @@ export async function refreshAccessToken(): Promise<boolean> {
     const data: TokenResponse = await res.json();
     handleTokenResponse(data);
     return true;
-  } catch {
-    logout();
-    _clearSessionCookie();
+  } catch (err) {
+    // 网络错误（Failed to fetch / DNS / timeout）→ 不登出，仅返回 false，
+    // 允许后续请求重试。避免临时网络波动把用户踢出登录。
+    console.warn("[auth] token refresh network error, will retry later:", err);
     return false;
   }
 }

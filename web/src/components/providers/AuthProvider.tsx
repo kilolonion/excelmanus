@@ -7,6 +7,7 @@ import {
   fetchCurrentUser,
   refreshAccessToken,
   isTokenExpired,
+  clearSessionCookie,
 } from "@/lib/auth-api";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 
@@ -18,20 +19,29 @@ interface AuthProviderProps {
 }
 
 /**
- * 乐观认证提供者。
+ * 安全优先认证提供者。
  *
- * 若 localStorage 中已有未过期的 JWT 则立即渲染页面；
- * 通过后台请求 /auth/me 静默校验会话。
- * 仅当确实没有本地 token 且需等待刷新尝试时才显示加载动画。
+ * 渲染决策完全在渲染路径中同步计算（基于响应式 zustand hook），
+ * 不依赖任何 useEffect 异步置状态来控制 gate，
+ * 从而杜绝 "水合完成 → useEffect 运行前" 窗口期的内容泄漏。
+ *
+ * 规则：
+ * 1. zustand 未水合 → null
+ * 2. 公开路径 → 放行
+ * 3. 有效本地 token（未过期 JWT） → 乐观放行，后台静默校验
+ * 4. 其余情况 → LoadingScreen 阻塞，等待后台刷新/重定向
  */
 export function AuthProvider({ children, authEnabled = false }: AuthProviderProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [hydrated, setHydrated] = useState(false);
-  // gateOpen 控制是否渲染子节点。初始为 true，仅在确认用户无可用本地 token 且需等待网络请求时才关闭。
-  const [gateOpen, setGateOpen] = useState(true);
-  const [showSpinner, setShowSpinner] = useState(false);
   const validatedRef = useRef(false);
+
+  // ── 响应式订阅认证状态（logout/setTokens 后自动触发重渲染）──
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const accessToken = useAuthStore((s) => s.accessToken);
+
+  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
 
   // ── 水合监听 ───────────────────────────────────
   useEffect(() => {
@@ -40,49 +50,19 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     return unsub;
   }, []);
 
-  // ── 水合后立即决定 gate 状态 ────────
-  useEffect(() => {
-    if (!hydrated || !authEnabled) return;
-
-    const { isAuthenticated, accessToken } = useAuthStore.getState();
-    const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-
-    if (isPublic) {
-      // 公开页始终立即渲染
-      setGateOpen(true);
-      return;
-    }
-
-    if (isAuthenticated && accessToken && !isTokenExpired(accessToken)) {
-      // 本地 token 有效 → 立即渲染，后台校验
-      setGateOpen(true);
-      return;
-    }
-
-    // 本地无可用 token，需等待刷新或重定向
-    setGateOpen(false);
-    setShowSpinner(true);
-  }, [hydrated, authEnabled, pathname]);
-
-  // ── 后台校验（每次挂载执行一次）──────────
+  // ── 后台校验（水合后执行一次）──────────
   const validateSession = useCallback(async () => {
     if (!authEnabled) return;
 
-    const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-    const { isAuthenticated, accessToken, refreshToken } = useAuthStore.getState();
+    const state = useAuthStore.getState();
 
     // 情况 1：完全没有 token
-    if (!isAuthenticated || !accessToken) {
-      if (refreshToken) {
+    if (!state.isAuthenticated || !state.accessToken) {
+      if (state.refreshToken) {
         const refreshed = await refreshAccessToken();
-        if (refreshed) {
-          setGateOpen(true);
-          setShowSpinner(false);
-          return;
-        }
+        if (refreshed) return; // store 更新 → 响应式 hook 触发重渲染 → 放行
       }
       if (!isPublic) router.replace("/login");
-      setShowSpinner(false);
       return;
     }
 
@@ -94,18 +74,14 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     }
 
     // 情况 3：本地 token 已过期 → 先尝试刷新
-    if (isTokenExpired(accessToken)) {
-      if (refreshToken) {
+    if (isTokenExpired(state.accessToken)) {
+      if (state.refreshToken) {
         const refreshed = await refreshAccessToken();
-        if (refreshed) {
-          setGateOpen(true);
-          setShowSpinner(false);
-          return;
-        }
+        if (refreshed) return;
       }
       useAuthStore.getState().logout();
+      clearSessionCookie();
       router.replace("/login");
-      setShowSpinner(false);
       return;
     }
 
@@ -116,14 +92,16 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
         const refreshed = await refreshAccessToken();
         if (!refreshed) {
           useAuthStore.getState().logout();
+          clearSessionCookie();
           router.replace("/login");
         }
       }
     } catch {
       useAuthStore.getState().logout();
+      clearSessionCookie();
       router.replace("/login");
     }
-  }, [authEnabled, pathname, router]);
+  }, [authEnabled, pathname, router, isPublic]);
 
   useEffect(() => {
     if (!hydrated || validatedRef.current) return;
@@ -131,21 +109,22 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     validateSession();
   }, [hydrated, validateSession]);
 
-  // ── 渲染逻辑 ─────────────────────────────────────────
+  // ── 渲染逻辑（纯同步，无异步状态依赖）──────────────
 
+  // 认证未启用 → 始终放行
   if (!authEnabled) return <>{children}</>;
 
-  // 仍在等待 zustand 从 localStorage 水合
+  // zustand 尚未从 localStorage 水合 → 不渲染任何内容
   if (!hydrated) return null;
 
-  // gate 关闭：无可用本地 token，等待网络
-  if (!gateOpen && showSpinner) {
-    return <LoadingScreen message="验证身份中..." />;
+  // 公开路径 → 始终放行
+  if (isPublic) return <>{children}</>;
+
+  // 同步判定：有效本地 token → 乐观放行（后台 validateSession 静默校验）
+  if (isAuthenticated && accessToken && !isTokenExpired(accessToken)) {
+    return <>{children}</>;
   }
 
-  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
-  const { isAuthenticated } = useAuthStore.getState();
-  if (!isAuthenticated && !isPublic && !gateOpen) return null;
-
-  return <>{children}</>;
+  // 无有效 token → 阻塞渲染，显示加载（validateSession 正在后台刷新或重定向）
+  return <LoadingScreen message="验证身份中..." />;
 }

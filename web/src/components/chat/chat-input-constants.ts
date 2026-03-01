@@ -22,13 +22,8 @@ import {
   FolderOpen,
 } from "lucide-react";
 
-export const ACCEPTED_EXTENSIONS = {
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-  "application/vnd.ms-excel": [".xls"],
-  "text/csv": [".csv"],
-  "image/png": [".png"],
-  "image/jpeg": [".jpg", ".jpeg"],
-};
+// 不限制上传文件类型 — 后端仅做大小限制
+export const ACCEPTED_EXTENSIONS: Record<string, string[]> | undefined = undefined;
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 export function isImageFile(name: string): boolean {
@@ -108,16 +103,10 @@ export function friendlyUploadError(err: unknown): string {
   return "上传失败，请重试";
 }
 
-const UPLOADABLE_EXTS = [".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"];
-const _FILE_URL_RE = new RegExp(
-  `^https?://\\S+(?:${UPLOADABLE_EXTS.map((e) => e.replace(".", "\\.")).join("|")})(?:[?#].*)?$`,
-  "i"
-);
-
-/** 检测文本是否为可上传的文件 URL */
+/** 检测文本是否为可上传的文件 URL（匹配带扩展名的 http(s) 链接） */
 export function detectFileUrl(text: string): string | null {
   const trimmed = text.trim();
-  if (_FILE_URL_RE.test(trimmed)) return trimmed;
+  if (/^https?:\/\/\S+\.[a-z0-9]{1,10}(?:[?#].*)?$/i.test(trimmed)) return trimmed;
   return null;
 }
 

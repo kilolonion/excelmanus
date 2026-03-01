@@ -12,6 +12,7 @@ import {
   Database,
   Palette,
   ShieldCheck,
+  Zap,
 } from "lucide-react";
 import type { PipelineStatus } from "@/stores/chat-store";
 
@@ -34,6 +35,9 @@ const STAGES = [
   { key: "vlm_extract_data", label: "提取数据", icon: Database },
   { key: "vlm_extract_style", label: "提取样式", icon: Palette },
   { key: "vlm_extract_verification", label: "自校验", icon: ShieldCheck },
+  // 单轮合并提取（视觉原生模式）
+  { key: "single_pass", label: "单轮提取", icon: Zap },
+  { key: "single_pass_done", label: "提取完成", icon: Check },
   // B 通道 VLM 描述
   { key: "vlm_describe", label: "图片描述", icon: FileSearch },
 ] as const;

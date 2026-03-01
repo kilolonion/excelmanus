@@ -8,7 +8,7 @@
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
+import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -657,7 +657,8 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
 
     case "excel_diff": {
       const edFilePath = (data.file_path as string) || "";
-      useExcelStore.getState().addDiff({
+      const edDiffMode = (data.diff_mode as string) || undefined;
+      const edEntry: ExcelDiffEntry = {
         toolCallId: (data.tool_call_id as string) || "",
         filePath: edFilePath,
         sheet: (data.sheet as string) || "",
@@ -667,7 +668,25 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         oldMergeRanges: Array.isArray(data.old_merge_ranges) ? data.old_merge_ranges as MergeRange[] : undefined,
         metadataHints: Array.isArray(data.metadata_hints) ? data.metadata_hints as string[] : undefined,
         timestamp: Date.now(),
-      });
+      };
+      if (edDiffMode === "cross_file" || edDiffMode === "cross_sheet") {
+        edEntry.diffMode = edDiffMode;
+        edEntry.filePathB = (data.file_path_b as string) || "";
+        edEntry.sheetB = (data.sheet_b as string) || "";
+        const rawSummary = data.diff_summary as Record<string, unknown> | undefined;
+        if (rawSummary) {
+          edEntry.diffSummary = {
+            totalCellsCompared: (rawSummary.total_cells_compared as number) || 0,
+            cellsDifferent: (rawSummary.cells_different as number) || 0,
+            rowsAdded: (rawSummary.rows_added as number) || 0,
+            rowsDeleted: (rawSummary.rows_deleted as number) || 0,
+            rowsModified: (rawSummary.rows_modified as number) || 0,
+            columnsAdded: (rawSummary.columns_added as string[]) || [],
+            columnsDeleted: (rawSummary.columns_deleted as string[]) || [],
+          };
+        }
+      }
+      useExcelStore.getState().addDiff(edEntry);
       if (edFilePath) {
         const fn = edFilePath.split("/").pop() || edFilePath;
         useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
@@ -784,6 +803,24 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
+    // ── 计划创建 ────────────────────────────
+    case "plan_created": {
+      const planTitle = (data.plan_title as string) || "";
+      const planTaskCount = (data.plan_task_count as number) || 0;
+      if (planTitle) {
+        S().appendBlock(msgId, {
+          type: "status",
+          label: `已创建计划「${planTitle}」（${planTaskCount} 项任务）`,
+          variant: "info",
+        });
+      }
+      break;
+    }
+
+    // ── 对话摘要（前端静默消费，不渲染） ────────
+    case "chat_summary":
+      break;
+
     // ── 模式变更 ────────────────────────────
     case "mode_changed": {
       const uiMode = useUIStore.getState();
@@ -830,10 +867,53 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "done": {
+      // 仅清除流水线进度指示器。
+      // 不要在此处调用 setStreaming(false) / setAbortController(null) / saveCurrentSession()！
+      // 这些清理由 chat-actions.ts 的 finally 块统一执行。
+      // 如果在 done 事件中提前清除，会导致 SessionSync 的 useEffect 在 finally 之前触发，
+      // 引发 refreshSessionMessagesFromBackend 读到后端尚未持久化的旧数据，造成消息闪烁。
       S().setPipelineStatus(null);
-      S().saveCurrentSession();
-      S().setStreaming(false);
-      S().setAbortController(null);
+      break;
+    }
+
+    case "llm_retry": {
+      const retryStatus = data.retry_status as string;
+      const retryAttempt = (data.retry_attempt as number) || 0;
+      const retryMax = (data.retry_max_attempts as number) || 0;
+      const retryDelay = (data.retry_delay_seconds as number) || 0;
+      const retryError = (data.retry_error_message as string) || "";
+
+      if (retryStatus === "retrying") {
+        // 追加或更新 retry block
+        S().upsertBlockByType(msgId, "llm_retry", {
+          type: "llm_retry",
+          retryAttempt: retryAttempt,
+          retryMaxAttempts: retryMax,
+          retryDelaySeconds: retryDelay,
+          retryErrorMessage: retryError,
+          retryStatus: "retrying",
+        });
+      } else if (retryStatus === "succeeded") {
+        // 重试成功：更新 block 状态
+        S().upsertBlockByType(msgId, "llm_retry", {
+          type: "llm_retry",
+          retryAttempt: retryAttempt,
+          retryMaxAttempts: retryMax,
+          retryDelaySeconds: 0,
+          retryErrorMessage: "",
+          retryStatus: "succeeded",
+        });
+      } else if (retryStatus === "exhausted") {
+        // 重试耗尽
+        S().upsertBlockByType(msgId, "llm_retry", {
+          type: "llm_retry",
+          retryAttempt: retryAttempt,
+          retryMaxAttempts: retryMax,
+          retryDelaySeconds: 0,
+          retryErrorMessage: retryError,
+          retryStatus: "exhausted",
+        });
+      }
       break;
     }
 

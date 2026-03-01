@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Github, Mail, MailCheck, Loader2, AlertCircle, CheckCircle, Save, Eye, EyeOff } from "lucide-react";
+import { Github, Mail, MailCheck, Loader2, AlertCircle, CheckCircle, Save, Eye, EyeOff, ScrollText } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,7 +27,7 @@ function Toggle({ icon, title, description, checked, loading, onChange }: Toggle
       <div className="flex items-start gap-3 min-w-0">
         <div
           className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg"
-          style={{ backgroundColor: "var(--em-primary)", opacity: 0.12 }}
+          style={{ backgroundColor: "color-mix(in srgb, var(--em-primary) 12%, transparent)" }}
         >
           <span style={{ color: "var(--em-primary)" }}>{icon}</span>
         </div>
@@ -149,7 +149,7 @@ function CredentialSection({ icon, title, description, children, dirty, saving, 
       <div className="flex items-start gap-3 p-4 pb-2">
         <div
           className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg"
-          style={{ backgroundColor: "var(--em-primary)", opacity: 0.12 }}
+          style={{ backgroundColor: "color-mix(in srgb, var(--em-primary) 12%, transparent)" }}
         >
           <span style={{ color: "var(--em-primary)" }}>{icon}</span>
         </div>
@@ -561,6 +561,24 @@ export default function LoginConfigTab() {
               placeholder="如 ExcelManus <noreply@example.com>"
             />
           </CredentialSection>
+        </div>
+      </div>
+
+      {/* ── 用户协议 ─────────────────────────────── */}
+      <div className="border-t border-border pt-6">
+        <h3 className="text-sm font-semibold mb-1">用户协议</h3>
+        <p className="text-xs text-muted-foreground mb-3">
+          控制登录和注册页面是否展示并要求用户勾选《服务条款》与《隐私政策》。关闭后用户无需勾选即可登录/注册。
+        </p>
+        <div className="space-y-2">
+          <Toggle
+            icon={<ScrollText className="h-4 w-4" />}
+            title="要求同意用户协议"
+            description="登录和注册时必须勾选同意《服务条款》和《隐私政策》"
+            checked={config.require_agreement}
+            loading={toggling === "require_agreement"}
+            onChange={(val) => handleToggle("require_agreement", val)}
+          />
         </div>
       </div>
     </motion.div>

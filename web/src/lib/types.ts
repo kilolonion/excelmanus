@@ -11,6 +11,8 @@ export interface AttachedFile {
   status: "uploading" | "success" | "failed";
   uploadResult?: { filename: string; path: string; size: number };
   error?: string;
+  /** 预编码的 base64 数据（由示例卡片预上传时生成），sendMessage 可跳过重复编码 */
+  cachedBase64?: string;
 }
 
 export interface Session {
@@ -128,6 +130,14 @@ export type AssistantBlock =
       type: "staging_hint";
       pendingCount: number;
       files: string[];
+    }
+  | {
+      type: "llm_retry";
+      retryAttempt: number;
+      retryMaxAttempts: number;
+      retryDelaySeconds: number;
+      retryErrorMessage: string;
+      retryStatus: "retrying" | "succeeded" | "exhausted";
     };
 
 export interface TaskItem {

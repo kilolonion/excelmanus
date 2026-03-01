@@ -11,6 +11,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
 import type { Session, AssistantBlock } from "@/lib/types";
+import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
 
 /** 将后端 route_mode 映射为用户友好的中文标签（与 chat-actions.ts 保持一致） */
 const _ROUTE_MODE_LABELS: Record<string, string> = {
@@ -125,11 +126,14 @@ export function SessionSync() {
 
         // 若 activeSessionId（从 localStorage 恢复）与后端已知会话都不匹配，则清空以避免陈旧 404 轮询风暴。
         // 若有活跃 SSE 流（乐观创建尚未到达服务端）则跳过。
+        // Demo sessions are local-only — never prune them via backend sync.
         const currentActive = useSessionStore.getState().activeSessionId;
-        if (currentActive && !mapped.some((s) => s.id === currentActive)) {
-          const hasActiveStream = useChatStore.getState().abortController !== null;
-          if (!hasActiveStream) {
-            setActiveSession(null);
+        if (currentActive && !currentActive.startsWith(DEMO_SESSION_PREFIX) && !mapped.some((s) => s.id === currentActive)) {
+          {
+            const hasActiveStream = useChatStore.getState().abortController !== null;
+            if (!hasActiveStream) {
+              setActiveSession(null);
+            }
           }
         }
       } catch {
@@ -140,7 +144,7 @@ export function SessionSync() {
     void syncSessions();
     const timer = window.setInterval(() => {
       void syncSessions();
-    }, 15000);
+    }, 15_000);
 
     return () => {
       cancelled = true;
@@ -151,6 +155,10 @@ export function SessionSync() {
   useEffect(() => {
     // 本地 SSE 流活跃时不自动切换会话；等流结束再切换，避免清掉乐观进行中的消息。
     if (abortController) return;
+
+    // Demo sessions are fully managed by CoachMarks — skip async switchSession
+    // which would wipe mock messages by trying to load from IDB/backend.
+    if (activeSessionId?.startsWith(DEMO_SESSION_PREFIX)) return;
 
     if (!activeSessionId) {
       if (currentSessionId !== null) {
@@ -174,6 +182,9 @@ export function SessionSync() {
       }
       return;
     }
+
+    // Demo sessions are local-only — skip backend polling entirely.
+    if (activeSessionId.startsWith(DEMO_SESSION_PREFIX)) return;
 
     let cancelled = false;
     const prevInFlightRef = { current: false };
@@ -202,6 +213,7 @@ export function SessionSync() {
 
         // 收到有效响应，重置计数器
         notFoundCount = 0;
+        consecutiveErrors = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
         setVisionCapable(detail.visionCapable);
@@ -211,7 +223,7 @@ export function SessionSync() {
         // 轮询覆盖会导致用户切换模式后几秒被重置回旧值。
         // 后端主动推送的模式变更（SSE mode_changed 事件）仍然生效。
         const modelName = detail.currentModelName || detail.currentModel;
-        setCurrentModel(modelName ?? "");
+        if (modelName) setCurrentModel(modelName);
 
         // 重要：pollDetail 为异步，可能与乐观本地 sendMessage() 竞态。
         // 在任何会覆盖消息的刷新前，务必重新读取最新 chat 状态，避免擦除刚追加的本地 user/assistant 气泡。
@@ -296,26 +308,34 @@ export function SessionSync() {
         if (cancelled) {
           return;
         }
-        // 网络错误或非 404 服务端错误：重置 UI 开关但保留会话项。不重置 currentModel（由 TopModelSelector 独立管理），也不重置 chatMode（用户驱动状态）。
-        setFullAccessEnabled(false);
+        // 网络错误（如断网/超时）：不重置 UI 开关，避免瞬时网络波动导致用户丢失 Full Access 状态。
+        // fullAccessEnabled 等 UI 状态会在下一次成功轮询时自然恢复。
+        consecutiveErrors++;
       }
     };
 
     // 自适应轮询：inFlight 时 2s 高频同步，空闲时 5s 低频检查
+    // 连续失败时指数退避（最大 30s），成功时重置
+    // 性能优化：首次延迟 800ms 再触发，避免与 switchSession 的消息加载竞态
     const POLL_FAST = 2000;
     const POLL_IDLE = 5000;
+    const POLL_MAX_BACKOFF = 30_000;
+    const POLL_INITIAL_DELAY = 800;
     let currentInterval = POLL_FAST;
+    let consecutiveErrors = 0;
     let timer = window.setTimeout(function schedule() {
       void pollDetail().then(() => {
         if (cancelled) return;
         const isActive = prevInFlightRef.current;
-        const nextInterval = isActive ? POLL_FAST : POLL_IDLE;
-        if (nextInterval !== currentInterval) {
-          currentInterval = nextInterval;
+        let nextInterval = isActive ? POLL_FAST : POLL_IDLE;
+        // 连续失败时指数退避
+        if (consecutiveErrors > 0) {
+          nextInterval = Math.min(nextInterval * Math.pow(2, consecutiveErrors), POLL_MAX_BACKOFF);
         }
+        currentInterval = nextInterval;
         timer = window.setTimeout(schedule, currentInterval);
       });
-    }, 0); // 首次立即触发
+    }, POLL_INITIAL_DELAY); // 延迟首次触发，避免与 switchSession 竞态
 
     return () => {
       cancelled = true;

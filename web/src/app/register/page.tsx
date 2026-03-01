@@ -3,7 +3,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Loader2, Github, Mail, Eye, EyeOff, AlertCircle, Check, X, MailCheck, Shield, FileSpreadsheet, Sparkles, Bot, BarChart3 } from "lucide-react";
+import { Loader2, Github, Eye, EyeOff, AlertCircle, Check, X, MailCheck, Shield, FileSpreadsheet, Sparkles, Bot, BarChart3 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { register, verifyEmail, resendCode, getOAuthUrl } from "@/lib/auth-api";
@@ -163,6 +163,7 @@ function VerifyStep({ email, onBack }: { email: string; onBack: () => void }) {
     setError("");
     try {
       await resendCode(email, "register");
+      if (cooldownRef.current) clearInterval(cooldownRef.current);
       setResendCooldown(60);
       cooldownRef.current = setInterval(() => {
         setResendCooldown((s) => {
@@ -273,10 +274,12 @@ export default function RegisterPage() {
   const [agreed, setAgreed] = useState(false);
   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   const loginMethods = useAuthConfigStore((s) => s.loginMethods);
+  const authConfigChecked = useAuthConfigStore((s) => s.checked);
+  const requireAgreement = loginMethods.require_agreement;
   const githubEnabled = loginMethods.github_enabled;
   const googleEnabled = loginMethods.google_enabled;
   const qqEnabled = loginMethods.qq_enabled;
-  const showOAuthSection = githubEnabled || googleEnabled || qqEnabled;
+  const showOAuthSection = authConfigChecked && (githubEnabled || googleEnabled || qqEnabled);
 
   const strength = useMemo(() => getPasswordStrength(password), [password]);
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -292,7 +295,7 @@ export default function RegisterPage() {
     validEmail === true &&
     password.length >= 8 &&
     passwordsMatch &&
-    agreed &&
+    (!requireAgreement || agreed) &&
     !loading;
 
   useEffect(() => {
@@ -326,8 +329,8 @@ export default function RegisterPage() {
   }, [email, password, confirmPassword, displayName, router]);
 
   const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
-    if (!agreed) {
-      setError("请先同意用户服务协议和隐私政策");
+    if (requireAgreement && !agreed) {
+      setError("请先阅读并同意《服务条款》和《隐私政策》后再注册");
       return;
     }
     setOauthLoading(provider);
@@ -340,7 +343,7 @@ export default function RegisterPage() {
       setError(`${names[provider]} 登录暂不可用`);
       setOauthLoading(null);
     }
-  }, [agreed]);
+  }, [requireAgreement, agreed]);
 
   // 验证步骤
   if (pendingEmail) {
@@ -354,7 +357,7 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="h-screen flex bg-gradient-to-b from-background to-muted/30 relative overflow-hidden">
+    <div className="h-viewport flex bg-gradient-to-b from-background to-muted/30 relative overflow-hidden">
       <div className="auth-bg-orb auth-bg-orb-1" />
       <div className="auth-bg-orb auth-bg-orb-2" />
 
@@ -582,6 +585,7 @@ export default function RegisterPage() {
           </div>
 
           {/* Terms */}
+          {requireAgreement && (
           <label className="flex items-start gap-2.5 cursor-pointer group py-1">
             <input
               type="checkbox"
@@ -596,6 +600,7 @@ export default function RegisterPage() {
               <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
             </span>
           </label>
+          )}
 
           <Button
             type="submit"
@@ -627,7 +632,7 @@ export default function RegisterPage() {
               <Button
                 variant="outline"
                 className="auth-oauth-btn h-11 font-normal"
-                disabled={oauthLoading !== null || !agreed}
+                disabled={oauthLoading !== null}
                 onClick={() => handleOAuth("github")}
               >
                 {oauthLoading === "github" ? (
@@ -644,14 +649,19 @@ export default function RegisterPage() {
               <Button
                 variant="outline"
                 className="auth-oauth-btn h-11 font-normal"
-                disabled={oauthLoading !== null || !agreed}
+                disabled={oauthLoading !== null}
                 onClick={() => handleOAuth("google")}
               >
                 {oauthLoading === "google" ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <>
-                    <Mail className="h-4 w-4 mr-2" />
+                    <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" />
+                      <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                      <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                      <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                    </svg>
                     Google
                   </>
                 )}
@@ -661,7 +671,7 @@ export default function RegisterPage() {
               <Button
                 variant="outline"
                 className="auth-oauth-btn h-11 font-normal"
-                disabled={oauthLoading !== null || !agreed}
+                disabled={oauthLoading !== null}
                 onClick={() => handleOAuth("qq")}
               >
                 {oauthLoading === "qq" ? (
@@ -685,6 +695,7 @@ export default function RegisterPage() {
               登录
             </Link>
           </p>
+          {!requireAgreement && (
           <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
             <Link href="/terms" target="_blank" className="hover:text-[var(--em-primary)] transition-colors">
               服务条款
@@ -694,6 +705,7 @@ export default function RegisterPage() {
               隐私政策
             </Link>
           </div>
+          )}
         </div>
         </div>
       </motion.div>

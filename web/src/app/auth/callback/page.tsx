@@ -83,9 +83,9 @@ function CallbackHandler() {
           setState("success");
           setTimeout(() => router.replace("/"), 600);
         })
-        .catch(() => {
-          setState("success");
-          setTimeout(() => router.replace("/"), 600);
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : "用户信息获取失败，请重新登录");
+          setState("error");
         });
       return;
     }

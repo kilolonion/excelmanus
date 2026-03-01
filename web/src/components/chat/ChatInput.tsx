@@ -30,7 +30,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { buildApiUrl, apiGet, apiPut, uploadFile, uploadFileFromUrl } from "@/lib/api";
+import { buildApiUrl, apiGet, apiPut, uploadFile, uploadFileFromUrl, getAuthHeaders } from "@/lib/api";
 import { UndoPanel } from "@/components/modals/UndoPanel";
 import type { ModelInfo, AttachedFile } from "@/lib/types";
 import {
@@ -127,6 +127,16 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     setQuestionSelected(new Set());
   }, [pendingQuestion?.id]);
 
+  // Onboarding coach mark: clear input when entering a step that expects specific input
+  useEffect(() => {
+    const handler = () => {
+      setText("");
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    window.addEventListener("coach-clear-input", handler);
+    return () => window.removeEventListener("coach-clear-input", handler);
+  }, []);
+
   const toggleQuestionOption = useCallback((label: string) => {
     setQuestionSelected((prev) => {
       const next = new Set(prev);
@@ -150,6 +160,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const popoverRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const isComposingRef = useRef(false);
+  const [excelDragOver, setExcelDragOver] = useState(false);
+  const excelDragCounter = useRef(0);
 
   // 图片缩略图的稳定预览 URL — 避免每次重渲染都创建新的
   // blob URL，防止移动浏览器在用户编辑时回收预览。
@@ -262,7 +274,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const fetchMentionData = useCallback(async (subpath?: string) => {
     try {
       const params = subpath ? `?path=${encodeURIComponent(subpath)}` : "";
-      const res = await fetch(`${buildApiUrl("/mentions")}${params}`);
+      const res = await fetch(`${buildApiUrl("/mentions")}${params}`, {
+        headers: { ...getAuthHeaders() },
+      });
       if (res.ok) {
         const data = await res.json();
         setMentionData(data);
@@ -889,7 +903,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       const { currentSessionId } = useChatStore.getState();
       useChatStore.getState().clearMessages();
       if (currentSessionId) {
-        fetch(buildApiUrl(`/sessions/${currentSessionId}/clear`), { method: "POST" }).catch(() => {});
+        fetch(buildApiUrl(`/sessions/${currentSessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
       }
       if (onCommandResult) onCommandResult("/clear", "对话历史已清除", "text");
       return;
@@ -899,7 +913,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       try {
         const res = await fetch(buildApiUrl("/command"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
           body: JSON.stringify({ command: trimmed }),
         });
         if (res.ok) {
@@ -918,7 +932,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const handleSend = async () => {
     if (configBlocked) return;
     const trimmed = text.trim();
-    if (!trimmed && files.length === 0) return;
+    if (!trimmed && files.length === 0 && questionSelected.size === 0) return;
     closePopover();
 
     if (trimmed.startsWith("/")) {
@@ -944,7 +958,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         setText("");
         requestAnimationFrame(autoResize);
         if (currentSessionId) {
-          fetch(buildApiUrl(`/sessions/${currentSessionId}/clear`), { method: "POST" }).catch(() => {});
+          fetch(buildApiUrl(`/sessions/${currentSessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
         }
         if (onCommandResult) {
           onCommandResult("/clear", "对话历史已清除", "text");
@@ -985,7 +999,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         try {
           const res = await fetch(buildApiUrl("/command"), {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...getAuthHeaders() },
             body: JSON.stringify({ command: trimmed }),
           });
           if (res.ok) {
@@ -1080,14 +1094,23 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   return (
     <div
       {...getRootProps()}
+      data-coach-id="coach-chat-input"
       onDrop={(e) => {
         // 在 dropzone 之前拦截 Excel 侧边栏拖拽
         if (e.dataTransfer.types.includes("application/x-excel-file")) {
+          excelDragCounter.current = 0;
+          setExcelDragOver(false);
           handleExcelDrop(e);
           return;
         }
         // 让 dropzone 处理原生文件拖放
         getRootProps().onDrop?.(e as any);
+      }}
+      onDragEnter={(e) => {
+        if (e.dataTransfer.types.includes("application/x-excel-file")) {
+          excelDragCounter.current++;
+          setExcelDragOver(true);
+        }
       }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("application/x-excel-file")) {
@@ -1095,8 +1118,17 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           e.dataTransfer.dropEffect = "copy";
         }
       }}
+      onDragLeave={(e) => {
+        if (e.dataTransfer.types.includes("application/x-excel-file")) {
+          excelDragCounter.current--;
+          if (excelDragCounter.current <= 0) {
+            excelDragCounter.current = 0;
+            setExcelDragOver(false);
+          }
+        }
+      }}
       className={`relative rounded-[20px] border bg-background transition-all duration-200 chat-input-ring ${
-        isDragActive
+        isDragActive || excelDragOver
           ? "border-[var(--em-primary-light)] bg-[var(--em-primary)]/5 shadow-lg shadow-[var(--em-primary)]/10"
           : "border-border/60 shadow-[0_1px_8px_rgba(0,0,0,0.06)] dark:shadow-[0_1px_8px_rgba(0,0,0,0.25)] hover:shadow-[0_2px_12px_rgba(0,0,0,0.1)] dark:hover:shadow-[0_2px_12px_rgba(0,0,0,0.35)] focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.12)] dark:focus-within:shadow-[0_2px_14px_rgba(0,0,0,0.45)] focus-within:border-border"
       }`}
@@ -1104,7 +1136,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       <input {...getInputProps()} />
 
       {/* Drag overlay */}
-      {isDragActive && (
+      {(isDragActive || excelDragOver) && (
         <div className="absolute inset-0 z-40 flex items-center justify-center rounded-[20px] bg-[var(--em-primary-alpha-06)] border-2 border-dashed border-[var(--em-primary-light)] backdrop-blur-[2px]">
           <div className="flex flex-col items-center gap-1.5 text-[var(--em-primary)]">
             <Plus className="h-6 w-6" />
@@ -1303,6 +1335,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               padding: "8px 8px",
               fontSize: "13px",
               lineHeight: "20px",
+              fontFamily: "var(--font-sans, inherit)",
               wordBreak: "break-all",
               WebkitTextSizeAdjust: "100%",
             }}
@@ -1323,14 +1356,16 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             disabled={disabled}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0
-              text-transparent caret-foreground selection:bg-[var(--em-primary)]/20 relative z-10"
+              selection:bg-[var(--em-primary)]/20 relative z-10"
             style={{
               padding: "8px 8px",
               fontSize: "13px",
               lineHeight: "20px",
-              fontFamily: "inherit",
+              fontFamily: "var(--font-sans, inherit)",
               wordBreak: "break-all" as const,
               WebkitTextSizeAdjust: "100%",
+              color: "transparent",
+              caretColor: "var(--foreground)",
             }}
             rows={1}
           />
@@ -1348,6 +1383,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 transition={{ duration: 0.15, ease: "easeOut" }}
               >
                 <Button
+                  data-coach-id="coach-stop-btn"
                   size="icon"
                   className="h-9 w-9 sm:h-8 sm:w-8 rounded-full bg-foreground hover:bg-foreground/80"
                   onClick={onStop}
@@ -1364,6 +1400,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 transition={{ duration: 0.15, ease: "easeOut" }}
               >
                 <Button
+                  data-coach-id="coach-send-btn"
                   size="icon"
                   className="h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
