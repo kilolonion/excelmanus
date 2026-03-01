@@ -65,7 +65,7 @@ const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 const remarkPluginsStable = [remarkGfm];
 
 // 识别为可下载工作区文件的扩展名
-const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
+const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xlsm|xlsb|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
 
 function isWorkspaceFileLink(href: string): boolean {
   if (!href) return false;

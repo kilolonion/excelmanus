@@ -39,7 +39,7 @@ import { FlatFileListView } from "./FlatFileListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import { StorageBar } from "./StorageBar";
 
-const ALL_EXTENSIONS = ".xlsx,.xls,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
+const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
 
 /** Hook: long-press detection for touch devices (opens context menu) */
 function useLongPress(onLongPress: () => void, delay = 500) {
@@ -410,7 +410,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => setTreeView((v) => !v)}
-                    className={`h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
+                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
                       treeView
                         ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
                         : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
@@ -428,7 +428,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 <TooltipTrigger asChild>
                   <button
                     onClick={toggleShowSystemFiles}
-                    className={`h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
+                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
                       showSystemFiles
                         ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
                         : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
@@ -443,7 +443,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-                    className={`h-7 w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
+                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
                       selectMode
                         ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
                         : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
@@ -458,7 +458,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 <TooltipTrigger asChild>
                   <button
                     onClick={requestClearAll}
-                    className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
+                    className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -470,7 +470,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                   <TooltipTrigger asChild>
                     <button
                       onClick={() => setCreatingRootFolder(true)}
-                      className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)] transition-all duration-150"
+                      className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)] transition-all duration-150"
                     >
                       <FolderPlus className="h-3.5 w-3.5" />
                     </button>
@@ -482,7 +482,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 <TooltipTrigger asChild>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="h-7 w-7 flex items-center justify-center rounded-md text-white shadow-sm transition-all duration-150 hover:opacity-90"
+                    className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-white shadow-sm transition-all duration-150 hover:opacity-90"
                     style={{ backgroundColor: "var(--em-primary)" }}
                   >
                     <Plus className="h-3.5 w-3.5" />

@@ -901,6 +901,28 @@ class AgentEngine:
         self._pending_approval_route_result = None
         self._pending_approval_tool_call_id = None
 
+        # ── rollback 额外状态清理（与 clear_memory 对齐） ──
+        # 任务清单：任务在被回退的轮次中创建，已无效
+        self._task_store.clear()
+        # 窗口感知：保留了已回退轮次的窗口数据，需重置
+        self._window_perception.reset()
+        # 工具 schema 缓存失效
+        self._tools_cache = None
+        # SessionState 中与已回退轮次相关的累积状态
+        self._state.affected_files.clear()
+        self._state.write_operations_log.clear()
+        self._state.execution_guard_fired = False
+        self._state.finish_task_warned = False
+        self._state.verification_attempt_count = 0
+        self._state.stuck_warning_fired = False
+        self._state._recent_tool_calls.clear()
+        if rollback_files:
+            # 文件已回滚，explorer 缓存与实际文件不一致
+            self._state.explorer_reports.clear()
+            self._state.backup_write_notice_shown = False
+        # 图片追踪：清理已移除消息相关的图片状态
+        self._memory.reset_image_tracking()
+
         return {
             "removed_messages": removed,
             "file_rollback_results": file_results,
@@ -951,7 +973,7 @@ class AgentEngine:
         excel_files = [
             f for f in all_files
             if any(str(getattr(f, "path", f)).lower().endswith(ext)
-                   for ext in (".xlsx", ".xlsm", ".xls", ".csv"))
+                   for ext in (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv"))
         ]
         if not excel_files:
             return
@@ -3608,89 +3630,21 @@ class AgentEngine:
                             pending = self._approval.pending
                             if approval_resolver is not None and pending is not None:
                                 # ── 内联审批：在同一轮对话内等待用户决策 ──
-                                logger.info("内联审批等待决策: %s", tc_result.approval_id)
+                                approval_id = tc_result.approval_id or pending.approval_id
+                                logger.info("内联审批等待决策: %s", approval_id)
                                 try:
                                     decision = await approval_resolver(pending)
                                 except Exception as _resolver_exc:  # noqa: BLE001
                                     logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
                                     decision = None
 
-                                if decision in ("accept", "fullaccess"):
-                                    if decision == "fullaccess":
-                                        self._full_access_enabled = True
-                                        logger.info("内联审批: fullaccess 已开启")
-                                    # 执行已批准的工具
-                                    exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                        pending, on_event=on_event, tool_call_id=tool_call_id,
-                                    )
-                                    # 用真实结果替换之前写入 memory 的审批提示
-                                    if tool_call_id:
-                                        self._memory.replace_tool_result(tool_call_id, exec_result)
-                                    # 发射审批已解决事件
-                                    self._emit(
-                                        on_event,
-                                        ToolCallEvent(
-                                            event_type=EventType.APPROVAL_RESOLVED,
-                                            approval_id=tc_result.approval_id or "",
-                                            approval_tool_name=pending.tool_name,
-                                            result=exec_result,
-                                            success=exec_ok,
-                                            iteration=iteration,
-                                            approval_undoable=bool(
-                                                exec_record is not None and exec_record.undoable
-                                            ),
-                                            approval_has_changes=bool(
-                                                exec_record is not None and exec_record.changes
-                                            ),
-                                        ),
-                                    )
-                                    # 更新 tc_result 统计信息
-                                    tc_result = replace(
-                                        tc_result,
-                                        pending_approval=False,
-                                        success=exec_ok,
-                                        result=exec_result,
-                                        error=None if exec_ok else exec_result,
-                                    )
-                                    # 写入追踪：审批执行的工具如果是写入工具则标记
-                                    if exec_ok and exec_record is not None:
-                                        _effect = self._get_tool_write_effect(pending.tool_name)
-                                        if exec_record.changes or _effect == "workspace_write":
-                                            self._record_workspace_write_action()
-                                        elif _effect == "external_write":
-                                            self._record_external_write_action()
-                                        if self._has_write_tool_call and write_hint != "may_write":
-                                            write_hint = "may_write"
-                                    logger.info(
-                                        "内联审批完成: decision=%s ok=%s tool=%s",
-                                        decision, exec_ok, pending.tool_name,
-                                    )
-                                else:
-                                    # reject / None → 拒绝
-                                    reject_msg = self._approval.reject_pending(
-                                        tc_result.approval_id or (pending.approval_id if pending else ""),
-                                    )
-                                    if tool_call_id:
-                                        self._memory.replace_tool_result(tool_call_id, reject_msg)
-                                    self._emit(
-                                        on_event,
-                                        ToolCallEvent(
-                                            event_type=EventType.APPROVAL_RESOLVED,
-                                            approval_id=tc_result.approval_id or "",
-                                            approval_tool_name=pending.tool_name if pending else "",
-                                            result=reject_msg,
-                                            success=False,
-                                            iteration=iteration,
-                                        ),
-                                    )
-                                    tc_result = replace(
-                                        tc_result,
-                                        pending_approval=False,
-                                        success=False,
-                                        result=reject_msg,
-                                        error=reject_msg,
-                                    )
-                                    logger.info("内联审批拒绝: %s", tc_result.approval_id)
+                                updates, _wrote = await self._apply_approval_decision(
+                                    decision, pending, approval_id,
+                                    tool_call_id, on_event, iteration, "内联审批",
+                                )
+                                tc_result = replace(tc_result, **updates)
+                                if _wrote and self._has_write_tool_call and write_hint != "may_write":
+                                    write_hint = "may_write"
                                 # 内联审批完成，不退出循环，继续处理后续工具调用
                             else:
                                 # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
@@ -3725,72 +3679,13 @@ class AgentEngine:
                                 else:
                                     decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
                                     self._interaction_registry.cleanup_done()
-                                    if decision in ("accept", "fullaccess"):
-                                        if decision == "fullaccess":
-                                            self._full_access_enabled = True
-                                            logger.info("Web 审批: fullaccess 已开启")
-                                        exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                            pending, on_event=on_event, tool_call_id=tool_call_id,
-                                        )
-                                        if tool_call_id:
-                                            self._memory.replace_tool_result(tool_call_id, exec_result)
-                                        self._emit(
-                                            on_event,
-                                            ToolCallEvent(
-                                                event_type=EventType.APPROVAL_RESOLVED,
-                                                approval_id=approval_id,
-                                                approval_tool_name=pending.tool_name,
-                                                result=exec_result,
-                                                success=exec_ok,
-                                                iteration=iteration,
-                                                approval_undoable=bool(
-                                                    exec_record is not None and exec_record.undoable
-                                                ),
-                                                approval_has_changes=bool(
-                                                    exec_record is not None and exec_record.changes
-                                                ),
-                                            ),
-                                        )
-                                        tc_result = replace(
-                                            tc_result,
-                                            pending_approval=False,
-                                            success=exec_ok,
-                                            result=exec_result,
-                                            error=None if exec_ok else exec_result,
-                                        )
-                                        if exec_ok and exec_record is not None:
-                                            _effect = self._get_tool_write_effect(pending.tool_name)
-                                            if exec_record.changes or _effect == "workspace_write":
-                                                self._record_workspace_write_action()
-                                            elif _effect == "external_write":
-                                                self._record_external_write_action()
-                                            if self._has_write_tool_call and write_hint != "may_write":
-                                                write_hint = "may_write"
-                                        logger.info(
-                                            "Web 审批完成: decision=%s ok=%s tool=%s",
-                                            decision, exec_ok, pending.tool_name,
-                                        )
-                                    else:
-                                        reject_msg = self._approval.reject_pending(approval_id)
-                                        if tool_call_id:
-                                            self._memory.replace_tool_result(tool_call_id, reject_msg)
-                                        self._emit(
-                                            on_event,
-                                            ToolCallEvent(
-                                                event_type=EventType.APPROVAL_RESOLVED,
-                                                approval_id=approval_id,
-                                                approval_tool_name=pending.tool_name if pending else "",
-                                                result=reject_msg,
-                                                success=False,
-                                                iteration=iteration,
-                                            ),
-                                        )
-                                        tc_result = replace(
-                                            tc_result,
-                                            pending_approval=False, success=False,
-                                            result=reject_msg, error=reject_msg,
-                                        )
-                                        logger.info("Web 审批拒绝: %s", approval_id)
+                                    updates, _wrote = await self._apply_approval_decision(
+                                        decision, pending, approval_id,
+                                        tool_call_id, on_event, iteration, "Web 审批",
+                                    )
+                                    tc_result = replace(tc_result, **updates)
+                                    if _wrote and self._has_write_tool_call and write_hint != "may_write":
+                                        write_hint = "may_write"
 
                         # 更新统计
                         self._last_tool_call_count += 1
@@ -4290,6 +4185,93 @@ class AgentEngine:
                 raise
             raise _AuditedExecutionError(cause=exc, record=record) from exc
 
+    async def _apply_approval_decision(
+        self,
+        decision: str | None,
+        pending: PendingApproval,
+        approval_id: str,
+        tool_call_id: str | None,
+        on_event: EventCallback | None,
+        iteration: int,
+        source: str,
+    ) -> tuple[Any, bool]:
+        """处理审批决策（accept/reject/fullaccess），返回 (updated_tc_result_kwargs, write_happened)。
+
+        统一内联审批和 Web 审批的 accept/reject 逻辑。
+        返回 (dict_for_replace, write_happened) — 调用方使用 replace(tc_result, **dict_for_replace)。
+        """
+        from excelmanus.events import EventType, ToolCallEvent
+
+        write_happened = False
+        if decision in ("accept", "fullaccess"):
+            if decision == "fullaccess":
+                self._full_access_enabled = True
+                logger.info("%s: fullaccess 已开启", source)
+            exec_ok, exec_result, exec_record = await self._execute_approved_pending(
+                pending, on_event=on_event, tool_call_id=tool_call_id,
+            )
+            if tool_call_id:
+                self._memory.replace_tool_result(tool_call_id, exec_result)
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    tool_call_id=tool_call_id or "",
+                    approval_id=approval_id,
+                    approval_tool_name=pending.tool_name,
+                    result=exec_result,
+                    success=exec_ok,
+                    iteration=iteration,
+                    approval_undoable=bool(
+                        exec_record is not None and exec_record.undoable
+                    ),
+                    approval_has_changes=bool(
+                        exec_record is not None and exec_record.changes
+                    ),
+                ),
+            )
+            if exec_ok and exec_record is not None:
+                _effect = self._get_tool_write_effect(pending.tool_name)
+                if exec_record.changes or _effect == "workspace_write":
+                    self._record_workspace_write_action()
+                    write_happened = True
+                elif _effect == "external_write":
+                    self._record_external_write_action()
+                    write_happened = True
+            logger.info(
+                "%s完成: decision=%s ok=%s tool=%s",
+                source, decision, exec_ok, pending.tool_name,
+            )
+            return dict(
+                pending_approval=False,
+                success=exec_ok,
+                result=exec_result,
+                error=None if exec_ok else exec_result,
+            ), write_happened
+        else:
+            reject_msg = self._approval.reject_pending(approval_id)
+            if tool_call_id:
+                self._memory.replace_tool_result(tool_call_id, reject_msg)
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    tool_call_id=tool_call_id or "",
+                    approval_id=approval_id,
+                    approval_tool_name=pending.tool_name if pending else "",
+                    result=reject_msg,
+                    success=False,
+                    iteration=iteration,
+                ),
+            )
+            logger.info("%s拒绝: %s", source, approval_id)
+            return dict(
+                pending_approval=False,
+                success=False,
+                result=reject_msg,
+                error=reject_msg,
+            ), False
+
     async def _execute_approved_pending(
         self,
         pending: PendingApproval,
@@ -4309,7 +4291,7 @@ class AgentEngine:
                 tool_scope=None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=not self._approval.is_read_only_safe_tool(pending.tool_name) and pending.tool_name not in {"run_code", "run_shell"},
+                undoable=self._approval.is_undoable_tool(pending.tool_name),
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:
