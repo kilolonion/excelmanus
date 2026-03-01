@@ -18,6 +18,7 @@ export interface StatusResponse {
   progress: number;
   checks: EnvCheck;
   details: EnvDetails;
+  deploy_error?: string | null;
 }
 
 export interface ConfigResponse {

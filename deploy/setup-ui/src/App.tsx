@@ -26,6 +26,7 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [running, setRunning] = useState(false);
   const [deploying, setDeploying] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [config, setConfig] = useState<ConfigResponse>({
     bePort: "8000",
@@ -63,6 +64,7 @@ export default function App() {
       setProgress(status.progress);
       setRunning(status.running);
       setDeploying(status.deploying);
+      setDeployError(status.deploy_error ?? null);
       if (logRes.logs && logRes.logs.length > 0) {
         setLogs((prev) => {
           const merged = [...prev, ...logRes.logs];
@@ -123,6 +125,7 @@ export default function App() {
                 running={running}
                 logs={logs}
                 fePort={config.fePort}
+                deployError={deployError}
                 onBack={() => setStep(1)}
               />
             )}
