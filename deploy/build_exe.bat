@@ -26,7 +26,7 @@ if "%CSC%"=="" (
 echo [OK] Compiler: %CSC%
 echo [..] Building EXE...
 
-"%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
+"%CSC%" /nologo /codepage:65001 /langversion:5 /target:winexe /out:"%OUT%" /optimize+ /platform:anycpu /win32icon:"%SCRIPT_DIR%icon.ico" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Net.dll "%SRC%"
 
 if errorlevel 1 (
     echo [ERR] Build failed.

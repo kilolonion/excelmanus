@@ -41,9 +41,8 @@ body{background:var(--bg);color:var(--t1);display:flex;flex-direction:column;min
 
 .hdr{background:var(--card);border-bottom:1px solid var(--brd);padding:0 28px;height:54px;display:flex;align-items:center;gap:14px;flex-shrink:0;position:relative}
 .hdr::after{content:'';position:absolute;bottom:-1px;left:0;width:120px;height:2px;background:linear-gradient(90deg,var(--g),transparent);border-radius:2px}
-.logo{width:34px;height:34px;position:relative;flex-shrink:0}
-.logo::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--gl),var(--g));clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)}
-.logo::after{content:'';position:absolute;inset:5px;background:rgba(255,255,255,.25);clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)}
+.logo{width:34px;height:34px;flex-shrink:0}
+.logo img{width:100%;height:100%;object-fit:contain;border-radius:6px}
 .brand{display:flex;align-items:baseline;gap:10px}
 .brand h1{font-size:17px;font-weight:700;letter-spacing:-.3px}
 .brand span{font-size:11px;color:var(--t3);font-weight:500;letter-spacing:.5px}
@@ -137,7 +136,7 @@ select.fi{cursor:pointer;appearance:none;background-image:url(""data:image/svg+x
 </head>
 <body>
 <div class='hdr'>
-  <div class='logo'></div>
+  <div class='logo'><img src='data:image/png;base64,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' alt='ExcelManus'></div>
   <div class='brand'><h1>ExcelManus</h1><span>Deploy Tool &middot; v2.0</span></div>
 </div>
 
@@ -229,11 +228,16 @@ select.fi{cursor:pointer;appearance:none;background-image:url(""data:image/svg+x
           <div class='success-box'>
             <div class='success-icon'>&#127881;</div>
             <div class='success-title'>\u90E8\u7F72\u6210\u529F\uFF01</div>
-            <div class='success-sub'>\u670D\u52A1\u5DF2\u542F\u52A8\uFF0C\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u6253\u5F00 ExcelManus</div>
-            <button class='btn b1 btn-big' onclick='doOpen()'>&#127760; \u6253\u5F00 ExcelManus</button>
-            <div style='margin-top:14px'>
+            <div class='success-sub'>\u670D\u52A1\u5DF2\u542F\u52A8\uFF0C\u5373\u5C06\u8DF3\u8F6C\u5230 ExcelManus</div>
+            <div id='redirectCountdown' style='font-size:13px;color:var(--t3);margin-bottom:16px'><span id='countdownNum'>3</span> \u79D2\u540E\u81EA\u52A8\u8DF3\u8F6C... <a href='#' onclick='cancelRedirect();return false' style='color:var(--cyan)'>\u53D6\u6D88</a></div>
+            <button class='btn b1 btn-big' onclick='doOpen()'>&#127760; \u7ACB\u5373\u6253\u5F00 ExcelManus</button>
+            <div style='margin-top:14px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap'>
+              <button class='btn b3' id='btnShortcut' onclick='doCreateShortcut()'>&#128194; \u521B\u5EFA\u684C\u9762\u5FEB\u6377\u65B9\u5F0F</button>
+              <button class='btn b3' id='btnUpdate' onclick='doUpdate()' style='display:none'>&#128259; \u68C0\u67E5\u66F4\u65B0</button>
               <button class='btn b2' onclick='doStop()'>&#9724; \u505C\u6B62\u670D\u52A1</button>
             </div>
+            <div style='margin-top:10px;font-size:11px;color:var(--t3)'>&#128161; \u53EF\u901A\u8FC7\u7CFB\u7EDF\u6258\u76D8\u56FE\u6807\u968F\u65F6\u8FD4\u56DE\u7BA1\u7406\u9762\u677F</div>
+            <div id='updateMsg' class='test-msg' style='margin-top:12px'></div>
           </div>
         </div>
       </div>
@@ -399,14 +403,26 @@ function doDeploy(){
 var STAGE_NAMES={0:'\u6B63\u5728\u51C6\u5907...',14:'\u6B63\u5728\u4E0B\u8F7D\u6E90\u7801...',28:'\u6B63\u5728\u4E0B\u8F7D\u6E90\u7801...',42:'\u6B63\u5728\u5B89\u88C5\u540E\u7AEF\u4F9D\u8D56...',57:'\u6B63\u5728\u5B89\u88C5\u540E\u7AEF\u4F9D\u8D56...',71:'\u6B63\u5728\u5B89\u88C5\u524D\u7AEF\u4F9D\u8D56...',85:'\u6B63\u5728\u542F\u52A8\u670D\u52A1...',100:'\u90E8\u7F72\u5B8C\u6210\uFF01'};
 function closestStage(p){var best='';for(var k in STAGE_NAMES){if(parseInt(k)<=p)best=STAGE_NAMES[k];}return best||'\u6B63\u5728\u90E8\u7F72...';}
 
-function doStop(){fetch('/api/stop',{method:'POST'}).then(function(){
+var redirectIv=null;
+function startRedirect(){
+  var n=3;document.getElementById('countdownNum').textContent=n;
+  redirectIv=setInterval(function(){
+    n--;if(n<=0){clearInterval(redirectIv);redirectIv=null;doOpen();}
+    else document.getElementById('countdownNum').textContent=n;
+  },1000);
+}
+function cancelRedirect(){
+  if(redirectIv){clearInterval(redirectIv);redirectIv=null;}
+  var el=document.getElementById('redirectCountdown');if(el)el.style.display='none';
+}
+function doStop(){cancelRedirect();fetch('/api/stop',{method:'POST'}).then(function(){
   deploying=false;deployDone=false;
   document.getElementById('preDeployView').style.display='';
   document.getElementById('deployingView').style.display='none';
   document.getElementById('successView').style.display='none';
   document.getElementById('step3Back').style.display='';
 });}
-function doOpen(){var p=document.getElementById('f_fp').value||'3000';window.open('http://localhost:'+p,'_blank');}
+function doOpen(){var p=document.getElementById('f_fp').value||'3000';window.location.href='http://localhost:'+p;}
 
 /* ── Polling ── */
 function pollLogs(){
@@ -428,6 +444,8 @@ function pollSt(){
         deployDone=true;
         document.getElementById('deployingView').style.display='none';
         document.getElementById('successView').style.display='';
+        document.getElementById('btnUpdate').style.display='';
+        startRedirect();
       }
     }
   }).catch(function(){});
@@ -444,6 +462,61 @@ function toggleAdv(){
   var a=document.getElementById('advArr');
   if(el.className.indexOf('show')>=0){el.className='adv-body';a.innerHTML='&#9654;';}
   else{el.className='adv-body show';a.innerHTML='&#9660;';}
+}
+
+/* ── Shortcut ── */
+function doCreateShortcut(){
+  var btn=document.getElementById('btnShortcut');
+  var msg=document.getElementById('updateMsg');
+  btn.disabled=true;btn.innerHTML='&#8987; \u521B\u5EFA\u4E2D...';
+  fetch('/api/create-shortcut',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.path){
+      msg.className='test-msg ok';msg.style.display='block';
+      msg.textContent='\u2705 \u684C\u9762\u5FEB\u6377\u65B9\u5F0F\u5DF2\u521B\u5EFA: '+d.path;
+      btn.style.display='none';
+    }else{
+      msg.className='test-msg fail';msg.style.display='block';
+      msg.textContent='\u274C \u521B\u5EFA\u5931\u8D25: '+(d.error||'\u672A\u77E5\u9519\u8BEF');
+    }
+  }).catch(function(e){
+    msg.className='test-msg fail';msg.style.display='block';
+    msg.textContent='\u274C \u521B\u5EFA\u5931\u8D25: '+e;
+  }).finally(function(){btn.disabled=false;btn.innerHTML='&#128194; \u521B\u5EFA\u684C\u9762\u5FEB\u6377\u65B9\u5F0F';});
+}
+
+/* ── Update ── */
+function doUpdate(){
+  var btn=document.getElementById('btnUpdate');
+  var msg=document.getElementById('updateMsg');
+  btn.disabled=true;btn.innerHTML='&#8987; \u68C0\u67E5\u4E2D...';
+  msg.className='test-msg';msg.style.display='none';
+  fetch('/api/update-check',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.has_update){
+      msg.className='test-msg ok';msg.style.display='block';
+      msg.innerHTML='\u{1F389} \u53D1\u73B0\u65B0\u7248\u672C: <b>'+d.current+' \u2192 '+d.latest+'</b> ('+d.behind+' \u4E2A\u65B0\u63D0\u4EA4)<br><br>'
+        +'<button class=""btn b1"" onclick=""doApplyUpdate()"" style=""margin-top:6px"">\u{1F504} \u7ACB\u5373\u66F4\u65B0</button>';
+    }else{
+      msg.className='test-msg ok';msg.style.display='block';
+      msg.textContent='\u2705 \u5DF2\u662F\u6700\u65B0\u7248\u672C ('+d.current+')';
+    }
+  }).catch(function(e){
+    msg.className='test-msg fail';msg.style.display='block';
+    msg.textContent='\u274C \u68C0\u67E5\u66F4\u65B0\u5931\u8D25: '+e;
+  }).finally(function(){btn.disabled=false;btn.innerHTML='&#128259; \u68C0\u67E5\u66F4\u65B0';});
+}
+function doApplyUpdate(){
+  var msg=document.getElementById('updateMsg');
+  msg.className='test-msg';msg.style.display='block';
+  msg.innerHTML='<div class=""spinner""></div> \u6B63\u5728\u66F4\u65B0\uFF0C\u8BF7\u7A0D\u5019...';
+  fetch('/api/update-apply',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    if(d.success){
+      msg.className='test-msg ok';
+      msg.innerHTML='\u2705 \u66F4\u65B0\u6210\u529F\uFF01'+d.old_version+' \u2192 '+d.new_version+'<br>\u8BF7\u91CD\u542F\u670D\u52A1\u4EE5\u5E94\u7528\u66F4\u65B0\u3002';
+    }else{
+      msg.className='test-msg fail';
+      msg.textContent='\u274C \u66F4\u65B0\u5931\u8D25: '+(d.error||'\u672A\u77E5\u9519\u8BEF');
+    }
+  }).catch(function(e){msg.className='test-msg fail';msg.textContent='\u274C \u66F4\u65B0\u5931\u8D25: '+e;});
 }
 
 init();
@@ -944,11 +1017,16 @@ public class Engine
             setCk("repo", true, "\u672C\u5730\u5DF2\u5B58\u5728");
         }
 
-        bool beOk = SetupBE();
+        // ── Backend + Frontend in parallel ──
+        bool beOk = false, feOk = false;
+        _log.Hl("\u5E76\u884C\u5B89\u88C5\u540E\u7AEF + \u524D\u7AEF\u4F9D\u8D56...");
+        var beThread = new Thread(() => { beOk = SetupBE(); });
+        var feThread = new Thread(() => { feOk = SetupFE(); });
+        beThread.Start(); feThread.Start();
+        beThread.Join(); feThread.Join();
+
         setCk("backend", beOk, beOk ? "\u5C31\u7EEA" : "\u5931\u8D25");
         if (!beOk) { lock (_lock) { _deploying = false; } return; }
-
-        bool feOk = SetupFE();
         setCk("frontend", feOk, feOk ? "\u5C31\u7EEA" : "\u5931\u8D25");
         if (!feOk) { lock (_lock) { _deploying = false; } return; }
 
@@ -1040,6 +1118,39 @@ public class Engine
         catch { }
     }
 
+    private bool? _domesticCache = null;
+    private bool IsDomesticNetwork()
+    {
+        if (_domesticCache.HasValue) return _domesticCache.Value;
+        try
+        {
+            double tMirror = 999, tPypi = 999;
+            var t1 = new Thread(() => {
+                try {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    using (var tcp = new System.Net.Sockets.TcpClient())
+                    { tcp.Connect("pypi.tuna.tsinghua.edu.cn", 443); }
+                    sw.Stop(); tMirror = sw.Elapsed.TotalSeconds;
+                } catch { tMirror = 999; }
+            });
+            var t2 = new Thread(() => {
+                try {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    using (var tcp = new System.Net.Sockets.TcpClient())
+                    { tcp.Connect("pypi.org", 443); }
+                    sw.Stop(); tPypi = sw.Elapsed.TotalSeconds;
+                } catch { tPypi = 999; }
+            });
+            t1.Start(); t2.Start();
+            t1.Join(4000); t2.Join(4000);
+            _domesticCache = tMirror < 5 && (tPypi > 5 || tMirror < tPypi * 0.8);
+            if (_domesticCache.Value)
+                _log.Info(string.Format("\u68C0\u6D4B\u5230\u56FD\u5185\u7F51\u7EDC (mirror={0:F3}s pypi={1:F3}s)\uFF0C\u542F\u7528\u955C\u50CF\u52A0\u901F", tMirror, tPypi));
+        }
+        catch { _domesticCache = false; }
+        return _domesticCache.Value;
+    }
+
     private bool TryAutoInstall(string name, string wingetId)
     {
         _log.Warn(string.Format("\u5C1D\u8BD5\u81EA\u52A8\u5B89\u88C5 {0} ...", name));
@@ -1103,8 +1214,10 @@ public class Engine
             return true;
         }
         _log.Info("\u5B89\u88C5\u540E\u7AEF Python \u4F9D\u8D56 (pip install)\uFF0C\u8BF7\u7A0D\u5019...");
-        bool pipOk = RunStreamCmd(vpy, string.Format("-m pip install -e \"{0}\"", _root), "pip");
-        if (!pipOk)
+        bool domestic = IsDomesticNetwork();
+        string mirrorArg = domestic ? " -i https://pypi.tuna.tsinghua.edu.cn/simple" : "";
+        bool pipOk = RunStreamCmd(vpy, string.Format("-m pip install -e \"{0}\"{1}", _root, mirrorArg), "pip");
+        if (!pipOk && !domestic)
         {
             _log.Warn("pip \u5931\u8D25\uFF0C\u5C1D\u8BD5\u4F7F\u7528\u6E05\u534E\u955C\u50CF\u6E90...");
             pipOk = RunStreamCmd(vpy, string.Format("-m pip install -e \"{0}\" -i https://pypi.tuna.tsinghua.edu.cn/simple", _root), "pip");
@@ -1165,7 +1278,12 @@ public class Engine
         _log.Info("\u5B89\u88C5\u524D\u7AEF\u4F9D\u8D56 (npm install)\uFF0C\u8BF7\u7A0D\u5019...");
         try
         {
-            ProcessStartInfo si = new ProcessStartInfo("cmd.exe", "/c npm install --registry=https://registry.npmmirror.com");
+            bool domestic = IsDomesticNetwork();
+            string npmFirst = domestic ? "/c npm install --registry=https://registry.npmmirror.com" : "/c npm install";
+            string npmFallback = domestic ? "/c npm install" : "/c npm install --registry=https://registry.npmmirror.com";
+            string npmFallbackLabel = domestic ? "\u9ED8\u8BA4\u6E90" : "npmmirror \u955C\u50CF";
+
+            ProcessStartInfo si = new ProcessStartInfo("cmd.exe", npmFirst);
             si.WorkingDirectory = wd;
             si.RedirectStandardOutput = true;
             si.RedirectStandardError = true;
@@ -1187,8 +1305,8 @@ public class Engine
             p.WaitForExit(300000);
             if (p.ExitCode != 0)
             {
-                _log.Warn("npm install \u5931\u8D25\uFF0C\u5C1D\u8BD5\u4F7F\u7528\u9ED8\u8BA4\u6E90\u91CD\u8BD5...");
-                ProcessStartInfo si2 = new ProcessStartInfo("cmd.exe", "/c npm install");
+                _log.Warn(string.Format("npm install \u5931\u8D25\uFF0C\u5C1D\u8BD5\u4F7F\u7528{0}\u91CD\u8BD5...", npmFallbackLabel));
+                ProcessStartInfo si2 = new ProcessStartInfo("cmd.exe", npmFallback);
                 si2.WorkingDirectory = wd;
                 si2.RedirectStandardOutput = true; si2.RedirectStandardError = true;
                 si2.UseShellExecute = false; si2.CreateNoWindow = true;
@@ -1301,11 +1419,7 @@ public class Engine
                 _procFE.BeginOutputReadLine();
                 _procFE.BeginErrorReadLine();
                 _log.Ok(string.Format("\u524D\u7AEF\u5DF2\u542F\u52A8 \u2192 http://localhost:{0}", _fePort));
-                if (_autoOpen)
-                {
-                    Thread.Sleep(3000);
-                    OpenUrl(string.Format("http://localhost:{0}", _fePort));
-                }
+                // Auto-open handled by frontend JS in-place redirect
             }
             catch (Exception ex) { _log.Err(string.Format("\u524D\u7AEF\u542F\u52A8\u5931\u8D25: {0}", ex.Message)); }
         });
@@ -1351,6 +1465,205 @@ public class Engine
     }
 
     public bool IsRunning { get { lock (_lock) { return _running; } } }
+
+    public string CheckUpdate()
+    {
+        try
+        {
+            _log.Info("\u68C0\u67E5\u66F4\u65B0...");
+            // git fetch
+            string fetchOut = CmdRun("git", string.Format("-C \"{0}\" fetch origin --tags", _root));
+
+            // current version
+            string currentVer = "unknown";
+            string tomlPath = Path.Combine(_root, "pyproject.toml");
+            if (File.Exists(tomlPath))
+            {
+                foreach (string line in File.ReadAllLines(tomlPath, Encoding.UTF8))
+                {
+                    if (line.TrimStart().StartsWith("version") && line.Contains("="))
+                    {
+                        currentVer = line.Split('=')[1].Trim().Trim('"');
+                        break;
+                    }
+                }
+            }
+
+            // branch
+            string branch = CmdRun("git", string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", _root));
+            if (string.IsNullOrEmpty(branch)) branch = "main";
+
+            // commits behind
+            string countStr = CmdRun("git", string.Format("-C \"{0}\" rev-list --count HEAD..origin/{1}", _root, branch));
+            int behind = 0;
+            int.TryParse(countStr, out behind);
+
+            // remote version
+            string latestVer = currentVer;
+            if (behind > 0)
+            {
+                string remoteToml = CmdRun("git", string.Format("-C \"{0}\" show origin/{1}:pyproject.toml", _root, branch));
+                if (!string.IsNullOrEmpty(remoteToml))
+                {
+                    foreach (string line in remoteToml.Split('\n'))
+                    {
+                        if (line.TrimStart().StartsWith("version") && line.Contains("="))
+                        {
+                            latestVer = line.Split('=')[1].Trim().Trim('"');
+                            break;
+                        }
+                    }
+                }
+            }
+
+            bool hasUpdate = behind > 0;
+            _log.Info(string.Format("\u5F53\u524D: {0}, \u6700\u65B0: {1}, \u843D\u540E: {2}", currentVer, latestVer, behind));
+            return string.Format("{{\"has_update\":{0},\"current\":\"{1}\",\"latest\":\"{2}\",\"behind\":{3}}}",
+                hasUpdate ? "true" : "false", JE(currentVer), JE(latestVer), behind);
+        }
+        catch (Exception ex)
+        {
+            return string.Format("{{\"has_update\":false,\"error\":\"{0}\"}}", JE(ex.Message));
+        }
+    }
+
+    public string ApplyUpdate()
+    {
+        try
+        {
+            _log.Hl("\u2550\u2550\u2550 \u5F00\u59CB\u66F4\u65B0 \u2550\u2550\u2550");
+
+            // read old version
+            string oldVer = "unknown";
+            string tomlPath = Path.Combine(_root, "pyproject.toml");
+            if (File.Exists(tomlPath))
+            {
+                foreach (string line in File.ReadAllLines(tomlPath, Encoding.UTF8))
+                {
+                    if (line.TrimStart().StartsWith("version") && line.Contains("="))
+                    {
+                        oldVer = line.Split('=')[1].Trim().Trim('"');
+                        break;
+                    }
+                }
+            }
+
+            // backup .env
+            string envPath = Path.Combine(_root, ".env");
+            string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string backupDir = Path.Combine(_root, "backups", string.Format("backup_{0}_{1}", oldVer, ts));
+            Directory.CreateDirectory(backupDir);
+            if (File.Exists(envPath))
+            {
+                File.Copy(envPath, Path.Combine(backupDir, ".env"), true);
+                _log.Ok("\u5907\u4EFD .env");
+            }
+
+            // git stash + pull
+            _log.Info("\u62C9\u53D6\u6700\u65B0\u4EE3\u7801...");
+            CmdRun("git", string.Format("-C \"{0}\" stash --include-untracked", _root));
+            string branch = CmdRun("git", string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", _root));
+            if (string.IsNullOrEmpty(branch)) branch = "main";
+
+            string pullResult = CmdRun("git", string.Format("-C \"{0}\" pull origin {1} --ff-only", _root, branch));
+            if (string.IsNullOrEmpty(pullResult) || pullResult.Contains("fatal"))
+            {
+                _log.Warn("fast-forward \u5931\u8D25\uFF0C\u6267\u884C\u5F3A\u5236\u8986\u76D6...");
+                CmdRun("git", string.Format("-C \"{0}\" reset --hard origin/{1}", _root, branch));
+            }
+            _log.Ok("\u4EE3\u7801\u5DF2\u66F4\u65B0");
+
+            // reinstall backend deps
+            _log.Info("\u66F4\u65B0\u540E\u7AEF\u4F9D\u8D56...");
+            string vpy = Path.Combine(_root, ".venv", "Scripts", "python.exe");
+            if (!File.Exists(vpy)) vpy = "python";
+            RunStreamCmd(vpy, string.Format("-m pip install -e \"{0}\" --quiet", _root), "pip");
+            _log.Ok("\u540E\u7AEF\u4F9D\u8D56\u5DF2\u66F4\u65B0");
+
+            // read new version
+            string newVer = "unknown";
+            if (File.Exists(tomlPath))
+            {
+                foreach (string line in File.ReadAllLines(tomlPath, Encoding.UTF8))
+                {
+                    if (line.TrimStart().StartsWith("version") && line.Contains("="))
+                    {
+                        newVer = line.Split('=')[1].Trim().Trim('"');
+                        break;
+                    }
+                }
+            }
+
+            _log.Hl(string.Format("\u66F4\u65B0\u6210\u529F\uFF01{0} \u2192 {1}", oldVer, newVer));
+            _log.Info("\u8BF7\u91CD\u542F\u670D\u52A1\u4EE5\u5E94\u7528\u66F4\u65B0\uFF08\u6570\u636E\u5E93\u8FC1\u79FB\u5C06\u5728\u542F\u52A8\u65F6\u81EA\u52A8\u6267\u884C\uFF09");
+            return string.Format("{{\"success\":true,\"old_version\":\"{0}\",\"new_version\":\"{1}\"}}", JE(oldVer), JE(newVer));
+        }
+        catch (Exception ex)
+        {
+            _log.Err(string.Format("\u66F4\u65B0\u5931\u8D25: {0}", ex.Message));
+            return string.Format("{{\"success\":false,\"error\":\"{0}\"}}", JE(ex.Message));
+        }
+    }
+
+    public string CreateShortcut()
+    {
+        try
+        {
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrEmpty(desktop) || !Directory.Exists(desktop))
+            {
+                return "{\"error\":\"\u672A\u627E\u5230\u684C\u9762\u76EE\u5F55\"}";
+            }
+
+            string lnkPath = Path.Combine(desktop, "ExcelManus.lnk");
+
+            // 查找启动脚本
+            string target = "";
+            string startBat = Path.Combine(_root, "deploy", "start.bat");
+            string exePath = Path.Combine(_root, "ExcelManusSetup.exe");
+            if (File.Exists(startBat)) target = startBat;
+            else if (File.Exists(exePath)) target = exePath;
+
+            if (string.IsNullOrEmpty(target))
+            {
+                return string.Format("{{\"error\":\"\u672A\u627E\u5230\u542F\u52A8\u811A\u672C\"}}");
+            }
+
+            // 使用 PowerShell 创建 .lnk
+            string psCmd = string.Format(
+                "$ws=New-Object -ComObject WScript.Shell;" +
+                "$sc=$ws.CreateShortcut('{0}');" +
+                "$sc.TargetPath='cmd.exe';" +
+                "$sc.Arguments='/c \"\"{1}\"\"';" +
+                "$sc.WorkingDirectory='{2}';" +
+                "$sc.Description='ExcelManus';" +
+                "$sc.Save()",
+                lnkPath.Replace("'", "''"),
+                target.Replace("'", "''"),
+                _root.Replace("'", "''"));
+
+            var psi = new ProcessStartInfo("powershell", string.Format("-NoProfile -Command \"{0}\"", psCmd))
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            var proc = Process.Start(psi);
+            proc.WaitForExit(10000);
+
+            if (File.Exists(lnkPath))
+            {
+                _log.Ok(string.Format("\u684C\u9762\u5FEB\u6377\u65B9\u5F0F\u5DF2\u521B\u5EFA: {0}", lnkPath));
+                return string.Format("{{\"path\":\"{0}\"}}", JE(lnkPath));
+            }
+            return "{\"error\":\"\u521B\u5EFA\u5FEB\u6377\u65B9\u5F0F\u5931\u8D25\"}";
+        }
+        catch (Exception ex)
+        {
+            return string.Format("{{\"error\":\"{0}\"}}", JE(ex.Message));
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1457,9 +1770,21 @@ public class WebServer
                 _engine.StopServices();
                 Respond(ctx, 200, "application/json", "{\"ok\":true}");
             }
+            else if (path == "/api/create-shortcut" && method == "POST")
+            {
+                Respond(ctx, 200, "application/json", _engine.CreateShortcut());
+            }
+            else if (path == "/api/update-check" && method == "POST")
+            {
+                Respond(ctx, 200, "application/json", _engine.CheckUpdate());
+            }
+            else if (path == "/api/update-apply" && method == "POST")
+            {
+                Respond(ctx, 200, "application/json", _engine.ApplyUpdate());
+            }
             else if (path == "/favicon.ico")
             {
-                ctx.Response.StatusCode = 204; ctx.Response.Close();
+                ServeFavicon(ctx);
             }
             else
                 Respond(ctx, 404, "text/plain", "Not Found");
@@ -1477,6 +1802,37 @@ public class WebServer
         ctx.Response.ContentType = ct;
         ctx.Response.ContentLength64 = buf.Length;
         ctx.Response.OutputStream.Write(buf, 0, buf.Length);
+        ctx.Response.Close();
+    }
+
+    private void ServeFavicon(HttpListenerContext ctx)
+    {
+        try
+        {
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            string[] candidates = new string[] {
+                Path.Combine(exeDir, "icon.ico"),
+                Path.Combine(exeDir, "deploy", "icon.ico"),
+                Path.Combine(exeDir, "..", "deploy", "icon.ico"),
+                Path.Combine(exeDir, "web", "public", "favicon.ico"),
+                Path.Combine(exeDir, "..", "web", "public", "favicon.ico")
+            };
+            foreach (string p in candidates)
+            {
+                if (File.Exists(p))
+                {
+                    byte[] data = File.ReadAllBytes(p);
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "image/x-icon";
+                    ctx.Response.ContentLength64 = data.Length;
+                    ctx.Response.OutputStream.Write(data, 0, data.Length);
+                    ctx.Response.Close();
+                    return;
+                }
+            }
+        }
+        catch { }
+        ctx.Response.StatusCode = 204;
         ctx.Response.Close();
     }
 
@@ -1540,7 +1896,7 @@ public class AppTray : ApplicationContext
 
     private void OpenUI()
     {
-        try { Process.Start(new ProcessStartInfo(_server.Url) { UseShellExecute = true }); } catch { }
+        try { Program.LaunchAppMode(_server.Url); } catch { }
     }
 
     private void ExitApp()
@@ -1554,6 +1910,26 @@ public class AppTray : ApplicationContext
 
     private Icon MakeIcon()
     {
+        // Try to load brand icon from file (icon.ico next to exe, or in deploy/)
+        try
+        {
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            string[] candidates = new string[] {
+                Path.Combine(exeDir, "icon.ico"),
+                Path.Combine(exeDir, "deploy", "icon.ico"),
+                Path.Combine(exeDir, "..", "deploy", "icon.ico"),
+                Path.Combine(exeDir, "web", "public", "favicon.ico"),
+                Path.Combine(exeDir, "..", "web", "public", "favicon.ico")
+            };
+            foreach (string p in candidates)
+            {
+                if (File.Exists(p))
+                    return new Icon(p, 32, 32);
+            }
+        }
+        catch { }
+
+        // Fallback: programmatic icon
         Bitmap bmp = new Bitmap(32, 32);
         using (Graphics g = Graphics.FromImage(bmp))
         {
@@ -1575,6 +1951,40 @@ public class AppTray : ApplicationContext
 // ═══════════════════════════════════════════════════════════
 public static class Program
 {
+    public static void LaunchAppMode(string url)
+    {
+        string[] candidates = new string[] {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Google", "Chrome", "Application", "chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Google", "Chrome", "Application", "chrome.exe")
+        };
+        foreach (string exe in candidates)
+        {
+            if (File.Exists(exe))
+            {
+                try
+                {
+                    ProcessStartInfo si = new ProcessStartInfo(exe,
+                        string.Format("--app={0} --window-size=1100,780 --disable-extensions", url));
+                    si.UseShellExecute = false;
+                    Process.Start(si);
+                    return;
+                }
+                catch { }
+            }
+        }
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+    }
+
     [STAThread]
     public static void Main()
     {
@@ -1601,7 +2011,7 @@ public static class Program
                 return;
             }
 
-            try { Process.Start(new ProcessStartInfo(server.Url) { UseShellExecute = true }); } catch { }
+            try { LaunchAppMode(server.Url); } catch { }
 
             Application.Run(new AppTray(server, engine));
         }

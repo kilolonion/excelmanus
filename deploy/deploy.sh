@@ -500,7 +500,7 @@ _ensure_frontend_standalone_assets() {
   _remote_frontend "
     cd '${FRONTEND_DIR}/web'
     if [[ ! -d .next/standalone ]]; then
-      echo '[WARN] 未检测到 standalone 目录。请确认 next.config.ts 包含 output: standalone 且构建使用了 --no-turbopack'
+      echo '[WARN] 未检测到 standalone 目录。请确认 next.config.ts 包含 output: standalone 且构建使用了 --webpack'
       echo '[INFO] 将回退到 next start 启动'
       exit 0
     fi
@@ -720,7 +720,7 @@ _validate_frontend_build() {
     fi
 
     if [[ \"\$_ok\" != true ]]; then
-      echo '[FATAL] 构建产物校验失败！这通常是 Turbopack 构建不完整导致。'
+      echo '[FATAL] 构建产物校验失败！请确认使用 webpack 模式构建（npm run build）。'
       echo '[FATAL] 将保留当前运行版本，不执行重启。'
       exit 1
     fi
@@ -1033,7 +1033,7 @@ _deploy_frontend() {
     # 校验构建产物完整性（不通过则不重启，避免 502）
     if ! _validate_frontend_build; then
       error "构建产物校验失败！保留当前运行版本，不执行重启。"
-      warn "这通常是 Next.js Turbopack 构建不完整导致。"
+      warn "请确认使用 webpack 模式构建。"
       warn "解决方法：在服务器上手动执行 cd ${FRONTEND_DIR}/web && npm run build"
       return 1
     fi
