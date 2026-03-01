@@ -92,3 +92,37 @@ def create_token_pair(user_id: str, role: str) -> tuple[str, str, int]:
     access = create_access_token(data)
     refresh = create_refresh_token(data)
     return access, refresh, ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+
+MERGE_TOKEN_EXPIRE_MINUTES = 5  # 合并令牌有效期 5 分钟
+
+
+def create_merge_token(
+    existing_user_id: str,
+    provider: str,
+    oauth_id: str,
+    email: str,
+    display_name: str = "",
+    avatar_url: str | None = None,
+) -> str:
+    """创建短效合并令牌，用于 OAuth 账号合并确认。"""
+    expire = datetime.now(tz=timezone.utc) + timedelta(minutes=MERGE_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "type": "merge",
+        "sub": existing_user_id,
+        "provider": provider,
+        "oauth_id": oauth_id,
+        "email": email,
+        "display_name": display_name,
+        "avatar_url": avatar_url or "",
+        "exp": expire,
+    }
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def decode_merge_token(token: str) -> dict[str, Any] | None:
+    """解码并验证合并令牌。返回 claims 字典或 None。"""
+    payload = decode_token(token)
+    if payload is None or payload.get("type") != "merge":
+        return None
+    return payload

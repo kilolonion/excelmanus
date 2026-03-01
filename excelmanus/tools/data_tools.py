@@ -63,6 +63,87 @@ _FORM_LABEL_KEYWORDS = frozenset({
 _FORM_LABEL_RATIO_THRESHOLD = 0.3  # 标签行占比超过此阈值认为是表单类文档
 _FORM_MERGED_CELL_RATIO_THRESHOLD = 0.15  # 合并单元格占比超过此阈值认为是表单类文档
 
+# ── 合并单元格摘要配置 ─────────────────────────────────────
+_MERGED_SUMMARY_MAX_SPANS = 20  # 摘要中最多列出的合并区域数
+
+
+def _collect_merged_cell_summary(ws: Any) -> dict[str, Any] | None:
+    """收集工作表的合并单元格摘要信息。
+
+    将合并区域按语义角色分类（标题跨列、列组标头、数据区合并），
+    并计算合并单元格占比，附带处理建议。
+
+    Args:
+        ws: openpyxl Worksheet 对象（非 read_only 模式）。
+
+    Returns:
+        合并摘要字典，无合并时返回 None。
+    """
+    from openpyxl.utils import get_column_letter
+
+    merged_ranges = list(ws.merged_cells.ranges)
+    if not merged_ranges:
+        return None
+
+    total_rows = ws.max_row or 1
+    total_cols = ws.max_column or 1
+    total_cells = total_rows * total_cols
+
+    # 统计合并单元格总数
+    merged_cell_count = 0
+    for mr in merged_ranges:
+        merged_cell_count += (mr.max_row - mr.min_row + 1) * (mr.max_col - mr.min_col + 1)
+    merged_ratio = merged_cell_count / max(total_cells, 1)
+
+    # 分类合并区域
+    header_spans: list[str] = []       # 宽跨列（标题/分组标头）
+    column_group_spans: list[str] = []  # 列组标头（如 "星期一" 跨若干列）
+    data_merged_count = 0               # 数据区合并（跨行，暗示 NaN）
+
+    for mr in merged_ranges:
+        col_span = mr.max_col - mr.min_col + 1
+        row_span = mr.max_row - mr.min_row + 1
+        start_col_letter = get_column_letter(mr.min_col)
+        end_col_letter = get_column_letter(mr.max_col)
+
+        # 读取合并区域左上角值
+        top_left_value = ws.cell(row=mr.min_row, column=mr.min_col).value
+        label = f"'{top_left_value}'" if top_left_value else "(空)"
+
+        range_str = str(mr)
+
+        if col_span > total_cols * 0.5:
+            # 宽跨列：跨度超过总列数 50%，通常是标题行
+            header_spans.append(f"{range_str} → {label}")
+        elif col_span >= 2 and row_span <= 2 and mr.min_row <= 5:
+            # 列组标头：前 5 行内、跨 2+ 列但不太宽，通常是分组标头
+            column_group_spans.append(
+                f"{range_str} → {label} (cols {start_col_letter}:{end_col_letter})"
+            )
+        elif row_span >= 2:
+            # 数据区跨行合并：pandas 读取时仅首格有值，其余为 NaN
+            data_merged_count += 1
+
+    summary: dict[str, Any] = {
+        "merged_range_count": len(merged_ranges),
+        "merged_cell_ratio": f"{merged_ratio:.1%}",
+    }
+
+    if header_spans:
+        summary["header_spans"] = header_spans[:_MERGED_SUMMARY_MAX_SPANS]
+    if column_group_spans:
+        summary["column_group_spans"] = column_group_spans[:_MERGED_SUMMARY_MAX_SPANS]
+    if data_merged_count > 0:
+        summary["data_merged_ranges"] = data_merged_count
+        summary["hint"] = (
+            f"数据区存在 {data_merged_count} 处跨行合并，"
+            "pandas 读取时仅合并区域左上角单元格有值，其余为 NaN。"
+            "建议用 openpyxl ws.merged_cells.ranges 获取合并信息后做值传播（forward-fill）。"
+        )
+
+    return summary
+
+
 # ── CSV/TSV 支持 ──────────────────────────────────────────
 
 _CSV_EXTENSIONS: frozenset[str] = frozenset({".csv", ".tsv", ".txt"})
@@ -469,8 +550,9 @@ def _resolve_formula_columns(
 
     wb = load_workbook(safe_path, data_only=False, read_only=True)
     try:
-        ws = get_worksheet(wb, sheet_name)
-        if ws is None:
+        try:
+            ws = get_worksheet(wb, sheet_name)
+        except ValueError:
             df.attrs["formula_resolution"] = formula_meta
             return df
 
@@ -703,7 +785,7 @@ def _read_range_direct(
             min_col=min_col, max_col=max_col,
             values_only=True,
         ):
-            rows.append([_serialize_cell_value(c) for c in row])
+            rows.append(_trim_trailing_nulls_generic([_serialize_cell_value(c) for c in row]))
 
         return {
             "range": cell_range,
@@ -768,8 +850,15 @@ def read_excel(
         return not_found
 
     # .xls/.xlsb → 透明转换为 xlsx（后续 openpyxl 调用统一走 xlsx）
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible, check_sheet_name
     safe_path = ensure_openpyxl_compatible(safe_path)
+
+    # ── sheet 名验证：提前拦截无效 sheet 名，附带可用列表 ──
+    if sheet_name is not None and not _is_csv_file(safe_path):
+        resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
+        if sheet_err is not None:
+            return sheet_err
+        sheet_name = resolved_sheet  # 可能经过 case-insensitive 修正
 
     # ── range 模式：精确读取指定坐标范围 ──
     if range is not None:
@@ -817,14 +906,15 @@ def read_excel(
 
     summary["columns"] = [str(c) for c in df.columns]
     summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
-    summary["preview"] = json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso"))
+    _null_info = _build_null_info(df)
+    if _null_info:
+        summary["null_info"] = _null_info
+    summary["preview"] = _df_to_compact_records(df.head(10))
 
     # 自动 tail 预览：表格 > 20 行时附加最后 5 行
     if df.shape[0] > 20:
         tail_start = df.shape[0] - 5
-        summary["tail_preview"] = json.loads(
-            df.tail(5).to_json(orient="records", force_ascii=False, date_format="iso")
-        )
+        summary["tail_preview"] = _df_to_compact_records(df.tail(5))
         summary["tail_note"] = f"显示最后 5 行（第 {tail_start + 1}~{df.shape[0]} 行）"
 
     # 等距采样：sample_rows 指定时附加采样数据
@@ -832,9 +922,7 @@ def read_excel(
         step = max(1, len(df) // sample_rows)
         indices = list(_builtin_range(0, len(df), step))[:sample_rows]
         sampled_df = df.iloc[indices]
-        summary["sample_preview"] = json.loads(
-            sampled_df.to_json(orient="records", force_ascii=False, date_format="iso")
-        )
+        summary["sample_preview"] = _df_to_compact_records(sampled_df)
         summary["sample_note"] = f"等距采样 {len(indices)} 行（共 {len(df)} 行，间隔 {step}）"
 
     formula_meta = df.attrs.get("formula_resolution")
@@ -859,6 +947,26 @@ def read_excel(
             f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
             f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
         )
+
+    # 合并单元格警告：高合并率时提醒 LLM 注意值传播
+    if not _is_csv_file(safe_path):
+        try:
+            from openpyxl import load_workbook as _lw
+            _wb_mc = _lw(safe_path, read_only=False, data_only=True)
+            try:
+                _ws_mc = (
+                    _wb_mc[sheet_name]
+                    if sheet_name and sheet_name in _wb_mc.sheetnames
+                    else _wb_mc.active
+                )
+                if _ws_mc is not None:
+                    _mc_summary = _collect_merged_cell_summary(_ws_mc)
+                    if _mc_summary:
+                        summary["merged_cell_summary"] = _mc_summary
+            finally:
+                _wb_mc.close()
+        except Exception:
+            pass
 
     # 向后兼容：include_style_summary=True 映射为 include=["styles"]
     include_set: set[str] = set()
@@ -906,7 +1014,7 @@ def read_excel(
         finally:
             wb_include.close()
 
-    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(summary, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 
@@ -1043,6 +1151,10 @@ def filter_data(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
     ops = {
@@ -1144,7 +1256,8 @@ def filter_data(
         "original_rows": len(df),
         "filtered_rows": total_filtered,
         "returned_rows": len(filtered),
-        "data": json.loads(filtered.to_json(orient="records", force_ascii=False, date_format="iso")),
+        "columns": [str(c) for c in filtered.columns],
+        "data": _df_to_compact_records(filtered),
     }
     if total_filtered > len(filtered):
         result["truncated"] = True
@@ -1152,7 +1265,7 @@ def filter_data(
     if missing_cols:
         result["missing_columns"] = missing_cols
 
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 
@@ -1184,6 +1297,10 @@ def transform_data(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
@@ -1350,7 +1467,7 @@ def inspect_excel_files(
     # 先收集全部再排序，确保结果确定性（glob 返回顺序依赖文件系统，不可靠）
     glob_method = safe_dir.rglob if recursive else safe_dir.glob
     excel_paths: list[Path] = []
-    for ext in ("*.xlsx", "*.xlsm"):
+    for ext in ("*.xlsx", "*.xlsm", "*.xls", "*.xlsb"):
         for p in glob_method(ext):
             if p.name.startswith((".", "~$")):
                 continue
@@ -1510,6 +1627,48 @@ def _trim_trailing_nulls(row: list[Any]) -> list[Any]:
     while end > 0 and row[end - 1] is None:
         end -= 1
     return row[:end]
+
+
+def _df_to_compact_records(df: "pd.DataFrame") -> list[dict[str, Any]]:
+    """将 DataFrame 转为紧凑记录：去除 null/NaN 键，大幅减少 token 浪费。
+
+    原理：等效于 JSON 版 Markdown-KV——每个值显式关联其键名，无 null 噪音。
+    研究表明 KV 格式 LLM 理解度最高（60.7% vs JSON 53.7% vs CSV 44.3%）。
+    合并单元格导致的 NaN 由 merged_cell_summary 独立解释，不依赖数据中的 null。
+    """
+    records: list[dict[str, Any]] = []
+    cols = [str(c) for c in df.columns]
+    for row in df.itertuples(index=False):
+        d: dict[str, Any] = {}
+        for col_name, val in zip(cols, row):
+            if pd.notna(val):
+                # 序列化 datetime 类型
+                if isinstance(val, (date, datetime)):
+                    d[col_name] = val.isoformat()
+                else:
+                    d[col_name] = val
+        records.append(d)
+    return records
+
+
+def _build_null_info(df: "pd.DataFrame") -> dict[str, Any] | None:
+    """生成空值摘要：一行代替 N×M 个 null token。
+
+    返回 None 表示无显著空值。
+    """
+    if df.empty:
+        return None
+    null_rates = df.isnull().mean()
+    all_null_cols = [str(c) for c in null_rates[null_rates == 1.0].index]
+    high_null_cols = [str(c) for c in null_rates[(null_rates >= 0.6) & (null_rates < 1.0)].index]
+    if not all_null_cols and not high_null_cols:
+        return None
+    info: dict[str, Any] = {}
+    if all_null_cols:
+        info["完全为空"] = all_null_cols
+    if high_null_cols:
+        info["高空值率(≥60%)"] = high_null_cols
+    return info
 
 
 def _format_size(size_bytes: int) -> str:
@@ -2323,7 +2482,7 @@ def group_aggregate(
         "total_groups": int(grouped.ngroups),
         "rows_returned": len(result_df),
         "columns": [str(c) for c in result_df.columns],
-        "data": json.loads(result_df.to_json(orient="records", force_ascii=False, date_format="iso")),
+        "data": _df_to_compact_records(result_df),
     }
     if limit is not None and limit > 0 and total_before_limit > limit:
         completeness = build_completeness_meta(
@@ -2334,7 +2493,7 @@ def group_aggregate(
         result["is_truncated"] = completeness.get("is_truncated", False)
         result["truncation_note"] = completeness.get("truncation_note", "")
 
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 def _normalize_mapping_keys(series: pd.Series) -> pd.Series:
@@ -3074,6 +3233,33 @@ def _generate_quality_signals(
                 "detail": f"{dup_count} 行完全重复 ({dup_rate:.1%})",
             })
 
+        # high_merge_ratio — 合并单元格占比高，数据读取可能产生大量 NaN
+        merged_summary = sheet.get("merged_cell_summary")
+        if merged_summary:
+            ratio_str = merged_summary.get("merged_cell_ratio", "0%")
+            data_merged = merged_summary.get("data_merged_ranges", 0)
+            try:
+                ratio_val = float(ratio_str.rstrip("%")) / 100
+            except (ValueError, AttributeError):
+                ratio_val = 0.0
+            if ratio_val > _FORM_MERGED_CELL_RATIO_THRESHOLD:
+                detail_parts = [f"合并单元格占比 {ratio_str}"]
+                if data_merged > 0:
+                    detail_parts.append(
+                        f"其中 {data_merged} 处数据区跨行合并（pandas 读取会产生 NaN）"
+                    )
+                col_groups = merged_summary.get("column_group_spans", [])
+                if col_groups:
+                    detail_parts.append(
+                        f"列组标头: {', '.join(col_groups[:5])}"
+                    )
+                signals.append({
+                    "severity": "high",
+                    "type": "high_merge_ratio",
+                    "sheet": sheet_name,
+                    "detail": "；".join(detail_parts),
+                })
+
     return signals[:_SNAPSHOT_MAX_SIGNALS]
 
 
@@ -3129,7 +3315,13 @@ def scan_excel_snapshot(
         wb_full = load_workbook(safe_path, read_only=False, data_only=False)
         for i, ws in enumerate(wb_full.worksheets[:_SNAPSHOT_MAX_SHEETS]):
             if i < len(sheet_metas):
-                sheet_metas[i]["has_merged_cells"] = len(ws.merged_cells.ranges) > 0
+                has_merged = len(ws.merged_cells.ranges) > 0
+                sheet_metas[i]["has_merged_cells"] = has_merged
+                # 合并单元格摘要：语义分类 + 合并率 + 处理建议
+                if has_merged:
+                    merged_summary = _collect_merged_cell_summary(ws)
+                    if merged_summary:
+                        sheet_metas[i]["merged_cell_summary"] = merged_summary
                 # 检测公式：扫描前 20 行
                 has_formulas = False
                 for row in ws.iter_rows(min_row=1, max_row=min(20, ws.max_row or 0), values_only=False):
@@ -3328,7 +3520,64 @@ def search_excel_values(
         )
 
     # 编译匹配函数
-    if match_mode == "regex":
+    if match_mode == "fuzzy":
+        # 模糊匹配：将 query 拆分为子串 token，单元格值包含所有 token 即匹配
+        # 拆分规则：按空格/标点分割，同时将连续中文与连续数字/字母分离
+        # 额外在中文数字边界处拆分（如 '电子一班' → ['电子', '一班']）
+        _cjk_re = _re.compile(r'[\u4e00-\u9fff]+|[a-zA-Z]+|\d+', _re.UNICODE)
+        _CN_DIGITS_SET = set("一二三四五六七八九十")
+        _pre_tokens = _cjk_re.findall(query)
+        _raw_tokens: list[str] = []
+        for _pt in _pre_tokens:
+            # 对纯中文 token，在中文数字与非中文数字字符之间拆分
+            if all('\u4e00' <= c <= '\u9fff' for c in _pt) and any(c in _CN_DIGITS_SET for c in _pt):
+                _sub_re = _re.compile(r'(?<=[^\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])(?=[一二三四五六七八九十])|(?<=[一二三四五六七八九十])(?=[^\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])')
+                _parts = _sub_re.split(_pt)
+                _raw_tokens.extend(p for p in _parts if p)
+            else:
+                _raw_tokens.append(_pt)
+        # 中文数字 → 阿拉伯数字等价替换，合并两套 token
+        _CN_DIGIT = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                     "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+        _normalized_tokens: list[str] = []
+        for _tok in _raw_tokens:
+            _alt = _tok
+            for _cn, _ar in _CN_DIGIT.items():
+                _alt = _alt.replace(_cn, _ar)
+            if not case_sensitive:
+                _tok = _tok.lower()
+                _alt = _alt.lower()
+            _normalized_tokens.append(_tok)
+            if _alt != _tok:
+                _normalized_tokens.append(_alt)
+        # 去重并过滤空串
+        _fuzzy_tokens = list(dict.fromkeys(t for t in _normalized_tokens if t))
+        if not _fuzzy_tokens:
+            # 无有效 token 时回退到 contains
+            if case_sensitive:
+                def _match(cell_str: str) -> bool:
+                    return query in cell_str
+            else:
+                _q_lower = query.lower()
+                def _match(cell_str: str) -> bool:
+                    return _q_lower in cell_str.lower()
+        else:
+            # 每个原始 token 至少有一个变体命中即可（原始或数字替换版本）
+            # 构造 token 组：每组内的 token 是同一原始词的变体，组内 OR，组间 AND
+            _token_groups: list[list[str]] = []
+            for _tok in _raw_tokens:
+                _group = [_tok.lower() if not case_sensitive else _tok]
+                _alt = _tok
+                for _cn, _ar in _CN_DIGIT.items():
+                    _alt = _alt.replace(_cn, _ar)
+                if _alt != _tok:
+                    _group.append(_alt.lower() if not case_sensitive else _alt)
+                _token_groups.append(_group)
+
+            def _match(cell_str: str) -> bool:
+                _s = cell_str if case_sensitive else cell_str.lower()
+                return all(any(v in _s for v in grp) for grp in _token_groups)
+    elif match_mode == "regex":
         try:
             flags = 0 if case_sensitive else _re.IGNORECASE
             pattern = _re.compile(query, flags)
@@ -3384,7 +3633,7 @@ def search_excel_values(
             continue
         sheets_searched += 1
 
-        # 读取 header 行
+        # 读取 header 行（仅用于列名标注，不再跳过 row 1 的搜索）
         header: list[str] = []
         header_row_data: list[Any] = []
         for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
@@ -3401,9 +3650,9 @@ def search_excel_values(
             if not target_col_indices:
                 continue
 
-        # 逐行扫描（从第 2 行开始，跳过 header）
+        # 逐行扫描（从第 1 行开始，包含 header 行——表单类文档的数据可能从第 1 行起）
         for row_idx, row in enumerate(
-            ws.iter_rows(min_row=2, values_only=True), start=2
+            ws.iter_rows(min_row=1, values_only=True), start=1
         ):
             if len(matches) >= max_results:
                 break
@@ -3467,6 +3716,25 @@ def search_excel_values(
         "matches": matches,
         "summary_by_sheet": summary_by_sheet,
     }
+
+    # 0 结果时添加智能提示，引导 LLM 优化搜索策略
+    if total_matches == 0 and match_mode in ("contains", "exact", "startswith"):
+        hints: list[str] = []
+        if len(query) > 2:
+            hints.append(f"缩短搜索词（如只搜索 '{query[:2]}' 或其中某个关键词）")
+        # 检测中文数字，提示可能的阿拉伯数字等价
+        _CN_DIGIT_MAP = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                         "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+        _has_cn_digit = any(c in query for c in _CN_DIGIT_MAP)
+        if _has_cn_digit:
+            _alt = query
+            for cn, ar in _CN_DIGIT_MAP.items():
+                _alt = _alt.replace(cn, ar)
+            hints.append(f"查询含中文数字，可尝试阿拉伯数字版本: '{_alt}'")
+        hints.append("尝试 match_mode='fuzzy' 进行分词模糊匹配（自动拆分关键词 + 中文数字转换）")
+        hints.append("尝试 match_mode='regex' 用正则灵活匹配")
+        result["search_hints"] = hints
+
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
@@ -3552,7 +3820,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=read_excel,
-            max_result_chars=6000,
+            max_result_chars=10000,
             write_effect="none",
         ),
         # write_excel: Batch 1 精简
@@ -3644,6 +3912,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=filter_data,
+            max_result_chars=8000,
             write_effect="none",
         ),
         ToolDef(
@@ -3800,15 +4069,17 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=scan_excel_snapshot,
-            max_result_chars=8000,
+            max_result_chars=15000,
             write_effect="none",
         ),
         ToolDef(
             name="search_excel_values",
             description=(
-                "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀匹配。"
+                "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀/模糊匹配。"
                 "返回匹配的 sheet/行/列/值/单元格引用及同行上下文。"
                 "适用场景：在整个文件中查找特定值或模式、定位数据出现位置。"
+                "模糊匹配（fuzzy）：自动拆分关键词并逐个子串匹配，适合用户口语与实际数据不完全一致的场景"
+                "（如搜索'电子一班'可匹配'24级电子信息科学与技术1班'）。"
                 "不适用：条件筛选和排序（改用 filter_data）。"
             ),
             input_schema={
@@ -3824,8 +4095,8 @@ def get_tools() -> list[ToolDef]:
                     },
                     "match_mode": {
                         "type": "string",
-                        "enum": ["contains", "exact", "regex", "startswith"],
-                        "description": "匹配模式，默认 contains",
+                        "enum": ["contains", "exact", "regex", "startswith", "fuzzy"],
+                        "description": "匹配模式：contains（默认）| exact | regex | startswith | fuzzy（分词模糊匹配，适合口语化搜索）",
                         "default": "contains",
                     },
                     "sheets": {
@@ -3854,7 +4125,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=search_excel_values,
-            max_result_chars=6000,
+            max_result_chars=8000,
             write_effect="none",
         ),
     ]
