@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Code2,
@@ -8,6 +8,7 @@ import {
   TrendingUp,
   TableProperties,
   Paperclip,
+  Loader2,
   type LucideIcon,
 } from "lucide-react";
 import { duration } from "@/lib/sidebar-motion";
@@ -56,6 +57,25 @@ const cardVariants = {
   show: { opacity: 1, y: 0, scale: 1, transition: { duration: duration.normal, ease: smoothEase } },
 };
 
+const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+function _isImageName(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 && _IMAGE_EXTS.has(name.slice(dot).toLowerCase());
+}
+
+function _blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const idx = result.indexOf(",");
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function fetchAndUploadSample(
   sampleFile: string,
   sampleFileName: string,
@@ -66,30 +86,56 @@ async function fetchAndUploadSample(
     const blob = await res.blob();
     const file = new File([blob], sampleFileName, { type: blob.type });
     const id = `sample-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const result = await uploadFile(file);
-    return { id, file, status: "success", uploadResult: result };
+    // 图片预编码 base64，sendMessage 可直接复用
+    const isImage = _isImageName(sampleFileName) || blob.type.startsWith("image/");
+    const [result, cachedBase64] = await Promise.all([
+      uploadFile(file),
+      isImage ? _blobToBase64(blob) : Promise.resolve(undefined),
+    ]);
+    return { id, file, status: "success", uploadResult: result, cachedBase64 };
   } catch {
     return null;
   }
 }
 
 export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
+  // hover 预上传缓存：sampleFile → Promise<AttachedFile | null>
+  const prefetchCache = useRef<Map<string, Promise<AttachedFile | null>>>(new Map());
+
+  const prefetchSample = useCallback((suggestion: Suggestion) => {
+    const { sampleFile, sampleFileName } = suggestion;
+    if (!sampleFile || !sampleFileName) return;
+    if (prefetchCache.current.has(sampleFile)) return;
+    prefetchCache.current.set(
+      sampleFile,
+      fetchAndUploadSample(sampleFile, sampleFileName),
+    );
+  }, []);
+
   const handleClick = useCallback(
     async (suggestion: Suggestion) => {
-      if (suggestion.sampleFile && suggestion.sampleFileName) {
-        const attached = await fetchAndUploadSample(
-          suggestion.sampleFile,
-          suggestion.sampleFileName,
-        );
-        onSuggestionClick(
-          suggestion.text,
-          attached ? [attached] : undefined,
-        );
-      } else {
-        onSuggestionClick(suggestion.text);
+      if (loadingKey) return;
+
+      setLoadingKey(suggestion.text);
+      try {
+        if (suggestion.sampleFile && suggestion.sampleFileName) {
+          // 优先使用 hover 预上传的缓存结果
+          const cached = prefetchCache.current.get(suggestion.sampleFile);
+          const task = cached ?? fetchAndUploadSample(suggestion.sampleFile, suggestion.sampleFileName);
+          const attached = await Promise.race([
+            task,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          onSuggestionClick(suggestion.text, attached ? [attached] : undefined);
+        } else {
+          onSuggestionClick(suggestion.text);
+        }
+      } finally {
+        setLoadingKey(null);
       }
     },
-    [onSuggestionClick],
+    [onSuggestionClick, loadingKey],
   );
 
   return (
@@ -125,21 +171,29 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
       >
         {SUGGESTIONS.map((suggestion) => {
           const { text, icon: Icon, sampleFileName } = suggestion;
+          const isThis = loadingKey === text;
+          const isBusy = !!loadingKey;
           return (
             <motion.button
               key={text}
               variants={cardVariants}
-              whileHover={{ y: -2, transition: { duration: 0.15 } }}
-              whileTap={{ scale: 0.97 }}
+              whileHover={isBusy ? {} : { y: -2, transition: { duration: 0.15 } }}
+              whileTap={isBusy ? {} : { scale: 0.97 }}
+              onPointerEnter={() => prefetchSample(suggestion)}
               onClick={() => handleClick(suggestion)}
-              className="group flex items-center gap-3 rounded-xl welcome-card-glass p-4 text-left text-sm
-                hover:bg-[var(--em-primary-alpha-06)]
-                active:bg-[var(--em-primary-alpha-10)] transition-[border-color,background-color,box-shadow,color] duration-200 cursor-pointer min-h-[44px]"
+              disabled={isBusy}
+              className={`group flex items-center gap-3 rounded-xl welcome-card-glass p-4 text-left text-sm
+                transition-[border-color,background-color,box-shadow,color,opacity] duration-200 min-h-[44px]
+                ${isThis ? "opacity-60 cursor-wait" : isBusy ? "opacity-80 cursor-default" : "hover:bg-[var(--em-primary-alpha-06)] active:bg-[var(--em-primary-alpha-10)] cursor-pointer"}`}
             >
               <span className="flex-shrink-0 h-8 w-8 rounded-lg bg-[var(--em-primary-alpha-06)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
-                <Icon className="h-4 w-4 text-muted-foreground group-hover:text-[var(--em-primary)] transition-colors" />
+                {isThis ? (
+                  <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
+                ) : (
+                  <Icon className="h-4 w-4 text-muted-foreground group-hover:text-[var(--em-primary)] transition-colors" />
+                )}
               </span>
-              <span className="flex-1 group-hover:text-foreground transition-colors truncate">{text}</span>
+              <span className="flex-1 group-hover:text-foreground transition-colors line-clamp-2">{text}</span>
               {sampleFileName && (
                 <span className="flex items-center gap-1 text-[10px] text-muted-foreground/60 group-hover:text-muted-foreground transition-colors flex-shrink-0">
                   <Paperclip className="h-3 w-3" />

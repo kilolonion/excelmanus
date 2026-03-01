@@ -46,6 +46,10 @@ class ContextBuilder:
         # W1: 窗口感知 notice 脏标记缓存
         self._window_notice_cache: str | None = None
         self._window_notice_dirty: bool = True
+        # P5: 文件全景 panorama 脏标记缓存（CoW 写入时标脏）
+        self._panorama_cache: str | None = None
+        self._panorama_dirty: bool = True
+        self._panorama_cache_turn: int = -1
 
     def _all_tool_names(self) -> list[str]:
         e = self._engine
@@ -233,6 +237,21 @@ class ContextBuilder:
 
         return "## 进展反思\n" + "\n".join(parts)
 
+    def _build_memory_notice(self) -> str:
+        """构建语义记忆注入文本。
+
+        当 engine 使用 semantic 模式时，从缓存的检索结果中读取；
+        static 模式下记忆已在 system_prompt 中，返回空。
+        """
+        e = self._engine
+        mode = getattr(e, "_memory_injection_mode", "static")
+        if mode != "semantic":
+            return ""
+        text = getattr(e, "_relevant_memory_text", "")
+        if not text or not text.strip():
+            return ""
+        return f"## 持久记忆（语义相关）\n{text.strip()}"
+
     def _build_playbook_notice(self) -> str:
         """检索并构建 Playbook 历史经验注入文本。
 
@@ -323,6 +342,191 @@ class ContextBuilder:
             parts.append(f"建议：{rec}")
 
         return "\n\n".join(parts)
+
+    def _build_post_write_verification_hint(self) -> str:
+        """关键写入操作后注入即时验证提示，让主代理在下一轮迭代中自检。
+
+        借鉴 Windsurf 的 post_write_code hook：不等到 finish_task 才验证，
+        而是在写入后立即提醒主代理确认结果。
+
+        仅在满足以下条件时触发（避免过度提示）：
+        - 本轮有写入操作（write_operations_log 非空）
+        - 写入涉及关键操作（跨 sheet、公式、大批量等）
+        - 未处于 finish_task 阶段（避免和 verifier 重复）
+        """
+        e = self._engine
+        state = getattr(e, "_state", None)
+        if state is None:
+            return ""
+        ops = state.write_operations_log
+        if not ops:
+            return ""
+        # finish_task 阶段不注入（verifier 会接管）
+        if getattr(state, "finish_task_warned", False):
+            return ""
+
+        # 判断是否涉及关键操作（简单单次写入不提示，避免噪音）
+        tool_names = {entry.get("tool_name", "") for entry in ops}
+        sheets = {entry.get("sheet", "") for entry in ops if entry.get("sheet")}
+
+        # 检测是否涉及新文件创建（summary 含创建/新建/生成等关键词）
+        _NEW_FILE_KEYWORDS = ("创建", "新建", "生成", "新文件", "new file", "created")
+        _has_new_file = any(
+            any(kw in (entry.get("summary", "") or "").lower() for kw in _NEW_FILE_KEYWORDS)
+            for entry in ops
+        )
+
+        is_critical = (
+            _has_new_file                          # 新文件创建（必须回读验证）
+            or len(ops) >= 3                       # 多步写入
+            or len(sheets) > 1                     # 跨 sheet
+            or "run_code" in tool_names            # 代码写入（风险高）
+            or any("公式" in (entry.get("summary", "") or "") or "VLOOKUP" in (entry.get("summary", "") or "").upper() for entry in ops)
+        )
+        if not is_critical:
+            return ""
+
+        # 构建最近写入的简要摘要
+        recent = ops[-3:]  # 最近 3 条
+        summaries = []
+        for entry in recent:
+            tool = entry.get("tool_name", "?")
+            fp = entry.get("file_path", "")
+            sheet = entry.get("sheet", "")
+            desc = entry.get("summary", "")[:60]
+            parts = [tool]
+            if fp:
+                parts.append(fp.split("/")[-1])
+            if sheet:
+                parts.append(sheet)
+            if desc:
+                parts.append(desc)
+            summaries.append(" · ".join(parts))
+
+        # 新文件创建场景使用更强硬的提示
+        if _has_new_file:
+            return (
+                "## ⚠ 新文件创建——必须回读验证\n"
+                "你刚创建了新的 Excel 文件，stdout 输出**不能**替代回读验证：\n"
+                + "\n".join(f"- {s}" for s in summaries)
+                + "\n\n**必须**立即用 `read_excel` 或 `scan_excel_snapshot` 回读新文件，"
+                "确认：① 文件已创建 ② sheet 结构正确 ③ 数据行数/列数与预期一致。"
+                "\n验证通过后再继续下一步或汇报结果。"
+            )
+
+        return (
+            "## ⚡ 写入后自检提示\n"
+            "你刚执行了关键写入操作，建议在继续下一步前快速确认：\n"
+            + "\n".join(f"- {s}" for s in summaries)
+            + "\n\n用 `read_excel` 或 `scan_excel_snapshot` 抽检目标区域，"
+            "确认数据正确后再继续。发现问题立即修正，不要等到 finish_task。"
+        )
+
+    def _build_scan_tool_hint(self) -> str:
+        """当工作区有 Excel 文件但无 explorer 缓存时，自动预扫描并注入缓存。
+
+        - 首次 chat 时检测到 Excel 文件且无缓存 → 自动调用 scan_excel_snapshot
+        - 将扫描结果转换为 explorer_report 格式注入 session_state.explorer_reports
+        - 同一轮的 _build_explorer_report_notice 即可接管展示
+        - 如果自动扫描失败，降级为文本提示
+
+        仅在第一轮（无缓存）时触发，后续轮次零开销。
+        """
+        e = self._engine
+        state = getattr(e, "_state", None)
+        if state is None:
+            return ""
+        if state.explorer_reports:
+            return ""
+        # 标记探索已启动，防止与 _auto_explore_after_scan 竞态重复注入
+        if getattr(state, "_explore_in_progress", False):
+            return ""
+        # 直接扫描磁盘目录发现 Excel 文件（不依赖 FileRegistry._path_cache，
+        # 因为后台 scan_workspace 可能尚未完成）
+        workspace_root = getattr(e.config, "workspace_root", None) or getattr(e, "_workspace_root", None)
+        if not workspace_root:
+            return ""
+        excel_paths = self._discover_excel_files_on_disk(str(workspace_root))
+        if not excel_paths:
+            return ""
+        state._explore_in_progress = True  # type: ignore[attr-defined]
+
+        # 尝试自动预扫描（最多扫描前 3 个文件，每个最多 500ms）
+        auto_scanned = self._try_auto_prescan(excel_paths[:3], state)
+        if auto_scanned:
+            # 扫描成功 → 结果已注入 explorer_reports，_build_explorer_report_notice 会接管
+            # 返回空字符串，不需要额外提示
+            return ""
+
+        # 自动扫描失败 → 降级为文本提示
+        return (
+            "## 💡 数据快速扫描提示\n"
+            "工作区有 Excel 文件但尚无数据概况缓存。"
+            "处理数据任务前，建议先调用 `scan_excel_snapshot` 一次性获取文件全貌"
+            "（schema、列统计、质量信号、跨 Sheet 关联），"
+            "或使用 `search_excel_values` 跨 Sheet 搜索特定值。"
+        )
+
+    @staticmethod
+    def _try_auto_prescan(excel_paths: list[str], state: Any) -> bool:
+        """尝试自动调用 scan_excel_snapshot 并将结果注入 explorer_reports。
+
+        Returns:
+            True 如果至少一个文件扫描成功并注入了缓存。
+        """
+        import json as _json
+        try:
+            from excelmanus.tools.data_tools import scan_excel_snapshot
+        except ImportError:
+            return False
+
+        any_success = False
+        for path in excel_paths:
+            try:
+                raw = scan_excel_snapshot(file_path=path, max_sample_rows=200)
+                scan = _json.loads(raw)
+                if "error" in scan:
+                    continue
+                # 转换为 explorer_report 格式
+                report = _convert_scan_to_explorer_report(scan, path)
+                if report:
+                    state.explorer_reports.append(report)
+                    any_success = True
+            except Exception:
+                continue
+        return any_success
+
+    @staticmethod
+    def _discover_excel_files_on_disk(workspace_root: str, *, max_files: int = 10) -> list[str]:
+        """直接扫描磁盘发现 Excel 文件，不依赖 FileRegistry 缓存。
+
+        轻量级目录遍历，仅收集文件路径（不打开文件），
+        用于在 FileRegistry scan 尚未完成时作为 fallback。
+        """
+        import os as _os
+        from pathlib import Path as _Path
+
+        _SKIP = frozenset({
+            ".git", ".venv", "node_modules", "__pycache__",
+            ".worktrees", "dist", "build",
+        })
+        _EXCEL_EXTS = frozenset({".xlsx", ".xlsm", ".xls", ".xlsb"})
+        root = _Path(workspace_root)
+        results: list[str] = []
+        try:
+            for walk_root, dirs, files in _os.walk(root):
+                dirs[:] = [d for d in dirs if d not in _SKIP]
+                for name in files:
+                    if name.startswith((".", "~$")):
+                        continue
+                    ext = _os.path.splitext(name)[1].lower()
+                    if ext in _EXCEL_EXTS:
+                        results.append(str(_Path(walk_root, name)))
+                        if len(results) >= max_files:
+                            return results
+        except Exception:
+            pass
+        return results
 
     @staticmethod
     def _compute_reasoning_level_static(route_result: Any) -> str:
@@ -415,7 +619,7 @@ class ContextBuilder:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # 统一文件全景 + CoW 路径映射（不缓存：CoW 映射 turn 内可增长）
+        # 统一文件全景 + CoW 路径映射（turn 内缓存，写入时标脏重建）
         file_registry_notice = self._build_file_registry_notice()
         if file_registry_notice:
             base_prompt = base_prompt + "\n\n" + file_registry_notice
@@ -442,6 +646,11 @@ class ContextBuilder:
                     _strategy_text_captured = _strategy_text
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
+
+        # D2: 语义记忆动态注入（替代 system_prompt 中的全量静态注入）
+        memory_notice = self._build_memory_notice()
+        if memory_notice:
+            base_prompt = base_prompt + "\n\n" + memory_notice
 
         # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
         playbook_notice = self._build_playbook_notice()
@@ -477,10 +686,22 @@ class ContextBuilder:
         if verification_fix_notice:
             base_prompt = base_prompt + "\n\n" + verification_fix_notice
 
+        # R8: 写入后即时验证提示（借鉴 Windsurf post_write hooks）
+        post_write_hint = self._build_post_write_verification_hint()
+        if post_write_hint:
+            base_prompt = base_prompt + "\n\n" + post_write_hint
+
+        # R7: 自动预扫描（必须在 R6 之前，以便注入缓存后被 R6 读取）
+        scan_hint = self._build_scan_tool_hint()
+
         # R6: 注入已缓存的 explorer 结构化报告摘要
         explorer_notice = self._build_explorer_report_notice()
         if explorer_notice:
             base_prompt = base_prompt + "\n\n" + explorer_notice
+
+        # R7 降级提示：自动扫描失败时的文本提示
+        if scan_hint:
+            base_prompt = base_prompt + "\n\n" + scan_hint
 
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
@@ -508,6 +729,8 @@ class ContextBuilder:
             _snapshot_components["hook_context"] = _hook_context_captured
         if task_plan_notice:
             _snapshot_components["task_plan_notice"] = task_plan_notice
+        if memory_notice:
+            _snapshot_components["memory_notice"] = memory_notice
         if playbook_notice:
             _snapshot_components["playbook_notice"] = playbook_notice
         if verification_fix_notice:
@@ -954,19 +1177,30 @@ class ContextBuilder:
         """统一文件全景 + CoW 路径映射注入。
 
         使用 FileRegistry.build_panorama() 作为唯一数据源。
-        CoW 映射始终追加（不缓存，turn 内可增长）。
+        panorama 部分使用脏标记缓存（写入时标脏），CoW 映射始终实时追加。
         """
         e = self._engine
         parts: list[str] = []
 
-        # ── 文件全景：FileRegistry ──
-        _reg = e.file_registry
-        if _reg is not None:
-            panorama = _reg.build_panorama()
-            if panorama:
-                parts.append(panorama)
+        # ── 文件全景：FileRegistry（turn 内缓存，写入时标脏重建）──
+        _turn = e._session_turn
+        if _turn != self._panorama_cache_turn:
+            self._panorama_dirty = True
+            self._panorama_cache_turn = _turn
 
-        # ── CoW 路径映射（始终追加，不缓存） ──
+        if self._panorama_dirty:
+            _reg = e.file_registry
+            if _reg is not None:
+                panorama = _reg.build_panorama()
+                self._panorama_cache = panorama if panorama else None
+            else:
+                self._panorama_cache = None
+            self._panorama_dirty = False
+
+        if self._panorama_cache:
+            parts.append(self._panorama_cache)
+
+        # ── CoW 路径映射（始终实时追加，turn 内可增长） ──
         cow_registry: dict[str, str] = {}
         try:
             if hasattr(e.state, "get_cow_mappings"):
@@ -994,6 +1228,13 @@ class ContextBuilder:
             parts.append("\n".join(cow_lines))
 
         return "\n\n".join(parts)
+
+    def mark_panorama_dirty(self) -> None:
+        """标记文件全景缓存为脏，下次构建时重建 panorama。
+
+        应在工具写入操作成功后调用（_record_workspace_write_action 等）。
+        """
+        self._panorama_dirty = True
 
     def mark_window_notice_dirty(self) -> None:
         """标记窗口感知 notice 缓存为脏，下次构建时重新渲染。
@@ -1118,4 +1359,113 @@ class ContextBuilder:
         if len(normalized) <= max_chars:
             return normalized
         return normalized[:max_chars]
+
+
+def _convert_scan_to_explorer_report(scan: dict, file_path: str) -> dict | None:
+    """将 scan_excel_snapshot 的输出转换为 explorer_report 格式。
+
+    explorer_report 格式 (兼容 _build_explorer_report_notice):
+    {
+        "summary": str,
+        "files": [{"path": str, "sheets": [{"name", "rows", "cols", "has_header"}]}],
+        "schema": {sheet_name: [{"column", "dtype", "nulls", "unique", "sample"}]},
+        "findings": [{"type", "severity", "detail"}],
+        "recommendation": str,
+    }
+    """
+    sheets = scan.get("sheets", [])
+    if not sheets:
+        return None
+
+    # files
+    files_entry = {
+        "path": file_path,
+        "sheets": [
+            {
+                "name": s.get("name", "?"),
+                "rows": s.get("rows", 0),
+                "cols": s.get("cols", 0),
+                "has_header": True,
+            }
+            for s in sheets
+        ],
+    }
+
+    # schema
+    schema: dict[str, list[dict]] = {}
+    for s in sheets:
+        sheet_name = s.get("name", "?")
+        cols = []
+        for c in s.get("columns", []):
+            entry: dict = {
+                "column": c.get("name", "?"),
+                "dtype": c.get("inferred_type", c.get("dtype", "?")),
+                "nulls": c.get("null_count", 0),
+                "unique": c.get("unique_count", 0),
+            }
+            sample = c.get("sample_values")
+            if sample:
+                entry["sample"] = sample[:3]
+            if "min" in c:
+                entry["min"] = c["min"]
+            if "max" in c:
+                entry["max"] = c["max"]
+            cols.append(entry)
+        if cols:
+            schema[sheet_name] = cols
+
+    # findings (from quality_signals + relationships)
+    findings: list[dict] = []
+    for sig in scan.get("quality_signals", []):
+        sig_type = sig.get("type", "quality")
+        mapped_type = "anomaly" if sig_type in ("missing_data", "empty_column", "outliers") else "quality"
+        if sig_type in ("candidate_foreign_key", "shared_column_name"):
+            mapped_type = "relationship"
+        findings.append({
+            "type": mapped_type,
+            "severity": sig.get("severity", "info"),
+            "detail": sig.get("detail", ""),
+        })
+    for rel in scan.get("relationships", []):
+        detail = ""
+        if rel.get("type") == "shared_column_name":
+            detail = f"共享列 {rel.get('columns', [])} 出现在 {rel.get('sheets', [])}"
+        elif rel.get("type") == "candidate_foreign_key":
+            src = rel.get("source", {})
+            tgt = rel.get("target", {})
+            detail = (
+                f"{src.get('sheet', '?')}.{src.get('column', '?')} → "
+                f"{tgt.get('sheet', '?')}.{tgt.get('column', '?')} "
+                f"(重叠率 {rel.get('overlap_rate', 0):.0%})"
+            )
+        if detail:
+            findings.append({
+                "type": "relationship",
+                "severity": "info",
+                "detail": detail,
+            })
+
+    # summary
+    total_sheets = len(sheets)
+    total_rows = sum(s.get("rows", 0) for s in sheets)
+    signal_count = len(scan.get("quality_signals", []))
+    summary = f"{file_path}: {total_sheets} 个 Sheet, 共 {total_rows} 行"
+    if signal_count > 0:
+        summary += f", {signal_count} 个质量信号"
+    summary += " (自动预扫描)"
+
+    # recommendation
+    high_signals = [s for s in scan.get("quality_signals", []) if s.get("severity") == "high"]
+    recommendation = ""
+    if high_signals:
+        types = list({s.get("type", "") for s in high_signals})
+        recommendation = f"检测到 {len(high_signals)} 个高优先级问题（{', '.join(types)}），建议优先处理"
+
+    return {
+        "summary": summary,
+        "files": [files_entry],
+        "schema": schema,
+        "findings": findings[:10],
+        "recommendation": recommendation,
+    }
 

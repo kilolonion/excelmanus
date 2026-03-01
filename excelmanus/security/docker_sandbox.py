@@ -28,7 +28,7 @@ _SANDBOX_DOCKERFILE_CONTENT = """\
 FROM python:3.12-slim
 
 RUN pip install --no-cache-dir \\
-    pandas openpyxl numpy matplotlib xlsxwriter et-xmlfile \\
+    pandas openpyxl numpy matplotlib xlsxwriter et-xmlfile scikit-learn \\
     && rm -rf /root/.cache
 
 WORKDIR /workspace

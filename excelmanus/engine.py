@@ -52,7 +52,7 @@ from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
-from excelmanus.engine_core.llm_caller import LLMCaller
+from excelmanus.engine_core.llm_caller import LLMCaller, is_retryable_llm_error, compute_retry_delay
 from excelmanus.engine_core.interaction_handler import InteractionHandler
 from excelmanus.engine_core.meta_tools import MetaToolBuilder
 from excelmanus.engine_core.skill_resolver import SkillResolver
@@ -310,7 +310,7 @@ class AgentEngine:
                     database, self._config.workspace_root, enable_versions=True,
                 )
             except Exception:
-                logger.debug("FileRegistry 初始化失败", exc_info=True)
+                logger.warning("FileRegistry 初始化失败", exc_info=True)
         self._transaction: WorkspaceTransaction | None = None
         if self._workspace.transaction_enabled:
             if self._file_registry is not None and self._file_registry.has_versions:
@@ -393,6 +393,9 @@ class AgentEngine:
 
         # ── 上下文自动压缩（Compaction）──────────────────────
         self._compaction_manager = CompactionManager(config)
+        # 缓存最近一次 _tool_calling_loop 中构建的 system_msgs，
+        # 供 get_compaction_status / /compact 命令使用更准确的 token 计数。
+        self._last_system_msgs: list[dict] | None = None
 
         # ── 验证门控（Verification Gate）──────────────────────
         from excelmanus.engine_core.verification_gate import VerificationGate
@@ -462,14 +465,28 @@ class AgentEngine:
                 logger.debug("语义记忆初始化失败，回退到传统加载", exc_info=True)
                 self._semantic_memory = None
                 self._embedding_client = None
-        # 会话启动时加载核心记忆到 system prompt（同步回退，语义检索在首轮 chat 时异步执行）
+        # 会话启动时清理过期记忆
+        if persistent_memory is not None and config.memory_expire_days > 0:
+            try:
+                persistent_memory.cleanup_expired(config.memory_expire_days)
+            except Exception:
+                logger.debug("记忆过期清理失败，已跳过", exc_info=True)
+        # 会话启动时加载核心记忆到 system prompt
+        # 语义记忆可用时：不在此处静态注入，改为 chat() 中按用户消息动态注入
+        self._memory_injection_mode = "static"  # "static" | "semantic"
         if persistent_memory is not None:
-            core_memory = persistent_memory.load_core()
-            if core_memory:
-                original = self._memory.system_prompt
-                self._memory.system_prompt = (
-                    f"{original}\n\n## 持久记忆\n{core_memory}"
-                )
+            if self._semantic_memory is not None:
+                # 语义记忆可用：延迟到 chat() 按相关性注入
+                self._memory_injection_mode = "semantic"
+            else:
+                core_memory = persistent_memory.load_core()
+                if core_memory:
+                    original = self._memory.system_prompt
+                    self._memory.system_prompt = (
+                        f"{original}\n\n## 持久记忆\n{core_memory}"
+                    )
+        # 缓存语义记忆检索结果，供 context_builder 使用
+        self._relevant_memory_text: str = ""
 
         # ── 用户自定义规则 ─────────────────────────────────
         self._rules_manager: Any = None  # 类型：RulesManager | None
@@ -491,6 +508,7 @@ class AgentEngine:
         self._active_base_url: str = config.base_url
         self._active_protocol: str = config.protocol
         self._active_model_name: str | None = None  # 当前激活的 profile name
+        self._active_profile: ModelProfile | None = None  # 当前激活的完整 profile
 
         # ── 模型能力探测结果（由 API 层或启动时注入） ──
         from excelmanus.model_probe import ModelCapabilities
@@ -744,9 +762,10 @@ class AgentEngine:
         return "unknown"
 
     def _record_workspace_write_action(self) -> None:
-        """记录工作区写入：写入态 + registry 刷新标记。"""
+        """记录工作区写入：写入态 + registry 刷新标记 + panorama 脏标记。"""
         self._state.record_write_action()
         self._registry_refresh_needed = True
+        self._context_builder.mark_panorama_dirty()
 
     def _record_external_write_action(self) -> None:
         """记录工作区外写入：仅写入态，不触发 registry 刷新。"""
@@ -901,6 +920,28 @@ class AgentEngine:
         self._pending_approval_route_result = None
         self._pending_approval_tool_call_id = None
 
+        # ── rollback 额外状态清理（与 clear_memory 对齐） ──
+        # 任务清单：任务在被回退的轮次中创建，已无效
+        self._task_store.clear()
+        # 窗口感知：保留了已回退轮次的窗口数据，需重置
+        self._window_perception.reset()
+        # 工具 schema 缓存失效
+        self._tools_cache = None
+        # SessionState 中与已回退轮次相关的累积状态
+        self._state.affected_files.clear()
+        self._state.write_operations_log.clear()
+        self._state.execution_guard_fired = False
+        self._state.finish_task_warned = False
+        self._state.verification_attempt_count = 0
+        self._state.stuck_warning_fired = False
+        self._state._recent_tool_calls.clear()
+        if rollback_files:
+            # 文件已回滚，explorer 缓存与实际文件不一致
+            self._state.explorer_reports.clear()
+            self._state.backup_write_notice_shown = False
+        # 图片追踪：清理已移除消息相关的图片状态
+        self._memory.reset_image_tracking()
+
         return {
             "removed_messages": removed,
             "file_rollback_results": file_results,
@@ -937,9 +978,12 @@ class AgentEngine:
         条件：FileRegistry 中存在 Excel 文件且尚无 explorer_reports 缓存。
         结果以 EXPLORER_REPORT 格式缓存到 session_state，供 context_builder 注入。
         """
-        # 已有缓存则跳过
+        # 已有缓存或 prescan 已在主线程中启动则跳过（防止 TOCTOU 竞态重复注入）
         if getattr(self._state, "explorer_reports", None):
             return
+        if getattr(self._state, "_explore_in_progress", False):
+            return
+        self._state._explore_in_progress = True  # type: ignore[attr-defined]
 
         # 检查是否有 Excel 文件
         if self._file_registry is None:
@@ -951,7 +995,7 @@ class AgentEngine:
         excel_files = [
             f for f in all_files
             if any(str(getattr(f, "path", f)).lower().endswith(ext)
-                   for ext in (".xlsx", ".xlsm", ".xls", ".csv"))
+                   for ext in (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv"))
         ]
         if not excel_files:
             return
@@ -1160,10 +1204,47 @@ class AgentEngine:
                         memory_trigger=trigger,
                     ),
                 )
+            # 提取新记忆后，检查是否应触发维护
+            if entries:
+                await self._maybe_run_memory_maintenance()
             return entries
         except Exception:
             logger.exception("持久记忆提取或保存失败，已跳过")
             return []
+
+    async def _maybe_run_memory_maintenance(self) -> None:
+        """条件性触发记忆维护代理（合并/删除/改写）。"""
+        if not self._config.memory_maintenance_enabled:
+            return
+        if self._persistent_memory is None:
+            return
+
+        from excelmanus.memory_maintainer import MemoryMaintainer
+
+        if not MemoryMaintainer.should_run(
+            self._persistent_memory,
+            min_entries=self._config.memory_maintenance_min_entries,
+            new_threshold=self._config.memory_maintenance_new_threshold,
+            interval_hours=self._config.memory_maintenance_interval_hours,
+        ):
+            return
+
+        # 模型优先级: memory_maintenance_model > aux_model > 主模型
+        client = getattr(self, "_aux_client", None) or self._client
+        model = (
+            self._config.memory_maintenance_model
+            or getattr(self, "_aux_model", None)
+            or self._model
+        )
+        maintainer = MemoryMaintainer(client, model)
+        try:
+            result = await maintainer.maintain(self._persistent_memory)
+            logger.info(
+                "记忆维护完成: kept=%d deleted=%d rewritten=%d merged=%d",
+                result.kept, result.deleted, result.rewritten, result.merged,
+            )
+        except Exception:
+            logger.debug("记忆维护执行失败，已跳过", exc_info=True)
 
     async def initialize_mcp(self) -> None:
         """异步初始化 MCP 连接（需在 event loop 中调用）。
@@ -1352,7 +1433,9 @@ class AgentEngine:
 
     def get_compaction_status(self) -> dict[str, Any]:
         """返回上下文压缩状态，供 API 层查询。"""
-        return self._compaction_manager.get_status(self._memory, None)
+        return self._compaction_manager.get_status(
+            self._memory, self._last_system_msgs,
+        )
 
     @property
     def last_route_result(self) -> SkillMatchResult:
@@ -1935,6 +2018,7 @@ class AgentEngine:
                     break
 
         # ── 路由（斜杠命令 + chat_mode 映射） ──
+        _route_start = time.monotonic()
         route_result = await self._route_skills(
             user_message,
             slash_command=effective_slash_command,
@@ -1943,6 +2027,7 @@ class AgentEngine:
             on_event=on_event,
             images=normalized_images if normalized_images else None,
         )
+        logger.debug("perf.chat: routing %.0fms", (time.monotonic() - _route_start) * 1000)
 
         route_result, user_message = await self._adapt_guidance_only_slash_route(
             route_result=route_result,
@@ -2168,6 +2253,24 @@ class AgentEngine:
         # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
         self._mention_contexts = mention_contexts
 
+
+        # D2: 语义记忆动态注入 — 根据用户消息检索相关记忆
+        _mem_start = time.monotonic()
+        if self._memory_injection_mode == "semantic" and self._semantic_memory is not None:
+            try:
+                self._relevant_memory_text = await self._semantic_memory.search(user_message)
+            except Exception:
+                logger.debug("语义记忆检索失败，降级到全量加载", exc_info=True)
+                if self._persistent_memory is not None:
+                    self._relevant_memory_text = self._persistent_memory.load_core()
+        _mem_elapsed = (time.monotonic() - _mem_start) * 1000
+        if _mem_elapsed > 50:
+            logger.debug("perf.chat: semantic_memory %.0fms", _mem_elapsed)
+
+        logger.debug(
+            "perf.chat: pre-loop total %.0fms (route+adapt+memory+hints)",
+            (time.monotonic() - chat_start) * 1000,
+        )
 
         # ── 异步 LLM 分类：已内化到 router._classify_task 同步流程 ──
         self._pending_classify_task = None
@@ -2595,6 +2698,8 @@ class AgentEngine:
         """
         if not self._subagent_enabled:
             return None
+        if not getattr(self._config, "verifier_enabled", False):
+            return None
 
         verifier_config = self._subagent_registry.get("verifier")
         if verifier_config is None:
@@ -2637,6 +2742,11 @@ class AgentEngine:
         task_list_notice = self._context_builder._build_task_list_status_notice()
         if task_list_notice:
             parts.append(f"任务清单：\n{task_list_notice[:600]}")
+
+        # 注入 VerificationGate 已通过的自动检查结果
+        gate_summary = self._build_gate_results_for_verifier()
+        if gate_summary:
+            parts.append(gate_summary)
 
         prompt = "\n".join(parts)
 
@@ -2782,6 +2892,69 @@ class AgentEngine:
         if len(sections) <= 1:
             return ""
 
+        return "\n\n".join(sections)
+
+    def _build_gate_results_for_verifier(self) -> str:
+        """汇总 VerificationGate 结果 + 待 verifier 手动验证的条件，注入 verifier prompt。
+
+        分三层：
+        1. Gate 已自动通过的条件 → 告知 verifier 无需重复
+        2. Gate 自动检查失败的条件 → 告知 verifier 重点关注
+        3. custom 类型 / 未被 Gate 处理的条件 → 明确列出，让 verifier 按清单执行
+        """
+        task_list = self._task_store.current
+        if task_list is None:
+            return ""
+
+        auto_passed: list[str] = []
+        auto_failed: list[str] = []
+        needs_manual: list[str] = []
+
+        for item in task_list.items:
+            vc = item.verification_criteria
+            if vc is None:
+                continue
+
+            detail = f"{vc.check_type}"
+            if vc.target_file:
+                detail += f" @ {vc.target_file}"
+            if vc.target_sheet:
+                detail += f"/{vc.target_sheet}"
+            if vc.expected:
+                detail += f" (期望: {vc.expected}"
+                if vc.actual:
+                    detail += f", 实际: {vc.actual}"
+                detail += ")"
+
+            if vc.check_type == "custom" or vc.passed is None:
+                # custom 类型或未被 Gate 处理 → 需要 verifier 手动验证
+                label = vc.expected or detail
+                needs_manual.append(f"- 🔍 {item.title}: {label}")
+            elif vc.passed:
+                auto_passed.append(f"- ✅ {detail}")
+            else:
+                auto_failed.append(f"- ❌ {detail}")
+
+        if not auto_passed and not auto_failed and not needs_manual:
+            return ""
+
+        sections: list[str] = ["## 验证条件协作清单"]
+
+        if auto_passed:
+            sections.append(
+                "**已自动通过（无需重复）**：\n" + "\n".join(auto_passed)
+            )
+        if auto_failed:
+            sections.append(
+                "**自动检查失败（重点关注）**：\n" + "\n".join(auto_failed)
+            )
+        if needs_manual:
+            sections.append(
+                "**需要你验证（Gate 无法覆盖）**：\n" + "\n".join(needs_manual)
+                + "\n请用 scan_excel_snapshot / search_excel_values / read_excel 逐条验证以上条件。"
+            )
+
+        sections.append("此外，请聚焦于任何自动检查未覆盖的语义验证（数据正确性、业务逻辑）。")
         return "\n\n".join(sections)
 
     def _build_full_mode_contexts(self) -> list[str]:
@@ -3066,9 +3239,11 @@ class AgentEngine:
             # ── 后台 LLM 分类已内化到 router 同步流程，无需收割 ──
 
             if iteration == start_iteration:
-                # 首轮：给事件循环一个 tick 处理已完成的线程回调，再短暂等待 registry
+                # 首轮：给事件循环一个 tick 处理已完成的线程回调，再等待 registry
+                _reg_start = time.monotonic()
                 await asyncio.sleep(0)
-                await self.await_registry_scan(timeout=0.05)
+                await self.await_registry_scan(timeout=0.5)
+                logger.debug("perf.loop: registry_scan %.0fms", (time.monotonic() - _reg_start) * 1000)
                 self._emit(
                     on_event,
                     ToolCallEvent(
@@ -3078,10 +3253,13 @@ class AgentEngine:
                     ),
                 )
 
+            _ctx_start = time.monotonic()
             system_prompts, context_error = self._context_builder._prepare_system_prompts_for_request(
                 current_route_result.system_contexts,
                 route_result=current_route_result,
             )
+            if iteration == start_iteration:
+                logger.debug("perf.loop: context_build %.0fms", (time.monotonic() - _ctx_start) * 1000)
             if context_error is not None:
                 self._last_iteration_count = iteration
                 self._last_failure_count += 1
@@ -3108,6 +3286,7 @@ class AgentEngine:
             # 使用增强的 ExcelManus 场景化摘要提示词，避免硬截断导致重要上下文丢失。
             if iteration > 1:
                 _sys_msgs = self._memory.build_system_messages(system_prompts)
+                self._last_system_msgs = _sys_msgs  # 缓存供 status/manual compact 使用
                 if self._compaction_manager.should_compact(self._memory, _sys_msgs):
                     self._emit(
                         on_event,
@@ -3125,6 +3304,7 @@ class AgentEngine:
                     except Exception:
                         logger.debug("压缩前记忆提取失败，继续压缩", exc_info=True)
                     _summary_model = self._config.aux_model or self._active_model
+                    _msgs_before_compact = len(self._memory.messages)
                     try:
                         await self._compaction_manager.auto_compact(
                             memory=self._memory,
@@ -3134,6 +3314,9 @@ class AgentEngine:
                         )
                     except Exception as _compact_exc:
                         logger.debug("自动 Compaction 异常，跳过: %s", _compact_exc)
+                    # 压缩/截断可能替换 _messages，重置快照索引以触发持久化全量重写
+                    if len(self._memory.messages) != _msgs_before_compact:
+                        self._history_snapshot_index = 0
                 # summarization 作为 compaction 的次级兜底
                 elif (
                     self._config.summarization_enabled
@@ -3142,6 +3325,7 @@ class AgentEngine:
                     _cur_tokens = self._memory._total_tokens_with_system_messages(_sys_msgs)
                     _threshold_ratio = self._config.summarization_threshold_ratio
                     if _cur_tokens > self._config.max_context_tokens * _threshold_ratio:
+                        _msgs_before_sum = len(self._memory.messages)
                         try:
                             await self._memory.summarize_and_trim(
                                 threshold=int(self._config.max_context_tokens * (_threshold_ratio - 0.1)),
@@ -3152,6 +3336,8 @@ class AgentEngine:
                             )
                         except Exception as _sum_exc:
                             logger.debug("对话摘要异常，跳过: %s", _sum_exc)
+                        if len(self._memory.messages) != _msgs_before_sum:
+                            self._history_snapshot_index = 0
 
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
@@ -3170,39 +3356,75 @@ class AgentEngine:
             if tools:
                 kwargs["tools"] = tools
 
-            # 注入 thinking 参数（根据探测到的 thinking_type + ThinkingConfig）
+            # 注入 thinking 参数
+            # 优先级：profile.thinking_mode > caps.thinking_type > 默认
             caps = self._model_capabilities
             tc = self._thinking_config
-            if caps and caps.supports_thinking and not tc.is_disabled:
-                ttype = caps.thinking_type
+            _profile = self._active_profile
+            _profile_thinking_mode = getattr(_profile, "thinking_mode", "auto") if _profile else "auto"
+
+            if _profile_thinking_mode not in ("auto", ""):
+                # 用户显式指定了 thinking_mode
+                _effective_ttype = _profile_thinking_mode if _profile_thinking_mode != "disabled" else ""
+            elif caps and caps.supports_thinking:
+                _effective_ttype = caps.thinking_type
+            else:
+                _effective_ttype = ""
+
+            if _effective_ttype and not tc.is_disabled:
                 budget = tc.effective_budget()
-                if ttype == "claude":
+                if _effective_ttype == "claude":
                     kwargs["_thinking_enabled"] = True
                     kwargs["_thinking_budget"] = budget
-                elif ttype == "gemini":
+                elif _effective_ttype == "claude_compat":
+                    extra = kwargs.get("extra_body", {})
+                    extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    kwargs["extra_body"] = extra
+                elif _effective_ttype == "gemini":
                     kwargs["_thinking_budget"] = budget
-                elif ttype == "gemini_level":
+                elif _effective_ttype == "gemini_level":
                     kwargs["_thinking_level"] = tc.gemini_level
-                elif ttype == "openai_reasoning":
+                elif _effective_ttype == "openai_reasoning":
                     kwargs["reasoning_effort"] = tc.openai_effort
-                elif ttype == "enable_thinking":
+                elif _effective_ttype == "enable_thinking":
                     extra = kwargs.get("extra_body", {})
                     extra["enable_thinking"] = True
                     extra["thinking_budget"] = budget
                     kwargs["extra_body"] = extra
-                elif ttype == "glm_thinking":
+                elif _effective_ttype == "glm_thinking":
                     extra = kwargs.get("extra_body", {})
                     extra["thinking"] = {"type": "enabled"}
                     kwargs["extra_body"] = extra
-                elif ttype == "openrouter":
+                elif _effective_ttype == "openrouter":
                     extra = kwargs.get("extra_body", {})
-                    # OpenRouter 统一接口：同时传 effort 和 max_tokens
                     extra["reasoning"] = {
                         "effort": tc.openai_effort,
                         "max_tokens": budget,
                     }
                     kwargs["extra_body"] = extra
-                # "deepseek" → 模型自动输出推理内容，无需额外参数
+                # "deepseek" / "reasoning_content_auto" → 模型自动输出推理内容，无需额外参数
+
+            # 注入 profile 自定义 extra_body / extra_headers
+            if _profile:
+                import json as _json
+                if _profile.custom_extra_body:
+                    try:
+                        _ceb = _json.loads(_profile.custom_extra_body)
+                        if isinstance(_ceb, dict):
+                            merged = kwargs.get("extra_body", {})
+                            merged.update(_ceb)
+                            kwargs["extra_body"] = merged
+                    except (ValueError, TypeError):
+                        pass
+                if _profile.custom_extra_headers:
+                    try:
+                        _ceh = _json.loads(_profile.custom_extra_headers)
+                        if isinstance(_ceh, dict):
+                            merged = kwargs.get("extra_headers", {})
+                            merged.update(_ceh)
+                            kwargs["extra_headers"] = merged
+                    except (ValueError, TypeError):
+                        pass
 
             # 提示词缓存优化：同一 session_turn 内共享 cache key，
             # 确保 OpenAI 路由到同一缓存机器，最大化系统提示前缀 cache hit。
@@ -3234,24 +3456,117 @@ class AgentEngine:
             if isinstance(self._client, openai.AsyncOpenAI):
                 stream_kwargs["stream_options"] = {"include_usage": True}
 
-            try:
-                stream_or_response = await self._llm_caller.create_chat_completion_with_system_fallback(stream_kwargs)
-                # 检查返回值是否为异步迭代器（支持流式）
-                if hasattr(stream_or_response, "__aiter__"):
-                    message, usage = await self._llm_caller.consume_stream(
-                        stream_or_response, on_event, iteration,
-                        _llm_start_ts=_llm_start_ts,
-                    )
-                else:
-                    # provider 不支持 stream，返回了普通 response 对象
-                    message, usage = _extract_completion_message(stream_or_response)
-            except Exception as stream_exc:
-                # 流式调用失败时回退到非流式
-                logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
-                response = await self._llm_caller.create_chat_completion_with_system_fallback(kwargs)
-                message, usage = _extract_completion_message(response)
+            # ── LLM 调用 + 5xx/429 自动重试 ──
+            _retry_max = self._config.llm_retry_max_attempts
+            _retry_base = self._config.llm_retry_base_delay_seconds
+            _retry_cap = self._config.llm_retry_max_delay_seconds
+            for _retry_attempt in range(1, _retry_max + 1):
+                try:
+                    try:
+                        stream_or_response = await self._llm_caller.create_chat_completion_with_system_fallback(stream_kwargs)
+                        # 检查返回值是否为异步迭代器（支持流式）
+                        if hasattr(stream_or_response, "__aiter__"):
+                            message, usage = await self._llm_caller.consume_stream(
+                                stream_or_response, on_event, iteration,
+                                _llm_start_ts=_llm_start_ts,
+                            )
+                        else:
+                            # provider 不支持 stream，返回了普通 response 对象
+                            message, usage = _extract_completion_message(stream_or_response)
+                    except Exception as stream_exc:
+                        # 可重试的瞬时错误 → 跳过非流式回退，直接进入重试
+                        if is_retryable_llm_error(stream_exc):
+                            raise
+                        # 流式调用失败时回退到非流式
+                        logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
+                        response = await self._llm_caller.create_chat_completion_with_system_fallback(kwargs)
+                        message, usage = _extract_completion_message(response)
+
+                    # 成功 — 若经历过重试则通知前端
+                    if _retry_attempt > 1:
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="succeeded",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                            ),
+                        )
+                    break  # 成功，退出重试循环
+
+                except Exception as _retry_exc:
+                    if _retry_attempt < _retry_max and is_retryable_llm_error(_retry_exc):
+                        _delay = compute_retry_delay(
+                            _retry_attempt, _retry_base, _retry_cap, _retry_exc,
+                        )
+                        _err_brief = str(_retry_exc)[:200]
+                        logger.warning(
+                            "LLM 调用失败（可重试），%0.1f 秒后第 %d/%d 次重试: %s",
+                            _delay, _retry_attempt, _retry_max - 1, _err_brief,
+                        )
+                        # 通知前端：正在重试
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="retrying",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                                retry_delay_seconds=_delay,
+                                retry_error_message=_err_brief,
+                            ),
+                        )
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.PIPELINE_PROGRESS,
+                                pipeline_stage="llm_retrying",
+                                pipeline_message=(
+                                    f"模型服务暂时不可用，{_delay:.0f}秒后"
+                                    f"第 {_retry_attempt}/{_retry_max - 1} 次重试..."
+                                ),
+                            ),
+                        )
+                        await asyncio.sleep(_delay)
+                        # 重试前重新发射 calling_llm 进度
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.PIPELINE_PROGRESS,
+                                pipeline_stage="calling_llm",
+                                pipeline_message=f"正在重试与模型通信（第 {_retry_attempt + 1}/{_retry_max} 次尝试）...",
+                            ),
+                        )
+                        continue
+
+                    # 不可重试或重试次数耗尽
+                    if _retry_attempt >= _retry_max and is_retryable_llm_error(_retry_exc):
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="exhausted",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                                retry_error_message=str(_retry_exc)[:200],
+                            ),
+                        )
+                    raise
 
             tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
+            _llm_elapsed_ms = (time.monotonic() - _llm_start_ts) * 1000
+            _tc_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in (tool_calls or [])]
+            if iteration == start_iteration:
+                logger.info(
+                    "perf.loop: first_llm_call %.0fms → tools=%s",
+                    _llm_elapsed_ms, _tc_names or "text_reply",
+                )
+            else:
+                logger.debug(
+                    "perf.loop: llm_call iter=%d %.0fms → tools=%s",
+                    iteration, _llm_elapsed_ms, _tc_names or "text_reply",
+                )
 
             # 图片生命周期：视觉模型保留图片利用 Provider 缓存，非视觉模型立即降级
             if self._is_vision_capable:
@@ -3540,89 +3855,21 @@ class AgentEngine:
                             pending = self._approval.pending
                             if approval_resolver is not None and pending is not None:
                                 # ── 内联审批：在同一轮对话内等待用户决策 ──
-                                logger.info("内联审批等待决策: %s", tc_result.approval_id)
+                                approval_id = tc_result.approval_id or pending.approval_id
+                                logger.info("内联审批等待决策: %s", approval_id)
                                 try:
                                     decision = await approval_resolver(pending)
                                 except Exception as _resolver_exc:  # noqa: BLE001
                                     logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
                                     decision = None
 
-                                if decision in ("accept", "fullaccess"):
-                                    if decision == "fullaccess":
-                                        self._full_access_enabled = True
-                                        logger.info("内联审批: fullaccess 已开启")
-                                    # 执行已批准的工具
-                                    exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                        pending, on_event=on_event, tool_call_id=tool_call_id,
-                                    )
-                                    # 用真实结果替换之前写入 memory 的审批提示
-                                    if tool_call_id:
-                                        self._memory.replace_tool_result(tool_call_id, exec_result)
-                                    # 发射审批已解决事件
-                                    self._emit(
-                                        on_event,
-                                        ToolCallEvent(
-                                            event_type=EventType.APPROVAL_RESOLVED,
-                                            approval_id=tc_result.approval_id or "",
-                                            approval_tool_name=pending.tool_name,
-                                            result=exec_result,
-                                            success=exec_ok,
-                                            iteration=iteration,
-                                            approval_undoable=bool(
-                                                exec_record is not None and exec_record.undoable
-                                            ),
-                                            approval_has_changes=bool(
-                                                exec_record is not None and exec_record.changes
-                                            ),
-                                        ),
-                                    )
-                                    # 更新 tc_result 统计信息
-                                    tc_result = replace(
-                                        tc_result,
-                                        pending_approval=False,
-                                        success=exec_ok,
-                                        result=exec_result,
-                                        error=None if exec_ok else exec_result,
-                                    )
-                                    # 写入追踪：审批执行的工具如果是写入工具则标记
-                                    if exec_ok and exec_record is not None:
-                                        _effect = self._get_tool_write_effect(pending.tool_name)
-                                        if exec_record.changes or _effect == "workspace_write":
-                                            self._record_workspace_write_action()
-                                        elif _effect == "external_write":
-                                            self._record_external_write_action()
-                                        if self._has_write_tool_call and write_hint != "may_write":
-                                            write_hint = "may_write"
-                                    logger.info(
-                                        "内联审批完成: decision=%s ok=%s tool=%s",
-                                        decision, exec_ok, pending.tool_name,
-                                    )
-                                else:
-                                    # reject / None → 拒绝
-                                    reject_msg = self._approval.reject_pending(
-                                        tc_result.approval_id or (pending.approval_id if pending else ""),
-                                    )
-                                    if tool_call_id:
-                                        self._memory.replace_tool_result(tool_call_id, reject_msg)
-                                    self._emit(
-                                        on_event,
-                                        ToolCallEvent(
-                                            event_type=EventType.APPROVAL_RESOLVED,
-                                            approval_id=tc_result.approval_id or "",
-                                            approval_tool_name=pending.tool_name if pending else "",
-                                            result=reject_msg,
-                                            success=False,
-                                            iteration=iteration,
-                                        ),
-                                    )
-                                    tc_result = replace(
-                                        tc_result,
-                                        pending_approval=False,
-                                        success=False,
-                                        result=reject_msg,
-                                        error=reject_msg,
-                                    )
-                                    logger.info("内联审批拒绝: %s", tc_result.approval_id)
+                                updates, _wrote = await self._apply_approval_decision(
+                                    decision, pending, approval_id,
+                                    tool_call_id, on_event, iteration, "内联审批",
+                                )
+                                tc_result = replace(tc_result, **updates)
+                                if _wrote and self._has_write_tool_call and write_hint != "may_write":
+                                    write_hint = "may_write"
                                 # 内联审批完成，不退出循环，继续处理后续工具调用
                             else:
                                 # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
@@ -3657,72 +3904,13 @@ class AgentEngine:
                                 else:
                                     decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
                                     self._interaction_registry.cleanup_done()
-                                    if decision in ("accept", "fullaccess"):
-                                        if decision == "fullaccess":
-                                            self._full_access_enabled = True
-                                            logger.info("Web 审批: fullaccess 已开启")
-                                        exec_ok, exec_result, exec_record = await self._execute_approved_pending(
-                                            pending, on_event=on_event, tool_call_id=tool_call_id,
-                                        )
-                                        if tool_call_id:
-                                            self._memory.replace_tool_result(tool_call_id, exec_result)
-                                        self._emit(
-                                            on_event,
-                                            ToolCallEvent(
-                                                event_type=EventType.APPROVAL_RESOLVED,
-                                                approval_id=approval_id,
-                                                approval_tool_name=pending.tool_name,
-                                                result=exec_result,
-                                                success=exec_ok,
-                                                iteration=iteration,
-                                                approval_undoable=bool(
-                                                    exec_record is not None and exec_record.undoable
-                                                ),
-                                                approval_has_changes=bool(
-                                                    exec_record is not None and exec_record.changes
-                                                ),
-                                            ),
-                                        )
-                                        tc_result = replace(
-                                            tc_result,
-                                            pending_approval=False,
-                                            success=exec_ok,
-                                            result=exec_result,
-                                            error=None if exec_ok else exec_result,
-                                        )
-                                        if exec_ok and exec_record is not None:
-                                            _effect = self._get_tool_write_effect(pending.tool_name)
-                                            if exec_record.changes or _effect == "workspace_write":
-                                                self._record_workspace_write_action()
-                                            elif _effect == "external_write":
-                                                self._record_external_write_action()
-                                            if self._has_write_tool_call and write_hint != "may_write":
-                                                write_hint = "may_write"
-                                        logger.info(
-                                            "Web 审批完成: decision=%s ok=%s tool=%s",
-                                            decision, exec_ok, pending.tool_name,
-                                        )
-                                    else:
-                                        reject_msg = self._approval.reject_pending(approval_id)
-                                        if tool_call_id:
-                                            self._memory.replace_tool_result(tool_call_id, reject_msg)
-                                        self._emit(
-                                            on_event,
-                                            ToolCallEvent(
-                                                event_type=EventType.APPROVAL_RESOLVED,
-                                                approval_id=approval_id,
-                                                approval_tool_name=pending.tool_name if pending else "",
-                                                result=reject_msg,
-                                                success=False,
-                                                iteration=iteration,
-                                            ),
-                                        )
-                                        tc_result = replace(
-                                            tc_result,
-                                            pending_approval=False, success=False,
-                                            result=reject_msg, error=reject_msg,
-                                        )
-                                        logger.info("Web 审批拒绝: %s", approval_id)
+                                    updates, _wrote = await self._apply_approval_decision(
+                                        decision, pending, approval_id,
+                                        tool_call_id, on_event, iteration, "Web 审批",
+                                    )
+                                    tc_result = replace(tc_result, **updates)
+                                    if _wrote and self._has_write_tool_call and write_hint != "may_write":
+                                        write_hint = "may_write"
 
                         # 更新统计
                         self._last_tool_call_count += 1
@@ -3773,7 +3961,8 @@ class AgentEngine:
             self._tool_dispatcher.flush_deferred_images()
 
             # ── Stuck Detection：检测重复/冗余工具调用模式 ──
-            stuck_warning = self._state.detect_stuck_pattern()
+            _stuck_tags = tuple(getattr(self._last_route_result, "task_tags", ()) or ())
+            stuck_warning = self._state.detect_stuck_pattern(task_tags=_stuck_tags)
             if stuck_warning:
                 self._memory.add_user_message(stuck_warning)
                 if diag:
@@ -4056,8 +4245,15 @@ class AgentEngine:
         arguments: dict[str, Any],
         result_text: str,
         success: bool,
+        raw_result_text: str | None = None,
     ) -> str:
-        """在工具返回中附加窗口感知信息。"""
+        """在工具返回中附加窗口感知信息。
+
+        Args:
+            raw_result_text: 截断前的原始工具结果，供窗口感知解析 JSON 使用。
+                当工具结果被截断后 JSON 可能损坏，此参数确保窗口感知
+                始终能访问有效的 JSON 结构进行状态更新。
+        """
         requested_mode = self._requested_window_return_mode()
         try:
             return self._window_perception.enrich_tool_result(
@@ -4067,6 +4263,7 @@ class AgentEngine:
                 success=success,
                 mode=requested_mode,
                 model_id=self._active_model,
+                raw_result_text=raw_result_text,
             )
         except Exception:
             logger.warning(
@@ -4082,6 +4279,7 @@ class AgentEngine:
                     success=success,
                     mode="enriched",
                     model_id=self._active_model,
+                    raw_result_text=raw_result_text,
                 )
             except Exception:
                 return result_text
@@ -4222,6 +4420,93 @@ class AgentEngine:
                 raise
             raise _AuditedExecutionError(cause=exc, record=record) from exc
 
+    async def _apply_approval_decision(
+        self,
+        decision: str | None,
+        pending: PendingApproval,
+        approval_id: str,
+        tool_call_id: str | None,
+        on_event: EventCallback | None,
+        iteration: int,
+        source: str,
+    ) -> tuple[Any, bool]:
+        """处理审批决策（accept/reject/fullaccess），返回 (updated_tc_result_kwargs, write_happened)。
+
+        统一内联审批和 Web 审批的 accept/reject 逻辑。
+        返回 (dict_for_replace, write_happened) — 调用方使用 replace(tc_result, **dict_for_replace)。
+        """
+        from excelmanus.events import EventType, ToolCallEvent
+
+        write_happened = False
+        if decision in ("accept", "fullaccess"):
+            if decision == "fullaccess":
+                self._full_access_enabled = True
+                logger.info("%s: fullaccess 已开启", source)
+            exec_ok, exec_result, exec_record = await self._execute_approved_pending(
+                pending, on_event=on_event, tool_call_id=tool_call_id,
+            )
+            if tool_call_id:
+                self._memory.replace_tool_result(tool_call_id, exec_result)
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    tool_call_id=tool_call_id or "",
+                    approval_id=approval_id,
+                    approval_tool_name=pending.tool_name,
+                    result=exec_result,
+                    success=exec_ok,
+                    iteration=iteration,
+                    approval_undoable=bool(
+                        exec_record is not None and exec_record.undoable
+                    ),
+                    approval_has_changes=bool(
+                        exec_record is not None and exec_record.changes
+                    ),
+                ),
+            )
+            if exec_ok and exec_record is not None:
+                _effect = self._get_tool_write_effect(pending.tool_name)
+                if exec_record.changes or _effect == "workspace_write":
+                    self._record_workspace_write_action()
+                    write_happened = True
+                elif _effect == "external_write":
+                    self._record_external_write_action()
+                    write_happened = True
+            logger.info(
+                "%s完成: decision=%s ok=%s tool=%s",
+                source, decision, exec_ok, pending.tool_name,
+            )
+            return dict(
+                pending_approval=False,
+                success=exec_ok,
+                result=exec_result,
+                error=None if exec_ok else exec_result,
+            ), write_happened
+        else:
+            reject_msg = self._approval.reject_pending(approval_id)
+            if tool_call_id:
+                self._memory.replace_tool_result(tool_call_id, reject_msg)
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.APPROVAL_RESOLVED,
+                    tool_call_id=tool_call_id or "",
+                    approval_id=approval_id,
+                    approval_tool_name=pending.tool_name if pending else "",
+                    result=reject_msg,
+                    success=False,
+                    iteration=iteration,
+                ),
+            )
+            logger.info("%s拒绝: %s", source, approval_id)
+            return dict(
+                pending_approval=False,
+                success=False,
+                result=reject_msg,
+                error=reject_msg,
+            ), False
+
     async def _execute_approved_pending(
         self,
         pending: PendingApproval,
@@ -4241,7 +4526,7 @@ class AgentEngine:
                 tool_scope=None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=not self._approval.is_read_only_safe_tool(pending.tool_name) and pending.tool_name not in {"run_code", "run_shell"},
+                undoable=self._approval.is_undoable_tool(pending.tool_name),
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:
@@ -4492,6 +4777,10 @@ class AgentEngine:
         """当前激活的模型 profile 短名称，None 表示使用默认配置。"""
         return self._active_model_name
 
+    def sync_model_profiles(self, profiles: tuple["ModelProfile", ...]) -> None:
+        """热更新可用模型档案列表（由 SessionManager 广播调用）。"""
+        object.__setattr__(self._config, "models", profiles)
+
     def list_models(self) -> list[dict[str, str]]:
         """列出所有可用模型档案，含当前激活标记。"""
         result: list[dict[str, str]] = []
@@ -4536,6 +4825,7 @@ class AgentEngine:
             self._active_base_url = self._config.base_url
             self._active_protocol = self._config.protocol
             self._active_model_name = None
+            self._active_profile = None
             self._client = create_client(
                 api_key=self._active_api_key,
                 base_url=self._active_base_url,
@@ -4574,6 +4864,7 @@ class AgentEngine:
         self._active_base_url = matched.base_url
         self._active_protocol = matched.protocol
         self._active_model_name = matched.name
+        self._active_profile = matched
         self._client = create_client(
             api_key=self._active_api_key,
             base_url=self._active_base_url,

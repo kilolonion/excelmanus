@@ -102,6 +102,16 @@ class ChatHistoryStore:
         """检查会话是否属于指定用户。"""
         return self.session_exists(session_id, user_id=user_id)
 
+    def get_session_meta(self, session_id: str) -> dict | None:
+        """返回会话元数据（id, title, created_at, updated_at），不存在时返回 None。"""
+        row = self._conn.execute(
+            "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
     def get_title_source(self, session_id: str) -> str | None:
         """返回会话的 title_source 字段，会话不存在时返回 None。"""
         row = self._conn.execute(

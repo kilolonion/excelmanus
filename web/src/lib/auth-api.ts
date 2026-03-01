@@ -6,6 +6,23 @@ import { useExcelStore } from "@/stores/excel-store";
 import { clearAllCachedMessages } from "@/lib/idb-cache";
 import { buildApiUrl } from "./api";
 
+// ── Session cookie（配合 Next.js middleware 服务端路由保护）──
+const SESSION_COOKIE = "em-session";
+const SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 天
+
+function _setSessionCookie() {
+  if (typeof document === "undefined") return;
+  document.cookie = `${SESSION_COOKIE}=1; path=/; max-age=${SESSION_COOKIE_MAX_AGE}; samesite=lax`;
+}
+
+function _clearSessionCookie() {
+  if (typeof document === "undefined") return;
+  document.cookie = `${SESSION_COOKIE}=; path=/; max-age=0`;
+}
+
+/** 供外部（如 AuthProvider）在登出时清除会话 cookie。 */
+export { _clearSessionCookie as clearSessionCookie };
+
 // ── Types ─────────────────────────────────────────────────
 
 interface TokenResponse {
@@ -22,8 +39,28 @@ interface TokenResponse {
     has_custom_llm_key: boolean;
     has_password: boolean;
     allowed_models: string[];
+    oauth_providers: string[];
     created_at: string;
   };
+}
+
+export interface MergeRequiredInfo {
+  merge_required: true;
+  merge_token: string;
+  existing_email: string;
+  existing_display_name: string;
+  existing_providers: string[];
+  existing_has_password: boolean;
+  new_provider: string;
+  new_provider_display_name: string;
+  new_provider_avatar_url: string | null;
+}
+
+export interface OAuthLinkInfo {
+  provider: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  linked_at: string;
 }
 
 function mapUser(raw: TokenResponse["user"]): AuthUser {
@@ -36,6 +73,7 @@ function mapUser(raw: TokenResponse["user"]): AuthUser {
     hasCustomLlmKey: raw.has_custom_llm_key,
     hasPassword: raw.has_password ?? true,
     allowedModels: raw.allowed_models ?? [],
+    oauthProviders: raw.oauth_providers ?? [],
     createdAt: raw.created_at,
   };
 }
@@ -58,6 +96,9 @@ function handleTokenResponse(data: TokenResponse) {
     displayName: user.displayName,
     avatarUrl: user.avatarUrl ?? null,
   });
+
+  // 设置会话 cookie 供 middleware 服务端拦截使用
+  _setSessionCookie();
 }
 
 /**
@@ -185,6 +226,8 @@ export async function resetPassword(email: string, code: string, newPassword: st
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || data.error || `重置失败: ${res.status}`);
   }
+  // 密码已重置，清除旧的保存密码以避免自动登录失败
+  useRecentAccountsStore.getState().updateSavedPassword(email, "", false);
 }
 
 export async function login(email: string, password: string) {
@@ -206,6 +249,7 @@ export async function refreshAccessToken(): Promise<boolean> {
   const { refreshToken, logout } = useAuthStore.getState();
   if (!refreshToken) {
     logout();
+    _clearSessionCookie();
     return false;
   }
 
@@ -216,14 +260,18 @@ export async function refreshAccessToken(): Promise<boolean> {
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
     if (!res.ok) {
+      // 服务端明确拒绝（401/403 等）→ token 已失效，执行登出
       logout();
+      _clearSessionCookie();
       return false;
     }
     const data: TokenResponse = await res.json();
     handleTokenResponse(data);
     return true;
-  } catch {
-    logout();
+  } catch (err) {
+    // 网络错误（Failed to fetch / DNS / timeout）→ 不登出，仅返回 false，
+    // 允许后续请求重试。避免临时网络波动把用户踢出登录。
+    console.warn("[auth] token refresh network error, will retry later:", err);
     return false;
   }
 }
@@ -282,7 +330,7 @@ export async function handleOAuthCallback(
   provider: "github" | "google" | "qq",
   code: string,
   state?: string
-) {
+): Promise<TokenResponse | MergeRequiredInfo> {
   const params = new URLSearchParams({ code });
   if (state) params.set("state", state);
   // 直连后端交换 token，绕过 CDN→Nginx→Next.js rewrite 代理链
@@ -293,14 +341,68 @@ export async function handleOAuthCallback(
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `OAuth 回调失败: ${res.status}`);
   }
+  const data = await res.json();
+  // 检测合并场景
+  if (data.merge_required) {
+    return data as MergeRequiredInfo;
+  }
+  handleTokenResponse(data as TokenResponse);
+  return data as TokenResponse;
+}
+
+/**
+ * 确认 OAuth 账号合并：将新的 OAuth 登录绑定到已有账号。
+ */
+export async function confirmAccountMerge(mergeToken: string): Promise<void> {
+  const res = await fetch(buildApiUrl("/auth/oauth/confirm-merge", { direct: true }), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ merge_token: mergeToken }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `合并失败: ${res.status}`);
+  }
   const data: TokenResponse = await res.json();
   handleTokenResponse(data);
-  return data;
+}
+
+/**
+ * 获取当前用户已绑定的 OAuth 登录方式。
+ */
+export async function fetchOAuthLinks(): Promise<{ links: OAuthLinkInfo[]; has_password: boolean }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/me/oauth-links"), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `获取绑定列表失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 解绑某个 OAuth 登录方式。
+ */
+export async function unlinkOAuth(provider: string): Promise<{ links: OAuthLinkInfo[] }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/me/oauth-links/${provider}`), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `解绑失败: ${res.status}`);
+  }
+  return res.json();
 }
 
 export function logout() {
   useAuthStore.getState().logout();
   _clearUserSpecificStores();
+  // 清除会话 cookie，使 middleware 在下次请求时重定向到登录页
+  _clearSessionCookie();
   // 阻止登录页自动登录 —— 用户主动退出不应立刻被自动登录回去
   if (typeof window !== "undefined") {
     sessionStorage.setItem("suppress-auto-login", "1");
@@ -348,6 +450,8 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   const data = await res.json();
   const user = mapUser(data.user);
   useAuthStore.getState().setUser(user);
+  // 密码已变更，清除旧的保存密码以避免自动登录失败
+  useRecentAccountsStore.getState().updateSavedPassword(user.email, "", false);
   return user;
 }
 
@@ -558,6 +662,7 @@ export interface LoginConfig {
   login_google_enabled: boolean;
   login_qq_enabled: boolean;
   email_verify_required: boolean;
+  require_agreement: boolean;
   // GitHub OAuth
   github_client_id: string;
   github_client_secret: string;

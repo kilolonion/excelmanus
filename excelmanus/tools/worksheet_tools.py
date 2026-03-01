@@ -107,6 +107,9 @@ def set_print_layout(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     resolved = resolve_sheet_name(sheet_name, wb.sheetnames)
     if resolved is None:
@@ -242,6 +245,9 @@ def set_page_header_footer(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     wb = load_workbook(safe_path)
     resolved = resolve_sheet_name(sheet_name, wb.sheetnames)

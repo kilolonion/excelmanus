@@ -135,10 +135,15 @@ class UserPublic(BaseModel):
     has_custom_llm_key: bool = False
     has_password: bool = True
     allowed_models: list[str] = []
+    oauth_providers: list[str] = []
     created_at: str
 
     @classmethod
-    def from_record(cls, rec: UserRecord) -> "UserPublic":
+    def from_record(
+        cls,
+        rec: UserRecord,
+        oauth_providers: list[str] | None = None,
+    ) -> "UserPublic":
         import json as _json
         raw = getattr(rec, "allowed_models", None)
         if isinstance(raw, list):
@@ -161,6 +166,7 @@ class UserPublic(BaseModel):
             has_custom_llm_key=bool(rec.llm_api_key),
             has_password=bool(rec.password_hash),
             allowed_models=am,
+            oauth_providers=oauth_providers or [],
             created_at=rec.created_at,
         )
 
@@ -232,3 +238,33 @@ class ChangeEmailRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     new_email: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=255)]
     password: Annotated[str, StringConstraints(min_length=1)]
+
+
+# ── 账号合并 schema ───────────────────────────
+
+
+class MergeRequiredResponse(BaseModel):
+    """当 OAuth 登录发现同邮箱已有账号时返回，前端需弹窗确认合并。"""
+    merge_required: bool = True
+    merge_token: str
+    existing_email: str
+    existing_display_name: str
+    existing_providers: list[str] = []
+    existing_has_password: bool = False
+    new_provider: str
+    new_provider_display_name: str = ""
+    new_provider_avatar_url: str | None = None
+
+
+class ConfirmMergeRequest(BaseModel):
+    """前端确认合并时发送的请求。"""
+    model_config = ConfigDict(extra="forbid")
+    merge_token: str
+
+
+class OAuthLinkInfo(BaseModel):
+    """单个 OAuth 绑定信息。"""
+    provider: str
+    display_name: str | None = None
+    avatar_url: str | None = None
+    linked_at: str

@@ -25,7 +25,7 @@ export function ChatModeTabs() {
         <button
           key={key}
           onClick={() => setChatMode(key)}
-          className={`relative inline-flex items-center gap-1 px-2.5 sm:py-1 py-0.5 rounded-lg text-xs font-medium transition-colors ${
+          className={`relative inline-flex items-center gap-1 px-2.5 sm:py-1 py-1.5 min-h-[44px] sm:min-h-0 rounded-lg text-xs font-medium transition-colors ${
             chatMode === key
               ? ""
               : "text-muted-foreground hover:text-foreground hover:bg-accent/40"

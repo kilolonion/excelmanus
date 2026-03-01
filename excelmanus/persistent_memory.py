@@ -100,6 +100,22 @@ class PersistentMemory:
         """按 ID 删除指定记忆条目。"""
         return self._backend.delete_entry(entry_id)
 
+    def cleanup_expired(self, max_age_days: int = 90) -> int:
+        """清理超过指定天数的旧记忆条目。"""
+        return self._backend.cleanup_expired(max_age_days)
+
+    def count(self) -> int:
+        """返回记忆条目总数。"""
+        return self._backend.count()
+
+    def get_meta(self, key: str) -> str | None:
+        """读取元数据值。"""
+        return self._backend.get_meta(key)
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写入元数据值。"""
+        self._backend.set_meta(key, value)
+
     # ── 格式化 / 解析工具方法（保留向后兼容）──────────────────
 
     @staticmethod

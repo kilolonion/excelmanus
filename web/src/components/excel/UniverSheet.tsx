@@ -37,6 +37,41 @@ function extractPathFromUrl(url: string): string {
   }
 }
 
+/** Check whether a path refers to the onboarding demo file. */
+function isDemoPath(path: string): boolean {
+  return path.startsWith("__demo__") || path.startsWith("./__demo__");
+}
+
+/** Generate mock snapshot data for the onboarding demo file. */
+function buildDemoSnapshots(): ExcelSnapshot[] {
+  return [
+    {
+      file: "__demo__/示例销售数据.xlsx",
+      sheet: "Sheet1",
+      sheets: ["Sheet1"],
+      shape: { rows: 12, columns: 5 },
+      column_letters: ["A", "B", "C", "D", "E"],
+      headers: ["月份", "产品", "销售额", "成本", "利润"],
+      rows: [
+        ["2024-01", "产品A", 12500, 8200, 4300],
+        ["2024-02", "产品A", 13800, 8500, 5300],
+        ["2024-03", "产品A", 15200, 9100, 6100],
+        ["2024-04", "产品B", 9800, 6400, 3400],
+        ["2024-05", "产品B", 11200, 7000, 4200],
+        ["2024-06", "产品B", 13800, 7800, 6000],
+        ["2024-07", "产品A", 16500, 9800, 6700],
+        ["2024-08", "产品A", 18200, 10500, 7700],
+        ["2024-09", "产品B", 14500, 8200, 6300],
+        ["2024-10", "产品A", 19800, 11200, 8600],
+        ["2024-11", "产品B", 16200, 9500, 6700],
+        ["2024-12", "产品A", 22000, 12500, 9500],
+      ],
+      total_rows: 12,
+      truncated: false,
+    },
+  ];
+}
+
 /**
  * Convert an ExcelSnapshot into Univer IWorkbookData.
  */
@@ -315,7 +350,9 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         setError(null);
 
         // 单次请求拉取所有 sheet，避免 N 次串行 HTTP 往返
-        const resp = await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
+        const resp = isDemoPath(filePath)
+          ? { file: filePath, sheets: ["Sheet1"], all_snapshots: buildDemoSnapshots() }
+          : await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
         if (loadVersion !== loadVersionRef.current) return;
 
         const allSnapshots: ExcelSnapshot[] = resp.all_snapshots;
@@ -390,9 +427,11 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     const init = async () => {
       try {
         // 与 Univer 引擎加载并行预取数据
-        const dataPromise = filePath
-          ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
-          : Promise.resolve(null);
+        const dataPromise = isDemoPath(filePath)
+          ? Promise.resolve({ file: filePath, sheets: ["Sheet1"], all_snapshots: buildDemoSnapshots() })
+          : filePath
+            ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
+            : Promise.resolve(null);
 
         const [{ createUniver, LocaleType }, { UniverSheetsCorePreset }, sheetsCoreZhCNMod] =
           await Promise.all([

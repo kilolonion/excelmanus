@@ -18,6 +18,7 @@ import type { ModelInfo } from "@/lib/types";
 export function ModelSelector() {
   const currentModel = useUIStore((s) => s.currentModel);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
+  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -36,6 +37,12 @@ export function ModelSelector() {
     fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 当 Settings 页 profile 变更时自动刷新模型列表
+  useEffect(() => {
+    if (modelProfileVersion > 0) fetchModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelProfileVersion]);
 
   const handleSwitch = async (name: string) => {
     if (name === currentModel || switching) return;

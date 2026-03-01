@@ -50,6 +50,7 @@ const _MAX_DIFFS_IN_STORE = 500;
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
+  "llm_retry",
 ]);
 
 /**
@@ -797,6 +798,7 @@ interface ChatState {
   appendBlock: (messageId: string, block: AssistantBlock) => void;
   updateLastBlock: (messageId: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
   updateBlockByType: (messageId: string, blockType: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
+  upsertBlockByType: (messageId: string, blockType: string, block: AssistantBlock) => void;
   updateSubagentBlock: (
     messageId: string,
     conversationId: string | null,
@@ -877,6 +879,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const realIdx = m.blocks.length - 1 - idx;
         const blocks = [...m.blocks];
         blocks[realIdx] = updater(blocks[realIdx]);
+        return { ...m, blocks };
+      }),
+    })),
+  upsertBlockByType: (messageId, blockType, block) =>
+    set((state) => ({
+      messages: state.messages.map((m) => {
+        if (m.id !== messageId || m.role !== "assistant") return m;
+        const idx = [...m.blocks].reverse().findIndex((b) => b.type === blockType);
+        if (idx === -1) {
+          return { ...m, blocks: [...m.blocks, block] };
+        }
+        const realIdx = m.blocks.length - 1 - idx;
+        const blocks = [...m.blocks];
+        blocks[realIdx] = block;
         return { ...m, blocks };
       }),
     })),

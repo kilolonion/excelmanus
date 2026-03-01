@@ -18,9 +18,7 @@ import { SessionList } from "./SessionList";
 import { ExcelFilesBar } from "./ExcelFilesBar";
 import { StatusFooter } from "./StatusFooter";
 
-type SidebarTab = "chats" | "files";
-
-const tabs: { key: SidebarTab; label: string; icon: typeof MessageSquare }[] = [
+const tabs: { key: "chats" | "files"; label: string; icon: typeof MessageSquare }[] = [
   { key: "chats", label: "对话", icon: MessageSquare },
   { key: "files", label: "文件", icon: FolderOpen },
 ];
@@ -58,7 +56,8 @@ export function Sidebar() {
   
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const { safeTransition } = useMotionSafe();
-  const [activeTab, setActiveTab] = useState<SidebarTab>("chats");
+  const activeTab = useUIStore((s) => s.sidebarTab);
+  const setActiveTab = useUIStore((s) => s.setSidebarTab);
 
   // 首次渲染跳过动画，避免侧栏闪烁
   const isFirstRender = useRef(true);
@@ -91,6 +90,7 @@ export function Sidebar() {
         )}
       </AnimatePresence>
       <motion.aside
+        data-coach-id="coach-sidebar"
         animate={{ width: isMobile ? (sidebarOpen ? "min(85vw, 320px)" : 0) : (sidebarOpen ? 260 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
         className={`flex flex-col border-r border-border ${
@@ -143,7 +143,7 @@ export function Sidebar() {
       />
 
       {/* Tab Navigation */}
-      <div className="px-3 flex gap-1 flex-shrink-0">
+      <div className="px-3 flex gap-1 flex-shrink-0" data-coach-id="coach-sidebar-tabs">
         {tabs.map(({ key, label, icon: Icon }) => (
           <button
             key={key}

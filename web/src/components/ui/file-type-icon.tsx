@@ -8,6 +8,8 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   // 电子表格
   xlsx: { color: "#21a366", label: "XL" },
   xls:  { color: "#21a366", label: "XL" },
+  xlsm: { color: "#21a366", label: "XM" },
+  xlsb: { color: "#21a366", label: "XB" },
   csv:  { color: "#21a366", label: "CV" },
 
   // Python 相关
@@ -144,7 +146,7 @@ export function FileTypeIcon({ filename, className, ...props }: FileTypeIconProp
   );
 }
 
-const EXCEL_EXTS = new Set(["xlsx", "xls", "csv"]);
+const EXCEL_EXTS = new Set(["xlsx", "xls", "xlsm", "xlsb", "csv"]);
 
 export function isExcelFile(filename: string): boolean {
   const dotIdx = filename.lastIndexOf(".");

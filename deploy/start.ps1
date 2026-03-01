@@ -57,7 +57,9 @@ param(
     [string]$LogDir = "",
     [int]$HealthTimeout = 0,
     [switch]$NoKillPorts,
-    [switch]$ShowVersion
+    [switch]$ShowVersion,
+    [switch]$Update,
+    [switch]$CheckUpdate
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -74,6 +76,18 @@ $Script:FrontendProcess = $null
 if ($ShowVersion) {
     Write-Output "ExcelManus Start v$($Script:VERSION) (PowerShell)"
     exit 0
+}
+
+if ($CheckUpdate) {
+    & "$($Script:SCRIPT_DIR)\update.ps1" -CheckOnly
+    exit $LASTEXITCODE
+}
+
+if ($Update) {
+    & "$($Script:SCRIPT_DIR)\update.ps1" -Yes
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[--] 更新完成，继续启动..." -ForegroundColor Cyan
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -121,14 +135,15 @@ function Write-Dbg {
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  GitHub 仓库配置
+#  Git 仓库配置（优先 Gitee）
 # ═══════════════════════════════════════════════════════════════
 
-$Script:REPO_URL = "https://github.com/kilolonion/excelmanus"
+$Script:REPO_URL = "https://gitee.com/kilolonion/excelmanus.git"
+$Script:REPO_URL_GITHUB = "https://github.com/kilolonion/excelmanus"
 $Script:REPO_BRANCH = "main"
 
 # ═══════════════════════════════════════════════════════════════
-#  检查项目完整性（缺失则从 GitHub 克隆）
+#  检查项目完整性（缺失则从 Gitee 克隆，GitHub 备用）
 # ═══════════════════════════════════════════════════════════════
 
 $pyprojectPath = Join-Path $Script:PROJECT_ROOT "pyproject.toml"
@@ -139,18 +154,22 @@ if (-not (Test-Path $pyprojectPath)) {
         Write-Host "     或手动下载项目: $($Script:REPO_URL)" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[--] 正在从 GitHub 克隆项目..." -ForegroundColor Cyan
+    Write-Host "[--] 正在从 Gitee 克隆项目..." -ForegroundColor Cyan
     Write-Host "     仓库: $($Script:REPO_URL)" -ForegroundColor Cyan
     Write-Host "     分支: $($Script:REPO_BRANCH)" -ForegroundColor Cyan
     $tmpDir = "$($Script:PROJECT_ROOT)_tmp"
     & git clone -b $Script:REPO_BRANCH $Script:REPO_URL $tmpDir
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[XX] Git 克隆失败，请检查网络连接" -ForegroundColor Red
-        exit 1
+        Write-Host "[!!] Gitee 克隆失败，尝试 GitHub..." -ForegroundColor Yellow
+        & git clone -b $Script:REPO_BRANCH $Script:REPO_URL_GITHUB $tmpDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[XX] Git 克隆失败，请检查网络连接" -ForegroundColor Red
+            exit 1
+        }
     }
     Copy-Item -Path "$tmpDir\*" -Destination $Script:PROJECT_ROOT -Recurse -Force
     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "[OK] 项目已从 GitHub 克隆完成" -ForegroundColor Green
+    Write-Host "[OK] 项目已克隆完成" -ForegroundColor Green
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -271,12 +290,68 @@ function Test-CommandExists {
     return $true
 }
 
+function Test-DomesticNetwork {
+    <# Auto-detect if user is on a domestic (Chinese) network via TCP ping race #>
+    try {
+        $mirrorJob = Start-Job -ScriptBlock {
+            try {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $tcp.Connect('pypi.tuna.tsinghua.edu.cn', 443)
+                $tcp.Close()
+                $sw.Stop()
+                return $sw.Elapsed.TotalSeconds
+            } catch { return 999 }
+        }
+        $pypiJob = Start-Job -ScriptBlock {
+            try {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $tcp.Connect('pypi.org', 443)
+                $tcp.Close()
+                $sw.Stop()
+                return $sw.Elapsed.TotalSeconds
+            } catch { return 999 }
+        }
+        $null = Wait-Job $mirrorJob, $pypiJob -Timeout 6
+        $tMirror = Receive-Job $mirrorJob
+        $tPypi = Receive-Job $pypiJob
+        Remove-Job $mirrorJob, $pypiJob -Force -ErrorAction SilentlyContinue
+        if ($null -eq $tMirror) { $tMirror = 999 }
+        if ($null -eq $tPypi) { $tPypi = 999 }
+        return ($tMirror -lt 5 -and ($tPypi -gt 5 -or $tMirror -lt $tPypi * 0.8))
+    } catch {
+        return $false
+    }
+}
+
 function Get-PipMirror {
-    return @{ Url = "https://pypi.tuna.tsinghua.edu.cn/simple"; Host = "pypi.tuna.tsinghua.edu.cn" }
+    # Auto-detect domestic network
+    if (Test-DomesticNetwork) {
+        Write-Info "检测到国内网络，启用镜像加速"
+        return @{ Url = "https://pypi.tuna.tsinghua.edu.cn/simple"; Host = "pypi.tuna.tsinghua.edu.cn" }
+    }
+    return $null
 }
 
 function Invoke-PipInstall {
     param([string[]]$PipArgs)
+    # Prefer uv for massive speedup
+    $hasUv = Get-Command uv -ErrorAction SilentlyContinue
+    if ($hasUv) {
+        Write-Dbg "使用 uv 安装 (加速模式)"
+        if ($Script:PipMirror) {
+            $uvArgs = @("pip", "install") + $PipArgs + @("-i", $Script:PipMirror.Url)
+            & uv @uvArgs
+            if ($LASTEXITCODE -eq 0) { return }
+            Write-Warn "uv 镜像安装失败, 尝试默认源..."
+        }
+        $uvArgs = @("pip", "install") + $PipArgs
+        & uv @uvArgs
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warn "uv 安装失败, 回退到 pip..."
+    }
+    # Fallback to pip
     if ($Script:PipMirror) {
         $mirrorArgs = $PipArgs + @("-i", $Script:PipMirror.Url, "--trusted-host", $Script:PipMirror.Host)
         & $Script:PythonBin -m pip install @mirrorArgs
@@ -704,8 +779,24 @@ if (-not $BackendOnly) {
     Start-Frontend
 }
 
-# 等待前端启动
-Start-Sleep -Seconds 3
+# 等待前端启动（轮询健康检查）
+if (-not $BackendOnly) {
+    $feUrl = "http://localhost:${FrontendPort}"
+    $feReady = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 2
+        try {
+            $resp = Invoke-WebRequest -Uri $feUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            if ($resp.StatusCode -lt 500) { $feReady = $true; break }
+        } catch { }
+        if ($i % 5 -eq 4) { Write-Info "  前端尚未就绪，已等待 $((($i + 1) * 2)) 秒..." }
+    }
+    if (-not $feReady) {
+        Write-Warn "前端在 60 秒内未就绪，请检查日志"
+    } else {
+        Write-Info "前端已就绪: $feUrl"
+    }
+}
 
 # ── 自动打开浏览器 ──
 if (-not $NoOpen -and -not $BackendOnly) {

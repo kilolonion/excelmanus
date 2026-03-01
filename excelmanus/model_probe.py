@@ -200,12 +200,24 @@ async def probe_thinking(
     model: str,
     base_url: str,
     timeout: float = 45.0,
+    thinking_mode: str = "auto",
 ) -> tuple[bool, str, str]:
     """探测模型是否支持输出思考过程。
 
     返回 (supported, error_msg, thinking_type)。
-    thinking_type: "claude"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+    thinking_type: "claude"|"claude_compat"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+
+    thinking_mode 参数：
+      - "auto"（默认）：自动探测
+      - "disabled"：跳过探测，返回不支持
+      - 其他值：跳过探测，直接信任用户配置
     """
+    # 用户显式指定 thinking_mode 时，跳过探测直接信任
+    if thinking_mode not in ("auto", ""):
+        if thinking_mode == "disabled":
+            return False, "", ""
+        return True, "", thinking_mode
+
     messages = [{"role": "user", "content": "What is 17*23? Think step by step."}]
 
     # ── Claude: 尝试 extended thinking ──
@@ -334,6 +346,7 @@ async def run_full_probe(
     base_url: str,
     skip_if_cached: bool = True,
     db: Any = None,
+    thinking_mode: str = "auto",
 ) -> ModelCapabilities:
     """运行完整的三项能力探测，返回 ModelCapabilities。
 
@@ -375,7 +388,7 @@ async def run_full_probe(
     # ── 健康检查通过，并发探测三项能力 ──
     tool_task = asyncio.create_task(probe_tool_calling(client, model))
     vision_task = asyncio.create_task(probe_vision(client, model))
-    thinking_task = asyncio.create_task(probe_thinking(client, model, base_url))
+    thinking_task = asyncio.create_task(probe_thinking(client, model, base_url, thinking_mode=thinking_mode))
 
     tool_ok, tool_err = await tool_task
     vision_ok, vision_err = await vision_task
@@ -493,6 +506,7 @@ def _is_param_unsupported_error(err: str) -> bool:
         "not available",
         "not allowed",
         "image_url",
+        "deserialize",
     ]
     return any(kw in lowered for kw in keywords)
 
@@ -543,6 +557,17 @@ def _get_thinking_strategies(
     """
     strategies: list[tuple[str, dict[str, Any], str]] = []
     model_lower = model.lower()
+
+    # ── Claude 模型经 OpenAI 兼容代理（按模型名检测） ────────
+    # 当 Claude 模型通过第三方 OpenAI 兼容代理访问时，客户端是 AsyncOpenAI 而非 ClaudeClient，
+    # 但仍需要 Anthropic 风格的 thinking 参数。大多数代理会透传 extra_body 到上游。
+    _is_claude_model = any(model_lower.startswith(p) for p in ("claude-", "claude_"))
+    if _is_claude_model:
+        strategies.append((
+            "claude_compat_thinking",
+            {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}}},
+            "claude",
+        ))
 
     # ── 按 provider 添加专属策略 ────────────────────────────
     if provider == "dashscope":

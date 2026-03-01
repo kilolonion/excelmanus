@@ -212,9 +212,11 @@ export async function sendMessage(
 
       // 将图片编码为 base64 用于 LLM 多模态载荷。
       // 即使文件上传失败，也能确保 agent 可以"看到"图片。
-      if (isImage) {
+      // 跳过空 File 对象（保留附件使用 new File([], name) 创建，无实际内容）
+      if (isImage && af.file.size > 0) {
         try {
-          const b64 = await _fileToBase64(af.file);
+          // 优先使用预编码的 base64（示例卡片预上传时已生成）
+          const b64 = af.cachedBase64 ?? await _fileToBase64(af.file);
           imageAttachments.push({
             data: b64,
             media_type: af.file.type || "image/png",
@@ -315,13 +317,22 @@ export async function sendMessage(
     hadStreamError: false,
   };
 
-  // 连接超时：30 秒内未收到任何 SSE 事件则自动中止，防止无限"正在连接"。
+  // 流停滞检测：初始连接 30 秒超时，之后每次收到事件重置为 90 秒。
+  // 如果中途 LLM 或后端处理挂起超过 90 秒无任何事件，自动中止。
   let _connectionTimedOut = false;
-  const _CONNECTION_TIMEOUT_MS = 30_000;
-  const _connectionTimer = setTimeout(() => {
+  const _INITIAL_TIMEOUT_MS = 30_000;
+  const _STALL_TIMEOUT_MS = 90_000;
+  let _stallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
     _connectionTimedOut = true;
     abortController.abort();
-  }, _CONNECTION_TIMEOUT_MS);
+  }, _INITIAL_TIMEOUT_MS);
+  const _resetStallTimer = () => {
+    if (_stallTimer !== null) clearTimeout(_stallTimer);
+    _stallTimer = setTimeout(() => {
+      _connectionTimedOut = true;
+      abortController.abort();
+    }, _STALL_TIMEOUT_MS);
+  };
 
   // 诊断日志：记录图片附件状态
   if (files && files.length > 0) {
@@ -350,8 +361,8 @@ export async function sendMessage(
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
-        // 收到首个事件，取消连接超时
-        clearTimeout(_connectionTimer);
+        // 收到事件，重置停滞检测计时器
+        _resetStallTimer();
 
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
@@ -437,7 +448,8 @@ export async function sendMessage(
       });
     }
   } finally {
-    clearTimeout(_connectionTimer);
+    if (_stallTimer !== null) clearTimeout(_stallTimer);
+    _stallTimer = null;
     batcher.dispose();
     S().setPipelineStatus(null);
     S().saveCurrentSession();
@@ -529,11 +541,23 @@ export async function sendContinuation(
     hadStreamError: false,
   };
 
+  // 流停滞检测（与 sendMessage 一致）
+  let _contStallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    abortController.abort();
+  }, 30_000);
+  const _resetContStall = () => {
+    if (_contStallTimer !== null) clearTimeout(_contStallTimer);
+    _contStallTimer = setTimeout(() => {
+      abortController.abort();
+    }, 90_000);
+  };
+
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
       { message: text, session_id: effectiveSessionId },
       (event) => {
+        _resetContStall();
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
@@ -605,6 +629,8 @@ export async function sendContinuation(
       });
     }
   } finally {
+    if (_contStallTimer !== null) clearTimeout(_contStallTimer);
+    _contStallTimer = null;
     batcher.dispose();
     S().setPipelineStatus(null);
     S().saveCurrentSession();
@@ -792,8 +818,19 @@ export async function retryAssistantMessage(
   const truncated = messages.slice(0, userIdx);
   store.setMessages(truncated);
 
-  // 重新发送
-  await sendMessage(userContent, undefined, effectiveSessionId);
+  // 保留原始用户消息的文件附件（已上传，无需重传）
+  let retainedAttached: AttachedFile[] | undefined;
+  if (userMessage.role === "user" && userMessage.files && userMessage.files.length > 0) {
+    retainedAttached = userMessage.files.map((f, i) => ({
+      id: `retry-retained-${Date.now()}-${i}`,
+      file: new File([], f.filename),
+      status: "success" as const,
+      uploadResult: { filename: f.filename, path: f.path, size: f.size },
+    }));
+  }
+
+  // 重新发送（携带原始附件信息）
+  await sendMessage(userContent, retainedAttached, effectiveSessionId);
 }
 
 export function stopGeneration() {

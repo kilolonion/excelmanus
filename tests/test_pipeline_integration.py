@@ -219,8 +219,8 @@ class TestHappyPath:
         pipeline = _make_pipeline(str(tmp_path), caller)
         asyncio.get_event_loop().run_until_complete(pipeline.run())
 
-        # on_event 应被调用 8 次（每阶段 2 次：开始 + 结束）
-        assert pipeline._on_event.call_count == 8
+        # on_event: 每阶段 3 次（phase_start + vlm_calling + progress）× 4 阶段 = 12
+        assert pipeline._on_event.call_count == 12
 
 
 # ════════════════════════════════════════════════════════════════
@@ -660,10 +660,10 @@ class TestMultiTurnBehavior:
         pipeline = _make_pipeline(str(tmp_path), caller)
         asyncio.get_event_loop().run_until_complete(pipeline.run())
 
-        # Phase 1: 有图, Phase 2: 无图, Phase 3: 有图, Phase 4: 无图
+        # Phase 1: 有图, Phase 2: 无图, Phase 3: 无图(复用multi-turn), Phase 4: 无图
         assert caller.calls[0]["has_image"] is True   # Phase 1
         assert caller.calls[1]["has_image"] is False  # Phase 2
-        assert caller.calls[2]["has_image"] is True   # Phase 3
+        assert caller.calls[2]["has_image"] is False  # Phase 3（优化：复用 Phase 1 视觉上下文）
         assert caller.calls[3]["has_image"] is False  # Phase 4
 
     def test_conversation_cleared_on_fallback(self, tmp_path):

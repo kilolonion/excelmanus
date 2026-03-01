@@ -65,7 +65,7 @@ const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 const remarkPluginsStable = [remarkGfm];
 
 // 识别为可下载工作区文件的扩展名
-const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
+const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xlsm|xlsb|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
 
 function isWorkspaceFileLink(href: string): boolean {
   if (!href) return false;
@@ -176,7 +176,7 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+            className="flex items-center gap-1 py-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
           >
             <ChevronDown className="h-3 w-3" />
             展开全部
@@ -187,7 +187,7 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
         <button
           type="button"
           onClick={() => setExpanded(false)}
-          className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+          className="flex items-center gap-1 mt-1 py-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
         >
           <ChevronUp className="h-3 w-3" />
           收起
@@ -323,25 +323,25 @@ function CollapsedChainCard({ stats, onExpand }: { stats: ChainStats; onExpand: 
         <div className="flex items-center gap-2 text-xs">
           <Layers className="h-3 w-3 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
           <span className="font-medium text-foreground">
-            {stats.totalTools} 次工具调用
+            {stats.totalTools} <span className="hidden sm:inline">次工具</span><span className="sm:hidden">工具</span>调用
           </span>
           {stats.iterations > 0 && (
             <span className="flex items-center gap-1 text-muted-foreground">
               <Repeat className="h-2.5 w-2.5" />
-              {stats.iterations + 1} 轮
+              {stats.iterations + 1}<span className="hidden sm:inline"> 轮</span>
             </span>
           )}
           {/* 状态指示 */}
           {allSuccess && (
             <span className="flex items-center gap-0.5 text-[10px] font-medium" style={{ color: "var(--em-primary)" }}>
               <CheckCircle2 className="h-3 w-3" />
-              全部成功
+              <span className="hidden sm:inline">全部成功</span>
             </span>
           )}
           {hasError && (
             <span className="flex items-center gap-0.5 text-[10px] font-medium" style={{ color: "var(--em-error, #ef4444)" }}>
               <XCircle className="h-3 w-3" />
-              {stats.errorCount} 失败
+              {stats.errorCount}<span className="hidden sm:inline"> 失败</span>
             </span>
           )}
           {stats.hasSubagent && (
@@ -552,7 +552,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
 
   if (validFiles.length === 0) return null;
 
-  const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv", ".tsv"]);
+  const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".tsv"]);
   const isExcel = (name: string) => {
     const dot = name.lastIndexOf(".");
     return dot >= 0 && EXCEL_EXTS.has(name.slice(dot).toLowerCase());
@@ -610,7 +610,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
                   activeSessionId ?? undefined,
                 ).catch(() => {})
               }
-              className="rounded p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
+              className="rounded p-1.5 sm:p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
               title="下载"
             >
               <Download className="h-3 w-3" />
@@ -828,6 +828,49 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <ConfigErrorCard items={block.items} />;
     case "staging_hint":
       return <StagingHintCard pendingCount={block.pendingCount} files={block.files} />;
+    case "llm_retry": {
+      if (block.retryStatus === "retrying") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400 animate-pulse">
+            <Repeat className="h-4 w-4 flex-shrink-0 animate-spin" style={{ animationDuration: "2s" }} />
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium">
+                模型服务暂时不可用，正在第 {block.retryAttempt}/{block.retryMaxAttempts - 1} 次重试...
+              </span>
+              {block.retryErrorMessage && (
+                <span className="text-xs text-amber-600/70 dark:text-amber-500/70 truncate max-w-md">
+                  {block.retryErrorMessage}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
+      if (block.retryStatus === "succeeded") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 text-xs text-emerald-700 dark:text-emerald-400">
+            <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+            <span>模型服务已恢复，第 {block.retryAttempt} 次尝试成功</span>
+          </div>
+        );
+      }
+      if (block.retryStatus === "exhausted") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/5 text-sm text-red-700 dark:text-red-400">
+            <XCircle className="h-4 w-4 flex-shrink-0" />
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium">模型服务持续不可用，已重试 {block.retryAttempt} 次</span>
+              {block.retryErrorMessage && (
+                <span className="text-xs text-red-600/70 dark:text-red-500/70 truncate max-w-md">
+                  {block.retryErrorMessage}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
+      return null;
+    }
     default:
       return null;
   }

@@ -16,6 +16,8 @@ from excelmanus.subagent.models import SubagentConfig
 # explorer 探索工具白名单
 # 基于 READ_ONLY_SAFE_TOOLS 子集 + run_code（分析性计算）+ read_text_file（非 Excel 文件）
 _EXPLORER_TOOLS: list[str] = [
+    "scan_excel_snapshot",    # 一次拿全貌（schema + 统计 + 质量信号 + 跨 Sheet 关联）
+    "search_excel_values",    # Excel grep：跨 Sheet 搜索值/模式
     "read_excel",
     "list_sheets",
     "inspect_excel_files",
@@ -29,6 +31,8 @@ _EXPLORER_TOOLS: list[str] = [
 
 # verifier 验证工具白名单（探索 + 计算验证）
 _VERIFIER_TOOLS: list[str] = [
+    "scan_excel_snapshot",    # 快速校验文件结构和数据质量
+    "search_excel_values",    # 跨 Sheet 搜索验证特定值
     "read_excel",
     "list_sheets",
     "inspect_excel_files",
@@ -53,8 +57,9 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
     "explorer": SubagentConfig(
         name="explorer",
         description=(
-            "数据探索子代理，用于文件结构分析、数据预览、统计概况与数据质量检测。"
-            "适用于查看/分析/读取/统计/定位/profiling 等探索任务，"
+            "数据上下文快速收集器，用于文件结构分析、数据 schema 扫描、统计概况与数据质量检测。"
+            "优先使用 scan_excel_snapshot 一次性获取文件全貌，"
+            "用 search_excel_values 跨 Sheet 搜索定位。"
             "支持 run_code 做分析性计算（pandas/openpyxl 只读操作）。"
         ),
         allowed_tools=_EXPLORER_TOOLS,

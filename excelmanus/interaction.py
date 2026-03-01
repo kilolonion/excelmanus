@@ -66,6 +66,8 @@ class InteractionRegistry:
             return False
         fut.set_result(payload)
         logger.debug("交互已 resolve: %s", interaction_id)
+        # 立即清理已完成的 Future，避免长生命周期 session 中内存泄漏
+        self.cleanup_done()
         return True
 
     def cancel(self, interaction_id: str) -> bool:

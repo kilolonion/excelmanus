@@ -500,7 +500,7 @@ _ensure_frontend_standalone_assets() {
   _remote_frontend "
     cd '${FRONTEND_DIR}/web'
     if [[ ! -d .next/standalone ]]; then
-      echo '[WARN] 未检测到 standalone 目录。请确认 next.config.ts 包含 output: standalone 且构建使用了 --no-turbopack'
+      echo '[WARN] 未检测到 standalone 目录。请确认 next.config.ts 包含 output: standalone 且构建使用了 --webpack'
       echo '[INFO] 将回退到 next start 启动'
       exit 0
     fi
@@ -675,6 +675,7 @@ _build_frontend_remote() {
   info "构建前端..."
   if _remote_frontend "
     cd '${FRONTEND_DIR}/web' && \
+    export NODE_OPTIONS=\"--max-old-space-size=4096\" && \
     ${cold_cmd}npm run build 2>&1; \
     BUILD_EXIT=\$?; \
     echo \"[deploy] npm run build exit code: \$BUILD_EXIT\"; \
@@ -686,6 +687,7 @@ _build_frontend_remote() {
   warn "默认构建失败，尝试 webpack 兜底（npm run build:webpack）..."
   _remote_frontend "
     cd '${FRONTEND_DIR}/web' && \
+    export NODE_OPTIONS=\"--max-old-space-size=4096\" && \
     ${cold_cmd}npm run build:webpack 2>&1; \
     BUILD_EXIT=\$?; \
     echo \"[deploy] webpack build exit code: \$BUILD_EXIT\"; \
@@ -720,7 +722,7 @@ _validate_frontend_build() {
     fi
 
     if [[ \"\$_ok\" != true ]]; then
-      echo '[FATAL] 构建产物校验失败！这通常是 Turbopack 构建不完整导致。'
+      echo '[FATAL] 构建产物校验失败！请确认使用 webpack 模式构建（npm run build）。'
       echo '[FATAL] 将保留当前运行版本，不执行重启。'
       exit 1
     fi
@@ -873,7 +875,7 @@ _sync_code() {
     run "rsync -az --partial ${_rsync_extra} --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
       '${PROJECT_ROOT}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
-    info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
+    info "从 Git 仓库拉取更新到 ${label} (${host:-localhost})..."
     local key_for_host="$SSH_KEY_PATH"
     [[ "$host" == "$BACKEND_HOST" ]] && key_for_host="$BACKEND_SSH_KEY_PATH" || true
     [[ "$host" == "$FRONTEND_HOST" ]] && key_for_host="$FRONTEND_SSH_KEY_PATH" || true
@@ -954,11 +956,14 @@ SVCEOF
       sudo systemctl start '${PM2_BACKEND}'; }"
   else
     _remote_backend "
-      pm2 restart '${PM2_BACKEND}' --update-env 2>/dev/null || \
-      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
-        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
-        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info \
-        2>/dev/null || true
+      if pm2 describe '${PM2_BACKEND}' >/dev/null 2>&1; then
+        pm2 restart '${PM2_BACKEND}' --update-env
+      else
+        pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
+          --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
+          -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info
+      fi
+      pm2 save
     "
   fi
   log "后端部署完成"
@@ -1020,7 +1025,7 @@ _deploy_frontend() {
       info "安装前端依赖..."
       _remote_frontend "
         cd '${FRONTEND_DIR}/web' && \
-        npm install --production=false 2>&1
+        npm ci 2>&1
       "
     fi
 
@@ -1033,7 +1038,7 @@ _deploy_frontend() {
     # 校验构建产物完整性（不通过则不重启，避免 502）
     if ! _validate_frontend_build; then
       error "构建产物校验失败！保留当前运行版本，不执行重启。"
-      warn "这通常是 Next.js Turbopack 构建不完整导致。"
+      warn "请确认使用 webpack 模式构建。"
       warn "解决方法：在服务器上手动执行 cd ${FRONTEND_DIR}/web && npm run build"
       return 1
     fi
@@ -1146,7 +1151,7 @@ _print_summary() {
       ;;
   esac
 
-  echo -e "  代码来源: ${CYAN}$([ "$FROM_LOCAL" == true ] && echo "本地 rsync" || echo "GitHub (${REPO_BRANCH})")${NC}"
+  echo -e "  代码来源: ${CYAN}$([ "$FROM_LOCAL" == true ] && echo "本地 rsync" || echo "Git (${REPO_BRANCH})")${NC}"
   [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  前端制品: ${CYAN}${FRONTEND_ARTIFACT}${NC}" || true
   [[ "$COLD_BUILD" == true ]] && echo -e "  构建缓存: ${YELLOW}冷构建 (--cold-build)${NC}" || true
   [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  回滚备份: ${CYAN}保留最近 ${FRONTEND_RELEASE_KEEP} 个${NC}" || true

@@ -77,6 +77,7 @@
 
 1. 如您发现本产品中存在违法违规内容或行为，可通过以下渠道举报：
    - 邮箱：kilolonion@gmail.com
+   - Gitee Issues：[https://gitee.com/kilolonion/excelmanus/issues](https://gitee.com/kilolonion/excelmanus/issues)
    - GitHub Issues：[https://github.com/kilolonion/excelmanus/issues](https://github.com/kilolonion/excelmanus/issues)
 2. 我们将在收到举报后尽快核实处理，并反馈结果。
 3. 对违规用户，我们将视情节轻重采取警示、限制功能、暂停服务或终止账号等措施。
@@ -94,6 +95,7 @@
 3. 本协议中的任何条款被认定为无效或不可执行的，不影响其余条款的效力。
 4. 如您对本协议有任何疑问，欢迎通过以下方式与我们联系：
    - 邮箱：kilolonion@gmail.com
+   - Gitee Issues：[https://gitee.com/kilolonion/excelmanus/issues](https://gitee.com/kilolonion/excelmanus/issues)
    - GitHub Issues：[https://github.com/kilolonion/excelmanus/issues](https://github.com/kilolonion/excelmanus/issues)
 
 ---

@@ -3,13 +3,39 @@ import { useAuthStore } from "@/stores/auth-store";
 
 const API_BASE_PATH = "/api/v1";
 
-function getAuthHeaders(): Record<string, string> {
+/** 普通 REST 请求的默认超时（毫秒）。上传/下载等大体积操作使用更长的超时。 */
+const _DEFAULT_TIMEOUT_MS = 30_000;
+const _UPLOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * 创建一个带超时的 AbortSignal。如果调用方已提供 signal，则合并两者（任一触发即中止）。
+ */
+function _withTimeout(timeoutMs: number, existingSignal?: AbortSignal | null): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!existingSignal) return timeoutSignal;
+  // AbortSignal.any 合并多个 signal（任一触发即中止）
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([existingSignal, timeoutSignal]);
+  }
+  // Fallback for older browsers: prefer caller's signal, timeout won't apply
+  return existingSignal;
+}
+
+export function getAuthHeaders(): Record<string, string> {
   const token = useAuthStore.getState().accessToken;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+/**
+ * 判断主机名是否为 loopback 地址（localhost / 127.x.x.x / ::1）。
+ */
+function isLoopback(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h.startsWith("127.") || h === "::1";
 }
 
 /**
@@ -21,6 +47,10 @@ function trimTrailingSlash(value: string): string {
  *    - 设为 "same-origin" → 走同源（适用于 Nginx 已配置 proxy_buffering off）
  * 2. 未配置时回退 → http://{当前主机名}:8000（开发/默认 docker-compose 场景）
  *
+ * 特殊处理：如果配置值指向 loopback（localhost/127.0.0.1），但浏览器实际从
+ * 非本机访问（局域网 IP），则自动回退到 window.location.hostname + 同端口，
+ * 避免局域网设备的 SSE 请求发往自己本机的 loopback 地址导致 "fail to fetch"。
+ *
  * 生产环境如果 Nginx 已配置 /api/ 反向代理且关闭了 buffering，
  * 设置 NEXT_PUBLIC_BACKEND_ORIGIN=same-origin 即可，所有请求走同源，无 CORS 问题。
  */
@@ -29,6 +59,20 @@ function resolveDirectBackendOrigin(): string {
   if (configured) {
     // "same-origin" 显式表示走同源（Nginx 场景），返回空字符串
     if (configured.toLowerCase() === "same-origin") return "";
+
+    // 配置值指向 loopback，但用户从非本机访问 → 回退到实际访问地址 + 同端口
+    if (typeof window !== "undefined") {
+      try {
+        const cfgUrl = new URL(configured);
+        if (isLoopback(cfgUrl.hostname) && !isLoopback(window.location.hostname)) {
+          const port = cfgUrl.port || "8000";
+          return `${cfgUrl.protocol}//${window.location.hostname}:${port}`;
+        }
+      } catch {
+        // URL 解析失败，按原值使用
+      }
+    }
+
     return trimTrailingSlash(configured);
   }
   // 未配置时回退到同主机 :8000 — 避免 SSE 流走 Next.js rewrite 被缓冲
@@ -93,9 +137,17 @@ export function proxyAvatarUrl(url: string | null | undefined): string | null {
   return url;
 }
 
+/** 判断是否为可重试的暂态错误（网络异常或 502/503/504）。 */
+function _isTransientError(err: unknown, res?: Response | null): boolean {
+  if (err instanceof TypeError) return true; // "Failed to fetch" — 网络不可达
+  if (res && (res.status === 502 || res.status === 503 || res.status === 504)) return true;
+  return false;
+}
+
 /**
  * 带 auth token 刷新重试的 fetch 包装（用于直连调用）。
- * 遇到 401 时自动刷新 token 并重试一次。
+ * - 遇到 401 时自动刷新 token 并重试一次。
+ * - 遇到暂态网络错误或 502/503/504 时自动重试一次（间隔 1 秒）。
  */
 export async function directFetch(
   input: RequestInfo | URL,
@@ -107,10 +159,30 @@ export async function directFetch(
     if (token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${token}`);
     }
-    return fetch(input, { ...init, headers });
+    // 如果调用方未提供 signal，注入默认超时；SSE 调用方自带 AbortController 的 signal 不受影响
+    const signal = init?.signal ?? _withTimeout(_DEFAULT_TIMEOUT_MS);
+    return fetch(input, { ...init, headers, signal });
   };
 
-  let res = await doFetch();
+  let res: Response;
+  try {
+    res = await doFetch();
+  } catch (err) {
+    // 暂态网络错误 → 延迟 1s 重试一次
+    if (_isTransientError(err)) {
+      await new Promise((r) => setTimeout(r, 1000));
+      res = await doFetch(); // 重试失败则抛出，由调用方处理
+    } else {
+      throw err;
+    }
+  }
+
+  // 502/503/504 暂态服务端错误 → 重试一次
+  if (_isTransientError(null, res)) {
+    await new Promise((r) => setTimeout(r, 1000));
+    res = await doFetch();
+  }
+
   if (res.status === 401) {
     const { refreshToken } = useAuthStore.getState();
     if (refreshToken) {
@@ -118,10 +190,9 @@ export async function directFetch(
       const ok = await refreshAccessToken();
       if (ok) {
         res = await doFetch();
-      } else {
-        useAuthStore.getState().logout();
-        if (typeof window !== "undefined") window.location.href = "/login";
       }
+      // refreshAccessToken 内部已处理：认证错误→logout，网络错误→仅返回 false。
+      // 此处不再重复 logout/redirect，避免网络波动踢出用户。
     } else {
       useAuthStore.getState().logout();
       if (typeof window !== "undefined") window.location.href = "/login";
@@ -135,10 +206,8 @@ async function handleAuthError(res: Response): Promise<never> {
     const { refreshToken, logout } = useAuthStore.getState();
     if (refreshToken) {
       const { refreshAccessToken } = await import("./auth-api");
-      const ok = await refreshAccessToken();
-      if (!ok) {
-        if (typeof window !== "undefined") window.location.href = "/login";
-      }
+      await refreshAccessToken();
+      // refreshAccessToken 内部已处理：认证错误→logout+清 cookie，网络错误→仅返回 false。
     } else {
       logout();
       if (typeof window !== "undefined") window.location.href = "/login";
@@ -148,9 +217,10 @@ async function handleAuthError(res: Response): Promise<never> {
   throw new Error(data.error || data.detail || `API error: ${res.status}`);
 }
 
-export async function apiGet<T = unknown>(path: string): Promise<T> {
-  const res = await fetch(buildApiUrl(path), {
+export async function apiGet<T = unknown>(path: string, opts?: { direct?: boolean }): Promise<T> {
+  const res = await fetch(buildApiUrl(path, opts), {
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -158,12 +228,14 @@ export async function apiGet<T = unknown>(path: string): Promise<T> {
 
 export async function apiPost<T = unknown>(
   path: string,
-  body: unknown
+  body: unknown,
+  opts?: { direct?: boolean },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path), {
+  const res = await fetch(buildApiUrl(path, opts), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -171,12 +243,14 @@ export async function apiPost<T = unknown>(
 
 export async function apiPut<T = unknown>(
   path: string,
-  body: unknown
+  body: unknown,
+  opts?: { direct?: boolean },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path), {
+  const res = await fetch(buildApiUrl(path, opts), {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -184,21 +258,24 @@ export async function apiPut<T = unknown>(
 
 export async function apiPatch<T = unknown>(
   path: string,
-  body: unknown
+  body: unknown,
+  opts?: { direct?: boolean },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path), {
+  const res = await fetch(buildApiUrl(path, opts), {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
-export async function apiDelete(path: string): Promise<void> {
-  const res = await fetch(buildApiUrl(path), {
+export async function apiDelete(path: string, opts?: { direct?: boolean }): Promise<void> {
+  const res = await fetch(buildApiUrl(path, opts), {
     method: "DELETE",
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
 }
@@ -222,6 +299,7 @@ export async function fetchSessionDetail(
 ): Promise<SessionDetail | null> {
   const res = await fetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`), {
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (res.status === 404) {
     return null;
@@ -295,6 +373,7 @@ export async function clearAllSessions(): Promise<{
   const res = await fetch(buildApiUrl("/sessions"), {
     method: "DELETE",
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -369,6 +448,61 @@ export async function fetchSessionExcelEvents(
   }
 }
 
+// ── Session Export / Import ──────────────────────────
+
+export type ExportFormat = "md" | "txt" | "emx";
+
+/**
+ * 导出会话为指定格式，触发浏览器下载。
+ */
+export async function exportSession(
+  sessionId: string,
+  format: ExportFormat = "md",
+): Promise<void> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`,
+  );
+  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_UPLOAD_TIMEOUT_MS) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `导出失败: ${res.status}`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
+  const filename = filenameMatch?.[1] || `session.${format}`;
+
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 100);
+}
+
+/**
+ * 从 EMX JSON 导入会话。
+ */
+export async function importSession(
+  emxData: unknown,
+): Promise<{ status: string; session_id: string; title: string; message_count: number }> {
+  const url = buildApiUrl("/sessions/import");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify(emxData),
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `导入失败: ${res.status}`);
+  }
+  return res.json();
+}
+
 export interface ApprovalRecord {
   id: string;
   tool_name: string;
@@ -419,6 +553,7 @@ export async function answerQuestion(
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ question_id: questionId, answer }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -437,6 +572,7 @@ export async function submitApproval(
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ approval_id: approvalId, decision }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -454,6 +590,7 @@ export async function toggleFullAccess(
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ enabled }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -468,6 +605,7 @@ export async function abortChat(sessionId: string): Promise<{ status: string }> 
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -498,6 +636,7 @@ export async function rollbackChat(opts: {
       new_message: opts.newMessage ?? null,
       resend_mode: opts.resendMode ?? false,
     }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -529,6 +668,7 @@ export async function rollbackPreview(
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId, turn_index: turnIndex }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -604,7 +744,7 @@ export interface ExcelFileListItem {
 
 export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
   const url = buildApiUrl("/files/excel/list");
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
@@ -612,7 +752,7 @@ export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
 
 export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   const url = buildApiUrl("/files/workspace/list");
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
@@ -631,9 +771,16 @@ export interface WorkspaceStorage {
 
 export async function fetchWorkspaceStorage(): Promise<WorkspaceStorage | null> {
   const url = buildApiUrl("/files/workspace/storage");
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
-  if (!res.ok) return null;
-  return res.json();
+  try {
+    const res = await fetch(url, {
+      headers: { ...getAuthHeaders() },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
 }
 
 // ── FileRegistry API ─────────────────────────────────────
@@ -694,6 +841,7 @@ export async function workspaceMkdir(path: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -707,6 +855,7 @@ export async function workspaceCreateFile(path: string): Promise<void> {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -720,6 +869,7 @@ export async function workspaceDeleteItem(path: string): Promise<void> {
     method: "DELETE",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -733,6 +883,7 @@ export async function workspaceRenameItem(oldPath: string, newPath: string): Pro
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -747,10 +898,10 @@ export async function uploadFileToFolder(
   const formData = new FormData();
   formData.append("file", file);
   formData.append("folder", folder);
-  const res = await fetch(buildApiUrl("/upload", { direct: true }), {
+  const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
-    headers: { ...getAuthHeaders() },
     body: formData,
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -774,7 +925,7 @@ export async function fetchAllSheetsSnapshot(
   if (opts?.sessionId) params.set("session_id", opts.sessionId);
   params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
   const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Snapshot error: ${res.status}`);
@@ -788,6 +939,7 @@ export async function fetchExcelSnapshot(
 ): Promise<ExcelSnapshot> {
   const res = await fetch(buildExcelSnapshotUrl(path, opts), {
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     // 兼容历史脱敏路径 "<path>/foo.xlsx"：尝试按 basename 回查 workspace 文件并重试
@@ -798,6 +950,7 @@ export async function fetchExcelSnapshot(
       if (matches.length === 1) {
         const retryRes = await fetch(buildExcelSnapshotUrl(matches[0].path, opts), {
           headers: { ...getAuthHeaders() },
+          signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
         });
         if (retryRes.ok) {
           return retryRes.json();
@@ -826,6 +979,7 @@ export async function writeExcelCells(opts: {
       changes: opts.changes,
       session_id: opts.sessionId ?? null,
     }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -850,6 +1004,7 @@ export async function downloadFile(path: string, filename?: string, sessionId?: 
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
   const res = await fetch(url, {
     headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -874,10 +1029,10 @@ export async function uploadFile(file: File): Promise<{
 }> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(buildApiUrl("/upload", { direct: true }), {
+  const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
-    headers: { ...getAuthHeaders() },
     body: formData,
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -891,10 +1046,11 @@ export async function uploadFileFromUrl(url: string): Promise<{
   path: string;
   size: number;
 }> {
-  const res = await fetch(buildApiUrl("/upload-from-url", { direct: true }), {
+  const res = await directFetch(buildApiUrl("/upload-from-url", { direct: true }), {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url }),
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -934,7 +1090,7 @@ export async function fetchBackupList(
   const url = buildApiUrl(
     `/workspace/staged?session_id=${encodeURIComponent(sessionId)}`
   );
-  const res = await fetch(url, { headers: { ...getAuthHeaders() } });
+  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) {
     return { files: [], backup_enabled: false };
   }
@@ -959,6 +1115,7 @@ export async function applyBackup(opts: {
       session_id: opts.sessionId,
       files: opts.files ?? null,
     }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -979,6 +1136,7 @@ export async function discardBackup(opts: {
       session_id: opts.sessionId,
       files: opts.files ?? null,
     }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -1001,11 +1159,90 @@ export async function undoBackup(opts: {
       original_path: opts.originalPath,
       undo_path: opts.undoPath,
     }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || data.detail || `Undo error: ${res.status}`);
   }
+  return res.json();
+}
+
+// ── 操作历史时间线 API ────────────────────────────────────
+
+export interface OperationChange {
+  path: string;
+  change_type: "added" | "modified" | "deleted";
+  before_size: number | null;
+  after_size: number | null;
+  is_binary: boolean;
+}
+
+export interface OperationRecord {
+  approval_id: string;
+  tool_name: string;
+  arguments_summary: Record<string, string>;
+  session_turn: number | null;
+  created_at_utc: string;
+  applied_at_utc: string;
+  execution_status: "success" | "failed";
+  undoable: boolean;
+  result_preview: string;
+  changes: OperationChange[];
+}
+
+export interface OperationDetail extends OperationRecord {
+  arguments: Record<string, unknown>;
+  patch_content: string | null;
+  error_type: string | null;
+  error_message: string | null;
+}
+
+export interface OperationsListResponse {
+  operations: OperationRecord[];
+  total: number;
+  has_more: boolean;
+}
+
+export async function fetchOperations(
+  sessionId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<OperationsListResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const qs = params.toString() ? `?${params}` : "";
+  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/operations${qs}`);
+  const res = await fetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  if (!res.ok) await handleAuthError(res);
+  return res.json();
+}
+
+export async function fetchOperationDetail(
+  sessionId: string,
+  approvalId: string,
+): Promise<OperationDetail> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}`,
+  );
+  const res = await fetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  if (!res.ok) await handleAuthError(res);
+  return res.json();
+}
+
+export async function undoOperation(
+  sessionId: string,
+  approvalId: string,
+): Promise<{ status: string; message: string; approval_id: string }> {
+  const url = buildApiUrl(
+    `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}/undo`,
+  );
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  });
+  if (!res.ok) await handleAuthError(res);
   return res.json();
 }
 
@@ -1023,6 +1260,7 @@ export interface TestConnectionResult {
   model: string;
   base_url?: string;
   is_placeholder?: boolean;
+  hint?: string;
 }
 
 export async function testModelConnection(opts: {
@@ -1034,6 +1272,25 @@ export async function testModelConnection(opts: {
   return apiPost<TestConnectionResult>("/config/models/test-connection", opts);
 }
 
+export interface RemoteModelItem {
+  id: string;
+  owned_by?: string;
+}
+
+export interface ListRemoteModelsResult {
+  models: RemoteModelItem[];
+  error?: string;
+  hint?: string;
+}
+
+export async function listRemoteModels(opts: {
+  base_url?: string;
+  api_key?: string;
+  protocol?: string;
+}): Promise<ListRemoteModelsResult> {
+  return apiPost<ListRemoteModelsResult>("/config/models/list-remote", opts, { direct: true });
+}
+
 export interface PlaceholderCheckResult {
   has_placeholder: boolean;
   items: { name: string; field: string; model: string }[];
@@ -1041,4 +1298,82 @@ export interface PlaceholderCheckResult {
 
 export async function checkModelPlaceholder(): Promise<PlaceholderCheckResult> {
   return apiGet<PlaceholderCheckResult>("/config/models/check-placeholder");
+}
+
+// ── ClawHub API ──────────────────────────────────────────
+
+export interface ClawHubSearchResult {
+  slug: string;
+  display_name: string;
+  summary: string;
+  version: string | null;
+  score: number;
+  updated_at: number | null;
+}
+
+export interface ClawHubSkillDetail {
+  slug: string;
+  display_name: string;
+  summary: string;
+  tags: string[];
+  latest_version: string | null;
+  latest_changelog: string;
+  owner_handle: string | null;
+  owner_display_name: string | null;
+  stats: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ClawHubUpdateInfo {
+  slug: string;
+  installed_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+}
+
+export interface ClawHubInstalled {
+  slug: string;
+  version: string | null;
+}
+
+export async function clawhubSearch(
+  query: string,
+  limit = 15
+): Promise<{ results: ClawHubSearchResult[] }> {
+  return apiGet(`/clawhub/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+}
+
+export async function clawhubSkillDetail(
+  slug: string
+): Promise<ClawHubSkillDetail> {
+  return apiGet(`/clawhub/skill/${encodeURIComponent(slug)}`);
+}
+
+export async function clawhubInstall(opts: {
+  slug: string;
+  version?: string;
+  overwrite?: boolean;
+}): Promise<Record<string, unknown>> {
+  return apiPost("/clawhub/install", opts);
+}
+
+export async function clawhubCheckUpdates(): Promise<{
+  updates: ClawHubUpdateInfo[];
+}> {
+  return apiGet("/clawhub/updates");
+}
+
+export async function clawhubUpdate(opts: {
+  slug?: string;
+  version?: string;
+  all?: boolean;
+}): Promise<{ results: Record<string, unknown>[] }> {
+  return apiPost("/clawhub/update", opts);
+}
+
+export async function clawhubListInstalled(): Promise<{
+  installed: ClawHubInstalled[];
+}> {
+  return apiGet("/clawhub/installed");
 }

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.6-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.7-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -53,7 +53,10 @@ One Markdown = one skill. Auto-discovery, on-demand activation, supports Hooks a
 ### 🔌 MCP & Subagent
 Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents
 
-### 👥 Multi-User
+### � Session Export
+Export to Markdown / Plain Text / EMX (JSON) — EMX format can be re-imported as a full session
+
+### �👥 Multi-User
 Independent workspace / database / session isolation, admin panel for permissions and usage control
 
 </td>
@@ -69,7 +72,10 @@ The easiest way — the script auto-installs dependencies and launches both back
 **Step 1: Clone the project**
 
 ```bash
-git clone https://github.com/kilolonion/excelmanus.git
+# Recommended for users in China (faster)
+git clone https://gitee.com/kilolonion/excelmanus.git
+# Or use GitHub
+# git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
 ```
 
@@ -142,7 +148,10 @@ For users with an existing Python environment (≥3.10) who want precise control
 **1. Clone and install**
 
 ```bash
-git clone https://github.com/kilolonion/excelmanus.git
+# Recommended for users in China (faster)
+git clone https://gitee.com/kilolonion/excelmanus.git
+# Or use GitHub
+# git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
 pip install ".[all]"          # Full install (CLI + Web + all optional deps)
 # Or pick what you need:
@@ -200,6 +209,7 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 | `/compact` | Context compaction |
 | `/config export` | Encrypted config export |
 | `/config import` | Import config |
+| `/export` | Export session (Markdown / Plain Text / EMX) |
 | `/clear` | Clear conversation |
 
 </details>

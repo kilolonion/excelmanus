@@ -64,6 +64,15 @@ class ConversationPersistence:
                     break
             self._chat_history.create_session(session_id, title, user_id=user_id)
 
+        # 压缩/摘要会替换 _messages 并将 snapshot_index 重置为 0，
+        # 此时需要先清空旧消息再全量重写，否则 SQLite 中仍是压缩前的历史。
+        if snapshot_idx == 0 and exists:
+            try:
+                self._chat_history.clear_messages(session_id)
+                logger.debug("会话 %s 消息列表已重建（压缩/摘要），全量重写持久化", session_id)
+            except Exception:
+                logger.warning("会话 %s 压缩后清理旧消息失败", session_id, exc_info=True)
+
         self._chat_history.save_turn_messages(session_id, new_msgs, turn_number=turn)
         engine.set_message_snapshot_index(len(messages))
 
@@ -126,11 +135,23 @@ class ConversationPersistence:
         session_id: str,
         engine: "AgentEngine",
     ) -> None:
-        """回退后清空持久化消息并重置快照索引。"""
+        """回退后清空持久化消息并立即重新持久化剩余消息。
+
+        先清空 SQLite 再立即写入 engine 中剩余的消息，避免中间状态下
+        SQLite 为空（若后续 sendMessage 失败，刷新页面时消息不会丢失）。
+        """
         try:
             if self._chat_history.session_exists(session_id):
                 self._chat_history.clear_messages(session_id)
             engine.set_message_snapshot_index(0)
+            # 立即将剩余消息重新持久化，消除 SQLite 空窗期
+            remaining = engine.raw_messages
+            if remaining:
+                turn = engine.session_turn
+                self._chat_history.save_turn_messages(
+                    session_id, remaining, turn_number=turn,
+                )
+                engine.set_message_snapshot_index(len(remaining))
         except Exception:
             logger.warning(
                 "会话 %s 回退后清理持久化消息失败", session_id, exc_info=True

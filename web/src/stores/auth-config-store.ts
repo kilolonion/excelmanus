@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import { buildApiUrl } from "@/lib/api";
+import { useOnboardingStore } from "@/stores/onboarding-store";
 
 interface LoginMethods {
   github_enabled: boolean;
   google_enabled: boolean;
   qq_enabled: boolean;
   email_verify_required: boolean;
+  require_agreement: boolean;
 }
 
 interface AuthConfigState {
@@ -20,6 +22,7 @@ const DEFAULT_LOGIN_METHODS: LoginMethods = {
   google_enabled: true,
   qq_enabled: false,
   email_verify_required: false,
+  require_agreement: true,
 };
 
 export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
@@ -41,9 +44,14 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
               google_enabled: lm.google_enabled ?? true,
               qq_enabled: lm.qq_enabled ?? false,
               email_verify_required: lm.email_verify_required ?? false,
+              require_agreement: lm.require_agreement ?? true,
             }
           : { ...DEFAULT_LOGIN_METHODS };
         set({ authEnabled: enabled, loginMethods, checked: true });
+        // Propagate backend config status to onboarding store
+        if (typeof data.configured === "boolean") {
+          useOnboardingStore.getState().setBackendConfigured(data.configured);
+        }
         return enabled;
       }
     } catch {

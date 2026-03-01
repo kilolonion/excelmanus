@@ -83,6 +83,8 @@ export const useSessionStore = create<SessionState>()(
           if (remote.length > 0) {
             for (const [id, local] of localMap) {
               if (!remoteIds.has(id) && id !== state.activeSessionId) {
+                // Never prune onboarding demo sessions — they are local-only
+                if (id.startsWith("__onboarding_demo__")) continue;
                 if (local.createdAt && (now - local.createdAt) < GRACE_PERIOD_MS) {
                   continue;
                 }

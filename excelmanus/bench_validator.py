@@ -324,7 +324,7 @@ def _check_golden_cells(
     # ── 定位输出文件 ──
     output_file: Path | None = None
     if workfile_dir and workfile_dir.is_dir():
-        xlsx_files = list(workfile_dir.glob("*.xlsx"))
+        xlsx_files = [f for ext in ("*.xlsx", "*.xls", "*.xlsb") for f in workfile_dir.glob(ext)]
         if len(xlsx_files) == 1:
             output_file = xlsx_files[0]
         elif len(xlsx_files) > 1:
@@ -365,6 +365,10 @@ def _check_golden_cells(
         )
 
     # ── 批量加载单元格数据（优化：减少 I/O 次数）────
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    output_file = ensure_openpyxl_compatible(Path(output_file))
+    golden_path = ensure_openpyxl_compatible(golden_path)
     try:
         # 先只加载 data_only=True 版本（用于值比对）
         wb_out = load_workbook(output_file, data_only=True, read_only=True)

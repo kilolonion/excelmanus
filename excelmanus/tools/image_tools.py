@@ -433,6 +433,10 @@ def verify_excel_replica(
     if not excel_file.is_file():
         return json.dumps({"status": "error", "message": f"Excel 文件不存在: {excel_path}"}, ensure_ascii=False)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    excel_file = ensure_openpyxl_compatible(excel_file)
+
     try:
         spec = ReplicaSpec.model_validate_json(spec_file.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -777,10 +781,6 @@ def get_tools() -> list[ToolDef]:
                         "default": False,
                     },
                 },
-                "oneOf": [
-                    {"required": ["file_path"]},
-                    {"required": ["file_paths"]},
-                ],
                 "additionalProperties": False,
             },
             func=lambda **kw: json.dumps({"__extract_pending__": True}),
