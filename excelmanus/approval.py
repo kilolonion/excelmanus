@@ -189,6 +189,14 @@ class ApprovalManager:
     def is_high_risk_tool(self, tool_name: str) -> bool:
         return self.is_confirm_required_tool(tool_name)
 
+    def is_undoable_tool(self, tool_name: str) -> bool:
+        """判断工具执行结果是否支持自动回滚。"""
+        if self.is_read_only_safe_tool(tool_name):
+            return False
+        if tool_name in {"run_code", "run_shell"}:
+            return False
+        return True
+
     def is_mcp_tool(self, tool_name: str) -> bool:
         """判断工具名是否为 MCP 远程工具（以 mcp_ 前缀开头）。"""
         return tool_name.startswith("mcp_")
@@ -493,7 +501,7 @@ class ApprovalManager:
         return count
 
     def _persist_undoable_flag(self, record: AppliedApprovalRecord) -> None:
-        """将 record.undoable 同步写回磁盘 manifest.json（best-effort）。"""
+        """将 record.undoable 同步写回磁盘 manifest.json 和 DB（best-effort）。"""
         manifest_path = self.workspace_root / record.manifest_file
         if not manifest_path.exists():
             return
@@ -507,6 +515,11 @@ class ApprovalManager:
                 )
         except (OSError, json.JSONDecodeError, TypeError):
             pass
+        if self._db_store is not None:
+            try:
+                self._db_store.update_undoable(record.approval_id, record.undoable)
+            except Exception:
+                logger.debug("DB undoable 标记同步失败: %s", record.approval_id, exc_info=True)
 
     def undo(self, approval_id: str) -> str:
         record = self.get_applied(approval_id)

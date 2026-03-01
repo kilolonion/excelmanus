@@ -38,9 +38,16 @@ class UserContext:
         *,
         role: str = "user",
         global_workspace_root: str,
+        data_root: str = "",
     ) -> UserContext:
-        """为已认证用户创建上下文，workspace 自动隔离到 per-user 目录。"""
-        root = Path(global_workspace_root) / "users" / user_id
+        """为已认证用户创建上下文，workspace 自动隔离到 per-user 目录。
+
+        当 ``data_root`` 非空时，用户目录指向集中数据目录。
+        """
+        if data_root:
+            root = Path(data_root) / "users" / user_id
+        else:
+            root = Path(global_workspace_root) / "users" / user_id
         root.mkdir(parents=True, exist_ok=True)
         return UserContext(
             user_id=user_id,
@@ -49,9 +56,12 @@ class UserContext:
         )
 
     @staticmethod
-    def anonymous(global_workspace_root: str) -> UserContext:
+    def anonymous(global_workspace_root: str, data_root: str = "") -> UserContext:
         """单用户/CLI 模式的匿名上下文，兼容旧行为。"""
-        root = Path(global_workspace_root)
+        if data_root:
+            root = Path(data_root)
+        else:
+            root = Path(global_workspace_root)
         root.mkdir(parents=True, exist_ok=True)
         return UserContext(
             user_id=_ANONYMOUS_SENTINEL,

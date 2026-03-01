@@ -21,18 +21,21 @@ from excelmanus.providers.openai_responses import OpenAIResponsesClient
 # ── URL 模式匹配 ─────────────────────────────────────────────
 
 # Gemini 原生 API
+# 注意：仅匹配确定性的原生 API 标识。不匹配 URL 路径中的 /gemini/，
+# 因为第三方 OpenAI 兼容代理（如 right.codes/gemini/v1）会被误判。
 _GEMINI_URL_PATTERNS = (
     re.compile(r"generativelanguage\.googleapis\.com", re.IGNORECASE),
-    re.compile(r"/gemini/", re.IGNORECASE),
     re.compile(r":generateContent", re.IGNORECASE),
     re.compile(r":streamGenerateContent", re.IGNORECASE),
 )
 
 # Claude / Anthropic 原生 API
+# 注意：仅匹配域名部分包含 anthropic 的 URL。不匹配路径中的 /claude/，
+# 因为第三方 OpenAI 兼容代理（如 right.codes/claude/v1）会被误判为原生 API，
+# 导致 ClaudeClient 拼出 /v1/v1/messages 之类的错误路径。
 _CLAUDE_URL_PATTERNS = (
     re.compile(r"api\.anthropic\.com", re.IGNORECASE),
-    re.compile(r"anthropic", re.IGNORECASE),
-    re.compile(r"/claude/", re.IGNORECASE),
+    re.compile(r"://[^/]*anthropic", re.IGNORECASE),  # 仅匹配域名中的 anthropic
 )
 
 

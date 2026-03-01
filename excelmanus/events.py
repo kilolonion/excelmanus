@@ -46,6 +46,7 @@ class EventType(Enum):
     RETRACT_THINKING = "retract_thinking"
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
     STAGING_UPDATED = "staging_updated"  # staging 文件列表变化（apply/discard/新增）
+    LLM_RETRY = "llm_retry"  # LLM 调用重试通知
 
 
 @dataclass
@@ -131,6 +132,11 @@ class ToolCallEvent:
     excel_merge_ranges: List[Dict[str, int]] = field(default_factory=list)
     excel_old_merge_ranges: List[Dict[str, int]] = field(default_factory=list)
     excel_metadata_hints: List[str] = field(default_factory=list)
+    # Excel 跨文件对比事件扩展字段
+    excel_diff_mode: str = ""       # "" (inline) | "cross_file" | "cross_sheet"
+    excel_file_b: str = ""          # 对比文件路径（cross_file 模式）
+    excel_sheet_b: str = ""         # 对比 sheet 名称
+    excel_diff_summary: Optional[Dict[str, Any]] = None  # 对比摘要
     # text_diff 事件字段
     text_diff_file_path: str = ""
     text_diff_hunks: List[str] = field(default_factory=list)
@@ -179,6 +185,12 @@ class ToolCallEvent:
     staging_action: str = ""             # "applied" | "discarded" | "undone" | "new"
     staging_files: List[Dict[str, Any]] = field(default_factory=list)  # 变化的文件列表
     staging_pending_count: int = 0       # 剩余待应用文件数
+    # llm_retry 事件字段
+    retry_attempt: int = 0               # 当前重试次数
+    retry_max_attempts: int = 0          # 最大尝试次数
+    retry_delay_seconds: float = 0.0     # 本次等待延迟（秒）
+    retry_error_message: str = ""        # 触发重试的错误信息
+    retry_status: str = ""               # "retrying" | "succeeded" | "exhausted"
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

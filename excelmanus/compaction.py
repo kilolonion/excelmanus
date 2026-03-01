@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -295,7 +296,14 @@ class CompactionManager:
             summary_text = (response.choices[0].message.content or "").strip()
         except Exception as exc:
             logger.warning("Compaction 摘要调用失败 (source=%s): %s", source, exc)
-            # 降级到硬截断
+            # 降级：规则化极简摘要 + 硬截断
+            rule_summary = _extract_rule_based_summary(old_messages)
+            if rule_summary:
+                synthetic = [
+                    {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
+                    {"role": "assistant", "content": f"[对话摘要-规则提取]\n{rule_summary}"},
+                ]
+                memory._messages = synthetic + recent_messages
             target_threshold = int(
                 self._config.max_context_tokens
                 * (self._config.compaction_threshold_ratio - 0.1)
@@ -309,11 +317,18 @@ class CompactionManager:
                 messages_after=messages_after,
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
-                error=f"摘要失败，已硬截断兜底: {exc}",
+                error=f"摘要失败，已规则提取+硬截断兜底: {exc}",
             )
 
         if not summary_text:
-            logger.warning("Compaction 摘要为空 (source=%s)，回退到硬截断", source)
+            logger.warning("Compaction 摘要为空 (source=%s)，回退到规则提取+硬截断", source)
+            rule_summary = _extract_rule_based_summary(old_messages)
+            if rule_summary:
+                synthetic = [
+                    {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
+                    {"role": "assistant", "content": f"[对话摘要-规则提取]\n{rule_summary}"},
+                ]
+                memory._messages = synthetic + recent_messages
             target_threshold = int(
                 self._config.max_context_tokens
                 * (self._config.compaction_threshold_ratio - 0.1)
@@ -327,7 +342,7 @@ class CompactionManager:
                 messages_after=messages_after,
                 tokens_before=tokens_before,
                 tokens_after=tokens_after,
-                error="摘要为空，已硬截断兜底。",
+                error="摘要为空，已规则提取+硬截断兜底。",
             )
 
         # 用合成消息替换旧历史
@@ -447,5 +462,85 @@ def _format_messages_for_compaction(
             break
         parts.append(line)
         total_chars += len(line)
+
+    return "\n".join(parts)
+
+
+_RULE_SUMMARY_FILE_PATTERN = re.compile(
+    r'(?:file_path|path|file|io)["\s:=]+["\']?'
+    r'([^\s"\',}\]]+\.(?:xlsx|xls|xlsm|xlsb|csv|tsv|txt|py|json|md))',
+    re.IGNORECASE,
+)
+
+
+def _extract_rule_based_summary(messages: list[dict[str, Any]]) -> str:
+    """从消息列表中用纯规则提取极简摘要（不依赖 LLM）。
+
+    提取维度：
+    1. 涉及的文件路径
+    2. 已执行的工具调用列表
+    3. 用户最近的意图（最后几条 user 消息）
+
+    Returns:
+        摘要文本，无可提取内容时返回空字符串。
+    """
+    import json as _json
+
+    file_paths: set[str] = set()
+    tool_calls_summary: list[str] = []
+    user_intents: list[str] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        tool_calls = msg.get("tool_calls")
+
+        # 提取文件路径
+        if isinstance(content, str):
+            for m in _RULE_SUMMARY_FILE_PATTERN.finditer(content):
+                file_paths.add(m.group(1))
+
+        # 提取工具调用
+        if tool_calls and isinstance(tool_calls, list):
+            for tc in tool_calls:
+                func = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = func.get("name", "?") if isinstance(func, dict) else getattr(func, "name", "?")
+                args_str = func.get("arguments", "") if isinstance(func, dict) else getattr(func, "arguments", "")
+                # 从参数中提取文件路径
+                if isinstance(args_str, str):
+                    for m in _RULE_SUMMARY_FILE_PATTERN.finditer(args_str):
+                        file_paths.add(m.group(1))
+                    try:
+                        args_dict = _json.loads(args_str)
+                        fp = args_dict.get("file_path") or args_dict.get("path") or ""
+                        if fp:
+                            file_paths.add(str(fp))
+                    except (ValueError, TypeError):
+                        pass
+                tool_calls_summary.append(name)
+
+        # 提取用户意图
+        if role == "user" and isinstance(content, str):
+            text = content.strip()
+            if text and not text.startswith("[系统]"):
+                user_intents.append(text[:200])
+
+    parts: list[str] = []
+
+    if file_paths:
+        paths_list = sorted(file_paths)[:20]
+        parts.append("**涉及文件**：" + "、".join(paths_list))
+
+    if tool_calls_summary:
+        # 去重统计
+        from collections import Counter
+        counts = Counter(tool_calls_summary)
+        top_tools = counts.most_common(10)
+        tool_lines = [f"{name}×{cnt}" for name, cnt in top_tools]
+        parts.append("**已执行工具**：" + "、".join(tool_lines))
+
+    if user_intents:
+        latest = user_intents[-3:]
+        parts.append("**用户意图**：\n" + "\n".join(f"- {i}" for i in latest))
 
     return "\n".join(parts)

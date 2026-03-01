@@ -406,6 +406,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
         SHORTCUT_ACTION_SHOW_HELP,
         SUBAGENT_ALIASES,
         extract_slash_raw_args,
+        handle_clawhub_subcommand,
         handle_config_command,
         handle_skills_subcommand,
         render_farewell,
@@ -622,6 +623,19 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
             except Exception as exc:
                 logger.error("处理 /skills 子命令失败: %s", exc, exc_info=True)
                 console.print(f"  [{THEME.RED}]{THEME.FAILURE} /skills 子命令执行失败：{exc}[/{THEME.RED}]")
+                handled = True
+            if handled:
+                continue
+
+        if user_input.lower().startswith("/clawhub"):
+            try:
+                handled = handle_clawhub_subcommand(
+                    console, engine, user_input,
+                    sync_callback=lambda: _sync_slash_commands(engine),
+                )
+            except Exception as exc:
+                logger.error("处理 /clawhub 子命令失败: %s", exc, exc_info=True)
+                console.print(f"  [{THEME.RED}]{THEME.FAILURE} /clawhub 子命令执行失败：{exc}[/{THEME.RED}]")
                 handled = True
             if handled:
                 continue

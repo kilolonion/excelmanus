@@ -33,3 +33,19 @@ class MemoryStorageBackend(Protocol):
     def delete_entry(self, entry_id: str) -> bool:
         """按 MemoryEntry.id 删除记忆条目。"""
         ...
+
+    def cleanup_expired(self, max_age_days: int = 90) -> int:
+        """删除超过 max_age_days 天的旧记忆条目，返回删除数量。"""
+        ...
+
+    def count(self) -> int:
+        """返回记忆条目总数。"""
+        ...
+
+    def get_meta(self, key: str) -> str | None:
+        """读取元数据值。"""
+        ...
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写入元数据值。"""
+        ...

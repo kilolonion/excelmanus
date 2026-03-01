@@ -781,10 +781,6 @@ def get_tools() -> list[ToolDef]:
                         "default": False,
                     },
                 },
-                "oneOf": [
-                    {"required": ["file_path"]},
-                    {"required": ["file_paths"]},
-                ],
                 "additionalProperties": False,
             },
             func=lambda **kw: json.dumps({"__extract_pending__": True}),

@@ -198,7 +198,7 @@ async def list_memory_entries(request: Request, category: str | None = None) -> 
     if user_id is not None and db is not None and cfg is not None:
         try:
             from excelmanus.user_scope import UserScope
-            scope = UserScope.create(user_id, db, cfg.workspace_root)
+            scope = UserScope.create(user_id, db, cfg.workspace_root, data_root=cfg.data_root)
             mem_store = scope.memory_store()
             if cat is not None:
                 entries = mem_store.load_by_category(cat)
@@ -242,7 +242,7 @@ async def delete_memory_entry(entry_id: str, request: Request) -> dict:
     if user_id is not None and db is not None and cfg is not None:
         try:
             from excelmanus.user_scope import UserScope
-            scope = UserScope.create(user_id, db, cfg.workspace_root)
+            scope = UserScope.create(user_id, db, cfg.workspace_root, data_root=cfg.data_root)
             mem_store = scope.memory_store()
             ok = mem_store.delete_entry(entry_id)
             if not ok:

@@ -316,19 +316,22 @@ class ProgressivePipeline:
             data_spec = loaded_spec  # type: ignore[assignment]
             self._prev_spec = data_spec
 
-        # ── Phase 3: Style (可选，传图——样式需要观察颜色) ──
+        # ── Phase 3: Style (可选) ──
+        # 优化：先尝试不传图（复用 Phase 1 multi-turn 视觉上下文），
+        # 失败时 fallback 到传图重试。减少 1 次图片传输（~1500 tokens）。
         if not self.config.skip_style and self._should_run_phase(3):
             self._emit_phase_start(PipelinePhase.STYLE, "正在提取样式...")
             data_summary = build_data_summary(data_spec)
+            # 先尝试不传图（multi-turn 上下文已有 Phase 1 的图片）
             p3_json = await self._call_vlm_phase(
                 PipelinePhase.STYLE,
                 build_phase3_prompt(data_summary),
                 image_mode="style",
-                include_image=True,
+                include_image=False,
             )
-            # Fallback：失败后清空对话 + 重传图片重试一次
+            # Fallback：不传图失败 → 清空对话 + 传图重试
             if p3_json is None:
-                logger.info("Phase 3 首次调用失败，清空对话重试")
+                logger.info("Phase 3 无图调用失败，回退到传图重试")
                 self._conversation.clear()
                 p3_json = await self._call_vlm_phase(
                     PipelinePhase.STYLE,

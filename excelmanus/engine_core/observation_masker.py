@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 # 保留完整内容的最近 N 轮（用户消息计数）
 FRESH_WINDOW = 4
 
+# 单 turn 多迭代场景下保留完整内容的最近 N 次迭代（按 assistant tool_calls 批次计数）
+# 设为 8 非常保守，12 轮场景只遮蔽前 4 轮
+FRESH_ITERATIONS = 8
+
 # 遮蔽后的最大字符数
 _MASKED_MAX_CHARS = 200
 
@@ -63,6 +67,7 @@ def mask_messages(
     messages: list[dict[str, Any]],
     *,
     fresh_window: int = FRESH_WINDOW,
+    fresh_iterations: int = FRESH_ITERATIONS,
 ) -> list[dict[str, Any]]:
     """对旧轮次的工具返回值做结构化遮蔽。
 
@@ -72,6 +77,8 @@ def mask_messages(
     3. assistant 消息（推理文本）：完整保留
     4. user 消息：完整保留
     5. system 消息：完整保留
+    6. 单 turn 多迭代场景：当 user 消息不足以触发遮蔽时，
+       回退到按 assistant tool_calls 批次（迭代代理）遮蔽
 
     Returns:
         新的消息列表（不修改原列表）
@@ -85,12 +92,44 @@ def mask_messages(
         if msg.get("role") == "user":
             user_indices.append(i)
 
-    if len(user_indices) <= fresh_window:
-        # 总用户消息不超过窗口，全部保留
+    if len(user_indices) > fresh_window:
+        # 标准路径：按 user 消息计数遮蔽
+        boundary_idx = user_indices[-fresh_window]
+        return _apply_masking(messages, boundary_idx)
+
+    # 回退路径：单 turn 多迭代场景，按 assistant tool_calls 批次遮蔽
+    return _mask_by_iteration(messages, fresh_iterations)
+
+
+def _mask_by_iteration(
+    messages: list[dict[str, Any]],
+    fresh_iterations: int,
+) -> list[dict[str, Any]]:
+    """单 turn 多迭代场景的回退遮蔽。
+
+    以 assistant 带 tool_calls 的消息作为迭代边界，
+    仅对超过 fresh_iterations 的早期迭代的 tool result 做遮蔽。
+    """
+    # 找到所有带 tool_calls 的 assistant 消息位置（作为迭代边界）
+    iter_indices: list[int] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            iter_indices.append(i)
+
+    if len(iter_indices) <= fresh_iterations:
+        # 迭代次数不超过阈值，全部保留
         return messages
 
-    # 找到窗口边界：第 -fresh_window 个 user 消息的索引
-    boundary_idx = user_indices[-fresh_window]
+    # 找到窗口边界：第 -fresh_iterations 个迭代的起始位置
+    boundary_idx = iter_indices[-fresh_iterations]
+    return _apply_masking(messages, boundary_idx)
+
+
+def _apply_masking(
+    messages: list[dict[str, Any]],
+    boundary_idx: int,
+) -> list[dict[str, Any]]:
+    """对 boundary_idx 之前的 tool result 消息做遮蔽。"""
 
     # 构建 tool_call_id → tool_name 映射（仅 boundary 之前的部分需要）
     name_map = _build_tool_call_name_map(messages[:boundary_idx])

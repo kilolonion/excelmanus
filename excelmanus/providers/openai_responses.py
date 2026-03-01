@@ -21,7 +21,11 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
-from excelmanus.providers.stream_types import StreamDelta
+from excelmanus.providers.stream_types import (
+    InlineThinkingStateMachine,
+    StreamDelta,
+    extract_inline_thinking,
+)
 
 logger = get_logger("openai_responses_provider")
 
@@ -47,6 +51,9 @@ class _Message:
     role: str = "assistant"
     content: str | None = None
     tool_calls: list[_ToolCall] | None = None
+    thinking: str | None = None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -282,9 +289,17 @@ def _responses_output_to_openai(
                 ),
             ))
 
+    # 合并 text，然后检测非标准 <thinking> 内联标签
+    raw_text = "\n".join(text_parts) if text_parts else ""
+    inline_thinking, clean_text = extract_inline_thinking(raw_text)
+    thinking_joined = inline_thinking if inline_thinking else None
+
     message = _Message(
-        content="\n".join(text_parts) if text_parts else None,
+        content=clean_text if clean_text else None,
         tool_calls=tool_calls if tool_calls else None,
+        thinking=thinking_joined,
+        reasoning=thinking_joined,
+        reasoning_content=thinking_joined,
     )
 
     # 确定 finish_reason
@@ -483,6 +498,7 @@ class OpenAIResponsesClient:
 
         async def _stream_generator():
             current_tools: dict[int, dict] = {}
+            _inline_sm = InlineThinkingStateMachine()
 
             async with self._http.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
@@ -507,7 +523,8 @@ class OpenAIResponsesClient:
                     if event_type == "response.output_text.delta":
                         delta_text = event_data.get("delta", "")
                         if delta_text:
-                            yield StreamDelta(content_delta=delta_text)
+                            for _d in _inline_sm.feed(delta_text):
+                                yield _d
 
                     elif event_type == "response.output_item.added":
                         item = event_data.get("item", {})

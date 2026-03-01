@@ -51,6 +51,7 @@ class UserScope:
         user_id: str | None,
         shared_database: "Database",
         global_workspace_root: str,
+        data_root: str = "",
     ) -> "UserScope":
         """从裸 user_id 创建完整的 UserScope。
 
@@ -58,10 +59,11 @@ class UserScope:
         - user_id 非空 → 多租户模式（per-user 隔离）
         """
         if user_id is None:
-            ctx = UserContext.anonymous(global_workspace_root)
+            ctx = UserContext.anonymous(global_workspace_root, data_root=data_root)
         else:
             ctx = UserContext.create(
-                user_id, global_workspace_root=global_workspace_root
+                user_id, global_workspace_root=global_workspace_root,
+                data_root=data_root,
             )
         scoped_db = ScopedDatabase(ctx, shared_database)
         return UserScope(user_ctx=ctx, _scoped_db=scoped_db)

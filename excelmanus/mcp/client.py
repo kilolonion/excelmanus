@@ -177,7 +177,10 @@ class MCPClientWrapper:
             )
             return list(self._tools)
 
-        result = await self._session.list_tools()
+        result = await asyncio.wait_for(
+            self._session.list_tools(),
+            timeout=self._config.timeout,
+        )
         # 更新原始工具列表快照（Tool 对象）
         self._tools = list(result.tools)
         self._tools_cached_at = now

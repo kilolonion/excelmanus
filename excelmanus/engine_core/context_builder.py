@@ -46,6 +46,10 @@ class ContextBuilder:
         # W1: 窗口感知 notice 脏标记缓存
         self._window_notice_cache: str | None = None
         self._window_notice_dirty: bool = True
+        # P5: 文件全景 panorama 脏标记缓存（CoW 写入时标脏）
+        self._panorama_cache: str | None = None
+        self._panorama_dirty: bool = True
+        self._panorama_cache_turn: int = -1
 
     def _all_tool_names(self) -> list[str]:
         e = self._engine
@@ -233,6 +237,21 @@ class ContextBuilder:
 
         return "## 进展反思\n" + "\n".join(parts)
 
+    def _build_memory_notice(self) -> str:
+        """构建语义记忆注入文本。
+
+        当 engine 使用 semantic 模式时，从缓存的检索结果中读取；
+        static 模式下记忆已在 system_prompt 中，返回空。
+        """
+        e = self._engine
+        mode = getattr(e, "_memory_injection_mode", "static")
+        if mode != "semantic":
+            return ""
+        text = getattr(e, "_relevant_memory_text", "")
+        if not text or not text.strip():
+            return ""
+        return f"## 持久记忆（语义相关）\n{text.strip()}"
+
     def _build_playbook_notice(self) -> str:
         """检索并构建 Playbook 历史经验注入文本。
 
@@ -349,11 +368,20 @@ class ContextBuilder:
         # 判断是否涉及关键操作（简单单次写入不提示，避免噪音）
         tool_names = {entry.get("tool_name", "") for entry in ops}
         sheets = {entry.get("sheet", "") for entry in ops if entry.get("sheet")}
+
+        # 检测是否涉及新文件创建（summary 含创建/新建/生成等关键词）
+        _NEW_FILE_KEYWORDS = ("创建", "新建", "生成", "新文件", "new file", "created")
+        _has_new_file = any(
+            any(kw in (entry.get("summary", "") or "").lower() for kw in _NEW_FILE_KEYWORDS)
+            for entry in ops
+        )
+
         is_critical = (
-            len(ops) >= 3                          # 多步写入
+            _has_new_file                          # 新文件创建（必须回读验证）
+            or len(ops) >= 3                       # 多步写入
             or len(sheets) > 1                     # 跨 sheet
             or "run_code" in tool_names            # 代码写入（风险高）
-            or any("公式" in (e.get("summary", "") or "") or "VLOOKUP" in (e.get("summary", "") or "").upper() for e in ops)
+            or any("公式" in (entry.get("summary", "") or "") or "VLOOKUP" in (entry.get("summary", "") or "").upper() for entry in ops)
         )
         if not is_critical:
             return ""
@@ -374,6 +402,17 @@ class ContextBuilder:
             if desc:
                 parts.append(desc)
             summaries.append(" · ".join(parts))
+
+        # 新文件创建场景使用更强硬的提示
+        if _has_new_file:
+            return (
+                "## ⚠ 新文件创建——必须回读验证\n"
+                "你刚创建了新的 Excel 文件，stdout 输出**不能**替代回读验证：\n"
+                + "\n".join(f"- {s}" for s in summaries)
+                + "\n\n**必须**立即用 `read_excel` 或 `scan_excel_snapshot` 回读新文件，"
+                "确认：① 文件已创建 ② sheet 结构正确 ③ 数据行数/列数与预期一致。"
+                "\n验证通过后再继续下一步或汇报结果。"
+            )
 
         return (
             "## ⚡ 写入后自检提示\n"
@@ -399,21 +438,18 @@ class ContextBuilder:
             return ""
         if state.explorer_reports:
             return ""
-        # 检查 FileRegistry 中是否有 Excel 文件
-        registry = state.file_registry
-        if registry is None:
+        # 标记探索已启动，防止与 _auto_explore_after_scan 竞态重复注入
+        if getattr(state, "_explore_in_progress", False):
             return ""
-        excel_paths: list[str] = []
-        try:
-            entries = registry.list_entries() if hasattr(registry, "list_entries") else []
-            for ent in entries:
-                p = str(getattr(ent, "canonical_path", "") or getattr(ent, "path", "") or "")
-                if p.lower().endswith((".xlsx", ".xlsm", ".xls")):
-                    excel_paths.append(p)
-        except Exception:
-            pass
+        # 直接扫描磁盘目录发现 Excel 文件（不依赖 FileRegistry._path_cache，
+        # 因为后台 scan_workspace 可能尚未完成）
+        workspace_root = getattr(e.config, "workspace_root", None) or getattr(e, "_workspace_root", None)
+        if not workspace_root:
+            return ""
+        excel_paths = self._discover_excel_files_on_disk(str(workspace_root))
         if not excel_paths:
             return ""
+        state._explore_in_progress = True  # type: ignore[attr-defined]
 
         # 尝试自动预扫描（最多扫描前 3 个文件，每个最多 500ms）
         auto_scanned = self._try_auto_prescan(excel_paths[:3], state)
@@ -459,6 +495,38 @@ class ContextBuilder:
             except Exception:
                 continue
         return any_success
+
+    @staticmethod
+    def _discover_excel_files_on_disk(workspace_root: str, *, max_files: int = 10) -> list[str]:
+        """直接扫描磁盘发现 Excel 文件，不依赖 FileRegistry 缓存。
+
+        轻量级目录遍历，仅收集文件路径（不打开文件），
+        用于在 FileRegistry scan 尚未完成时作为 fallback。
+        """
+        import os as _os
+        from pathlib import Path as _Path
+
+        _SKIP = frozenset({
+            ".git", ".venv", "node_modules", "__pycache__",
+            ".worktrees", "dist", "build",
+        })
+        _EXCEL_EXTS = frozenset({".xlsx", ".xlsm", ".xls", ".xlsb"})
+        root = _Path(workspace_root)
+        results: list[str] = []
+        try:
+            for walk_root, dirs, files in _os.walk(root):
+                dirs[:] = [d for d in dirs if d not in _SKIP]
+                for name in files:
+                    if name.startswith((".", "~$")):
+                        continue
+                    ext = _os.path.splitext(name)[1].lower()
+                    if ext in _EXCEL_EXTS:
+                        results.append(str(_Path(walk_root, name)))
+                        if len(results) >= max_files:
+                            return results
+        except Exception:
+            pass
+        return results
 
     @staticmethod
     def _compute_reasoning_level_static(route_result: Any) -> str:
@@ -551,7 +619,7 @@ class ContextBuilder:
         if mcp_context:
             base_prompt = base_prompt + "\n\n" + mcp_context
 
-        # 统一文件全景 + CoW 路径映射（不缓存：CoW 映射 turn 内可增长）
+        # 统一文件全景 + CoW 路径映射（turn 内缓存，写入时标脏重建）
         file_registry_notice = self._build_file_registry_notice()
         if file_registry_notice:
             base_prompt = base_prompt + "\n\n" + file_registry_notice
@@ -578,6 +646,11 @@ class ContextBuilder:
                     _strategy_text_captured = _strategy_text
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
+
+        # D2: 语义记忆动态注入（替代 system_prompt 中的全量静态注入）
+        memory_notice = self._build_memory_notice()
+        if memory_notice:
+            base_prompt = base_prompt + "\n\n" + memory_notice
 
         # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
         playbook_notice = self._build_playbook_notice()
@@ -656,6 +729,8 @@ class ContextBuilder:
             _snapshot_components["hook_context"] = _hook_context_captured
         if task_plan_notice:
             _snapshot_components["task_plan_notice"] = task_plan_notice
+        if memory_notice:
+            _snapshot_components["memory_notice"] = memory_notice
         if playbook_notice:
             _snapshot_components["playbook_notice"] = playbook_notice
         if verification_fix_notice:
@@ -1102,19 +1177,30 @@ class ContextBuilder:
         """统一文件全景 + CoW 路径映射注入。
 
         使用 FileRegistry.build_panorama() 作为唯一数据源。
-        CoW 映射始终追加（不缓存，turn 内可增长）。
+        panorama 部分使用脏标记缓存（写入时标脏），CoW 映射始终实时追加。
         """
         e = self._engine
         parts: list[str] = []
 
-        # ── 文件全景：FileRegistry ──
-        _reg = e.file_registry
-        if _reg is not None:
-            panorama = _reg.build_panorama()
-            if panorama:
-                parts.append(panorama)
+        # ── 文件全景：FileRegistry（turn 内缓存，写入时标脏重建）──
+        _turn = e._session_turn
+        if _turn != self._panorama_cache_turn:
+            self._panorama_dirty = True
+            self._panorama_cache_turn = _turn
 
-        # ── CoW 路径映射（始终追加，不缓存） ──
+        if self._panorama_dirty:
+            _reg = e.file_registry
+            if _reg is not None:
+                panorama = _reg.build_panorama()
+                self._panorama_cache = panorama if panorama else None
+            else:
+                self._panorama_cache = None
+            self._panorama_dirty = False
+
+        if self._panorama_cache:
+            parts.append(self._panorama_cache)
+
+        # ── CoW 路径映射（始终实时追加，turn 内可增长） ──
         cow_registry: dict[str, str] = {}
         try:
             if hasattr(e.state, "get_cow_mappings"):
@@ -1142,6 +1228,13 @@ class ContextBuilder:
             parts.append("\n".join(cow_lines))
 
         return "\n\n".join(parts)
+
+    def mark_panorama_dirty(self) -> None:
+        """标记文件全景缓存为脏，下次构建时重建 panorama。
+
+        应在工具写入操作成功后调用（_record_workspace_write_action 等）。
+        """
+        self._panorama_dirty = True
 
     def mark_window_notice_dirty(self) -> None:
         """标记窗口感知 notice 缓存为脏，下次构建时重新渲染。

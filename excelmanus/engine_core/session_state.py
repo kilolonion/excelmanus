@@ -12,13 +12,22 @@
 
 from __future__ import annotations
 
-from collections import deque
+import hashlib
+import json
+from collections import Counter, deque
 from typing import Any
 
 # 卡住检测参数
-_STUCK_WINDOW_SIZE = 6
+_STUCK_WINDOW_SIZE = 15
 _ACTION_REPEAT_THRESHOLD = 3
-_READ_ONLY_LOOP_THRESHOLD = 5
+_READ_ONLY_LOOP_THRESHOLD = 8
+_REDUNDANT_READ_THRESHOLD = 4  # 同一文件读取 N 次触发提示
+
+# 读取类工具名集合（用于 Pattern 3 同文件重复读取检测）
+_READ_TOOLS: frozenset[str] = frozenset({
+    "read_excel", "list_sheets", "scan_excel_snapshot",
+    "search_excel_values", "inspect_excel_files",
+})
 
 
 class SessionState:
@@ -74,6 +83,8 @@ class SessionState:
         self._recent_tool_calls: deque[tuple[str, str]] = deque(
             maxlen=_STUCK_WINDOW_SIZE,
         )
+        # 文件读取计数器：file_path → 读取次数（用于 Pattern 3）
+        self._file_read_counts: Counter[str] = Counter()
         # 当前轮次内是否已触发过 stuck 警告（避免重复注入）
         self.stuck_warning_fired: bool = False
 
@@ -97,6 +108,7 @@ class SessionState:
         self.finish_task_warned = False
         self.verification_attempt_count = 0
         self._recent_tool_calls.clear()
+        self._file_read_counts.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
         self.write_operations_log = []
@@ -123,6 +135,7 @@ class SessionState:
         self.backup_write_notice_shown = False
         self.prompt_injection_snapshots = []
         self._recent_tool_calls.clear()
+        self._file_read_counts.clear()
         self.stuck_warning_fired = False
         self.affected_files = []
         self.write_operations_log = []
@@ -231,9 +244,6 @@ class SessionState:
     @staticmethod
     def _args_fingerprint(arguments: dict[str, Any]) -> str:
         """生成工具参数的紧凑指纹，用于检测重复调用。"""
-        import hashlib
-        import json
-
         try:
             canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
@@ -246,14 +256,32 @@ class SessionState:
         """记录工具调用到滑动窗口，供卡住检测使用。"""
         fp = self._args_fingerprint(arguments)
         self._recent_tool_calls.append((tool_name, fp))
+        # Pattern 3: 追踪读取类工具的 file_path
+        if tool_name in _READ_TOOLS:
+            file_path = str(arguments.get("file_path", "") or "").strip()
+            if file_path:
+                self._file_read_counts[file_path] += 1
 
-    def detect_stuck_pattern(self) -> str | None:
+    # 需要放宽只读循环阈值的 task_tags（复杂/表单类任务需要更多探索）
+    _RELAXED_TAGS: frozenset[str] = frozenset({
+        "cross_sheet", "large_data", "formatting", "multi_file",
+        "form_document", "complex",
+    })
+    _RELAXED_READ_ONLY_THRESHOLD: int = 12
+
+    def detect_stuck_pattern(
+        self,
+        task_tags: tuple[str, ...] = (),
+    ) -> str | None:
         """检测退化模式，返回警告消息或 None。
 
         灵感来源：OpenHands 卡住检测。
         检测两类模式：
         1. 动作重复：连续 N 次调用同一工具且参数指纹相同
         2. 只读循环：连续 N 次只读工具但 write_hint 为 may_write（应写未写）
+
+        task_tags 用于动态调整阈值：含 cross_sheet/large_data/formatting 等
+        复杂标签时放宽到 12 次，避免 agent 合理探索被过早中断。
         """
         if self.stuck_warning_fired:
             return None
@@ -274,20 +302,37 @@ class SessionState:
                 "3) 调用 ask_user 寻求用户帮助。"
             )
 
+        # 模式 3：同文件重复读取（不同参数但同一 file_path）
+        for file_path, count in self._file_read_counts.items():
+            if count >= _REDUNDANT_READ_THRESHOLD:
+                fname = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
+                self.stuck_warning_fired = True
+                return (
+                    f"⚠️ 同一文件 `{fname}` 已读取 {count} 次。"
+                    "建议：1) 使用 include=[...] 一次获取所需全部维度 "
+                    "2) 使用 scan_excel_snapshot 一次性获取文件全貌 "
+                    "3) 复用已有上下文中的信息，避免重复读取。"
+                )
+
         # 模式 2：只读循环（write_hint=may_write 时持续只读）
         from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS
 
+        # 动态阈值：复杂任务放宽
+        effective_threshold = _READ_ONLY_LOOP_THRESHOLD
+        if task_tags and any(t in self._RELAXED_TAGS for t in task_tags):
+            effective_threshold = max(effective_threshold, self._RELAXED_READ_ONLY_THRESHOLD)
+
         if (
             self.current_write_hint == "may_write"
-            and len(calls) >= _READ_ONLY_LOOP_THRESHOLD
+            and len(calls) >= effective_threshold
         ):
-            recent = calls[-_READ_ONLY_LOOP_THRESHOLD:]
+            recent = calls[-effective_threshold:]
             all_read_only = all(name in READ_ONLY_SAFE_TOOLS for name, _ in recent)
             if all_read_only and not self.has_write_tool_call:
                 self.stuck_warning_fired = True
                 return (
                     "⚠️ 检测到只读循环：任务需要写入操作，但最近 "
-                    f"{_READ_ONLY_LOOP_THRESHOLD} 次调用均为只读工具。"
+                    f"{effective_threshold} 次调用均为只读工具。"
                     "请立即执行写入操作（如 run_code），或调用 ask_user 确认任务意图。"
                 )
 

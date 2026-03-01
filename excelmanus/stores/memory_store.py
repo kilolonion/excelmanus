@@ -179,6 +179,52 @@ class MemoryStore:
                 return True
         return False
 
+    def get_meta(self, key: str) -> str | None:
+        """从 memory_meta 表读取元数据值。"""
+        try:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS memory_meta "
+                "(key TEXT PRIMARY KEY, value TEXT, user_id TEXT)"
+            )
+            row = self._conn.execute(
+                f"SELECT value FROM memory_meta WHERE key = ? AND {self._uid_clause}",
+                (key, *self._uid_params),
+            ).fetchone()
+            return row["value"] if row else None
+        except Exception:
+            logger.debug("读取 memory_meta 失败", exc_info=True)
+            return None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """向 memory_meta 表写入元数据值。"""
+        try:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS memory_meta "
+                "(key TEXT PRIMARY KEY, value TEXT, user_id TEXT)"
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO memory_meta (key, value, user_id) VALUES (?, ?, ?)",
+                (key, value, self._user_id),
+            )
+            self._conn.commit()
+        except Exception:
+            logger.debug("写入 memory_meta 失败", exc_info=True)
+
+    def cleanup_expired(self, max_age_days: int = 90) -> int:
+        """删除超过 max_age_days 天的旧记忆条目，返回删除数量。"""
+        from datetime import timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM memory_entries "
+            f"WHERE {self._uid_clause} AND created_at < ?",
+            (*self._uid_params, cutoff),
+        )
+        deleted = cur.rowcount
+        if deleted > 0:
+            self._conn.commit()
+            logger.info("记忆过期清理：移除 %d 条超过 %d 天的旧条目", deleted, max_age_days)
+        return deleted
+
     @staticmethod
     def _row_to_entry(row: object) -> MemoryEntry:
         """将 sqlite3.Row 转为 MemoryEntry。"""

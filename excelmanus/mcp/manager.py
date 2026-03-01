@@ -561,7 +561,7 @@ class MCPManager:
             )
         try:
             await client.connect()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             state.status = "connect_failed"
             state.last_error = _short_error(exc)
             state.init_ms = int((time.monotonic() - started) * 1000)
@@ -590,7 +590,7 @@ class MCPManager:
         # 发现远程工具
         try:
             mcp_tools = await client.discover_tools()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             state.status = "discover_failed"
             state.last_error = _short_error(exc)
             state.init_ms = int((time.monotonic() - started) * 1000)
