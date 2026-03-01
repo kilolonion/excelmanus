@@ -281,20 +281,8 @@ class ToolDispatcher:
             SkillActivationHandler,
             SuggestModeSwitchHandler,
         )
-        self._handlers = [
-            SkillActivationHandler(engine, self),
-            DelegationHandler(engine, self),
-            FinishTaskHandler(engine, self),
-            AskUserHandler(engine, self),
-            SuggestModeSwitchHandler(engine, self),
-            ExtractTableSpecHandler(engine, self),
-            CodePolicyHandler(engine, self),
-            AuditOnlyHandler(engine, self),
-            HighRiskApprovalHandler(engine, self),
-            DefaultToolHandler(engine, self),  # 兜底，必须放最后
-        ]
-
         # T2: 按工具名建立 O(1) 索引，跳过需动态判断的 handler
+        # 每个 handler 只实例化一次，specific 和 generic 复用同一对象
         _specific: dict[str, Any] = {}
         _skill = SkillActivationHandler(engine, self)
         _specific["activate_skill"] = _skill
@@ -307,12 +295,11 @@ class ToolDispatcher:
         _specific["extract_table_spec"] = ExtractTableSpecHandler(engine, self)
         self._specific_handlers: dict[str, Any] = _specific
         # 动态/条件 handler + 兜底（保持原有顺序）
-        self._generic_handlers = [
-            CodePolicyHandler(engine, self),
-            AuditOnlyHandler(engine, self),
-            HighRiskApprovalHandler(engine, self),
-            DefaultToolHandler(engine, self),
-        ]
+        _code_policy = CodePolicyHandler(engine, self)
+        _audit_only = AuditOnlyHandler(engine, self)
+        _high_risk = HighRiskApprovalHandler(engine, self)
+        _default = DefaultToolHandler(engine, self)
+        self._generic_handlers = [_code_policy, _audit_only, _high_risk, _default]
 
     @property
     def _registry(self) -> Any:
@@ -949,6 +936,7 @@ class ToolDispatcher:
         from excelmanus.events import EventType, ToolCallEvent
 
         e = self._engine
+        _t0 = time.monotonic()
 
         function = getattr(tc, "function", None)
         tool_name = getattr(function, "name", "")
@@ -1126,6 +1114,7 @@ class ToolDispatcher:
             iteration=iteration,
             on_event=on_event,
             cow_reminders=_cow_reminders,
+            start_time=_t0,
         )
 
         return ToolCallResult(
@@ -1156,10 +1145,9 @@ class ToolDispatcher:
         route_result: Any = None,
         skip_high_risk_approval_by_hook: bool = False,
     ) -> "_ToolExecOutcome":
-        """通过策略处理器表分发工具执行（替代 if-elif 链）。
+        """通过策略处理器表分发工具执行。
 
-        遍历 self._handlers，第一个 can_handle 返回 True 的 handler 负责执行。
-        并保留旧 _dispatch_tool_execution 的统一异常语义。
+        先查 _specific_handlers O(1) 索引，未命中则遍历 _generic_handlers。
         对 RETRYABLE 错误自动重试（指数退避，不消耗 Agent 迭代预算）。
         """
         policy = DEFAULT_RETRY_POLICY
@@ -1248,8 +1236,9 @@ class ToolDispatcher:
             # T2: O(1) 索引查找特定工具 handler，未命中时走动态/兜底链
             handler = self._specific_handlers.get(tool_name)
             if handler is None:
-                for handler in self._generic_handlers:
-                    if handler.can_handle(tool_name):
+                for candidate in self._generic_handlers:
+                    if candidate.can_handle(tool_name):
+                        handler = candidate
                         break
                 else:
                     raise RuntimeError(f"No handler found for tool: {tool_name}")
@@ -1297,707 +1286,6 @@ class ToolDispatcher:
                 audit_record=audit_record,
             )
 
-    async def _dispatch_tool_execution(
-        self,
-        *,
-        tool_name: str,
-        tool_call_id: str,
-        arguments: dict[str, Any],
-        tool_scope: Sequence[str] | None,
-        on_event: "EventCallback | None",
-        iteration: int,
-        route_result: Any | None = None,
-        skip_high_risk_approval_by_hook: bool = False,
-    ) -> _ToolExecOutcome:
-        """工具执行分发：特殊工具 → 安全策略 → 普通 registry 调用。
-
-        从 execute() 中提取的核心分发逻辑，返回结构化 _ToolExecOutcome。
-        """
-        from excelmanus.engine import _AuditedExecutionError
-
-        e = self._engine
-        result_str = ""
-        success = True
-        error: str | None = None
-        pending_approval = False
-        approval_id: str | None = None
-        audit_record = None
-        pending_question = False
-        question_id: str | None = None
-        defer_tool_result = False
-        finish_accepted = False
-
-        try:
-            if tool_name == "activate_skill":
-                selected_name = arguments.get("skill_name")
-                if not isinstance(selected_name, str) or not selected_name.strip():
-                    result_str = "工具参数错误: skill_name 必须为非空字符串。"
-                    success = False
-                    error = result_str
-                else:
-                    result_str = await e.handle_activate_skill(
-                        selected_name.strip(),
-                    )
-                    success = result_str.startswith("OK")
-                    error = None if success else result_str
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str if success else None,
-                    error=error if not success else None,
-                )
-            elif tool_name in ("delegate", "delegate_to_subagent"):
-                # ── 并行模式：tasks 数组 ──
-                tasks_value = arguments.get("tasks")
-                if isinstance(tasks_value, list) and len(tasks_value) >= 2:
-                    try:
-                        pd_outcome = await e.parallel_delegate_to_subagents(
-                            tasks=tasks_value,
-                            on_event=on_event,
-                        )
-                        result_str = pd_outcome.reply if hasattr(pd_outcome, "reply") else str(pd_outcome)
-                        success = getattr(pd_outcome, "success", True)
-                        error = None if success else result_str
-                        # 写入传播
-                        if hasattr(pd_outcome, "outcomes"):
-                            for pd_sub_outcome in pd_outcome.outcomes:
-                                sub_result = getattr(pd_sub_outcome, "subagent_result", None)
-                                if (
-                                    sub_result is not None
-                                    and sub_result.structured_changes
-                                ):
-                                    e.record_workspace_write_action()
-                                    logger.info(
-                                        "delegate(parallel) 写入传播: agent=%s, changes=%d",
-                                        pd_sub_outcome.picked_agent,
-                                        len(sub_result.structured_changes),
-                                    )
-                    except Exception as exc:  # noqa: BLE001
-                        result_str = f"delegate(parallel) 执行异常: {exc}"
-                        success = False
-                        error = str(exc)
-                else:
-                    # ── 单任务模式 ──
-                    task_value = arguments.get("task")
-                    task_brief = arguments.get("task_brief")
-                    # task_brief 优先：渲染为结构化 Markdown
-                    if isinstance(task_brief, dict) and task_brief.get("title"):
-                        task_value = e.render_task_brief(task_brief)
-                    if not isinstance(task_value, str) or not task_value.strip():
-                        result_str = "工具参数错误: task、task_brief 或 tasks 必须提供其一。"
-                        success = False
-                        error = result_str
-                    else:
-                        agent_name_value = arguments.get("agent_name")
-                        if agent_name_value is not None and not isinstance(agent_name_value, str):
-                            result_str = "工具参数错误: agent_name 必须为字符串。"
-                            success = False
-                            error = result_str
-                        else:
-                            raw_file_paths = arguments.get("file_paths")
-                            if raw_file_paths is not None and not isinstance(raw_file_paths, list):
-                                result_str = "工具参数错误: file_paths 必须为字符串数组。"
-                                success = False
-                                error = result_str
-                            else:
-                                delegate_outcome = await e.delegate_to_subagent(
-                                    task=task_value.strip(),
-                                    agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
-                                    file_paths=raw_file_paths,
-                                    on_event=on_event,
-                                )
-                                result_str = delegate_outcome.reply
-                                success = delegate_outcome.success
-                                error = None if success else result_str
-
-                                # ── 写入传播：subagent 有文件变更时视为主 agent 写入 ──
-                                sub_result = delegate_outcome.subagent_result
-                                if (
-                                    success
-                                    and sub_result is not None
-                                    and sub_result.structured_changes
-                                ):
-                                    e.record_write_action()
-                                    logger.info(
-                                        "delegate_to_subagent 写入传播: structured_changes=%d, paths=%s",
-                                        len(sub_result.structured_changes),
-                                        sub_result.file_changes,
-                                    )
-                                if (
-                                    not success
-                                    and sub_result is not None
-                                    and sub_result.pending_approval_id is not None
-                                ):
-                                    pending = e.approval.pending
-                                    approval_id_value = sub_result.pending_approval_id
-                                    high_risk_tool = (
-                                        pending.tool_name
-                                        if pending is not None and pending.approval_id == approval_id_value
-                                        else "高风险工具"
-                                    )
-                                    question = e.enqueue_subagent_approval_question(
-                                        approval_id=approval_id_value,
-                                        tool_name=high_risk_tool,
-                                        picked_agent=delegate_outcome.picked_agent or "subagent",
-                                        task_text=delegate_outcome.task_text,
-                                        normalized_paths=delegate_outcome.normalized_paths,
-                                        tool_call_id=tool_call_id,
-                                        on_event=on_event,
-                                        iteration=iteration,
-                                    )
-                                    result_str = f"已创建待回答问题 `{question.question_id}`。"
-                                    question_id = question.question_id
-                                    pending_question = True
-                                    defer_tool_result = True
-                                    success = True
-                                    error = None
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str if success else None,
-                    error=error if not success else None,
-                )
-            elif tool_name == "list_subagents":
-                result_str = e.handle_list_subagents()
-                success = True
-                error = None
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str,
-                )
-            elif tool_name == "parallel_delegate":
-                # ── 兼容旧名称：转发到 delegate 的并行模式 ──
-                raw_tasks = arguments.get("tasks")
-                if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
-                    result_str = "工具参数错误: tasks 必须为包含至少 2 个子任务的数组。"
-                    success = False
-                    error = result_str
-                else:
-                    try:
-                        pd_outcome = await e.parallel_delegate_to_subagents(
-                            tasks=raw_tasks,
-                            on_event=on_event,
-                        )
-                        result_str = pd_outcome.reply
-                        success = pd_outcome.success
-                        error = None if success else result_str
-
-                        # ── 写入传播 ──
-                        for pd_sub_outcome in pd_outcome.outcomes:
-                            sub_result = pd_sub_outcome.subagent_result
-                            if (
-                                pd_sub_outcome.success
-                                and sub_result is not None
-                                and sub_result.structured_changes
-                            ):
-                                e.record_workspace_write_action()
-                                logger.info(
-                                    "delegate(parallel-compat) 写入传播: agent=%s, changes=%d",
-                                    pd_sub_outcome.picked_agent,
-                                    len(sub_result.structured_changes),
-                                )
-                    except Exception as exc:  # noqa: BLE001
-                        result_str = f"delegate(parallel) 执行异常: {exc}"
-                        success = False
-                        error = str(exc)
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str if success else None,
-                    error=error if not success else None,
-                )
-            elif tool_name == "ask_user":
-                result_str = await e.handle_ask_user_blocking(
-                    arguments=arguments,
-                    tool_call_id=tool_call_id,
-                    on_event=on_event,
-                    iteration=iteration,
-                )
-                success = True
-                error = None
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str,
-                )
-            elif tool_name == "suggest_mode_switch":
-                # 将模式切换建议转化为 USER_QUESTION 事件（阻塞等待）
-                import asyncio as _asyncio
-                from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT as _SMT
-                target_mode = str(arguments.get("target_mode", "write")).strip()
-                reason = str(arguments.get("reason", "")).strip()
-                _mode_labels = {"write": "写入", "read": "读取", "plan": "计划"}
-                target_label = _mode_labels.get(target_mode, target_mode)
-                question_payload = {
-                    "header": "建议切换模式",
-                    "text": f"{reason}\n\n是否切换到「{target_label}」模式？",
-                    "options": [
-                        {"label": f"切换到{target_label}", "description": f"切换到{target_label}模式继续"},
-                        {"label": "保持当前模式", "description": "不切换，继续当前模式"},
-                    ],
-                    "multiSelect": False,
-                }
-                pending_q = e._question_flow.enqueue(
-                    question_payload=question_payload,
-                    tool_call_id=tool_call_id,
-                )
-                e._interaction_handler.emit_user_question_event(
-                    question=pending_q,
-                    on_event=on_event,
-                    iteration=iteration,
-                )
-                _sms_fut = e._interaction_registry.create(pending_q.question_id)
-                try:
-                    _sms_payload = await _asyncio.wait_for(_sms_fut, timeout=_SMT)
-                except (_asyncio.TimeoutError, _asyncio.CancelledError):
-                    e._question_flow.pop_current()
-                    e._interaction_registry.cleanup_done()
-                    _sms_payload = None
-                else:
-                    e._question_flow.pop_current()
-                    e._interaction_registry.cleanup_done()
-                import json as _sms_json
-                result_str = _sms_json.dumps(_sms_payload, ensure_ascii=False) if isinstance(_sms_payload, dict) else str(_sms_payload or "超时/取消")
-                success = True
-                error = None
-                log_tool_call(
-                    logger,
-                    tool_name,
-                    arguments,
-                    result=result_str,
-                )
-            elif tool_name == "run_code" and e.config.code_policy_enabled:
-                # ── 动态代码策略引擎路由 ──
-                from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets, strip_exit_calls
-                _code_arg = arguments.get("code") or ""
-                _cp_engine = CodePolicyEngine(
-                    extra_safe_modules=e.config.code_policy_extra_safe_modules,
-                    extra_blocked_modules=e.config.code_policy_extra_blocked_modules,
-                )
-                _analysis = _cp_engine.analyze(_code_arg)
-                _auto_green = (
-                    _analysis.tier == CodeRiskTier.GREEN
-                    and e.config.code_policy_green_auto_approve
-                )
-                _auto_yellow = (
-                    _analysis.tier == CodeRiskTier.YELLOW
-                    and e.config.code_policy_yellow_auto_approve
-                )
-                if _auto_green or _auto_yellow or e.full_access_enabled:
-                    _sandbox_tier = _analysis.tier.value
-                    _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
-                    # ── run_code 前: 对可能被修改的 Excel 文件做快照 ──
-                    _rc_excel_targets_raw = [
-                        t.file_path for t in extract_excel_targets(_code_arg)
-                        if t.operation in ("write", "unknown")
-                    ]
-                    # 过滤 AST 无法解析的 <variable> 占位符
-                    _rc_excel_targets = [p for p in _rc_excel_targets_raw if p != "<variable>"]
-                    _rc_before_snap = self._snapshot_excel_for_diff(
-                        _rc_excel_targets, e.config.workspace_root,
-                    ) if _rc_excel_targets else {}
-                    # uploads 目录快照（检测新建/变更文件）
-                    _uploads_before = self._snapshot_uploads_dir(e.config.workspace_root)
-                    result_value, audit_record = await e.execute_tool_with_audit(
-                        tool_name=tool_name,
-                        arguments=_augmented_args,
-                        tool_scope=tool_scope,
-                        approval_id=e.approval.new_approval_id(),
-                        created_at_utc=e.approval.utc_now(),
-                        undoable=False,
-                    )
-                    result_str = str(result_value)
-                    tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
-                    if tool_def is not None:
-                        result_str = tool_def.truncate_result(result_str)
-                    success = True
-                    error = None
-                    # ── run_code 写入追踪 ──
-                    _rc_json: dict | None = None
-                    try:
-                        _rc_json = json.loads(result_str)
-                        if not isinstance(_rc_json, dict):
-                            _rc_json = None
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                    _has_cow = bool(_rc_json and _rc_json.get("cow_mapping"))
-                    _has_ast_write = any(
-                        t.operation == "write"
-                        for t in extract_excel_targets(_code_arg)
-                    )
-                    if (
-                        (audit_record is not None and audit_record.changes)
-                        or _has_cow
-                        or _has_ast_write
-                    ):
-                        e.record_write_action()
-                    # ── run_code → window 感知桥接 ──
-                    _stdout_tail = ""
-                    if _rc_json is not None:
-                        _stdout_tail = _rc_json.get("stdout_tail", "")
-                    if audit_record is not None and e.window_perception is not None:
-                        e.window_perception.observe_code_execution(
-                            code=_code_arg,
-                            audit_changes=audit_record.changes if audit_record else None,
-                            stdout_tail=_stdout_tail,
-                            iteration=iteration,
-                        )
-                        e._context_builder.mark_window_notice_dirty()
-                    # ── run_code → files_changed 事件 ──
-                    _uploads_after = self._snapshot_uploads_dir(e.config.workspace_root)
-                    _uploads_changed = self._diff_uploads_snapshots(_uploads_before, _uploads_after)
-                    _rc_cow = _rc_json.get("cow_mapping") if _rc_json else None
-                    self._emit_files_changed_from_audit(
-                        e, on_event, tool_call_id, _code_arg,
-                        audit_record.changes if audit_record else None,
-                        iteration,
-                        extra_changed_paths=_uploads_changed or None,
-                        cow_mapping=_rc_cow if isinstance(_rc_cow, dict) else None,
-                    )
-                    # ── run_code 后: 对比快照生成 Excel diff ──
-                    # 补充 AST 无法解析的实际文件路径（从 cow_mapping / audit 获取）
-                    _rc_all_targets = self._collect_actual_excel_paths(
-                        _rc_excel_targets,
-                        _rc_json,
-                        audit_record.changes if audit_record else None,
-                        e.config.workspace_root,
-                    )
-                    if _rc_all_targets and on_event is not None:
-                        try:
-                            _rc_after_snap = self._snapshot_excel_for_diff(
-                                _rc_all_targets, e.config.workspace_root,
-                            )
-                            _rc_diffs = self._compute_snapshot_diffs(
-                                _rc_before_snap, _rc_after_snap,
-                            )
-                            from excelmanus.events import EventType, ToolCallEvent
-                            for _rd in _rc_diffs:
-                                _rc_old_merges: list[dict[str, int]] = _rd.get("old_merge_ranges", [])
-                                _rc_new_merges: list[dict[str, int]] = _rd.get("new_merge_ranges", [])
-                                _rc_hints: list[str] = []
-                                try:
-                                    _, _rc_hints = self._extract_sheet_metadata(
-                                        _rd["file_path"], _rd["sheet"] or None,
-                                        e.config.workspace_root,
-                                    )
-                                except Exception:
-                                    pass
-                                e.emit(
-                                    on_event,
-                                    ToolCallEvent(
-                                        event_type=EventType.EXCEL_DIFF,
-                                        tool_call_id=tool_call_id,
-                                        excel_file_path=_rd["file_path"],
-                                        excel_sheet=_rd["sheet"],
-                                        excel_affected_range=_rd["affected_range"],
-                                        excel_changes=_rd["changes"],
-                                        excel_merge_ranges=_rc_new_merges,
-                                        excel_old_merge_ranges=_rc_old_merges,
-                                        excel_metadata_hints=_rc_hints,
-                                    ),
-                                )
-                        except Exception:
-                            logger.debug("run_code Excel diff 计算失败", exc_info=True)
-                    logger.info(
-                        "run_code 策略引擎: tier=%s auto_approved=True caps=%s",
-                        _analysis.tier.value,
-                        sorted(_analysis.capabilities),
-                    )
-                    log_tool_call(logger, tool_name, arguments, result=result_str)
-                else:
-                    # 风险等级 RED 或配置不允许自动执行
-                    # ── 尝试自动清洗退出调用并降级 ──
-                    _sanitized_code = strip_exit_calls(_code_arg) if _analysis.tier == CodeRiskTier.RED else None
-                    _downgraded = False
-                    if _sanitized_code is not None:
-                        _re_analysis = _cp_engine.analyze(_sanitized_code)
-                        _re_auto_green = (
-                            _re_analysis.tier == CodeRiskTier.GREEN
-                            and e.config.code_policy_green_auto_approve
-                        )
-                        _re_auto_yellow = (
-                            _re_analysis.tier == CodeRiskTier.YELLOW
-                            and e.config.code_policy_yellow_auto_approve
-                        )
-                        if _re_auto_green or _re_auto_yellow:
-                            _downgraded = True
-                            logger.info(
-                                "run_code 自动清洗: %s → %s (移除退出调用)",
-                                _analysis.tier.value,
-                                _re_analysis.tier.value,
-                            )
-                            _sanitized_args = {**arguments, "code": _sanitized_code, "sandbox_tier": _re_analysis.tier.value}
-                            _rc_targets_s_raw = [
-                                t.file_path for t in extract_excel_targets(_sanitized_code)
-                                if t.operation in ("write", "unknown")
-                            ]
-                            _rc_targets_s = [p for p in _rc_targets_s_raw if p != "<variable>"]
-                            _rc_before_snap_s = self._snapshot_excel_for_diff(
-                                _rc_targets_s, e.config.workspace_root,
-                            ) if _rc_targets_s else {}
-                            # uploads 目录快照（检测新建/变更文件）
-                            _uploads_before_s = self._snapshot_uploads_dir(e.config.workspace_root)
-                            result_value, audit_record = await e.execute_tool_with_audit(
-                                tool_name=tool_name,
-                                arguments=_sanitized_args,
-                                tool_scope=tool_scope,
-                                approval_id=e.approval.new_approval_id(),
-                                created_at_utc=e.approval.utc_now(),
-                                undoable=False,
-                            )
-                            result_str = str(result_value)
-                            tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
-                            if tool_def is not None:
-                                result_str = tool_def.truncate_result(result_str)
-                            success = True
-                            error = None
-                            # 写入追踪（与 GREEN/YELLOW 路径一致）
-                            _rc_json_s: dict | None = None
-                            try:
-                                _rc_json_s = json.loads(result_str)
-                                if not isinstance(_rc_json_s, dict):
-                                    _rc_json_s = None
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                            _has_cow_s = bool(_rc_json_s and _rc_json_s.get("cow_mapping"))
-                            _has_ast_write_s = any(
-                                t.operation == "write"
-                                for t in extract_excel_targets(_sanitized_code)
-                            )
-                            if (
-                                (audit_record is not None and audit_record.changes)
-                                or _has_cow_s
-                                or _has_ast_write_s
-                            ):
-                                e.record_write_action()
-                            _stdout_tail_s = ""
-                            if _rc_json_s is not None:
-                                _stdout_tail_s = _rc_json_s.get("stdout_tail", "")
-                            if audit_record is not None and e.window_perception is not None:
-                                e.window_perception.observe_code_execution(
-                                    code=_sanitized_code,
-                                    audit_changes=audit_record.changes if audit_record else None,
-                                    stdout_tail=_stdout_tail_s,
-                                    iteration=iteration,
-                                )
-                                e._context_builder.mark_window_notice_dirty()
-                            # ── run_code(清洗) → files_changed 事件 ──
-                            _uploads_after_s = self._snapshot_uploads_dir(e.config.workspace_root)
-                            _uploads_changed_s = self._diff_uploads_snapshots(_uploads_before_s, _uploads_after_s)
-                            _rc_cow_s = _rc_json_s.get("cow_mapping") if _rc_json_s else None
-                            self._emit_files_changed_from_audit(
-                                e, on_event, tool_call_id, _sanitized_code,
-                                audit_record.changes if audit_record else None,
-                                iteration,
-                                extra_changed_paths=_uploads_changed_s or None,
-                                cow_mapping=_rc_cow_s if isinstance(_rc_cow_s, dict) else None,
-                            )
-                            # ── run_code(清洗) 后: 对比快照生成 Excel diff ──
-                            _rc_all_targets_s = self._collect_actual_excel_paths(
-                                _rc_targets_s,
-                                _rc_json_s,
-                                audit_record.changes if audit_record else None,
-                                e.config.workspace_root,
-                            )
-                            if _rc_all_targets_s and on_event is not None:
-                                try:
-                                    _rc_after_snap_s = self._snapshot_excel_for_diff(
-                                        _rc_all_targets_s, e.config.workspace_root,
-                                    )
-                                    _rc_diffs_s = self._compute_snapshot_diffs(
-                                        _rc_before_snap_s, _rc_after_snap_s,
-                                    )
-                                    from excelmanus.events import EventType, ToolCallEvent
-                                    for _rd_s in _rc_diffs_s:
-                                        _rc_old_merges_s: list[dict[str, int]] = _rd_s.get("old_merge_ranges", [])
-                                        _rc_new_merges_s: list[dict[str, int]] = _rd_s.get("new_merge_ranges", [])
-                                        _rc_hints_s: list[str] = []
-                                        try:
-                                            _, _rc_hints_s = self._extract_sheet_metadata(
-                                                _rd_s["file_path"], _rd_s["sheet"] or None,
-                                                e.config.workspace_root,
-                                            )
-                                        except Exception:
-                                            pass
-                                        e.emit(
-                                            on_event,
-                                            ToolCallEvent(
-                                                event_type=EventType.EXCEL_DIFF,
-                                                tool_call_id=tool_call_id,
-                                                excel_file_path=_rd_s["file_path"],
-                                                excel_sheet=_rd_s["sheet"],
-                                                excel_affected_range=_rd_s["affected_range"],
-                                                excel_changes=_rd_s["changes"],
-                                                excel_merge_ranges=_rc_new_merges_s,
-                                                excel_old_merge_ranges=_rc_old_merges_s,
-                                                excel_metadata_hints=_rc_hints_s,
-                                            ),
-                                        )
-                                except Exception:
-                                    logger.debug("run_code(清洗) Excel diff 计算失败", exc_info=True)
-                            logger.info(
-                                "run_code 策略引擎: tier=%s(清洗后) auto_approved=True caps=%s",
-                                _re_analysis.tier.value,
-                                sorted(_re_analysis.capabilities),
-                            )
-                            log_tool_call(logger, tool_name, _sanitized_args, result=result_str)
-
-                    if not _downgraded:
-                        # 无法降级 → /accept 流程
-                        _caps_detail = ", ".join(sorted(_analysis.capabilities))
-                        _details_text = "; ".join(_analysis.details[:3])
-                        pending = e.approval.create_pending(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            tool_scope=tool_scope,
-                        )
-                        pending_approval = True
-                        approval_id = pending.approval_id
-                        result_str = (
-                            f"⚠️ 代码包含高风险操作，需要人工确认：\n"
-                            f"- 风险等级: {_analysis.tier.value}\n"
-                            f"- 检测到: {_caps_detail}\n"
-                            f"- 详情: {_details_text}\n"
-                            f"{e.format_pending_prompt(pending)}"
-                        )
-                        success = True
-                        error = None
-                        e.emit_pending_approval_event(
-                            pending=pending, on_event=on_event, iteration=iteration,
-                            tool_call_id=tool_call_id,
-                        )
-                        logger.info(
-                            "run_code 策略引擎: tier=%s → pending approval %s",
-                            _analysis.tier.value,
-                            pending.approval_id,
-                        )
-                        log_tool_call(logger, tool_name, arguments, result=result_str)
-            elif e.approval.is_audit_only_tool(tool_name):
-                result_value, audit_record = await e.execute_tool_with_audit(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    tool_scope=tool_scope,
-                    approval_id=e.approval.new_approval_id(),
-                    created_at_utc=e.approval.utc_now(),
-                    undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
-                )
-                result_str = str(result_value)
-                tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
-                if tool_def is not None:
-                    result_str = tool_def.truncate_result(result_str)
-                success = True
-                error = None
-                log_tool_call(logger, tool_name, arguments, result=result_str)
-            elif e.approval.is_high_risk_tool(tool_name):
-                if not e.full_access_enabled and not skip_high_risk_approval_by_hook:
-                    pending = e.approval.create_pending(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        tool_scope=tool_scope,
-                    )
-                    pending_approval = True
-                    approval_id = pending.approval_id
-                    result_str = e.format_pending_prompt(pending)
-                    success = True
-                    error = None
-                    e.emit_pending_approval_event(
-                        pending=pending, on_event=on_event, iteration=iteration,
-                        tool_call_id=tool_call_id,
-                    )
-                    log_tool_call(logger, tool_name, arguments, result=result_str)
-                elif e.approval.is_mcp_tool(tool_name):
-                    # 非白名单 MCP 工具在 fullaccess 下可直接执行（不做文件审计）。
-                    probe_before, probe_before_partial = self._capture_unknown_write_probe(tool_name)
-                    result_value = await self.call_registry_tool(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        tool_scope=tool_scope,
-                    )
-                    self._apply_unknown_write_probe(
-                        tool_name=tool_name,
-                        before_snapshot=probe_before,
-                        before_partial=probe_before_partial,
-                    )
-                    result_str = str(result_value)
-                    success = True
-                    error = None
-                    log_tool_call(logger, tool_name, arguments, result=result_str)
-                else:
-                    result_value, audit_record = await e.execute_tool_with_audit(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        tool_scope=tool_scope,
-                        approval_id=e.approval.new_approval_id(),
-                        created_at_utc=e.approval.utc_now(),
-                        undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
-                    )
-                    result_str = str(result_value)
-                    tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
-                    if tool_def is not None:
-                        result_str = tool_def.truncate_result(result_str)
-                    success = True
-                    error = None
-                    log_tool_call(logger, tool_name, arguments, result=result_str)
-            else:
-                probe_before, probe_before_partial = self._capture_unknown_write_probe(tool_name)
-                result_value = await self.call_registry_tool(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    tool_scope=tool_scope,
-                )
-                self._apply_unknown_write_probe(
-                    tool_name=tool_name,
-                    before_snapshot=probe_before,
-                    before_partial=probe_before_partial,
-                )
-                result_str = str(result_value)
-                success = True
-                error = None
-                log_tool_call(logger, tool_name, arguments, result=result_str)
-        except ValueError as exc:
-            result_str = str(exc)
-            success = False
-            error = result_str
-            log_tool_call(logger, tool_name, arguments, error=error)
-        except ToolNotAllowedError:
-            permission_error = {
-                "error_code": "TOOL_NOT_ALLOWED",
-                "tool": tool_name,
-                "message": f"工具 '{tool_name}' 不在当前授权范围内。",
-            }
-            result_str = json.dumps(permission_error, ensure_ascii=False)
-            success = False
-            error = result_str
-            log_tool_call(logger, tool_name, arguments, error=error)
-        except Exception as exc:
-            root_exc: Exception = exc
-            if isinstance(exc, _AuditedExecutionError):
-                audit_record = exc.record
-                root_exc = exc.cause
-            result_str = f"工具执行错误: {root_exc}"
-            success = False
-            error = str(root_exc)
-            log_tool_call(logger, tool_name, arguments, error=error)
-
-        return _ToolExecOutcome(
-            result_str=result_str,
-            success=success,
-            error=error,
-            pending_approval=pending_approval,
-            approval_id=approval_id,
-            audit_record=audit_record,
-            pending_question=pending_question,
-            question_id=question_id,
-            defer_tool_result=defer_tool_result,
-            finish_accepted=finish_accepted,
-        )
-
     async def _postprocess_result(
         self,
         *,
@@ -2010,6 +1298,7 @@ class ToolDispatcher:
         iteration: int,
         on_event: "EventCallback | None",
         cow_reminders: list[str],
+        start_time: float = 0.0,
     ) -> tuple[str, bool, str | None]:
         """后处理流水线：CoW/备份/图片/VLM/窗口感知/硬截断/事件/审计/任务清单。
 
@@ -2141,7 +1430,7 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     arguments_hash=e.state._args_fingerprint(arguments) if arguments else None,
                     success=success,
-                    duration_ms=0.0,
+                    duration_ms=(time.monotonic() - start_time) * 1000 if start_time else 0.0,
                     result_chars=len(result_str) if result_str else 0,
                     error_type=type(error).__name__ if isinstance(error, Exception) else (error[:50] if error else None),
                     error_preview=str(error)[:200] if error else None,
@@ -2401,6 +1690,11 @@ class ToolDispatcher:
 
         abs_path = _P(file_path) if _P(file_path).is_absolute() else _P(workspace_root) / file_path
         abs_path = abs_path.resolve()
+
+        # .xls/.xlsb → 工具层已转换为 .xlsx，checkpoint 需要打开转换后的文件
+        from excelmanus.tools._helpers import ensure_openpyxl_compatible
+        abs_path = ensure_openpyxl_compatible(abs_path)
+
         if not abs_path.is_file():
             return ""
 
@@ -2427,6 +1721,7 @@ class ToolDispatcher:
         cell_range = arguments.get("cell_range")
         values = arguments.get("values")
 
+        # read_only=False 必须：ws[cell] 随机访问在 read_only 模式下不支持
         wb = _opx.load_workbook(str(abs_path), read_only=False, data_only=True)
         try:
             ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
@@ -2692,6 +1987,9 @@ class ToolDispatcher:
                 from openpyxl import load_workbook
                 from openpyxl.utils import get_column_letter
                 from excelmanus.tools._style_extract import extract_cell_style, extract_merge_ranges
+                # .xls/.xlsb → 透明转换为 xlsx
+                from excelmanus.tools._helpers import ensure_openpyxl_compatible
+                abs_path = ensure_openpyxl_compatible(abs_path)
                 wb = load_workbook(str(abs_path), data_only=False, read_only=False)
                 file_snaps: list[tuple[str, list[dict], list[dict]]] = []
                 for sheet_name in wb.sheetnames:
