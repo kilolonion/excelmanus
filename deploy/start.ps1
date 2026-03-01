@@ -779,8 +779,24 @@ if (-not $BackendOnly) {
     Start-Frontend
 }
 
-# 等待前端启动
-Start-Sleep -Seconds 3
+# 等待前端启动（轮询健康检查）
+if (-not $BackendOnly) {
+    $feUrl = "http://localhost:${FrontendPort}"
+    $feReady = $false
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 2
+        try {
+            $resp = Invoke-WebRequest -Uri $feUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            if ($resp.StatusCode -lt 500) { $feReady = $true; break }
+        } catch { }
+        if ($i % 5 -eq 4) { Write-Info "  前端尚未就绪，已等待 $((($i + 1) * 2)) 秒..." }
+    }
+    if (-not $feReady) {
+        Write-Warn "前端在 60 秒内未就绪，请检查日志"
+    } else {
+        Write-Info "前端已就绪: $feUrl"
+    }
+}
 
 # ── 自动打开浏览器 ──
 if (-not $NoOpen -and -not $BackendOnly) {

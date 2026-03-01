@@ -295,7 +295,7 @@ _apply_defaults() {
   PM2_FRONTEND="${PM2_FRONTEND:-excelmanus-web}"
   BACKEND_PORT="${BACKEND_PORT:-8000}"
   FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-  REPO_URL="${REPO_URL:-https://gitee.com/kilolonion/excelmanus.git}"
+  REPO_URL="${REPO_URL:-https://github.com/kilolonion/excelmanus}"
   REPO_BRANCH="${REPO_BRANCH:-main}"
   VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-30}"
   SERVICE_MANAGER="${SERVICE_MANAGER:-pm2}"
@@ -675,6 +675,7 @@ _build_frontend_remote() {
   info "构建前端..."
   if _remote_frontend "
     cd '${FRONTEND_DIR}/web' && \
+    export NODE_OPTIONS=\"--max-old-space-size=4096\" && \
     ${cold_cmd}npm run build 2>&1; \
     BUILD_EXIT=\$?; \
     echo \"[deploy] npm run build exit code: \$BUILD_EXIT\"; \
@@ -686,6 +687,7 @@ _build_frontend_remote() {
   warn "默认构建失败，尝试 webpack 兜底（npm run build:webpack）..."
   _remote_frontend "
     cd '${FRONTEND_DIR}/web' && \
+    export NODE_OPTIONS=\"--max-old-space-size=4096\" && \
     ${cold_cmd}npm run build:webpack 2>&1; \
     BUILD_EXIT=\$?; \
     echo \"[deploy] webpack build exit code: \$BUILD_EXIT\"; \
@@ -954,11 +956,14 @@ SVCEOF
       sudo systemctl start '${PM2_BACKEND}'; }"
   else
     _remote_backend "
-      pm2 restart '${PM2_BACKEND}' --update-env 2>/dev/null || \
-      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
-        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
-        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info \
-        2>/dev/null || true
+      if pm2 describe '${PM2_BACKEND}' >/dev/null 2>&1; then
+        pm2 restart '${PM2_BACKEND}' --update-env
+      else
+        pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
+          --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
+          -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info
+      fi
+      pm2 save
     "
   fi
   log "后端部署完成"
@@ -1020,7 +1025,7 @@ _deploy_frontend() {
       info "安装前端依赖..."
       _remote_frontend "
         cd '${FRONTEND_DIR}/web' && \
-        npm install --production=false 2>&1
+        npm ci 2>&1
       "
     fi
 

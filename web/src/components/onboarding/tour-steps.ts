@@ -299,7 +299,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-tab-skills",
     title: "技能包管理",
-    description: "技能包让 AI 学会特定领域的工作流程。支持从文件、GitHub、ClawHub 导入，也可以手动创建",
+    description: "技能包让 AI 学会特定领域的工作流程。支持从文件、Gitee/GitHub、ClawHub 导入，也可以手动创建",
     icon: "Package",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到技能页面", autoAdvanceMs: 1000 },
@@ -427,7 +427,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-tab-skills",
     title: "技能包",
-    description: "从文件、GitHub 或 ClawHub 导入技能包",
+    description: "从文件、Gitee/GitHub 或 ClawHub 导入技能包",
     icon: "Package",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到技能", autoAdvanceMs: 1000 },

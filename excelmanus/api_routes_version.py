@@ -55,7 +55,7 @@ async def version_check(request: Request) -> JSONResponse:
     root = _get_project_root()
     current = get_current_version(root)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, check_for_updates, root)
         return JSONResponse(content={
             "current": current,
@@ -185,7 +185,7 @@ class UpdateApplyRequest(BaseModel):
 
 
 @router.post("/api/v1/version/update/apply")
-async def version_update_apply(request: Request) -> JSONResponse:
+async def version_update_apply(body: UpdateApplyRequest, request: Request) -> JSONResponse:
     """执行更新（仅管理员）。"""
     if not _is_admin_or_noauth(request):
         return _error(403, "需要管理员权限")
@@ -193,22 +193,16 @@ async def version_update_apply(request: Request) -> JSONResponse:
     import asyncio
     from excelmanus.updater import perform_update
 
-    body: dict = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
-
     root = _get_project_root()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     result = await loop.run_in_executor(
         None,
         lambda: perform_update(
             root,
-            skip_backup=bool(body.get("skip_backup", False)),
-            skip_deps=bool(body.get("skip_deps", False)),
-            use_mirror=bool(body.get("use_mirror", False)),
+            skip_backup=body.skip_backup,
+            skip_deps=body.skip_deps,
+            use_mirror=body.use_mirror,
         ),
     )
 
@@ -256,7 +250,7 @@ async def version_restore_backup(body: RestoreBackupRequest, request: Request) -
     if not backup_dir.is_dir():
         return _error(404, f"备份不存在: {name}")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ok = await loop.run_in_executor(
         None, restore_from_backup, str(backup_dir), str(root),
     )
@@ -292,6 +286,6 @@ async def version_migrate_data(request: Request) -> JSONResponse:
     if not source:
         source = str(_get_project_root())
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     stats = await loop.run_in_executor(None, migrate_data_from_project, source)
     return JSONResponse(content={"status": "ok", "migrated": stats})

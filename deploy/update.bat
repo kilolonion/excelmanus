@@ -197,10 +197,10 @@ if %SKIP_DEPS%==0 (
     set "PIP_MIRROR="
     if %USE_MIRROR%==1 set "PIP_MIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple"
 
-    !PY! -m pip install -e . !PIP_MIRROR! --quiet 2>nul
+    !PY! -m pip install -e ".[all]" !PIP_MIRROR! --quiet 2>nul
     if errorlevel 1 (
         echo [!!] pip 失败，尝试清华镜像...
-        !PY! -m pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet 2>nul
+        !PY! -m pip install -e ".[all]" -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet 2>nul
         if errorlevel 1 echo [XX] 后端依赖安装失败
     )
     echo [OK] 后端依赖已更新

@@ -253,10 +253,8 @@ def _save_installations(installations: list[dict[str, Any]]) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
-            # Windows 上 rename 不允许目标已存在，需先删除
-            if sys.platform == "win32" and path.exists():
-                path.unlink()
-            os.rename(tmp_path, str(path))
+            # os.replace 在所有平台上都支持原子覆盖（包括 Windows）
+            os.replace(tmp_path, str(path))
         except BaseException:
             # 清理临时文件
             try:
