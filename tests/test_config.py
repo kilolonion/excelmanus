@@ -15,6 +15,12 @@ from hypothesis import strategies as st
 from excelmanus.config import ConfigError, load_config, load_cors_allow_origins
 
 
+@pytest.fixture(autouse=True)
+def _disable_centralized_config(monkeypatch):
+    """禁用集中配置注入，避免 ~/.excelmanus/config.env 干扰测试。"""
+    monkeypatch.setattr("excelmanus.data_home.inject_centralized_config", lambda: 0)
+
+
 # ── 辅助策略 ──────────────────────────────────────────────
 
 # 生成合法的非空 ASCII 字符串作为 API Key

@@ -818,7 +818,7 @@ class TestContextBudgetAndHardCap:
 
     @pytest.mark.asyncio
     async def test_tool_loop_messages_fit_max_context_budget(self) -> None:
-        config = _make_config(max_context_tokens=20000)
+        config = _make_config(max_context_tokens=40000)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine.memory.add_user_message("测试上下文预算")
@@ -4860,12 +4860,19 @@ class TestApprovalFlow:
         ])
         return registry
 
+    @staticmethod
+    def _promote_write_text_file_to_confirm(engine: AgentEngine) -> None:
+        """将 write_text_file 从 Tier B (audit-only) 提升为 Tier A (confirm-required)，以测试审批流程。"""
+        engine._approval._confirm_tools.add("write_text_file")
+        engine._approval._audit_only_tools.discard("write_text_file")
+
     @pytest.mark.asyncio
     async def test_high_risk_tool_requires_accept(self, tmp_path: Path) -> None:
         """阻塞式审批：approval_resolver 返回 accept 后内联执行高风险工具。"""
         config = _make_config(workspace_root=str(tmp_path), window_perception_enabled=False)
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        self._promote_write_text_file_to_confirm(engine)
 
         captured_id = None
         async def _accept(p):
@@ -4953,6 +4960,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        self._promote_write_text_file_to_confirm(engine)
 
         async def _reject(p):
             return "reject"
@@ -4974,6 +4982,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        self._promote_write_text_file_to_confirm(engine)
 
         captured_id = None
         async def _accept(p):
@@ -5002,6 +5011,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_failing_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        self._promote_write_text_file_to_confirm(engine)
 
         captured_id = None
         async def _accept(p):
@@ -5058,6 +5068,7 @@ class TestApprovalFlow:
         registry = self._make_registry_with_write_tool(tmp_path)
         engine1 = AgentEngine(config, registry)
         _activate_test_tools(engine1, ["write_text_file"])
+        self._promote_write_text_file_to_confirm(engine1)
 
         captured_id = None
         async def _accept(p):
@@ -5109,6 +5120,7 @@ class TestApprovalFlow:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
+        self._promote_write_text_file_to_confirm(engine)
 
         async def _fullaccess(p):
             return "fullaccess"

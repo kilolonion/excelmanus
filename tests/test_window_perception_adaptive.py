@@ -248,7 +248,7 @@ def test_manager_ingest_exception_preserves_payload_without_locals_dependency() 
     def _raise_locate(*_args, **_kwargs):
         raise RuntimeError("locate boom")
 
-    def _capture_fallback(*, tool_name, arguments, result_text, success, payload):  # type: ignore[no-untyped-def]
+    def _capture_fallback(*, tool_name, arguments, result_text, success, payload, raw_result_text=None):  # type: ignore[no-untyped-def]
         captured["payload"] = payload
         return "fallback"
 

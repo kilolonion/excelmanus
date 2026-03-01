@@ -31,7 +31,7 @@ def _make_config(**overrides: Any) -> ExcelManusConfig:
         "api_key": "test-key",
         "base_url": "https://api.example.com/v1",
         "model": "test-model",
-        "max_context_tokens": 1000,
+        "max_context_tokens": 500_000,
         "compaction_enabled": True,
         "compaction_threshold_ratio": 0.85,
         "compaction_keep_recent_turns": 2,
@@ -98,7 +98,7 @@ class TestShouldCompact:
         assert mgr.should_compact(memory, None) is False
 
     def test_above_threshold(self) -> None:
-        config = _make_config(max_context_tokens=1000, compaction_threshold_ratio=0.85)
+        config = _make_config(max_context_tokens=20000, compaction_threshold_ratio=0.85)
         mgr = CompactionManager(config)
         memory = _make_memory(config)
         # 填充大量消息使 token 超阈值
@@ -108,7 +108,7 @@ class TestShouldCompact:
         assert mgr.should_compact(memory, None) is True
 
     def test_disabled_never_triggers(self) -> None:
-        config = _make_config(max_context_tokens=100, compaction_threshold_ratio=0.1)
+        config = _make_config(max_context_tokens=20000, compaction_threshold_ratio=0.1)
         mgr = CompactionManager(config)
         mgr.enabled = False
         memory = _make_memory(config)
@@ -126,7 +126,7 @@ class TestAutoCompact:
     @pytest.mark.asyncio
     async def test_successful_compact(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -163,7 +163,7 @@ class TestAutoCompact:
     @pytest.mark.asyncio
     async def test_too_few_messages(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=5,
         )
         mgr = CompactionManager(config)
@@ -189,7 +189,7 @@ class TestAutoCompact:
 
     @pytest.mark.asyncio
     async def test_empty_messages(self) -> None:
-        config = _make_config(max_context_tokens=10000)
+        config = _make_config(max_context_tokens=500_000)
         mgr = CompactionManager(config)
         memory = _make_memory(config)
         client = _mock_client()
@@ -207,7 +207,7 @@ class TestAutoCompact:
     @pytest.mark.asyncio
     async def test_llm_call_failure_falls_back(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -238,7 +238,7 @@ class TestAutoCompact:
     @pytest.mark.asyncio
     async def test_empty_summary_falls_back(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -269,7 +269,7 @@ class TestManualCompact:
     @pytest.mark.asyncio
     async def test_manual_compact_with_custom_instruction(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -297,7 +297,7 @@ class TestManualCompact:
     @pytest.mark.asyncio
     async def test_manual_compact_without_instruction(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -326,21 +326,21 @@ class TestGetStatus:
     """get_status 状态查询测试。"""
 
     def test_initial_status(self) -> None:
-        config = _make_config(max_context_tokens=1000)
+        config = _make_config(max_context_tokens=500_000)
         mgr = CompactionManager(config)
         memory = _make_memory(config)
 
         status = mgr.get_status(memory, None)
 
         assert status["enabled"] is True
-        assert status["max_tokens"] == 1000
+        assert status["max_tokens"] == 500_000
         assert status["compaction_count"] == 0
         assert status["last_compaction_at"] is None
 
     @pytest.mark.asyncio
     async def test_status_after_compact(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
@@ -378,7 +378,7 @@ class TestTokenUsageRatio:
         assert 0.0 < ratio < 1.0
 
     def test_zero_max_tokens(self) -> None:
-        config = _make_config(max_context_tokens=1)
+        config = _make_config(max_context_tokens=500_000)
         mgr = CompactionManager(config)
         memory = _make_memory(config)
         ratio = mgr.get_token_usage_ratio(memory, None)
@@ -477,7 +477,7 @@ class TestMultipleCompactions:
     @pytest.mark.asyncio
     async def test_stats_accumulate(self) -> None:
         config = _make_config(
-            max_context_tokens=10000,
+            max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)

@@ -56,8 +56,11 @@ def test_create_app_uses_config_cors_for_middleware() -> None:
     config = _test_config(
         cors_allow_origins=("http://a.example", "http://b.example")
     )
-    # mock socket.getaddrinfo 避免 LAN IP 自动发现注入额外 origin
-    with patch("socket.getaddrinfo", return_value=[]):
+    # mock socket.getaddrinfo + UDP connect trick 避免 LAN IP 自动发现注入额外 origin
+    mock_sock = MagicMock()
+    mock_sock.getsockname.return_value = ("127.0.0.1", 0)
+    with patch("socket.getaddrinfo", return_value=[]), \
+         patch("socket.socket", return_value=mock_sock):
         local_app = api_module.create_app(config=config)
 
     assert local_app.state.bootstrap_config is config
@@ -124,11 +127,13 @@ def _setup_api_globals(config=None, *, chat_history=None):
         except ImportError:
             pass
 
+    from excelmanus.skillpacks import SkillpackManager
     registry = ToolRegistry()
     registry.register_builtin_tools(config.workspace_root)
     loader = SkillpackLoader(config, registry)
     loader.load_all()
     router = SkillRouter(config, loader)
+    sk_manager = SkillpackManager(config, loader)
     manager = SessionManager(
         max_sessions=config.max_sessions,
         ttl_seconds=config.session_ttl_seconds,
@@ -142,12 +147,14 @@ def _setup_api_globals(config=None, *, chat_history=None):
     old_registry = api_module._tool_registry
     old_loader = api_module._skillpack_loader
     old_router = api_module._skill_router
+    old_sk_manager = api_module._skillpack_manager
     old_manager = api_module._session_manager
 
     api_module._config = config
     api_module._tool_registry = registry
     api_module._skillpack_loader = loader
     api_module._skill_router = router
+    api_module._skillpack_manager = sk_manager
     api_module._session_manager = manager
 
     try:
@@ -158,6 +165,7 @@ def _setup_api_globals(config=None, *, chat_history=None):
         api_module._tool_registry = old_registry
         api_module._skillpack_loader = old_loader
         api_module._skill_router = old_router
+        api_module._skillpack_manager = old_sk_manager
         api_module._session_manager = old_manager
         # 恢复工具模块的 _guard 状态
         for _mod_name, _saved in _saved_guards.items():
@@ -656,34 +664,24 @@ class TestProperty14SessionDeletion:
         assert registry["total_files"] == 7
 
     @pytest.mark.asyncio
-    async def test_session_status_lazily_restores_history_session(
+    async def test_session_status_returns_idle_for_non_memory_session(
         self, client: AsyncClient, setup_api_state: dict
     ) -> None:
-        """状态查询应懒恢复仅存在于历史存储的会话，无需先发消息。"""
+        """状态轮询不应触发引擎恢复，非内存会话直接返回 idle 默认值。
+
+        性能优化：避免每次轮询都为已被 TTL 清理的会话创建重量级引擎。
+        """
         manager: SessionManager = setup_api_state["manager"]
-        restored_engine = MagicMock()
-        restored_engine.get_compaction_status.return_value = {"enabled": False}
-        restored_engine.registry_scan_status.return_value = {
-            "state": "building",
-            "total_files": None,
-            "scan_duration_ms": None,
-            "error": None,
-        }
 
         with patch.object(
-            manager, "can_restore_session", return_value=True
-        ), patch.object(
-            manager,
-            "get_or_restore_engine",
-            new_callable=AsyncMock,
-            return_value=restored_engine,
-        ) as restore_mock:
+            manager, "get_engine", return_value=None
+        ) as get_mock:
             status_resp = await client.get("/api/v1/sessions/history-only/status")
 
         assert status_resp.status_code == 200
         registry = status_resp.json()["registry"]
-        assert registry["state"] == "building"
-        restore_mock.assert_awaited_once()
+        assert registry["state"] == "idle"
+        get_mock.assert_called_once_with("history-only", user_id=None)
 
     @pytest.mark.asyncio
     async def test_list_sessions_include_archived_query_passed_to_manager(
