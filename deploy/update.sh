@@ -49,7 +49,7 @@ LIST_BACKUPS=false
 AUTO_YES=false
 VERBOSE=false
 
-REPO_URL_GITEE="https://gitee.com/kilolonion/excelmanus.git"
+REPO_URL_GITHUB="https://github.com/kilolonion/excelmanus.git"
 
 # ── 网络探测：自动识别国内网络，优先使用镜像 ──
 _detect_domestic_network() {
@@ -168,7 +168,7 @@ echo ""
 # ── 检查 Git ──
 if [[ ! -d "${PROJECT_ROOT}/.git" ]]; then
   error "项目不是 Git 仓库，无法通过 git 更新"
-  error "请手动从 ${REPO_URL:-https://github.com/kilolonion/excelmanus} 下载最新版本"
+  error "请手动从 ${REPO_URL:-https://gitee.com/kilolonion/excelmanus} 下载最新版本"
   exit 1
 fi
 
@@ -177,21 +177,16 @@ if ! command -v git &>/dev/null; then
   exit 1
 fi
 
-# ── Step 1: 检查更新（国内自动 Gitee 加速） ──
+# ── Step 1: 检查更新（Gitee 优先，GitHub 备用）──
 step "检查更新"
 if ! git -C "$PROJECT_ROOT" fetch origin --tags --quiet 2>/dev/null; then
-  if [[ "$USE_MIRROR" == true ]]; then
-    warn "GitHub fetch 失败，尝试 Gitee 镜像..."
-    git -C "$PROJECT_ROOT" remote add gitee "$REPO_URL_GITEE" 2>/dev/null || true
-    git -C "$PROJECT_ROOT" remote set-url gitee "$REPO_URL_GITEE" 2>/dev/null || true
-    git -C "$PROJECT_ROOT" fetch gitee --tags --quiet 2>/dev/null || {
-      warn "Gitee fetch 也失败，请检查网络连接"
-      exit 1
-    }
-  else
-    warn "git fetch 失败，请检查网络连接"
+  warn "Gitee fetch 失败，尝试 GitHub 备用源..."
+  git -C "$PROJECT_ROOT" remote add github "$REPO_URL_GITHUB" 2>/dev/null || true
+  git -C "$PROJECT_ROOT" remote set-url github "$REPO_URL_GITHUB" 2>/dev/null || true
+  git -C "$PROJECT_ROOT" fetch github --tags --quiet 2>/dev/null || {
+    warn "GitHub fetch 也失败，请检查网络连接"
     exit 1
-  fi
+  }
 fi
 
 BRANCH="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")"

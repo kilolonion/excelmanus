@@ -738,10 +738,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         has_project_local_data,
         migrate_data_from_project,
         is_data_centralized,
+        scan_once,
     )
     project_root = Path(__file__).resolve().parent.parent
     try:
         register_installation(project_root)
+        scan_once()
         migrate_project_env(project_root)
         if _config.data_root:
             ensure_data_dirs()
@@ -752,6 +754,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     logger.info("首次运行数据迁移完成: %s", stats)
     except Exception:
         logger.debug("集中数据管理初始化失败（非致命）", exc_info=True)
+
+    # ── 首次启动自动创建桌面快捷方式 ──────────────────────
+    try:
+        from excelmanus.shortcuts import get_shortcut_info, create_desktop_shortcut
+        si = get_shortcut_info()
+        if not si.get("exists"):
+            sc_path = create_desktop_shortcut(project_root)
+            if sc_path:
+                logger.info("已自动创建桌面快捷方式: %s", sc_path)
+    except Exception:
+        logger.debug("自动创建桌面快捷方式失败（非致命）", exc_info=True)
 
     # 初始化工具层
     _tool_registry = ToolRegistry()
@@ -6810,164 +6823,9 @@ async def build_docker_sandbox_image(request: Request) -> JSONResponse:
     return _error_json_response(500, f"镜像构建失败: {msg}")
 
 
-# ── 更新管理 API ──────────────────────────────────────────
-
-
-@_router.get("/api/v1/update/check")
-async def update_check(request: Request) -> JSONResponse:
-    """检查是否有可用更新。"""
-    import asyncio
-    from excelmanus.updater import check_for_updates, get_current_version
-
-    project_root = Path(__file__).resolve().parent.parent
-    loop = asyncio.get_event_loop()
-    info = await loop.run_in_executor(None, check_for_updates, project_root)
-
-    return JSONResponse(content={
-        "current_version": info.current,
-        "latest_version": info.latest,
-        "has_update": info.has_update,
-        "commits_behind": info.commits_behind,
-        "release_notes": info.release_notes,
-        "check_method": info.check_method,
-    })
-
-
-@_router.get("/api/v1/update/backups")
-async def update_backup_list(request: Request) -> JSONResponse:
-    """列出所有数据备份。"""
-    if getattr(request.app.state, "auth_enabled", False):
-        from excelmanus.auth.dependencies import get_current_user_from_request
-        user = await get_current_user_from_request(request)
-        if user.role != "admin":
-            return _error_json_response(403, "需要管理员权限。")
-
-    from excelmanus.updater import list_backups
-
-    project_root = Path(__file__).resolve().parent.parent
-    backups = list_backups(project_root)
-    return JSONResponse(content={"backups": backups})
-
-
-@_router.post("/api/v1/update/apply")
-async def update_apply(request: Request) -> JSONResponse:
-    """执行更新（仅管理员）。
-
-    请求体（均为可选）:
-      {"skip_backup": false, "skip_deps": false, "use_mirror": false}
-    """
-    if getattr(request.app.state, "auth_enabled", False):
-        from excelmanus.auth.dependencies import get_current_user_from_request
-        user = await get_current_user_from_request(request)
-        if user.role != "admin":
-            return _error_json_response(403, "需要管理员权限。")
-
-    import asyncio
-    from excelmanus.updater import perform_update
-
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
-
-    project_root = Path(__file__).resolve().parent.parent
-    loop = asyncio.get_event_loop()
-
-    result = await loop.run_in_executor(
-        None,
-        lambda: perform_update(
-            project_root,
-            skip_backup=bool(body.get("skip_backup", False)),
-            skip_deps=bool(body.get("skip_deps", False)),
-            use_mirror=bool(body.get("use_mirror", False)),
-        ),
-    )
-
-    status_code = 200 if result.success else 500
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "success": result.success,
-            "old_version": result.old_version,
-            "new_version": result.new_version,
-            "backup_dir": result.backup_dir,
-            "steps_completed": result.steps_completed,
-            "error": result.error,
-            "needs_restart": result.needs_restart,
-        },
-    )
-
-
-@_router.post("/api/v1/update/restore")
-async def update_restore(request: Request) -> JSONResponse:
-    """从指定备份恢复数据（仅管理员）。
-
-    请求体: {"backup_name": "backup_1.6.6_20260301_120000"}
-    """
-    if getattr(request.app.state, "auth_enabled", False):
-        from excelmanus.auth.dependencies import get_current_user_from_request
-        user = await get_current_user_from_request(request)
-        if user.role != "admin":
-            return _error_json_response(403, "需要管理员权限。")
-
-    import asyncio
-    from excelmanus.updater import restore_from_backup
-
-    body = await request.json()
-    backup_name = body.get("backup_name", "")
-    if not backup_name:
-        return _error_json_response(400, "缺少 backup_name 参数。")
-
-    project_root = Path(__file__).resolve().parent.parent
-    backup_dir = project_root / "backups" / backup_name
-    if not backup_dir.is_dir():
-        return _error_json_response(404, f"备份不存在: {backup_name}")
-
-    loop = asyncio.get_event_loop()
-    ok = await loop.run_in_executor(
-        None, restore_from_backup, str(backup_dir), str(project_root),
-    )
-
-    if ok:
-        return JSONResponse(content={"status": "ok", "message": "数据已从备份恢复，请重启服务。"})
-    return _error_json_response(500, "恢复失败，请查看服务日志。")
-
-
-# ── 集中数据 & 快捷方式管理 API ────────────────────────────
-
-
-@_router.get("/api/v1/data/installations")
-async def list_installations(request: Request) -> JSONResponse:
-    """列出所有已注册的 ExcelManus 安装。"""
-    from excelmanus.data_home import discover_old_installations
-    return JSONResponse(content={"installations": discover_old_installations()})
-
-
-@_router.post("/api/v1/data/migrate")
-async def migrate_data(request: Request) -> JSONResponse:
-    """从指定旧安装目录迁移数据到集中位置（仅管理员）。"""
-    err = await _require_admin_if_auth_enabled(request)
-    if err is not None:
-        return err
-
-    import asyncio
-    from excelmanus.data_home import migrate_data_from_project
-
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
-
-    source = body.get("source", "")
-    if not source:
-        project_root = Path(__file__).resolve().parent.parent
-        source = str(project_root)
-
-    loop = asyncio.get_event_loop()
-    stats = await loop.run_in_executor(None, migrate_data_from_project, source)
-    return JSONResponse(content={"status": "ok", "migrated": stats})
+# ── 快捷方式管理 API ────────────────────────────────────
+# 注意: 版本检查、备份管理、更新执行、安装注册表、数据迁移
+# 已统一迁移到 api_routes_version.py（/api/v1/version/* 命名空间）
 
 
 @_router.get("/api/v1/shortcut/info")

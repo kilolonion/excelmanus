@@ -135,14 +135,15 @@ function Write-Dbg {
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  GitHub 仓库配置
+#  Git 仓库配置（优先 Gitee）
 # ═══════════════════════════════════════════════════════════════
 
-$Script:REPO_URL = "https://github.com/kilolonion/excelmanus"
+$Script:REPO_URL = "https://gitee.com/kilolonion/excelmanus.git"
+$Script:REPO_URL_GITHUB = "https://github.com/kilolonion/excelmanus"
 $Script:REPO_BRANCH = "main"
 
 # ═══════════════════════════════════════════════════════════════
-#  检查项目完整性（缺失则从 GitHub 克隆）
+#  检查项目完整性（缺失则从 Gitee 克隆，GitHub 备用）
 # ═══════════════════════════════════════════════════════════════
 
 $pyprojectPath = Join-Path $Script:PROJECT_ROOT "pyproject.toml"
@@ -153,18 +154,22 @@ if (-not (Test-Path $pyprojectPath)) {
         Write-Host "     或手动下载项目: $($Script:REPO_URL)" -ForegroundColor Red
         exit 1
     }
-    Write-Host "[--] 正在从 GitHub 克隆项目..." -ForegroundColor Cyan
+    Write-Host "[--] 正在从 Gitee 克隆项目..." -ForegroundColor Cyan
     Write-Host "     仓库: $($Script:REPO_URL)" -ForegroundColor Cyan
     Write-Host "     分支: $($Script:REPO_BRANCH)" -ForegroundColor Cyan
     $tmpDir = "$($Script:PROJECT_ROOT)_tmp"
     & git clone -b $Script:REPO_BRANCH $Script:REPO_URL $tmpDir
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[XX] Git 克隆失败，请检查网络连接" -ForegroundColor Red
-        exit 1
+        Write-Host "[!!] Gitee 克隆失败，尝试 GitHub..." -ForegroundColor Yellow
+        & git clone -b $Script:REPO_BRANCH $Script:REPO_URL_GITHUB $tmpDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[XX] Git 克隆失败，请检查网络连接" -ForegroundColor Red
+            exit 1
+        }
     }
     Copy-Item -Path "$tmpDir\*" -Destination $Script:PROJECT_ROOT -Recurse -Force
     Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "[OK] 项目已从 GitHub 克隆完成" -ForegroundColor Green
+    Write-Host "[OK] 项目已克隆完成" -ForegroundColor Green
 }
 
 # ═══════════════════════════════════════════════════════════════

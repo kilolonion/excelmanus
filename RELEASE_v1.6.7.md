@@ -198,6 +198,8 @@ api.py 从 6827 → 6042 行（-785 行），提取 3 个子模块：
 - **start.sh / start.ps1** — 集中数据目录支持、环境检测增强
 - **deploy.sh / deploy.ps1** — macOS sed 兼容性修复、standalone 检测加固
 - **ExcelManusSetup.cs** — Windows 安装程序大幅扩展（自动更新 / 服务管理）
+- **应用重命名** — `ExcelManusDeployTool.exe` → `ExcelManus.exe`，统一品牌名称
+- **部署向导精简** — 从三步（环境检测 → 配置 LLM → 启动部署）简化为两步（环境检测 → 启动部署），移除前端内置的 LLM 配置步骤
 
 ### 提示词策略更新
 

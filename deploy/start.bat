@@ -33,11 +33,12 @@ set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%.."
 set "PROJECT_ROOT=%CD%"
 
-REM -- GitHub repo config --
-set "REPO_URL=https://github.com/kilolonion/excelmanus"
+REM -- Git repo config (Gitee priority) --
+set "REPO_URL=https://gitee.com/kilolonion/excelmanus.git"
+set "REPO_URL_GITHUB=https://github.com/kilolonion/excelmanus"
 set "REPO_BRANCH=main"
 
-REM -- Check if project is complete (clone from GitHub if missing) --
+REM -- Check if project is complete (clone from Gitee if missing, GitHub fallback) --
 if not exist "%PROJECT_ROOT%\pyproject.toml" (
     echo [!!] 未检测到完整项目文件
     where git >nul 2>&1
@@ -46,10 +47,14 @@ if not exist "%PROJECT_ROOT%\pyproject.toml" (
         echo     或手动下载项目: %REPO_URL%
         goto :exit_with_pause
     )
-    echo [--] 正在从 GitHub 克隆项目...
+    echo [--] 正在从 Gitee 克隆项目...
     echo     仓库: %REPO_URL%
     echo     分支: %REPO_BRANCH%
     git clone -b %REPO_BRANCH% %REPO_URL% "%PROJECT_ROOT%_tmp"
+    if errorlevel 1 (
+        echo [!!] Gitee 克隆失败，尝试 GitHub...
+        git clone -b %REPO_BRANCH% %REPO_URL_GITHUB% "%PROJECT_ROOT%_tmp"
+    )
     if errorlevel 1 (
         echo [XX] Git 克隆失败，请检查网络连接
         goto :exit_with_pause
@@ -57,7 +62,7 @@ if not exist "%PROJECT_ROOT%\pyproject.toml" (
     REM Move files from tmp to project root
     xcopy /E /Y /Q "%PROJECT_ROOT%_tmp\*" "%PROJECT_ROOT%\" >nul 2>&1
     rmdir /S /Q "%PROJECT_ROOT%_tmp" >nul 2>&1
-    echo [OK] 项目已从 GitHub 克隆完成
+    echo [OK] 项目已克隆完成
 )
 
 REM -- Interactive .env setup if missing --
@@ -315,8 +320,25 @@ if "%PRODUCTION%"=="1" (
     start "" /b cmd /c "cd /d %PROJECT_ROOT%\web && npm run dev -- -p %FRONTEND_PORT%"
 )
 
-REM Wait for frontend
-timeout /t 3 /nobreak >nul 2>&1
+REM Wait for frontend ready
+set "FE_READY=0"
+set "FE_WAIT=0"
+:wait_frontend
+if %FE_WAIT% geq 30 goto :frontend_timeout
+curl -s -o nul -w "" "http://localhost:%FRONTEND_PORT%/" >nul 2>&1
+if not errorlevel 1 (
+    echo [OK] 前端已就绪
+    set "FE_READY=1"
+    goto :frontend_ready
+)
+set /a FE_WAIT+=1
+timeout /t 1 /nobreak >nul 2>&1
+goto :wait_frontend
+
+:frontend_timeout
+echo [!!] 前端启动较慢，继续等待中...
+
+:frontend_ready
 
 REM -- Auto open browser --
 if "%AUTO_OPEN%"=="1" (

@@ -295,7 +295,7 @@ _apply_defaults() {
   PM2_FRONTEND="${PM2_FRONTEND:-excelmanus-web}"
   BACKEND_PORT="${BACKEND_PORT:-8000}"
   FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-  REPO_URL="${REPO_URL:-https://github.com/kilolonion/excelmanus}"
+  REPO_URL="${REPO_URL:-https://gitee.com/kilolonion/excelmanus.git}"
   REPO_BRANCH="${REPO_BRANCH:-main}"
   VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-30}"
   SERVICE_MANAGER="${SERVICE_MANAGER:-pm2}"
@@ -873,7 +873,7 @@ _sync_code() {
     run "rsync -az --partial ${_rsync_extra} --timeout=120 ${_rsync_excludes[*]} --progress -e \"$rsync_ssh\" \
       '${PROJECT_ROOT}/' '${SSH_USER}@${host}:${remote_dir}/'"
   else
-    info "从 GitHub 拉取更新到 ${label} (${host:-localhost})..."
+    info "从 Git 仓库拉取更新到 ${label} (${host:-localhost})..."
     local key_for_host="$SSH_KEY_PATH"
     [[ "$host" == "$BACKEND_HOST" ]] && key_for_host="$BACKEND_SSH_KEY_PATH" || true
     [[ "$host" == "$FRONTEND_HOST" ]] && key_for_host="$FRONTEND_SSH_KEY_PATH" || true
@@ -1146,7 +1146,7 @@ _print_summary() {
       ;;
   esac
 
-  echo -e "  代码来源: ${CYAN}$([ "$FROM_LOCAL" == true ] && echo "本地 rsync" || echo "GitHub (${REPO_BRANCH})")${NC}"
+  echo -e "  代码来源: ${CYAN}$([ "$FROM_LOCAL" == true ] && echo "本地 rsync" || echo "Git (${REPO_BRANCH})")${NC}"
   [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  前端制品: ${CYAN}${FRONTEND_ARTIFACT}${NC}" || true
   [[ "$COLD_BUILD" == true ]] && echo -e "  构建缓存: ${YELLOW}冷构建 (--cold-build)${NC}" || true
   [[ -n "$FRONTEND_ARTIFACT" ]] && echo -e "  回滚备份: ${CYAN}保留最近 ${FRONTEND_RELEASE_KEEP} 个${NC}" || true
