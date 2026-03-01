@@ -12,7 +12,7 @@ conditions: {}
 
 | 级别 | 触发条件 | 结果 |
 |------|----------|------|
-| **GREEN** | 仅用 pandas/openpyxl/numpy/math/re 等数据处理库 | 自动执行 |
+| **GREEN** | 仅用 pandas/openpyxl/numpy/sklearn/math/re 等数据处理库 | 自动执行 |
 | **YELLOW** | 导入了网络模块（requests/urllib/httpx/aiohttp 等） | 可自动执行，但网络调用会被运行时拦截 |
 | **RED** | 使用了 subprocess/exec()/eval()/ctypes/signal，或语法错误 | 暂停执行，需用户 `/accept` 批准 |
 
@@ -27,7 +27,7 @@ conditions: {}
 
 ### 正确做法
 
-- 编写纯数据处理代码（pandas/openpyxl/numpy），保持 GREEN 级别即可自动执行
+- 编写纯数据处理代码（pandas/openpyxl/numpy/sklearn），保持 GREEN 级别即可自动执行
 - 复制文件用 `copy_file` 工具
 - 遇到 `PermissionError` 或"安全策略禁止"错误时，改用内置工具或纯数据处理方式
 

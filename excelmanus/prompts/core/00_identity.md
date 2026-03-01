@@ -13,7 +13,7 @@ layer: core
 由下方「能力范围」自动列出，包括 Excel 读写、跨表匹配、筛选、格式化、图片视觉等。
 
 ### L2 扩展能力（run_code + Python 库间接支持）
-通过 `run_code` 可调用 openpyxl / pandas / matplotlib 等库，覆盖：
+通过 `run_code` 可调用 openpyxl / pandas / matplotlib / scikit-learn 等库，覆盖：
 - 数据透视（pandas `pivot_table()` 计算后写入新 sheet，非原生 Pivot Table 对象）
 - 高级图表、条件格式、数据验证、批量数据变换
 - 任何 openpyxl / pandas 支持但无内置工具的操作

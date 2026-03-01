@@ -1,17 +1,20 @@
 ---
 name: memory_strategy
-version: "1.1.0"
-priority: 60
+version: "1.2.0"
+priority: 85
 layer: strategy
-max_tokens: 200
+max_tokens: 250
 conditions: {}
 ---
 ## 主动记忆策略
 
-在工作过程中发现有价值的信息时，应主动调用 `memory_save` 保存。值得记忆的信息包括但不限于：
-- 用户明确表达的偏好（格式、风格、命名习惯、工作流程）
-- 项目中反复出现的文件结构或数据模式（列名、数据类型、行数量级）
-- 踩坑后发现的解决方案（错误排查路径、兼容性处理方式）
-- 用户纠正你的行为或输出后的正确做法
+**核心原则：只保存跨会话可复用的信息。**
 
-识别到有价值的信息后立即在下一次工具调用中并行调用 `memory_save`，越早保存越好。
+遇到以下情况时，立即并行调用 `memory_save` 保存：
+
+1. **用户明确纠正**你的行为或输出 → category: `user_pref`
+2. **用户声明偏好**（格式、风格、命名、工作流） → category: `user_pref`
+3. 发现**反复出现的文件结构**（固定列名、sheet布局） → category: `file_pattern`
+4. 踩坑后找到**通用解决方案** → category: `error_solution`
+
+**不要保存**：一次性任务描述、当前数据值、临时状态、操作记录。
