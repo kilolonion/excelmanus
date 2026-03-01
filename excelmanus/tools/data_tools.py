@@ -54,12 +54,12 @@ _TITLE_HINT_PREFIXES = (
 
 # ── 表单类文档识别配置 ────────────────────────────────────
 # 表单类文档特征：大量标签-值对，标签行占比高，大量合并单元格
-_FORM_LABEL_KEYWORDS = (
+_FORM_LABEL_KEYWORDS = frozenset({
     "交款人", "交款单位", "联系人", "联系方式", "付款账户", "付款人",
     "付款事由", "付款方式", "付款金额", "其他金额", "费用合计", "大写金额",
     "备注", "说明", "日期", "编号", "单位", "姓名", "电话", "地址",
     "客户", "供应商", "发票", "账号", "开户行",
-)
+})
 _FORM_LABEL_RATIO_THRESHOLD = 0.3  # 标签行占比超过此阈值认为是表单类文档
 _FORM_MERGED_CELL_RATIO_THRESHOLD = 0.15  # 合并单元格占比超过此阈值认为是表单类文档
 
@@ -228,9 +228,9 @@ def _is_form_type_document(
 
             if len(non_empty) >= 2:  # 至少2个非空单元格才计入
                 total_scannable_rows += 1
-                # 检查是否包含表单标签关键词
-                row_text = " ".join(str(v) for v in non_empty if isinstance(v, str))
-                if any(kw in row_text for kw in _FORM_LABEL_KEYWORDS):
+                # 检查是否包含表单标签关键词（精确匹配单元格值，避免数据行误判）
+                cell_texts = {str(v).strip() for v in non_empty if isinstance(v, str)}
+                if any(ct in _FORM_LABEL_KEYWORDS for ct in cell_texts):
                     label_rows += 1
 
         label_ratio = label_rows / max(total_scannable_rows, 1)
@@ -766,6 +766,10 @@ def read_excel(
     not_found = check_file_exists(safe_path, file_path, guard)
     if not_found is not None:
         return not_found
+
+    # .xls/.xlsb → 透明转换为 xlsx（后续 openpyxl 调用统一走 xlsx）
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     # ── range 模式：精确读取指定坐标范围 ──
     if range is not None:

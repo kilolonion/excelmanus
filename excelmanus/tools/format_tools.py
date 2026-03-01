@@ -124,6 +124,9 @@ def format_cells(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -209,6 +212,9 @@ def adjust_column_width(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -291,6 +297,9 @@ def read_cell_styles(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -307,6 +316,7 @@ def read_cell_styles(
     if isinstance(cell_data, (Cell, MergedCell)):
         rows: tuple = ((cell_data,),)
     elif isinstance(cell_data, tuple) and cell_data and not isinstance(cell_data[0], tuple):
+        # 单行范围如 "A1:C1" 返回 tuple of Cell
         rows = (cell_data,)
     else:
         rows = cell_data
@@ -424,6 +434,9 @@ def adjust_row_height(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -481,6 +494,9 @@ def merge_cells_tool(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -517,6 +533,9 @@ def unmerge_cells_tool(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)

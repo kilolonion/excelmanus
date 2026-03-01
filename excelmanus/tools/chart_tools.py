@@ -342,6 +342,9 @@ def create_excel_chart(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 

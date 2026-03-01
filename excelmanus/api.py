@@ -2889,7 +2889,7 @@ async def list_excel_files(request: Request) -> JSONResponse:
     from pathlib import Path as _Path
 
     workspace = _Path(_resolve_workspace_root(request)).resolve()
-    excel_exts = {".xlsx", ".xls", ".csv"}
+    excel_exts = {".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"}
     skip_dirs = {"node_modules", "__pycache__", ".venv", ".git", ".next"}
     results: list[dict[str, Any]] = []
 
@@ -3110,18 +3110,28 @@ async def get_excel_file(request: Request) -> StreamingResponse:
 
     file_path = _Path(resolved)
     suffix = file_path.suffix.lower()
-    if suffix not in {".xlsx", ".xls", ".csv"}:
+    if suffix not in {".xlsx", ".xls", ".xlsb", ".xlsm", ".csv"}:
         return _error_json_response(400, f"不支持的文件格式: {suffix}")  # type: ignore[return-value]
+
+    # .xls/.xlsb → 透明转换为 xlsx 供前端 Univer 加载
+    actual_file = resolved
+    from excelmanus.xls_converter import needs_conversion as _nc2, ensure_xlsx as _ensure2
+    if _nc2(resolved):
+        try:
+            _xlsx_p2, _ = _ensure2(resolved)
+            actual_file = str(_xlsx_p2)
+            suffix = ".xlsx"
+        except Exception:
+            logger.warning("excel 流转换失败，返回原始文件: %s", resolved)
 
     content_type = (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        if suffix == ".xlsx"
-        else "application/vnd.ms-excel" if suffix == ".xls"
+        if suffix in (".xlsx", ".xlsm")
         else "text/csv"
     )
 
     def _iter_file():
-        with open(resolved, "rb") as f:  # type: ignore[arg-type]
+        with open(actual_file, "rb") as f:  # type: ignore[arg-type]
             while chunk := f.read(65536):
                 yield chunk
 
@@ -3390,7 +3400,17 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
 
         from excelmanus.tools._style_extract import extract_cell_style as _extract_cell_style
 
-        wb = load_workbook(resolved, data_only=True, read_only=not with_styles)
+        # .xls/.xlsb → 透明转换为 xlsx 后再用 openpyxl 打开
+        from excelmanus.xls_converter import needs_conversion as _nc, ensure_xlsx as _ensure
+        _actual_path = resolved
+        if _nc(resolved):
+            try:
+                _xlsx_p, _ = _ensure(resolved)
+                _actual_path = str(_xlsx_p)
+            except Exception:
+                logger.warning("snapshot 转换失败，尝试直接打开: %s", resolved)
+
+        wb = load_workbook(_actual_path, data_only=True, read_only=not with_styles)
         sheet_names = wb.sheetnames
 
         def _read_sheet(ws_obj: Any) -> dict:
@@ -3655,25 +3675,46 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     if auth_enabled and user_id:
         ws.enforce_quota()
 
+    # .xls/.xlsb → 自动转换为 .xlsx，保留原始文件
+    converted = False
+    original_filename = filename
+    from excelmanus.xls_converter import needs_conversion, convert_to_xlsx, ConversionError
+    if needs_conversion(dest_path):
+        try:
+            xlsx_path = convert_to_xlsx(dest_path, overwrite=True)
+            dest_path = xlsx_path
+            filename = xlsx_path.name
+            converted = True
+            logger.info("上传文件自动转换: %s → %s", original_filename, filename)
+        except (ConversionError, Exception) as exc:
+            logger.warning("上传文件转换失败，保留原始格式: %s (%s)", original_filename, exc)
+
     rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
 
     # 注册到 FileRegistry
     registry = _get_file_registry(str(ws.root_dir), user_id=user_id)
     if registry is not None:
         try:
-            registry.register_upload(
+            entry = registry.register_upload(
                 canonical_path=str(dest_path.relative_to(ws.root_dir)),
-                original_name=filename,
-                size_bytes=len(content),
+                original_name=original_filename,
+                size_bytes=dest_path.stat().st_size,
             )
+            # 转换后添加原始扩展名别名，方便用户用原名引用
+            if converted:
+                registry.add_alias(entry.id, "original_path", f"./{(target_dir / safe_name).relative_to(ws.root_dir)}")
         except Exception:
             logger.debug("FileRegistry register_upload 失败", exc_info=True)
 
-    return JSONResponse(content={
-        "filename": filename,
+    resp: dict[str, Any] = {
+        "filename": original_filename,
         "path": rel_path,
-        "size": len(content),
-    })
+        "size": dest_path.stat().st_size,
+    }
+    if converted:
+        resp["converted_from"] = original_filename
+        resp["converted_to"] = filename
+    return JSONResponse(content=resp)
 
 
 @_router.post("/api/v1/upload-from-url")

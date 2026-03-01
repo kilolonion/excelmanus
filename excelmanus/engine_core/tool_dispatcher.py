@@ -419,10 +419,12 @@ class ToolDispatcher:
                 parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
 
             # B 通道：缓存图片数据供异步 VLM 描述
-            if e.vlm_enhance_available:
+            # 当主模型有视觉能力时，C 通道已直接注入图片，跳过 B 通道以避免
+            # 额外的 VLM API 调用延迟（10-30s），主模型直接看图效果已足够。
+            if e.vlm_enhance_available and not e.is_vision_capable:
                 self._pending_vlm_image = injection
                 parsed["vlm_enhance"] = "VLM 增强描述将自动生成并追加到下方。"
-            elif not e.is_vision_capable:
+            elif not e.is_vision_capable and not e.vlm_enhance_available:
                 parsed["hint"] += "且未配置 VLM 增强，无法分析图片内容。建议配置 EXCELMANUS_VLM_* 环境变量。"
 
         cleaned = json.dumps(parsed, ensure_ascii=False) if mutated else result_str
@@ -2078,7 +2080,8 @@ class ToolDispatcher:
                 result_str = result_str + _ckpt
 
         # ── B 通道：异步 VLM 描述追加 ──
-        if success and self._pending_vlm_image is not None:
+        # 当主模型有视觉能力时跳过（C 通道已直接注入图片，无需额外 VLM 描述）
+        if success and self._pending_vlm_image is not None and not e.is_vision_capable:
             e.emit(
                 on_event,
                 ToolCallEvent(
@@ -2562,8 +2565,12 @@ class ToolDispatcher:
 
         abs_path = Path(file_path) if Path(file_path).is_absolute() else Path(workspace_root) / file_path
         abs_path = abs_path.resolve()
-        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm"):
+        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm", ".xls", ".xlsb"):
             return []
+
+        # .xls/.xlsb → 透明转换为 xlsx
+        from excelmanus.tools._helpers import ensure_openpyxl_compatible
+        abs_path = ensure_openpyxl_compatible(abs_path)
 
         wb = openpyxl.load_workbook(str(abs_path), read_only=False, data_only=True)
         try:
@@ -2600,8 +2607,12 @@ class ToolDispatcher:
 
         abs_path = Path(file_path) if Path(file_path).is_absolute() else Path(workspace_root) / file_path
         abs_path = abs_path.resolve()
-        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm"):
+        if not abs_path.is_file() or abs_path.suffix.lower() not in (".xlsx", ".xlsm", ".xls", ".xlsb"):
             return [], []
+
+        # .xls/.xlsb → 透明转换为 xlsx
+        from excelmanus.tools._helpers import ensure_openpyxl_compatible
+        abs_path = ensure_openpyxl_compatible(abs_path)
 
         wb = openpyxl.load_workbook(str(abs_path), read_only=False, data_only=False)
         try:
@@ -2876,6 +2887,34 @@ class ToolDispatcher:
                         excel_metadata_hints=diff_hints,
                     ),
                 )
+
+        # compare_excel 跨文件/跨 Sheet 对比 → EXCEL_DIFF（带扩展字段）
+        if tool_name == "compare_excel" and parsed.get("status") == "ok":
+            diff_mode = parsed.get("diff_mode", "cross_file")
+            sample_diffs = parsed.get("sample_diffs", [])
+            # 将 sample_diffs 转为 excel_changes 格式
+            cross_changes: list[dict] = []
+            for sd in sample_diffs[:200]:
+                cross_changes.append({
+                    "cell": sd.get("cell", sd.get("column", "")),
+                    "key": sd.get("key", ""),
+                    "old": sd.get("old"),
+                    "new": sd.get("new"),
+                })
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.EXCEL_DIFF,
+                    tool_call_id=tool_call_id,
+                    excel_file_path=arguments.get("file_a", ""),
+                    excel_sheet=arguments.get("sheet_a", ""),
+                    excel_changes=cross_changes,
+                    excel_diff_mode=diff_mode,
+                    excel_file_b=arguments.get("file_b", ""),
+                    excel_sheet_b=arguments.get("sheet_b", ""),
+                    excel_diff_summary=parsed.get("summary"),
+                ),
+            )
 
         # _text_diff 对应 TEXT_DIFF（write_text_file / edit_text_file 在结果中附带）
         text_diff_data = parsed.get("_text_diff")
