@@ -10,6 +10,7 @@ export interface AuthUser {
   hasCustomLlmKey: boolean;
   hasPassword: boolean;
   allowedModels: string[];
+  oauthProviders: string[];
   createdAt: string;
 }
 
