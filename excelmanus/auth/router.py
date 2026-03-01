@@ -13,9 +13,12 @@ from excelmanus.auth.dependencies import get_current_user, get_current_user_opti
 from excelmanus.auth.models import (
     ChangeEmailRequest,
     ChangePasswordRequest,
+    ConfirmMergeRequest,
     ForgotPasswordRequest,
     LoginRequest,
+    MergeRequiredResponse,
     OAuthCallbackParams,
+    OAuthLinkInfo,
     RefreshRequest,
     RegisterPendingResponse,
     RegisterRequest,
@@ -39,7 +42,9 @@ from excelmanus.auth.oauth import (
 )
 from excelmanus.auth.email import is_email_configured, send_verification_email
 from excelmanus.auth.security import (
+    create_merge_token,
     create_token_pair,
+    decode_merge_token,
     decode_token,
     hash_password,
     verify_password,
@@ -67,13 +72,17 @@ def _get_workspace_root(request: Request) -> str:
     return os.environ.get("EXCELMANUS_WORKSPACE_ROOT", "./workspace")
 
 
-def _build_token_response(user: UserRecord) -> TokenResponse:
+def _build_token_response(user: UserRecord, store: UserStore | None = None) -> TokenResponse:
     access, refresh, expires_in = create_token_pair(user.id, user.role)
+    oauth_providers: list[str] = []
+    if store is not None:
+        links = store.get_oauth_links(user.id)
+        oauth_providers = [link["provider"] for link in links]
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
         expires_in=expires_in,
-        user=UserPublic.from_record(user),
+        user=UserPublic.from_record(user, oauth_providers=oauth_providers),
     )
 
 
@@ -443,12 +452,34 @@ def _oauth_error_response(message: str, want_json: bool = False):
 
 
 def _oauth_success_response(store: UserStore, info: Any, want_json: bool = False):
-    """将 OAuth 信息换取 JWT 令牌，返回 JSON 或重定向到前端。"""
+    """将 OAuth 信息换取 JWT 令牌，返回 JSON 或重定向到前端。
+
+    如果检测到需要合并（同邮箱已有账号），返回 merge_required 响应。
+    """
     try:
-        token_resp = _handle_oauth_user(store, info)
+        result = _handle_oauth_user(store, info)
     except HTTPException as exc:
         return _oauth_error_response(exc.detail or "认证失败", want_json)
 
+    # 合并场景：返回 MergeRequiredResponse
+    if isinstance(result, MergeRequiredResponse):
+        if want_json:
+            return JSONResponse(result.model_dump())
+        from urllib.parse import urlencode
+        params = urlencode({
+            "merge_required": "1",
+            "merge_token": result.merge_token,
+            "existing_email": result.existing_email,
+            "existing_display_name": result.existing_display_name,
+            "existing_has_password": "1" if result.existing_has_password else "0",
+            "existing_providers": ",".join(result.existing_providers),
+            "new_provider": result.new_provider,
+            "new_provider_display_name": result.new_provider_display_name,
+        })
+        return RedirectResponse(f"/auth/callback?{params}")
+
+    # 正常登录
+    token_resp = result
     if want_json:
         return JSONResponse({
             "access_token": token_resp.access_token,
@@ -467,28 +498,53 @@ def _oauth_success_response(store: UserStore, info: Any, want_json: bool = False
     return RedirectResponse(f"/auth/callback?{params}")
 
 
-def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
-    """根据 OAuth 信息查找或创建用户，返回令牌对。"""
-    # 检查用户是否已通过 OAuth 关联
+def _handle_oauth_user(
+    store: UserStore, info: Any,
+) -> TokenResponse | MergeRequiredResponse:
+    """根据 OAuth 信息查找或创建用户。
+
+    返回 TokenResponse（直接登录）或 MergeRequiredResponse（需要前端确认合并）。
+    """
+    # 1) 检查是否已绑定此 OAuth
     user = store.get_by_oauth(info.provider, info.oauth_id)
     if user is not None:
         if not user.is_active:
             raise HTTPException(403, "账户已被禁用")
-        return _build_token_response(user)
+        return _build_token_response(user, store)
 
-    # 检查邮箱是否已注册（关联 OAuth）
-    user = store.get_by_email(info.email)
-    if user is not None:
-        store.update_user(
-            user.id,
-            oauth_provider=info.provider,
+    # 2) 检查邮箱是否已被其他账号使用 → 需要合并确认
+    existing = store.get_by_email(info.email)
+    if existing is not None:
+        if not existing.is_active:
+            raise HTTPException(403, "该邮箱关联的账户已被禁用")
+        # 获取已有绑定列表
+        existing_links = store.get_oauth_links(existing.id)
+        existing_providers = [link["provider"] for link in existing_links]
+        # 生成短效合并令牌
+        merge_token = create_merge_token(
+            existing_user_id=existing.id,
+            provider=info.provider,
             oauth_id=info.oauth_id,
-            avatar_url=info.avatar_url or user.avatar_url,
+            email=info.email,
+            display_name=info.display_name or "",
+            avatar_url=info.avatar_url,
         )
-        updated = store.get_by_id(user.id)
-        return _build_token_response(updated or user)
+        logger.info(
+            "OAuth 合并待确认: email=%s provider=%s existing_user=%s",
+            info.email, info.provider, existing.id,
+        )
+        return MergeRequiredResponse(
+            merge_token=merge_token,
+            existing_email=existing.email,
+            existing_display_name=existing.display_name,
+            existing_providers=existing_providers,
+            existing_has_password=bool(existing.password_hash),
+            new_provider=info.provider,
+            new_provider_display_name=info.display_name or "",
+            new_provider_avatar_url=info.avatar_url,
+        )
 
-    # 创建新用户
+    # 3) 完全新用户 → 创建用户 + OAuth 绑定
     role = UserRole.ADMIN if store.count_users() == 0 else UserRole.USER
     user = UserRecord(
         email=info.email,
@@ -499,8 +555,124 @@ def _handle_oauth_user(store: UserStore, info: Any) -> TokenResponse:
         avatar_url=info.avatar_url,
     )
     store.create_user(user)
+    # 同时在 user_oauth_links 表创建绑定
+    store.create_oauth_link(
+        user_id=user.id,
+        provider=info.provider,
+        oauth_id=info.oauth_id,
+        display_name=info.display_name,
+        avatar_url=info.avatar_url,
+    )
     logger.info("OAuth 用户注册: %s via %s", info.email, info.provider)
-    return _build_token_response(user)
+    return _build_token_response(user, store)
+
+
+# ── 账号合并确认 ─────────────────────────────────────
+
+
+@router.post("/oauth/confirm-merge", response_model=TokenResponse)
+async def confirm_merge(body: ConfirmMergeRequest, request: Request) -> Any:
+    """前端确认合并后调用：将 OAuth 绑定添加到已有账号。"""
+    payload = decode_merge_token(body.merge_token)
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="合并令牌无效或已过期，请重新登录",
+        )
+
+    store = _get_store(request)
+    user_id = payload["sub"]
+    provider = payload["provider"]
+    oauth_id = payload["oauth_id"]
+    display_name = payload.get("display_name", "")
+    avatar_url = payload.get("avatar_url") or None
+
+    user = store.get_by_id(user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=404, detail="用户不存在或已禁用")
+
+    # 检查是否已绑定（幂等）
+    existing_link = store.get_oauth_link(provider, oauth_id)
+    if existing_link is None:
+        store.create_oauth_link(
+            user_id=user_id,
+            provider=provider,
+            oauth_id=oauth_id,
+            display_name=display_name,
+            avatar_url=avatar_url,
+        )
+
+    # 如果用户没有头像，用 OAuth 提供的
+    if not user.avatar_url and avatar_url:
+        store.update_user(user_id, avatar_url=avatar_url)
+        user = store.get_by_id(user_id) or user
+
+    logger.info("OAuth 合并完成: user=%s provider=%s", user.email, provider)
+    return _build_token_response(user, store)
+
+
+# ── OAuth Links 管理（个人中心） ──────────────────────
+
+
+@router.get("/me/oauth-links")
+async def list_oauth_links(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """列出当前用户已绑定的 OAuth 登录方式。"""
+    store = _get_store(request)
+    links = store.get_oauth_links(user.id)
+    return {
+        "links": [
+            OAuthLinkInfo(
+                provider=link["provider"],
+                display_name=link.get("display_name"),
+                avatar_url=link.get("avatar_url"),
+                linked_at=link["linked_at"],
+            ).model_dump()
+            for link in links
+        ],
+        "has_password": bool(user.password_hash),
+    }
+
+
+@router.delete("/me/oauth-links/{provider}")
+async def unlink_oauth(
+    provider: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """解绑某个 OAuth 登录方式。至少保留一种登录方式（密码或 OAuth）。"""
+    store = _get_store(request)
+    link_count = store.count_oauth_links(user.id)
+    has_password = bool(user.password_hash)
+
+    # 安全检查：不能解绑到零登录方式
+    if not has_password and link_count <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无法解绑：您需要至少保留一种登录方式。请先设置密码，再解绑此账号。",
+        )
+
+    deleted = store.delete_oauth_link(user.id, provider)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="未找到该绑定")
+
+    logger.info("OAuth 解绑: user=%s provider=%s", user.email, provider)
+    # 返回更新后的绑定列表
+    links = store.get_oauth_links(user.id)
+    return {
+        "status": "ok",
+        "links": [
+            OAuthLinkInfo(
+                provider=link["provider"],
+                display_name=link.get("display_name"),
+                avatar_url=link.get("avatar_url"),
+                linked_at=link["linked_at"],
+            ).model_dump()
+            for link in links
+        ],
+    }
 
 
 # ── 头像代理（绕过 GFW） ─────────────────────────────
@@ -1090,6 +1262,7 @@ _LOGIN_TOGGLE_KEYS: dict[str, bool] = {
     "login_google_enabled": True,
     "login_qq_enabled": False,
     "email_verify_required": False,
+    "require_agreement": True,
 }
 
 # 字符串凭据 key → 对应环境变量名
