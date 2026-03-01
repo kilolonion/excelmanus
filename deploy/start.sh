@@ -149,9 +149,9 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ── GitHub 仓库配置 ──
-REPO_URL="https://github.com/kilolonion/excelmanus"
-REPO_URL_GITEE="https://gitee.com/kilolonion/excelmanus.git"
+# ── Git 仓库配置（优先 Gitee）──
+REPO_URL="https://gitee.com/kilolonion/excelmanus.git"
+REPO_URL_GITHUB="https://github.com/kilolonion/excelmanus"
 REPO_BRANCH="main"
 
 # ── 检查项目完整性（缺失则克隆，国内优先 Gitee）──
@@ -164,25 +164,14 @@ if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
   fi
   tmpdir="${PROJECT_ROOT}_tmp"
   clone_ok=false
-  # Try Gitee first for domestic users
-  if [[ "$IS_DOMESTIC" == true ]]; then
-    info "正在从 Gitee 镜像克隆项目（加速）..."
-    git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL_GITEE" "$tmpdir" 2>/dev/null && clone_ok=true
-  fi
+  # Try Gitee first
+  info "正在从 Gitee 克隆项目..."
+  git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$tmpdir" 2>/dev/null && clone_ok=true
   if [[ "$clone_ok" != true ]]; then
-    info "正在从 GitHub 克隆项目..."
-    git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$tmpdir" || {
-      # Final fallback to Gitee
-      if [[ "$IS_DOMESTIC" != true ]]; then
-        warn "GitHub 克隆失败，尝试 Gitee 镜像..."
-        git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL_GITEE" "$tmpdir" || {
-          error "Git 克隆失败，请检查网络连接"
-          exit 1
-        }
-      else
-        error "Git 克隆失败，请检查网络连接"
-        exit 1
-      fi
+    info "Gitee 克隆失败，尝试 GitHub..."
+    git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL_GITHUB" "$tmpdir" || {
+      error "Git 克隆失败，请检查网络连接"
+      exit 1
     }
   fi
   cp -a "$tmpdir"/. "$PROJECT_ROOT"/

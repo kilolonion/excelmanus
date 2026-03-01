@@ -32,7 +32,7 @@ services:
       - EXCELMANUS_DATABASE_URL=postgresql://${PG_USER:-excelmanus}:${PG_PASSWORD:-excelmanus}@postgres:5432/excelmanus
       - EXCELMANUS_WORKSPACE_ROOT=/workspace
       - EXCELMANUS_DB_PATH=/data/excelmanus.db
-      - EXCELMANUS_CORS_ALLOW_ORIGINS=http://localhost:3000,http://localhost
+      - EXCELMANUS_CORS_ALLOW_ORIGINS=${EXCELMANUS_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost}
     volumes:
       - workspace_data:/workspace
       - db_data:/data

@@ -76,13 +76,12 @@ cd excelmanus
 <details open>
 <summary><b>Windows — 图形化部署工具</b></summary>
 
-**无需提前 clone 仓库**，直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManusDeployTool.exe` 双击运行即可。
+**无需提前 clone 仓库**，直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe` 双击运行即可。
 
-工具采用**三步向导式界面**，全程引导完成部署：
+工具采用**两步向导式界面**，全程引导完成部署：
 
 1. **Step 1 — 环境检测**：自动检测 Python、Node.js、Git，缺失时通过 winget 自动安装，失败时提供手动下载链接
-2. **Step 2 — 配置 AI 模型**：内置 DeepSeek / 硅基流动 / OpenAI 提供商预设，选择后自动填充 Base URL 和模型列表；支持「测试连接」验证 API Key
-3. **Step 3 — 一键部署**：自动克隆仓库、安装后端/前端依赖、启动服务，进度条实时展示当前步骤
+2. **Step 2 — 一键部署**：自动克隆仓库、安装后端/前端依赖、启动服务，进度条实时展示当前步骤
 
 部署完成后浏览器会自动打开 **http://localhost:3000**。
 
@@ -293,19 +292,18 @@ cd web && npm install && npm run dev    # 前端
 
 ### Windows 图形化部署工具
 
-Windows 用户可直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManusDeployTool.exe`，**无需提前 clone 仓库**。
+Windows 用户可直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe`，**无需提前 clone 仓库**。
 
 ```text
-ExcelManusDeployTool.exe    ← 下载后双击即可，放在任意目录
+ExcelManus.exe    ← 下载后双击即可，放在任意目录
 ```
 
-工具采用**三步向导式界面**（v2.0），全程引导完成部署：
+工具采用**两步向导式界面**（v2.0），全程引导完成部署：
 
 | 步骤 | 说明 |
 |------|------|
 | **Step 1 — 环境检测** | 自动检测 Python、Node.js、Git，缺失时 winget 自动安装，失败提供手动下载链接 |
-| **Step 2 — 配置 AI 模型** | 内置 DeepSeek / 硅基流动 / OpenAI 预设，自动填充 URL 和模型；支持「测试连接」 |
-| **Step 3 — 一键部署** | 克隆仓库 → 安装依赖 → 启动服务，进度条 + 可折叠日志 |
+| **Step 2 — 一键部署** | 克隆仓库 → 安装依赖 → 启动服务，进度条 + 可折叠日志 |
 
 **国内网络优化**：
 - Git clone 先试 GitHub，失败自动回退 **Gitee 镜像**

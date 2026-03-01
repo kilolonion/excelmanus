@@ -265,6 +265,31 @@ if (-not $SkipDeps) {
     Write-Warn "跳过依赖更新 (-SkipDeps)"
 }
 
+# Step 5: 预验证数据库迁移
+Write-Step "预验证数据库迁移"
+$venvPyCheck = Join-Path $Script:PROJECT_ROOT ".venv" "Scripts" "python.exe"
+if (-not (Test-Path $venvPyCheck)) { $venvPyCheck = "python" }
+try {
+    $dbCheckResult = & $venvPyCheck -c @"
+import sys
+try:
+    from excelmanus.updater import verify_database_migration
+    ok, msg = verify_database_migration('$($Script:PROJECT_ROOT -replace '\\','\\\\')')
+    print(msg)
+    sys.exit(0 if ok else 1)
+except Exception as e:
+    print(f'跳过预验证: {e}')
+    sys.exit(0)
+"@ 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "数据库迁移验证: $dbCheckResult"
+    } else {
+        Write-Warn "数据库迁移预验证警告: $dbCheckResult（将在启动时自动重试）"
+    }
+} catch {
+    Write-Warn "数据库迁移预验证跳过: $_"
+}
+
 # 完成
 Write-Host ""
 Write-Host "  +======================================+" -ForegroundColor Green

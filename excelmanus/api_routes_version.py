@@ -1,6 +1,7 @@
-"""版本与备份管理 API 路由。
+"""版本、备份与更新管理 API 路由。
 
-提供版本检查、备份列表/删除、安装注册表管理等端点。
+提供版本检查、备份列表/删除、执行更新、恢复备份、
+安装注册表管理、数据迁移等端点。
 由 api.py 在 lifespan 完成后通过 include_router 注册。
 """
 
@@ -48,12 +49,14 @@ def _is_admin_or_noauth(request: Request) -> bool:
 @router.get("/api/v1/version/check")
 async def version_check(request: Request) -> JSONResponse:
     """检查当前版本与可用更新。"""
+    import asyncio
     from excelmanus.updater import check_for_updates, get_current_version
 
     root = _get_project_root()
     current = get_current_version(root)
     try:
-        info = check_for_updates(root)
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, check_for_updates, root)
         return JSONResponse(content={
             "current": current,
             "latest": info.latest,
@@ -170,3 +173,125 @@ async def delete_installation(body: DeleteInstallationRequest, request: Request)
 
     _save_installations(installations)
     return JSONResponse(content={"status": "ok", "remaining": len(installations)})
+
+
+# ── 执行更新 ──────────────────────────────────────────
+
+
+class UpdateApplyRequest(BaseModel):
+    skip_backup: bool = Field(default=False, description="跳过数据备份")
+    skip_deps: bool = Field(default=False, description="跳过依赖重装")
+    use_mirror: bool = Field(default=False, description="使用国内镜像")
+
+
+@router.post("/api/v1/version/update/apply")
+async def version_update_apply(request: Request) -> JSONResponse:
+    """执行更新（仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.updater import perform_update
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    root = _get_project_root()
+    loop = asyncio.get_event_loop()
+
+    result = await loop.run_in_executor(
+        None,
+        lambda: perform_update(
+            root,
+            skip_backup=bool(body.get("skip_backup", False)),
+            skip_deps=bool(body.get("skip_deps", False)),
+            use_mirror=bool(body.get("use_mirror", False)),
+        ),
+    )
+
+    status_code = 200 if result.success else 500
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": result.success,
+            "old_version": result.old_version,
+            "new_version": result.new_version,
+            "backup_dir": result.backup_dir,
+            "steps_completed": result.steps_completed,
+            "error": result.error,
+            "needs_restart": result.needs_restart,
+        },
+    )
+
+
+# ── 恢复备份 ──────────────────────────────────────────
+
+
+class RestoreBackupRequest(BaseModel):
+    backup_name: str = Field(description="备份目录名称，如 backup_1.6.6_20260301_120000")
+
+
+@router.post("/api/v1/version/backups/restore")
+async def version_restore_backup(body: RestoreBackupRequest, request: Request) -> JSONResponse:
+    """从指定备份恢复数据（仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.updater import restore_from_backup
+
+    name = body.backup_name
+    if not name:
+        return _error(400, "缺少 backup_name 参数")
+
+    # 安全检查
+    if not name.startswith("backup_") or "/" in name or "\\" in name or ".." in name:
+        return _error(400, f"非法备份名称: {name}")
+
+    root = _get_project_root()
+    backup_dir = root / "backups" / name
+    if not backup_dir.is_dir():
+        return _error(404, f"备份不存在: {name}")
+
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(
+        None, restore_from_backup, str(backup_dir), str(root),
+    )
+
+    if ok:
+        return JSONResponse(content={"status": "ok", "message": "数据已从备份恢复，请重启服务。"})
+    return _error(500, "恢复失败，请查看服务日志")
+
+
+# ── 数据迁移 ──────────────────────────────────────────
+
+
+class MigrateDataRequest(BaseModel):
+    source: str = Field(default="", description="源安装目录路径（为空则使用当前项目）")
+
+
+@router.post("/api/v1/version/data/migrate")
+async def version_migrate_data(request: Request) -> JSONResponse:
+    """从指定旧安装目录迁移数据到集中位置（仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.data_home import migrate_data_from_project
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    source = body.get("source", "")
+    if not source:
+        source = str(_get_project_root())
+
+    loop = asyncio.get_event_loop()
+    stats = await loop.run_in_executor(None, migrate_data_from_project, source)
+    return JSONResponse(content={"status": "ok", "migrated": stats})

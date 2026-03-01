@@ -6,7 +6,7 @@ if /I "%~1"=="/auto" set "AUTO=1"
 
 set "SCRIPT_DIR=%~dp0"
 set "SRC=%SCRIPT_DIR%ExcelManusSetup.cs"
-set "OUT=%SCRIPT_DIR%ExcelManusDeployTool.exe"
+set "OUT=%SCRIPT_DIR%ExcelManus.exe"
 
 REM Find csc.exe (prefer x64)
 set "CSC="
@@ -38,9 +38,9 @@ echo [OK] Build succeeded.
 echo [OK] Output: %OUT%
 
 REM Copy to repo root for direct run
-copy /Y "%OUT%" "%SCRIPT_DIR%..\ExcelManusDeployTool.exe" >nul 2>&1
+copy /Y "%OUT%" "%SCRIPT_DIR%..\ExcelManus.exe" >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] Copied to repo root: ExcelManusDeployTool.exe
+    echo [OK] Copied to repo root: ExcelManus.exe
 )
 
 if "%AUTO%"=="0" (

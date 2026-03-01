@@ -20,11 +20,22 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-REPO_URL = "https://github.com/kilolonion/excelmanus.git"
-REPO_URL_GITEE = "https://gitee.com/kilolonion/excelmanus.git"
+REPO_URL = "https://gitee.com/kilolonion/excelmanus.git"
+REPO_URL_GITHUB = "https://github.com/kilolonion/excelmanus.git"
 GITHUB_API_TAGS = "https://api.github.com/repos/kilolonion/excelmanus/tags"
 _BACKUP_DIR_NAME = "backups"
 _DATA_PATHS_TO_BACKUP = [".env", "users", "outputs", "uploads"]
+
+
+def _parse_version_tuple(v: str) -> tuple[int, ...]:
+    """将版本字符串解析为可比较的整数元组，用于 semver 比较。
+
+    例如 '1.6.10' → (1, 6, 10)，无法解析时回退到 (0,)。
+    """
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except (ValueError, AttributeError):
+        return (0,)
 
 
 @dataclass
@@ -144,10 +155,10 @@ def _has_uv() -> bool:
         return False
 
 
-def _ensure_gitee_remote(project_root: Path) -> None:
-    """Ensure 'gitee' remote exists as a fallback mirror."""
-    _run_cmd(["git", "remote", "add", "gitee", REPO_URL_GITEE], cwd=project_root)
-    _run_cmd(["git", "remote", "set-url", "gitee", REPO_URL_GITEE], cwd=project_root)
+def _ensure_github_remote(project_root: Path) -> None:
+    """Ensure 'github' remote exists as a fallback mirror."""
+    _run_cmd(["git", "remote", "add", "github", REPO_URL_GITHUB], cwd=project_root)
+    _run_cmd(["git", "remote", "set-url", "github", REPO_URL_GITHUB], cwd=project_root)
 
 
 def check_for_updates(project_root: str | Path | None = None) -> VersionInfo:
@@ -199,7 +210,10 @@ def check_for_updates(project_root: str | Path | None = None) -> VersionInfo:
             if data and isinstance(data, list):
                 latest_tag = data[0].get("name", "").lstrip("v")
                 info.latest = latest_tag
-                info.has_update = latest_tag != info.current
+                info.has_update = (
+                    _parse_version_tuple(latest_tag)
+                    > _parse_version_tuple(info.current)
+                )
     except Exception as e:
         logger.warning("GitHub API 检查更新失败: %s", e)
         info.latest = info.current
@@ -328,9 +342,21 @@ def restore_from_backup(
                 shutil.copy2(str(src), str(dst))
                 _log(f"  恢复文件: {rel_path}")
             elif src.is_dir():
-                if dst.is_dir():
-                    shutil.rmtree(str(dst))
-                shutil.copytree(str(src), str(dst))
+                # 安全恢复：先复制到临时目录，成功后再替换，避免 copytree 失败导致数据丢失
+                dst_tmp = dst.with_name(dst.name + "._restore_tmp")
+                try:
+                    if dst_tmp.is_dir():
+                        shutil.rmtree(str(dst_tmp))
+                    shutil.copytree(str(src), str(dst_tmp))
+                    # 复制成功，替换原目录
+                    if dst.is_dir():
+                        shutil.rmtree(str(dst))
+                    dst_tmp.rename(dst)
+                except Exception:
+                    # 清理临时目录
+                    if dst_tmp.is_dir():
+                        shutil.rmtree(str(dst_tmp), ignore_errors=True)
+                    raise
                 _log(f"  恢复目录: {rel_path}/")
         home_db_backup = backup_dir / ".excelmanus_home"
         if home_db_backup.is_dir():
@@ -404,7 +430,7 @@ def verify_database_migration(
 
         if current >= _LATEST_VERSION:
             return True, f"schema v{current}（已是最新）"
-        return True, f"schema v{current} → v{_LATEST_VERSION} 迁移成功"
+        return True, f"schema v{current} → v{_LATEST_VERSION} 待迁移（将在启动时自动执行）"
     except Exception as e:
         return False, f"迁移失败: {e}"
 
@@ -467,7 +493,11 @@ def perform_update(
         result.error = "项目不是 Git 仓库，无法更新"
         return result
     _p("正在拉取最新代码...", 30)
-    _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
+    # 检测是否有本地修改需要暂存
+    _, status_out, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
+    has_stash = bool(status_out.strip())
+    if has_stash:
+        _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
     _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
     branch = branch or "main"
     git_remote = "origin"
@@ -475,14 +505,14 @@ def perform_update(
         ["git", "pull", "origin", branch, "--ff-only"],
         cwd=project_root, timeout=60 if domestic else 120,
     )
-    if rc != 0 and domestic:
-        _p("GitHub 拉取较慢，尝试 Gitee 镜像...", 33)
-        _ensure_gitee_remote(project_root)
-        rc2, _, _ = _run_cmd(["git", "fetch", "gitee", branch], cwd=project_root, timeout=120)
+    if rc != 0:
+        _p("拉取失败，尝试 GitHub 备用源...", 33)
+        _ensure_github_remote(project_root)
+        rc2, _, _ = _run_cmd(["git", "fetch", "github", branch], cwd=project_root, timeout=120)
         if rc2 == 0:
-            git_remote = "gitee"
+            git_remote = "github"
             rc, _, err = _run_cmd(
-                ["git", "merge", f"gitee/{branch}", "--ff-only"], cwd=project_root,
+                ["git", "merge", f"github/{branch}", "--ff-only"], cwd=project_root,
             )
     if rc != 0:
         _p("fast-forward 失败，执行强制覆盖...", 35)
@@ -492,6 +522,11 @@ def perform_update(
             _run_cmd(["git", "stash", "pop"], cwd=project_root)
             return result
     result.steps_completed.append("git_pull")
+    # 恢复暂存的本地修改（成功路径）
+    if has_stash:
+        rc_pop, _, _ = _run_cmd(["git", "stash", "pop"], cwd=project_root)
+        if rc_pop != 0:
+            _p("警告: git stash pop 失败，本地修改保留在 stash 中，请手动执行 git stash pop", 43)
     _p("代码已更新", 45)
 
     # Step 4: 安装依赖（pip + npm 并行，uv 优先，镜像加速）
@@ -522,8 +557,9 @@ def perform_update(
                 npm_args.append("--registry=https://registry.npmmirror.com")
             rc, _, err = _run_cmd(npm_args, cwd=web_dir, timeout=300)
             if rc != 0 and not domestic:
-                npm_args.append("--registry=https://registry.npmmirror.com")
-                rc, _, err = _run_cmd(npm_args, cwd=web_dir, timeout=300)
+                # 首次未使用镜像，重试时加上镜像（用新的参数列表避免重复）
+                npm_args_mirror = ["npm", "install", "--registry=https://registry.npmmirror.com"]
+                rc, _, err = _run_cmd(npm_args_mirror, cwd=web_dir, timeout=300)
             return rc == 0, err
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -533,7 +569,7 @@ def perform_update(
             fe_ok, _ = fut_fe.result(timeout=600)
 
         if not be_ok:
-            result.error = f"后端依赖更新失败: {be_err[-200:]}"
+            result.error = f"后端依赖更新失败: {be_err[-200:]}（代码已更新到新版本，请手动执行 pip install -e . 或使用 --rollback 回滚）"
             return result
         result.steps_completed.append("pip_install")
         _p("后端依赖已更新", 65)

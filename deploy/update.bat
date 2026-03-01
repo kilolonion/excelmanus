@@ -138,8 +138,12 @@ if %AUTO_YES%==0 (
 REM ── Step 2: 备份 ──
 if %SKIP_BACKUP%==0 (
     echo -- 备份用户数据 --
-    set "TS=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
-    set "TS=!TS: =0!"
+    REM 使用 PowerShell 获取区域设置无关的时间戳
+    for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'"') do set "TS=%%t"
+    if not defined TS (
+        set "TS=%date:~0,4%%date:~5,2%%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
+        set "TS=!TS: =0!"
+    )
     set "BACKUP_PATH=backups\backup_%CURRENT_VERSION%_!TS!"
     mkdir "!BACKUP_PATH!" 2>nul
 
@@ -216,6 +220,17 @@ if %SKIP_DEPS%==0 (
     )
 ) else (
     echo [!!] 跳过依赖更新
+)
+
+REM ── Step 5: 预验证数据库迁移 ──
+echo -- 预验证数据库迁移 --
+set "DB_PY=python"
+if exist ".venv\Scripts\python.exe" set "DB_PY=.venv\Scripts\python.exe"
+!DB_PY! -c "import sys; exec('try:\n from excelmanus.updater import verify_database_migration\n ok, msg = verify_database_migration()\n print(msg)\n sys.exit(0 if ok else 1)\nexcept Exception as e:\n print(f\"跳过预验证: {e}\")\n sys.exit(0)')" 2>nul
+if errorlevel 1 (
+    echo [!!] 数据库迁移预验证警告（将在启动时自动重试）
+) else (
+    echo [OK] 数据库迁移验证通过
 )
 
 REM ── 完成 ──
