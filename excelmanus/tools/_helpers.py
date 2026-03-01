@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Sequence
+
+_logger = logging.getLogger(__name__)
 
 # 文件存在性检查时，最多列出的可用文件数量
 _MAX_SUGGESTION_FILES = 15
@@ -127,3 +130,31 @@ def get_worksheet(wb: Any, sheet_name: str | None) -> Any:
     if resolved is not None:
         return wb[resolved]
     return wb.active
+
+
+def ensure_openpyxl_compatible(safe_path: Path) -> Path:
+    """确保路径指向 openpyxl 可操作的文件格式（.xlsx/.xlsm）。
+
+    若为 .xls/.xlsb，透明转换为同目录 .xlsx 并返回新路径。
+    转换结果会被缓存（同名 .xlsx 已存在时跳过转换）。
+    CSV 文件原样返回（由调用方处理）。
+
+    Args:
+        safe_path: 经 guard.resolve_and_validate 后的绝对路径。
+
+    Returns:
+        openpyxl 可直接打开的文件路径。
+    """
+    from excelmanus.xls_converter import needs_conversion, ensure_xlsx
+
+    if not needs_conversion(safe_path):
+        return safe_path
+
+    try:
+        xlsx_path, converted = ensure_xlsx(safe_path)
+        if converted:
+            _logger.info("工具层自动转换: %s → %s", safe_path.name, xlsx_path.name)
+        return xlsx_path
+    except Exception as exc:
+        _logger.warning("工具层 xls 转换失败，返回原路径: %s (%s)", safe_path.name, exc)
+        return safe_path

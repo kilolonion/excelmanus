@@ -109,6 +109,9 @@ def list_sheets(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     not_found = check_file_exists(safe_path, file_path, guard)
     if not_found is not None:
         return not_found
@@ -472,8 +475,12 @@ def copy_range_between_sheets(
     """
     guard = _get_guard()
     safe_source = guard.resolve_and_validate(source_file)
+
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_source = ensure_openpyxl_compatible(safe_source)
+
     same_file = target_file is None or str(guard.resolve_and_validate(target_file)) == str(safe_source)
-    safe_target = safe_source if same_file else guard.resolve_and_validate(target_file)  # type: ignore[arg-type]
+    safe_target = safe_source if same_file else ensure_openpyxl_compatible(guard.resolve_and_validate(target_file))  # type: ignore[arg-type]
 
     # 读取源数据
     src_wb = load_workbook(safe_source, data_only=True)

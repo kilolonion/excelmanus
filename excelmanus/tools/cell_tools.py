@@ -244,6 +244,10 @@ def write_cells(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -455,6 +459,10 @@ def insert_rows(
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -523,6 +531,10 @@ def insert_columns(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)

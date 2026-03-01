@@ -1047,50 +1047,182 @@ class FileRegistry:
 
     @staticmethod
     def _scan_file_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
-        """用 openpyxl 扫描单个 Excel 文件的 sheet 元数据。"""
+        """扫描单个 Excel 文件的 sheet 元数据。
+
+        支持 .xlsx/.xlsm (openpyxl)、.xls (xlrd)、.xlsb (pyxlsb)、.csv。
+        """
+        ext = fp.suffix.lower()
+
         # CSV 文件不走 openpyxl
-        if fp.suffix.lower() == ".csv":
-            import csv as _csv
+        if ext == ".csv":
+            return FileRegistry._scan_csv_sheets(fp, header_scan_rows)
 
-            _enc = "utf-8"
-            for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
-                try:
-                    with open(fp, "r", encoding=_try_enc) as _f:
-                        _f.read(4096)
-                    _enc = _try_enc
+        # .xls → xlrd 直接读取元数据（不转换）
+        if ext == ".xls":
+            return FileRegistry._scan_xls_sheets(fp, header_scan_rows)
+
+        # .xlsb → pyxlsb 直接读取元数据（不转换）
+        if ext == ".xlsb":
+            return FileRegistry._scan_xlsb_sheets(fp, header_scan_rows)
+
+        # .xlsx/.xlsm → openpyxl
+        return FileRegistry._scan_xlsx_sheets(fp, header_scan_rows)
+
+    @staticmethod
+    def _scan_csv_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
+        """扫描 CSV 文件的元数据。"""
+        import csv as _csv
+
+        _enc = "utf-8"
+        for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
+            try:
+                with open(fp, "r", encoding=_try_enc) as _f:
+                    _f.read(4096)
+                _enc = _try_enc
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+        with open(fp, "r", encoding=_enc, newline="") as _f:
+            reader = _csv.reader(_f)
+            rows_raw: list[list[str]] = []
+            for row in reader:
+                rows_raw.append(row)
+                if len(rows_raw) >= header_scan_rows + 1:
                     break
-                except (UnicodeDecodeError, LookupError):
-                    continue
 
-            with open(fp, "r", encoding=_enc, newline="") as _f:
-                reader = _csv.reader(_f)
-                rows_raw: list[list[str]] = []
-                for row in reader:
-                    rows_raw.append(row)
-                    if len(rows_raw) >= header_scan_rows + 1:
-                        break
+        total_rows = len(rows_raw)
+        total_cols = max((len(r) for r in rows_raw), default=0)
+        headers: list[str] = []
+        if rows_raw:
+            best_idx = 0
+            best_score = -1
+            for idx, r in enumerate(rows_raw):
+                non_empty = [v for v in r if v and v.strip()]
+                score = len(non_empty) * 2
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+            headers = [v.strip() for v in rows_raw[best_idx] if v and v.strip()]
 
-            total_rows = len(rows_raw)
-            total_cols = max((len(r) for r in rows_raw), default=0)
-            headers: list[str] = []
-            if rows_raw:
-                best_idx = 0
-                best_score = -1
-                for idx, r in enumerate(rows_raw):
-                    non_empty = [v for v in r if v and v.strip()]
-                    score = len(non_empty) * 2
-                    if score > best_score:
-                        best_score = score
-                        best_idx = idx
-                headers = [v.strip() for v in rows_raw[best_idx] if v and v.strip()]
+        return [{
+            "name": "Sheet1",
+            "rows": total_rows,
+            "columns": total_cols,
+            "headers": headers,
+        }]
 
-            return [{
-                "name": "Sheet1",
-                "rows": total_rows,
-                "columns": total_cols,
-                "headers": headers,
-            }]
+    @staticmethod
+    def _scan_xls_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
+        """用 xlrd 扫描 .xls 文件的 sheet 元数据。"""
+        try:
+            import xlrd
+        except ImportError:
+            logger.warning("xlrd 未安装，无法扫描 .xls 文件: %s", fp.name)
+            return []
 
+        xls_wb = xlrd.open_workbook(str(fp), on_demand=True)
+        sheets: list[dict] = []
+        try:
+            for si in range(xls_wb.nsheets):
+                xls_ws = xls_wb.sheet_by_index(si)
+                total_rows = xls_ws.nrows
+                total_cols = xls_ws.ncols
+
+                headers: list[str] = []
+                if total_rows > 0:
+                    scan_limit = min(header_scan_rows, total_rows)
+                    rows_raw: list[list[Any]] = []
+                    for r in range(scan_limit):
+                        row_vals = []
+                        for c in range(min(total_cols, 30)):
+                            row_vals.append(xls_ws.cell_value(r, c))
+                        rows_raw.append(row_vals)
+
+                    if rows_raw:
+                        best_idx = 0
+                        best_score = -1
+                        for idx, r in enumerate(rows_raw):
+                            non_empty = [v for v in r if v is not None and str(v).strip()]
+                            str_count = sum(1 for v in non_empty if isinstance(v, str))
+                            score = str_count * 2 + len(non_empty)
+                            if score > best_score:
+                                best_score = score
+                                best_idx = idx
+                        header_row = rows_raw[best_idx]
+                        headers = [
+                            str(v).strip()
+                            for v in header_row
+                            if v is not None and str(v).strip()
+                        ]
+
+                sheets.append({
+                    "name": xls_ws.name,
+                    "rows": total_rows,
+                    "columns": total_cols,
+                    "headers": headers,
+                })
+        finally:
+            xls_wb.release_resources()
+        return sheets
+
+    @staticmethod
+    def _scan_xlsb_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
+        """用 pyxlsb 扫描 .xlsb 文件的 sheet 元数据。"""
+        try:
+            from pyxlsb import open_workbook as open_xlsb
+        except ImportError:
+            logger.warning("pyxlsb 未安装，无法扫描 .xlsb 文件: %s", fp.name)
+            return []
+
+        sheets: list[dict] = []
+        xlsb_wb = open_xlsb(str(fp))
+        try:
+            for sheet_name in xlsb_wb.sheets:
+                total_rows = 0
+                total_cols = 0
+                rows_raw: list[list[Any]] = []
+
+                with xlsb_wb.get_sheet(sheet_name) as xlsb_ws:
+                    for row in xlsb_ws.rows():
+                        total_rows += 1
+                        row_vals = [cell.v for cell in row]
+                        if len(row_vals) > total_cols:
+                            total_cols = len(row_vals)
+                        if len(rows_raw) < header_scan_rows:
+                            rows_raw.append(row_vals)
+
+                headers: list[str] = []
+                if rows_raw:
+                    best_idx = 0
+                    best_score = -1
+                    for idx, r in enumerate(rows_raw):
+                        non_empty = [v for v in r if v is not None and str(v).strip()]
+                        str_count = sum(1 for v in non_empty if isinstance(v, str))
+                        score = str_count * 2 + len(non_empty)
+                        if score > best_score:
+                            best_score = score
+                            best_idx = idx
+                    header_row = rows_raw[best_idx]
+                    headers = [
+                        str(v).strip()
+                        for v in header_row
+                        if v is not None and str(v).strip()
+                    ]
+
+                sheets.append({
+                    "name": sheet_name,
+                    "rows": total_rows,
+                    "columns": total_cols,
+                    "headers": headers,
+                })
+        finally:
+            xlsb_wb.close()
+        return sheets
+
+    @staticmethod
+    def _scan_xlsx_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
+        """用 openpyxl 扫描 .xlsx/.xlsm 文件的 sheet 元数据。"""
         from openpyxl import load_workbook
 
         sheets: list[dict] = []
