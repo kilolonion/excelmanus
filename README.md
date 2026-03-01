@@ -76,16 +76,19 @@ cd excelmanus
 <details open>
 <summary><b>Windows — 图形化部署工具</b></summary>
 
-双击项目根目录的 `ExcelManusDeployTool.exe` 即可，无需安装任何环境。
+**无需提前 clone 仓库**，直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManusDeployTool.exe` 双击运行即可。
 
-工具会自动打开浏览器，在可视化界面中：
-1. **自动检测环境** — Python、Node.js、npm、Git，缺失时通过 winget 自动安装
-2. **填写 LLM 配置** — API Key、Base URL、模型名称
-3. **点击「启动部署」** — 自动创建虚拟环境、安装依赖、启动前后端服务
+工具采用**三步向导式界面**，全程引导完成部署：
+
+1. **Step 1 — 环境检测**：自动检测 Python、Node.js、Git，缺失时通过 winget 自动安装，失败时提供手动下载链接
+2. **Step 2 — 配置 AI 模型**：内置 DeepSeek / 硅基流动 / OpenAI 提供商预设，选择后自动填充 Base URL 和模型列表；支持「测试连接」验证 API Key
+3. **Step 3 — 一键部署**：自动克隆仓库、安装后端/前端依赖、启动服务，进度条实时展示当前步骤
 
 部署完成后浏览器会自动打开 **http://localhost:3000**。
 
+> **国内网络友好**：GitHub 克隆失败自动回退 Gitee 镜像；npm 默认使用淘宝镜像源；pip 失败回退清华源。
 > 该工具为零依赖单文件 exe，基于 .NET Framework 4.0（Windows 内置）。源码：`deploy/ExcelManusSetup.cs`。
+> 也可以先 `git clone` 后将 exe 放入项目根目录运行，此时跳过克隆步骤。
 
 </details>
 
@@ -290,18 +293,24 @@ cd web && npm install && npm run dev    # 前端
 
 ### Windows 图形化部署工具
 
-Windows 用户可直接双击运行 `ExcelManusDeployTool.exe`，无需安装任何依赖。
+Windows 用户可直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManusDeployTool.exe`，**无需提前 clone 仓库**。
 
 ```text
-ExcelManusDeployTool.exe    ← 双击即可
+ExcelManusDeployTool.exe    ← 下载后双击即可，放在任意目录
 ```
 
-工具会自动打开浏览器，在可视化界面中完成所有部署操作：
+工具采用**三步向导式界面**（v2.0），全程引导完成部署：
 
-- **环境检测** — 自动检查 Python、Node.js、npm、Git，缺失时通过 winget 自动安装
-- **LLM 配置** — 在界面中填写 API Key、Base URL、模型名称
-- **一键部署** — 自动创建虚拟环境、安装后端/前端依赖、启动服务
-- **实时日志** — 所有步骤的输出实时显示在界面中
+| 步骤 | 说明 |
+|------|------|
+| **Step 1 — 环境检测** | 自动检测 Python、Node.js、Git，缺失时 winget 自动安装，失败提供手动下载链接 |
+| **Step 2 — 配置 AI 模型** | 内置 DeepSeek / 硅基流动 / OpenAI 预设，自动填充 URL 和模型；支持「测试连接」 |
+| **Step 3 — 一键部署** | 克隆仓库 → 安装依赖 → 启动服务，进度条 + 可折叠日志 |
+
+**国内网络优化**：
+- Git clone 先试 GitHub，失败自动回退 **Gitee 镜像**
+- npm install 默认使用**淘宝镜像源**（npmmirror），失败回退官方源
+- pip install 失败自动回退**清华镜像源**
 
 > 该工具为纯 C# 编译的单文件 exe，基于 .NET Framework 4.0（Windows 内置），零外部依赖。源码位于 `deploy/ExcelManusSetup.cs`，可通过 `deploy/build_exe.bat` 重新编译。
 

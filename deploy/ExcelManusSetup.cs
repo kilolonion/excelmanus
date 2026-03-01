@@ -28,221 +28,424 @@ public static class Html
 <title>ExcelManus Deploy Tool</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;overflow:hidden;font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+html,body{height:100%;font-family:'Segoe UI',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;overflow-y:auto}
 :root{
-  --g:#217346;--gl:#33a867;--gd:#1a5c38;--ga1:rgba(33,115,70,.06);--ga2:rgba(33,115,70,.12);--ga3:rgba(33,115,70,.18);
+  --g:#217346;--gl:#33a867;--gd:#1a5c38;
+  --ga1:rgba(33,115,70,.06);--ga2:rgba(33,115,70,.12);--ga3:rgba(33,115,70,.18);
   --bg:#f5f5f7;--card:#fff;--brd:#e5e7eb;--brd2:#d1d5db;
   --red:#d13438;--redl:#e74c3c;--gold:#e5a100;--cyan:#0078d4;
   --t1:#1a1a1a;--t2:#4b5563;--t3:#9ca3af;--t4:#d1d5db;
-  --r:10px;--r2:8px;
+  --r:12px;--r2:8px;
 }
-body{background:var(--bg);color:var(--t1);display:flex;flex-direction:column}
+body{background:var(--bg);color:var(--t1);display:flex;flex-direction:column;min-height:100%}
 
-/* ── Header ── */
-.hdr{
-  background:var(--card);border-bottom:1px solid var(--brd);
-  padding:0 28px;height:54px;display:flex;align-items:center;gap:14px;flex-shrink:0;
-  position:relative;
-}
+.hdr{background:var(--card);border-bottom:1px solid var(--brd);padding:0 28px;height:54px;display:flex;align-items:center;gap:14px;flex-shrink:0;position:relative}
 .hdr::after{content:'';position:absolute;bottom:-1px;left:0;width:120px;height:2px;background:linear-gradient(90deg,var(--g),transparent);border-radius:2px}
-.logo{
-  width:34px;height:34px;position:relative;flex-shrink:0;
-}
-.logo::before{
-  content:'';position:absolute;inset:0;
-  background:linear-gradient(135deg,var(--gl),var(--g));
-  clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);
-}
-.logo::after{
-  content:'';position:absolute;inset:5px;
-  background:rgba(255,255,255,.25);
-  clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%);
-}
+.logo{width:34px;height:34px;position:relative;flex-shrink:0}
+.logo::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--gl),var(--g));clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)}
+.logo::after{content:'';position:absolute;inset:5px;background:rgba(255,255,255,.25);clip-path:polygon(50% 0%,100% 50%,50% 100%,0% 50%)}
 .brand{display:flex;align-items:baseline;gap:10px}
-.brand h1{font-size:17px;font-weight:700;color:var(--t1);letter-spacing:-.3px}
+.brand h1{font-size:17px;font-weight:700;letter-spacing:-.3px}
 .brand span{font-size:11px;color:var(--t3);font-weight:500;letter-spacing:.5px}
 
-/* ── Progress ── */
-.pbar{height:2px;background:var(--brd);flex-shrink:0;overflow:hidden}
-.pfill{height:100%;width:0%;background:linear-gradient(90deg,var(--g),var(--gl));transition:width .5s ease;position:relative}
-.pfill::after{content:'';position:absolute;inset:0;width:60px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);animation:shimmer 1.8s infinite}
-@keyframes shimmer{from{transform:translateX(-60px)}to{transform:translateX(400px)}}
+/* Steps indicator */
+.steps-bar{display:flex;align-items:center;justify-content:center;gap:0;padding:20px 20px 4px;flex-shrink:0}
+.step-ind{display:flex;align-items:center;gap:0}
+.step-dot{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;border:2px solid var(--brd2);color:var(--t3);background:var(--card);transition:all .3s;flex-shrink:0}
+.step-dot.active{border-color:var(--g);color:#fff;background:var(--g);box-shadow:0 2px 8px rgba(33,115,70,.3)}
+.step-dot.done{border-color:var(--g);color:#fff;background:var(--gl)}
+.step-line{width:60px;height:2px;background:var(--brd2);transition:background .3s}
+.step-line.done{background:var(--gl)}
+.step-label{font-size:11px;color:var(--t3);text-align:center;margin-top:6px;font-weight:500}
+.step-label.active{color:var(--g);font-weight:700}
+.step-col{display:flex;flex-direction:column;align-items:center}
 
-/* ── Main grid: 3 columns, fill remaining height ── */
-.main{
-  flex:1;min-height:0;
-  display:grid;
-  grid-template-columns:210px 1fr 1fr;
-  gap:14px;
-  padding:14px 20px;
-}
-
-/* ── Cards ── */
-.card{
-  background:var(--card);border:1px solid var(--brd);border-radius:var(--r);
-  display:flex;flex-direction:column;overflow:hidden;
-}
-.card-t{
-  font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:1.5px;
-  padding:14px 16px 10px;border-bottom:1px solid var(--brd);flex-shrink:0;
-  display:flex;align-items:center;gap:8px;
-}
+/* Content area */
+.content{flex:1;max-width:580px;width:100%;margin:0 auto;padding:16px 20px 30px}
+.card{background:var(--card);border:1px solid var(--brd);border-radius:var(--r);overflow:hidden}
+.card-t{font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:1.5px;padding:14px 18px 10px;border-bottom:1px solid var(--brd);display:flex;align-items:center;gap:8px}
 .card-t i{color:var(--g);font-style:normal;font-size:13px}
-.card-body{padding:10px 14px;flex:1;min-height:0;overflow-y:auto}
+.card-body{padding:16px 18px}
 
-/* ── Checks ── */
-.ck{display:flex;align-items:center;padding:7px 6px;border-radius:6px;margin-bottom:1px;transition:background .2s}
-.ck:hover{background:var(--ga1)}
-.dot{width:8px;height:8px;border-radius:50%;margin-right:10px;flex-shrink:0;transition:all .3s}
-.dot-0{background:var(--t4)}
-.dot-1{background:var(--g);box-shadow:0 0 6px rgba(33,115,70,.35)}
-.dot-2{background:var(--red);box-shadow:0 0 6px rgba(209,52,56,.3)}
-.dot-3{background:var(--gold);animation:pulse 1s ease-in-out infinite}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.8)}}
-.ck-n{flex:1;font-size:12.5px;font-weight:500;color:var(--t1)}
-.ck-s{font-size:10.5px;font-weight:600;color:var(--t3);white-space:nowrap}
-.ck-s.s1{color:var(--g)}.ck-s.s2{color:var(--red)}.ck-s.s3{color:var(--gold)}
+/* Step panels */
+.step-panel{display:none}.step-panel.show{display:block}
 
-/* ── Config column: 2 stacked cards ── */
-.col-cfg{display:flex;flex-direction:column;gap:14px;min-height:0}
+/* Env check items */
+.env-item{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--bg)}
+.env-item:last-child{border-bottom:none}
+.env-icon{width:36px;height:36px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;margin-right:14px;flex-shrink:0;background:var(--bg)}
+.env-icon.ok{background:#e8f5e9;color:var(--g)}
+.env-icon.fail{background:#fde8e8;color:var(--red)}
+.env-icon.wait{background:#fff8e1;color:var(--gold)}
+.env-info{flex:1}
+.env-name{font-size:14px;font-weight:600;color:var(--t1)}
+.env-detail{font-size:12px;color:var(--t3);margin-top:2px}
+.env-detail a{color:var(--cyan);text-decoration:none}.env-detail a:hover{text-decoration:underline}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:18px;height:18px;border:2.5px solid var(--brd);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite}
 
-/* ── Inputs ── */
-.fg{margin-bottom:12px}.fg:last-child{margin-bottom:0}
-.fl{font-size:10px;font-weight:700;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.fi{
-  width:100%;background:var(--bg);border:1.5px solid var(--brd);border-radius:var(--r2);
-  padding:8px 12px;color:var(--t1);font-size:13px;font-family:inherit;outline:none;
-  transition:border-color .2s,box-shadow .2s;
-}
+/* Inputs */
+.fg{margin-bottom:14px}.fg:last-child{margin-bottom:0}
+.fl{font-size:11px;font-weight:600;color:var(--t2);margin-bottom:5px;display:flex;align-items:center;gap:6px}
+.fi{width:100%;background:var(--bg);border:1.5px solid var(--brd);border-radius:var(--r2);padding:10px 14px;color:var(--t1);font-size:14px;font-family:inherit;outline:none;transition:border-color .2s,box-shadow .2s}
 .fi:focus{border-color:var(--g);box-shadow:0 0 0 3px var(--ga1)}
 .fi::placeholder{color:var(--t4)}
-.pr{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+select.fi{cursor:pointer;appearance:none;background-image:url(""data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%239ca3af' fill='none' stroke-width='1.5'/%3E%3C/svg%3E"");background-repeat:no-repeat;background-position:right 12px center}
+.help-link{font-size:11px;color:var(--cyan);text-decoration:none;margin-left:auto;font-weight:500}.help-link:hover{text-decoration:underline}
 
-/* ── Checkbox ── */
-.chk{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:12.5px;color:var(--t2);user-select:none;padding:2px 0}
-.chk:hover{color:var(--t1)}
-.cb{
-  width:18px;height:18px;border-radius:5px;border:2px solid var(--brd2);
-  display:flex;align-items:center;justify-content:center;
-  transition:all .2s;flex-shrink:0;font-size:11px;color:transparent;
-}
-.cb.on{background:var(--g);border-color:var(--g);color:#fff}
-
-/* ── Buttons ── */
-.acts{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--brd);flex-shrink:0}
-.btn{
-  padding:8px 18px;border-radius:var(--r2);font-size:12.5px;font-weight:600;
-  border:none;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px;font-family:inherit;
-}
+/* Buttons */
+.btn{padding:10px 24px;border-radius:var(--r2);font-size:14px;font-weight:600;border:none;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:8px;font-family:inherit}
 .btn:active{transform:scale(.97)}
 .b1{background:linear-gradient(135deg,var(--g),var(--gd));color:#fff;box-shadow:0 2px 8px rgba(33,115,70,.2)}
 .b1:hover{box-shadow:0 4px 14px rgba(33,115,70,.28);transform:translateY(-1px)}
 .b2{background:var(--red);color:#fff}.b2:hover{background:var(--redl)}
-.b3{background:var(--bg);color:var(--g);border:1.5px solid var(--ga3)}.b3:hover{background:var(--ga1);border-color:var(--g)}
+.b3{background:var(--bg);color:var(--g);border:1.5px solid var(--ga3)}.b3:hover{background:var(--ga1)}
 .btn:disabled{opacity:.35;cursor:not-allowed;transform:none!important;box-shadow:none!important}
+.btn-row{display:flex;gap:10px;margin-top:18px;justify-content:flex-end}
+.btn-big{width:100%;justify-content:center;padding:14px;font-size:16px;border-radius:var(--r)}
 
-/* ── Log ── */
-.log-card{display:flex;flex-direction:column;min-height:0}
-.log-card .card{flex:1;display:flex;flex-direction:column;min-height:0}
-.lcon{
-  flex:1;min-height:0;overflow-y:auto;
-  background:var(--bg);padding:10px 14px;
-  font-family:'Cascadia Mono',Consolas,monospace;font-size:12px;line-height:1.65;color:var(--t2);
-}
+/* Test result */
+.test-msg{margin-top:8px;padding:8px 12px;border-radius:6px;font-size:12px;font-weight:500;display:none}
+.test-msg.ok{display:block;background:#e8f5e9;color:var(--gd)}.test-msg.fail{display:block;background:#fde8e8;color:var(--red)}
+
+/* Deploy progress */
+.deploy-stage{font-size:14px;font-weight:600;color:var(--t1);margin-bottom:8px}
+.deploy-sub{font-size:12px;color:var(--t3);margin-bottom:14px}
+.pbar{height:6px;background:var(--brd);border-radius:3px;overflow:hidden;margin-bottom:16px}
+.pfill{height:100%;width:0%;background:linear-gradient(90deg,var(--g),var(--gl));transition:width .5s ease;border-radius:3px;position:relative}
+.pfill::after{content:'';position:absolute;inset:0;width:60px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.5),transparent);animation:shimmer 1.8s infinite}
+@keyframes shimmer{from{transform:translateX(-60px)}to{transform:translateX(400px)}}
+.log-toggle{font-size:12px;color:var(--cyan);cursor:pointer;user-select:none;display:flex;align-items:center;gap:4px;margin-bottom:8px}
+.log-toggle:hover{text-decoration:underline}
+.lcon{max-height:200px;overflow-y:auto;background:var(--bg);padding:8px 12px;border-radius:6px;font-family:'Cascadia Mono',Consolas,monospace;font-size:11px;line-height:1.6;color:var(--t2);display:none}
+.lcon.show{display:block}
 .ll{padding:1px 0;white-space:pre-wrap;word-break:break-all}
 .ll.ok{color:var(--g)}.ll.err{color:var(--red)}.ll.warn{color:var(--gold)}.ll.hl{color:var(--cyan)}
+
+/* Success screen */
+.success-box{text-align:center;padding:30px 20px}
+.success-icon{font-size:56px;margin-bottom:12px}
+.success-title{font-size:22px;font-weight:700;color:var(--g);margin-bottom:6px}
+.success-sub{font-size:14px;color:var(--t3);margin-bottom:24px}
+
+/* Advanced toggle */
+.adv-toggle{font-size:12px;color:var(--t3);cursor:pointer;user-select:none;display:flex;align-items:center;gap:4px;margin-top:12px;padding-top:12px;border-top:1px solid var(--brd)}
+.adv-toggle:hover{color:var(--t2)}
+.adv-body{display:none;margin-top:10px}.adv-body.show{display:block}
+.pr{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 </style>
 </head>
 <body>
 <div class='hdr'>
   <div class='logo'></div>
-  <div class='brand'>
-    <h1>ExcelManus</h1>
-    <span>Deploy Tool &middot; v1.0</span>
-  </div>
+  <div class='brand'><h1>ExcelManus</h1><span>Deploy Tool &middot; v2.0</span></div>
 </div>
-<div class='pbar'><div class='pfill' id='pf'></div></div>
-<div class='main'>
-  <!-- Col 1: Env Checks -->
-  <div class='card'>
-    <div class='card-t'><i>&#10003;</i> &#x73AF;&#x5883;&#x68C0;&#x6D4B;</div>
-    <div class='card-body' id='cks'></div>
-  </div>
-  <!-- Col 2: Config -->
-  <div class='col-cfg'>
-    <div class='card' style='flex:1'>
-      <div class='card-t'><i>&#9881;</i> LLM &#x914D;&#x7F6E;</div>
-      <div class='card-body'>
-        <div class='fg'><div class='fl'>API KEY</div><input class='fi' type='password' id='f_key' placeholder='sk-...'></div>
-        <div class='fg'><div class='fl'>BASE URL</div><input class='fi' id='f_url' placeholder='https://api.openai.com/v1'></div>
-        <div class='fg'><div class='fl'>&#x6A21;&#x578B;&#x540D;&#x79F0;</div><input class='fi' id='f_model' placeholder='gpt-4o'></div>
-      </div>
-    </div>
+
+<div class='steps-bar'>
+  <div class='step-col'><div class='step-dot active' id='sd1'>1</div><div class='step-label active' id='sl1'>\u73AF\u5883\u68C0\u6D4B</div></div>
+  <div class='step-ind'><div class='step-line' id='sln1'></div></div>
+  <div class='step-col'><div class='step-dot' id='sd2'>2</div><div class='step-label' id='sl2'>\u914D\u7F6E LLM</div></div>
+  <div class='step-ind'><div class='step-line' id='sln2'></div></div>
+  <div class='step-col'><div class='step-dot' id='sd3'>3</div><div class='step-label' id='sl3'>\u542F\u52A8\u90E8\u7F72</div></div>
+</div>
+
+<div class='content'>
+  <!-- ══ Step 1: Environment Check ══ -->
+  <div class='step-panel show' id='p1'>
     <div class='card'>
-      <div class='card-t'><i>&#9889;</i> &#x670D;&#x52A1;&#x914D;&#x7F6E;</div>
+      <div class='card-t'><i>&#128269;</i> \u6B63\u5728\u68C0\u6D4B\u60A8\u7684\u7535\u8111\u73AF\u5883...</div>
+      <div class='card-body' id='env-list'></div>
+    </div>
+    <div class='btn-row'>
+      <button class='btn b3' id='btnRecheck' onclick='doCheckEnv()' style='display:none'>&#x21BB; \u91CD\u65B0\u68C0\u6D4B</button>
+      <button class='btn b1' id='btnNext1' onclick='goStep(2)' disabled>\u4E0B\u4E00\u6B65 &#8594;</button>
+    </div>
+  </div>
+
+  <!-- ══ Step 2: LLM Config ══ -->
+  <div class='step-panel' id='p2'>
+    <div class='card'>
+      <div class='card-t'><i>&#9881;</i> \u914D\u7F6E AI \u6A21\u578B</div>
       <div class='card-body'>
-        <div class='pr'>
-          <div class='fg'><div class='fl'>&#x540E;&#x7AEF;&#x7AEF;&#x53E3;</div><input class='fi' id='f_bp' value='8000'></div>
-          <div class='fg'><div class='fl'>&#x524D;&#x7AEF;&#x7AEF;&#x53E3;</div><input class='fi' id='f_fp' value='3000'></div>
+        <div class='fg'>
+          <div class='fl'>\u9009\u62E9\u670D\u52A1\u63D0\u4F9B\u5546</div>
+          <select class='fi' id='f_provider' onchange='onProvider()'>
+            <option value=''>\u2014 \u8BF7\u9009\u62E9 \u2014</option>
+            <option value='deepseek'>DeepSeek (\u63A8\u8350\u56FD\u5185\u7528\u6237)</option>
+            <option value='siliconflow'>\u7845\u57FA\u6D41\u52A8 SiliconFlow</option>
+            <option value='openai'>OpenAI</option>
+            <option value='custom'>\u81EA\u5B9A\u4E49 / \u5176\u4ED6\u63D0\u4F9B\u5546</option>
+          </select>
         </div>
-        <div class='chk' onclick='tgAuto()'><div class='cb on' id='acb'>&#10003;</div><span>&#x542F;&#x52A8;&#x540E;&#x81EA;&#x52A8;&#x6253;&#x5F00;&#x6D4F;&#x89C8;&#x5668;</span></div>
-      </div>
-      <div class='acts'>
-        <button class='btn b1' id='bS' onclick='doStart()'>&#9654; &#x542F;&#x52A8;&#x90E8;&#x7F72;</button>
-        <button class='btn b2' id='bX' onclick='doStop()' disabled>&#9724; &#x505C;&#x6B62;</button>
-        <button class='btn b3' onclick='doOpen()'>&#8599; &#x6D4F;&#x89C8;&#x5668;</button>
+        <div class='fg'>
+          <div class='fl'>API Key <a class='help-link' id='helpLink' href='#' target='_blank' style='display:none'>\u2753 \u5982\u4F55\u83B7\u53D6?</a></div>
+          <input class='fi' type='password' id='f_key' placeholder='\u8BF7\u8F93\u5165\u60A8\u7684 API Key'>
+        </div>
+        <div class='fg' id='fgUrl' style='display:none'>
+          <div class='fl'>Base URL</div>
+          <input class='fi' id='f_url' placeholder='https://api.example.com/v1'>
+        </div>
+        <div class='fg'>
+          <div class='fl'>\u6A21\u578B</div>
+          <select class='fi' id='f_model_sel' style='display:none'></select>
+          <input class='fi' id='f_model' placeholder='\u6A21\u578B\u540D\u79F0' style='display:none'>
+        </div>
+        <button class='btn b3' id='btnTest' onclick='doTestLLM()' style='margin-top:4px' disabled>&#128268; \u6D4B\u8BD5\u8FDE\u63A5</button>
+        <div class='test-msg' id='testMsg'></div>
+
+        <div class='adv-toggle' onclick='toggleAdv()'>&#9881; \u9AD8\u7EA7\u8BBE\u7F6E <span id='advArr'>&#9654;</span></div>
+        <div class='adv-body' id='advBody'>
+          <div class='pr'>
+            <div class='fg'><div class='fl'>\u540E\u7AEF\u7AEF\u53E3</div><input class='fi' id='f_bp' value='8000'></div>
+            <div class='fg'><div class='fl'>\u524D\u7AEF\u7AEF\u53E3</div><input class='fi' id='f_fp' value='3000'></div>
+          </div>
+        </div>
       </div>
     </div>
+    <div class='btn-row'>
+      <button class='btn b3' onclick='goStep(1)'>&#8592; \u4E0A\u4E00\u6B65</button>
+      <button class='btn b1' id='btnNext2' onclick='goStep(3)' disabled>\u4E0B\u4E00\u6B65 &#8594;</button>
+    </div>
   </div>
-  <!-- Col 3: Log -->
-  <div class='log-card'>
-    <div class='card'>
-      <div class='card-t'><i>&#9776;</i> &#x8FD0;&#x884C;&#x65E5;&#x5FD7;</div>
-      <div class='lcon' id='lc'></div>
+
+  <!-- ══ Step 3: Deploy ══ -->
+  <div class='step-panel' id='p3'>
+    <div class='card' id='deployCard'>
+      <div class='card-body'>
+        <div id='preDeployView' style='text-align:center;padding:20px 0'>
+          <div style='font-size:42px;margin-bottom:10px'>&#128640;</div>
+          <div style='font-size:18px;font-weight:700;margin-bottom:6px'>\u4E00\u5207\u5C31\u7EEA\uFF0C\u51C6\u5907\u90E8\u7F72\uFF01</div>
+          <div style='font-size:13px;color:var(--t3);margin-bottom:20px'>\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\uFF0C\u81EA\u52A8\u5B8C\u6210\u6240\u6709\u5B89\u88C5\u4E0E\u542F\u52A8</div>
+          <button class='btn b1 btn-big' id='btnDeploy' onclick='doDeploy()'>&#9654; \u5F00\u59CB\u90E8\u7F72</button>
+        </div>
+        <div id='deployingView' style='display:none'>
+          <div class='deploy-stage' id='dStage'>\u6B63\u5728\u51C6\u5907...</div>
+          <div class='deploy-sub' id='dSub'>\u8BF7\u7A0D\u5019\uFF0C\u9996\u6B21\u90E8\u7F72\u9884\u8BA1\u9700\u8981 3-8 \u5206\u949F</div>
+          <div class='pbar'><div class='pfill' id='pf'></div></div>
+          <div class='log-toggle' onclick='toggleLog()'>\u{1F4CB} <span id='logToggleText'>\u5C55\u5F00\u8BE6\u7EC6\u65E5\u5FD7</span></div>
+          <div class='lcon' id='lc'></div>
+        </div>
+        <div id='successView' style='display:none'>
+          <div class='success-box'>
+            <div class='success-icon'>&#127881;</div>
+            <div class='success-title'>\u90E8\u7F72\u6210\u529F\uFF01</div>
+            <div class='success-sub'>\u670D\u52A1\u5DF2\u542F\u52A8\uFF0C\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u6253\u5F00 ExcelManus</div>
+            <button class='btn b1 btn-big' onclick='doOpen()'>&#127760; \u6253\u5F00 ExcelManus</button>
+            <div style='margin-top:14px'>
+              <button class='btn b2' onclick='doStop()'>&#9724; \u505C\u6B62\u670D\u52A1</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class='btn-row' id='step3Back'>
+      <button class='btn b3' onclick='goStep(2)'>&#8592; \u4E0A\u4E00\u6B65</button>
     </div>
   </div>
 </div>
+
 <script>
-var CKS=[{id:'python',n:'Python 3.x'},{id:'node',n:'Node.js'},{id:'npm',n:'npm'},{id:'git',n:'Git'},{id:'backend',n:'\u540E\u7AEF\u4F9D\u8D56'},{id:'frontend',n:'\u524D\u7AEF\u4F9D\u8D56'}];
-var autoOpen=true,logIdx=0;
+/* ── Provider presets ── */
+var PROVIDERS={
+  deepseek:{name:'DeepSeek',url:'https://api.deepseek.com/v1',models:['deepseek-chat','deepseek-reasoner'],help:'https://platform.deepseek.com/api_keys'},
+  siliconflow:{name:'\u7845\u57FA\u6D41\u52A8',url:'https://api.siliconflow.cn/v1',models:['Qwen/Qwen2.5-72B-Instruct','deepseek-ai/DeepSeek-V3','deepseek-ai/DeepSeek-R1'],help:'https://cloud.siliconflow.cn/account/ak'},
+  openai:{name:'OpenAI',url:'https://api.openai.com/v1',models:['gpt-4o','gpt-4o-mini','o3-mini'],help:'https://platform.openai.com/api-keys'}
+};
+var ENV_ITEMS=[
+  {id:'python',name:'Python 3.x',ico:'&#128013;',dl:'https://www.python.org/downloads/'},
+  {id:'node',name:'Node.js',ico:'&#9889;',dl:'https://nodejs.org/zh-cn/download/'},
+  {id:'git',name:'Git',ico:'&#128230;',dl:'https://git-scm.com/download/win'}
+];
+var curStep=1,logIdx=0,autoOpen=true,deploying=false,deployDone=false;
+
 function init(){
-var h='';for(var i=0;i<CKS.length;i++){var c=CKS[i];
-h+='<div class=""ck""><div class=""dot dot-0"" id=""d_'+c.id+'""></div><span class=""ck-n"">'+c.n+'</span><span class=""ck-s"" id=""s_'+c.id+'"">'+'\u5F85\u68C0\u6D4B'+'</span></div>';}
-document.getElementById('cks').innerHTML=h;
-fetch('/api/config').then(function(r){return r.json()}).then(function(d){
-if(d.apiKey)document.getElementById('f_key').value=d.apiKey;
-if(d.baseUrl)document.getElementById('f_url').value=d.baseUrl;
-if(d.model)document.getElementById('f_model').value=d.model;
-if(d.bePort)document.getElementById('f_bp').value=d.bePort;
-if(d.fePort)document.getElementById('f_fp').value=d.fePort;
-if(d.autoOpen!==undefined){autoOpen=d.autoOpen;updAuto();}
-}).catch(function(){});
-setInterval(pollLogs,500);setInterval(pollSt,800);
+  buildEnvList();
+  fetch('/api/config').then(function(r){return r.json()}).then(function(d){
+    if(d.apiKey)document.getElementById('f_key').value=d.apiKey;
+    if(d.baseUrl)document.getElementById('f_url').value=d.baseUrl;
+    if(d.model)document.getElementById('f_model').value=d.model;
+    if(d.bePort)document.getElementById('f_bp').value=d.bePort;
+    if(d.fePort)document.getElementById('f_fp').value=d.fePort;
+    if(d.autoOpen!==undefined)autoOpen=d.autoOpen;
+    guessProvider(d.baseUrl);
+  }).catch(function(){});
+  setInterval(pollLogs,600);
+  setInterval(pollSt,900);
+  doCheckEnv();
 }
+
+function guessProvider(url){
+  if(!url)return;
+  var sel=document.getElementById('f_provider');
+  for(var k in PROVIDERS){if(PROVIDERS[k].url===url){sel.value=k;onProvider();return;}}
+  sel.value='custom';onProvider();
+}
+
+function buildEnvList(){
+  var h='';
+  for(var i=0;i<ENV_ITEMS.length;i++){
+    var e=ENV_ITEMS[i];
+    h+='<div class=""env-item""><div class=""env-icon wait"" id=""ei_'+e.id+'""><div class=""spinner""></div></div>';
+    h+='<div class=""env-info""><div class=""env-name"">'+e.name+'</div>';
+    h+='<div class=""env-detail"" id=""ed_'+e.id+'"">\u68C0\u6D4B\u4E2D...</div></div></div>';
+  }
+  document.getElementById('env-list').innerHTML=h;
+}
+
+function doCheckEnv(){
+  document.getElementById('btnRecheck').style.display='none';
+  document.getElementById('btnNext1').disabled=true;
+  buildEnvList();
+  fetch('/api/check-env',{method:'POST'}).catch(function(){});
+}
+
+function updateEnvUI(checks,details){
+  var allOk=true;
+  for(var i=0;i<ENV_ITEMS.length;i++){
+    var e=ENV_ITEMS[i];
+    var st=checks[e.id]||0;
+    var el=document.getElementById('ei_'+e.id);
+    var dl=document.getElementById('ed_'+e.id);
+    if(st===1){el.className='env-icon ok';el.innerHTML='&#10004;';dl.textContent=details[e.id]||'\u5DF2\u5C31\u7EEA';}
+    else if(st===2){el.className='env-icon fail';el.innerHTML='&#10008;';dl.innerHTML='\u672A\u627E\u5230 \u2014 <a href=""'+e.dl+'"" target=""_blank"">\u70B9\u6B64\u624B\u52A8\u4E0B\u8F7D\u5B89\u88C5</a>';allOk=false;}
+    else if(st===3){el.className='env-icon wait';el.innerHTML='<div class=""spinner""></div>';dl.textContent=details[e.id]||'\u68C0\u6D4B\u4E2D...';}
+    else{allOk=false;}
+  }
+  if(checks['python']&&checks['node']&&checks['git']&&checks['python']!==3&&checks['node']!==3&&checks['git']!==3){
+    document.getElementById('btnRecheck').style.display='';
+    if(allOk){document.getElementById('btnNext1').disabled=false;}
+  }
+}
+
+/* ── Step navigation ── */
+function goStep(n){
+  curStep=n;
+  for(var i=1;i<=3;i++){
+    document.getElementById('p'+i).className='step-panel'+(i===n?' show':'');
+    var d=document.getElementById('sd'+i);
+    var l=document.getElementById('sl'+i);
+    if(i<n){d.className='step-dot done';d.innerHTML='&#10004;';l.className='step-label';}
+    else if(i===n){d.className='step-dot active';d.innerHTML=i;l.className='step-label active';}
+    else{d.className='step-dot';d.innerHTML=i;l.className='step-label';}
+  }
+  if(document.getElementById('sln1'))document.getElementById('sln1').className='step-line'+(n>1?' done':'');
+  if(document.getElementById('sln2'))document.getElementById('sln2').className='step-line'+(n>2?' done':'');
+}
+
+/* ── Provider selection ── */
+function onProvider(){
+  var v=document.getElementById('f_provider').value;
+  var p=PROVIDERS[v];
+  var urlG=document.getElementById('fgUrl');
+  var mSel=document.getElementById('f_model_sel');
+  var mInp=document.getElementById('f_model');
+  var hl=document.getElementById('helpLink');
+  if(p){
+    urlG.style.display='none';
+    document.getElementById('f_url').value=p.url;
+    mSel.innerHTML='';for(var i=0;i<p.models.length;i++){var o=document.createElement('option');o.value=p.models[i];o.textContent=p.models[i];mSel.appendChild(o);}
+    mSel.style.display='';mInp.style.display='none';
+    hl.href=p.help;hl.style.display='';
+  }else if(v==='custom'){
+    urlG.style.display='';mSel.style.display='none';mInp.style.display='';hl.style.display='none';
+  }else{
+    urlG.style.display='none';mSel.style.display='none';mInp.style.display='none';hl.style.display='none';
+  }
+  checkStep2Ready();
+}
+
+function getModel(){
+  var mSel=document.getElementById('f_model_sel');
+  if(mSel.style.display!=='none')return mSel.value;
+  return document.getElementById('f_model').value;
+}
+
+function checkStep2Ready(){
+  var key=document.getElementById('f_key').value.trim();
+  var prov=document.getElementById('f_provider').value;
+  document.getElementById('btnTest').disabled=!key||!prov;
+  document.getElementById('btnNext2').disabled=!key||!prov;
+}
+document.getElementById('f_key').addEventListener('input',checkStep2Ready);
+document.getElementById('f_model').addEventListener('input',checkStep2Ready);
+
+/* ── Test LLM ── */
+function doTestLLM(){
+  var msg=document.getElementById('testMsg');
+  msg.className='test-msg';msg.style.display='none';
+  document.getElementById('btnTest').disabled=true;
+  document.getElementById('btnTest').textContent='\u6D4B\u8BD5\u4E2D...';
+  var body=JSON.stringify({apiKey:document.getElementById('f_key').value,baseUrl:document.getElementById('f_url').value,model:getModel()});
+  fetch('/api/test-llm',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.ok){msg.className='test-msg ok';msg.textContent='\u2705 \u8FDE\u63A5\u6210\u529F\uFF01\u6A21\u578B\u54CD\u5E94\u6B63\u5E38\u3002';}
+      else{msg.className='test-msg fail';msg.textContent='\u274C \u8FDE\u63A5\u5931\u8D25: '+(d.error||'\u8BF7\u68C0\u67E5 API Key \u548C\u7F51\u7EDC');}
+    })
+    .catch(function(){msg.className='test-msg fail';msg.textContent='\u274C \u7F51\u7EDC\u8BF7\u6C42\u5931\u8D25';})
+    .finally(function(){document.getElementById('btnTest').disabled=false;document.getElementById('btnTest').innerHTML='&#128268; \u6D4B\u8BD5\u8FDE\u63A5';});
+}
+
+/* ── Deploy ── */
+function doDeploy(){
+  document.getElementById('preDeployView').style.display='none';
+  document.getElementById('deployingView').style.display='';
+  document.getElementById('step3Back').style.display='none';
+  deploying=true;
+  var body=JSON.stringify({apiKey:document.getElementById('f_key').value,baseUrl:document.getElementById('f_url').value,model:getModel(),bePort:document.getElementById('f_bp').value,fePort:document.getElementById('f_fp').value,autoOpen:autoOpen});
+  fetch('/api/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:body}).catch(function(){});
+}
+
+var STAGE_NAMES={0:'\u6B63\u5728\u51C6\u5907...',14:'\u6B63\u5728\u4E0B\u8F7D\u6E90\u7801...',28:'\u6B63\u5728\u4E0B\u8F7D\u6E90\u7801...',42:'\u6B63\u5728\u5B89\u88C5\u540E\u7AEF\u4F9D\u8D56...',57:'\u6B63\u5728\u5B89\u88C5\u540E\u7AEF\u4F9D\u8D56...',71:'\u6B63\u5728\u5B89\u88C5\u524D\u7AEF\u4F9D\u8D56...',85:'\u6B63\u5728\u542F\u52A8\u670D\u52A1...',100:'\u90E8\u7F72\u5B8C\u6210\uFF01'};
+function closestStage(p){var best='';for(var k in STAGE_NAMES){if(parseInt(k)<=p)best=STAGE_NAMES[k];}return best||'\u6B63\u5728\u90E8\u7F72...';}
+
+function doStop(){fetch('/api/stop',{method:'POST'}).then(function(){
+  deploying=false;deployDone=false;
+  document.getElementById('preDeployView').style.display='';
+  document.getElementById('deployingView').style.display='none';
+  document.getElementById('successView').style.display='none';
+  document.getElementById('step3Back').style.display='';
+});}
+function doOpen(){var p=document.getElementById('f_fp').value||'3000';window.open('http://localhost:'+p,'_blank');}
+
+/* ── Polling ── */
 function pollLogs(){
-fetch('/api/logs?since='+logIdx).then(function(r){return r.json()}).then(function(d){
-var el=document.getElementById('lc');
-for(var i=0;i<d.logs.length;i++){var l=d.logs[i];var div=document.createElement('div');div.className='ll '+l.level;div.textContent=l.text;el.appendChild(div);logIdx=l.idx+1;}
-if(d.logs.length>0)el.scrollTop=el.scrollHeight;
-}).catch(function(){});
+  fetch('/api/logs?since='+logIdx).then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('lc');
+    for(var i=0;i<d.logs.length;i++){var l=d.logs[i];var div=document.createElement('div');div.className='ll '+l.level;div.textContent=l.text;el.appendChild(div);logIdx=l.idx+1;}
+    if(d.logs.length>0)el.scrollTop=el.scrollHeight;
+  }).catch(function(){});
 }
+
 function pollSt(){
-fetch('/api/status').then(function(r){return r.json()}).then(function(d){
-for(var i=0;i<CKS.length;i++){var c=CKS[i];var st=d.checks[c.id]||0;
-document.getElementById('d_'+c.id).className='dot dot-'+st;
-var se=document.getElementById('s_'+c.id);if(d.details&&d.details[c.id])se.textContent=d.details[c.id];
-se.className='ck-s s'+st;}
-document.getElementById('bS').disabled=d.deploying||d.running;
-document.getElementById('bX').disabled=!d.running;
-document.getElementById('pf').style.width=d.progress+'%';
-}).catch(function(){});
+  fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+    updateEnvUI(d.checks,d.details||{});
+    if(deploying){
+      var pct=d.progress||0;
+      document.getElementById('pf').style.width=pct+'%';
+      document.getElementById('dStage').textContent=closestStage(pct);
+      if(d.running&&!deployDone){
+        deployDone=true;
+        document.getElementById('deployingView').style.display='none';
+        document.getElementById('successView').style.display='';
+      }
+    }
+  }).catch(function(){});
 }
-function cfg(){return{apiKey:document.getElementById('f_key').value,baseUrl:document.getElementById('f_url').value,model:document.getElementById('f_model').value,bePort:document.getElementById('f_bp').value,fePort:document.getElementById('f_fp').value,autoOpen:autoOpen}}
-function doStart(){document.getElementById('bS').disabled=true;fetch('/api/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg())})}
-function doStop(){fetch('/api/stop',{method:'POST'})}
-function doOpen(){var p=document.getElementById('f_fp').value||'3000';window.open('http://localhost:'+p,'_blank')}
-function tgAuto(){autoOpen=!autoOpen;updAuto()}
-function updAuto(){var e=document.getElementById('acb');if(autoOpen){e.className='cb on';e.innerHTML='&#10003;';}else{e.className='cb';e.innerHTML='';}}
+
+function toggleLog(){
+  var el=document.getElementById('lc');
+  var t=document.getElementById('logToggleText');
+  if(el.className.indexOf('show')>=0){el.className='lcon';t.textContent='\u5C55\u5F00\u8BE6\u7EC6\u65E5\u5FD7';}
+  else{el.className='lcon show';t.textContent='\u6536\u8D77\u65E5\u5FD7';el.scrollTop=el.scrollHeight;}
+}
+function toggleAdv(){
+  var el=document.getElementById('advBody');
+  var a=document.getElementById('advArr');
+  if(el.className.indexOf('show')>=0){el.className='adv-body';a.innerHTML='&#9654;';}
+  else{el.className='adv-body show';a.innerHTML='&#9660;';}
+}
+
 init();
 </script>
 </body>
@@ -300,6 +503,9 @@ public class LogStore
 // ═══════════════════════════════════════════════════════════
 public class Engine
 {
+    private const string REPO_URL = "https://github.com/kilolonion/excelmanus.git";
+    private const string REPO_URL_GITEE = "https://gitee.com/kilolonion/excelmanus.git";
+    private const string REPO_DIR_NAME = "excelmanus";
     private string _root;
     private readonly LogStore _log;
     private readonly object _lock = new object();
@@ -307,6 +513,7 @@ public class Engine
     private Process _procFE;
     private bool _running;
     private bool _deploying;
+    private bool _needsClone;
     private readonly Dictionary<string, int> _checks = new Dictionary<string, int>();
     private readonly Dictionary<string, string> _details = new Dictionary<string, string>();
     private int _progress;
@@ -322,7 +529,7 @@ public class Engine
         _apiKey = ""; _baseUrl = ""; _model = "";
         _bePort = "8000"; _fePort = "3000"; _autoOpen = true;
 
-        string[] ids = new string[] { "python", "node", "npm", "git", "backend", "frontend" };
+        string[] ids = new string[] { "python", "node", "npm", "git", "repo", "backend", "frontend" };
         foreach (string id in ids)
         {
             _checks[id] = 0;
@@ -335,12 +542,29 @@ public class Engine
     private void DetectRoot()
     {
         string d = Path.GetDirectoryName(Application.ExecutablePath);
+        // Case 1: exe is in repo root (has pyproject.toml)
         if (File.Exists(Path.Combine(d, "pyproject.toml")))
-        { _root = d; }
+        { _root = d; _needsClone = false; }
         else
         {
+            // Case 2: exe is in deploy/ subfolder
             string p = Directory.GetParent(d) != null ? Directory.GetParent(d).FullName : d;
-            _root = File.Exists(Path.Combine(p, "pyproject.toml")) ? p : d;
+            if (File.Exists(Path.Combine(p, "pyproject.toml")))
+            { _root = p; _needsClone = false; }
+            else
+            {
+                // Case 3: previously cloned repo exists next to exe
+                string cloned = Path.Combine(d, REPO_DIR_NAME);
+                if (File.Exists(Path.Combine(cloned, "pyproject.toml")))
+                { _root = cloned; _needsClone = false; }
+                else
+                {
+                    // Case 4: standalone exe, need to clone
+                    _root = d;
+                    _needsClone = true;
+                    _log.Warn("\u672A\u627E\u5230\u9879\u76EE\u6587\u4EF6\uFF0C\u5C06\u5728\u90E8\u7F72\u65F6\u81EA\u52A8\u4ECE GitHub \u514B\u9686");
+                }
+            }
         }
         _log.Hl(string.Format("\u9879\u76EE\u6839\u76EE\u5F55: {0}", _root));
     }
@@ -381,14 +605,67 @@ public class Engine
     {
         try
         {
-            File.WriteAllLines(EnvPath, new string[] {
-                string.Format("EXCELMANUS_API_KEY={0}", _apiKey),
-                string.Format("EXCELMANUS_BASE_URL={0}", _baseUrl),
-                string.Format("EXCELMANUS_MODEL={0}", _model)
-            }, Encoding.UTF8);
+            // Merge mode: read existing .env, update/add keys, preserve everything else
+            Dictionary<string, string> envMap = new Dictionary<string, string>();
+            List<string> orderedKeys = new List<string>();
+            List<string> comments = new List<string>();
+
+            if (File.Exists(EnvPath))
+            {
+                foreach (string raw in File.ReadAllLines(EnvPath))
+                {
+                    string ln = raw.Trim();
+                    if (string.IsNullOrEmpty(ln) || ln.StartsWith("#"))
+                    {
+                        comments.Add(raw);
+                        continue;
+                    }
+                    int eq = ln.IndexOf('=');
+                    if (eq <= 0) { comments.Add(raw); continue; }
+                    string k = ln.Substring(0, eq).Trim();
+                    string v = ln.Substring(eq + 1).Trim();
+                    envMap[k] = v;
+                    if (!orderedKeys.Contains(k)) orderedKeys.Add(k);
+                }
+            }
+
+            // Upsert user-provided values
+            UpsertEnv(envMap, orderedKeys, "EXCELMANUS_API_KEY", _apiKey);
+            UpsertEnv(envMap, orderedKeys, "EXCELMANUS_BASE_URL", _baseUrl);
+            UpsertEnv(envMap, orderedKeys, "EXCELMANUS_MODEL", _model);
+
+            // Essential defaults for new installations
+            EnsureEnvDefault(envMap, orderedKeys, "EXCELMANUS_CORS_ALLOW_ORIGINS",
+                string.Format("http://localhost:{0},http://localhost:5173", _fePort));
+            EnsureEnvDefault(envMap, orderedKeys, "EXCELMANUS_AUTH_ENABLED", "false");
+            EnsureEnvDefault(envMap, orderedKeys, "EXCELMANUS_EXTERNAL_SAFE_MODE", "false");
+
+            // Write back
+            List<string> lines = new List<string>();
+            foreach (string c in comments) lines.Add(c);
+            foreach (string k in orderedKeys)
+            {
+                lines.Add(string.Format("{0}={1}", k, envMap[k]));
+            }
+            File.WriteAllLines(EnvPath, lines.ToArray(), Encoding.UTF8);
             _log.Ok("\u5DF2\u4FDD\u5B58 .env");
         }
         catch (Exception ex) { _log.Err(string.Format("\u4FDD\u5B58 .env \u5931\u8D25: {0}", ex.Message)); }
+    }
+
+    private void UpsertEnv(Dictionary<string, string> map, List<string> keys, string k, string v)
+    {
+        map[k] = v;
+        if (!keys.Contains(k)) keys.Add(k);
+    }
+
+    private void EnsureEnvDefault(Dictionary<string, string> map, List<string> keys, string k, string v)
+    {
+        if (!map.ContainsKey(k))
+        {
+            map[k] = v;
+            if (!keys.Contains(k)) keys.Add(k);
+        }
     }
 
     public string GetConfigJson()
@@ -447,6 +724,111 @@ public class Engine
         return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "").Replace("\t", "\\t");
     }
 
+    public void CheckEnv()
+    {
+        lock (_lock)
+        {
+            _checks["python"] = 3; _details["python"] = "\u68C0\u6D4B\u4E2D...";
+            _checks["node"] = 3; _details["node"] = "\u68C0\u6D4B\u4E2D...";
+            _checks["git"] = 3; _details["git"] = "\u68C0\u6D4B\u4E2D...";
+        }
+        ThreadPool.QueueUserWorkItem(delegate { RunCheckEnv(); });
+    }
+
+    private void RunCheckEnv()
+    {
+        // Python
+        string pyV = CmdRun("python", "--version");
+        bool pyOk = !string.IsNullOrEmpty(pyV) && pyV.Contains("Python 3");
+        if (!pyOk)
+        {
+            if (TryAutoInstall("Python", "Python.Python.3.11"))
+            {
+                pyV = CmdRun("python", "--version");
+                pyOk = !string.IsNullOrEmpty(pyV) && pyV.Contains("Python 3");
+            }
+        }
+        lock (_lock) { _checks["python"] = pyOk ? 1 : 2; _details["python"] = pyOk ? pyV.Replace("Python ", "v") : "\u672A\u627E\u5230"; }
+        LogCk("Python", pyOk, pyV);
+
+        // Node.js (includes npm)
+        string ndV = CmdRun("node", "--version");
+        bool ndOk = !string.IsNullOrEmpty(ndV);
+        if (!ndOk)
+        {
+            if (TryAutoInstall("Node.js", "OpenJS.NodeJS.LTS"))
+            {
+                ndV = CmdRun("node", "--version");
+                ndOk = !string.IsNullOrEmpty(ndV);
+            }
+        }
+        lock (_lock) { _checks["node"] = ndOk ? 1 : 2; _details["node"] = ndOk ? ndV : "\u672A\u627E\u5230"; }
+        LogCk("Node.js", ndOk, ndV);
+
+        // Git
+        string gtV = CmdRun("git", "--version");
+        bool gtOk = !string.IsNullOrEmpty(gtV);
+        if (!gtOk)
+        {
+            if (TryAutoInstall("Git", "Git.Git"))
+            {
+                gtV = CmdRun("git", "--version");
+                gtOk = !string.IsNullOrEmpty(gtV);
+            }
+        }
+        lock (_lock) { _checks["git"] = gtOk ? 1 : 2; _details["git"] = gtOk ? gtV.Replace("git version ", "v") : "\u672A\u627E\u5230"; }
+        LogCk("Git", gtOk, gtV);
+    }
+
+    public string TestLLM(string apiKey, string baseUrl, string model)
+    {
+        try
+        {
+            string url = baseUrl.TrimEnd('/') + "/chat/completions";
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Method = "POST";
+            req.ContentType = "application/json";
+            req.Timeout = 15000;
+            req.Headers.Add("Authorization", "Bearer " + apiKey);
+            string payload = string.Format(
+                "{{\"model\":\"{0}\",\"messages\":[{{\"role\":\"user\",\"content\":\"Hi\"}}],\"max_tokens\":5}}",
+                model.Replace("\"", "\\\""));
+            byte[] data = Encoding.UTF8.GetBytes(payload);
+            req.ContentLength = data.Length;
+            using (Stream s = req.GetRequestStream()) { s.Write(data, 0, data.Length); }
+            using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+            {
+                if ((int)resp.StatusCode >= 200 && (int)resp.StatusCode < 300)
+                    return "{\"ok\":true}";
+                return string.Format("{{\"ok\":false,\"error\":\"HTTP {0}\"}}", (int)resp.StatusCode);
+            }
+        }
+        catch (WebException wex)
+        {
+            string msg = "\u7F51\u7EDC\u8BF7\u6C42\u5931\u8D25";
+            if (wex.Response != null)
+            {
+                try
+                {
+                    using (StreamReader sr = new StreamReader(wex.Response.GetResponseStream(), Encoding.UTF8))
+                    {
+                        string body = sr.ReadToEnd();
+                        int sc = (int)((HttpWebResponse)wex.Response).StatusCode;
+                        if (sc == 401) msg = "API Key \u65E0\u6548\u6216\u5DF2\u8FC7\u671F";
+                        else if (sc == 404) msg = "\u6A21\u578B\u4E0D\u5B58\u5728\u6216 Base URL \u9519\u8BEF";
+                        else msg = string.Format("HTTP {0}", sc);
+                    }
+                }
+                catch { }
+            }
+            return string.Format("{{\"ok\":false,\"error\":\"{0}\"}}", JE(msg));
+        }
+        catch (Exception ex)
+        {
+            return string.Format("{{\"ok\":false,\"error\":\"{0}\"}}", JE(ex.Message));
+        }
+    }
+
     public void StartDeploy()
     {
         lock (_lock)
@@ -472,7 +854,7 @@ public class Engine
 
     private void RunDeploy()
     {
-        int done = 0, total = 6;
+        int done = 0, total = 7;
         Action<string, bool, string> setCk = delegate(string id, bool ok, string detail)
         {
             lock (_lock)
@@ -539,6 +921,29 @@ public class Engine
             return;
         }
 
+        // ── Clone repo if running as standalone exe ──
+        if (_needsClone)
+        {
+            if (!gtOk)
+            {
+                _log.Err("\u5355\u72EC\u8FD0\u884C\u6A21\u5F0F\u9700\u8981 Git \u6765\u514B\u9686\u4ED3\u5E93\uFF0C\u8BF7\u5148\u5B89\u88C5 Git");
+                setCk("repo", false, "\u9700\u8981 Git");
+                lock (_lock) { _deploying = false; }
+                return;
+            }
+            bool cloneOk = CloneRepo();
+            setCk("repo", cloneOk, cloneOk ? "\u5C31\u7EEA" : "\u514B\u9686\u5931\u8D25");
+            if (!cloneOk)
+            {
+                lock (_lock) { _deploying = false; }
+                return;
+            }
+        }
+        else
+        {
+            setCk("repo", true, "\u672C\u5730\u5DF2\u5B58\u5728");
+        }
+
         bool beOk = SetupBE();
         setCk("backend", beOk, beOk ? "\u5C31\u7EEA" : "\u5931\u8D25");
         if (!beOk) { lock (_lock) { _deploying = false; } return; }
@@ -549,6 +954,54 @@ public class Engine
 
         lock (_lock) { _progress = 100; _deploying = false; }
         StartServices();
+    }
+
+    private bool CloneRepo()
+    {
+        string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+        string target = Path.Combine(exeDir, REPO_DIR_NAME);
+
+        if (Directory.Exists(target) && File.Exists(Path.Combine(target, "pyproject.toml")))
+        {
+            _log.Ok(string.Format("\u4ED3\u5E93\u5DF2\u5B58\u5728: {0}\uFF0C\u6267\u884C git pull \u66F4\u65B0...", target));
+            bool pullOk = RunStreamCmd("cmd.exe", string.Format("/c git -C \"{0}\" pull --ff-only", target), "git pull");
+            if (!pullOk) _log.Warn("git pull \u5931\u8D25\uFF0C\u7EE7\u7EED\u4F7F\u7528\u73B0\u6709\u4EE3\u7801");
+            _root = target;
+            _needsClone = false;
+            _log.Hl(string.Format("\u9879\u76EE\u6839\u76EE\u5F55\u5DF2\u66F4\u65B0: {0}", _root));
+            LoadConfig();
+            return true;
+        }
+
+        _log.Hl(string.Format("\u6B63\u5728\u4ECE GitHub \u514B\u9686\u4ED3\u5E93\u5230: {0}", target));
+        _log.Info(string.Format("git clone {0}", REPO_URL));
+
+        bool ok = RunStreamCmd("cmd.exe",
+            string.Format("/c git clone --depth 1 \"{0}\" \"{1}\"", REPO_URL, target), "git clone");
+
+        if (!ok || !File.Exists(Path.Combine(target, "pyproject.toml")))
+        {
+            // Fallback to Gitee mirror for users in China
+            _log.Warn("GitHub \u514B\u9686\u5931\u8D25\uFF0C\u5C1D\u8BD5\u4F7F\u7528 Gitee \u955C\u50CF...");
+            _log.Info(string.Format("git clone {0}", REPO_URL_GITEE));
+            try { if (Directory.Exists(target)) Directory.Delete(target, true); } catch { }
+            ok = RunStreamCmd("cmd.exe",
+                string.Format("/c git clone --depth 1 \"{0}\" \"{1}\"", REPO_URL_GITEE, target), "git clone");
+        }
+
+        if (!ok || !File.Exists(Path.Combine(target, "pyproject.toml")))
+        {
+            _log.Err("\u4ED3\u5E93\u514B\u9686\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5\u6216\u624B\u52A8 git clone");
+            _log.Info(string.Format("\u624B\u52A8\u547D\u4EE4: git clone {0}", REPO_URL));
+            return false;
+        }
+
+        _root = target;
+        _needsClone = false;
+        _log.Ok("\u4ED3\u5E93\u514B\u9686\u6210\u529F");
+        _log.Hl(string.Format("\u9879\u76EE\u6839\u76EE\u5F55\u5DF2\u66F4\u65B0: {0}", _root));
+        LoadConfig();
+        return true;
     }
 
     private void LogCk(string name, bool ok, string d)
@@ -698,7 +1151,12 @@ public class Engine
     private bool SetupFE()
     {
         string wd = Path.Combine(_root, "web");
-        if (!Directory.Exists(wd)) { _log.Warn("\u672A\u627E\u5230 web \u76EE\u5F55"); return false; }
+        if (!Directory.Exists(wd))
+        {
+            _log.Err(string.Format("\u672A\u627E\u5230 web \u76EE\u5F55: {0}", wd));
+            _log.Err("\u8BF7\u786E\u4FDD\u5DF2\u5B8C\u6574\u514B\u9686\u4ED3\u5E93\uFF0C\u6216\u5C06 exe \u653E\u5165\u4ED3\u5E93\u6839\u76EE\u5F55\u540E\u91CD\u8BD5");
+            return false;
+        }
         if (Directory.Exists(Path.Combine(wd, "node_modules")))
         {
             _log.Ok(string.Format("\u524D\u7AEF\u4F9D\u8D56\u5DF2\u5B58\u5728: {0}", Path.Combine(wd, "node_modules")));
@@ -707,7 +1165,7 @@ public class Engine
         _log.Info("\u5B89\u88C5\u524D\u7AEF\u4F9D\u8D56 (npm install)\uFF0C\u8BF7\u7A0D\u5019...");
         try
         {
-            ProcessStartInfo si = new ProcessStartInfo("cmd.exe", "/c npm install");
+            ProcessStartInfo si = new ProcessStartInfo("cmd.exe", "/c npm install --registry=https://registry.npmmirror.com");
             si.WorkingDirectory = wd;
             si.RedirectStandardOutput = true;
             si.RedirectStandardError = true;
@@ -727,7 +1185,21 @@ public class Engine
             p.BeginOutputReadLine();
             p.BeginErrorReadLine();
             p.WaitForExit(300000);
-            if (p.ExitCode != 0) { _log.Err("npm install \u5931\u8D25"); return false; }
+            if (p.ExitCode != 0)
+            {
+                _log.Warn("npm install \u5931\u8D25\uFF0C\u5C1D\u8BD5\u4F7F\u7528\u9ED8\u8BA4\u6E90\u91CD\u8BD5...");
+                ProcessStartInfo si2 = new ProcessStartInfo("cmd.exe", "/c npm install");
+                si2.WorkingDirectory = wd;
+                si2.RedirectStandardOutput = true; si2.RedirectStandardError = true;
+                si2.UseShellExecute = false; si2.CreateNoWindow = true;
+                si2.StandardOutputEncoding = Encoding.UTF8; si2.StandardErrorEncoding = Encoding.UTF8;
+                Process p2 = Process.Start(si2);
+                p2.OutputDataReceived += delegate(object s2, DataReceivedEventArgs ev2) { if (ev2.Data != null && ev2.Data.Trim().Length > 0) _log.Info(string.Format("  [npm] {0}", ev2.Data)); };
+                p2.ErrorDataReceived += delegate(object s2, DataReceivedEventArgs ev2) { if (ev2.Data != null && ev2.Data.Trim().Length > 0) _log.Info(string.Format("  [npm] {0}", ev2.Data)); };
+                p2.BeginOutputReadLine(); p2.BeginErrorReadLine();
+                p2.WaitForExit(300000);
+                if (p2.ExitCode != 0) { _log.Err("npm install \u5931\u8D25"); return false; }
+            }
             _log.Ok("\u524D\u7AEF\u4F9D\u8D56\u5C31\u7EEA");
             return true;
         }
@@ -761,6 +1233,10 @@ public class Engine
                 si.EnvironmentVariables["EXCELMANUS_API_KEY"] = _apiKey;
                 si.EnvironmentVariables["EXCELMANUS_BASE_URL"] = _baseUrl;
                 si.EnvironmentVariables["EXCELMANUS_MODEL"] = _model;
+                si.EnvironmentVariables["EXCELMANUS_CORS_ALLOW_ORIGINS"] =
+                    string.Format("http://localhost:{0},http://localhost:5173", _fePort);
+                si.EnvironmentVariables["EXCELMANUS_AUTH_ENABLED"] = "false";
+                si.EnvironmentVariables["EXCELMANUS_EXTERNAL_SAFE_MODE"] = "false";
                 _procBE = Process.Start(si);
                 _procBE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
                 _procBE.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
@@ -775,7 +1251,37 @@ public class Engine
         {
             try
             {
-                Thread.Sleep(2000);
+                // Wait for backend to be ready (health check loop)
+                _log.Info(string.Format("\u7B49\u5F85\u540E\u7AEF\u5C31\u7EEA (http://localhost:{0})...", _bePort));
+                bool backendReady = false;
+                for (int attempt = 0; attempt < 30; attempt++)
+                {
+                    Thread.Sleep(2000);
+                    try
+                    {
+                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                            string.Format("http://127.0.0.1:{0}/api/v1/health", _bePort));
+                        req.Timeout = 3000;
+                        req.Method = "GET";
+                        using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                        {
+                            if ((int)resp.StatusCode == 200)
+                            {
+                                backendReady = true;
+                                break;
+                            }
+                        }
+                    }
+                    catch { }
+                    if (attempt % 5 == 4)
+                        _log.Info(string.Format("  \u540E\u7AEF\u5C1A\u672A\u5C31\u7EEA\uFF0C\u5DF2\u7B49\u5F85 {0} \u79D2...", (attempt + 1) * 2));
+                }
+                if (!backendReady)
+                {
+                    _log.Err("\u540E\u7AEF\u5728 60 \u79D2\u5185\u672A\u5C31\u7EEA\uFF0C\u8BF7\u68C0\u67E5\u65E5\u5FD7\u6392\u67E5\u95EE\u9898");
+                    return;
+                }
+                _log.Ok(string.Format("\u540E\u7AEF\u5DF2\u5C31\u7EEA: http://localhost:{0}", _bePort));
                 _log.Hl("\u542F\u52A8\u524D\u7AEF\u670D\u52A1...");
                 _log.Info(string.Format("\u524D\u7AEF\u76EE\u5F55: {0}", Path.Combine(_root, "web")));
                 ProcessStartInfo si = new ProcessStartInfo();
@@ -934,6 +1440,17 @@ public class WebServer
                     JVal(body, "bePort"), JVal(body, "fePort"), JVal(body, "autoOpen") == "true");
                 _engine.StartDeploy();
                 Respond(ctx, 200, "application/json", "{\"ok\":true}");
+            }
+            else if (path == "/api/check-env" && method == "POST")
+            {
+                _engine.CheckEnv();
+                Respond(ctx, 200, "application/json", "{\"ok\":true}");
+            }
+            else if (path == "/api/test-llm" && method == "POST")
+            {
+                string body = ReadBody(ctx);
+                string result = _engine.TestLLM(JVal(body, "apiKey"), JVal(body, "baseUrl"), JVal(body, "model"));
+                Respond(ctx, 200, "application/json", result);
             }
             else if (path == "/api/stop" && method == "POST")
             {
