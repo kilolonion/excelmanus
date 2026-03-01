@@ -12,6 +12,7 @@ interface Props {
   running: boolean;
   logs: LogEntry[];
   fePort: string;
+  deployError: string | null;
   onBack: () => void;
 }
 
@@ -34,13 +35,14 @@ function closestStage(p: number): string {
   return best;
 }
 
-type View = "pre" | "deploying" | "success";
+type View = "pre" | "deploying" | "success" | "failed";
 
 export default function DeployPanel({
   progress,
   running,
   logs,
   fePort,
+  deployError,
   onBack,
 }: Props) {
   const [view, setView] = useState<View>("pre");
@@ -68,6 +70,13 @@ export default function DeployPanel({
       setRedirectActive(true);
     }
   }, [running, view]);
+
+  // Detect deploy error → failed
+  useEffect(() => {
+    if (deployError && view === "deploying") {
+      setView("failed");
+    }
+  }, [deployError, view]);
 
   // Countdown redirect
   useEffect(() => {
@@ -187,7 +196,33 @@ export default function DeployPanel({
             </div>
           )}
 
-          {/* Success */}
+          {/* Failed */}
+      {view === "failed" && (
+        <div>
+          <div className="py-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-red-50">
+              <IconStop size={32} className="text-[var(--em-error)]" />
+            </div>
+            <div className="mb-1.5 text-lg font-bold text-[var(--em-error)]">
+              部署失败
+            </div>
+            <div className="mb-4 text-sm text-[var(--muted-fg)]">
+              {deployError || "未知错误，请查看日志详情"}
+            </div>
+            <div className="flex justify-center gap-2">
+              <button onClick={startDeploy} className="auth-btn-primary flex items-center gap-1.5 px-5 py-2.5 text-sm">
+                <IconRefresh size={14} /> 重新部署
+              </button>
+              <button onClick={onBack} className="auth-btn-secondary flex items-center gap-1.5 px-5 py-2.5 text-sm">
+                <IconBack size={14} /> 返回
+              </button>
+            </div>
+          </div>
+          <LogConsole logs={logs} />
+        </div>
+      )}
+
+      {/* Success */}
           {view === "success" && (
             <div className="py-6 text-center">
               {/* Success icon with confetti particles */}
