@@ -7,9 +7,9 @@ import { useSessionStore } from "@/stores/session-store";
 import { normalizeExcelPath, downloadFile } from "@/lib/api";
 import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv", ".tsv"]);
+const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".tsv"]);
 const DOWNLOADABLE_EXTS =
-  /\.(xlsx|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
+  /\.(xlsx|xlsm|xlsb|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
 
 /**
  * 检测一段文本是否是文件路径（含扩展名）。
@@ -90,20 +90,21 @@ export function FilePathLink({
       <code
         role="button"
         tabIndex={0}
-        className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[12.5px] font-mono cursor-pointer transition-colors bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)] hover:underline"
+        className="inline rounded px-1 py-0.5 text-[12.5px] font-mono cursor-pointer transition-colors bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)] hover:underline"
+        style={{ boxDecorationBreak: "clone", WebkitBoxDecorationBreak: "clone" }}
         title={title}
       >
-        <Icon className="h-3 w-3 flex-shrink-0 inline" />
+        <Icon className="h-3 w-3 inline align-[-0.125em] mr-1" />
         {children}
       </code>
     ) : (
       <span
         role="button"
         tabIndex={0}
-        className="inline-flex items-center gap-0.5 cursor-pointer transition-colors text-[var(--em-primary)] hover:underline font-medium"
+        className="inline cursor-pointer transition-colors text-[var(--em-primary)] hover:underline font-medium"
         title={title}
       >
-        <Icon className="h-3 w-3 flex-shrink-0 inline" />
+        <Icon className="h-3 w-3 inline align-[-0.125em] mr-0.5" />
         {children}
       </span>
     );
@@ -117,10 +118,11 @@ export function FilePathLink({
         tabIndex={0}
         onClick={handleClick}
         onKeyDown={(e) => e.key === "Enter" && handleClick(e as unknown as React.MouseEvent)}
-        className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[12.5px] font-mono cursor-pointer transition-colors bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)] hover:underline"
+        className="inline rounded px-1 py-0.5 text-[12.5px] font-mono cursor-pointer transition-colors bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-20)] hover:underline"
+        style={{ boxDecorationBreak: "clone", WebkitBoxDecorationBreak: "clone" }}
         title={title}
       >
-        <Icon className="h-3 w-3 flex-shrink-0 inline" />
+        <Icon className="h-3 w-3 inline align-[-0.125em] mr-1" />
         {children}
       </code>
     );
@@ -133,10 +135,10 @@ export function FilePathLink({
       tabIndex={0}
       onClick={handleClick}
       onKeyDown={(e) => e.key === "Enter" && handleClick(e as unknown as React.MouseEvent)}
-      className="inline-flex items-center gap-0.5 cursor-pointer transition-colors text-[var(--em-primary)] hover:underline font-medium"
+      className="inline cursor-pointer transition-colors text-[var(--em-primary)] hover:underline font-medium"
       title={title}
     >
-      <Icon className="h-3 w-3 flex-shrink-0 inline" />
+      <Icon className="h-3 w-3 inline align-[-0.125em] mr-0.5" />
       {children}
     </span>
   );

@@ -74,7 +74,7 @@ def normalize_path(path: Any) -> str:
 def is_excel_path(path: str) -> bool:
     """判断是否 Excel 文件路径。"""
     lower = (path or "").lower()
-    return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")
+    return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls") or lower.endswith(".xlsb")
 
 
 def extract_file_path(arguments: dict[str, Any], result_json: dict[str, Any] | None) -> str:

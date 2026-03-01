@@ -13,7 +13,7 @@ import type { FileAttachment } from "@/lib/types";
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
 
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
+const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"]);
 function isExcelFile(filename: string): boolean {
   const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
   return EXCEL_EXTS.has(ext);
@@ -25,7 +25,7 @@ function isImageFile(filename: string): boolean {
   return IMAGE_EXTS.has(ext);
 }
 
-const ACCEPTED_EDIT_EXTENSIONS = ".xlsx,.xls,.csv,.png,.jpg,.jpeg";
+const ACCEPTED_EDIT_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.png,.jpg,.jpeg";
 
 interface UserMessageProps {
   content: string;
@@ -260,18 +260,18 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 e.target.value = "";
               }}
             />
-            <div className="flex flex-wrap gap-1.5 relative">
+            <div className="flex flex-wrap gap-1.5 relative items-center">
               <button
                 onClick={() => editFileInputRef.current?.click()}
-                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
+                className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
                 title="添加附件"
               >
                 <Plus className="h-3 w-3" />
-                附件
+                <span className="hidden sm:inline">附件</span>
               </button>
               <button
                 onClick={toggleWsPicker}
-                className={`inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg transition-colors font-medium ${
+                className={`inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg transition-colors font-medium ${
                   wsPickerOpen
                     ? "bg-[var(--em-primary-alpha-15)] text-[var(--em-primary)]"
                     : "bg-muted text-muted-foreground hover:bg-muted/80"
@@ -279,8 +279,9 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 title="从工作区选取文件"
               >
                 <FolderOpen className="h-3 w-3" />
-                工作区
+                <span className="hidden sm:inline">工作区</span>
               </button>
+              <div className="flex-1 sm:hidden" />
               {wsPickerOpen && (
                 <div
                   ref={wsPickerRef}
@@ -323,17 +324,17 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               )}
               <button
                 onClick={confirmEdit}
-                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
+                className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
               >
                 <Check className="h-3 w-3" />
-                重发
+                <span className="hidden sm:inline">重发</span>
               </button>
               <button
                 onClick={cancelEdit}
-                className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
+                className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
               >
                 <X className="h-3 w-3" />
-                取消
+                <span className="hidden sm:inline">取消</span>
               </button>
             </div>
           </div>
@@ -382,7 +383,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
             )}
             {onEditAndResend && !isStreaming && (
               <span
-                className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show transition-opacity"
+                className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show-desktop transition-opacity"
                 aria-label="编辑消息"
               >
                 <Pencil className="h-3 w-3 text-muted-foreground" />

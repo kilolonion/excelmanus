@@ -21,10 +21,10 @@ from excelmanus.tools.policy import TOOL_CATEGORIES
 logger = get_logger("skillpacks.router")
 
 _EXCEL_PATH_PATTERN = re.compile(
-    r"""(?:"([^"]+\.(?:xlsx|xlsm|xls))"|'([^']+\.(?:xlsx|xlsm|xls))'|([^\s"'，。！？；：]+?\.(?:xlsx|xlsm|xls)))""",
+    r"""(?:"([^"]+\.(?:xlsx|xlsm|xlsb|xls))"|'([^']+\.(?:xlsx|xlsm|xlsb|xls))'|([^\s"'，。！？；：]+?\.(?:xlsx|xlsm|xlsb|xls)))""",
     re.IGNORECASE,
 )
-_EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xls"}
+_EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xlsb", ".xls"}
 _MAY_WRITE_HINT_RE = re.compile(
     r"(创建|修改|写入|删除|替换|填充|插入|更新|设置|格式化|高亮|加粗|标红|美化|条件格式|"
     r"画图|生成图表|柱状图|饼图|折线图|雷达图|散点图|排序|合并|转置|拆分|"
@@ -797,6 +797,8 @@ class SkillRouter:
 
             try:
                 from openpyxl import load_workbook
+                from excelmanus.tools._helpers import ensure_openpyxl_compatible
+                resolved = str(ensure_openpyxl_compatible(Path(resolved)))
                 wb = load_workbook(resolved, read_only=True, data_only=True)
             except Exception:
                 continue

@@ -6,7 +6,7 @@ import { normalizeExcelPath } from "@/lib/api";
 import { FilePathLink, isFilePath } from "./FilePathLink";
 import { isCodeFile } from "./CodePreviewModal";
 
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv"]);
+const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"]);
 
 /**
  * Regex matching @type:value and @type:value[RangeSpec] mentions,

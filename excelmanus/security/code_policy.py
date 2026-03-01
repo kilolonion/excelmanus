@@ -202,7 +202,7 @@ class ExcelTarget:
 
 # ── Excel 目标提取 ──────────────────────────────────────
 
-_EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".csv"})
+_EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"})
 
 
 def _is_excel_literal(value: str) -> bool:
