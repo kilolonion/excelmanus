@@ -193,7 +193,7 @@ def _mask_read_excel(content: str) -> str:
 def _mask_inspect(content: str) -> str:
     """inspect_excel_files 结果：提取文件列表。"""
     # 简单计算文件数
-    file_count = content.count(".xlsx") + content.count(".xls") + content.count(".csv")
+    file_count = content.count(".xlsx") + content.count(".xlsm") + content.count(".xlsb") + content.count(".xls") + content.count(".csv")
     if file_count == 0:
         file_count = 1
     truncated = content[:150]

@@ -732,7 +732,7 @@ def read_excel(
     """读取 Excel/CSV 文件并返回数据摘要，可通过 include 按需附加额外维度。
 
     Args:
-        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xlsm/.csv/.tsv。
+        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv。
         sheet_name: 工作表名称，默认读取第一个（CSV 时忽略）。
         max_rows: 最大读取行数，默认全部读取。
         include_style_summary: 是否附带样式概览（已废弃，请用 include=["styles"]）。
@@ -3490,7 +3490,7 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel/CSV 文件路径（相对于工作目录），支持 .xlsx/.xlsm/.csv/.tsv",
+                        "description": "Excel/CSV 文件路径（相对于工作目录），支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv",
                     },
                     "sheet_name": {
                         "type": "string",
@@ -3782,7 +3782,7 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径（相对于工作目录），支持 .xlsx/.xlsm/.csv/.tsv",
+                        "description": "Excel 文件路径（相对于工作目录），支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv",
                     },
                     "max_sample_rows": {
                         "type": "integer",
