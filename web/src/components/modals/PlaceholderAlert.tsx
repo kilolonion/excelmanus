@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useUIStore } from "@/stores/ui-store";
+import { useOnboardingStore } from "@/stores/onboarding-store";
 
 const DISMISS_KEY = "excelmanus_placeholder_alert_dismissed";
 
@@ -23,6 +24,7 @@ export function PlaceholderAlert() {
   const openSettings = useUIStore((s) => s.openSettings);
   const setConfigReady = useUIStore((s) => s.setConfigReady);
   const setConfigPlaceholderItems = useUIStore((s) => s.setConfigPlaceholderItems);
+  const wizardCompleted = useOnboardingStore((s) => s.wizardCompleted);
 
   useEffect(() => {
     checkModelPlaceholder()
@@ -31,7 +33,12 @@ export function PlaceholderAlert() {
           setData(result);
           setConfigReady(false);
           setConfigPlaceholderItems(result.items);
-          if (typeof window !== "undefined" && sessionStorage.getItem(DISMISS_KEY) !== "1") {
+          // Don't show PlaceholderAlert if wizard hasn't been completed yet — wizard handles it
+          if (
+            wizardCompleted &&
+            typeof window !== "undefined" &&
+            sessionStorage.getItem(DISMISS_KEY) !== "1"
+          ) {
             setOpen(true);
           }
         } else {
@@ -43,7 +50,7 @@ export function PlaceholderAlert() {
         setConfigReady(true);
         setConfigPlaceholderItems([]);
       });
-  }, [setConfigReady, setConfigPlaceholderItems]);
+  }, [setConfigReady, setConfigPlaceholderItems, wizardCompleted]);
 
   const handleDismiss = () => {
     setOpen(false);

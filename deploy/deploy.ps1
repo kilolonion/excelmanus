@@ -37,7 +37,7 @@
     远端构建前清理 web\.next\cache（高风险，默认关闭）
 
 .PARAMETER FromLocal
-    从本地同步（默认从 GitHub 拉取）
+    从本地同步（默认从 Git 仓库拉取）
 
 .PARAMETER DryRun
     仅打印将执行的操作，不实际执行
@@ -425,7 +425,7 @@ function Apply-Defaults {
     if (-not $Script:CFG.ServiceManager) { $Script:CFG.ServiceManager = "pm2" }
     if ($Script:CFG.BackendPort -eq 0)   { $Script:CFG.BackendPort    = 8000 }
     if ($Script:CFG.FrontendPort -eq 0)  { $Script:CFG.FrontendPort   = 3000 }
-    if (-not $Script:CFG.RepoUrl)        { $Script:CFG.RepoUrl        = "https://github.com/kilolonion/excelmanus" }
+    if (-not $Script:CFG.RepoUrl)        { $Script:CFG.RepoUrl        = "https://gitee.com/kilolonion/excelmanus.git" }
     if (-not $Script:CFG.Branch)         { $Script:CFG.Branch         = "main" }
     if ($Script:CFG.VerifyTimeout -eq 0) { $Script:CFG.VerifyTimeout  = 30 }
     if ($Script:CFG.KeepFrontendReleases -eq 0) { $Script:CFG.KeepFrontendReleases = 3 }
@@ -636,7 +636,7 @@ function Ensure-FrontendStandaloneAssets {
     $cmd = @"
 cd '$($Script:CFG.FrontendDir)/web'
 if [ ! -d .next/standalone ]; then
-    echo '[INFO] no standalone output (Turbopack/Next.js 16+ may not generate it), will use next start'
+    echo '[INFO] no standalone output, will use next start'
     exit 0
 fi
 
@@ -828,7 +828,7 @@ else
     echo '[INFO] standalone/server.js missing, will use next start mode'
 fi
 if [ "`$_ok" != true ]; then
-    echo '[FATAL] Build artifact validation failed! Likely incomplete Turbopack build.'
+    echo '[FATAL] Build artifact validation failed! Ensure webpack mode is used (npm run build).'
     echo '[FATAL] Keeping current running version, skipping restart.'
     exit 1
 fi
@@ -1022,7 +1022,7 @@ function Deploy-Frontend {
         # Validate build artifacts (fail = no restart = no 502)
         if (-not (Validate-FrontendBuild)) {
             Write-Err "build artifact validation failed! Keeping current running version."
-            Write-Warn "This is usually caused by incomplete Turbopack builds."
+            Write-Warn "Ensure webpack mode is used for building."
             Write-Warn "Fix: SSH into server and run: cd $($cfg.FrontendDir)/web && npm run build"
             return $false
         }
@@ -1188,7 +1188,7 @@ function Show-Summary {
         }
     }
 
-    $src = if ($FromLocal) { "local rsync" } else { "GitHub ($($Script:CFG.Branch))" }
+    $src = if ($FromLocal) { "local rsync" } else { "Git ($($Script:CFG.Branch))" }
     Write-Host "  Source:    $src" -ForegroundColor Cyan
     if ($FrontendArtifact) { Write-Host "  Artifact:  $FrontendArtifact" -ForegroundColor Cyan }
     if ($DryRun) { Write-Host "  !! DRY RUN MODE" -ForegroundColor Yellow }

@@ -246,9 +246,10 @@ pm2 logs excelmanus-api --lines 50 --nostream
 # 实时日志
 pm2 logs excelmanus-api
 
-# 手动更新代码
+# 手动更新代码（Gitee 优先，GitHub 备用）
 cd /www/wwwroot/excelmanus
-git fetch https://github.com/kilolonion/excelmanus main
+git fetch https://gitee.com/kilolonion/excelmanus main
+# 或 git fetch https://github.com/kilolonion/excelmanus main
 git reset --hard FETCH_HEAD
 source venv/bin/activate
 pip install -e '.[all]' -q
@@ -515,7 +516,9 @@ npm install -g pm2
 
 # 4. 克隆代码
 mkdir -p /www/wwwroot
-git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
+# 国内推荐 Gitee（更快）
+git clone https://gitee.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
+# 或 git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 cd /www/wwwroot/excelmanus
 
 # 5. 创建 venv 并安装依赖

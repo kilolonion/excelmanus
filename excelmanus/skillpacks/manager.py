@@ -12,6 +12,14 @@ import threading
 from typing import Any
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.skillpacks.clawhub import (
+    ClawHubClient,
+    ClawHubError,
+    ClawHubSearchResult,
+    ClawHubSkillDetail,
+    ClawHubUpdateInfo,
+)
+from excelmanus.skillpacks.clawhub_lockfile import ClawHubLockfile
 from excelmanus.skillpacks.importer import (
     SkillImportError,
     SkillImportResult,
@@ -102,6 +110,16 @@ class SkillpackManager:
         self._archive_root = self._workspace_root / ".excelmanus" / "skillpacks_archive"
 
         self._ensure_in_workspace(self._project_dir, "skills_project_dir")
+
+        # ClawHub 集成
+        self._clawhub_client: ClawHubClient | None = None
+        self._clawhub_lockfile: ClawHubLockfile | None = None
+        if config.clawhub_enabled:
+            self._clawhub_client = ClawHubClient(
+                registry_url=config.clawhub_registry_url,
+                prefer_cli=config.clawhub_prefer_cli,
+            )
+            self._clawhub_lockfile = ClawHubLockfile(workspace)
 
     def list_skillpacks(self) -> list[dict[str, Any]]:
         skillpacks = self._ensure_loaded()
@@ -302,9 +320,152 @@ class SkillpackManager:
             )
             self._loader.load_all()
             return result.to_dict()
+        if source == "clawhub":
+            return await self._import_from_clawhub(
+                slug=value, actor=actor, overwrite=overwrite,
+            )
         raise SkillpackInputError(
-            f"不支持的导入来源：{source}（支持 local_path / github_url）"
+            f"不支持的导入来源：{source}（支持 local_path / github_url / clawhub）"
         )
+
+    # ── ClawHub 操作 ─────────────────────────────────────
+
+    def _require_clawhub(self) -> tuple[ClawHubClient, ClawHubLockfile]:
+        if not self._clawhub_client or not self._clawhub_lockfile:
+            raise SkillpackManagerError("ClawHub 未启用，请设置 EXCELMANUS_CLAWHUB_ENABLED=true")
+        return self._clawhub_client, self._clawhub_lockfile
+
+    async def clawhub_search(
+        self, query: str, *, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        """搜索 ClawHub 技能。"""
+        client, _ = self._require_clawhub()
+        results = await client.search(query, limit=limit)
+        return [
+            {
+                "slug": r.slug,
+                "display_name": r.display_name,
+                "summary": r.summary,
+                "version": r.version,
+                "score": r.score,
+                "updated_at": r.updated_at,
+            }
+            for r in results
+        ]
+
+    async def clawhub_skill_detail(self, slug: str) -> dict[str, Any]:
+        """获取 ClawHub 技能详情。"""
+        client, _ = self._require_clawhub()
+        detail = await client.get_skill(slug)
+        return {
+            "slug": detail.slug,
+            "display_name": detail.display_name,
+            "summary": detail.summary,
+            "tags": detail.tags,
+            "latest_version": detail.latest_version,
+            "latest_changelog": detail.latest_changelog,
+            "owner_handle": detail.owner_handle,
+            "owner_display_name": detail.owner_display_name,
+            "stats": detail.stats,
+            "created_at": detail.created_at,
+            "updated_at": detail.updated_at,
+        }
+
+    async def _import_from_clawhub(
+        self,
+        slug: str,
+        actor: str,
+        overwrite: bool = False,
+        version: str | None = None,
+    ) -> dict[str, Any]:
+        """从 ClawHub 安装技能。"""
+        client, lockfile = self._require_clawhub()
+        with self._lock:
+            resolved_version, files = await client.download_and_extract(
+                slug=slug,
+                dest_dir=self._project_dir,
+                version=version,
+                overwrite=overwrite,
+            )
+            lockfile.add(slug, resolved_version)
+            self._loader.load_all()
+        return {
+            "name": slug,
+            "description": "",
+            "source_type": "clawhub",
+            "files_copied": files,
+            "dest_dir": str(self._project_dir / slug),
+            "version": resolved_version,
+        }
+
+    async def clawhub_check_updates(self) -> list[dict[str, Any]]:
+        """检查已安装 ClawHub 技能的可用更新。"""
+        client, lockfile = self._require_clawhub()
+        installed = lockfile.get_installed()
+        if not installed:
+            return []
+        updates = await client.check_updates(installed)
+        return [
+            {
+                "slug": u.slug,
+                "installed_version": u.installed_version,
+                "latest_version": u.latest_version,
+                "update_available": u.update_available,
+            }
+            for u in updates
+        ]
+
+    async def clawhub_update(
+        self,
+        slug: str | None = None,
+        *,
+        version: str | None = None,
+        update_all: bool = False,
+    ) -> list[dict[str, Any]]:
+        """更新 ClawHub 技能。"""
+        client, lockfile = self._require_clawhub()
+        installed = lockfile.get_installed()
+
+        if update_all:
+            slugs_to_update = list(installed.keys())
+        elif slug:
+            slugs_to_update = [slug]
+        else:
+            raise SkillpackInputError("请指定 slug 或使用 update_all=true")
+
+        results: list[dict[str, Any]] = []
+        for s in slugs_to_update:
+            try:
+                resolved, files = await client.download_and_extract(
+                    slug=s,
+                    dest_dir=self._project_dir,
+                    version=version,
+                    overwrite=True,
+                )
+                lockfile.update_version(s, resolved)
+                self._loader.load_all()
+                results.append({
+                    "slug": s,
+                    "version": resolved,
+                    "success": True,
+                    "files": files,
+                })
+            except Exception as exc:
+                results.append({
+                    "slug": s,
+                    "success": False,
+                    "error": str(exc),
+                })
+        return results
+
+    async def clawhub_list_installed(self) -> list[dict[str, Any]]:
+        """列出已安装的 ClawHub 技能。"""
+        _, lockfile = self._require_clawhub()
+        installed = lockfile.get_installed()
+        return [
+            {"slug": slug, "version": ver}
+            for slug, ver in sorted(installed.items())
+        ]
 
     def _ensure_loaded(self) -> dict[str, Skillpack]:
         skillpacks = self._loader.get_skillpacks()

@@ -132,6 +132,10 @@ async def test_extract_excludes_system_and_tool_from_prompt() -> None:
         [
             {"role": "system", "content": "系统内容"},
             {"role": "tool", "content": "工具结果"},
+            {"role": "user", "content": "用户消息1"},
+            {"role": "assistant", "content": "助手消息1"},
+            {"role": "user", "content": "用户消息2"},
+            {"role": "assistant", "content": "助手消息2"},
             {"role": "user", "content": "用户消息"},
             {"role": "assistant", "content": "助手消息"},
         ]

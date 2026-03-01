@@ -3,7 +3,8 @@
 import { useCallback, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download, Paintbrush, MoreHorizontal } from "lucide-react";
+import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download, Paintbrush, MoreHorizontal, History, FileSpreadsheet } from "lucide-react";
+import { OperationTimeline } from "./OperationTimeline";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -79,6 +80,7 @@ export function ExcelSidePanel() {
   // 来自 Univer 选区的待确认范围（尚未确认）
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
   const [withStyles, setWithStyles] = useState(true);
+  const [activeTab, setActiveTab] = useState<"sheet" | "timeline">("sheet");
 
   // 移动端下滑关闭
   const touchRef = useRef<{ startY: number; startTime: number } | null>(null);
@@ -91,7 +93,7 @@ export function ExcelSidePanel() {
     const dy = e.changedTouches[0].clientY - touchRef.current.startY;
     const dt = Date.now() - touchRef.current.startTime;
     touchRef.current = null;
-    if (dy > 80 && dt < 400) {
+    if (dy > 50 && dt < 400) {
       closePanel();
     }
   }, [isMobile, closePanel]);
@@ -156,6 +158,7 @@ export function ExcelSidePanel() {
       {isOpen && (
         <motion.div
           key="excel-side-panel"
+          data-coach-id="coach-excel-panel"
           variants={getAnimationVariants()}
           initial="initial"
           animate="animate"
@@ -290,17 +293,48 @@ export function ExcelSidePanel() {
             </div>
           </div>
 
-          {/* Univer 表格 */}
-          <div className="flex-1 overflow-hidden">
-            <UniverSheet
-              fileUrl={fileUrl}
-              initialSheet={activeSheet || undefined}
-              selectionMode={selectionMode}
-              onRangeSelected={handleRangeSelected}
-              withStyles={withStyles}
-
-            />
+          {/* Tab 切换栏 */}
+          <div className="flex border-b border-border bg-muted/20 px-1">
+            <button
+              onClick={() => setActiveTab("sheet")}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+                activeTab === "sheet"
+                  ? "border-[var(--em-primary)] text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <FileSpreadsheet className="h-3 w-3" />
+              表格
+            </button>
+            <button
+              onClick={() => setActiveTab("timeline")}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+                activeTab === "timeline"
+                  ? "border-[var(--em-primary)] text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <History className="h-3 w-3" />
+              操作历史
+            </button>
           </div>
+
+          {/* 内容区 */}
+          {activeTab === "sheet" ? (
+            <div className="flex-1 overflow-hidden">
+              <UniverSheet
+                fileUrl={fileUrl}
+                initialSheet={activeSheet || undefined}
+                selectionMode={selectionMode}
+                onRangeSelected={handleRangeSelected}
+                withStyles={withStyles}
+              />
+            </div>
+          ) : (
+            <div className="flex-1 overflow-hidden">
+              <OperationTimeline />
+            </div>
+          )}
 
           {/* 选区确认栏 */}
           {selectionMode && pendingRange && (

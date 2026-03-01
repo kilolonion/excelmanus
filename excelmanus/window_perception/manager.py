@@ -691,8 +691,14 @@ class WindowPerceptionManager:
         success: bool,
         mode: str = "enriched",
         model_id: str = "",
+        raw_result_text: str | None = None,
     ) -> str:
-        """增强工具返回。"""
+        """增强工具返回。
+
+        Args:
+            raw_result_text: 截断前的原始工具结果。当工具结果被截断导致
+                JSON 损坏时，使用此参数确保窗口感知能正确解析状态。
+        """
         if not self._enabled or not success:
             return result_text
 
@@ -710,12 +716,14 @@ class WindowPerceptionManager:
                 mode=effective_mode,
                 requested_mode=mode,
                 model_id=model_id,
+                raw_result_text=raw_result_text,
             )
 
         payload = self.update_from_tool_call(
             tool_name=tool_name,
             arguments=arguments,
             result_text=result_text,
+            raw_result_text=raw_result_text,
         )
         if payload is None:
             return result_text
@@ -738,6 +746,7 @@ class WindowPerceptionManager:
         mode: str = "anchored",
         requested_mode: str = "anchored",
         model_id: str = "",
+        raw_result_text: str | None = None,
     ) -> str:
         """WURM 路径：ingest + anchored 确认，异常时原子回退 enriched。"""
         if not self._enabled or not success:
@@ -747,7 +756,11 @@ class WindowPerceptionManager:
         if classification.window_type is None:
             return result_text
 
-        parsed = parse_json_payload(result_text)
+        # 优先用截断前的原始结果解析 JSON，回退到截断后的结果
+        _parse_source = raw_result_text or result_text
+        parsed = parse_json_payload(_parse_source)
+        if parsed is None and raw_result_text and raw_result_text != result_text:
+            parsed = parse_json_payload(result_text)
         result_json = parsed if isinstance(parsed, dict) else None
         repeat_warning = False
         canonical_name = classification.canonical_name or tool_name
@@ -760,6 +773,7 @@ class WindowPerceptionManager:
                 tool_name=tool_name,
                 arguments=arguments,
                 result_text=result_text,
+                raw_result_text=raw_result_text,
             )
             if payload is None:
                 return result_text
@@ -822,6 +836,7 @@ class WindowPerceptionManager:
                 result_text=result_text,
                 success=success,
                 payload=payload,
+                raw_result_text=raw_result_text,
             )
 
         if is_adaptive_requested:
@@ -866,6 +881,7 @@ class WindowPerceptionManager:
                 result_text=result_text,
                 success=success,
                 payload=payload,
+                raw_result_text=raw_result_text,
             )
 
     def update_from_tool_call(
@@ -874,6 +890,7 @@ class WindowPerceptionManager:
         tool_name: str,
         arguments: dict[str, Any],
         result_text: str,
+        raw_result_text: str | None = None,
     ) -> dict[str, Any] | None:
         """根据工具调用更新窗口状态并返回感知 payload。"""
         if not self._enabled:
@@ -883,7 +900,11 @@ class WindowPerceptionManager:
         if classification.window_type is None:
             return None
 
-        parsed = parse_json_payload(result_text)
+        # 优先用截断前的原始结果解析 JSON，回退到截断后的结果
+        _parse_source = raw_result_text or result_text
+        parsed = parse_json_payload(_parse_source)
+        if parsed is None and raw_result_text and raw_result_text != result_text:
+            parsed = parse_json_payload(result_text)
         result_json = parsed if isinstance(parsed, dict) else None
 
         # focus_window 快速路径：状态已由 focus_window_action 更新，
@@ -954,6 +975,7 @@ class WindowPerceptionManager:
         result_text: str,
         success: bool,
         payload: dict[str, Any] | None = None,
+        raw_result_text: str | None = None,
     ) -> str:
         """ingest 失败时回退到 enriched 逻辑。"""
         if payload is None:
@@ -961,6 +983,7 @@ class WindowPerceptionManager:
                 tool_name=tool_name,
                 arguments=arguments,
                 result_text=result_text,
+                raw_result_text=raw_result_text,
             )
         if payload is None:
             return result_text

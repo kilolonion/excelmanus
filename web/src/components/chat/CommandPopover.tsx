@@ -48,6 +48,7 @@ export function CommandPopover({
   return (
     <div
       ref={popoverRef}
+      data-coach-id="coach-command-popover"
       className="absolute bottom-full left-0 right-0 mb-2 bg-card border border-border/60 rounded-2xl shadow-xl overflow-hidden z-50"
     >
       <div className="px-3.5 py-2 text-[11px] text-muted-foreground border-b border-border/40 flex items-center gap-1.5">
@@ -99,7 +100,7 @@ export function CommandPopover({
         )}
         <span className="ml-auto text-[10px] opacity-60 hidden sm:inline">↑↓ 导航 · Tab 选择 · Esc 关闭</span>
       </div>
-      <div className="max-h-48 sm:max-h-60 overflow-y-auto py-1">
+      <div className="max-h-[min(192px,40dvh)] sm:max-h-60 overflow-y-auto py-1 overscroll-contain">
         {popoverItems.map((item, i) => {
           const isActive = item.isActive;
           const hasChildren = item.hasChildren;

@@ -18,6 +18,9 @@
 #    --log-dir DIR          日志输出目录（默认 不写日志）
 #    --health-timeout SEC   后端健康检查超时秒数（默认 30）
 #    --no-kill-ports        不清理残留端口
+#    --update               更新到最新版本后启动
+#    --check-update         仅检查是否有可用更新
+#    --create-shortcut      创建桌面快捷方式
 #    -v, --verbose          详细输出
 #    -h, --help             显示帮助
 # ═══════════════════════════════════════════════════════════════════════
@@ -136,6 +139,9 @@ while [[ $# -gt 0 ]]; do
     --log-dir)              LOG_DIR="$2"; shift ;;
     --health-timeout)       HEALTH_TIMEOUT="$2"; shift ;;
     --no-kill-ports)        NO_KILL_PORTS=true ;;
+    --update)               bash "${SCRIPT_DIR}/update.sh" --yes && info "更新完成，继续启动..." ;;
+    --check-update)         bash "${SCRIPT_DIR}/update.sh" --check; exit $? ;;
+    --create-shortcut)      python3 -c "from excelmanus.shortcuts import create_desktop_shortcut; r=create_desktop_shortcut('${PROJECT_ROOT}'); print(r or '创建失败')"; exit $? ;;
     -v|--verbose)           VERBOSE=true ;;
     -h|--help)              _show_help; exit 0 ;;
     *)                      error "未知参数: $1（使用 --help 查看帮助）"; exit 1 ;;
@@ -143,11 +149,12 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# ── GitHub 仓库配置 ──
-REPO_URL="https://github.com/kilolonion/excelmanus"
+# ── Git 仓库配置（优先 Gitee）──
+REPO_URL="https://gitee.com/kilolonion/excelmanus.git"
+REPO_URL_GITHUB="https://github.com/kilolonion/excelmanus"
 REPO_BRANCH="main"
 
-# ── 检查项目完整性（缺失则从 GitHub 克隆）──
+# ── 检查项目完整性（缺失则克隆，国内优先 Gitee）──
 if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
   warn "未检测到完整项目文件"
   if ! command -v git &>/dev/null; then
@@ -155,17 +162,21 @@ if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
     error "或手动下载项目: $REPO_URL"
     exit 1
   fi
-  info "正在从 GitHub 克隆项目..."
-  info "仓库: $REPO_URL"
-  info "分支: $REPO_BRANCH"
   tmpdir="${PROJECT_ROOT}_tmp"
-  git clone -b "$REPO_BRANCH" "$REPO_URL" "$tmpdir" || {
-    error "Git 克隆失败，请检查网络连接"
-    exit 1
-  }
+  clone_ok=false
+  # Try Gitee first
+  info "正在从 Gitee 克隆项目..."
+  git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$tmpdir" 2>/dev/null && clone_ok=true
+  if [[ "$clone_ok" != true ]]; then
+    info "Gitee 克隆失败，尝试 GitHub..."
+    git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL_GITHUB" "$tmpdir" || {
+      error "Git 克隆失败，请检查网络连接"
+      exit 1
+    }
+  fi
   cp -a "$tmpdir"/. "$PROJECT_ROOT"/
   rm -rf "$tmpdir"
-  log "项目已从 GitHub 克隆完成"
+  log "项目已克隆完成"
 fi
 
 # ── 交互式 .env 配置（首次启动）──
@@ -251,12 +262,62 @@ _check_command() {
   return 0
 }
 
+# ── 网络探测：自动识别国内网络 ──
+IS_DOMESTIC=false
+NPM_MIRROR_REGISTRY=""
+_detect_domestic_network() {
+  local result
+  result=$(python3 -c "
+import socket, time, concurrent.futures
+def ping(host):
+    try:
+        t=time.monotonic(); socket.create_connection((host,443),3); return time.monotonic()-t
+    except: return 999
+with concurrent.futures.ThreadPoolExecutor(2) as p:
+    fm=p.submit(ping,'pypi.tuna.tsinghua.edu.cn')
+    fp=p.submit(ping,'pypi.org')
+    tm,tp=fm.result(5),fp.result(5)
+print('1' if tm<5 and (tp>5 or tm<tp*0.8) else '0')
+" 2>/dev/null || echo "0")
+  if [[ "$result" == "1" ]]; then
+    IS_DOMESTIC=true
+    return 0
+  fi
+  return 1
+}
+
+_has_uv() {
+  command -v uv &>/dev/null && return 0 || return 1
+}
+
 _init_pip_mirror() {
-  PIP_MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
-  PIP_MIRROR_HOST="pypi.tuna.tsinghua.edu.cn"
+  # Auto-detect domestic network if not already known
+  if [[ "$IS_DOMESTIC" != true ]]; then
+    _detect_domestic_network && debug "检测到国内网络，启用镜像加速" || true
+  fi
+  if [[ "$IS_DOMESTIC" == true ]]; then
+    PIP_MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+    PIP_MIRROR_HOST="pypi.tuna.tsinghua.edu.cn"
+    NPM_MIRROR_REGISTRY="--registry=https://registry.npmmirror.com"
+  else
+    PIP_MIRROR_URL=""
+    PIP_MIRROR_HOST=""
+    NPM_MIRROR_REGISTRY=""
+  fi
 }
 
 _pip_install() {
+  # Prefer uv for 10-100x speedup
+  if _has_uv; then
+    debug "使用 uv 安装 (加速模式)"
+    if [[ -n "$PIP_MIRROR_URL" ]]; then
+      uv pip install "$@" -i "$PIP_MIRROR_URL" && return 0
+      warn "uv 镜像安装失败, 尝试默认源..."
+    fi
+    uv pip install "$@" && return 0
+    warn "uv 安装失败, 回退到 pip..."
+  fi
+  # Fallback to pip
   if [[ -n "$PIP_MIRROR_URL" ]]; then
     .venv/bin/python -m pip install "$@" -i "$PIP_MIRROR_URL" --trusted-host "$PIP_MIRROR_HOST" && return 0
     warn "镜像安装失败, 尝试默认源..."
@@ -305,19 +366,16 @@ _check_deps() {
     fi
 
     # 检查项目依赖是否已安装
+    NEED_PIP=false
     if [[ -x ".venv/bin/python" ]]; then
       if ! .venv/bin/python -c "import fastapi; import uvicorn; import rich" 2>/dev/null; then
-        info "正在安装项目依赖（首次启动可能需要几分钟）..."
-        _pip_install -e '.[all]' || {
-          error "项目依赖安装失败"
-          ok=false
-        }
-        log "项目依赖已安装"
+        NEED_PIP=true
       fi
     fi
   fi
 
   # Node.js / npm
+  NEED_NPM=false
   if [[ "$BACKEND_ONLY" != true ]]; then
     local node_hint="https://nodejs.org/"
     if [[ "$OS_TYPE" == "linux" ]]; then
@@ -334,10 +392,52 @@ _check_deps() {
 
     # web/node_modules
     if [[ ! -d "web/node_modules" ]]; then
-      info "首次启动，安装前端依赖..."
-      (cd web && npm install) || { error "npm install 失败"; ok=false; }
+      NEED_NPM=true
+    fi
+  fi
+
+  # ── 并行安装 pip + npm（互不依赖） ──
+  if [[ "$NEED_PIP" == true ]] || [[ "$NEED_NPM" == true ]]; then
+    info "正在并行安装依赖（首次启动可能需要几分钟）..."
+
+    local pip_pid=0 npm_pid=0
+    local pip_ok_f=$(mktemp) npm_ok_f=$(mktemp)
+
+    if [[ "$NEED_PIP" == true ]]; then
+      ( _pip_install -e '.[all]' && echo "1" > "$pip_ok_f" || echo "0" > "$pip_ok_f" ) &
+      pip_pid=$!
+    else
+      echo "1" > "$pip_ok_f"
     fi
 
+    if [[ "$NEED_NPM" == true ]]; then
+      ( cd web && npm install ${NPM_MIRROR_REGISTRY:-} && echo "1" > "$npm_ok_f" || echo "0" > "$npm_ok_f" ) &
+      npm_pid=$!
+    else
+      echo "1" > "$npm_ok_f"
+    fi
+
+    [[ $pip_pid -ne 0 ]] && wait $pip_pid 2>/dev/null
+    [[ $npm_pid -ne 0 ]] && wait $npm_pid 2>/dev/null
+
+    if [[ "$(cat "$pip_ok_f" 2>/dev/null)" != "1" ]]; then
+      error "项目依赖安装失败"
+      ok=false
+    else
+      [[ "$NEED_PIP" == true ]] && log "项目依赖已安装"
+    fi
+
+    if [[ "$(cat "$npm_ok_f" 2>/dev/null)" != "1" ]]; then
+      error "npm install 失败"
+      ok=false
+    else
+      [[ "$NEED_NPM" == true ]] && log "前端依赖已安装"
+    fi
+
+    rm -f "$pip_ok_f" "$npm_ok_f"
+  fi
+
+  if [[ "$BACKEND_ONLY" != true ]]; then
     # 生产模式需要先构建
     if [[ "$PRODUCTION" == true && ! -d "web/.next" ]]; then
       info "生产模式首次启动，构建前端..."

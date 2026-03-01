@@ -54,14 +54,95 @@ _TITLE_HINT_PREFIXES = (
 
 # ── 表单类文档识别配置 ────────────────────────────────────
 # 表单类文档特征：大量标签-值对，标签行占比高，大量合并单元格
-_FORM_LABEL_KEYWORDS = (
+_FORM_LABEL_KEYWORDS = frozenset({
     "交款人", "交款单位", "联系人", "联系方式", "付款账户", "付款人",
     "付款事由", "付款方式", "付款金额", "其他金额", "费用合计", "大写金额",
     "备注", "说明", "日期", "编号", "单位", "姓名", "电话", "地址",
     "客户", "供应商", "发票", "账号", "开户行",
-)
+})
 _FORM_LABEL_RATIO_THRESHOLD = 0.3  # 标签行占比超过此阈值认为是表单类文档
 _FORM_MERGED_CELL_RATIO_THRESHOLD = 0.15  # 合并单元格占比超过此阈值认为是表单类文档
+
+# ── 合并单元格摘要配置 ─────────────────────────────────────
+_MERGED_SUMMARY_MAX_SPANS = 20  # 摘要中最多列出的合并区域数
+
+
+def _collect_merged_cell_summary(ws: Any) -> dict[str, Any] | None:
+    """收集工作表的合并单元格摘要信息。
+
+    将合并区域按语义角色分类（标题跨列、列组标头、数据区合并），
+    并计算合并单元格占比，附带处理建议。
+
+    Args:
+        ws: openpyxl Worksheet 对象（非 read_only 模式）。
+
+    Returns:
+        合并摘要字典，无合并时返回 None。
+    """
+    from openpyxl.utils import get_column_letter
+
+    merged_ranges = list(ws.merged_cells.ranges)
+    if not merged_ranges:
+        return None
+
+    total_rows = ws.max_row or 1
+    total_cols = ws.max_column or 1
+    total_cells = total_rows * total_cols
+
+    # 统计合并单元格总数
+    merged_cell_count = 0
+    for mr in merged_ranges:
+        merged_cell_count += (mr.max_row - mr.min_row + 1) * (mr.max_col - mr.min_col + 1)
+    merged_ratio = merged_cell_count / max(total_cells, 1)
+
+    # 分类合并区域
+    header_spans: list[str] = []       # 宽跨列（标题/分组标头）
+    column_group_spans: list[str] = []  # 列组标头（如 "星期一" 跨若干列）
+    data_merged_count = 0               # 数据区合并（跨行，暗示 NaN）
+
+    for mr in merged_ranges:
+        col_span = mr.max_col - mr.min_col + 1
+        row_span = mr.max_row - mr.min_row + 1
+        start_col_letter = get_column_letter(mr.min_col)
+        end_col_letter = get_column_letter(mr.max_col)
+
+        # 读取合并区域左上角值
+        top_left_value = ws.cell(row=mr.min_row, column=mr.min_col).value
+        label = f"'{top_left_value}'" if top_left_value else "(空)"
+
+        range_str = str(mr)
+
+        if col_span > total_cols * 0.5:
+            # 宽跨列：跨度超过总列数 50%，通常是标题行
+            header_spans.append(f"{range_str} → {label}")
+        elif col_span >= 2 and row_span <= 2 and mr.min_row <= 5:
+            # 列组标头：前 5 行内、跨 2+ 列但不太宽，通常是分组标头
+            column_group_spans.append(
+                f"{range_str} → {label} (cols {start_col_letter}:{end_col_letter})"
+            )
+        elif row_span >= 2:
+            # 数据区跨行合并：pandas 读取时仅首格有值，其余为 NaN
+            data_merged_count += 1
+
+    summary: dict[str, Any] = {
+        "merged_range_count": len(merged_ranges),
+        "merged_cell_ratio": f"{merged_ratio:.1%}",
+    }
+
+    if header_spans:
+        summary["header_spans"] = header_spans[:_MERGED_SUMMARY_MAX_SPANS]
+    if column_group_spans:
+        summary["column_group_spans"] = column_group_spans[:_MERGED_SUMMARY_MAX_SPANS]
+    if data_merged_count > 0:
+        summary["data_merged_ranges"] = data_merged_count
+        summary["hint"] = (
+            f"数据区存在 {data_merged_count} 处跨行合并，"
+            "pandas 读取时仅合并区域左上角单元格有值，其余为 NaN。"
+            "建议用 openpyxl ws.merged_cells.ranges 获取合并信息后做值传播（forward-fill）。"
+        )
+
+    return summary
+
 
 # ── CSV/TSV 支持 ──────────────────────────────────────────
 
@@ -228,9 +309,9 @@ def _is_form_type_document(
 
             if len(non_empty) >= 2:  # 至少2个非空单元格才计入
                 total_scannable_rows += 1
-                # 检查是否包含表单标签关键词
-                row_text = " ".join(str(v) for v in non_empty if isinstance(v, str))
-                if any(kw in row_text for kw in _FORM_LABEL_KEYWORDS):
+                # 检查是否包含表单标签关键词（精确匹配单元格值，避免数据行误判）
+                cell_texts = {str(v).strip() for v in non_empty if isinstance(v, str)}
+                if any(ct in _FORM_LABEL_KEYWORDS for ct in cell_texts):
                     label_rows += 1
 
         label_ratio = label_rows / max(total_scannable_rows, 1)
@@ -469,8 +550,9 @@ def _resolve_formula_columns(
 
     wb = load_workbook(safe_path, data_only=False, read_only=True)
     try:
-        ws = get_worksheet(wb, sheet_name)
-        if ws is None:
+        try:
+            ws = get_worksheet(wb, sheet_name)
+        except ValueError:
             df.attrs["formula_resolution"] = formula_meta
             return df
 
@@ -703,7 +785,7 @@ def _read_range_direct(
             min_col=min_col, max_col=max_col,
             values_only=True,
         ):
-            rows.append([_serialize_cell_value(c) for c in row])
+            rows.append(_trim_trailing_nulls_generic([_serialize_cell_value(c) for c in row]))
 
         return {
             "range": cell_range,
@@ -732,7 +814,7 @@ def read_excel(
     """读取 Excel/CSV 文件并返回数据摘要，可通过 include 按需附加额外维度。
 
     Args:
-        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xlsm/.csv/.tsv。
+        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv。
         sheet_name: 工作表名称，默认读取第一个（CSV 时忽略）。
         max_rows: 最大读取行数，默认全部读取。
         include_style_summary: 是否附带样式概览（已废弃，请用 include=["styles"]）。
@@ -766,6 +848,17 @@ def read_excel(
     not_found = check_file_exists(safe_path, file_path, guard)
     if not_found is not None:
         return not_found
+
+    # .xls/.xlsb → 透明转换为 xlsx（后续 openpyxl 调用统一走 xlsx）
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible, check_sheet_name
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
+    # ── sheet 名验证：提前拦截无效 sheet 名，附带可用列表 ──
+    if sheet_name is not None and not _is_csv_file(safe_path):
+        resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
+        if sheet_err is not None:
+            return sheet_err
+        sheet_name = resolved_sheet  # 可能经过 case-insensitive 修正
 
     # ── range 模式：精确读取指定坐标范围 ──
     if range is not None:
@@ -813,14 +906,15 @@ def read_excel(
 
     summary["columns"] = [str(c) for c in df.columns]
     summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
-    summary["preview"] = json.loads(df.head(10).to_json(orient="records", force_ascii=False, date_format="iso"))
+    _null_info = _build_null_info(df)
+    if _null_info:
+        summary["null_info"] = _null_info
+    summary["preview"] = _df_to_compact_records(df.head(10))
 
     # 自动 tail 预览：表格 > 20 行时附加最后 5 行
     if df.shape[0] > 20:
         tail_start = df.shape[0] - 5
-        summary["tail_preview"] = json.loads(
-            df.tail(5).to_json(orient="records", force_ascii=False, date_format="iso")
-        )
+        summary["tail_preview"] = _df_to_compact_records(df.tail(5))
         summary["tail_note"] = f"显示最后 5 行（第 {tail_start + 1}~{df.shape[0]} 行）"
 
     # 等距采样：sample_rows 指定时附加采样数据
@@ -828,9 +922,7 @@ def read_excel(
         step = max(1, len(df) // sample_rows)
         indices = list(_builtin_range(0, len(df), step))[:sample_rows]
         sampled_df = df.iloc[indices]
-        summary["sample_preview"] = json.loads(
-            sampled_df.to_json(orient="records", force_ascii=False, date_format="iso")
-        )
+        summary["sample_preview"] = _df_to_compact_records(sampled_df)
         summary["sample_note"] = f"等距采样 {len(indices)} 行（共 {len(df)} 行，间隔 {step}）"
 
     formula_meta = df.attrs.get("formula_resolution")
@@ -855,6 +947,26 @@ def read_excel(
             f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
             f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
         )
+
+    # 合并单元格警告：高合并率时提醒 LLM 注意值传播
+    if not _is_csv_file(safe_path):
+        try:
+            from openpyxl import load_workbook as _lw
+            _wb_mc = _lw(safe_path, read_only=False, data_only=True)
+            try:
+                _ws_mc = (
+                    _wb_mc[sheet_name]
+                    if sheet_name and sheet_name in _wb_mc.sheetnames
+                    else _wb_mc.active
+                )
+                if _ws_mc is not None:
+                    _mc_summary = _collect_merged_cell_summary(_ws_mc)
+                    if _mc_summary:
+                        summary["merged_cell_summary"] = _mc_summary
+            finally:
+                _wb_mc.close()
+        except Exception:
+            pass
 
     # 向后兼容：include_style_summary=True 映射为 include=["styles"]
     include_set: set[str] = set()
@@ -902,7 +1014,7 @@ def read_excel(
         finally:
             wb_include.close()
 
-    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(summary, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 
@@ -925,6 +1037,10 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df = pd.DataFrame(data)
 
@@ -967,6 +1083,9 @@ def analyze_data(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
@@ -1031,6 +1150,10 @@ def filter_data(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
@@ -1133,7 +1256,8 @@ def filter_data(
         "original_rows": len(df),
         "filtered_rows": total_filtered,
         "returned_rows": len(filtered),
-        "data": json.loads(filtered.to_json(orient="records", force_ascii=False, date_format="iso")),
+        "columns": [str(c) for c in filtered.columns],
+        "data": _df_to_compact_records(filtered),
     }
     if total_filtered > len(filtered):
         result["truncated"] = True
@@ -1141,7 +1265,7 @@ def filter_data(
     if missing_cols:
         result["missing_columns"] = missing_cols
 
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 
@@ -1173,6 +1297,10 @@ def transform_data(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
@@ -1319,6 +1447,7 @@ def inspect_excel_files(
     from pathlib import Path
 
     from openpyxl import load_workbook
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible as _compat
 
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_SCAN_FILES_DIMENSIONS)
@@ -1338,7 +1467,7 @@ def inspect_excel_files(
     # 先收集全部再排序，确保结果确定性（glob 返回顺序依赖文件系统，不可靠）
     glob_method = safe_dir.rglob if recursive else safe_dir.glob
     excel_paths: list[Path] = []
-    for ext in ("*.xlsx", "*.xlsm"):
+    for ext in ("*.xlsx", "*.xlsm", "*.xls", "*.xlsb"):
         for p in glob_method(ext):
             if p.name.startswith((".", "~$")):
                 continue
@@ -1367,7 +1496,7 @@ def inspect_excel_files(
             if len(matched) >= max_files:
                 break
             try:
-                wb_peek = load_workbook(fp, read_only=True, data_only=True)
+                wb_peek = load_workbook(_compat(fp), read_only=True, data_only=True)
                 try:
                     for sn in wb_peek.sheetnames:
                         sn_lower = sn.lower()
@@ -1399,7 +1528,7 @@ def inspect_excel_files(
 
         sheets_info: list[dict[str, Any]] = []
         try:
-            wb = load_workbook(fp, read_only=not needs_full, data_only=True)
+            wb = load_workbook(_compat(fp), read_only=not needs_full, data_only=True)
             for sn in wb.sheetnames:
                 ws = wb[sn]
                 total_cols = ws.max_column or 0
@@ -1498,6 +1627,48 @@ def _trim_trailing_nulls(row: list[Any]) -> list[Any]:
     while end > 0 and row[end - 1] is None:
         end -= 1
     return row[:end]
+
+
+def _df_to_compact_records(df: "pd.DataFrame") -> list[dict[str, Any]]:
+    """将 DataFrame 转为紧凑记录：去除 null/NaN 键，大幅减少 token 浪费。
+
+    原理：等效于 JSON 版 Markdown-KV——每个值显式关联其键名，无 null 噪音。
+    研究表明 KV 格式 LLM 理解度最高（60.7% vs JSON 53.7% vs CSV 44.3%）。
+    合并单元格导致的 NaN 由 merged_cell_summary 独立解释，不依赖数据中的 null。
+    """
+    records: list[dict[str, Any]] = []
+    cols = [str(c) for c in df.columns]
+    for row in df.itertuples(index=False):
+        d: dict[str, Any] = {}
+        for col_name, val in zip(cols, row):
+            if pd.notna(val):
+                # 序列化 datetime 类型
+                if isinstance(val, (date, datetime)):
+                    d[col_name] = val.isoformat()
+                else:
+                    d[col_name] = val
+        records.append(d)
+    return records
+
+
+def _build_null_info(df: "pd.DataFrame") -> dict[str, Any] | None:
+    """生成空值摘要：一行代替 N×M 个 null token。
+
+    返回 None 表示无显著空值。
+    """
+    if df.empty:
+        return None
+    null_rates = df.isnull().mean()
+    all_null_cols = [str(c) for c in null_rates[null_rates == 1.0].index]
+    high_null_cols = [str(c) for c in null_rates[(null_rates >= 0.6) & (null_rates < 1.0)].index]
+    if not all_null_cols and not high_null_cols:
+        return None
+    info: dict[str, Any] = {}
+    if all_null_cols:
+        info["完全为空"] = all_null_cols
+    if high_null_cols:
+        info["高空值率(≥60%)"] = high_null_cols
+    return info
 
 
 def _format_size(size_bytes: int) -> str:
@@ -1863,10 +2034,20 @@ def _collect_charts(ws: Any) -> list[dict[str, Any]]:
         info["type"] = type_name
         if hasattr(chart, "title") and chart.title:
             title = chart.title
-            if hasattr(title, "text"):
-                info["title"] = title.text
-            elif isinstance(title, str):
+            if isinstance(title, str):
                 info["title"] = title
+            else:
+                # openpyxl Title/Text object: drill into rich text paragraphs
+                text_obj = title.text if hasattr(title, "text") else title
+                rich = getattr(text_obj, "rich", None)
+                if rich is not None:
+                    parts: list[str] = []
+                    for p in getattr(rich, "p", []):
+                        for r in (getattr(p, "r", None) or []):
+                            if getattr(r, "t", None):
+                                parts.append(r.t)
+                    if parts:
+                        info["title"] = "".join(parts)
         info["series_count"] = len(chart.series) if hasattr(chart, "series") else 0
         # 锚点位置
         if hasattr(chart, "anchor") and chart.anchor:
@@ -2311,7 +2492,7 @@ def group_aggregate(
         "total_groups": int(grouped.ngroups),
         "rows_returned": len(result_df),
         "columns": [str(c) for c in result_df.columns],
-        "data": json.loads(result_df.to_json(orient="records", force_ascii=False, date_format="iso")),
+        "data": _df_to_compact_records(result_df),
     }
     if limit is not None and limit > 0 and total_before_limit > limit:
         completeness = build_completeness_meta(
@@ -2322,7 +2503,7 @@ def group_aggregate(
         result["is_truncated"] = completeness.get("is_truncated", False)
         result["truncation_note"] = completeness.get("truncation_note", "")
 
-    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'), default=str)
 
 
 def _normalize_mapping_keys(series: pd.Series) -> pd.Series:
@@ -2453,6 +2634,1120 @@ def analyze_sheet_mapping(
     return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
 
+# ── Excel 对比工具 ─────────────────────────────────────────
+
+
+def _load_sheet_as_df(
+    safe_path: Any,
+    sheet_name: str | None,
+    header_row: int | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """加载一个 sheet 为 DataFrame，返回 (df, sheet_names)。"""
+    from openpyxl import load_workbook
+
+    if _is_csv_file(safe_path):
+        df, _ = _read_csv_df(safe_path, max_rows=None, header_row=header_row)
+        return df, ["Sheet1"]
+
+    wb = load_workbook(safe_path, read_only=True, data_only=True)
+    sheet_names = list(wb.sheetnames)
+    wb.close()
+
+    df, _ = _read_df(safe_path, sheet_name, max_rows=None, header_row=header_row)
+    return df, sheet_names
+
+
+def compare_excel(
+    file_a: str,
+    file_b: str,
+    sheet_a: str = "",
+    sheet_b: str = "",
+    ignore_style: bool = True,
+    key_columns: list[str] | None = None,
+    max_diffs: int = 500,
+) -> str:
+    """对比两个 Excel 文件（或同一文件的两个 Sheet），返回结构化差异报告。
+
+    支持两种对比模式：
+    - 行号对齐模式（默认）：逐行逐列对比
+    - 关键列匹配模式（指定 key_columns 时）：按关键列 join 后对比
+
+    Args:
+        file_a: 基准文件路径
+        file_b: 对比文件路径（与 file_a 相同时用于跨 Sheet 对比）
+        sheet_a: file_a 的工作表名（空字符串=第一个）
+        sheet_b: file_b 的工作表名（空字符串=第一个）
+        ignore_style: 是否忽略样式差异（默认 True）
+        key_columns: 关键列名列表（用于行匹配，为空则按行号对齐）
+        max_diffs: 最大差异数量（超出截断）
+
+    Returns:
+        JSON 格式的差异报告。
+    """
+    guard = _get_guard()
+
+    # ── 1. 解析与校验路径 ──
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible as _compat2
+    try:
+        safe_a = _compat2(guard.resolve_and_validate(file_a))
+    except Exception as e:
+        return json.dumps({"error": f"文件 A 路径无效: {e}"}, ensure_ascii=False)
+    try:
+        safe_b = _compat2(guard.resolve_and_validate(file_b))
+    except Exception as e:
+        return json.dumps({"error": f"文件 B 路径无效: {e}"}, ensure_ascii=False)
+
+    not_found_a = check_file_exists(safe_a, file_a, guard)
+    if not_found_a is not None:
+        return not_found_a
+    not_found_b = check_file_exists(safe_b, file_b, guard)
+    if not_found_b is not None:
+        return not_found_b
+
+    # ── 2. 加载数据 ──
+    # 预读 sheet 列表，用于错误提示
+    _sheets_a_hint: list[str] = []
+    _sheets_b_hint: list[str] = []
+    if not _is_csv_file(safe_a):
+        try:
+            from openpyxl import load_workbook as _lw
+            _wb = _lw(safe_a, read_only=True, data_only=True)
+            _sheets_a_hint = list(_wb.sheetnames)
+            _wb.close()
+        except Exception:
+            pass
+    if not _is_csv_file(safe_b):
+        try:
+            from openpyxl import load_workbook as _lw2
+            _wb2 = _lw2(safe_b, read_only=True, data_only=True)
+            _sheets_b_hint = list(_wb2.sheetnames)
+            _wb2.close()
+        except Exception:
+            pass
+
+    try:
+        df_a, sheets_a = _load_sheet_as_df(safe_a, sheet_a or None)
+    except Exception as e:
+        return json.dumps(
+            {"error": f"无法读取文件 A: {e}", "available_sheets": _sheets_a_hint},
+            ensure_ascii=False,
+        )
+    try:
+        df_b, sheets_b = _load_sheet_as_df(safe_b, sheet_b or None)
+    except Exception as e:
+        return json.dumps(
+            {"error": f"无法读取文件 B: {e}", "available_sheets": _sheets_b_hint},
+            ensure_ascii=False,
+        )
+
+    # ── 3. 结构对比 ──
+    # 构建 str→原始列名 映射，用于 .at[] 访问
+    col_map_a: dict[str, Any] = {str(c): c for c in df_a.columns}
+    col_map_b: dict[str, Any] = {str(c): c for c in df_b.columns}
+    cols_a = set(col_map_a.keys())
+    cols_b = set(col_map_b.keys())
+    columns_added = sorted(cols_b - cols_a)
+    columns_deleted = sorted(cols_a - cols_b)
+    str_cols_a_list = list(col_map_a.keys())
+    common_cols = sorted(cols_a & cols_b, key=lambda c: str_cols_a_list.index(c) if c in str_cols_a_list else 0)
+
+    sheets_only_a = sorted(set(sheets_a) - set(sheets_b)) if str(safe_a) != str(safe_b) else []
+    sheets_only_b = sorted(set(sheets_b) - set(sheets_a)) if str(safe_a) != str(safe_b) else []
+
+    # ── 4. 数据对比 ──
+    cell_diffs: list[dict[str, Any]] = []
+    rows_added = 0
+    rows_deleted = 0
+    rows_modified = 0
+    total_cells_compared = 0
+
+    if key_columns and all(k in cols_a and k in cols_b for k in key_columns):
+        # ── 4B. 关键列匹配模式 ──
+        str_cols_a = {str(c): c for c in df_a.columns}
+        str_cols_b = {str(c): c for c in df_b.columns}
+
+        # 将 key_columns 映射回原始列名
+        key_a = [str_cols_a[k] for k in key_columns]
+        key_b = [str_cols_b[k] for k in key_columns]
+
+        df_a_keyed = df_a.set_index(key_a)
+        df_b_keyed = df_b.set_index(key_b)
+
+        all_keys = set(df_a_keyed.index.tolist()) | set(df_b_keyed.index.tolist())
+
+        for key_val in all_keys:
+            if len(cell_diffs) >= max_diffs:
+                break
+            key_label = str(key_val)
+            in_a = key_val in df_a_keyed.index
+            in_b = key_val in df_b_keyed.index
+
+            if in_a and not in_b:
+                rows_deleted += 1
+                continue
+            if not in_a and in_b:
+                rows_added += 1
+                continue
+
+            # 两边都有 → 对比 common_cols 中非 key 的列
+            row_a = df_a_keyed.loc[key_val]
+            row_b = df_b_keyed.loc[key_val]
+            # 处理 duplicate key 的情况：取第一行
+            if isinstance(row_a, pd.DataFrame):
+                row_a = row_a.iloc[0]
+            if isinstance(row_b, pd.DataFrame):
+                row_b = row_b.iloc[0]
+
+            row_changed = False
+            for col in common_cols:
+                if col in key_columns:
+                    continue
+                total_cells_compared += 1
+                val_a = _serialize_cell_value(row_a.get(col))
+                val_b = _serialize_cell_value(row_b.get(col))
+                if str(val_a) != str(val_b):
+                    row_changed = True
+                    if len(cell_diffs) < max_diffs:
+                        cell_diffs.append({
+                            "key": key_label,
+                            "column": col,
+                            "old": val_a,
+                            "new": val_b,
+                        })
+            if row_changed:
+                rows_modified += 1
+
+    else:
+        # ── 4A. 行号对齐模式 ──
+        max_rows_cmp = max(len(df_a), len(df_b))
+        rows_added = max(0, len(df_b) - len(df_a))
+        rows_deleted = max(0, len(df_a) - len(df_b))
+        min_rows = min(len(df_a), len(df_b))
+
+        # 大文件优化：先做行级 hash 快速过滤
+        use_hash_filter = min_rows > 10000
+        diff_row_indices: set[int] | None = None
+
+        if use_hash_filter and common_cols:
+            hash_a = df_a[list(df_a.columns)].iloc[:min_rows].astype(str).apply(
+                lambda r: hash(tuple(r)), axis=1
+            )
+            hash_b = df_b[list(df_b.columns)].iloc[:min_rows].astype(str).apply(
+                lambda r: hash(tuple(r)), axis=1
+            )
+            diff_row_indices = set((hash_a != hash_b).to_numpy().nonzero()[0])
+            logger.info(
+                "行级 hash 过滤：%d/%d 行有差异",
+                len(diff_row_indices), min_rows,
+            )
+
+        for row_idx in _builtin_range(min_rows):
+            if len(cell_diffs) >= max_diffs:
+                break
+            if diff_row_indices is not None and row_idx not in diff_row_indices:
+                total_cells_compared += len(common_cols)
+                continue
+
+            row_changed = False
+            for col in common_cols:
+                total_cells_compared += 1
+                orig_col_a = col_map_a.get(col)
+                orig_col_b = col_map_b.get(col)
+                val_a = _serialize_cell_value(
+                    df_a.at[row_idx, orig_col_a] if orig_col_a is not None else None
+                )
+                val_b = _serialize_cell_value(
+                    df_b.at[row_idx, orig_col_b] if orig_col_b is not None else None
+                )
+                if str(val_a) != str(val_b):
+                    row_changed = True
+                    if len(cell_diffs) < max_diffs:
+                        from openpyxl.utils import get_column_letter
+                        try:
+                            col_idx = list(str(c) for c in df_a.columns).index(col)
+                            cell_ref = f"{get_column_letter(col_idx + 1)}{row_idx + 2}"
+                        except (ValueError, IndexError):
+                            cell_ref = f"R{row_idx + 2}:{col}"
+                        cell_diffs.append({
+                            "cell": cell_ref,
+                            "old": val_a,
+                            "new": val_b,
+                        })
+            if row_changed:
+                rows_modified += 1
+
+        # 统计超出部分行的额外单元格
+        if len(df_b) > len(df_a):
+            for extra_idx in _builtin_range(len(df_a), min(len(df_b), len(df_a) + max_diffs)):
+                if len(cell_diffs) >= max_diffs:
+                    break
+                for col in cols_b:
+                    total_cells_compared += 1
+                    orig_col = col_map_b.get(col)
+                    val = _serialize_cell_value(df_b.at[extra_idx, orig_col] if orig_col is not None else None)
+                    if val is not None and str(val) != "":
+                        cell_diffs.append({
+                            "cell": f"R{extra_idx + 2}:{col}",
+                            "old": None,
+                            "new": val,
+                        })
+
+    # ── 5. 构建结果 ──
+    truncated = len(cell_diffs) >= max_diffs
+    cells_different = len(cell_diffs)
+
+    # 选取前 10 个 sample_diffs 供 LLM 参考
+    sample_diffs = cell_diffs[:10]
+
+    is_same_file = str(safe_a) == str(safe_b)
+    diff_mode = "cross_sheet" if is_same_file and (sheet_a or sheet_b) else "cross_file"
+
+    result: dict[str, Any] = {
+        "status": "ok",
+        "diff_mode": diff_mode,
+        "file_a": str(safe_a.name),
+        "file_b": str(safe_b.name),
+        "sheet_a": sheet_a or "(默认)",
+        "sheet_b": sheet_b or "(默认)",
+        "summary": {
+            "total_cells_compared": total_cells_compared,
+            "cells_different": cells_different,
+            "rows_added": rows_added,
+            "rows_deleted": rows_deleted,
+            "rows_modified": rows_modified,
+            "columns_added": columns_added,
+            "columns_deleted": columns_deleted,
+            "sheets_only_in_a": sheets_only_a,
+            "sheets_only_in_b": sheets_only_b,
+        },
+        "sample_diffs": sample_diffs,
+        "truncated": truncated,
+    }
+
+    if cells_different == 0 and rows_added == 0 and rows_deleted == 0:
+        result["hint"] = "两个文件（或 Sheet）的数据完全相同。"
+    else:
+        parts = []
+        if cells_different > 0:
+            parts.append(f"{cells_different} 处单元格差异")
+        if rows_added > 0:
+            parts.append(f"{rows_added} 行新增")
+        if rows_deleted > 0:
+            parts.append(f"{rows_deleted} 行删除")
+        if columns_added:
+            parts.append(f"新增列: {', '.join(columns_added)}")
+        if columns_deleted:
+            parts.append(f"删除列: {', '.join(columns_deleted)}")
+        result["hint"] = f"共发现 {'、'.join(parts)}。完整 diff 已通过前端展示。"
+
+    return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+
+# ── scan_excel_snapshot ──────────────────────────────────────
+
+_SNAPSHOT_MAX_SHEETS = 10
+_SNAPSHOT_MAX_SAMPLE_VALUES = 5
+_SNAPSHOT_MAX_TOP_VALUES = 5
+_SNAPSHOT_MAX_SIGNALS = 20
+_SNAPSHOT_CATEGORICAL_THRESHOLD = 20
+
+
+def _infer_column_type(series: "pd.Series") -> str:
+    """根据实际值分布推断列类型（不只看 dtype）。
+
+    Returns:
+        "numeric" | "string" | "date" | "boolean" | "mixed" | "empty"
+    """
+    non_null = series.dropna()
+    if non_null.empty:
+        return "empty"
+
+    type_counts: dict[str, int] = {}
+    for val in non_null.head(200):
+        if isinstance(val, bool):
+            type_counts["boolean"] = type_counts.get("boolean", 0) + 1
+        elif isinstance(val, (int, float)):
+            type_counts["numeric"] = type_counts.get("numeric", 0) + 1
+        elif isinstance(val, str):
+            type_counts["string"] = type_counts.get("string", 0) + 1
+        else:
+            t = type(val).__name__
+            if "date" in t.lower() or "time" in t.lower():
+                type_counts["date"] = type_counts.get("date", 0) + 1
+            else:
+                type_counts["other"] = type_counts.get("other", 0) + 1
+
+    if not type_counts:
+        return "empty"
+
+    dominant = max(type_counts, key=type_counts.get)  # type: ignore[arg-type]
+    total = sum(type_counts.values())
+    dominant_ratio = type_counts[dominant] / total
+
+    if len(type_counts) == 1:
+        return dominant
+    if dominant_ratio >= 0.9:
+        return dominant
+    return "mixed"
+
+
+def _detect_mixed_types(series: "pd.Series") -> dict[str, int] | None:
+    """检测同列中不同 Python 类型的分布。仅在存在混合时返回。"""
+    non_null = series.dropna()
+    if non_null.empty:
+        return None
+
+    type_counts: dict[str, int] = {}
+    for val in non_null.head(500):
+        if isinstance(val, bool):
+            t = "bool"
+        elif isinstance(val, int):
+            t = "int"
+        elif isinstance(val, float):
+            t = "float"
+        elif isinstance(val, str):
+            t = "str"
+        else:
+            t = type(val).__name__
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    if len(type_counts) <= 1:
+        return None
+    # int + float 不算混合
+    if set(type_counts.keys()) <= {"int", "float"}:
+        return None
+    return type_counts
+
+
+def _detect_outliers_iqr(series: "pd.Series") -> int:
+    """使用 IQR 方法检测数值列的异常值个数。"""
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if len(numeric) < 4:
+        return 0
+    q1 = float(numeric.quantile(0.25))
+    q3 = float(numeric.quantile(0.75))
+    iqr = q3 - q1
+    if iqr == 0:
+        return 0
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+    return int(((numeric < lower) | (numeric > upper)).sum())
+
+
+def _compute_column_stats(
+    series: "pd.Series",
+    inferred_type: str,
+    col_name: str,
+) -> dict[str, Any]:
+    """计算单列的统计信息。"""
+    total = len(series)
+    null_count = int(series.isna().sum())
+    null_rate = round(null_count / total, 4) if total > 0 else 0.0
+    non_null = series.dropna()
+    unique_count = int(non_null.nunique()) if not non_null.empty else 0
+
+    stats: dict[str, Any] = {
+        "name": col_name,
+        "dtype": str(series.dtype),
+        "inferred_type": inferred_type,
+        "null_count": null_count,
+        "null_rate": null_rate,
+        "unique_count": unique_count,
+    }
+
+    # 样本值
+    sample = non_null.head(_SNAPSHOT_MAX_SAMPLE_VALUES).tolist()
+    stats["sample_values"] = [
+        str(v) if not isinstance(v, (int, float, bool)) else v
+        for v in sample
+    ]
+
+    # 数值列特有统计
+    if inferred_type == "numeric" and not non_null.empty:
+        numeric = pd.to_numeric(non_null, errors="coerce").dropna()
+        if not numeric.empty:
+            stats["min"] = round(float(numeric.min()), 2)
+            stats["max"] = round(float(numeric.max()), 2)
+            stats["mean"] = round(float(numeric.mean()), 2)
+            stats["median"] = round(float(numeric.median()), 2)
+            if len(numeric) >= 4:
+                stats["q1"] = round(float(numeric.quantile(0.25)), 2)
+                stats["q3"] = round(float(numeric.quantile(0.75)), 2)
+            stats["outlier_count"] = _detect_outliers_iqr(numeric)
+
+    # 分类列（低基数 string/mixed）特有统计
+    if unique_count > 0 and unique_count <= _SNAPSHOT_CATEGORICAL_THRESHOLD:
+        vc = non_null.value_counts(dropna=True).head(_SNAPSHOT_MAX_TOP_VALUES)
+        stats["top_values"] = [
+            {"value": str(k), "count": int(v)} for k, v in vc.items()
+        ]
+
+    # 类型混杂检测
+    mixed = _detect_mixed_types(series)
+    if mixed is not None:
+        stats["mixed_type_counts"] = mixed
+
+    return stats
+
+
+def _detect_cross_sheet_relationships(
+    sheet_columns: dict[str, list[str]],
+    sheet_dfs: dict[str, "pd.DataFrame"],
+) -> list[dict[str, Any]]:
+    """检测跨 Sheet 关联：共享列名 + 值重叠率。"""
+    relationships: list[dict[str, Any]] = []
+    sheet_names = list(sheet_columns.keys())
+
+    # 共享列名检测
+    if len(sheet_names) >= 2:
+        from itertools import combinations
+        for s1, s2 in combinations(sheet_names, 2):
+            shared = set(sheet_columns[s1]) & set(sheet_columns[s2])
+            if shared:
+                relationships.append({
+                    "type": "shared_column_name",
+                    "columns": sorted(shared),
+                    "sheets": [s1, s2],
+                })
+
+    # 候选外键检测（值重叠率）
+    for rel in list(relationships):
+        if rel["type"] != "shared_column_name":
+            continue
+        s1, s2 = rel["sheets"]
+        df1, df2 = sheet_dfs.get(s1), sheet_dfs.get(s2)
+        if df1 is None or df2 is None:
+            continue
+        for col in rel["columns"]:
+            if col not in df1.columns or col not in df2.columns:
+                continue
+            vals1 = set(df1[col].dropna().astype(str).tolist()[:500])
+            vals2 = set(df2[col].dropna().astype(str).tolist()[:500])
+            if not vals1 or not vals2:
+                continue
+            overlap = len(vals1 & vals2)
+            smaller = min(len(vals1), len(vals2))
+            rate = round(overlap / smaller, 2) if smaller > 0 else 0
+            if rate >= 0.3:
+                relationships.append({
+                    "type": "candidate_foreign_key",
+                    "source": {"sheet": s2, "column": col},
+                    "target": {"sheet": s1, "column": col},
+                    "overlap_rate": rate,
+                })
+
+    return relationships
+
+
+def _generate_quality_signals(
+    sheets_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """根据扫描结果生成阈值化质量信号。"""
+    signals: list[dict[str, Any]] = []
+
+    for sheet in sheets_data:
+        sheet_name = sheet["name"]
+        total_rows = sheet.get("rows", 0)
+
+        for col in sheet.get("columns", []):
+            col_name = col["name"]
+            null_rate = col.get("null_rate", 0)
+
+            # empty_column
+            if null_rate >= 1.0:
+                signals.append({
+                    "severity": "high",
+                    "type": "empty_column",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": "该列全部为空值",
+                })
+                continue
+
+            # missing_data
+            if null_rate > 0.3:
+                signals.append({
+                    "severity": "high",
+                    "type": "missing_data",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": f"{col['null_count']} 个空值 ({null_rate:.1%})",
+                })
+            elif null_rate > 0.05:
+                signals.append({
+                    "severity": "medium",
+                    "type": "missing_data",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": f"{col['null_count']} 个空值 ({null_rate:.1%})",
+                })
+
+            # type_mixed
+            if col.get("mixed_type_counts"):
+                counts = col["mixed_type_counts"]
+                desc = " + ".join(f"{k}({v})" for k, v in counts.items())
+                signals.append({
+                    "severity": "high",
+                    "type": "type_mixed",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": f"混合了 {desc}",
+                })
+
+            # outliers
+            outlier_count = col.get("outlier_count", 0)
+            if outlier_count > 0:
+                signals.append({
+                    "severity": "medium",
+                    "type": "outliers",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": f"{outlier_count} 个异常值 (IQR 方法)",
+                })
+
+            # constant_column
+            if col.get("unique_count") == 1 and col.get("null_count", 0) == 0:
+                signals.append({
+                    "severity": "low",
+                    "type": "constant_column",
+                    "sheet": sheet_name,
+                    "column": col_name,
+                    "detail": "仅 1 个唯一值",
+                })
+
+            # high_cardinality
+            if (
+                col.get("inferred_type") == "string"
+                and total_rows > 10
+                and col.get("unique_count", 0) > 0
+            ):
+                unique_rate = col["unique_count"] / max(total_rows, 1)
+                if unique_rate > 0.9:
+                    signals.append({
+                        "severity": "info",
+                        "type": "high_cardinality",
+                        "sheet": sheet_name,
+                        "column": col_name,
+                        "detail": f"唯一率 {unique_rate:.1%}，疑似 ID 列",
+                    })
+
+        # duplicate_rows
+        dup_count = sheet.get("duplicate_row_count")
+        if dup_count is not None and dup_count > 0:
+            dup_rate = dup_count / max(total_rows, 1)
+            sev = "high" if dup_rate > 0.05 else "medium"
+            signals.append({
+                "severity": sev,
+                "type": "duplicate_rows",
+                "sheet": sheet_name,
+                "detail": f"{dup_count} 行完全重复 ({dup_rate:.1%})",
+            })
+
+        # high_merge_ratio — 合并单元格占比高，数据读取可能产生大量 NaN
+        merged_summary = sheet.get("merged_cell_summary")
+        if merged_summary:
+            ratio_str = merged_summary.get("merged_cell_ratio", "0%")
+            data_merged = merged_summary.get("data_merged_ranges", 0)
+            try:
+                ratio_val = float(ratio_str.rstrip("%")) / 100
+            except (ValueError, AttributeError):
+                ratio_val = 0.0
+            if ratio_val > _FORM_MERGED_CELL_RATIO_THRESHOLD:
+                detail_parts = [f"合并单元格占比 {ratio_str}"]
+                if data_merged > 0:
+                    detail_parts.append(
+                        f"其中 {data_merged} 处数据区跨行合并（pandas 读取会产生 NaN）"
+                    )
+                col_groups = merged_summary.get("column_group_spans", [])
+                if col_groups:
+                    detail_parts.append(
+                        f"列组标头: {', '.join(col_groups[:5])}"
+                    )
+                signals.append({
+                    "severity": "high",
+                    "type": "high_merge_ratio",
+                    "sheet": sheet_name,
+                    "detail": "；".join(detail_parts),
+                })
+
+    return signals[:_SNAPSHOT_MAX_SIGNALS]
+
+
+def scan_excel_snapshot(
+    file_path: str,
+    max_sample_rows: int = 500,
+    include_relationships: bool = True,
+) -> str:
+    """一次性扫描 Excel 文件，返回所有 Sheet 的 schema、列统计、数据质量信号。
+
+    Args:
+        file_path: Excel/CSV 文件路径（相对或绝对）。
+        max_sample_rows: 大表采样行数上限（默认 500）。
+        include_relationships: 是否检测跨 Sheet 关联。
+
+    Returns:
+        JSON 格式的完整扫描报告。
+    """
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    not_found = check_file_exists(safe_path, file_path, guard)
+    if not_found is not None:
+        return not_found
+
+    file_size = safe_path.stat().st_size
+    size_str = _format_size(file_size)
+
+    # CSV 特殊处理
+    if _is_csv_file(safe_path):
+        return _scan_csv_snapshot(safe_path, size_str, max_sample_rows)
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
+    from openpyxl import load_workbook
+
+    # 元数据扫描（read_only=True，快速获取行列数/公式/合并）
+    wb_meta = load_workbook(safe_path, read_only=True, data_only=True)
+    sheet_metas: list[dict[str, Any]] = []
+    for ws in wb_meta.worksheets[:_SNAPSHOT_MAX_SHEETS]:
+        meta: dict[str, Any] = {
+            "name": ws.title,
+            "rows": ws.max_row or 0,
+            "cols": ws.max_column or 0,
+        }
+        sheet_metas.append(meta)
+    wb_meta.close()
+
+    # 检测公式和合并单元格（需要非 read_only 模式，但只读前几行）
+    try:
+        wb_full = load_workbook(safe_path, read_only=False, data_only=False)
+        for i, ws in enumerate(wb_full.worksheets[:_SNAPSHOT_MAX_SHEETS]):
+            if i < len(sheet_metas):
+                has_merged = len(ws.merged_cells.ranges) > 0
+                sheet_metas[i]["has_merged_cells"] = has_merged
+                # 合并单元格摘要：语义分类 + 合并率 + 处理建议
+                if has_merged:
+                    merged_summary = _collect_merged_cell_summary(ws)
+                    if merged_summary:
+                        sheet_metas[i]["merged_cell_summary"] = merged_summary
+                # 检测公式：扫描前 20 行
+                has_formulas = False
+                for row in ws.iter_rows(min_row=1, max_row=min(20, ws.max_row or 0), values_only=False):
+                    for cell in row:
+                        if isinstance(cell.value, str) and cell.value.startswith("="):
+                            has_formulas = True
+                            break
+                    if has_formulas:
+                        break
+                sheet_metas[i]["has_formulas"] = has_formulas
+        wb_full.close()
+    except Exception:
+        for meta in sheet_metas:
+            meta.setdefault("has_formulas", False)
+            meta.setdefault("has_merged_cells", False)
+
+    # 逐 Sheet 统计
+    sheets_data: list[dict[str, Any]] = []
+    sheet_columns: dict[str, list[str]] = {}
+    sheet_dfs: dict[str, pd.DataFrame] = {}
+
+    for meta in sheet_metas:
+        sheet_name = meta["name"]
+        total_rows = meta["rows"]
+        data_rows = max(0, total_rows - 1)  # 减去 header
+        sampled = data_rows > max_sample_rows
+
+        try:
+            read_kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_sample_rows if sampled else None)
+            form_type = read_kwargs.pop("_form_type_document", False)
+            df = pd.read_excel(**read_kwargs)
+
+            if form_type:
+                df.columns = [f"Col_{i}" for i in range(len(df.columns))]
+        except Exception as exc:
+            sheets_data.append({
+                **meta,
+                "error": f"读取失败: {exc}",
+                "columns": [],
+            })
+            continue
+
+        # 列统计
+        columns_stats: list[dict[str, Any]] = []
+        col_names: list[str] = []
+        for col in df.columns:
+            col_str = str(col)
+            col_names.append(col_str)
+            inferred = _infer_column_type(df[col])
+            stats = _compute_column_stats(df[col], inferred, col_str)
+            columns_stats.append(stats)
+
+        # 重复行检测
+        dup_count: int | None = None
+        if data_rows <= 10000:
+            try:
+                dup_count = int(df.duplicated().sum())
+            except Exception:
+                dup_count = None
+
+        sheet_data: dict[str, Any] = {
+            **meta,
+            "duplicate_row_count": dup_count,
+            "columns": columns_stats,
+        }
+        if sampled:
+            sheet_data["sampled"] = True
+            sheet_data["sample_size"] = len(df)
+
+        sheets_data.append(sheet_data)
+        sheet_columns[sheet_name] = col_names
+        sheet_dfs[sheet_name] = df
+
+    # 跨 Sheet 关联
+    relationships: list[dict[str, Any]] = []
+    if include_relationships and len(sheet_columns) >= 2:
+        relationships = _detect_cross_sheet_relationships(sheet_columns, sheet_dfs)
+
+    # 质量信号
+    quality_signals = _generate_quality_signals(sheets_data)
+
+    result: dict[str, Any] = {
+        "file": safe_path.name,
+        "size": size_str,
+        "sheet_count": len(sheet_metas),
+        "sheets": sheets_data,
+        "relationships": relationships,
+        "quality_signals": quality_signals,
+    }
+
+    if len(wb_meta.sheetnames if hasattr(wb_meta, 'sheetnames') else sheet_metas) > _SNAPSHOT_MAX_SHEETS:
+        result["truncated"] = True
+        result["truncated_note"] = f"仅扫描前 {_SNAPSHOT_MAX_SHEETS} 个 Sheet"
+
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _scan_csv_snapshot(
+    safe_path: Any,
+    size_str: str,
+    max_sample_rows: int,
+) -> str:
+    """CSV 文件的 scan_excel_snapshot 简化实现。"""
+    try:
+        df, _ = _read_csv_df(safe_path, max_rows=max_sample_rows)
+    except Exception as exc:
+        return json.dumps({"error": f"CSV 读取失败: {exc}"}, ensure_ascii=False)
+
+    total_rows = len(df)
+    sampled = False
+    # 检查实际行数是否超过采样
+    try:
+        with open(safe_path, "r", encoding="utf-8", errors="ignore") as f:
+            actual_lines = sum(1 for _ in f) - 1  # 减去 header
+        if actual_lines > max_sample_rows:
+            sampled = True
+            total_rows = actual_lines
+    except Exception:
+        pass
+
+    columns_stats = []
+    for col in df.columns:
+        inferred = _infer_column_type(df[col])
+        stats = _compute_column_stats(df[col], inferred, str(col))
+        columns_stats.append(stats)
+
+    dup_count = int(df.duplicated().sum()) if len(df) <= 10000 else None
+
+    sheet_data: dict[str, Any] = {
+        "name": "Sheet1",
+        "rows": total_rows,
+        "cols": len(df.columns),
+        "header_row": 0,
+        "duplicate_row_count": dup_count,
+        "has_formulas": False,
+        "has_merged_cells": False,
+        "columns": columns_stats,
+    }
+    if sampled:
+        sheet_data["sampled"] = True
+        sheet_data["sample_size"] = len(df)
+
+    quality_signals = _generate_quality_signals([sheet_data])
+
+    result: dict[str, Any] = {
+        "file": safe_path.name,
+        "size": size_str,
+        "sheet_count": 1,
+        "sheets": [sheet_data],
+        "relationships": [],
+        "quality_signals": quality_signals,
+    }
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+# ── search_excel_values ──────────────────────────────────────
+
+
+def search_excel_values(
+    file_path: str,
+    query: str,
+    match_mode: str = "contains",
+    sheets: list[str] | None = None,
+    columns: list[str] | None = None,
+    max_results: int = 50,
+    case_sensitive: bool = False,
+) -> str:
+    """跨 Sheet 搜索 Excel 单元格值，类似 ripgrep。
+
+    Args:
+        file_path: Excel 文件路径（相对或绝对）。
+        query: 搜索字符串或正则表达式。
+        match_mode: 匹配模式："contains"（默认）| "exact" | "regex" | "startswith"。
+        sheets: 限定搜索的 Sheet 列表（默认全部）。
+        columns: 限定搜索的列名列表（默认全部）。
+        max_results: 最大返回匹配数（默认 50）。
+        case_sensitive: 是否区分大小写（默认 False）。
+
+    Returns:
+        JSON 格式的搜索结果。
+    """
+    import re as _re
+
+    guard = _get_guard()
+    safe_path = guard.resolve_and_validate(file_path)
+
+    not_found = check_file_exists(safe_path, file_path, guard)
+    if not_found is not None:
+        return not_found
+
+    if not query:
+        return json.dumps(
+            {"total_matches": 0, "returned": 0, "truncated": False,
+             "sheets_searched": 0, "matches": [], "summary_by_sheet": []},
+            ensure_ascii=False,
+        )
+
+    # 编译匹配函数
+    if match_mode == "fuzzy":
+        # 模糊匹配：将 query 拆分为子串 token，单元格值包含所有 token 即匹配
+        # 拆分规则：按空格/标点分割，同时将连续中文与连续数字/字母分离
+        # 额外在中文数字边界处拆分（如 '电子一班' → ['电子', '一班']）
+        _cjk_re = _re.compile(r'[\u4e00-\u9fff]+|[a-zA-Z]+|\d+', _re.UNICODE)
+        _CN_DIGITS_SET = set("一二三四五六七八九十")
+        _pre_tokens = _cjk_re.findall(query)
+        _raw_tokens: list[str] = []
+        for _pt in _pre_tokens:
+            # 对纯中文 token，在中文数字与非中文数字字符之间拆分
+            if all('\u4e00' <= c <= '\u9fff' for c in _pt) and any(c in _CN_DIGITS_SET for c in _pt):
+                _sub_re = _re.compile(r'(?<=[^\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])(?=[一二三四五六七八九十])|(?<=[一二三四五六七八九十])(?=[^\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])')
+                _parts = _sub_re.split(_pt)
+                _raw_tokens.extend(p for p in _parts if p)
+            else:
+                _raw_tokens.append(_pt)
+        # 中文数字 → 阿拉伯数字等价替换，合并两套 token
+        _CN_DIGIT = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                     "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+        _normalized_tokens: list[str] = []
+        for _tok in _raw_tokens:
+            _alt = _tok
+            for _cn, _ar in _CN_DIGIT.items():
+                _alt = _alt.replace(_cn, _ar)
+            if not case_sensitive:
+                _tok = _tok.lower()
+                _alt = _alt.lower()
+            _normalized_tokens.append(_tok)
+            if _alt != _tok:
+                _normalized_tokens.append(_alt)
+        # 去重并过滤空串
+        _fuzzy_tokens = list(dict.fromkeys(t for t in _normalized_tokens if t))
+        if not _fuzzy_tokens:
+            # 无有效 token 时回退到 contains
+            if case_sensitive:
+                def _match(cell_str: str) -> bool:
+                    return query in cell_str
+            else:
+                _q_lower = query.lower()
+                def _match(cell_str: str) -> bool:
+                    return _q_lower in cell_str.lower()
+        else:
+            # 每个原始 token 至少有一个变体命中即可（原始或数字替换版本）
+            # 构造 token 组：每组内的 token 是同一原始词的变体，组内 OR，组间 AND
+            _token_groups: list[list[str]] = []
+            for _tok in _raw_tokens:
+                _group = [_tok.lower() if not case_sensitive else _tok]
+                _alt = _tok
+                for _cn, _ar in _CN_DIGIT.items():
+                    _alt = _alt.replace(_cn, _ar)
+                if _alt != _tok:
+                    _group.append(_alt.lower() if not case_sensitive else _alt)
+                _token_groups.append(_group)
+
+            def _match(cell_str: str) -> bool:
+                _s = cell_str if case_sensitive else cell_str.lower()
+                return all(any(v in _s for v in grp) for grp in _token_groups)
+    elif match_mode == "regex":
+        try:
+            flags = 0 if case_sensitive else _re.IGNORECASE
+            pattern = _re.compile(query, flags)
+        except _re.error as exc:
+            return json.dumps(
+                {"error": f"正则表达式无效: {exc}"},
+                ensure_ascii=False,
+            )
+        def _match(cell_str: str) -> bool:
+            return bool(pattern.search(cell_str))
+    elif match_mode == "exact":
+        if case_sensitive:
+            def _match(cell_str: str) -> bool:
+                return cell_str == query
+        else:
+            _q_lower = query.lower()
+            def _match(cell_str: str) -> bool:
+                return cell_str.lower() == _q_lower
+    elif match_mode == "startswith":
+        if case_sensitive:
+            def _match(cell_str: str) -> bool:
+                return cell_str.startswith(query)
+        else:
+            _q_lower = query.lower()
+            def _match(cell_str: str) -> bool:
+                return cell_str.lower().startswith(_q_lower)
+    else:  # contains
+        if case_sensitive:
+            def _match(cell_str: str) -> bool:
+                return query in cell_str
+        else:
+            _q_lower = query.lower()
+            def _match(cell_str: str) -> bool:
+                return _q_lower in cell_str.lower()
+
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
+    wb = load_workbook(safe_path, read_only=True, data_only=True)
+    matches: list[dict[str, Any]] = []
+    sheet_match_counts: dict[str, int] = {}
+    total_matches = 0
+    sheets_searched = 0
+
+    target_sheets = set(s.lower() for s in sheets) if sheets else None
+
+    for ws in wb.worksheets:
+        if target_sheets and ws.title.lower() not in target_sheets:
+            continue
+        sheets_searched += 1
+
+        # 读取 header 行（仅用于列名标注，不再跳过 row 1 的搜索）
+        header: list[str] = []
+        header_row_data: list[Any] = []
+        for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+            header_row_data = list(row)
+            header = [str(c) if c is not None else f"Col_{i}" for i, c in enumerate(row)]
+            break
+
+        target_col_indices: set[int] | None = None
+        if columns:
+            col_set_lower = {c.lower() for c in columns}
+            target_col_indices = {
+                i for i, h in enumerate(header) if h.lower() in col_set_lower
+            }
+            if not target_col_indices:
+                continue
+
+        # 逐行扫描（从第 1 行开始，包含 header 行——表单类文档的数据可能从第 1 行起）
+        for row_idx, row in enumerate(
+            ws.iter_rows(min_row=1, values_only=True), start=1
+        ):
+            if len(matches) >= max_results:
+                break
+            row_list = list(row)
+            for col_idx, cell_val in enumerate(row_list):
+                if cell_val is None:
+                    continue
+                if target_col_indices is not None and col_idx not in target_col_indices:
+                    continue
+                cell_str = str(cell_val)
+                if not _match(cell_str):
+                    continue
+
+                total_matches += 1
+                sheet_match_counts[ws.title] = sheet_match_counts.get(ws.title, 0) + 1
+
+                if len(matches) < max_results:
+                    col_name = header[col_idx] if col_idx < len(header) else f"Col_{col_idx}"
+                    cell_ref = f"{get_column_letter(col_idx + 1)}{row_idx}"
+
+                    # context: 同行其他列的值（最多 5 列）
+                    context: dict[str, str] = {}
+                    ctx_count = 0
+                    for ci, cv in enumerate(row_list):
+                        if ci == col_idx or cv is None:
+                            continue
+                        h = header[ci] if ci < len(header) else f"Col_{ci}"
+                        context[h] = str(cv)[:100]
+                        ctx_count += 1
+                        if ctx_count >= 5:
+                            break
+
+                    matches.append({
+                        "sheet": ws.title,
+                        "row": row_idx,
+                        "column": col_name,
+                        "value": cell_str[:200],
+                        "cell_ref": cell_ref,
+                        "context": context,
+                    })
+
+        if len(matches) >= max_results:
+            # 继续统计剩余 sheet 的总匹配数（但不收集详情）
+            continue
+
+    wb.close()
+
+    truncated = total_matches > len(matches)
+    summary_by_sheet = [
+        {"sheet": s, "matches": c}
+        for s, c in sorted(sheet_match_counts.items(), key=lambda x: -x[1])
+    ]
+
+    result: dict[str, Any] = {
+        "query": query,
+        "match_mode": match_mode,
+        "total_matches": total_matches,
+        "returned": len(matches),
+        "truncated": truncated,
+        "sheets_searched": sheets_searched,
+        "matches": matches,
+        "summary_by_sheet": summary_by_sheet,
+    }
+
+    # 0 结果时添加智能提示，引导 LLM 优化搜索策略
+    if total_matches == 0 and match_mode in ("contains", "exact", "startswith"):
+        hints: list[str] = []
+        if len(query) > 2:
+            hints.append(f"缩短搜索词（如只搜索 '{query[:2]}' 或其中某个关键词）")
+        # 检测中文数字，提示可能的阿拉伯数字等价
+        _CN_DIGIT_MAP = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                         "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
+        _has_cn_digit = any(c in query for c in _CN_DIGIT_MAP)
+        if _has_cn_digit:
+            _alt = query
+            for cn, ar in _CN_DIGIT_MAP.items():
+                _alt = _alt.replace(cn, ar)
+            hints.append(f"查询含中文数字，可尝试阿拉伯数字版本: '{_alt}'")
+        hints.append("尝试 match_mode='fuzzy' 进行分词模糊匹配（自动拆分关键词 + 中文数字转换）")
+        hints.append("尝试 match_mode='regex' 用正则灵活匹配")
+        result["search_hints"] = hints
+
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
 
 
@@ -2473,7 +3768,7 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel/CSV 文件路径（相对于工作目录），支持 .xlsx/.xlsm/.csv/.tsv",
+                        "description": "Excel/CSV 文件路径（相对于工作目录），支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv",
                     },
                     "sheet_name": {
                         "type": "string",
@@ -2535,7 +3830,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=read_excel,
-            max_result_chars=6000,
+            max_result_chars=10000,
             write_effect="none",
         ),
         # write_excel: Batch 1 精简
@@ -2627,6 +3922,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=filter_data,
+            max_result_chars=8000,
             write_effect="none",
         ),
         ToolDef(
@@ -2697,9 +3993,151 @@ def get_tools() -> list[ToolDef]:
             max_result_chars=0,
             write_effect="none",
         ),
+        ToolDef(
+            name="compare_excel",
+            description=(
+                "对比两个 Excel 文件或同一文件的两个工作表，返回结构化差异报告。"
+                "支持按行/列/单元格级别展示新增、删除和修改。"
+                "适用场景：两个版本文件对比、模板 vs 填充后对比、同文件跨 Sheet 对比。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_a": {
+                        "type": "string",
+                        "description": "第一个文件路径（基准文件）",
+                    },
+                    "file_b": {
+                        "type": "string",
+                        "description": "第二个文件路径（对比文件）。与 file_a 相同时用于跨 Sheet 对比",
+                    },
+                    "sheet_a": {
+                        "type": "string",
+                        "description": "file_a 的工作表名（可选，默认第一个）",
+                        "default": "",
+                    },
+                    "sheet_b": {
+                        "type": "string",
+                        "description": "file_b 的工作表名（可选，默认第一个）",
+                        "default": "",
+                    },
+                    "ignore_style": {
+                        "type": "boolean",
+                        "description": "是否忽略样式差异，仅对比值",
+                        "default": True,
+                    },
+                    "key_columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "用于行匹配的关键列名（可选，默认按行号对齐）",
+                        "default": [],
+                    },
+                    "max_diffs": {
+                        "type": "integer",
+                        "description": "最大差异数量（超出截断）",
+                        "default": 500,
+                        "minimum": 1,
+                    },
+                },
+                "required": ["file_a", "file_b"],
+                "additionalProperties": False,
+            },
+            func=compare_excel,
+            write_effect="none",
+        ),
         # transform_data: Batch 1 精简
         # group_aggregate: Batch 4 精简，由 run_code + pandas groupby() 替代
         # analyze_sheet_mapping: Batch 4 精简，由 run_code + pandas merge 分析替代
+        ToolDef(
+            name="scan_excel_snapshot",
+            description=(
+                "一次性扫描 Excel 文件全貌：所有 Sheet 的列 schema、数据类型、统计概要（空值/唯一值/min/max/分位数/异常值）、"
+                "重复行检测、类型混杂检测、跨 Sheet 关联发现、数据质量信号汇总。"
+                "适用场景：首次接触文件时快速了解全貌，替代多次 read_excel + run_code 的组合。"
+                "不适用：已知具体需求时直接用 read_excel 定向读取。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径（相对于工作目录），支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv",
+                    },
+                    "max_sample_rows": {
+                        "type": "integer",
+                        "description": "大表采样行数上限（默认 500），行数 ≤ 此值时全量计算",
+                        "default": 500,
+                        "minimum": 10,
+                    },
+                    "include_relationships": {
+                        "type": "boolean",
+                        "description": "是否检测跨 Sheet 关联（共享列名、疑似外键），默认 true",
+                        "default": True,
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
+            func=scan_excel_snapshot,
+            max_result_chars=15000,
+            write_effect="none",
+        ),
+        ToolDef(
+            name="search_excel_values",
+            description=(
+                "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀/模糊匹配。"
+                "返回匹配的 sheet/行/列/值/单元格引用及同行上下文。"
+                "适用场景：在整个文件中查找特定值或模式、定位数据出现位置。"
+                "模糊匹配（fuzzy）：自动拆分关键词并逐个子串匹配，适合用户口语与实际数据不完全一致的场景"
+                "（如搜索'电子一班'可匹配'24级电子信息科学与技术1班'）。"
+                "不适用：条件筛选和排序（改用 filter_data）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Excel 文件路径（相对于工作目录）",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "搜索字符串或正则表达式",
+                    },
+                    "match_mode": {
+                        "type": "string",
+                        "enum": ["contains", "exact", "regex", "startswith", "fuzzy"],
+                        "description": "匹配模式：contains（默认）| exact | regex | startswith | fuzzy（分词模糊匹配，适合口语化搜索）",
+                        "default": "contains",
+                    },
+                    "sheets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "限定搜索的 Sheet 名称列表（默认全部）",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "限定搜索的列名列表（默认全部）",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最大返回匹配数，默认 50",
+                        "default": 50,
+                        "minimum": 1,
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "是否区分大小写，默认 false",
+                        "default": False,
+                    },
+                },
+                "required": ["file_path", "query"],
+                "additionalProperties": False,
+            },
+            func=search_excel_values,
+            max_result_chars=8000,
+            write_effect="none",
+        ),
     ]
 
 

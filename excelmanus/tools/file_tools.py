@@ -676,14 +676,14 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
 
 
 def read_text_file(
-    file_path: str, encoding: str = "utf-8", max_lines: int = 200
+    file_path: str, encoding: str = "utf-8", max_lines: int = 500
 ) -> str:
     """读取文本文件内容（CSV、TXT 等）。
 
     Args:
         file_path: 文件路径（相对于工作目录）。
         encoding: 文件编码，默认 utf-8。
-        max_lines: 最大读取行数，默认 200。
+        max_lines: 最大读取行数，默认 500。
 
     Returns:
         JSON 格式的文件内容。
@@ -1006,8 +1006,8 @@ def get_tools() -> list[ToolDef]:
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "最大读取行数（默认200）",
-                        "default": 200,
+                        "description": "最大读取行数（默认500）",
+                        "default": 500,
                         "minimum": 1,
                         "maximum": 1000,
                     },
@@ -1016,7 +1016,7 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=read_text_file,
-            max_result_chars=6000,
+            max_result_chars=10000,
             write_effect="none",
         ),
         ToolDef(

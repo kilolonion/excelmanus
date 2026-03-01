@@ -228,7 +228,7 @@ class CommandHandler:
 
         # /compact status
         if action == "status":
-            sys_msgs = e.memory.build_system_messages()
+            sys_msgs = getattr(e, "_last_system_msgs", None) or e.memory.build_system_messages()
             status = compaction_mgr.get_status(e.memory, sys_msgs)
             pct = status["usage_ratio"] * 100
             threshold_pct = status["threshold_ratio"] * 100
@@ -266,8 +266,9 @@ class CommandHandler:
 
         # 确定摘要模型
         summary_model = e.config.aux_model or e.active_model
-        sys_msgs = e.memory.build_system_messages()
+        sys_msgs = getattr(e, "_last_system_msgs", None) or e.memory.build_system_messages()
 
+        _msgs_before = len(e.memory.messages)
         result = await compaction_mgr.manual_compact(
             memory=e.memory,
             system_msgs=sys_msgs,
@@ -275,6 +276,9 @@ class CommandHandler:
             summary_model=summary_model,
             custom_instruction=custom_instruction,
         )
+        # 压缩替换了消息列表，重置快照索引以触发持久化全量重写
+        if len(e.memory.messages) != _msgs_before:
+            e.set_message_snapshot_index(0)
 
         if not result.success:
             return f"压缩未执行: {result.error}"

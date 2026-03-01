@@ -17,7 +17,7 @@ from openpyxl.utils.cell import range_boundaries
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
-from excelmanus.tools._helpers import get_worksheet
+from excelmanus.tools._helpers import ensure_openpyxl_compatible, get_worksheet
 from excelmanus.tools.format_tools import COLOR_NAME_MAP
 from excelmanus.tools.registry import ToolDef
 
@@ -181,6 +181,7 @@ def style_card_blocks(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = wb[sheet_name]
 
@@ -261,6 +262,7 @@ def scale_range_unit(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -334,6 +336,7 @@ def apply_dashboard_dark_theme(
     """暗色仪表盘主题：基础底色、卡片区、指标高亮、图表区域样式。"""
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = wb[sheet_name]
 
@@ -442,6 +445,7 @@ def add_color_scale(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -515,6 +519,7 @@ def add_data_bar(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 
@@ -613,6 +618,7 @@ def add_conditional_rule(
 
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+    safe_path = ensure_openpyxl_compatible(safe_path)
     wb = load_workbook(safe_path)
     ws = get_worksheet(wb, sheet_name)
 

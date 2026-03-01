@@ -135,6 +135,8 @@ class MentionResolver:
         """解析 Excel 文件：丰富的结构化摘要（工作表列表、行列数、列结构、数据类型）。"""
         try:
             from openpyxl import load_workbook
+            from excelmanus.tools._helpers import ensure_openpyxl_compatible
+            path = ensure_openpyxl_compatible(path)
 
             wb = load_workbook(str(path), read_only=True, data_only=True)
             try:
@@ -241,6 +243,8 @@ class MentionResolver:
             from openpyxl import load_workbook
             from openpyxl.utils import column_index_from_string, get_column_letter
             from openpyxl.utils.cell import range_boundaries
+            from excelmanus.tools._helpers import ensure_openpyxl_compatible
+            path = ensure_openpyxl_compatible(path)
 
             sheet_name, cell_range = self._parse_range_spec(mention.range_spec)  # type: ignore[arg-type]
 

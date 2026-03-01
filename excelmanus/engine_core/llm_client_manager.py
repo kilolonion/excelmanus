@@ -71,7 +71,7 @@ class LLMClientManager:
         )
 
         # ── VLM ──
-        self._vlm_client, self._vlm_model = self._build_vlm(config)
+        self._vlm_client, self._vlm_model = self._build_vlm(config, self._main_client)
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -179,6 +179,10 @@ class LLMClientManager:
             base_url=base_url,
             protocol=protocol,
         )
+        self._main_model = model
+        self._main_api_key = api_key
+        self._main_base_url = base_url
+        self._main_protocol = protocol
         self._active_model = model
         self._active_api_key = api_key
         self._active_base_url = base_url
@@ -262,8 +266,11 @@ class LLMClientManager:
         return router, advisor
 
     @staticmethod
-    def _build_vlm(config: "ExcelManusConfig") -> tuple[Any, str]:
-        """构建 VLM 客户端。返回 (client, model)。"""
+    def _build_vlm(config: "ExcelManusConfig", main_client: Any) -> tuple[Any, str]:
+        """构建 VLM 客户端。返回 (client, model)。
+
+        VLM 未启用或未配置独立 base_url 时复用 main_client（与原始 engine.py 行为一致）。
+        """
         _vlm_effective = config.vlm_enabled
         _vlm_api_key = (config.vlm_api_key if _vlm_effective else None) or config.api_key
         _vlm_base_url = (config.vlm_base_url if _vlm_effective else None) or config.base_url
@@ -277,9 +284,5 @@ class LLMClientManager:
                 protocol=_vlm_protocol,
             )
         else:
-            client = create_client(
-                api_key=config.api_key,
-                base_url=config.base_url,
-                protocol=config.protocol,
-            )
+            client = main_client
         return client, _vlm_model

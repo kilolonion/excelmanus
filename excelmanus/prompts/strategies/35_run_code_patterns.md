@@ -14,7 +14,7 @@ conditions:
 1. **所有写入操作通过 run_code 完成**（pandas/openpyxl）
 2. **包含顶层 try/except 异常处理**，print 到 stderr
 3. 仅使用数据处理代码（pandas/openpyxl/numpy）
-4. **写入后在 stdout 打印关键验证数据**（行数、列名、抽样值），作为核心法则 2（验证闭环）的验证依据
+4. **写入后在 stdout 打印关键验证数据**（行数、列名、抽样值），作为核心法则 2（验证闭环）的验证依据。**注意**：创建新文件时 stdout 不足以验证——必须在 `run_code` 之后额外调用 `read_excel` 或 `scan_excel_snapshot` 回读确认
 
 ### 核心代码模板
 

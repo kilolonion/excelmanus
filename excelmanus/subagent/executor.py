@@ -948,7 +948,7 @@ class SubagentExecutor:
                     arguments=arguments,
                     tool_scope=tool_scope,
                     execute=_execute,
-                    undoable=not self._approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
+                    undoable=self._approval.is_undoable_tool(tool_name),
                     created_at_utc=created_at_utc,
                     session_turn=session_turn,
                 )
@@ -1460,4 +1460,4 @@ class SubagentExecutor:
     @staticmethod
     def _is_excel_path(path: str) -> bool:
         lower = path.lower()
-        return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")
+        return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls") or lower.endswith(".xlsb")

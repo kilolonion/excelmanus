@@ -74,7 +74,7 @@ def normalize_path(path: Any) -> str:
 def is_excel_path(path: str) -> bool:
     """判断是否 Excel 文件路径。"""
     lower = (path or "").lower()
-    return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls")
+    return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls") or lower.endswith(".xlsb")
 
 
 def extract_file_path(arguments: dict[str, Any], result_json: dict[str, Any] | None) -> str:
@@ -164,7 +164,7 @@ def extract_shape(result_json: dict[str, Any] | None) -> tuple[int, int]:
         first_sheet = sheets[0]
         if isinstance(first_sheet, dict):
             rows = _to_int(first_sheet.get("rows"))
-            cols = _to_int(first_sheet.get("columns"))
+            cols = _to_int(first_sheet.get("columns")) or _to_int(first_sheet.get("cols"))
             if rows > 0 or cols > 0:
                 return rows, cols
 
@@ -193,7 +193,7 @@ def extract_sheet_dimensions(
         if not name:
             continue
         rows = _to_int(item.get("rows"))
-        cols = _to_int(item.get("columns"))
+        cols = _to_int(item.get("columns")) or _to_int(item.get("cols"))
         if rows > 0 or cols > 0:
             dims[name] = (rows, cols)
     return dims

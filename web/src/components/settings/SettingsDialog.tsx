@@ -2,7 +2,7 @@
 
 import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X } from "lucide-react";
+import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,6 +18,7 @@ const SkillsTab = lazy(() => import("./SkillsTab").then(m => ({ default: m.Skill
 const MCPTab = lazy(() => import("./MCPTab").then(m => ({ default: m.MCPTab })));
 const MemoryTab = lazy(() => import("./MemoryTab").then(m => ({ default: m.MemoryTab })));
 const RuntimeTab = lazy(() => import("./RuntimeTab").then(m => ({ default: m.RuntimeTab })));
+const VersionTab = lazy(() => import("./VersionTab").then(m => ({ default: m.VersionTab })));
 
 function TabSpinner() {
   return (
@@ -30,7 +31,9 @@ function TabSpinner() {
 }
 import { useShallow } from "zustand/react/shallow";
 import { useUIStore } from "@/stores/ui-store";
+import { useOnboardingStore } from "@/stores/onboarding-store";
 import { checkModelPlaceholder } from "@/lib/api";
+import { SettingsTourHints } from "@/components/onboarding/SettingsTourHints";
 
 const TAB_META = [
   { value: "model", label: "模型", icon: <Server className="size-4" /> },
@@ -39,6 +42,7 @@ const TAB_META = [
   { value: "mcp", label: "MCP", icon: <Plug className="size-4" /> },
   { value: "memory", label: "记忆", icon: <Brain className="size-4" /> },
   { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
+  { value: "version", label: "版本", icon: <ArrowUpCircle className="size-4" /> },
 ];
 
 export function SettingsDialog() {
@@ -51,10 +55,14 @@ export function SettingsDialog() {
     }))
   );
 
+  const isGuideLocked = useOnboardingStore((s) => s.isGuideLocked);
+
   const handleOpenChange = useCallback((v: boolean) => {
     if (v) {
       openSettings(settingsTab);
     } else {
+      // Prevent closing while settings tour is active
+      if (isGuideLocked) return;
       closeSettings();
       checkModelPlaceholder()
         .then((result) => {
@@ -70,7 +78,7 @@ export function SettingsDialog() {
         })
         .catch(() => {});
     }
-  }, [openSettings, closeSettings, settingsTab]);
+  }, [openSettings, closeSettings, settingsTab, isGuideLocked]);
 
   return (
     <Dialog open={settingsOpen} onOpenChange={handleOpenChange}>
@@ -94,7 +102,7 @@ export function SettingsDialog() {
           className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
         >
           {/* ── Tab navigation ── */}
-          <nav className="relative flex-shrink-0" role="tablist">
+          <nav className="relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
             <div className="flex px-1 sm:px-4 overflow-x-auto scrollbar-none">
               {TAB_META.map((tab) => {
                 const isActive = settingsTab === tab.value;
@@ -104,6 +112,7 @@ export function SettingsDialog() {
                     type="button"
                     role="tab"
                     aria-selected={isActive}
+                    data-coach-id={`coach-settings-tab-${tab.value}`}
                     onClick={() => openSettings(tab.value)}
                     className={`
                       relative flex-1 min-w-[44px] flex items-center justify-center
@@ -122,7 +131,7 @@ export function SettingsDialog() {
                     >
                       {tab.icon}
                     </span>
-                    <span className="text-[10px] sm:text-[13px] font-medium leading-tight">
+                    <span className="text-[11px] sm:text-[13px] font-medium leading-tight">
                       {tab.label}
                     </span>
                     {isActive && (
@@ -151,28 +160,32 @@ export function SettingsDialog() {
               className="overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col"
             >
               <Suspense fallback={<TabSpinner />}>
-                <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined}>
+                <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">
                   {settingsTab === "model" && <ModelTab />}
                 </TabsContent>
-                <TabsContent value="rules" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "rules" ? true : undefined}>
+                <TabsContent value="rules" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "rules" ? true : undefined} data-coach-id="coach-settings-content-rules">
                   {settingsTab === "rules" && <RulesTab />}
                 </TabsContent>
-                <TabsContent value="skills" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "skills" ? true : undefined}>
+                <TabsContent value="skills" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "skills" ? true : undefined} data-coach-id="coach-settings-content-skills">
                   {settingsTab === "skills" && <SkillsTab />}
                 </TabsContent>
-                <TabsContent value="mcp" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "mcp" ? true : undefined}>
+                <TabsContent value="mcp" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "mcp" ? true : undefined} data-coach-id="coach-settings-content-mcp">
                   {settingsTab === "mcp" && <MCPTab />}
                 </TabsContent>
-                <TabsContent value="memory" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "memory" ? true : undefined}>
+                <TabsContent value="memory" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "memory" ? true : undefined} data-coach-id="coach-settings-content-memory">
                   {settingsTab === "memory" && <MemoryTab />}
                 </TabsContent>
-                <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined}>
+                <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
                   {settingsTab === "runtime" && <RuntimeTab />}
+                </TabsContent>
+                <TabsContent value="version" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "version" ? true : undefined} data-coach-id="coach-settings-content-version">
+                  {settingsTab === "version" && <VersionTab />}
                 </TabsContent>
               </Suspense>
             </motion.div>
           </AnimatePresence>
         </Tabs>
+        <SettingsTourHints activeTab={settingsTab} />
       </DialogContent>
     </Dialog>
   );

@@ -72,10 +72,24 @@ class TestUploadFromUrl:
         assert resp.status_code == 400
         assert "扩展名" in resp.json().get("error", "") or "推断" in resp.json().get("error", "")
 
-    def test_unsupported_extension(self, client):
+    @patch("httpx.AsyncClient")
+    def test_any_extension_allowed(self, mock_httpx_cls, client, tmp_path):
+        """扩展名不再受限 — 任意格式都能上传（仅做大小限制）。"""
+        fake_content = b"# Hello\nworld"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = fake_content
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.get = AsyncMock(return_value=mock_response)
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
+        mock_httpx_cls.return_value = mock_client_instance
+
         resp = client.post("/api/v1/upload-from-url", json={"url": "https://example.com/doc.pdf"})
-        assert resp.status_code == 400
-        assert "不支持" in resp.json().get("error", "")
+        assert resp.status_code == 200
+        assert resp.json()["filename"] == "doc.pdf"
 
     @patch("httpx.AsyncClient")
     def test_success_xlsx(self, mock_httpx_cls, client, tmp_path):

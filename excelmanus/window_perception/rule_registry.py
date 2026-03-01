@@ -26,6 +26,7 @@ _SHEET_TOOLS = {
     "read_sheet",
     "filter_data",
     "list_sheets",
+    "scan_excel_snapshot",
     # MCP 工具名
     "describe_sheets",
     "write_to_sheet",
@@ -50,6 +51,7 @@ _MCP_SHEET_SUFFIXES = {
 _READ_LIKE_TOOLS = {
     "read_excel",
     "read_sheet",
+    "scan_excel_snapshot",
     # analyze_data: Batch 4 精简
     "filter_data",
     "focus_window_refill",

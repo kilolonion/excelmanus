@@ -18,32 +18,47 @@ logger = logging.getLogger(__name__)
 _EXTRACTION_SYSTEM_PROMPT = """\
 你是一个记忆提取助手。请分析以下对话历史，提取值得在未来会话中记住的有价值信息。
 
+**核心原则：只记忆"跨会话可复用"的信息。**
+
+问自己：如果用户下周开一个新会话，这条信息还有用吗？
+- 有用 → 提取
+- 只对本次会话有用 → 不提取
+
 **严格筛选标准——宁缺毋滥：**
 - 只提取对未来会话确实有复用价值的信息。
 - 一次性的操作细节、临时数据值、当前任务的中间过程不值得记忆。
 - 如果对话只是简单问答或一次性操作，没有产生可复用信息，必须返回空数组 []。
 - 不要为了凑数而编造或拉伸信息，质量远比数量重要。
+- 不要对用户行为做心理推测（如"用户可能偏好…"）。
 
 值得记忆的类别：
-- file_pattern: 项目中反复出现的 Excel 文件结构（列名、数据类型、行数量级）
-- user_pref: 用户明确表达或反复体现的偏好（格式、风格、命名习惯、工作流程）
-- error_solution: 踩坑后发现的解决方案（有通用复用价值的）
-- general: 其他在未来会话中确实有价值的信息
+- file_pattern: 用户**反复使用**的 Excel 文件结构特征（列名规律、sheet 布局、数据组织方式）
+- user_pref: 用户**明确表达**的偏好（不是推测），如格式要求、命名规则、工作流
+- error_solution: 具有**通用复用价值**的错误解决方案（不是单次调试细节）
+- general: 其他跨会话确实有价值的信息
+
+**不应提取的反例（遇到类似情况必须跳过）：**
+- ✗ "用户需要将回归分析结果写入Excel" — 一次性任务描述
+- ✗ "数据包含20行，2列：广告投入和销售额" — 单次会话的具体数据
+- ✗ "当前工作区有3个Excel文件" — 临时状态，下次会话已变
+- ✗ "用户询问了助手身份" — 一次性交互，不是偏好
+- ✗ "成功创建了图表/完成了排序" — 操作记录，不是可复用知识
+
+**应提取的正例：**
+- ✓ "用户的月度报表固定包含列：日期、产品、数量、单价、金额" — 反复出现的文件结构
+- ✓ "用户要求所有图表使用蓝色系配色，标题14号加粗" — 明确表达的偏好
+- ✓ "排序前需将文本型公式恢复为真实公式，否则排序结果异常" — 通用解决方案
 
 请以 JSON 数组格式输出，每条记忆包含 content 和 category 字段。
 如果没有值得记住的信息，返回空数组 []。
-
-输出格式示例：
-[
-  {"content": "用户的销售数据文件包含列：日期、产品、数量、单价、金额", "category": "file_pattern"},
-  {"content": "用户偏好蓝色系柱状图，标题使用14号字体", "category": "user_pref"}
-]
+大多数简单对话应该返回 []。
 
 只输出 JSON 数组，不要包含其他文字。"""
 
 _MAX_MESSAGES = 120
 _MAX_TOTAL_CHARS = 48_000
 _MAX_TOTAL_TOKENS = 12_000
+_MIN_USER_MESSAGES = 3  # 少于此数的对话不值得提取记忆
 _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
@@ -55,7 +70,15 @@ class MemoryExtractor:
         self._model = model
 
     async def extract(self, messages: list[dict]) -> list[MemoryEntry]:
-        """分析对话历史，返回值得记住的 MemoryEntry 列表。"""
+        """分析对话历史，返回值得记住的 MemoryEntry 列表。
+
+        对话轮次不足 _MIN_USER_MESSAGES 时直接跳过（短对话几乎不产生可复用记忆）。
+        """
+        user_count = sum(1 for m in messages if m.get("role") == "user")
+        if user_count < _MIN_USER_MESSAGES:
+            logger.debug("对话用户消息数 %d < %d，跳过记忆提取", user_count, _MIN_USER_MESSAGES)
+            return []
+
         normalized = self._prepare_messages(messages)
         if not normalized:
             return []
@@ -106,10 +129,6 @@ class MemoryExtractor:
             for item in content:
                 if isinstance(item, dict):
                     if isinstance(item.get("text"), str):
-                        parts.append(item["text"])
-                        continue
-                    # 兼容 Responses API 风格块
-                    if item.get("type") == "text" and isinstance(item.get("text"), str):
                         parts.append(item["text"])
                         continue
                     if isinstance(item.get("content"), str):

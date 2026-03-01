@@ -61,6 +61,18 @@ _SQLITE_USERS_DDL = [
         created_at  TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_ev_email_purpose ON email_verifications(email, purpose)",
+    """CREATE TABLE IF NOT EXISTS user_oauth_links (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider    TEXT NOT NULL,
+        oauth_id    TEXT NOT NULL,
+        display_name TEXT,
+        avatar_url  TEXT,
+        linked_at   TEXT NOT NULL,
+        UNIQUE(provider, oauth_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_uol_user ON user_oauth_links(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_uol_provider_oid ON user_oauth_links(provider, oauth_id)",
 ]
 
 _PG_USERS_DDL = [
@@ -105,6 +117,18 @@ _PG_USERS_DDL = [
         created_at  TEXT NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS idx_ev_email_purpose ON email_verifications(email, purpose)",
+    """CREATE TABLE IF NOT EXISTS user_oauth_links (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider    TEXT NOT NULL,
+        oauth_id    TEXT NOT NULL,
+        display_name TEXT,
+        avatar_url  TEXT,
+        linked_at   TEXT NOT NULL,
+        UNIQUE(provider, oauth_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_uol_user ON user_oauth_links(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_uol_provider_oid ON user_oauth_links(provider, oauth_id)",
 ]
 
 
@@ -124,6 +148,7 @@ class UserStore:
         # 迁移：为已有数据库添加 allowed_models 列
         self._migrate_allowed_models()
         self._migrate_storage_quota()
+        self._migrate_oauth_links()
 
     # ── CRUD ───────────────────────────────────────────────
 
@@ -151,6 +176,43 @@ class UserStore:
                     logger.info("迁移：已添加 users.%s 列", col)
                 except Exception:
                     pass
+
+    def _migrate_oauth_links(self) -> None:
+        """将 users 表中已有的 oauth_provider/oauth_id 迁移到 user_oauth_links（幂等）。"""
+        try:
+            rows = self._conn.execute(
+                """SELECT id, oauth_provider, oauth_id, display_name, avatar_url
+                   FROM users
+                   WHERE oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"""
+            ).fetchall()
+        except Exception:
+            return
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        migrated = 0
+        for row in rows:
+            r = dict(row)  # type: ignore[arg-type]
+            # 检查是否已迁移
+            existing = self._conn.execute(
+                "SELECT 1 FROM user_oauth_links WHERE provider = ? AND oauth_id = ?",
+                (r["oauth_provider"], r["oauth_id"]),
+            ).fetchone()
+            if existing:
+                continue
+            self._conn.execute(
+                """INSERT INTO user_oauth_links
+                   (id, user_id, provider, oauth_id, display_name, avatar_url, linked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()), r["id"],
+                    r["oauth_provider"], r["oauth_id"],
+                    r.get("display_name"), r.get("avatar_url"), now,
+                ),
+            )
+            migrated += 1
+        if migrated:
+            self._conn.commit()
+            logger.info("迁移：已将 %d 条旧 OAuth 绑定迁移到 user_oauth_links", migrated)
 
     def create_user(self, user: UserRecord) -> UserRecord:
         self._conn.execute(
@@ -195,6 +257,16 @@ class UserStore:
         return self._row_to_record(row) if row else None
 
     def get_by_oauth(self, provider: str, oauth_id: str) -> UserRecord | None:
+        """通过 OAuth 绑定查找用户（优先查 user_oauth_links 表）。"""
+        row = self._conn.execute(
+            """SELECT u.* FROM users u
+               JOIN user_oauth_links l ON u.id = l.user_id
+               WHERE l.provider = ? AND l.oauth_id = ?""",
+            (provider, oauth_id),
+        ).fetchone()
+        if row:
+            return self._row_to_record(row)
+        # 回退：兼容尚未迁移的旧数据
         row = self._conn.execute(
             "SELECT * FROM users WHERE oauth_provider = ? AND oauth_id = ?",
             (provider, oauth_id),
@@ -337,6 +409,64 @@ class UserStore:
             (used_at, email.lower(), purpose),
         )
         self._conn.commit()
+
+    # ── OAuth Links ─────────────────────────────────────────
+
+    def create_oauth_link(
+        self,
+        user_id: str,
+        provider: str,
+        oauth_id: str,
+        display_name: str | None = None,
+        avatar_url: str | None = None,
+    ) -> str:
+        """为用户创建 OAuth 绑定。返回 link id。"""
+        link_id = str(uuid.uuid4())
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO user_oauth_links
+               (id, user_id, provider, oauth_id, display_name, avatar_url, linked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (link_id, user_id, provider, oauth_id, display_name, avatar_url, now),
+        )
+        self._conn.commit()
+        logger.info("OAuth 绑定创建: user=%s provider=%s", user_id, provider)
+        return link_id
+
+    def get_oauth_links(self, user_id: str) -> list[dict]:
+        """获取用户的所有 OAuth 绑定。"""
+        rows = self._conn.execute(
+            "SELECT * FROM user_oauth_links WHERE user_id = ? ORDER BY linked_at",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]  # type: ignore[arg-type]
+
+    def get_oauth_link(self, provider: str, oauth_id: str) -> dict | None:
+        """通过 provider + oauth_id 查找绑定记录。"""
+        row = self._conn.execute(
+            "SELECT * FROM user_oauth_links WHERE provider = ? AND oauth_id = ?",
+            (provider, oauth_id),
+        ).fetchone()
+        return dict(row) if row else None  # type: ignore[arg-type]
+
+    def delete_oauth_link(self, user_id: str, provider: str) -> bool:
+        """删除用户的某个 OAuth 绑定。"""
+        cur = self._conn.execute(
+            "DELETE FROM user_oauth_links WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        )
+        self._conn.commit()
+        if cur.rowcount > 0:
+            logger.info("OAuth 绑定删除: user=%s provider=%s", user_id, provider)
+        return cur.rowcount > 0
+
+    def count_oauth_links(self, user_id: str) -> int:
+        """用户绑定的 OAuth 方式数量。"""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as c FROM user_oauth_links WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return row["c"] if row else 0  # type: ignore[index]
 
     # ── 辅助方法 ────────────────────────────────────────────
 

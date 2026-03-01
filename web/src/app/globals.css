@@ -55,11 +55,16 @@
   --em-accent: #107c41;
   --em-sidebar-bg: #f7f7f8;
   --em-primary-dark: #1a5c38;
-  --em-primary-alpha-10: rgba(33, 115, 70, 0.1);
+  --em-primary-alpha-02: rgba(33, 115, 70, 0.02);
+  --em-primary-alpha-04: rgba(33, 115, 70, 0.04);
   --em-primary-alpha-06: rgba(33, 115, 70, 0.06);
+  --em-primary-alpha-08: rgba(33, 115, 70, 0.08);
+  --em-primary-alpha-10: rgba(33, 115, 70, 0.1);
+  --em-primary-alpha-12: rgba(33, 115, 70, 0.12);
   --em-primary-alpha-15: rgba(33, 115, 70, 0.15);
   --em-primary-alpha-20: rgba(33, 115, 70, 0.2);
   --em-primary-alpha-25: rgba(33, 115, 70, 0.25);
+  --em-primary-alpha-30: rgba(33, 115, 70, 0.3);
   --em-surface: #f4f4f5;
   --em-error: #d13438;
   --em-gold: #e5a100;
@@ -132,11 +137,16 @@
   /* ExcelManus 深色主题覆盖 */
   --em-sidebar-bg: #1a1a1b;
   --em-primary-light: #2d8f56;
+  --em-primary-alpha-02: rgba(33, 115, 70, 0.03);
+  --em-primary-alpha-04: rgba(33, 115, 70, 0.05);
   --em-primary-alpha-06: rgba(33, 115, 70, 0.08);
+  --em-primary-alpha-08: rgba(33, 115, 70, 0.1);
   --em-primary-alpha-10: rgba(33, 115, 70, 0.12);
+  --em-primary-alpha-12: rgba(33, 115, 70, 0.15);
   --em-primary-alpha-15: rgba(33, 115, 70, 0.18);
   --em-primary-alpha-20: rgba(33, 115, 70, 0.25);
   --em-primary-alpha-25: rgba(33, 115, 70, 0.3);
+  --em-primary-alpha-30: rgba(33, 115, 70, 0.35);
 }
 
 @layer base {
@@ -517,11 +527,43 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
   --sar: env(safe-area-inset-right);
 }
 
+/* Horizontal scroll fade hint for Excel tables on mobile */
+.scroll-fade-x {
+  position: relative;
+}
+.scroll-fade-x::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--background, #fff));
+  opacity: 0;
+  transition: opacity 200ms;
+}
+@media (max-width: 767px) {
+  .scroll-fade-x::after {
+    opacity: 1;
+  }
+  .scroll-fade-x.scrolled-right::after {
+    opacity: 0;
+  }
+}
+
 /* On touch devices, always show elements that rely on hover for visibility */
 @media (hover: none) {
 
   .md\:opacity-0,
   .touch-show {
+    opacity: 1 !important;
+  }
+}
+
+/* Like touch-show but only on tablet+ screens — hides on mobile to reduce clutter */
+@media (hover: none) and (min-width: 640px) {
+  .touch-show-desktop {
     opacity: 1 !important;
   }
 }
@@ -574,7 +616,7 @@ button:active:not(:disabled),
 
   button,
   [role="button"],
-  input[type="checkbox"],
+  input[type="checkbox"]:not(.auth-checkbox),
   input[type="radio"],
   select {
     min-height: 44px;
@@ -1186,6 +1228,17 @@ button:active:not(:disabled),
   66% { transform: translate(-8px, 6px) scale(0.97); }
 }
 
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-4px); }
+  30% { transform: translateX(4px); }
+  45% { transform: translateX(-3px); }
+  60% { transform: translateX(3px); }
+  75% { transform: translateX(-2px); }
+  90% { transform: translateX(2px); }
+}
+.animate-shake { animation: shake 0.5s ease-in-out; }
+
 /* Auth card glassmorphism */
 .auth-card {
   background: oklch(1 0 0 / 70%);
@@ -1228,8 +1281,17 @@ button:active:not(:disabled),
 .auth-checkbox {
   appearance: none;
   -webkit-appearance: none;
+  -moz-appearance: none;
+  display: block;
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
   width: 18px;
   height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  max-width: 18px;
+  max-height: 18px;
   border: 2px solid var(--border);
   border-radius: 5px;
   background: var(--background);
@@ -1237,6 +1299,7 @@ button:active:not(:disabled),
   position: relative;
   transition: all 200ms ease;
   flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .auth-checkbox:hover {
@@ -1289,23 +1352,80 @@ button:active:not(:disabled),
   filter: grayscale(0.3);
 }
 
-/* Logo glow ring */
+/* Logo glow — multi-layered organic halo */
 .auth-logo-glow {
   position: relative;
 }
 
+/* Layer 1: wide diffused warm-green halo */
 .auth-logo-glow::before {
   content: "";
   position: absolute;
-  inset: -8px;
+  left: 50%;
+  bottom: -6px;
+  width: 140%;
+  height: 70%;
+  translate: -50% 0;
   border-radius: 50%;
-  background: radial-gradient(circle, var(--em-primary-alpha-15) 0%, transparent 70%);
-  animation: auth-logo-pulse 3s ease-in-out infinite;
+  background: radial-gradient(
+    ellipse 100% 80%,
+    var(--em-primary-alpha-20) 0%,
+    rgba(33, 168, 103, 0.10) 35%,
+    rgba(16, 124, 65, 0.04) 65%,
+    transparent 100%
+  );
+  filter: blur(18px);
+  animation: auth-glow-breathe 4s ease-in-out infinite;
 }
 
-@keyframes auth-logo-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(1.1); opacity: 1; }
+/* Layer 2: tight bright core accent */
+.auth-logo-glow::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 80%;
+  height: 50%;
+  translate: -50% 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse 80% 100%,
+    rgba(51, 168, 103, 0.22) 0%,
+    rgba(33, 115, 70, 0.08) 50%,
+    transparent 100%
+  );
+  filter: blur(10px);
+  animation: auth-glow-core 3s ease-in-out infinite 0.5s;
+}
+
+.dark .auth-logo-glow::before {
+  background: radial-gradient(
+    ellipse 100% 80%,
+    rgba(33, 168, 103, 0.16) 0%,
+    rgba(33, 115, 70, 0.08) 40%,
+    transparent 100%
+  );
+  filter: blur(22px);
+}
+
+.dark .auth-logo-glow::after {
+  background: radial-gradient(
+    ellipse 80% 100%,
+    rgba(51, 168, 103, 0.18) 0%,
+    rgba(33, 115, 70, 0.06) 50%,
+    transparent 100%
+  );
+}
+
+@keyframes auth-glow-breathe {
+  0%, 100% { opacity: 0.6; transform: scaleX(1) scaleY(1); }
+  40% { opacity: 1; transform: scaleX(1.08) scaleY(1.12); }
+  70% { opacity: 0.75; transform: scaleX(0.96) scaleY(1.04); }
+}
+
+@keyframes auth-glow-core {
+  0%, 100% { opacity: 0.5; transform: scaleX(1) scaleY(1); }
+  50% { opacity: 1; transform: scaleX(1.12) scaleY(1.18); }
 }
 
 /* OAuth button hover with green accent */
@@ -1370,7 +1490,8 @@ button:active:not(:disabled),
 @media (prefers-reduced-motion: reduce) {
   .auth-bg-orb-1,
   .auth-bg-orb-2,
-  .auth-logo-glow::before {
+  .auth-logo-glow::before,
+  .auth-logo-glow::after {
     animation: none;
   }
 }
@@ -1769,4 +1890,234 @@ button:active:not(:disabled),
 
 .dark .hljs-strong {
   font-weight: bold;
+}
+
+/* ── Onboarding Wizard Decorative Orbs ── */
+.onboarding-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+.onboarding-orb-1 {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, var(--em-primary-alpha-15) 0%, transparent 70%);
+  top: -10%;
+  right: -5%;
+  animation: onboarding-orb-drift 12s ease-in-out infinite;
+}
+
+.onboarding-orb-2 {
+  width: 350px;
+  height: 350px;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, transparent 70%);
+  bottom: -5%;
+  left: -5%;
+  animation: onboarding-orb-drift 15s ease-in-out infinite reverse;
+}
+
+.onboarding-orb-3 {
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+  top: 40%;
+  left: 50%;
+  animation: onboarding-orb-drift 10s ease-in-out infinite 2s;
+}
+
+.dark .onboarding-orb { opacity: 0.25; }
+
+@keyframes onboarding-orb-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(15px, -20px) scale(1.05); }
+  66% { transform: translate(-10px, 15px) scale(0.97); }
+}
+
+/* ── Coach Marks Interactive Pulse ── */
+.coach-highlight-pulse {
+  animation: coach-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes coach-pulse {
+  0%, 100% { box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 0 0 2px var(--em-primary), 0 0 16px 4px var(--em-primary-alpha-20); }
+  50% { box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 0 0 3px var(--em-primary), 0 0 24px 8px var(--em-primary-alpha-25); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-orb-1, .onboarding-orb-2, .onboarding-orb-3 { animation: none; }
+  .coach-highlight-pulse { animation: none; }
+}
+
+/* ── ClawHub Marketplace ── */
+
+/* Skill card shimmer on hover */
+@keyframes clawhub-card-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.clawhub-card {
+  position: relative;
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+              box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+              border-color 0.2s ease,
+              background-color 0.2s ease;
+}
+
+/* Touch feedback on mobile */
+.clawhub-card:active {
+  transform: scale(0.98);
+}
+
+/* Hover lift only on non-touch devices */
+@media (hover: hover) {
+  .clawhub-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.06),
+                0 4px 8px -2px rgba(0, 0, 0, 0.03);
+  }
+
+  .clawhub-card:active {
+    transform: translateY(-1px) scale(0.99);
+  }
+
+  .dark .clawhub-card:hover {
+    box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.35),
+                0 4px 8px -2px rgba(0, 0, 0, 0.15);
+  }
+}
+
+/* Skeleton loading pulse */
+.clawhub-skeleton {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 0%,
+    var(--em-primary-alpha-06) 40%,
+    hsl(var(--muted)) 60%,
+    hsl(var(--muted)) 100%
+  );
+  background-size: 300% 100%;
+  animation: clawhub-card-shimmer 2s ease-in-out infinite;
+  border-radius: 10px;
+}
+
+/* Category tag hover */
+.clawhub-tag {
+  position: relative;
+  transition: background-color 0.2s ease,
+              color 0.2s ease,
+              transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+              box-shadow 0.2s ease;
+}
+
+@media (hover: hover) {
+  .clawhub-tag:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.06);
+  }
+}
+
+.clawhub-tag:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* Install button success burst */
+@keyframes clawhub-install-success {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.2); }
+  40% { transform: scale(1.02); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { transform: scale(1); box-shadow: none; }
+}
+
+.clawhub-install-success {
+  animation: clawhub-install-success 0.5s ease-out;
+}
+
+/* Search button */
+.clawhub-search-btn {
+  transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+@media (hover: hover) {
+  .clawhub-search-btn:not(:disabled):hover {
+    box-shadow: 0 2px 12px var(--em-primary-alpha-25);
+  }
+}
+
+.clawhub-search-btn:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+/* Detail hero gradient */
+.clawhub-hero-gradient {
+  background: linear-gradient(145deg, var(--em-primary-alpha-06) 0%, var(--em-primary-alpha-02) 40%, transparent 70%);
+  border: 1px solid var(--em-primary-alpha-06);
+}
+
+.dark .clawhub-hero-gradient {
+  background: linear-gradient(145deg, var(--em-primary-alpha-10) 0%, var(--em-primary-alpha-04) 40%, transparent 70%);
+  border-color: var(--em-primary-alpha-10);
+}
+
+/* Empty state icon glow */
+.clawhub-empty-icon {
+  box-shadow: 0 8px 32px var(--em-primary-alpha-10);
+  transition: box-shadow 0.3s ease;
+}
+
+/* Stat badge subtle glow */
+.clawhub-stat-badge {
+  transition: background-color 0.2s ease,
+              box-shadow 0.2s ease,
+              transform 0.15s ease;
+}
+
+@media (hover: hover) {
+  .clawhub-stat-badge:hover {
+    box-shadow: 0 2px 12px var(--em-primary-alpha-08);
+    transform: translateY(-1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clawhub-card, .clawhub-card:hover, .clawhub-card:active { transform: none !important; }
+  .clawhub-skeleton { animation: none; opacity: 0.5; }
+  .clawhub-tag:hover, .clawhub-tag:active { transform: none; }
+  .clawhub-install-success { animation: none; }
+  .clawhub-stat-badge:hover { transform: none; }
+  .clawhub-search-btn:not(:disabled):active { transform: none; }
+}
+
+/* ── Settings Tour Hints & Demo Items ── */
+
+/* Demo item fade-in */
+@keyframes settings-tour-demo-fadein {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.settings-tour-demo-item {
+  animation: settings-tour-demo-fadein 0.35s ease-out both;
+}
+
+.settings-tour-demo-item:nth-child(2) {
+  animation-delay: 0.1s;
+}
+
+/* Hint bubble subtle float — uses margin-top instead of transform
+   so it doesn't override the inline transform set per-placement. */
+@keyframes settings-tour-hint-float {
+  0%, 100% { margin-top: 0; }
+  50% { margin-top: -2px; }
+}
+
+.settings-tour-hint {
+  animation: settings-tour-hint-float 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-tour-demo-item { animation: none; opacity: 1; }
+  .settings-tour-hint { animation: none; }
 }

@@ -1,6 +1,6 @@
 ---
 name: complex_task
-version: "1.4.0"
+version: "1.5.0"
 priority: 52
 layer: strategy
 max_tokens: 500
@@ -10,7 +10,7 @@ conditions: {}
 
 当任务涉及多个 sheet、多文件或 5 步以上操作时：
 
-1. **全局探查先行**：用 list_sheets（或 inspect_excel_files）一次性了解所有相关文件和 sheet 的结构（列名、行数、数据类型），在操作前完成全部探查。
+1. **全局探查先行**：用 `scan_excel_snapshot`（或 `inspect_excel_files`）一次性了解所有相关文件和 sheet 的结构（列名、行数、数据类型），在操作前完成全部探查。特别注意返回的 `has_merged_cells` 和 `merged_cell_summary`——高合并率表单（如课表、模板）需要先用 openpyxl 读取合并区域并做值传播，不能直接依赖 pandas 读取。
 
 2. **积极使用 `run_code`**：涉及数据透视/转置、分组聚合、跨表匹配填充、条件行删除、多列计算、批量写入等操作时，直接用 `run_code` 编写 Python 脚本（pandas/openpyxl）一次性完成。
 
@@ -21,7 +21,8 @@ conditions: {}
    - `{"title": "写入VLOOKUP公式", "verification": {"check_type": "formula_exists", "target_file": "report.xlsx", "target_sheet": "Sheet1", "target_range": "B2:B50"}}`
    - 纯探查/分析步骤可省略 verification，写入步骤必须附带。
 
-5. **逐步执行+即时验证**：每完成一步写入后，用 `read_excel` 或 `run_code`（只读）回读验证第 4 条定义的条件。验证通过后再进入下一步，发现错误立即修正。
+5. **逐步执行+即时验证**：每完成一步写入后，用 `read_excel` 或 `run_code`（只读）回读验证第 4 条定义的条件。**数据完整性验证优先于样式验证**——先确认非空数据量是否符合预期（如源表 5 天 × 11 节次 = 55 格数据，目标应同样有 55 格非空），再检查格式外观。验证通过后再进入下一步，发现错误立即修正。
+   **特别注意——新文件创建**：当步骤涉及创建新 Excel 文件时，`run_code` 的 stdout 打印**不能**替代回读验证。必须在创建后立即用 `read_excel` 或 `scan_excel_snapshot` 确认：① 文件已成功创建 ② sheet 名称和数量正确 ③ 关键数据行数/列数与预期一致。
 
 6. **数据一致性**：跨表引用时核对键列的值域是否一致（如 Sheet1 的"部门"列值域是否与 Sheet2 的一致），不一致时先报告差异。
 

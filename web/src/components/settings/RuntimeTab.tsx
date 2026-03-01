@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useServerRestart } from "@/hooks/use-server-restart";
+import { ServerRestartOverlay } from "@/components/ServerRestartOverlay";
 import {
   Loader2,
   Save,
@@ -28,51 +30,147 @@ import {
   FileText,
   ChevronDown,
   Timer,
+  Sparkles,
+  Cpu,
+  ArrowRight,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+
 import { apiGet, apiPut } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { useOnboardingStore } from "@/stores/onboarding-store";
+import { useUIStore } from "@/stores/ui-store";
 
 interface RuntimeConfig {
+  // 会话与多用户
   auth_enabled: boolean;
+  session_ttl_seconds: number;
+  max_sessions: number;
+  max_consecutive_failures: number;
+  // 执行与安全
   subagent_enabled: boolean;
+  verifier_enabled: boolean;
   backup_enabled: boolean;
   checkpoint_enabled: boolean;
   external_safe_mode: boolean;
   max_iterations: number;
-  compaction_enabled: boolean;
-  compaction_threshold_ratio: number;
-  code_policy_enabled: boolean;
   guard_mode: string;
-  session_ttl_seconds: number;
-  max_sessions: number;
-  max_consecutive_failures: number;
+  friendly_error_messages: boolean;
+  // AUX / VLM 开关
+  aux_enabled: boolean;
+  vlm_enabled: boolean;
+  // 上下文与记忆
+  max_context_tokens: number;
   memory_enabled: boolean;
   memory_auto_extract_interval: number;
-  max_context_tokens: number;
+  memory_auto_load_lines: number;
+  memory_expire_days: number;
+  chat_history_enabled: boolean;
+  // 记忆维护
+  memory_maintenance_enabled: boolean;
+  memory_maintenance_min_entries: number;
+  memory_maintenance_new_threshold: number;
+  memory_maintenance_interval_hours: number;
+  memory_maintenance_model: string;
+  // 摘要与压缩
   summarization_enabled: boolean;
+  summarization_threshold_ratio: number;
+  summarization_keep_recent_turns: number;
+  compaction_enabled: boolean;
+  compaction_threshold_ratio: number;
+  compaction_keep_recent_turns: number;
+  compaction_max_summary_tokens: number;
+  prompt_cache_key_enabled: boolean;
+  // 推理配置
+  thinking_effort: string;
+  thinking_budget: number;
+  // 子代理
+  subagent_max_iterations: number;
+  subagent_timeout_seconds: number;
+  subagent_max_consecutive_failures: number;
+  parallel_subagent_max: number;
+  // LLM 重试
+  llm_retry_max_attempts: number;
+  llm_retry_base_delay_seconds: number;
+  llm_retry_max_delay_seconds: number;
+  // 感知与视觉
   window_perception_enabled: boolean;
+  window_perception_system_budget_tokens: number;
+  window_perception_tool_append_tokens: number;
+  window_perception_max_windows: number;
+  window_perception_default_rows: number;
+  window_perception_default_cols: number;
+  window_perception_minimized_tokens: number;
+  window_perception_background_after_idle: number;
+  window_perception_suspend_after_idle: number;
+  window_perception_terminate_after_idle: number;
+  window_perception_advisor_mode: string;
+  window_perception_advisor_timeout_ms: number;
+  window_perception_advisor_trigger_window_count: number;
+  window_perception_advisor_trigger_turn: number;
+  window_perception_advisor_plan_ttl_turns: number;
+  window_return_mode: string;
+  window_full_max_rows: number;
+  window_full_total_budget_tokens: number;
+  window_data_buffer_max_rows: number;
+  window_intent_enabled: boolean;
+  window_intent_sticky_turns: number;
+  window_intent_repeat_warn_threshold: number;
+  window_intent_repeat_trip_threshold: number;
+  window_rule_engine_version: string;
   vlm_enhance: boolean;
   main_model_vision: string;
+  vlm_timeout_seconds: number;
+  vlm_max_retries: number;
+  vlm_max_tokens: number;
+  vlm_image_max_long_edge: number;
+  vlm_image_jpeg_quality: number;
+  vlm_extraction_tier: string;
+  image_keep_rounds: number;
+  image_max_active: number;
+  image_token_budget: number;
+  // 系统消息与工具
+  system_message_mode: string;
+  tool_result_hard_cap_chars: number;
+  large_excel_threshold_bytes: number;
   parallel_readonly_tools: boolean;
-  chat_history_enabled: boolean;
   hooks_command_enabled: boolean;
+  hooks_command_timeout_seconds: number;
+  hooks_output_max_chars: number;
   log_level: string;
+  // 代码策略
+  code_policy_enabled: boolean;
+  code_policy_green_auto_approve: boolean;
+  code_policy_yellow_auto_approve: boolean;
   tool_schema_validation_mode: string;
   tool_schema_validation_canary_percent: number;
   tool_schema_strict_path: boolean;
-  thinking_effort: string;
-  thinking_budget: number;
-  subagent_max_iterations: number;
-  subagent_timeout_seconds: number;
-  parallel_subagent_max: number;
-  prompt_cache_key_enabled: boolean;
-  friendly_error_messages: boolean;
+  // 技能发现
+  skills_context_char_budget: number;
+  skills_discovery_enabled: boolean;
+  skills_discovery_scan_workspace_ancestors: boolean;
+  skills_discovery_include_agents: boolean;
+  skills_discovery_scan_external_tool_dirs: boolean;
+  // Embedding / 语义检索
+  embedding_enabled: boolean;
+  embedding_model: string;
+  embedding_dimensions: number;
+  embedding_timeout_seconds: number;
+  memory_semantic_top_k: number;
+  memory_semantic_threshold: number;
+  memory_semantic_fallback_recent: number;
+  // Playbook
+  playbook_enabled: boolean;
+  playbook_max_bullets: number;
+  playbook_inject_top_k: number;
+  registry_semantic_top_k: number;
+  registry_semantic_threshold: number;
 }
 
 interface SelectOption {
@@ -85,7 +183,7 @@ interface ToggleItem {
   label: string;
   desc: string;
   icon: React.ReactNode;
-  type: "bool" | "int" | "float" | "select";
+  type: "bool" | "int" | "float" | "select" | "string";
   options?: SelectOption[];
   min?: number;
   max?: number;
@@ -150,6 +248,13 @@ const BASIC_GROUPS: ItemGroup[] = [
         type: "bool",
       },
       {
+        key: "verifier_enabled",
+        label: "完成前验证器",
+        desc: "任务完成前自动运行 Verifier 子代理校验结果",
+        icon: <CheckCircle2 className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
         key: "backup_enabled",
         label: "备份沙盒",
         desc: "文件操作前自动创建备份副本",
@@ -188,6 +293,20 @@ const BASIC_GROUPS: ItemGroup[] = [
         label: "友好错误消息",
         desc: "将内部错误映射为更友好的用户可见消息",
         icon: <AlertCircle className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "aux_enabled",
+        label: "辅助模型",
+        desc: "启用辅助模型（子代理默认模型、窗口感知等）",
+        icon: <Bot className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "vlm_enabled",
+        label: "VLM 模型",
+        desc: "启用视觉语言模型（独立 VLM 配置）",
+        icon: <ScanEye className="h-4 w-4" />,
         type: "bool",
       },
     ],
@@ -232,6 +351,24 @@ const BASIC_GROUPS: ItemGroup[] = [
         desc: "将聊天记录保存到数据库",
         icon: <MessageSquare className="h-4 w-4" />,
         type: "bool",
+      },
+      {
+        key: "memory_auto_load_lines",
+        label: "记忆自动加载行数",
+        desc: "会话开始时自动加载的记忆条目数",
+        icon: <Brain className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 1000,
+      },
+      {
+        key: "memory_expire_days",
+        label: "记忆过期天数",
+        desc: "记忆过期天数（0 = 不过期）",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 3650,
       },
     ],
   },
@@ -331,6 +468,44 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         min: 1,
         max: 10,
       },
+      {
+        key: "subagent_max_consecutive_failures",
+        label: "子代理最大连续失败",
+        desc: "子代理连续工具调用失败达到此次数后停止",
+        icon: <AlertCircle className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+    ],
+  },
+  {
+    title: "LLM 重试",
+    icon: <RotateCcw className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "llm_retry_max_attempts",
+        label: "最大重试次数",
+        desc: "LLM 调用失败时的最大尝试次数（含首次）",
+        icon: <RotateCcw className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "llm_retry_base_delay_seconds",
+        label: "重试基准延迟",
+        desc: "指数退避基准延迟（秒）",
+        icon: <Timer className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "llm_retry_max_delay_seconds",
+        label: "重试最大延迟",
+        desc: "单次重试最大延迟上限（秒）",
+        icon: <Timer className="h-4 w-4" />,
+        type: "float",
+      },
     ],
   },
   {
@@ -354,11 +529,84 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         max: 100,
       },
       {
+        key: "memory_maintenance_enabled",
+        label: "记忆自动维护",
+        desc: "启用 LLM 驱动的记忆清理、合并与改进",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "memory_maintenance_min_entries",
+        label: "维护最少条目数",
+        desc: "记忆条目少于此数时不触发维护",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 200,
+      },
+      {
+        key: "memory_maintenance_new_threshold",
+        label: "维护新增阈值",
+        desc: "新增条目达到此数后触发维护",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "memory_maintenance_interval_hours",
+        label: "维护最小间隔",
+        desc: "两次维护之间的最小间隔（小时）",
+        icon: <Clock className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "memory_maintenance_model",
+        label: "维护模型",
+        desc: "用于记忆维护的模型 ID（留空使用辅助模型）",
+        icon: <Brain className="h-4 w-4" />,
+        type: "string",
+      },
+      {
         key: "prompt_cache_key_enabled",
         label: "提示词缓存",
         desc: "向 API 发送缓存键提升 prompt 缓存命中率",
         icon: <Zap className="h-4 w-4" />,
         type: "bool",
+      },
+      {
+        key: "summarization_threshold_ratio",
+        label: "摘要触发比例",
+        desc: "Token 使用率超过此比例触发对话摘要 (0-1)",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "summarization_keep_recent_turns",
+        label: "摘要保留轮次",
+        desc: "摘要时保留的最近对话轮次数",
+        icon: <History className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "compaction_keep_recent_turns",
+        label: "压缩保留轮次",
+        desc: "压缩时保留的最近对话轮次数",
+        icon: <History className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "compaction_max_summary_tokens",
+        label: "压缩摘要上限",
+        desc: "压缩摘要最大 token 数",
+        icon: <Shrink className="h-4 w-4" />,
+        type: "int",
+        min: 100,
+        max: 10000,
       },
     ],
   },
@@ -408,6 +656,20 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         icon: <Shield className="h-4 w-4" />,
         type: "bool",
       },
+      {
+        key: "code_policy_green_auto_approve",
+        label: "绿区自动审批",
+        desc: "安全代码（绿区）自动审批执行",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "code_policy_yellow_auto_approve",
+        label: "黄区自动审批",
+        desc: "中风险代码（黄区）自动审批执行",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
     ],
   },
   {
@@ -442,9 +704,546 @@ const ADVANCED_GROUPS: ItemGroup[] = [
           { value: "CRITICAL", label: "CRITICAL" },
         ],
       },
+      {
+        key: "system_message_mode",
+        label: "系统消息模式",
+        desc: "system message 处理方式：auto / merge / replace",
+        icon: <MessageSquare className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "auto", label: "自动 (auto)" },
+          { value: "merge", label: "合并 (merge)" },
+          { value: "replace", label: "替换 (replace)" },
+        ],
+      },
+      {
+        key: "tool_result_hard_cap_chars",
+        label: "工具结果截断",
+        desc: "工具返回结果的字符数上限（0 = 不限制）",
+        icon: <Shrink className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 100000,
+      },
+      {
+        key: "large_excel_threshold_bytes",
+        label: "大表格阈值",
+        desc: "Excel 文件超过此字节数视为大文件",
+        icon: <FileText className="h-4 w-4" />,
+        type: "int",
+        min: 1048576,
+        max: 104857600,
+      },
+      {
+        key: "hooks_command_timeout_seconds",
+        label: "Hook 命令超时",
+        desc: "Hook 命令执行超时时间（秒）",
+        icon: <Timer className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 300,
+      },
+      {
+        key: "hooks_output_max_chars",
+        label: "Hook 输出上限",
+        desc: "Hook 命令输出的最大字符数",
+        icon: <Shrink className="h-4 w-4" />,
+        type: "int",
+        min: 1000,
+        max: 100000,
+      },
+    ],
+  },
+  {
+    title: "窗口感知细参",
+    icon: <Eye className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "window_perception_system_budget_tokens",
+        label: "系统提示预算",
+        desc: "窗口感知层系统提示 token 预算",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 500,
+        max: 20000,
+      },
+      {
+        key: "window_perception_tool_append_tokens",
+        label: "工具追加 token",
+        desc: "每个工具结果追加的 token 数",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 100,
+        max: 5000,
+      },
+      {
+        key: "window_perception_max_windows",
+        label: "最大窗口数",
+        desc: "同时维护的最大窗口数量",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "window_perception_default_rows",
+        label: "默认行数",
+        desc: "窗口默认显示行数",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 5,
+        max: 200,
+      },
+      {
+        key: "window_perception_default_cols",
+        label: "默认列数",
+        desc: "窗口默认显示列数",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 100,
+      },
+      {
+        key: "window_perception_minimized_tokens",
+        label: "最小化 token",
+        desc: "最小化窗口的 token 预算",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 10,
+        max: 500,
+      },
+      {
+        key: "window_perception_background_after_idle",
+        label: "后台化闲置轮次",
+        desc: "窗口闲置多少轮后转为后台",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "window_perception_suspend_after_idle",
+        label: "挂起闲置轮次",
+        desc: "窗口闲置多少轮后挂起",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 30,
+      },
+      {
+        key: "window_perception_terminate_after_idle",
+        label: "关闭闲置轮次",
+        desc: "窗口闲置多少轮后关闭",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "window_perception_advisor_mode",
+        label: "顾问模式",
+        desc: "窗口感知顾问的工作模式",
+        icon: <Brain className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "rules", label: "规则 (rules)" },
+          { value: "hybrid", label: "混合 (hybrid)" },
+        ],
+      },
+      {
+        key: "window_perception_advisor_timeout_ms",
+        label: "顾问超时",
+        desc: "窗口感知顾问超时（毫秒）",
+        icon: <Timer className="h-4 w-4" />,
+        type: "int",
+        min: 100,
+        max: 10000,
+      },
+      {
+        key: "window_return_mode",
+        label: "返回模式",
+        desc: "工具返回数据的模式",
+        icon: <Layers className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "unified", label: "统一 (unified)" },
+          { value: "anchored", label: "锚定 (anchored)" },
+          { value: "enriched", label: "增强 (enriched)" },
+          { value: "adaptive", label: "自适应 (adaptive)" },
+        ],
+      },
+      {
+        key: "window_intent_enabled",
+        label: "意图识别",
+        desc: "启用窗口意图识别",
+        icon: <Eye className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "window_rule_engine_version",
+        label: "规则引擎版本",
+        desc: "窗口规则引擎版本",
+        icon: <Layers className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "v1", label: "v1" },
+          { value: "v2", label: "v2" },
+        ],
+      },
+    ],
+  },
+  {
+    title: "VLM 参数",
+    icon: <ScanEye className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "vlm_timeout_seconds",
+        label: "VLM 超时",
+        desc: "VLM 调用超时时间（秒）",
+        icon: <Timer className="h-4 w-4" />,
+        type: "int",
+        min: 10,
+        max: 600,
+      },
+      {
+        key: "vlm_max_retries",
+        label: "VLM 重试次数",
+        desc: "VLM 调用失败时的重试次数",
+        icon: <RotateCcw className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 5,
+      },
+      {
+        key: "vlm_max_tokens",
+        label: "VLM 最大输出",
+        desc: "VLM 最大输出 token 数",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 1024,
+        max: 65536,
+      },
+      {
+        key: "vlm_image_max_long_edge",
+        label: "图片长边上限",
+        desc: "图片长边像素上限",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 512,
+        max: 8192,
+      },
+      {
+        key: "vlm_image_jpeg_quality",
+        label: "JPEG 质量",
+        desc: "JPEG 压缩质量 (1-100)",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 100,
+      },
+      {
+        key: "vlm_extraction_tier",
+        label: "提取策略分级",
+        desc: "模型分级决定提取策略",
+        icon: <Layers className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "auto", label: "自动 (auto)" },
+          { value: "strong", label: "强 (strong)" },
+          { value: "standard", label: "标准 (standard)" },
+          { value: "weak", label: "弱 (weak)" },
+        ],
+      },
+      {
+        key: "image_keep_rounds",
+        label: "图片保持轮次",
+        desc: "图片保持完整 base64 的最小轮次",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "image_max_active",
+        label: "活跃图片上限",
+        desc: "同时保持高清的最大图片数",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "image_token_budget",
+        label: "图片 token 预算",
+        desc: "图片总 token 预算上限",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 1000,
+        max: 50000,
+      },
+    ],
+  },
+  {
+    title: "技能发现",
+    icon: <Sparkles className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "skills_discovery_enabled",
+        label: "技能发现",
+        desc: "启用自动技能包发现",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "skills_discovery_scan_workspace_ancestors",
+        label: "扫描祖先目录",
+        desc: "技能发现时扫描工作区祖先目录",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "skills_discovery_include_agents",
+        label: "包含代理",
+        desc: "技能发现时包含代理包",
+        icon: <Bot className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "skills_discovery_scan_external_tool_dirs",
+        label: "扫描外部工具目录",
+        desc: "技能发现时扫描外部工具目录",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "skills_context_char_budget",
+        label: "技能字符预算",
+        desc: "技能正文字符预算（0 = 不限制）",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 100000,
+      },
+    ],
+  },
+  {
+    title: "Embedding / 语义检索",
+    icon: <Brain className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "embedding_enabled",
+        label: "语义检索",
+        desc: "启用 embedding 语义检索功能",
+        icon: <Brain className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "embedding_model",
+        label: "Embedding 模型",
+        desc: "语义检索使用的 embedding 模型",
+        icon: <Brain className="h-4 w-4" />,
+        type: "string",
+      },
+      {
+        key: "embedding_dimensions",
+        label: "Embedding 维度",
+        desc: "Embedding 向量维度",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 64,
+        max: 8192,
+      },
+      {
+        key: "memory_semantic_top_k",
+        label: "语义检索 Top-K",
+        desc: "语义检索返回的最大条目数",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "memory_semantic_threshold",
+        label: "语义相似度阈值",
+        desc: "低于此阈值的结果将被过滤 (0-1)",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+      },
+    ],
+  },
+  {
+    title: "Playbook",
+    icon: <BookOpen className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "playbook_enabled",
+        label: "Playbook",
+        desc: "启用自进化战术手册",
+        icon: <BookOpen className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "playbook_max_bullets",
+        label: "最大条目数",
+        desc: "Playbook 条目上限",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 10,
+        max: 5000,
+      },
+      {
+        key: "playbook_inject_top_k",
+        label: "注入 Top-K",
+        desc: "每轮注入的最大条目数",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
     ],
   },
 ];
+
+interface GuideSection {
+  key: "wizard" | "basic" | "advanced" | "settings";
+  category: string;
+  categoryColor: string;
+  categoryBg: string;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+}
+
+const GUIDE_SECTIONS: GuideSection[] = [
+  {
+    key: "wizard",
+    category: "模型添加",
+    categoryColor: "text-blue-600 dark:text-blue-400",
+    categoryBg: "bg-blue-50 dark:bg-blue-950/40",
+    title: "模型配置向导",
+    description: "重新配置 AI 模型提供商、API 密钥和连接参数",
+    icon: <Cpu className="h-4 w-4" />,
+  },
+  {
+    key: "basic",
+    category: "基础",
+    categoryColor: "text-emerald-600 dark:text-emerald-400",
+    categoryBg: "bg-emerald-50 dark:bg-emerald-950/40",
+    title: "界面基础引导",
+    description: "了解侧边栏、输入框、发送消息、模型切换等核心操作",
+    icon: <BookOpen className="h-4 w-4" />,
+  },
+  {
+    key: "advanced",
+    category: "进阶",
+    categoryColor: "text-amber-600 dark:text-amber-400",
+    categoryBg: "bg-amber-50 dark:bg-amber-950/40",
+    title: "进阶技巧探索",
+    description: "掌握斜杠命令、对话模式切换、文件预览与技能规则",
+    icon: <Sparkles className="h-4 w-4" />,
+  },
+  {
+    key: "settings",
+    category: "设置",
+    categoryColor: "text-violet-600 dark:text-violet-400",
+    categoryBg: "bg-violet-50 dark:bg-violet-950/40",
+    title: "设置面板引导",
+    description: "深入了解模型、规则、技能、MCP、记忆、系统等设置页面",
+    icon: <SlidersHorizontal className="h-4 w-4" />,
+  },
+];
+
+function OnboardingReplayCard() {
+  const { wizardCompleted, coachMarksCompleted, resetToPhase } =
+    useOnboardingStore();
+  const closeSettings = useUIStore((s) => s.closeSettings);
+  const [expanded, setExpanded] = useState(false);
+
+  const handleReplayFrom = useCallback(
+    (target: "wizard" | "basic" | "advanced" | "settings") => {
+      resetToPhase(target);
+      closeSettings();
+    },
+    [resetToPhase, closeSettings]
+  );
+
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      {/* Header */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center justify-between gap-3 p-4 hover:bg-muted/40 transition-colors"
+      >
+        <div className="flex items-start gap-2.5 min-w-0 text-left">
+          <span
+            className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center"
+            style={{ backgroundColor: "var(--em-primary-alpha-10)", color: "var(--em-primary)" }}
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium">新手引导</div>
+            <div className="text-[11px] sm:text-xs text-muted-foreground">
+              {wizardCompleted && coachMarksCompleted
+                ? "已完成引导。展开选择章节重新播放。"
+                : wizardCompleted
+                  ? "配置向导已完成，界面指引进行中。"
+                  : "尚未完成引导。"}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className="text-[11px] text-muted-foreground hidden sm:inline">
+            重新引导
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}
+          />
+        </div>
+      </button>
+
+      {/* Expandable drawer */}
+      {expanded && (
+        <div className="border-t border-border bg-muted/20 px-3 pb-3 pt-2 space-y-2">
+          <p className="text-[11px] text-muted-foreground px-1 mb-1">
+            选择要进入的章节
+          </p>
+          {GUIDE_SECTIONS.map((section) => (
+            <button
+              key={section.key}
+              type="button"
+              onClick={() => handleReplayFrom(section.key)}
+              className="w-full flex items-center gap-3 rounded-lg border border-border bg-background p-3 text-left hover:border-[var(--em-primary)] hover:shadow-sm transition-all group"
+            >
+              <span
+                className={`flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${section.categoryBg} ${section.categoryColor}`}
+              >
+                {section.icon}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-sm font-medium group-hover:text-[var(--em-primary)] transition-colors">
+                    {section.title}
+                  </span>
+                  <span
+                    className={`text-[10px] font-semibold px-1.5 py-px rounded-full ${section.categoryBg} ${section.categoryColor}`}
+                  >
+                    {section.category}
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-1">
+                  {section.description}
+                </p>
+              </div>
+              <ArrowRight className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function RuntimeTab() {
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
@@ -453,8 +1252,7 @@ export function RuntimeTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [restarting, setRestarting] = useState(false);
-  const [restartTimeout, setRestartTimeout] = useState(false);
+  const { restarting, restartTimeout, triggerRestart } = useServerRestart();
 
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
@@ -496,47 +1294,8 @@ export function RuntimeTab() {
     try {
       const res = await apiPut<{ restarting?: boolean }>("/config/runtime", draft);
       if (res?.restarting) {
-        setRestarting(true);
-        setRestartTimeout(false);
         setSaving(false);
-
-        // 直连后端健康检查 URL（绕过 Next.js 代理和 auth 拦截）
-        // same-origin → 走 Nginx 代理（相对路径）；显式配置 → 直连；默认 → hostname:8000
-        const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
-        const backendOrigin = configured
-          ? (configured.toLowerCase() === "same-origin" ? "" : configured.replace(/\/+$/, ""))
-          : `http://${window.location.hostname}:8000`;
-        const healthUrl = `${backendOrigin}/api/v1/health`;
-
-        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-        const probe = async (): Promise<boolean> => {
-          try {
-            const r = await fetch(healthUrl, { method: "GET", signal: AbortSignal.timeout(2000) });
-            return r.ok;
-          } catch {
-            return false;
-          }
-        };
-
-        // Phase 1: 等待后端下线（最多 15 秒）
-        await wait(2000);
-        for (let i = 0; i < 26; i++) {
-          if (!(await probe())) break;
-          await wait(500);
-        }
-
-        // Phase 2: 等待后端上线（最多 60 秒）
-        let online = false;
-        for (let i = 0; i < 60; i++) {
-          if (await probe()) { online = true; break; }
-          await wait(1000);
-        }
-
-        if (online) {
-          window.location.reload();
-        } else {
-          setRestartTimeout(true);
-        }
+        triggerRestart();
         return;
       }
       setSaved(true);
@@ -551,26 +1310,11 @@ export function RuntimeTab() {
 
   if (restarting) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 gap-4">
-        {restartTimeout ? (
-          <>
-            <AlertCircle className="h-8 w-8 text-destructive" />
-            <div className="text-center space-y-1">
-              <p className="text-sm font-medium">重启超时</p>
-              <p className="text-xs text-muted-foreground">后端未能在预期时间内恢复，请检查服务日志</p>
-            </div>
-            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>手动刷新页面</Button>
-          </>
-        ) : (
-          <>
-            <Loader2 className="h-8 w-8 animate-spin" style={{ color: "var(--em-primary)" }} />
-            <div className="text-center space-y-1">
-              <p className="text-sm font-medium">服务正在重启…</p>
-              <p className="text-xs text-muted-foreground">认证配置已更新，正在等待后端就绪，请勿关闭页面</p>
-            </div>
-          </>
-        )}
-      </div>
+      <ServerRestartOverlay
+        restarting={restarting}
+        restartTimeout={restartTimeout}
+        reason="认证配置已更新，正在等待后端就绪，请勿关闭页面"
+      />
     );
   }
 
@@ -586,6 +1330,7 @@ export function RuntimeTab() {
             系统配置由管理员管理。如需调整，请联系管理员。
           </p>
         </div>
+        <OnboardingReplayCard />
       </div>
     );
   }
@@ -663,6 +1408,16 @@ export function RuntimeTab() {
                           </option>
                         ))}
                       </select>
+                    ) : item.type === "string" ? (
+                      <Input
+                        type="text"
+                        className="w-full sm:w-40 h-9 sm:h-8 text-xs font-mono flex-shrink-0"
+                        value={(value as string) || ""}
+                        placeholder={item.desc}
+                        onChange={(e) =>
+                          setDraft((prev) => ({ ...prev, [item.key]: e.target.value }))
+                        }
+                      />
                     ) : (
                       <Input
                         type="number"
@@ -695,11 +1450,14 @@ export function RuntimeTab() {
 
   return (
     <div className="space-y-5">
+      <OnboardingReplayCard />
+      <Separator />
       {renderGroups(BASIC_GROUPS)}
 
       <button
         onClick={() => setShowAdvanced((prev) => !prev)}
         className="flex items-center gap-1.5 w-full text-left py-1.5 group"
+        data-coach-id="coach-settings-advanced-toggle"
       >
         <ChevronDown
           className={`h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${showAdvanced ? "" : "-rotate-90"}`}

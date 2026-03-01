@@ -133,49 +133,139 @@ class ToolDef:
 
     @staticmethod
     def _truncate_json_smart(data: dict, limit: int) -> str | None:
-        """JSON 感知截断：保留元数据，缩减最大的 list 字段。
+        """JSON 感知截断：保留元数据，缩减最大的 list 或 string 字段。
 
-        策略：找到 dict 中最大的 list 字段，逐步减半其元素数量，
-        直到序列化后长度 <= limit。如果缩减到 0 个元素仍超限，返回 None 回退字符截断。
+        策略：
+        1. 优先找 dict 中最大的 list 字段，逐步减半其元素数量。
+        2. 若无可缩减的 list 字段（或 list 缩减到 0 仍超限），
+           则找最大的 string 字段，从头部截断（保留尾部，因为 stdout 尾部更有用）。
 
         注意：操作副本，不修改原始 data 对象。
         """
-        # 找到所有 list 类型的字段及其大小
+        # ── 阶段 1：尝试缩减最大的 list 字段 ──
         list_fields = {
             k: len(v) for k, v in data.items()
             if isinstance(v, list) and len(v) > 0
         }
-        if not list_fields:
-            # 没有可缩减的 list 字段，回退
+        if list_fields:
+            sorted_fields = sorted(list_fields.keys(), key=lambda k: list_fields[k], reverse=True)
+            target_field = sorted_fields[0]
+            original_list = data[target_field]
+            original_len = len(original_list)
+
+            working = dict(data)
+
+            lo, hi = 0, original_len
+            best_result: str | None = None
+
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                working[target_field] = original_list[:mid] if mid > 0 else []
+
+                if mid < original_len:
+                    working[f"_{target_field}_truncated"] = True
+                    working[f"_{target_field}_note"] = (
+                        f"⚠️ 完整数据有 {original_len} 行，仅展示前 {mid} 行"
+                        f"（字段: {target_field}）。"
+                        f"如需更多数据，可用 offset/max_rows 分页读取，"
+                        f"或用 run_code 执行 pandas 操作全量数据。"
+                    )
+                else:
+                    working.pop(f"_{target_field}_truncated", None)
+                    working.pop(f"_{target_field}_note", None)
+
+                try:
+                    candidate = json.dumps(working, ensure_ascii=False, default=str)
+                except (TypeError, ValueError):
+                    return None
+
+                if len(candidate) <= limit:
+                    best_result = candidate
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+
+            if best_result is not None:
+                return best_result
+
+        # ── 阶段 2：缩减最大的 dict 字段（如 styles、dtypes） ──
+        # 按序列化大小过滤，跳过小 dict（如 shape: {rows, columns}）
+        dict_fields: dict[str, int] = {}
+        for k, v in data.items():
+            if not isinstance(v, dict) or k.startswith("_"):
+                continue
+            try:
+                sz = len(json.dumps(v, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                continue
+            if sz > 200:
+                dict_fields[k] = sz
+        if dict_fields:
+            working_d = dict(data)
+            sorted_dicts = sorted(dict_fields.keys(), key=lambda k: dict_fields[k], reverse=True)
+            target_dict_field = sorted_dicts[0]
+            original_dict = working_d[target_dict_field]
+            original_dict_len = len(original_dict)
+            dict_items = list(original_dict.items())
+
+            lo_d, hi_d = 0, original_dict_len
+            best_dict_result: str | None = None
+
+            while lo_d <= hi_d:
+                mid_d = (lo_d + hi_d) // 2
+                trimmed = dict(dict_items[:mid_d]) if mid_d > 0 else {}
+                if mid_d < original_dict_len:
+                    trimmed["__truncated__"] = (
+                        f"保留 {mid_d}/{original_dict_len} 项"
+                    )
+                working_d[target_dict_field] = trimmed
+
+                try:
+                    candidate_d = json.dumps(working_d, ensure_ascii=False, default=str)
+                except (TypeError, ValueError):
+                    break
+
+                if len(candidate_d) <= limit:
+                    best_dict_result = candidate_d
+                    lo_d = mid_d + 1
+                else:
+                    hi_d = mid_d - 1
+
+            if best_dict_result is not None:
+                return best_dict_result
+
+        # ── 阶段 3：缩减最大的 string 字段（保留尾部） ──
+        str_fields = {
+            k: len(v) for k, v in data.items()
+            if isinstance(v, str) and len(v) > 100  # 只考虑较长的字符串
+            and not k.startswith("_")  # 跳过内部标记字段
+        }
+        if not str_fields:
             return None
 
-        # 按 list 长度降序排列，优先缩减最大的
-        sorted_fields = sorted(list_fields.keys(), key=lambda k: list_fields[k], reverse=True)
-        target_field = sorted_fields[0]
-        original_list = data[target_field]
-        original_len = len(original_list)
+        sorted_str = sorted(str_fields.keys(), key=lambda k: str_fields[k], reverse=True)
+        target_str_field = sorted_str[0]
+        original_str = data[target_str_field]
+        original_str_len = len(original_str)
 
-        # 在副本上操作，完全避免修改原始 data
         working = dict(data)
 
-        # 二分搜索合适的截断长度
-        lo, hi = 0, original_len
-        best_result: str | None = None
+        # 二分搜索：保留尾部多少字符可以 fit
+        lo, hi = 0, original_str_len
+        best_result = None
 
         while lo <= hi:
             mid = (lo + hi) // 2
-            working[target_field] = original_list[:mid] if mid > 0 else []
-
-            # 添加截断提示到副本中
-            if mid < original_len:
-                working[f"_{target_field}_truncated"] = True
-                working[f"_{target_field}_note"] = (
-                    f"⚠️ 完整数据有 {original_len} 行，仅展示前 {mid} 行"
-                    f"（字段: {target_field}）。"
+            if mid < original_str_len:
+                kept = original_str[-mid:] if mid > 0 else ""
+                working[target_str_field] = kept
+                working[f"_{target_str_field}_note"] = (
+                    f"⚠️ 原始输出 {original_str_len} 字符，已截断前部，保留后 {mid} 字符。"
+                    f"如需完整输出，可在 run_code 中将结果写入文件后用 read_text_file 查看。"
                 )
             else:
-                working.pop(f"_{target_field}_truncated", None)
-                working.pop(f"_{target_field}_note", None)
+                working[target_str_field] = original_str
+                working.pop(f"_{target_str_field}_note", None)
 
             try:
                 candidate = json.dumps(working, ensure_ascii=False, default=str)
@@ -184,7 +274,7 @@ class ToolDef:
 
             if len(candidate) <= limit:
                 best_result = candidate
-                lo = mid + 1  # 尝试保留更多元素
+                lo = mid + 1
             else:
                 hi = mid - 1
 

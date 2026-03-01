@@ -1,0 +1,268 @@
+export interface GuideStep {
+  title: string;
+  description: string;
+}
+
+export interface ProviderGuide {
+  id: string;
+  label: string;
+  description: string;
+  pricing: string;
+  recommended?: boolean;
+  purchaseUrl: string;
+  model: string;
+  base_url: string;
+  protocol: string;
+  thinking_mode: string;
+  model_family: string;
+  steps: GuideStep[];
+}
+
+export const PROVIDER_GUIDES: ProviderGuide[] = [
+  {
+    id: "gemini",
+    label: "Google Gemini",
+    description: "Gemini 2.5 Flash — 速度快、性价比高，推荐新手首选",
+    pricing: "免费额度充足，付费 $0.15~$3.5/百万 token",
+    recommended: true,
+    purchaseUrl: "https://aistudio.google.com/apikey",
+    model: "gemini-2.5-flash",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "gemini",
+    steps: [
+      {
+        title: "1. 访问 Google AI Studio",
+        description:
+          "打开 aistudio.google.com/apikey，使用 Google 账号登录。如果是首次使用，需要同意服务条款。",
+      },
+      {
+        title: "2. 创建 API Key",
+        description:
+          '点击页面中的「Create API Key」按钮，选择一个 Google Cloud 项目（或创建新项目），即可生成 API Key。',
+      },
+      {
+        title: "3. 复制 Key 并粘贴",
+        description:
+          "点击复制按钮将 API Key 复制到剪贴板，然后回到本页面粘贴到下方输入框中。Gemini 提供免费额度，无需预充值。",
+      },
+    ],
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    description: "DeepSeek-V3 — 中文理解出色，性价比极高",
+    pricing: "注册赠送 token，¥0.5~¥8/百万 token",
+    recommended: true,
+    purchaseUrl: "https://platform.deepseek.com/api_keys",
+    model: "deepseek-chat",
+    base_url: "https://api.deepseek.com/v1",
+    protocol: "openai",
+    thinking_mode: "deepseek",
+    model_family: "deepseek",
+    steps: [
+      {
+        title: "1. 注册 DeepSeek 账号",
+        description:
+          "打开 platform.deepseek.com，使用手机号或邮箱注册。新用户注册可获赠免费 token 额度。",
+      },
+      {
+        title: "2. 创建 API Key",
+        description:
+          '登录后进入「API Keys」页面，点击「创建 API Key」，为 Key 取一个名称后确认。',
+      },
+      {
+        title: "3. 复制并充值（可选）",
+        description:
+          "复制生成的 API Key 并粘贴到下方。免费额度用完后可在「充值」页面充值，最低 ¥10 起。",
+      },
+    ],
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    description: "GPT-4o — 全球最流行的多模态模型",
+    pricing: "$2.5/百万输入 token，$10/百万输出 token",
+    purchaseUrl: "https://platform.openai.com/api-keys",
+    model: "gpt-4o",
+    base_url: "https://api.openai.com/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "gpt",
+    steps: [
+      {
+        title: "1. 注册 OpenAI 账号",
+        description:
+          "打开 platform.openai.com，点击「Sign Up」注册。需要邮箱验证，部分地区可能需要手机号验证。",
+      },
+      {
+        title: "2. 充值余额",
+        description:
+          '进入 Settings → Billing，添加支付方式并充值。最低 $5 起充。OpenAI API 为预付费模式。',
+      },
+      {
+        title: "3. 创建 API Key",
+        description:
+          '进入 API Keys 页面，点击「Create new secret key」，复制生成的 Key 并粘贴到下方。注意：Key 只显示一次，请妥善保存。',
+      },
+    ],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    description: "Claude Sonnet 4 — 代码与推理能力一流",
+    pricing: "$3/百万输入 token，$15/百万输出 token",
+    purchaseUrl: "https://console.anthropic.com/settings/keys",
+    model: "claude-sonnet-4-20250514",
+    base_url: "https://api.anthropic.com",
+    protocol: "anthropic",
+    thinking_mode: "claude",
+    model_family: "claude",
+    steps: [
+      {
+        title: "1. 注册 Anthropic 账号",
+        description:
+          "打开 console.anthropic.com，使用邮箱注册并完成验证。",
+      },
+      {
+        title: "2. 充值余额",
+        description:
+          '进入 Settings → Billing，添加信用卡并充值。最低 $5 起充。',
+      },
+      {
+        title: "3. 创建 API Key",
+        description:
+          '进入 Settings → API Keys，点击「Create Key」，复制 Key 并粘贴到下方。',
+      },
+    ],
+  },
+  {
+    id: "qwen",
+    label: "阿里云百炼",
+    description: "通义千问 Qwen — 国内直连、中文优化",
+    pricing: "免费额度 100 万 token，¥0.8~¥8/百万 token",
+    recommended: true,
+    purchaseUrl: "https://dashscope.console.aliyun.com/apiKey",
+    model: "qwen-plus",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    protocol: "openai",
+    thinking_mode: "enable_thinking",
+    model_family: "qwen",
+    steps: [
+      {
+        title: "1. 注册阿里云账号",
+        description:
+          "打开 aliyun.com，使用手机号注册阿里云账号（或用已有账号登录）。首次使用需开通「百炼」服务。",
+      },
+      {
+        title: "2. 获取 API Key",
+        description:
+          '进入百炼控制台 → API Key 管理页面，点击「创建 API Key」即可生成。',
+      },
+      {
+        title: "3. 复制并使用",
+        description:
+          "复制 API Key 粘贴到下方。阿里云百炼在国内直连无需代理，延迟低且稳定。新用户有免费额度可用。",
+      },
+    ],
+  },
+  {
+    id: "zhipu",
+    label: "智谱 AI",
+    description: "GLM-4 Plus — 国产大模型，国内直连",
+    pricing: "注册赠送 token，¥5/百万 token",
+    purchaseUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+    model: "glm-4-plus",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    protocol: "openai",
+    thinking_mode: "glm_thinking",
+    model_family: "glm",
+    steps: [
+      {
+        title: "1. 注册智谱 AI 账号",
+        description:
+          "打开 open.bigmodel.cn，使用手机号注册并完成实名认证。",
+      },
+      {
+        title: "2. 获取 API Key",
+        description:
+          '进入用户中心 → API Keys 页面，点击「新建 API Key」即可生成。',
+      },
+      {
+        title: "3. 复制并使用",
+        description:
+          "复制 Key 粘贴到下方。智谱 AI 国内直连，新注册用户有免费 token 额度。",
+      },
+    ],
+  },
+  {
+    id: "siliconflow",
+    label: "硅基流动",
+    description: "多模型聚合平台 — 一个 Key 用多种模型",
+    pricing: "注册送额度，按模型计费",
+    purchaseUrl: "https://cloud.siliconflow.cn/account/ak",
+    model: "deepseek-ai/DeepSeek-V3",
+    base_url: "https://api.siliconflow.cn/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "",
+    steps: [
+      {
+        title: "1. 注册硅基流动账号",
+        description:
+          "打开 cloud.siliconflow.cn，使用手机号注册。新用户注册赠送免费额度。",
+      },
+      {
+        title: "2. 获取 API Key",
+        description:
+          '进入账户管理 → API 密钥页面，点击「新建 API 密钥」即可生成。',
+      },
+      {
+        title: "3. 复制并使用",
+        description:
+          "复制 Key 粘贴到下方。硅基流动聚合了 DeepSeek、Qwen 等多种模型，可按需切换。",
+      },
+    ],
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    description: "全球模型聚合路由 — 一个 Key 用遍全球模型",
+    pricing: "按模型计费，支持多种支付方式",
+    purchaseUrl: "https://openrouter.ai/keys",
+    model: "anthropic/claude-sonnet-4",
+    base_url: "https://openrouter.ai/api/v1",
+    protocol: "openai",
+    thinking_mode: "openrouter",
+    model_family: "",
+    steps: [
+      {
+        title: "1. 注册 OpenRouter 账号",
+        description:
+          "打开 openrouter.ai，使用 Google 或 GitHub 账号快速注册。",
+      },
+      {
+        title: "2. 充值并获取 Key",
+        description:
+          '进入 Keys 页面，创建新的 API Key。在 Credits 页面充值（支持信用卡、加密货币等）。',
+      },
+      {
+        title: "3. 复制并使用",
+        description:
+          "复制 Key 粘贴到下方。OpenRouter 支持 OpenAI/Anthropic/Google 等多家模型，统一接口调用。",
+      },
+    ],
+  },
+];
+
+export const PROVIDER_LOGO_SLUG: Record<string, string> = {
+  openai: "openai",
+  anthropic: "anthropic",
+  gemini: "gemini",
+  deepseek: "deepseek",
+  qwen: "qwen",
+  zhipu: "zhipu",
+  siliconflow: "siliconcloud",
+  openrouter: "openrouter",
+};

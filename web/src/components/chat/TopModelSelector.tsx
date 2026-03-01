@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useUIStore } from "@/stores/ui-store";
+import { useShallow } from "zustand/react/shallow";
 import { apiGet, apiPut } from "@/lib/api";
 import type { ModelInfo } from "@/lib/types";
 
@@ -102,6 +103,7 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 export function TopModelSelector() {
   const currentModel = useUIStore((s) => s.currentModel);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
+  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
@@ -136,6 +138,12 @@ export function TopModelSelector() {
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 当 Settings 页 profile 变更时自动刷新模型列表
+  useEffect(() => {
+    if (modelProfileVersion > 0) fetchModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelProfileVersion]);
 
   // Auto-focus search input when dropdown opens
   useEffect(() => {
@@ -185,7 +193,7 @@ export function TopModelSelector() {
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-1.5 px-2.5 h-9 text-base font-semibold group">
+        <Button variant="ghost" className="gap-1.5 px-2.5 h-9 text-base font-semibold group" data-coach-id="coach-model-selector">
           {/* Provider color indicator dot */}
           <span
             className="h-2 w-2 rounded-full shrink-0 transition-transform duration-200 group-hover:scale-125"
@@ -277,7 +285,7 @@ export function TopModelSelector() {
                       onClick={() => handleSwitch(m.name)}
                       disabled={switching}
                       className={[
-                        "w-full text-left px-3 py-2 flex items-center gap-3",
+                        "w-full text-left px-3 py-2 min-h-[40px] flex items-center gap-3",
                         "transition-all duration-150 ease-out cursor-pointer",
                         "border-l-[3px] border-l-transparent",
                         "hover:bg-accent/50",

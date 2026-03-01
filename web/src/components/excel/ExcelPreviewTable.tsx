@@ -64,7 +64,7 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
 
       {/* Table */}
       <ScrollablePreview collapsedHeight={180} expandedHeight={400}>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto scroll-fade-x">
           <table className="w-full border-collapse text-[11px]">
             <thead>
               <tr>

@@ -1,11 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import {
   X,
   Loader2,
   AlertCircle,
   RotateCcw,
+  ChevronDown,
 } from "lucide-react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { isImageFile } from "./chat-input-constants";
 import type { AttachedFile } from "@/lib/types";
 
@@ -24,10 +27,18 @@ export function FileAttachmentChips({
   retryUpload,
   removeFile,
 }: FileAttachmentChipsProps) {
+  const isMobile = useIsMobile();
+  const [expanded, setExpanded] = useState(false);
+
   if (files.length === 0) return null;
 
+  const MOBILE_VISIBLE_COUNT = 2;
+  const shouldCollapse = isMobile && files.length > MOBILE_VISIBLE_COUNT && !expanded;
+  const visibleFiles = shouldCollapse ? files.slice(0, MOBILE_VISIBLE_COUNT) : files;
+  const hiddenCount = files.length - visibleFiles.length;
+
   return (
-    <div className="flex flex-col gap-1 px-4 sm:px-14 pt-1.5 pb-0">
+    <div className="flex flex-col gap-1 px-3 sm:px-14 pt-1.5 pb-0">
       {/* 视觉能力不可用警告 */}
       {files.some((af) => isImageFile(af.file.name)) && !visionCapable && (
         <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-md px-2 py-1">
@@ -36,7 +47,7 @@ export function FileAttachmentChips({
         </div>
       )}
       <div className="flex flex-wrap gap-1">
-        {files.map((af) =>
+        {visibleFiles.map((af) =>
           isImageFile(af.file.name) ? (
             /* Image thumbnail chip */
             <span
@@ -115,6 +126,17 @@ export function FileAttachmentChips({
               </button>
             </span>
           )
+        )}
+        {/* 移动端折叠 badge */}
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            className="inline-flex items-center gap-0.5 rounded-full text-[11px] font-medium px-2.5 py-1 bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+          >
+            +{hiddenCount} 个文件
+            <ChevronDown className="h-3 w-3" />
+          </button>
         )}
       </div>
       {/* Inline error messages for failed uploads */}

@@ -514,16 +514,26 @@ class IsolatedWorkspace:
         sandbox_config: SandboxConfig | None = None,
         transaction_enabled: bool = True,
         transaction_scope: str = "all",
+        data_root: str = "",
     ) -> "IsolatedWorkspace":
         """解析请求对应的工作区。
 
         - auth_enabled 且提供 user_id  ->  每用户工作区
         - 否则                         ->  共享工作区（向后兼容）
+
+        当 ``data_root`` 非空时，用户目录和共享工作区的上传/输出
+        路径会指向集中数据目录（``~/.excelmanus/data``）。
         """
         if auth_enabled and user_id:
-            root = os.path.join(global_workspace_root, "users", user_id)
+            if data_root:
+                root = os.path.join(data_root, "users", user_id)
+            else:
+                root = os.path.join(global_workspace_root, "users", user_id)
         else:
-            root = global_workspace_root
+            if data_root:
+                root = data_root
+            else:
+                root = global_workspace_root
         return IsolatedWorkspace(
             root_dir=root,
             owner_id=user_id if (auth_enabled and user_id) else None,

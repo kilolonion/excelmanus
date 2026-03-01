@@ -334,6 +334,7 @@ export function MCPTab() {
             size="sm"
             variant="outline"
             className="h-7 text-xs gap-1"
+            data-coach-id="coach-settings-mcp-add-btn"
             onClick={() => {
               setShowCreate(true);
               setEditingServer(null);
@@ -536,7 +537,7 @@ export function MCPTab() {
       )}
 
       {/* Servers list */}
-      <div className="space-y-2">
+      <div className="space-y-2" data-coach-id="coach-settings-mcp-list">
           {servers.length === 0 && (
             <p className="text-xs text-muted-foreground text-center py-8">
               暂无 MCP Server 配置，点击"新增"添加

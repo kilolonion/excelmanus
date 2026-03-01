@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { ExternalLink, Plus, Minus, RefreshCw } from "lucide-react";
-import type { ExcelDiffEntry, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
+import type { ExcelDiffEntry, ExcelDiffSummary, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, type MergeSpan } from "./merge-utils";
@@ -162,7 +162,7 @@ function ChangeBadge({ type, size = "sm" }: { type: ChangeType; size?: "sm" | "x
 function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
   const sorted = useMemo(() => [...changes].sort(excelCellCompare), [changes]);
   return (
-    <div className="overflow-x-auto text-[11px] leading-[1.6]">
+    <div className="overflow-x-auto scroll-fade-x text-[11px] leading-[1.6]">
       <div className="flex items-center bg-muted/60 border-b border-border text-[10px] text-muted-foreground font-medium sticky top-0 z-10 backdrop-blur-sm">
         <span className="w-14 flex-shrink-0 px-1 text-center">单元格</span>
         <span className="flex-1 px-2 text-center border-l border-border/40">修改前</span>
@@ -198,7 +198,7 @@ function InlineHorizontalView({ changes }: { changes: ExcelCellDiff[] }) {
 function InlineVerticalView({ changes }: { changes: ExcelCellDiff[] }) {
   const sorted = useMemo(() => [...changes].sort(excelCellCompare), [changes]);
   return (
-    <div className="overflow-x-auto text-[11px] leading-[1.6]">
+    <div className="overflow-x-auto scroll-fade-x text-[11px] leading-[1.6]">
       {sorted.map((change, i) => {
         const type = classifyChange(change);
         return (
@@ -491,6 +491,44 @@ function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>): number 
   return width;
 }
 
+// ── 跨文件对比摘要头 ────────────────────────────────────
+function CrossFileDiffSummary({ summary }: { summary: ExcelDiffSummary }) {
+  return (
+    <div className="px-3 py-1.5 bg-blue-50/50 dark:bg-blue-950/20 border-b border-blue-100/60 dark:border-blue-900/30 text-[10px] flex flex-wrap items-center gap-x-3 gap-y-0.5">
+      <span className="text-muted-foreground/60 tabular-nums">
+        共对比 <span className="font-semibold text-foreground">{summary.totalCellsCompared.toLocaleString()}</span> 个单元格
+      </span>
+      {summary.cellsDifferent > 0 && (
+        <span className="flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+          <span className="text-amber-600 dark:text-amber-400 font-medium">{summary.cellsDifferent} 差异</span>
+        </span>
+      )}
+      {summary.rowsAdded > 0 && (
+        <span className="flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+          <span className="text-green-600 dark:text-green-400">+{summary.rowsAdded} 行</span>
+        </span>
+      )}
+      {summary.rowsDeleted > 0 && (
+        <span className="flex items-center gap-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+          <span className="text-red-500 dark:text-red-400">−{summary.rowsDeleted} 行</span>
+        </span>
+      )}
+      {summary.rowsModified > 0 && (
+        <span className="text-muted-foreground/70">{summary.rowsModified} 行修改</span>
+      )}
+      {summary.columnsAdded.length > 0 && (
+        <span className="text-green-600 dark:text-green-400">新增列: {summary.columnsAdded.join(", ")}</span>
+      )}
+      {summary.columnsDeleted.length > 0 && (
+        <span className="text-red-500 dark:text-red-400">删除列: {summary.columnsDeleted.join(", ")}</span>
+      )}
+    </div>
+  );
+}
+
 // ── 主组件 ──────────────────────────────────────────────
 export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -500,6 +538,8 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
   const handleOpenPanel = () => {
     openPanel(data.filePath, data.sheet);
   };
+
+  const isCrossFile = data.diffMode === "cross_file" || data.diffMode === "cross_sheet";
 
   const counts = { added: 0, modified: 0, deleted: 0, style: 0 };
   for (const change of data.changes) {
@@ -540,49 +580,84 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
     : profile === "all-deleted" ? Minus
     : RefreshCw;
 
+  const fileNameA = data.filePath.split("/").pop() || data.filePath;
+  const fileNameB = data.filePathB?.split("/").pop() || data.filePathB || "";
+
   return (
     <div ref={containerRef} className="my-2 rounded-lg border border-border/80 overflow-hidden text-xs shadow-sm">
       {/* Header bar */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 border-b border-border/60">
-        <div className="flex items-center gap-2 text-muted-foreground min-w-0">
-          <HeaderIcon className={`h-3.5 w-3.5 flex-shrink-0 ${
-            profile === "all-added" ? "text-green-500" : profile === "all-deleted" ? "text-red-500" : "text-amber-500"
-          }`} />
-          <span className="font-semibold text-foreground truncate text-[11px]">
-            {data.filePath.split("/").pop() || data.filePath}
-          </span>
-          {data.sheet && (
-            <>
-              <span className="flex-shrink-0 text-muted-foreground/40">/</span>
-              <span className="truncate text-muted-foreground/80">{data.sheet}</span>
-            </>
-          )}
-          <span className="text-[9px] text-muted-foreground/50 flex-shrink-0 font-mono">({data.affectedRange})</span>
+      {isCrossFile ? (
+        <div className="px-3 py-1.5 bg-muted/50 border-b border-border/60">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-muted-foreground min-w-0">
+              <RefreshCw className="h-3.5 w-3.5 flex-shrink-0 text-blue-500" />
+              <span className="text-[10px] font-medium text-muted-foreground/70">
+                {data.diffMode === "cross_sheet" ? "跨 Sheet 对比" : "跨文件对比"}
+              </span>
+            </div>
+            <button
+              onClick={handleOpenPanel}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors rounded px-1 py-0.5 hover:bg-muted/60"
+            >
+              <ExternalLink className="h-3 w-3" />
+              <span className="hidden sm:inline">打开</span>
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1 text-[11px]">
+            <span className="font-semibold text-red-600 dark:text-red-400 truncate">{fileNameA}</span>
+            {data.sheet && <span className="text-muted-foreground/50">/ {data.sheet}</span>}
+            <span className="text-muted-foreground/40 mx-0.5">vs</span>
+            <span className="font-semibold text-green-600 dark:text-green-400 truncate">{fileNameB}</span>
+            {data.sheetB && <span className="text-muted-foreground/50">/ {data.sheetB}</span>}
+          </div>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className="text-[10px] tabular-nums font-medium flex items-center gap-1">
-            {counts.added > 0 && (
-              <span className="text-green-600 dark:text-green-400">+{counts.added}</span>
+      ) : (
+        <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 border-b border-border/60">
+          <div className="flex items-center gap-2 text-muted-foreground min-w-0">
+            <HeaderIcon className={`h-3.5 w-3.5 flex-shrink-0 ${
+              profile === "all-added" ? "text-green-500" : profile === "all-deleted" ? "text-red-500" : "text-amber-500"
+            }`} />
+            <span className="font-semibold text-foreground truncate text-[11px]">
+              {fileNameA}
+            </span>
+            {data.sheet && (
+              <>
+                <span className="flex-shrink-0 text-muted-foreground/40">/</span>
+                <span className="truncate text-muted-foreground/80">{data.sheet}</span>
+              </>
             )}
-            {counts.modified > 0 && (
-              <span className="text-amber-600 dark:text-amber-400">~{counts.modified}</span>
-            )}
-            {counts.deleted > 0 && (
-              <span className="text-red-500 dark:text-red-400">−{counts.deleted}</span>
-            )}
-            {counts.style > 0 && (
-              <span className="text-blue-500 dark:text-blue-400">✦{counts.style}</span>
-            )}
-          </span>
-          <button
-            onClick={handleOpenPanel}
-            className="flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors rounded px-1 py-0.5 hover:bg-muted/60"
-          >
-            <ExternalLink className="h-3 w-3" />
-            <span className="hidden sm:inline">打开</span>
-          </button>
+            <span className="text-[9px] text-muted-foreground/50 flex-shrink-0 font-mono">({data.affectedRange})</span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span className="text-[10px] tabular-nums font-medium flex items-center gap-1">
+              {counts.added > 0 && (
+                <span className="text-green-600 dark:text-green-400">+{counts.added}</span>
+              )}
+              {counts.modified > 0 && (
+                <span className="text-amber-600 dark:text-amber-400">~{counts.modified}</span>
+              )}
+              {counts.deleted > 0 && (
+                <span className="text-red-500 dark:text-red-400">−{counts.deleted}</span>
+              )}
+              {counts.style > 0 && (
+                <span className="text-blue-500 dark:text-blue-400">✦{counts.style}</span>
+              )}
+            </span>
+            <button
+              onClick={handleOpenPanel}
+              className="flex items-center gap-1 text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors rounded px-1 py-0.5 hover:bg-muted/60"
+            >
+              <ExternalLink className="h-3 w-3" />
+              <span className="hidden sm:inline">打开</span>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* 跨文件对比摘要 */}
+      {isCrossFile && data.diffSummary && (
+        <CrossFileDiffSummary summary={data.diffSummary} />
+      )}
 
       {/* Diff 内容区 */}
       <ScrollablePreview collapsedHeight={160} expandedHeight={420}>

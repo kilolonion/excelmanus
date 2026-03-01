@@ -26,6 +26,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
@@ -39,6 +40,7 @@ import { CodeBlock } from "./CodeBlock";
 // 工具分类 → 图标映射
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   read_excel: BookOpen,
+  compare_excel: Search,
   list_sheets: Search,
   write_cells: PenLine,
   insert_rows: Table2,
@@ -185,14 +187,14 @@ function getTheme(name: string): ToolCategoryTheme {
   return CATEGORY_THEMES[getToolCategory(name)] || CATEGORY_THEMES.default;
 }
 
-const EXCEL_READ_TOOLS = new Set(["read_excel"]);
+const EXCEL_READ_TOOLS = new Set(["read_excel", "rebuild_excel_from_spec"]);
 const EXCEL_WRITE_TOOLS = new Set([
   "write_cells", "insert_rows", "insert_columns",
   "create_sheet", "delete_sheet",
 ]);
 const EXCEL_DIFF_TOOLS = new Set([
   ...EXCEL_WRITE_TOOLS,
-  "run_code", "finish_task",
+  "run_code", "finish_task", "compare_excel",
 ]);
 const TEXT_DIFF_TOOLS = new Set([
   "write_text_file", "edit_text_file", "run_code", "write_plan",
@@ -209,6 +211,7 @@ interface ToolCallCardProps {
 }
 
 export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name, args, status, result, error }: ToolCallCardProps) {
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [applyingInline, setApplyingInline] = useState(false);
   const [appliedInline, setAppliedInline] = useState(false);
@@ -348,7 +351,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
             style={{ backgroundColor: isError ? "var(--em-error)" : theme.bar, "--tool-cat-color": theme.bar } as React.CSSProperties}
           />
 
-          <div className={`flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5 ${isRunning ? "animate-tool-running-pulse" : ""}`}>
+          <div className={`flex items-center gap-2 flex-1 min-w-0 px-2.5 py-2 sm:py-1.5 ${isRunning ? "animate-tool-running-pulse" : ""}`}>
             {/* 圆形图标徽章 */}
             <span className={`flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 ${theme.iconBg}`}>
               <ToolIcon className={`h-3 w-3 ${theme.iconColor}`} />
@@ -359,9 +362,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
               {name}
             </span>
 
-            {/* 参数预览 */}
+            {/* 参数预览 — 移动端隐藏以腾出进度信息空间 */}
             {summary && (
-              <span className="text-[10px] text-muted-foreground/70 truncate min-w-0">
+              <span className="hidden sm:inline text-[10px] text-muted-foreground/70 truncate min-w-0">
                 {summary}
               </span>
             )}
@@ -385,7 +388,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
                 </span>
               )}
               {isRunning && toolProgress && (
-                <span className="flex items-center gap-1 max-w-[200px]">
+                <span className="flex items-center gap-1 max-w-[140px] sm:max-w-[200px]">
                   <span className="text-[10px] text-[var(--em-cyan)] truncate">{toolProgress.message}</span>
                   {toolProgress.phaseIndex != null && toolProgress.totalPhases != null && (
                     <span className="text-[9px] text-muted-foreground/60 tabular-nums flex-shrink-0">
@@ -410,11 +413,11 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
         </CollapsibleTrigger>
 
         <CollapsibleContent className="data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up overflow-hidden">
-          <div className={`px-3 py-2 text-xs space-y-2 border border-t-0 rounded-b-lg ml-[3px] ${borderCls} ${theme.cardBg}`}>
+          <div className={`px-3 py-2 text-xs space-y-2 border border-t-0 rounded-b-lg ml-[3px] overscroll-contain ${borderCls} ${theme.cardBg}`}>
             {Object.keys(args).length > 0 && (
               <div>
                 <p className="font-semibold text-muted-foreground mb-1">参数</p>
-                <CodeBlock language="json" code={JSON.stringify(args, null, 2)} />
+                <CodeBlock language="json" code={JSON.stringify(args, null, isMobile ? 1 : 2)} />
               </div>
             )}
             {result && (() => {

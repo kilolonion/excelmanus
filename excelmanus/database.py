@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -307,6 +308,12 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     16: [
         "ALTER TABLE sessions ADD COLUMN title_source TEXT DEFAULT 'auto'",
     ],
+    17: [
+        "ALTER TABLE model_profiles ADD COLUMN thinking_mode TEXT DEFAULT 'auto'",
+        "ALTER TABLE model_profiles ADD COLUMN model_family TEXT DEFAULT ''",
+        "ALTER TABLE model_profiles ADD COLUMN custom_extra_body TEXT DEFAULT ''",
+        "ALTER TABLE model_profiles ADD COLUMN custom_extra_headers TEXT DEFAULT ''",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -595,6 +602,12 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
     16: [
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title_source TEXT DEFAULT 'auto'",
     ],
+    17: [
+        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS thinking_mode TEXT DEFAULT 'auto'",
+        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS model_family TEXT DEFAULT ''",
+        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_body TEXT DEFAULT ''",
+        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_headers TEXT DEFAULT ''",
+    ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())
@@ -675,30 +688,137 @@ class Database:
         v = row["v"]
         return v if v is not None else 0
 
+    # ── SQLite ALTER TABLE 幂等保护 ──────────────────────────
+
+    _ALTER_ADD_COL_RE = re.compile(
+        r"ALTER\s+TABLE\s+(\S+)\s+ADD\s+COLUMN\s+(\S+)",
+        re.IGNORECASE,
+    )
+
+    def _sqlite_column_exists(self, table: str, column: str) -> bool:
+        """检查 SQLite 表中是否已存在指定列。"""
+        try:
+            rows = self._adapter.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+            return any(row[1] == column for row in rows)
+        except Exception:
+            return False
+
+    def _safe_execute_sql(self, sql: str) -> None:
+        """安全执行单条迁移 SQL，处理 SQLite ALTER TABLE 幂等问题。
+
+        SQLite 不支持 ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``，
+        因此在执行前检查列是否已存在，已存在则跳过。
+        """
+        if self._backend == Backend.SQLITE:
+            m = self._ALTER_ADD_COL_RE.search(sql)
+            if m:
+                table, column = m.group(1), m.group(2)
+                if self._sqlite_column_exists(table, column):
+                    logger.debug(
+                        "跳过已存在的列: %s.%s", table, column,
+                    )
+                    return
+        self._adapter.execute(sql)
+
+    # ── 迁移前备份 ────────────────────────────────────────────
+
+    def _backup_before_migrate(self, from_version: int, to_version: int) -> str | None:
+        """迁移前自动备份 SQLite 数据库文件。
+
+        返回备份路径；PostgreSQL 或备份失败时返回 None。
+        """
+        if self._backend != Backend.SQLITE or not self._db_path:
+            return None
+        if from_version == 0:
+            return None  # 全新数据库无用户数据，无需备份
+        src = Path(self._db_path)
+        if not src.exists() or src.stat().st_size == 0:
+            return None
+        backup_path = src.with_suffix(f".v{from_version}_to_v{to_version}.bak")
+        try:
+            shutil.copy2(str(src), str(backup_path))
+            # 同时备份 WAL / SHM 文件（如果存在）
+            for suffix in ("-wal", "-shm"):
+                wal = Path(str(src) + suffix)
+                if wal.exists():
+                    shutil.copy2(str(wal), str(backup_path) + suffix)
+            logger.info(
+                "迁移前备份: %s (v%d → v%d)",
+                backup_path.name, from_version, to_version,
+            )
+            return str(backup_path)
+        except Exception:
+            logger.warning("迁移前备份失败", exc_info=True)
+            return None
+
+    @staticmethod
+    def cleanup_migration_backups(db_path: str, keep: int = 2) -> None:
+        """清理旧的迁移备份文件，仅保留最近 *keep* 个。"""
+        p = Path(db_path)
+        backups = sorted(
+            p.parent.glob(f"{p.stem}.v*_to_v*.bak"),
+            key=lambda f: f.stat().st_mtime,
+        )
+        for old in backups[:-keep] if len(backups) > keep else []:
+            try:
+                old.unlink()
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(str(old) + suffix)
+                    if sidecar.exists():
+                        sidecar.unlink()
+            except OSError:
+                pass
+
+    # ── 核心迁移 ──────────────────────────────────────────────
+
     def _migrate(self) -> None:
         current = self._current_version()
         if current >= _LATEST_VERSION:
             return
+
+        # 迁移前自动备份
+        self._backup_before_migrate(current, _LATEST_VERSION)
+
         migrations = (
             _PG_MIGRATIONS if self._backend == Backend.POSTGRES
             else _SQLITE_MIGRATIONS
         )
         for version in range(current + 1, _LATEST_VERSION + 1):
             statements = migrations.get(version, [])
-            for sql in statements:
-                self._adapter.execute(sql)
-            if self._backend == Backend.SQLITE:
-                self._adapter.execute(
-                    "INSERT INTO schema_version (version) VALUES (?)",
-                    (version,),
+            try:
+                for sql in statements:
+                    self._safe_execute_sql(sql)
+                if self._backend == Backend.SQLITE:
+                    self._adapter.execute(
+                        "INSERT INTO schema_version (version) VALUES (?)",
+                        (version,),
+                    )
+                else:
+                    self._adapter.execute(
+                        "INSERT INTO schema_version (version) VALUES (%s)",
+                        (version,),
+                    )
+                self._adapter.commit()
+                logger.info("数据库 schema 迁移到 v%d（%s）", version, self._backend)
+            except Exception:
+                logger.error(
+                    "数据库 schema 迁移 v%d 失败（%s），后续版本将跳过",
+                    version, self._backend, exc_info=True,
                 )
-            else:
-                self._adapter.execute(
-                    "INSERT INTO schema_version (version) VALUES (%s)",
-                    (version,),
-                )
-            self._adapter.commit()
-            logger.info("数据库 schema 迁移到 v%d（%s）", version, self._backend)
+                # 尝试回滚当前事务（PG 需要）
+                try:
+                    self._adapter.commit()  # SQLite: no-op on error
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"数据库 schema 迁移 v{version} 失败，请检查日志或从备份恢复"
+                ) from None
+
+        # 迁移成功后清理旧备份
+        if self._db_path:
+            self.cleanup_migration_backups(self._db_path)
 
 
 # ── 旧数据迁移工具 ──────────────────────────────────────────

@@ -230,15 +230,9 @@ class SemanticMemory:
         return output
 
     def _load_all_entries(self) -> list[MemoryEntry]:
-        """从 MEMORY.md 加载所有条目。"""
-        from excelmanus.persistent_memory import CORE_MEMORY_FILE
-
-        filepath = self._pm.memory_dir / CORE_MEMORY_FILE
-        if not filepath.exists():
-            return []
+        """加载所有记忆条目（通过 PersistentMemory 后端抽象）。"""
         try:
-            content = filepath.read_text(encoding="utf-8")
-            return self._pm.parse_entries(content)
-        except OSError:
-            logger.warning("读取记忆文件失败", exc_info=True)
+            return self._pm.list_entries()
+        except Exception:
+            logger.warning("加载记忆条目失败", exc_info=True)
             return []
