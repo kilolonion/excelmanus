@@ -148,3 +148,6 @@ deploy/docker-images/
 !web/public/icon.png
 !web/public/samples/**
 backups/
+
+# Vite 缓存
+.vite/
