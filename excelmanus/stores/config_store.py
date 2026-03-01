@@ -40,14 +40,16 @@ class GlobalConfigStore:
 
     def list_profiles(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT name, model, api_key, base_url, description, protocol "
+            "SELECT name, model, api_key, base_url, description, protocol, "
+            "thinking_mode, model_family, custom_extra_body, custom_extra_headers "
             "FROM model_profiles ORDER BY id ASC"
         ).fetchall()
         return [dict(row) for row in rows]
 
     def get_profile(self, name: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT name, model, api_key, base_url, description, protocol "
+            "SELECT name, model, api_key, base_url, description, protocol, "
+            "thinking_mode, model_family, custom_extra_body, custom_extra_headers "
             "FROM model_profiles WHERE name = ?",
             (name,),
         ).fetchone()
@@ -61,13 +63,22 @@ class GlobalConfigStore:
         base_url: str = "",
         description: str = "",
         protocol: str = "auto",
+        thinking_mode: str = "auto",
+        model_family: str = "",
+        custom_extra_body: str = "",
+        custom_extra_headers: str = "",
     ) -> bool:
         now = _now_iso()
         try:
             self._conn.execute(
-                "INSERT INTO model_profiles (name, model, api_key, base_url, description, protocol, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, model, api_key, base_url, description, protocol, now, now),
+                "INSERT INTO model_profiles "
+                "(name, model, api_key, base_url, description, protocol, "
+                "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, model, api_key, base_url, description, protocol,
+                 thinking_mode, model_family, custom_extra_body, custom_extra_headers,
+                 now, now),
             )
             self._conn.commit()
             return True
@@ -84,6 +95,10 @@ class GlobalConfigStore:
         base_url: str | None = None,
         description: str | None = None,
         protocol: str | None = None,
+        thinking_mode: str | None = None,
+        model_family: str | None = None,
+        custom_extra_body: str | None = None,
+        custom_extra_headers: str | None = None,
     ) -> bool:
         sets: list[str] = []
         params: list[Any] = []
@@ -105,6 +120,18 @@ class GlobalConfigStore:
         if protocol is not None:
             sets.append("protocol = ?")
             params.append(protocol)
+        if thinking_mode is not None:
+            sets.append("thinking_mode = ?")
+            params.append(thinking_mode)
+        if model_family is not None:
+            sets.append("model_family = ?")
+            params.append(model_family)
+        if custom_extra_body is not None:
+            sets.append("custom_extra_body = ?")
+            params.append(custom_extra_body)
+        if custom_extra_headers is not None:
+            sets.append("custom_extra_headers = ?")
+            params.append(custom_extra_headers)
         if not sets:
             return False
         sets.append("updated_at = ?")
@@ -175,7 +202,15 @@ class GlobalConfigStore:
             base_url = (item.get("base_url") or "").strip() or default_base_url
             description = (item.get("description") or "").strip()
             protocol = (item.get("protocol") or "auto").strip().lower()
-            if self.add_profile(name, model, api_key, base_url, description, protocol):
+            thinking_mode = (item.get("thinking_mode") or "auto").strip().lower()
+            model_family = (item.get("model_family") or "").strip().lower()
+            custom_extra_body = (item.get("custom_extra_body") or "").strip()
+            custom_extra_headers = (item.get("custom_extra_headers") or "").strip()
+            if self.add_profile(
+                name, model, api_key, base_url, description, protocol,
+                thinking_mode=thinking_mode, model_family=model_family,
+                custom_extra_body=custom_extra_body, custom_extra_headers=custom_extra_headers,
+            ):
                 added += 1
         return added
 

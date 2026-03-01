@@ -138,7 +138,7 @@ class DelegationHandler(BaseToolHandler):
         # 写入传播
         sub_result = delegate_outcome.subagent_result
         if success and sub_result is not None and sub_result.structured_changes:
-            e.record_write_action()
+            e.record_workspace_write_action()
 
         # 子代理审批问题：阻塞等待用户决策
         if (
@@ -298,6 +298,14 @@ class FinishTaskHandler(BaseToolHandler):
             success = True
             finish_accepted = False
 
+        # ── 输出空值率前置检查 ────────────────────────────
+        if finish_accepted and _has_write:
+            null_warning = self._check_output_null_rate(e)
+            if null_warning:
+                finish_accepted = False
+                result_str = null_warning
+                success = True
+
         # ── Verifier 接线 ──────────────────────────────────
         if finish_accepted:
             _report_dict = report if isinstance(report, dict) else None
@@ -346,6 +354,94 @@ class FinishTaskHandler(BaseToolHandler):
 
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=success, finish_accepted=finish_accepted)
+
+    # ── 输出空值率检测 ──────────────────────────────────
+    _NULL_RATE_THRESHOLD: float = 0.5  # >50% 空值即告警
+    _NULL_CHECK_MAX_ROWS: int = 200    # 最多扫描行数（性能保护）
+
+    @staticmethod
+    def _check_output_null_rate(engine: Any) -> str | None:
+        """扫描写入操作涉及的文件，检测输出是否存在异常高空值率。
+
+        若写入的表格 >50% 单元格为空（且文件总行数 > 1），返回警告字符串阻断 finish_task。
+        任何异常静默跳过（fail-open）。
+        """
+        import logging as _logging
+
+        _state = getattr(engine, "_state", None)
+        if _state is None:
+            return None
+        write_log: list[dict] = getattr(_state, "write_operations_log", [])
+        if not write_log:
+            return None
+
+        # 收集写入涉及的 (file_path, sheet) 对
+        guard = getattr(engine, "_guard", None)
+        if guard is None:
+            return None
+
+        checked: set[tuple[str, str]] = set()
+        alerts: list[str] = []
+
+        for entry in write_log:
+            file_path = entry.get("file_path", "")
+            sheet = entry.get("sheet", "")
+            if not file_path:
+                continue
+            key = (file_path, sheet)
+            if key in checked:
+                continue
+            checked.add(key)
+
+            try:
+                from pathlib import Path
+                safe_path = guard.resolve_and_validate(file_path)
+                if not Path(safe_path).is_file():
+                    continue
+                suffix = Path(safe_path).suffix.lower()
+                if suffix not in (".xlsx", ".xlsm", ".xls", ".xlsb"):
+                    continue
+
+                import openpyxl
+                wb = openpyxl.load_workbook(safe_path, read_only=True, data_only=True)
+                try:
+                    target_sheets = [sheet] if sheet and sheet in wb.sheetnames else wb.sheetnames[:3]
+                    for sn in target_sheets:
+                        ws = wb[sn]
+                        total_cells = 0
+                        null_cells = 0
+                        row_count = 0
+                        for row in ws.iter_rows(min_row=2, max_row=FinishTaskHandler._NULL_CHECK_MAX_ROWS + 1):
+                            row_count += 1
+                            for cell in row:
+                                total_cells += 1
+                                if cell.value is None:
+                                    null_cells += 1
+                        if total_cells > 0 and row_count > 1:
+                            null_rate = null_cells / total_cells
+                            if null_rate > FinishTaskHandler._NULL_RATE_THRESHOLD:
+                                pct = int(null_rate * 100)
+                                alerts.append(
+                                    f"文件 `{file_path}` Sheet `{sn}`: "
+                                    f"{pct}% 单元格为空值（{null_cells}/{total_cells}）"
+                                )
+                finally:
+                    wb.close()
+            except Exception:  # noqa: BLE001
+                _logging.getLogger(__name__).debug(
+                    "null rate check skipped for %s: %s", file_path, exc_info=True,
+                )
+                continue
+
+        if not alerts:
+            return None
+
+        detail = "\n".join(f"- {a}" for a in alerts[:3])
+        return (
+            f"⚠️ 输出文件空值率异常，疑似数据未正确写入：\n{detail}\n\n"
+            "请先用 `read_excel` 或 `run_code` 检查写入结果是否正确，"
+            "确认无误后再次调用 finish_task。"
+        )
 
     def _resolve_verifier_level(
         self, task_tags: tuple[str, ...], has_write: bool, write_hint: str,
@@ -519,14 +615,15 @@ class AuditOnlyHandler(BaseToolHandler):
         result_value, audit_record = await e.execute_tool_with_audit(
             tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
             approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-            undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
+            undoable=e.approval.is_undoable_tool(tool_name),
         )
         result_str = str(result_value)
+        raw_result_str = result_str
         tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
         if tool_def is not None:
             result_str = tool_def.truncate_result(result_str)
         log_tool_call(logger, tool_name, arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True, audit_record=audit_record)
+        return _ToolExecOutcome(result_str=result_str, success=True, audit_record=audit_record, raw_result_str=raw_result_str)
 
 
 # ---------------------------------------------------------------------------
@@ -557,20 +654,22 @@ class HighRiskApprovalHandler(BaseToolHandler):
             result_value = await self._dispatcher.call_registry_tool(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
             self._dispatcher._apply_unknown_write_probe(tool_name=tool_name, before_snapshot=probe_before, before_partial=probe_before_partial)
             result_str = str(result_value)
+            raw_result_str = getattr(self._dispatcher, '_last_call_raw_result', result_str)
             log_tool_call(logger, tool_name, arguments, result=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=True)
+            return _ToolExecOutcome(result_str=result_str, success=True, raw_result_str=raw_result_str)
         else:
             result_value, audit_record = await e.execute_tool_with_audit(
                 tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
                 approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-                undoable=not e.approval.is_read_only_safe_tool(tool_name) and tool_name not in {"run_code", "run_shell"},
+                undoable=e.approval.is_undoable_tool(tool_name),
             )
             result_str = str(result_value)
+            raw_result_str = result_str
             tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
             if tool_def is not None:
                 result_str = tool_def.truncate_result(result_str)
             log_tool_call(logger, tool_name, arguments, result=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=True, audit_record=audit_record)
+            return _ToolExecOutcome(result_str=result_str, success=True, audit_record=audit_record, raw_result_str=raw_result_str)
 
 
 # ---------------------------------------------------------------------------
@@ -590,8 +689,9 @@ class DefaultToolHandler(BaseToolHandler):
         result_value = await self._dispatcher.call_registry_tool(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
         self._dispatcher._apply_unknown_write_probe(tool_name=tool_name, before_snapshot=probe_before, before_partial=probe_before_partial)
         result_str = str(result_value)
+        raw_result_str = getattr(self._dispatcher, '_last_call_raw_result', result_str)
         log_tool_call(logger, tool_name, arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True)
+        return _ToolExecOutcome(result_str=result_str, success=True, raw_result_str=raw_result_str)
 
 
 # ---------------------------------------------------------------------------
@@ -761,7 +861,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
                 mode=mode,
             )
 
-        # ── 构造管线并执行 ──
+        # ── 公共参数 ──
         from excelmanus.engine_core.tool_dispatcher import _image_content_hash
         image_hash = f"sha256:{_image_content_hash(raw_bytes)}"
         provenance = {
@@ -769,12 +869,32 @@ class ExtractTableSpecHandler(BaseToolHandler):
             "model": e.vlm_model,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-
-        # 输出目录：从 output_path 推导
         out_path = Path(output_path)
         output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
         output_basename = out_path.stem
 
+        # ── 策略选择：单轮提取 vs 4 阶段 Pipeline ──
+        strategy = self._select_extraction_strategy(e, skip_style)
+        if strategy == "single_pass":
+            result = await self._handle_single_pass(
+                raw_bytes=raw_bytes,
+                mime=mime,
+                path=path,
+                provenance=provenance,
+                output_dir=output_dir,
+                output_basename=output_basename,
+                skip_style=skip_style,
+                on_event=on_event,
+                arguments=arguments,
+                _vlm_caller=_vlm_caller,
+                _image_preparer=_image_preparer,
+            )
+            if result is not None:
+                return result
+            # 单轮提取失败 → 回退到 Pipeline
+            logger.warning("单轮提取失败，回退到 4 阶段 Pipeline")
+
+        # ── 4 阶段 Pipeline 路径 ──
         pipeline_config = PipelineConfig(
             skip_style=skip_style,
             uncertainty_pause_threshold=e.config.vlm_pipeline_uncertainty_threshold,
@@ -833,6 +953,148 @@ class ExtractTableSpecHandler(BaseToolHandler):
             log_tool_call(logger, "extract_table_spec", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
+        self._engine.record_write_action()
+        return self._build_spec_result(spec, spec_path, arguments)
+
+    @staticmethod
+    def _select_extraction_strategy(engine: "AgentEngine", skip_style: bool) -> str:
+        """选择提取策略：single_pass 或 pipeline。
+
+        策略矩阵：
+        ┌────────────┬─────────┬──────────┐
+        │ model_tier │ simple  │ complex  │
+        ├────────────┼─────────┼──────────┤
+        │ strong     │ single  │ single   │  ← Gemini 2.5 Pro 级别
+        │ standard   │ single  │ pipeline │  ← GPT-4o 级别
+        │ weak       │ pipeline│ pipeline │  ← 小模型
+        └────────────┴─────────┴──────────┘
+        """
+        tier = getattr(engine.config, "vlm_extraction_tier", "auto")
+
+        if tier == "auto":
+            model_name = (engine.vlm_model or "").lower()
+            if any(k in model_name for k in [
+                "gemini-2.5", "gemini-3", "gemini-2.0-flash",
+            ]):
+                tier = "strong"
+            elif any(k in model_name for k in [
+                "gpt-4o", "gpt-4.1", "claude-3.5", "claude-4",
+                "claude-sonnet", "claude-opus",
+                "qwen-vl-max", "qwen2.5-vl-72b",
+            ]):
+                tier = "standard"
+            else:
+                tier = "weak"
+
+        if tier == "strong":
+            logger.info("提取策略: single_pass (model_tier=strong)")
+            return "single_pass"
+        if tier == "weak":
+            logger.info("提取策略: pipeline (model_tier=weak)")
+            return "pipeline"
+        # standard: skip_style 时走单轮（更快），否则走 pipeline（样式需要多阶段）
+        if skip_style:
+            logger.info("提取策略: single_pass (model_tier=standard, skip_style=True)")
+            return "single_pass"
+        logger.info("提取策略: pipeline (model_tier=standard)")
+        return "pipeline"
+
+    async def _handle_single_pass(
+        self,
+        *,
+        raw_bytes: bytes,
+        mime: str,
+        path: "Path",
+        provenance: dict,
+        output_dir: str,
+        output_basename: str,
+        skip_style: bool,
+        on_event,
+        arguments: dict,
+        _vlm_caller,
+        _image_preparer,
+    ) -> "_ToolExecOutcome | None":
+        """单轮合并提取：一次 VLM 调用完成结构+数据+样式。
+
+        Returns:
+            _ToolExecOutcome 或 None（失败，应回退到 Pipeline）。
+        """
+        import base64
+        from excelmanus.pipeline.single_pass import (
+            SINGLE_PASS_PROMPT,
+            SINGLE_PASS_NO_STYLE_PROMPT,
+            parse_single_pass_result,
+        )
+        from excelmanus.events import EventType, ToolCallEvent
+
+        e = self._engine
+        dispatcher = self._dispatcher
+
+        # 发射进度事件
+        if on_event:
+            e.emit(on_event, ToolCallEvent(
+                event_type=EventType.PIPELINE_PROGRESS,
+                pipeline_stage="single_pass",
+                pipeline_message="正在执行单轮提取...",
+                pipeline_phase_index=0,
+                pipeline_total_phases=1,
+            ))
+
+        # 图片预处理
+        compressed, c_mime = _image_preparer(raw_bytes, "data")
+        b64 = base64.b64encode(compressed).decode("ascii")
+        prompt = SINGLE_PASS_NO_STYLE_PROMPT if skip_style else SINGLE_PASS_PROMPT
+
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{c_mime};base64,{b64}", "detail": "high",
+                }},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+
+        raw_text, error = await _vlm_caller(messages, "单轮提取", {"type": "json_object"})
+
+        if raw_text is None:
+            logger.warning("单轮提取 VLM 调用失败: %s", error)
+            return None
+
+        spec = parse_single_pass_result(raw_text, provenance)
+        if spec is None:
+            logger.warning("单轮提取结果解析失败")
+            return None
+
+        # 保存 spec
+        from pathlib import Path as _Path
+        spec_path = _Path(output_dir) / f"{output_basename}.json"
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text(
+            spec.model_dump_json(indent=2, exclude_none=True), encoding="utf-8",
+        )
+
+        # 发射完成事件
+        if on_event:
+            e.emit(on_event, ToolCallEvent(
+                event_type=EventType.PIPELINE_PROGRESS,
+                pipeline_stage="single_pass_done",
+                pipeline_message="单轮提取完成",
+                pipeline_phase_index=0,
+                pipeline_total_phases=1,
+                pipeline_spec_path=str(spec_path),
+            ))
+
+        self._engine.record_write_action()
+        return self._build_spec_result(spec, str(spec_path), arguments)
+
+    @staticmethod
+    def _build_spec_result(
+        spec: "ReplicaSpec", spec_path: str, arguments: dict,
+    ) -> "_ToolExecOutcome":
+        """构建 extract_table_spec 成功的 result。"""
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
         total_cells = sum(len(s.cells) for s in spec.sheets)
         has_styles = any(bool(s.styles) for s in spec.sheets)
         result_str = json.dumps({
@@ -848,7 +1110,6 @@ class ExtractTableSpecHandler(BaseToolHandler):
             ),
         }, ensure_ascii=False)
         log_tool_call(logger, "extract_table_spec", arguments, result=result_str)
-        self._engine.record_write_action()
         return _ToolExecOutcome(result_str=result_str, success=True)
 
     async def _handle_batch(

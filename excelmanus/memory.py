@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import tiktoken
@@ -13,6 +14,151 @@ from excelmanus.config import ExcelManusConfig
 logger = logging.getLogger(__name__)
 
 IMAGE_TOKEN_ESTIMATE = 1500  # 图片 token 估算值（用于 memory 截断）
+
+# ---------------------------------------------------------------------------
+# 图片生命周期管理
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImageCacheEntry:
+    """图片本地缓存条目（支持降级后重注入）。"""
+
+    image_id: int
+    raw_base64: str  # 原始 base64 数据
+    mime_type: str = "image/png"
+    detail: str = "auto"
+    inject_round: int = 0  # 注入时的对话轮次
+    last_referenced_round: int = 0  # 最后被 LLM 看到的轮次
+    degraded: bool = False  # 是否已降级为文本引用
+
+
+class ImageLifecycleManager:
+    """Provider-aware 的图片上下文生命周期管理。
+
+    替代粗暴的 ``mark_images_sent()`` 立即降级策略。
+
+    策略矩阵：
+    ┌──────────────────┬──────────────────────────────────────┐
+    │ 条件              │ 行为                                  │
+    ├──────────────────┼──────────────────────────────────────┤
+    │ 图片 < keep_rounds│ 保持完整 base64（Provider 自动缓存）   │
+    │ 活跃数 > max      │ LRU 淘汰最老图片                      │
+    │ token 超限        │ 强制降级最老图片                       │
+    │ 用户引用已降级图片 │ 从本地缓存重注入                       │
+    └──────────────────┴──────────────────────────────────────┘
+    """
+
+    def __init__(
+        self,
+        keep_rounds: int = 3,
+        max_active_images: int = 2,
+        image_token_budget: int = 6000,
+    ):
+        self.keep_rounds = keep_rounds
+        self.max_active_images = max_active_images
+        self.image_token_budget = image_token_budget
+        self._cache: dict[int, ImageCacheEntry] = {}
+
+    def register(
+        self,
+        image_id: int,
+        base64_data: str,
+        mime_type: str,
+        detail: str,
+        current_round: int,
+    ) -> None:
+        """注册新图片到生命周期管理器。"""
+        self._cache[image_id] = ImageCacheEntry(
+            image_id=image_id,
+            raw_base64=base64_data,
+            mime_type=mime_type,
+            detail=detail,
+            inject_round=current_round,
+            last_referenced_round=current_round,
+        )
+
+    def get_ids_to_degrade(self, current_round: int) -> list[int]:
+        """返回本轮应该降级的图片 ID 列表。
+
+        策略：
+        1. 超过 keep_rounds 的图片加入候选
+        2. 活跃图片数超过 max_active_images 时 LRU 淘汰
+        3. 活跃图片 token 超过 budget 时强制淘汰最老的
+        """
+        to_degrade: list[int] = []
+        active = [
+            e for e in self._cache.values() if not e.degraded
+        ]
+        if not active:
+            return to_degrade
+
+        # 按 last_referenced_round 排序（最老的在前）
+        active.sort(key=lambda e: e.last_referenced_round)
+
+        # 规则 1：超过 keep_rounds 的候选降级
+        for entry in active:
+            age = current_round - entry.inject_round
+            if age >= self.keep_rounds:
+                to_degrade.append(entry.image_id)
+
+        # 规则 2：活跃数超限 → LRU 淘汰
+        remaining_active = len(active) - len(to_degrade)
+        if remaining_active > self.max_active_images:
+            excess = remaining_active - self.max_active_images
+            for entry in active:
+                if entry.image_id not in to_degrade:
+                    to_degrade.append(entry.image_id)
+                    excess -= 1
+                    if excess <= 0:
+                        break
+
+        # 规则 3：token 预算检查
+        remaining_active_count = len(active) - len(to_degrade)
+        active_tokens = remaining_active_count * IMAGE_TOKEN_ESTIMATE
+        while active_tokens > self.image_token_budget and remaining_active_count > 0:
+            # 找最老的还没被标记降级的
+            for entry in active:
+                if entry.image_id not in to_degrade:
+                    to_degrade.append(entry.image_id)
+                    remaining_active_count -= 1
+                    active_tokens = remaining_active_count * IMAGE_TOKEN_ESTIMATE
+                    break
+            else:
+                break
+
+        return to_degrade
+
+    _MAX_CACHE_SIZE = 10  # 降级后的缓存条目上限（防止长会话内存泄漏）
+
+    def mark_degraded(self, image_id: int) -> None:
+        """标记图片为已降级。超过缓存上限时淘汰最老的降级条目。"""
+        entry = self._cache.get(image_id)
+        if entry:
+            entry.degraded = True
+        # 淘汰最老的降级条目（保持 _cache 不无限增长）
+        degraded = [e for e in self._cache.values() if e.degraded]
+        if len(degraded) > self._MAX_CACHE_SIZE:
+            degraded.sort(key=lambda e: e.last_referenced_round)
+            for old in degraded[: len(degraded) - self._MAX_CACHE_SIZE]:
+                del self._cache[old.image_id]
+
+    def mark_round_sent(self, image_id: int, current_round: int) -> None:
+        """更新图片的最后引用轮次。"""
+        entry = self._cache.get(image_id)
+        if entry and not entry.degraded:
+            entry.last_referenced_round = current_round
+
+    def get_reinject_data(self, image_id: int) -> ImageCacheEntry | None:
+        """获取已降级图片的缓存数据（用于重注入）。"""
+        entry = self._cache.get(image_id)
+        if entry and entry.degraded and entry.raw_base64:
+            return entry
+        return None
+
+    def clear(self) -> None:
+        """清空所有缓存。"""
+        self._cache.clear()
 
 # ---------------------------------------------------------------------------
 # 默认系统提示词：从 prompts/ 文件加载，缺失时自动补齐
@@ -94,6 +240,13 @@ class ConversationMemory:
         # 图片降级追踪
         self._image_seq: int = 0  # 图片序号
         self._fresh_image_ids: set[int] = set()  # 尚未发送过的图片 ID
+        # 图片生命周期管理器（视觉原生模式使用）
+        self._lifecycle = ImageLifecycleManager(
+            keep_rounds=getattr(config, "image_keep_rounds", 3),
+            max_active_images=getattr(config, "image_max_active", 2),
+            image_token_budget=getattr(config, "image_token_budget", 6000),
+        )
+        self._current_round: int = 0  # 当前对话轮次
 
     @property
     def messages(self) -> list[dict]:
@@ -154,6 +307,21 @@ class ConversationMemory:
                 "role": "user", "content": content, "_image_id": image_id,
             })
             self._fresh_image_ids.add(image_id)
+            # 注册到生命周期管理器（提取第一张图片的 base64/mime/detail）
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        img_url = part.get("image_url", {})
+                        url_str = img_url.get("url", "")
+                        detail = img_url.get("detail", "auto")
+                        # 从 data URI 提取 base64 和 mime
+                        if url_str.startswith("data:") and ";base64," in url_str:
+                            header, b64_data = url_str.split(";base64,", 1)
+                            mime_type = header.replace("data:", "")
+                            self._lifecycle.register(
+                                image_id, b64_data, mime_type, detail, self._current_round,
+                            )
+                        break  # 只注册第一张
         else:
             self._messages.append({"role": "user", "content": content})
         self._truncate_if_needed()
@@ -164,8 +332,7 @@ class ConversationMemory:
         """便捷方法：注入图片到对话上下文。
 
         图片首次注入时保留完整 base64 数据；LLM 调用完成后通过
-        ``mark_images_sent()`` 将其降级为短文本引用，避免后续轮次
-        重复携带巨大的 base64 payload。
+        ``mark_images_sent()`` 或 ``manage_image_lifecycle()`` 管理降级。
         """
         self._image_seq += 1
         image_id = self._image_seq
@@ -179,6 +346,10 @@ class ConversationMemory:
         msg = {"role": "user", "content": [part], "_image_id": image_id}
         self._messages.append(msg)
         self._fresh_image_ids.add(image_id)
+        # 注册到生命周期管理器
+        self._lifecycle.register(
+            image_id, base64_data, mime_type, detail, self._current_round,
+        )
         self._truncate_if_needed()
 
     def add_assistant_message(self, content: str) -> None:
@@ -295,6 +466,9 @@ class ConversationMemory:
                 output.append(clean)
             else:
                 output.append(msg)
+        # 对旧轮次的工具返回值做结构化遮蔽，节约上下文空间
+        from excelmanus.engine_core.observation_masker import mask_messages
+        output = mask_messages(output)
         return system_msgs + output
 
     def repair_dangling_tool_calls(self) -> int:
@@ -409,11 +583,25 @@ class ConversationMemory:
         """当前消息数量。"""
         return len(self._messages)
 
+    def reset_image_tracking(self) -> None:
+        """重置图片追踪状态（rollback 后调用）。
+
+        清除 fresh IDs 和 lifecycle 缓存，保留 _image_seq 以避免
+        新图片 ID 冲突。_current_round 同步到当前用户轮次数。
+        """
+        self._fresh_image_ids.clear()
+        self._lifecycle.clear()
+        # 同步 round 到当前剩余消息的用户轮次数
+        user_count = sum(1 for m in self._messages if m.get("role") == "user")
+        self._current_round = user_count
+
     def clear(self) -> None:
         """清除所有对话历史（保留 system prompt 配置）。"""
         self._messages.clear()
         self._image_seq = 0
         self._fresh_image_ids.clear()
+        self._lifecycle.clear()
+        self._current_round = 0
 
     def mark_images_sent(self) -> None:
         """将已发送的图片消息降级为文本引用，释放 base64 内存。
@@ -423,34 +611,102 @@ class ConversationMemory:
 
         对于多模态消息（text + image 混合），保留原始文本部分，
         仅将 image_url 部分替换为短文本引用。
+
+        注意：视觉原生模式应改用 ``manage_image_lifecycle()``。
         """
         if not self._fresh_image_ids:
             return
         for i, msg in enumerate(self._messages):
             image_id = msg.get("_image_id")
             if image_id is not None and image_id in self._fresh_image_ids:
-                # 在多模态内容降级前提取文本部分
-                original_text = ""
-                content = msg.get("content")
-                if isinstance(content, list):
-                    text_parts = [
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    ]
-                    original_text = "\n".join(t for t in text_parts if t)
-
-                image_ref = f"[图片 #{image_id} 已在之前的对话中发送]"
-                degraded_content = (
-                    f"{original_text}\n{image_ref}" if original_text else image_ref
-                )
-                self._messages[i] = {
-                    "role": "user",
-                    "content": degraded_content,
-                    "_image_id": image_id,
-                    "_image_downgraded": True,
-                }
+                self._degrade_image_message(i, image_id)
         self._fresh_image_ids.clear()
+
+    def manage_image_lifecycle(self) -> None:
+        """Provider-aware 图片生命周期管理（视觉原生模式）。
+
+        替代 ``mark_images_sent()`` 的粗暴降级策略：
+        - 图片在 keep_rounds 内保持完整 base64（利用 Provider 缓存）
+        - 超期或超数量时 LRU 淘汰
+        - 降级后仍缓存原始数据，支持按需重注入
+        """
+        self._current_round += 1
+
+        # 更新所有 fresh 图片的引用轮次
+        for msg in self._messages:
+            image_id = msg.get("_image_id")
+            if image_id is not None and image_id in self._fresh_image_ids:
+                self._lifecycle.mark_round_sent(image_id, self._current_round)
+        self._fresh_image_ids.clear()
+
+        # 获取需要降级的图片
+        to_degrade = self._lifecycle.get_ids_to_degrade(self._current_round)
+        if not to_degrade:
+            return
+
+        degrade_set = set(to_degrade)
+        for i, msg in enumerate(self._messages):
+            image_id = msg.get("_image_id")
+            if image_id is not None and image_id in degrade_set:
+                if not msg.get("_image_downgraded"):
+                    self._degrade_image_message(i, image_id)
+                    self._lifecycle.mark_degraded(image_id)
+                    cached = self._lifecycle._cache.get(image_id)
+                    age = self._current_round - cached.inject_round if cached else 0
+                    logger.info("图片生命周期: 降级图片 #%d (age=%d rounds)", image_id, age)
+
+    def reinject_image(self, image_id: int) -> bool:
+        """重注入已降级的图片（从本地缓存恢复）。
+
+        适用于用户追问图片细节时，图片已从上下文中降级的场景。
+
+        Returns:
+            True 如果成功重注入，False 如果缓存中无该图片。
+        """
+        entry = self._lifecycle.get_reinject_data(image_id)
+        if entry is None:
+            return False
+        # 重新注入（不分配新 ID，复用原 ID）
+        part = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{entry.mime_type};base64,{entry.raw_base64}",
+                "detail": entry.detail,
+            },
+        }
+        msg = {"role": "user", "content": [part], "_image_id": image_id}
+        self._messages.append(msg)
+        self._fresh_image_ids.add(image_id)
+        entry.degraded = False
+        entry.inject_round = self._current_round  # 重置注入轮次，避免立即被再次降级
+        entry.last_referenced_round = self._current_round
+        logger.info("图片生命周期: 重注入图片 #%d", image_id)
+        self._truncate_if_needed()
+        return True
+
+    def _degrade_image_message(self, msg_index: int, image_id: int) -> None:
+        """将指定消息中的图片降级为文本引用。"""
+        msg = self._messages[msg_index]
+        original_text = ""
+        content = msg.get("content")
+        if isinstance(content, list):
+            text_parts = [
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            original_text = "\n".join(t for t in text_parts if t)
+
+        image_ref = f"[图片 #{image_id} 已在之前的对话中发送]"
+        degraded_content = (
+            f"{original_text}\n{image_ref}" if original_text else image_ref
+        )
+        self._messages[msg_index] = {
+            "role": "user",
+            "content": degraded_content,
+            "_image_id": image_id,
+            "_image_downgraded": True,
+        }
 
     def _total_tokens(self) -> int:
         """计算当前所有消息（含 system prompt）的总 token 数。"""

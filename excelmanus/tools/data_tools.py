@@ -2034,10 +2034,20 @@ def _collect_charts(ws: Any) -> list[dict[str, Any]]:
         info["type"] = type_name
         if hasattr(chart, "title") and chart.title:
             title = chart.title
-            if hasattr(title, "text"):
-                info["title"] = title.text
-            elif isinstance(title, str):
+            if isinstance(title, str):
                 info["title"] = title
+            else:
+                # openpyxl Title/Text object: drill into rich text paragraphs
+                text_obj = title.text if hasattr(title, "text") else title
+                rich = getattr(text_obj, "rich", None)
+                if rich is not None:
+                    parts: list[str] = []
+                    for p in getattr(rich, "p", []):
+                        for r in (getattr(p, "r", None) or []):
+                            if getattr(r, "t", None):
+                                parts.append(r.t)
+                    if parts:
+                        info["title"] = "".join(parts)
         info["series_count"] = len(chart.series) if hasattr(chart, "series") else 0
         # 锚点位置
         if hasattr(chart, "anchor") and chart.anchor:

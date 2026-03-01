@@ -94,6 +94,7 @@ from excelmanus.skillpacks import (
     SkillpackNotFoundError,
     SkillRouter,
 )
+from excelmanus.skillpacks.clawhub import ClawHubError, ClawHubNotFoundError
 from excelmanus.skillpacks.importer import SkillImportError
 from excelmanus.tools import ToolRegistry
 from excelmanus.api_sse import (
@@ -233,7 +234,7 @@ class SkillpackImportRequest(BaseModel):
     """导入 skillpack 请求体。"""
 
     model_config = ConfigDict(extra="forbid")
-    source: Literal["local_path", "github_url"]
+    source: Literal["local_path", "github_url", "clawhub"]
     value: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)
     ]
@@ -271,7 +272,9 @@ _session_manager: SessionManager | None = None
 _tool_registry: ToolRegistry | None = None
 _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
+_skillpack_manager: "SkillpackManager | None" = None
 _config: ExcelManusConfig | None = None
+_config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
@@ -301,7 +304,7 @@ def _get_file_registry(workspace_root: str, *, user_id: str | None = None) -> An
         db_conn = _database
         if user_id is not None and _config is not None:
             from excelmanus.user_scope import UserScope
-            scope = UserScope.create(user_id, _database, _config.workspace_root)
+            scope = UserScope.create(user_id, _database, _config.workspace_root, data_root=_config.data_root)
             db_conn = scope.scoped_db
         reg = FileRegistry(db_conn, workspace_root)
         _file_registries[cache_key] = reg
@@ -356,6 +359,7 @@ def _resolve_workspace(request: Request) -> "IsolatedWorkspace":
         auth_enabled=auth_enabled,
         sandbox_config=SandboxConfig(docker_enabled=docker_enabled),
         transaction_enabled=_config.backup_enabled,
+        data_root=_config.data_root,
     )
 
 
@@ -561,18 +565,11 @@ def _make_content_disposition(filename: str) -> str:
         )
 
 
-def _require_skill_engine():
-    """创建临时 AgentEngine 实例用于 skillpack 管理。"""
-    assert _config is not None, "服务未初始化"
-    assert _tool_registry is not None, "服务未初始化"
-    assert _skill_router is not None, "服务未初始化"
-    from excelmanus.engine import AgentEngine
-
-    return AgentEngine(
-        config=_config,
-        registry=_tool_registry,
-        skill_router=_skill_router,
-    )
+def _require_skillpack_manager():
+    """获取模块级 SkillpackManager 实例（无需创建 AgentEngine）。"""
+    if _skillpack_manager is None:
+        raise HTTPException(status_code=503, detail="SkillpackManager 未初始化")
+    return _skillpack_manager
 
 
 def _to_skill_summary(detail: dict[str, Any]) -> SkillpackSummaryResponse:
@@ -704,15 +701,57 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _config, _database
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database, _config_incomplete
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
     if bootstrap_error is not None:
-        raise bootstrap_error
+        _config_incomplete = True
+        logger.warning(
+            "\n"
+            "╔══════════════════════════════════════════════════════════════╗\n"
+            "║  ⚠️  模型配置缺失，服务以降级模式启动                      ║\n"
+            "║                                                            ║\n"
+            "║  %s\n"
+            "║                                                            ║\n"
+            "║  你可以通过以下任一方式完成配置：                          ║\n"
+            "║    1. 打开浏览器访问前端页面，按引导填写 API Key           ║\n"
+            "║    2. 编辑项目根目录下的 .env 文件，设置以下必填项：       ║\n"
+            "║       EXCELMANUS_API_KEY=sk-xxx                            ║\n"
+            "║       EXCELMANUS_BASE_URL=https://api.openai.com/v1        ║\n"
+            "║       EXCELMANUS_MODEL=gpt-4o                              ║\n"
+            "║    3. 使用 EXCELMANUS_MODELS 环境变量配置多模型            ║\n"
+            "║                                                            ║\n"
+            "║  配置完成后，通过前端设置页保存即可生效（无需重启）。      ║\n"
+            "╚══════════════════════════════════════════════════════════════╝",
+            str(bootstrap_error).ljust(58)[:58] + "║",
+        )
 
     _config = app.state.bootstrap_config
     setup_logging(_config.log_level)
+
+    # ── 集中数据管理：注册安装 + 首次迁移 ──────────────
+    from excelmanus.data_home import (
+        register_installation,
+        migrate_project_env,
+        ensure_data_dirs,
+        has_project_local_data,
+        migrate_data_from_project,
+        is_data_centralized,
+    )
+    project_root = Path(__file__).resolve().parent.parent
+    try:
+        register_installation(project_root)
+        migrate_project_env(project_root)
+        if _config.data_root:
+            ensure_data_dirs()
+            # 首次运行且项目内有旧数据 → 自动迁移
+            if not is_data_centralized() and has_project_local_data(project_root):
+                stats = migrate_data_from_project(project_root)
+                if stats:
+                    logger.info("首次运行数据迁移完成: %s", stats)
+    except Exception:
+        logger.debug("集中数据管理初始化失败（非致命）", exc_info=True)
 
     # 初始化工具层
     _tool_registry = ToolRegistry()
@@ -722,6 +761,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _skillpack_loader = SkillpackLoader(_config, _tool_registry)
     _skillpack_loader.load_all()
     _skill_router = SkillRouter(_config, _skillpack_loader)
+    from excelmanus.skillpacks import SkillpackManager
+    _skillpack_manager = SkillpackManager(_config, _skillpack_loader)
 
     # 初始化统一数据库
     from excelmanus.database import Database
@@ -818,10 +859,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _config.memory_enabled:
         try:
             from excelmanus.persistent_memory import PersistentMemory as _PM
+            if _database is not None:
+                from excelmanus.stores.memory_store import MemoryStore as _MS
+                _mem_backend = _MS(_database)
+            else:
+                from excelmanus.stores.file_memory_backend import FileMemoryBackend as _FMB
+                _mem_backend = _FMB(
+                    memory_dir=_config.memory_dir,
+                    auto_load_lines=_config.memory_auto_load_lines,
+                )
             _api_persistent_memory = _PM(
-                memory_dir=_config.memory_dir,
+                backend=_mem_backend,
                 auto_load_lines=_config.memory_auto_load_lines,
-                database=_database,
             )
         except Exception:
             logger.debug("API PersistentMemory 初始化失败", exc_info=True)
@@ -845,6 +894,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.user_store = _user_store
             app.state.auth_enabled = auth_enabled
             app.state.workspace_root = _config.workspace_root
+            app.state.data_root = _config.data_root
             # Auth 即隔离：auth_enabled 时自动启用会话隔离，无需额外开关。
             app.state.session_isolation_enabled = auth_enabled
             # 将 UserStore 注入 SessionManager，使其能读取用户自定义 LLM 配置
@@ -1055,15 +1105,33 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
     # 构建 CORS 允许来源列表：除了显式配置的来源外，自动添加本机 LAN IP
     # 的前端端口来源，以便浏览器直连后端的 SSE 流式请求不被 CORS 拦截。
     cors_origins = set(bootstrap_config.cors_allow_origins)
+    lan_ips: set[str] = set()
+    # 方法1: gethostname + getaddrinfo（部分系统可用）
     try:
         import socket
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
             ip = info[4][0]
             if ip and not ip.startswith("127."):
-                cors_origins.add(f"http://{ip}:3000")
+                lan_ips.add(ip)
     except Exception:
-        pass  # 无法获取 LAN IP 时静默降级
+        pass
+    # 方法2: UDP connect trick（不实际发送数据，最可靠的主 IP 获取方式）
+    try:
+        import socket as _sock
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        s.settimeout(0)
+        s.connect(("10.254.254.254", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            lan_ips.add(ip)
+    except Exception:
+        pass
+    # 从环境变量读取前端端口，支持自定义端口部署（默认 3000）
+    _frontend_port = os.environ.get("EXCELMANUS_FRONTEND_PORT", "3000").strip()
+    for ip in lan_ips:
+        cors_origins.add(f"http://{ip}:{_frontend_port}")
 
     application.add_middleware(
         CORSMiddleware,
@@ -1088,6 +1156,8 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
     application.include_router(mcp_router)
     from excelmanus.api_routes_rules import router as rules_router
     application.include_router(rules_router)
+    from excelmanus.api_routes_version import router as version_router
+    application.include_router(version_router)
 
     application.include_router(_router)
     return application
@@ -1192,6 +1262,11 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
+    if _config_incomplete:
+        return _error_json_response(
+            503,
+            "模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+        )
 
     from excelmanus.auth.dependencies import extract_user_id
     auth_user_id = extract_user_id(raw_request)
@@ -1281,6 +1356,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     """
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
+    if _config_incomplete:
+        return _error_json_response(
+            503,
+            "模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+        )
 
     # ── 仅保留纯内存操作在流外部（微秒级） ──
     from excelmanus.auth.dependencies import extract_user_id
@@ -1422,12 +1502,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             _session_stream_states[session_id] = stream_state
             event_queue = stream_state.attach()
 
+            _sse_event_count = 0
+
             def _on_event(event: ToolCallEvent) -> None:
                 """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
 
                 注意：flush_messages_sync 在事件循环线程上做同步 SQLite I/O。
                 单次写入耗时毫秒级，当前可接受；高并发场景如需优化可改用 asyncio.to_thread。
                 """
+                nonlocal _sse_event_count
+                _sse_event_count += 1
+                has_subscriber = stream_state.subscriber_queue is not None
+                logger.debug(
+                    "SSE 事件投递 #%d [%s] subscriber=%s qsize=%s",
+                    _sse_event_count,
+                    event.event_type.value if hasattr(event.event_type, 'value') else event.event_type,
+                    has_subscriber,
+                    stream_state.subscriber_queue.qsize() if has_subscriber else "N/A",
+                )
                 stream_state.deliver(event)
                 _persist_excel_event(session_id, event)
                 if (
@@ -2333,8 +2425,8 @@ def _sse_event_to_sse(
 )
 async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
     """列出全部已加载 skillpack 摘要。"""
-    engine = _require_skill_engine()
-    details = engine.list_skillpacks_detail()
+    manager = _require_skillpack_manager()
+    details = manager.list_skillpacks()
     return [_to_skill_summary(detail) for detail in details]
 
 
@@ -2349,9 +2441,9 @@ async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
 )
 async def get_skill(name: str) -> SkillpackDetailResponse | SkillpackSummaryResponse | JSONResponse:
     """查询单个 skillpack。"""
-    engine = _require_skill_engine()
+    manager = _require_skillpack_manager()
     try:
-        detail = engine.get_skillpack_detail(name)
+        detail = manager.get_skillpack(name)
     except SkillpackInputError as exc:
         return _error_json_response(422, str(exc))
     except SkillpackNotFoundError as exc:
@@ -2380,9 +2472,9 @@ async def create_skill(
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    engine = _require_skill_engine()
+    manager = _require_skillpack_manager()
     try:
-        detail = engine.create_skillpack(
+        detail = manager.create_skillpack(
             name=request.name,
             payload=request.payload,
             actor="api",
@@ -2418,9 +2510,9 @@ async def patch_skill(
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    engine = _require_skill_engine()
+    manager = _require_skillpack_manager()
     try:
-        detail = engine.patch_skillpack(
+        detail = manager.patch_skillpack(
             name=name,
             payload=request.payload,
             actor="api",
@@ -2458,9 +2550,9 @@ async def delete_skill(
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    engine = _require_skill_engine()
+    manager = _require_skillpack_manager()
     try:
-        detail = engine.delete_skillpack(
+        detail = manager.delete_skillpack(
             name=name,
             actor="api",
             reason=reason,
@@ -2497,9 +2589,9 @@ async def import_skill(
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    engine = _require_skill_engine()
+    manager = _require_skillpack_manager()
     try:
-        result = await engine.import_skillpack_async(
+        result = await manager.import_skillpack_async(
             source=request.source,
             value=request.value,
             actor="api",
@@ -2517,6 +2609,120 @@ async def import_skill(
         name=str(result.get("name", "")),
         detail=result,
     )
+
+
+# ── ClawHub API ──────────────────────────────────────────
+
+
+@_router.get("/api/v1/clawhub/search")
+async def clawhub_search(
+    q: str = "",
+    limit: int = 15,
+) -> dict[str, Any]:
+    """搜索 ClawHub 技能市场。"""
+    if not q.strip():
+        return {"results": []}
+    manager = _require_skillpack_manager()
+    try:
+        results = await manager.clawhub_search(q.strip(), limit=limit)
+    except ClawHubError as exc:
+        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
+    return {"results": results}
+
+
+@_router.get("/api/v1/clawhub/skill/{slug}")
+async def clawhub_skill_detail(slug: str) -> dict[str, Any]:
+    """获取 ClawHub 技能详情。"""
+    manager = _require_skillpack_manager()
+    try:
+        detail = await manager.clawhub_skill_detail(slug)
+    except ClawHubNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+    except ClawHubError as exc:
+        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
+    return detail
+
+
+class ClawHubInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slug: str
+    version: str | None = None
+    overwrite: bool = False
+
+
+@_router.post("/api/v1/clawhub/install", status_code=201)
+async def clawhub_install(
+    request: ClawHubInstallRequest,
+) -> dict[str, Any]:
+    """从 ClawHub 安装技能。"""
+    if _is_external_safe_mode():
+        return _error_json_response(403, "external_safe_mode 开启时禁止安装。")
+    manager = _require_skillpack_manager()
+    try:
+        result = await manager.import_skillpack_async(
+            source="clawhub",
+            value=request.slug,
+            actor="api",
+            overwrite=request.overwrite,
+        )
+    except ClawHubNotFoundError as exc:
+        return _error_json_response(404, str(exc))
+    except ClawHubError as exc:
+        logger.warning("ClawHub 安装失败 slug=%s: %s", request.slug, exc, exc_info=True)
+        return _error_json_response(502, f"ClawHub 安装失败：{exc}")
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    return {"status": "installed", **result}
+
+
+@_router.get("/api/v1/clawhub/updates")
+async def clawhub_check_updates() -> dict[str, Any]:
+    """检查已安装 ClawHub 技能的可用更新。"""
+    manager = _require_skillpack_manager()
+    try:
+        updates = await manager.clawhub_check_updates()
+    except ClawHubError as exc:
+        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
+    return {"updates": updates}
+
+
+class ClawHubUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slug: str | None = None
+    version: str | None = None
+    all: bool = False
+
+
+@_router.post("/api/v1/clawhub/update")
+async def clawhub_update(
+    request: ClawHubUpdateRequest,
+) -> dict[str, Any]:
+    """更新 ClawHub 技能。"""
+    if _is_external_safe_mode():
+        return _error_json_response(403, "external_safe_mode 开启时禁止更新。")
+    manager = _require_skillpack_manager()
+    try:
+        results = await manager.clawhub_update(
+            slug=request.slug,
+            version=request.version,
+            update_all=request.all,
+        )
+    except SkillpackInputError as exc:
+        return _error_json_response(422, str(exc))
+    except ClawHubError as exc:
+        return _error_json_response(502, f"ClawHub 更新失败：{exc}")
+    return {"results": results}
+
+
+@_router.get("/api/v1/clawhub/installed")
+async def clawhub_list_installed() -> dict[str, Any]:
+    """列出已安装的 ClawHub 技能。"""
+    manager = _require_skillpack_manager()
+    try:
+        installed = await manager.clawhub_list_installed()
+    except ClawHubError as exc:
+        return _error_json_response(502, str(exc))
+    return {"installed": installed}
 
 
 @_router.delete("/api/v1/sessions/{session_id}", responses={
@@ -4274,16 +4480,12 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
                 pass
         return normalized
 
-    can_restore = _session_manager.can_restore_session(
-        session_id, user_id=user_id
-    )
-    engine = await _session_manager.get_or_restore_engine(
-        session_id, user_id=user_id
-    )
+    # 性能优化：仅查询内存中已有的引擎，不触发引擎创建/恢复。
+    # 如果会话被 TTL 清理出内存，返回 idle 默认值即可——
+    # 引擎会在用户真正发消息时才创建，避免轮询导致不必要的重量级初始化。
+    engine = _session_manager.get_engine(session_id, user_id=user_id)
 
     if engine is None:
-        # 会话可能尚未在后端创建（前端 local-first 乐观创建）或可从历史恢复，
-        # 统一返回 idle 默认值，避免 404 日志噪音。
         _idle = _normalize_registry_status({"state": "idle"})
         return JSONResponse(content={
             "session_id": session_id,
@@ -4720,6 +4922,10 @@ class ModelProfileCreate(BaseModel):
     base_url: str = ""
     description: str = ""
     protocol: str = "auto"
+    thinking_mode: str = "auto"
+    model_family: str = ""
+    custom_extra_body: str = ""
+    custom_extra_headers: str = ""
 
 
 @_router.get("/api/v1/config/models")
@@ -4758,6 +4964,10 @@ async def get_model_config(request: Request) -> JSONResponse:
                 "base_url": p.get("base_url", ""),
                 "description": p.get("description", ""),
                 "protocol": p.get("protocol", "auto"),
+                "thinking_mode": p.get("thinking_mode", "auto"),
+                "model_family": p.get("model_family", ""),
+                "custom_extra_body": p.get("custom_extra_body", ""),
+                "custom_extra_headers": p.get("custom_extra_headers", ""),
             }
             for p in (_config_store.list_profiles() if _config_store else [])
         ],
@@ -4788,6 +4998,10 @@ def _sync_config_profiles_from_db() -> None:
             base_url=row.get("base_url") or default_base_url,
             description=row.get("description", ""),
             protocol=row.get("protocol", "auto"),
+            thinking_mode=row.get("thinking_mode", "auto"),
+            model_family=row.get("model_family", ""),
+            custom_extra_body=row.get("custom_extra_body", ""),
+            custom_extra_headers=row.get("custom_extra_headers", ""),
         ))
     object.__setattr__(_config, "models", tuple(profiles))
 
@@ -4802,6 +5016,7 @@ async def update_model_config(
     guard_error = await _require_admin_if_auth_enabled(raw_request)
     if guard_error is not None:
         return guard_error
+    global _config_incomplete
     if section not in _MODEL_ENV_KEYS:
         return _error_json_response(400, f"未知配置区块: {section}")
 
@@ -4849,6 +5064,12 @@ async def update_model_config(
             if val is not None:
                 object.__setattr__(_config, config_attr, val)
 
+    # 主模型配置更新后，检查是否已补齐必填项 → 解除降级模式
+    if section == "main" and _config is not None and _config_incomplete:
+        if _config.api_key and _config.base_url and _config.model:
+            _config_incomplete = False
+            logger.info("模型配置已补齐，服务已从降级模式恢复为正常模式。")
+
     # AUX 变更需广播到所有活跃 engine，避免子代理/路由/顾问使用过时快照
     if section == "aux" and _session_manager is not None:
         await _session_manager.broadcast_aux_config(
@@ -4880,8 +5101,14 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         base_url=request.base_url or "",
         description=request.description or "",
         protocol=request.protocol or "auto",
+        thinking_mode=request.thinking_mode or "auto",
+        model_family=request.model_family or "",
+        custom_extra_body=request.custom_extra_body or "",
+        custom_extra_headers=request.custom_extra_headers or "",
     )
     _sync_config_profiles_from_db()
+    if _session_manager is not None and _config is not None:
+        await _session_manager.broadcast_model_profiles(_config.models)
 
     return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
 
@@ -4899,6 +5126,8 @@ async def delete_model_profile(name: str, request: Request) -> JSONResponse:
         return _error_json_response(404, f"未找到模型: {name}")
 
     _sync_config_profiles_from_db()
+    if _session_manager is not None and _config is not None:
+        await _session_manager.broadcast_model_profiles(_config.models)
     return JSONResponse(content={"status": "deleted", "name": name})
 
 
@@ -4926,8 +5155,14 @@ async def update_model_profile(
         base_url=request.base_url or None,
         description=request.description or None,
         protocol=request.protocol or None,
+        thinking_mode=request.thinking_mode,
+        model_family=request.model_family,
+        custom_extra_body=request.custom_extra_body,
+        custom_extra_headers=request.custom_extra_headers,
     )
     _sync_config_profiles_from_db()
+    if _session_manager is not None and _config is not None:
+        await _session_manager.broadcast_model_profiles(_config.models)
 
     return JSONResponse(content={"status": "updated", "name": request.name})
 
@@ -5153,6 +5388,10 @@ async def import_model_config(
                         base_url=p.get("base_url", ""),
                         description=p.get("description", ""),
                         protocol=p.get("protocol", "auto"),
+                        thinking_mode=p.get("thinking_mode", "auto"),
+                        model_family=p.get("model_family", ""),
+                        custom_extra_body=p.get("custom_extra_body", ""),
+                        custom_extra_headers=p.get("custom_extra_headers", ""),
                     )
                 else:
                     _config_store.add_profile(
@@ -5162,6 +5401,10 @@ async def import_model_config(
                         base_url=p.get("base_url", ""),
                         description=p.get("description", ""),
                         protocol=p.get("protocol", "auto"),
+                        thinking_mode=p.get("thinking_mode", "auto"),
+                        model_family=p.get("model_family", ""),
+                        custom_extra_body=p.get("custom_extra_body", ""),
+                        custom_extra_headers=p.get("custom_extra_headers", ""),
                     )
                 profile_names.append(name)
             if profile_names:
@@ -5367,8 +5610,25 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     if body.get("api_key"):
         api_key = body["api_key"]
 
+    # 解析 thinking_mode（来自请求体或 profile 配置）
+    req_thinking_mode = body.get("thinking_mode", "auto")
+    if req_thinking_mode == "auto" and _config_store and req_name:
+        _prof = _config_store.get_profile(req_name)
+        if _prof:
+            req_thinking_mode = _prof.get("thinking_mode", "auto")
+
     if db is not None:
         delete_capabilities(db, model, base_url)
+
+    # 非 ASCII 字符检测（httpx 用 ASCII 编码 HTTP header）
+    for _fl, _fv in [("API Key", api_key), ("Base URL", base_url), ("Model", model)]:
+        try:
+            _fv.encode("ascii")
+        except UnicodeEncodeError as _enc:
+            _bc = _enc.object[_enc.start:_enc.end]
+            return _error_json_response(
+                400, f"{_fl} 包含非法字符 '{_bc}'（位置 {_enc.start}），请检查是否有多余的特殊字符"
+            )
 
     req_protocol = body.get("protocol") or resolved_protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
@@ -5380,6 +5640,7 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
             base_url=base_url,
             skip_if_cached=False,
             db=db,
+            thinking_mode=req_thinking_mode,
         )
     except Exception as exc:
         return _error_json_response(500, f"探测失败: {exc}")
@@ -5417,14 +5678,20 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
         targets.append((p["name"], p["model"], p_base_url, p_api_key, p_protocol))
 
     results: list[dict] = []
+    # 构建 name → thinking_mode 映射
+    _thinking_mode_map: dict[str, str] = {}
+    for p in profiles:
+        _thinking_mode_map[p["name"]] = p.get("thinking_mode", "auto")
+
     for name, model, base_url, api_key, protocol in targets:
         if db is not None:
             delete_capabilities(db, model, base_url)
         client = create_client(api_key=api_key, base_url=base_url, protocol=protocol)
+        _tm = _thinking_mode_map.get(name, "auto")
         try:
             caps = await run_full_probe(
                 client=client, model=model, base_url=base_url,
-                skip_if_cached=False, db=db,
+                skip_if_cached=False, db=db, thinking_mode=_tm,
             )
             results.append({
                 "name": name, "model": model,
@@ -5439,6 +5706,61 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
             })
 
     return JSONResponse(content={"results": results})
+
+
+def _diagnose_connection_error(error: str, base_url: str, model: str) -> str:
+    """根据错误信息和配置，返回用户可操作的修复建议。"""
+    err_lower = error.lower()
+
+    # ── 请求被拦截（常见于 base_url 缺少 /v1） ──
+    if "blocked" in err_lower or "request was blocked" in err_lower:
+        if base_url and not base_url.rstrip("/").endswith("/v1"):
+            return f"请求被拦截，通常是 Base URL 缺少 /v1 路径。请尝试将 Base URL 改为：{base_url.rstrip('/')}/v1"
+        return "请求被 API 服务商拦截，请检查 Base URL 是否正确、账号是否有访问权限。"
+
+    # ── 404：路径错误 ──
+    if "404" in err_lower or "not found" in err_lower:
+        if base_url and not base_url.rstrip("/").endswith("/v1"):
+            return f"API 端点不存在 (404)。请尝试在 Base URL 末尾加上 /v1：{base_url.rstrip('/')}/v1"
+        return "API 端点不存在 (404)。请检查 Base URL 和模型名称是否正确。"
+
+    # ── 认证失败 ──
+    if any(k in err_lower for k in ("401", "unauthorized", "invalid api key", "authentication", "invalid.*key")):
+        return "API Key 认证失败，请检查 Key 是否正确、是否已过期。"
+
+    # ── 权限不足 ──
+    if any(k in err_lower for k in ("403", "forbidden", "permission")):
+        return "权限不足 (403)。该 API Key 可能无权访问此模型，请确认账号权限。"
+
+    # ── 额度/计费 ──
+    if any(k in err_lower for k in ("402", "quota", "billing", "balance", "insufficient", "payment")):
+        return "账号额度不足或计费问题，请检查 API 账号余额。"
+
+    # ── 限流 ──
+    if any(k in err_lower for k in ("429", "rate limit", "too many")):
+        return "请求被限流 (429)，请稍后重试或降低请求频率。"
+
+    # ── 模型不存在 ──
+    if any(k in err_lower for k in ("model not found", "model_not_found", "does not exist", "no such model")):
+        return f"模型 '{model}' 不存在。请检查模型名称是否拼写正确。"
+
+    # ── 账号池耗尽 ──
+    if any(k in err_lower for k in ("no.*account.*available", "no available", "pool.*exhaust")):
+        return "API 代理的账号池暂无可用账号，请稍后重试。"
+
+    # ── 超时 ──
+    if any(k in err_lower for k in ("timeout", "timed out")):
+        return "请求超时。请检查网络连通性，或 Base URL 是否可访问。"
+
+    # ── 连接失败 ──
+    if any(k in err_lower for k in ("connection refused", "connection error", "connect error", "name resolution", "getaddrinfo", "dns")):
+        return "无法连接到 API 服务器。请检查 Base URL 是否正确、网络是否畅通。"
+
+    # ── SSL 错误 ──
+    if any(k in err_lower for k in ("ssl", "certificate", "cert")):
+        return "SSL 证书验证失败。请检查 Base URL 的 HTTPS 证书是否有效。"
+
+    return ""
 
 
 @_router.post("/api/v1/config/models/test-connection")
@@ -5489,19 +5811,110 @@ async def test_model_connection(request: Request) -> JSONResponse:
                 "model": model,
             })
 
+    # 非 ASCII 字符检测（httpx 用 ASCII 编码 HTTP header，非 ASCII 会导致 UnicodeEncodeError）
+    for _field_label, _field_val in [("API Key", api_key), ("Base URL", base_url), ("Model", model)]:
+        try:
+            _field_val.encode("ascii")
+        except UnicodeEncodeError as _enc_err:
+            _bad_char = _enc_err.object[_enc_err.start:_enc_err.end]
+            return JSONResponse(content={
+                "ok": False,
+                "error": f"{_field_label} 包含非法字符 '{_bad_char}'（位置 {_enc_err.start}），请检查是否有多余的特殊字符或空格",
+                "model": model,
+            })
+
     req_protocol = body.get("protocol") or resolved_protocol
     client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
     try:
         healthy, health_err = await probe_health(client, model, timeout=15.0)
     except Exception as exc:
-        return JSONResponse(content={"ok": False, "error": f"连通测试异常: {exc}", "model": model})
+        err_str = str(exc)[:200]
+        hint = _diagnose_connection_error(err_str, base_url, model)
+        return JSONResponse(content={"ok": False, "error": f"连通测试异常: {err_str}", "hint": hint, "model": model})
 
-    return JSONResponse(content={
+    result: dict = {
         "ok": healthy,
         "error": health_err if not healthy else "",
         "model": model,
         "base_url": base_url,
-    })
+    }
+    if not healthy and health_err:
+        hint = _diagnose_connection_error(health_err, base_url, model)
+        if hint:
+            result["hint"] = hint
+    return JSONResponse(content=result)
+
+
+@_router.post("/api/v1/config/models/list-remote")
+async def list_remote_models(request: Request) -> JSONResponse:
+    """调用远程 API 端点列出可用模型（用于添加模型时自动检测）。"""
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
+    if _config is None:
+        return _error_json_response(503, "服务未初始化")
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    base_url = (body.get("base_url") or "").strip() or _config.base_url
+    api_key = (body.get("api_key") or "").strip() or _config.api_key
+    protocol = (body.get("protocol") or "auto").strip().lower()
+
+    if not base_url:
+        return JSONResponse(content={"models": [], "error": "Base URL 为空"})
+    if not api_key:
+        return JSONResponse(content={"models": [], "error": "API Key 为空"})
+
+    import httpx
+
+    # 构造 /models 端点
+    url = base_url.rstrip("/")
+    if not url.endswith("/models"):
+        url = url + "/models" if url.endswith("/v1") else url + "/v1/models"
+
+    headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"}
+    # Anthropic 原生 API 使用 x-api-key
+    if protocol == "anthropic" or "anthropic" in base_url.lower():
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        url = base_url.rstrip("/").rstrip("/v1").rstrip("/") + "/v1/models"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            resp = await http.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.TimeoutException:
+        return JSONResponse(content={"models": [], "error": "请求超时，请检查 Base URL 是否可访问"})
+    except httpx.HTTPStatusError as exc:
+        hint = _diagnose_connection_error(str(exc)[:200], base_url, "")
+        return JSONResponse(content={"models": [], "error": f"HTTP {exc.response.status_code}: {str(exc)[:150]}", "hint": hint})
+    except Exception as exc:
+        return JSONResponse(content={"models": [], "error": f"请求失败: {str(exc)[:200]}"})
+
+    # 解析模型列表（兼容 OpenAI / Anthropic / 各类代理格式）
+    models_raw: list = []
+    if isinstance(data, dict):
+        models_raw = data.get("data") or data.get("models") or []
+    elif isinstance(data, list):
+        models_raw = data
+
+    models_out: list[dict] = []
+    for m in models_raw:
+        if isinstance(m, str):
+            models_out.append({"id": m})
+        elif isinstance(m, dict):
+            mid = m.get("id") or m.get("name") or m.get("model") or ""
+            if mid:
+                models_out.append({"id": mid, "owned_by": m.get("owned_by", "")})
+
+    # 按 id 排序
+    models_out.sort(key=lambda x: x["id"])
+
+    return JSONResponse(content={"models": models_out})
 
 
 @_router.get("/api/v1/config/models/check-placeholder")
@@ -5590,42 +6003,129 @@ async def update_model_capabilities(request: Request) -> JSONResponse:
 # ── 运行时配置管理 API ──────────────────────────────────
 
 _RUNTIME_ENV_KEYS: dict[str, str] = {
+    # ── 会话与多用户 ──
+    "auth_enabled": "EXCELMANUS_AUTH_ENABLED",
+    "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
+    "max_sessions": "EXCELMANUS_MAX_SESSIONS",
+    "max_consecutive_failures": "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
+    # ── 执行与安全 ──
     "subagent_enabled": "EXCELMANUS_SUBAGENT_ENABLED",
+    "verifier_enabled": "EXCELMANUS_VERIFIER_ENABLED",
     "backup_enabled": "EXCELMANUS_BACKUP_ENABLED",
     "checkpoint_enabled": "EXCELMANUS_CHECKPOINT_ENABLED",
     "external_safe_mode": "EXCELMANUS_EXTERNAL_SAFE_MODE",
     "max_iterations": "EXCELMANUS_MAX_ITERATIONS",
+    "guard_mode": "EXCELMANUS_GUARD_MODE",
+    "friendly_error_messages": "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
+    # ── AUX / VLM 开关 ──
+    "aux_enabled": "EXCELMANUS_AUX_ENABLED",
+    "vlm_enabled": "EXCELMANUS_VLM_ENABLED",
+    # ── 上下文与记忆 ──
+    "max_context_tokens": "EXCELMANUS_MAX_CONTEXT_TOKENS",
+    "memory_enabled": "EXCELMANUS_MEMORY_ENABLED",
+    "memory_auto_extract_interval": "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
+    "memory_auto_load_lines": "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
+    "memory_expire_days": "EXCELMANUS_MEMORY_EXPIRE_DAYS",
+    "chat_history_enabled": "EXCELMANUS_CHAT_HISTORY_ENABLED",
+    # ── 记忆维护 ──
+    "memory_maintenance_enabled": "EXCELMANUS_MEMORY_MAINTENANCE_ENABLED",
+    "memory_maintenance_min_entries": "EXCELMANUS_MEMORY_MAINTENANCE_MIN_ENTRIES",
+    "memory_maintenance_new_threshold": "EXCELMANUS_MEMORY_MAINTENANCE_NEW_THRESHOLD",
+    "memory_maintenance_interval_hours": "EXCELMANUS_MEMORY_MAINTENANCE_INTERVAL_HOURS",
+    "memory_maintenance_model": "EXCELMANUS_MEMORY_MAINTENANCE_MODEL",
+    # ── 摘要与压缩 ──
+    "summarization_enabled": "EXCELMANUS_SUMMARIZATION_ENABLED",
+    "summarization_threshold_ratio": "EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO",
+    "summarization_keep_recent_turns": "EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS",
     "compaction_enabled": "EXCELMANUS_COMPACTION_ENABLED",
     "compaction_threshold_ratio": "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
+    "compaction_keep_recent_turns": "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
+    "compaction_max_summary_tokens": "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
+    "prompt_cache_key_enabled": "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
+    # ── 推理配置 ──
+    "thinking_effort": "EXCELMANUS_THINKING_EFFORT",
+    "thinking_budget": "EXCELMANUS_THINKING_BUDGET",
+    # ── 子代理 ──
+    "subagent_max_iterations": "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
+    "subagent_timeout_seconds": "EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS",
+    "subagent_max_consecutive_failures": "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
+    "parallel_subagent_max": "EXCELMANUS_PARALLEL_SUBAGENT_MAX",
+    # ── LLM 重试 ──
+    "llm_retry_max_attempts": "EXCELMANUS_LLM_RETRY_MAX_ATTEMPTS",
+    "llm_retry_base_delay_seconds": "EXCELMANUS_LLM_RETRY_BASE_DELAY_SECONDS",
+    "llm_retry_max_delay_seconds": "EXCELMANUS_LLM_RETRY_MAX_DELAY_SECONDS",
+    # ── 感知与视觉 ──
+    "window_perception_enabled": "EXCELMANUS_WINDOW_PERCEPTION_ENABLED",
+    "window_perception_system_budget_tokens": "EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS",
+    "window_perception_tool_append_tokens": "EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS",
+    "window_perception_max_windows": "EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS",
+    "window_perception_default_rows": "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS",
+    "window_perception_default_cols": "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS",
+    "window_perception_minimized_tokens": "EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS",
+    "window_perception_background_after_idle": "EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE",
+    "window_perception_suspend_after_idle": "EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE",
+    "window_perception_terminate_after_idle": "EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE",
+    "window_perception_advisor_mode": "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE",
+    "window_perception_advisor_timeout_ms": "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS",
+    "window_perception_advisor_trigger_window_count": "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT",
+    "window_perception_advisor_trigger_turn": "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN",
+    "window_perception_advisor_plan_ttl_turns": "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS",
+    "window_return_mode": "EXCELMANUS_WINDOW_RETURN_MODE",
+    "window_full_max_rows": "EXCELMANUS_WINDOW_FULL_MAX_ROWS",
+    "window_full_total_budget_tokens": "EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS",
+    "window_data_buffer_max_rows": "EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS",
+    "window_intent_enabled": "EXCELMANUS_WINDOW_INTENT_ENABLED",
+    "window_intent_sticky_turns": "EXCELMANUS_WINDOW_INTENT_STICKY_TURNS",
+    "window_intent_repeat_warn_threshold": "EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD",
+    "window_intent_repeat_trip_threshold": "EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD",
+    "window_rule_engine_version": "EXCELMANUS_WINDOW_RULE_ENGINE_VERSION",
+    "vlm_enhance": "EXCELMANUS_VLM_ENHANCE",
+    "main_model_vision": "EXCELMANUS_MAIN_MODEL_VISION",
+    "vlm_timeout_seconds": "EXCELMANUS_VLM_TIMEOUT_SECONDS",
+    "vlm_max_retries": "EXCELMANUS_VLM_MAX_RETRIES",
+    "vlm_max_tokens": "EXCELMANUS_VLM_MAX_TOKENS",
+    "vlm_image_max_long_edge": "EXCELMANUS_VLM_IMAGE_MAX_LONG_EDGE",
+    "vlm_image_jpeg_quality": "EXCELMANUS_VLM_IMAGE_JPEG_QUALITY",
+    "vlm_extraction_tier": "EXCELMANUS_VLM_EXTRACTION_TIER",
+    "image_keep_rounds": "EXCELMANUS_IMAGE_KEEP_ROUNDS",
+    "image_max_active": "EXCELMANUS_IMAGE_MAX_ACTIVE",
+    "image_token_budget": "EXCELMANUS_IMAGE_TOKEN_BUDGET",
+    # ── 系统消息与工具 ──
+    "system_message_mode": "EXCELMANUS_SYSTEM_MESSAGE_MODE",
+    "tool_result_hard_cap_chars": "EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS",
+    "large_excel_threshold_bytes": "EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES",
+    "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
+    "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
+    "hooks_command_timeout_seconds": "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
+    "hooks_output_max_chars": "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
+    "log_level": "EXCELMANUS_LOG_LEVEL",
+    # ── 代码策略 ──
     "code_policy_enabled": "EXCELMANUS_CODE_POLICY_ENABLED",
+    "code_policy_green_auto_approve": "EXCELMANUS_CODE_POLICY_GREEN_AUTO",
+    "code_policy_yellow_auto_approve": "EXCELMANUS_CODE_POLICY_YELLOW_AUTO",
     "tool_schema_validation_mode": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE",
     "tool_schema_validation_canary_percent": "EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT",
     "tool_schema_strict_path": "EXCELMANUS_TOOL_SCHEMA_STRICT_PATH",
-    "guard_mode": "EXCELMANUS_GUARD_MODE",
-    # ── 新增精选核心配置项 ──
-    "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
-    "max_sessions": "EXCELMANUS_MAX_SESSIONS",
-    "max_consecutive_failures": "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
-    "memory_enabled": "EXCELMANUS_MEMORY_ENABLED",
-    "memory_auto_extract_interval": "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
-    "max_context_tokens": "EXCELMANUS_MAX_CONTEXT_TOKENS",
-    "summarization_enabled": "EXCELMANUS_SUMMARIZATION_ENABLED",
-    "window_perception_enabled": "EXCELMANUS_WINDOW_PERCEPTION_ENABLED",
-    "vlm_enhance": "EXCELMANUS_VLM_ENHANCE",
-    "main_model_vision": "EXCELMANUS_MAIN_MODEL_VISION",
-    "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
-    "chat_history_enabled": "EXCELMANUS_CHAT_HISTORY_ENABLED",
-    "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
-    "log_level": "EXCELMANUS_LOG_LEVEL",
-    "thinking_effort": "EXCELMANUS_THINKING_EFFORT",
-    "thinking_budget": "EXCELMANUS_THINKING_BUDGET",
-    "subagent_max_iterations": "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
-    "subagent_timeout_seconds": "EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS",
-    "parallel_subagent_max": "EXCELMANUS_PARALLEL_SUBAGENT_MAX",
-    "prompt_cache_key_enabled": "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
-    "auth_enabled": "EXCELMANUS_AUTH_ENABLED",
-    # 友好错误消息
-    "friendly_error_messages": "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
+    # ── 技能发现 ──
+    "skills_context_char_budget": "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
+    "skills_discovery_enabled": "EXCELMANUS_SKILLS_DISCOVERY_ENABLED",
+    "skills_discovery_scan_workspace_ancestors": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS",
+    "skills_discovery_include_agents": "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
+    "skills_discovery_scan_external_tool_dirs": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS",
+    # ── Embedding / 语义检索 ──
+    "embedding_enabled": "EXCELMANUS_EMBEDDING_ENABLED",
+    "embedding_model": "EXCELMANUS_EMBEDDING_MODEL",
+    "embedding_dimensions": "EXCELMANUS_EMBEDDING_DIMENSIONS",
+    "embedding_timeout_seconds": "EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS",
+    "memory_semantic_top_k": "EXCELMANUS_MEMORY_SEMANTIC_TOP_K",
+    "memory_semantic_threshold": "EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD",
+    "memory_semantic_fallback_recent": "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
+    # ── Playbook ──
+    "playbook_enabled": "EXCELMANUS_PLAYBOOK_ENABLED",
+    "playbook_max_bullets": "EXCELMANUS_PLAYBOOK_MAX_BULLETS",
+    "playbook_inject_top_k": "EXCELMANUS_PLAYBOOK_INJECT_TOP_K",
+    "registry_semantic_top_k": "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
+    "registry_semantic_threshold": "EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD",
 }
 
 
@@ -5637,81 +6137,257 @@ async def get_runtime_config(request: Request) -> JSONResponse:
     if guard_error is not None:
         return guard_error
     return JSONResponse(content={
+        # ── 会话与多用户 ──
         "auth_enabled": getattr(request.app.state, "auth_enabled", False),
+        "session_ttl_seconds": _config.session_ttl_seconds,
+        "max_sessions": _config.max_sessions,
+        "max_consecutive_failures": _config.max_consecutive_failures,
+        # ── 执行与安全 ──
         "subagent_enabled": _config.subagent_enabled,
+        "verifier_enabled": _config.verifier_enabled,
         "backup_enabled": _config.backup_enabled,
         "checkpoint_enabled": _config.checkpoint_enabled,
         "external_safe_mode": _config.external_safe_mode,
         "max_iterations": _config.max_iterations,
+        "guard_mode": _config.guard_mode,
+        "friendly_error_messages": _config.friendly_error_messages,
+        # ── AUX / VLM 开关 ──
+        "aux_enabled": _config.aux_enabled,
+        "vlm_enabled": _config.vlm_enabled,
+        # ── 上下文与记忆 ──
+        "max_context_tokens": _config.max_context_tokens,
+        "memory_enabled": _config.memory_enabled,
+        "memory_auto_extract_interval": _config.memory_auto_extract_interval,
+        "memory_auto_load_lines": _config.memory_auto_load_lines,
+        "memory_expire_days": _config.memory_expire_days,
+        "chat_history_enabled": _config.chat_history_enabled,
+        # ── 记忆维护 ──
+        "memory_maintenance_enabled": _config.memory_maintenance_enabled,
+        "memory_maintenance_min_entries": _config.memory_maintenance_min_entries,
+        "memory_maintenance_new_threshold": _config.memory_maintenance_new_threshold,
+        "memory_maintenance_interval_hours": _config.memory_maintenance_interval_hours,
+        "memory_maintenance_model": _config.memory_maintenance_model or "",
+        # ── 摘要与压缩 ──
+        "summarization_enabled": _config.summarization_enabled,
+        "summarization_threshold_ratio": _config.summarization_threshold_ratio,
+        "summarization_keep_recent_turns": _config.summarization_keep_recent_turns,
         "compaction_enabled": _config.compaction_enabled,
         "compaction_threshold_ratio": _config.compaction_threshold_ratio,
+        "compaction_keep_recent_turns": _config.compaction_keep_recent_turns,
+        "compaction_max_summary_tokens": _config.compaction_max_summary_tokens,
+        "prompt_cache_key_enabled": _config.prompt_cache_key_enabled,
+        # ── 推理配置 ──
+        "thinking_effort": _config.thinking_effort,
+        "thinking_budget": _config.thinking_budget,
+        # ── 子代理 ──
+        "subagent_max_iterations": _config.subagent_max_iterations,
+        "subagent_timeout_seconds": _config.subagent_timeout_seconds,
+        "subagent_max_consecutive_failures": _config.subagent_max_consecutive_failures,
+        "parallel_subagent_max": _config.parallel_subagent_max,
+        # ── LLM 重试 ──
+        "llm_retry_max_attempts": _config.llm_retry_max_attempts,
+        "llm_retry_base_delay_seconds": _config.llm_retry_base_delay_seconds,
+        "llm_retry_max_delay_seconds": _config.llm_retry_max_delay_seconds,
+        # ── 感知与视觉 ──
+        "window_perception_enabled": _config.window_perception_enabled,
+        "window_perception_system_budget_tokens": _config.window_perception_system_budget_tokens,
+        "window_perception_tool_append_tokens": _config.window_perception_tool_append_tokens,
+        "window_perception_max_windows": _config.window_perception_max_windows,
+        "window_perception_default_rows": _config.window_perception_default_rows,
+        "window_perception_default_cols": _config.window_perception_default_cols,
+        "window_perception_minimized_tokens": _config.window_perception_minimized_tokens,
+        "window_perception_background_after_idle": _config.window_perception_background_after_idle,
+        "window_perception_suspend_after_idle": _config.window_perception_suspend_after_idle,
+        "window_perception_terminate_after_idle": _config.window_perception_terminate_after_idle,
+        "window_perception_advisor_mode": _config.window_perception_advisor_mode,
+        "window_perception_advisor_timeout_ms": _config.window_perception_advisor_timeout_ms,
+        "window_perception_advisor_trigger_window_count": _config.window_perception_advisor_trigger_window_count,
+        "window_perception_advisor_trigger_turn": _config.window_perception_advisor_trigger_turn,
+        "window_perception_advisor_plan_ttl_turns": _config.window_perception_advisor_plan_ttl_turns,
+        "window_return_mode": _config.window_return_mode,
+        "window_full_max_rows": _config.window_full_max_rows,
+        "window_full_total_budget_tokens": _config.window_full_total_budget_tokens,
+        "window_data_buffer_max_rows": _config.window_data_buffer_max_rows,
+        "window_intent_enabled": _config.window_intent_enabled,
+        "window_intent_sticky_turns": _config.window_intent_sticky_turns,
+        "window_intent_repeat_warn_threshold": _config.window_intent_repeat_warn_threshold,
+        "window_intent_repeat_trip_threshold": _config.window_intent_repeat_trip_threshold,
+        "window_rule_engine_version": _config.window_rule_engine_version,
+        "vlm_enhance": _config.vlm_enhance,
+        "main_model_vision": _config.main_model_vision,
+        "vlm_timeout_seconds": _config.vlm_timeout_seconds,
+        "vlm_max_retries": _config.vlm_max_retries,
+        "vlm_max_tokens": _config.vlm_max_tokens,
+        "vlm_image_max_long_edge": _config.vlm_image_max_long_edge,
+        "vlm_image_jpeg_quality": _config.vlm_image_jpeg_quality,
+        "vlm_extraction_tier": _config.vlm_extraction_tier,
+        "image_keep_rounds": _config.image_keep_rounds,
+        "image_max_active": _config.image_max_active,
+        "image_token_budget": _config.image_token_budget,
+        # ── 系统消息与工具 ──
+        "system_message_mode": _config.system_message_mode,
+        "tool_result_hard_cap_chars": _config.tool_result_hard_cap_chars,
+        "large_excel_threshold_bytes": _config.large_excel_threshold_bytes,
+        "parallel_readonly_tools": _config.parallel_readonly_tools,
+        "hooks_command_enabled": _config.hooks_command_enabled,
+        "hooks_command_timeout_seconds": _config.hooks_command_timeout_seconds,
+        "hooks_output_max_chars": _config.hooks_output_max_chars,
+        "log_level": _config.log_level,
+        # ── 代码策略 ──
         "code_policy_enabled": _config.code_policy_enabled,
+        "code_policy_green_auto_approve": _config.code_policy_green_auto_approve,
+        "code_policy_yellow_auto_approve": _config.code_policy_yellow_auto_approve,
         "tool_schema_validation_mode": _config.tool_schema_validation_mode,
         "tool_schema_validation_canary_percent": _config.tool_schema_validation_canary_percent,
         "tool_schema_strict_path": _config.tool_schema_strict_path,
-        "guard_mode": _config.guard_mode,
-        # ── 新增精选核心配置项 ──
-        "session_ttl_seconds": _config.session_ttl_seconds,
-        "max_sessions": _config.max_sessions,
-        "max_consecutive_failures": _config.max_consecutive_failures,
-        "memory_enabled": _config.memory_enabled,
-        "memory_auto_extract_interval": _config.memory_auto_extract_interval,
-        "max_context_tokens": _config.max_context_tokens,
-        "summarization_enabled": _config.summarization_enabled,
-        "window_perception_enabled": _config.window_perception_enabled,
-        "vlm_enhance": _config.vlm_enhance,
-        "main_model_vision": _config.main_model_vision,
-        "parallel_readonly_tools": _config.parallel_readonly_tools,
-        "chat_history_enabled": _config.chat_history_enabled,
-        "hooks_command_enabled": _config.hooks_command_enabled,
-        "log_level": _config.log_level,
-        "thinking_effort": _config.thinking_effort,
-        "thinking_budget": _config.thinking_budget,
-        "subagent_max_iterations": _config.subagent_max_iterations,
-        "subagent_timeout_seconds": _config.subagent_timeout_seconds,
-        "parallel_subagent_max": _config.parallel_subagent_max,
-        "prompt_cache_key_enabled": _config.prompt_cache_key_enabled,
-        "friendly_error_messages": _config.friendly_error_messages,
+        # ── 技能发现 ──
+        "skills_context_char_budget": _config.skills_context_char_budget,
+        "skills_discovery_enabled": _config.skills_discovery_enabled,
+        "skills_discovery_scan_workspace_ancestors": _config.skills_discovery_scan_workspace_ancestors,
+        "skills_discovery_include_agents": _config.skills_discovery_include_agents,
+        "skills_discovery_scan_external_tool_dirs": _config.skills_discovery_scan_external_tool_dirs,
+        # ── Embedding / 语义检索 ──
+        "embedding_enabled": _config.embedding_enabled,
+        "embedding_model": _config.embedding_model,
+        "embedding_dimensions": _config.embedding_dimensions,
+        "embedding_timeout_seconds": _config.embedding_timeout_seconds,
+        "memory_semantic_top_k": _config.memory_semantic_top_k,
+        "memory_semantic_threshold": _config.memory_semantic_threshold,
+        "memory_semantic_fallback_recent": _config.memory_semantic_fallback_recent,
+        # ── Playbook ──
+        "playbook_enabled": _config.playbook_enabled,
+        "playbook_max_bullets": _config.playbook_max_bullets,
+        "playbook_inject_top_k": _config.playbook_inject_top_k,
+        "registry_semantic_top_k": _config.registry_semantic_top_k,
+        "registry_semantic_threshold": _config.registry_semantic_threshold,
     })
 
 
 class RuntimeConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # ── 会话与多用户 ──
+    auth_enabled: bool | None = None
+    session_ttl_seconds: int | None = Field(default=None, gt=0)
+    max_sessions: int | None = Field(default=None, gt=0)
+    max_consecutive_failures: int | None = Field(default=None, gt=0)
+    # ── 执行与安全 ──
     subagent_enabled: bool | None = None
+    verifier_enabled: bool | None = None
     backup_enabled: bool | None = None
     checkpoint_enabled: bool | None = None
     external_safe_mode: bool | None = None
     max_iterations: int | None = None
+    guard_mode: Literal["off", "soft"] | None = None
+    friendly_error_messages: bool | None = None
+    # ── AUX / VLM 开关 ──
+    aux_enabled: bool | None = None
+    vlm_enabled: bool | None = None
+    # ── 上下文与记忆 ──
+    max_context_tokens: int | None = Field(default=None, gt=0)
+    memory_enabled: bool | None = None
+    memory_auto_extract_interval: int | None = Field(default=None, ge=0)
+    memory_auto_load_lines: int | None = Field(default=None, gt=0)
+    memory_expire_days: int | None = Field(default=None, ge=0)
+    chat_history_enabled: bool | None = None
+    # ── 记忆维护 ──
+    memory_maintenance_enabled: bool | None = None
+    memory_maintenance_min_entries: int | None = Field(default=None, ge=1)
+    memory_maintenance_new_threshold: int | None = Field(default=None, ge=1)
+    memory_maintenance_interval_hours: float | None = Field(default=None, ge=0.5)
+    memory_maintenance_model: str | None = None
+    # ── 摘要与压缩 ──
+    summarization_enabled: bool | None = None
+    summarization_threshold_ratio: float | None = Field(default=None, gt=0, lt=1)
+    summarization_keep_recent_turns: int | None = Field(default=None, gt=0)
     compaction_enabled: bool | None = None
-    compaction_threshold_ratio: float | None = None
+    compaction_threshold_ratio: float | None = Field(default=None, gt=0, lt=1)
+    compaction_keep_recent_turns: int | None = Field(default=None, gt=0)
+    compaction_max_summary_tokens: int | None = Field(default=None, gt=0)
+    prompt_cache_key_enabled: bool | None = None
+    # ── 推理配置 ──
+    thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    thinking_budget: int | None = Field(default=None, ge=0)
+    # ── 子代理 ──
+    subagent_max_iterations: int | None = Field(default=None, gt=0)
+    subagent_timeout_seconds: int | None = Field(default=None, gt=0)
+    subagent_max_consecutive_failures: int | None = Field(default=None, gt=0)
+    parallel_subagent_max: int | None = Field(default=None, gt=0)
+    # ── LLM 重试 ──
+    llm_retry_max_attempts: int | None = Field(default=None, ge=1)
+    llm_retry_base_delay_seconds: float | None = Field(default=None, gt=0)
+    llm_retry_max_delay_seconds: float | None = Field(default=None, gt=0)
+    # ── 感知与视觉 ──
+    window_perception_enabled: bool | None = None
+    window_perception_system_budget_tokens: int | None = Field(default=None, gt=0)
+    window_perception_tool_append_tokens: int | None = Field(default=None, gt=0)
+    window_perception_max_windows: int | None = Field(default=None, gt=0)
+    window_perception_default_rows: int | None = Field(default=None, gt=0)
+    window_perception_default_cols: int | None = Field(default=None, gt=0)
+    window_perception_minimized_tokens: int | None = Field(default=None, gt=0)
+    window_perception_background_after_idle: int | None = Field(default=None, gt=0)
+    window_perception_suspend_after_idle: int | None = Field(default=None, gt=0)
+    window_perception_terminate_after_idle: int | None = Field(default=None, gt=0)
+    window_perception_advisor_mode: Literal["rules", "hybrid"] | None = None
+    window_perception_advisor_timeout_ms: int | None = Field(default=None, gt=0)
+    window_perception_advisor_trigger_window_count: int | None = Field(default=None, gt=0)
+    window_perception_advisor_trigger_turn: int | None = Field(default=None, gt=0)
+    window_perception_advisor_plan_ttl_turns: int | None = Field(default=None, gt=0)
+    window_return_mode: Literal["unified", "anchored", "enriched", "adaptive"] | None = None
+    window_full_max_rows: int | None = Field(default=None, gt=0)
+    window_full_total_budget_tokens: int | None = Field(default=None, gt=0)
+    window_data_buffer_max_rows: int | None = Field(default=None, gt=0)
+    window_intent_enabled: bool | None = None
+    window_intent_sticky_turns: int | None = Field(default=None, gt=0)
+    window_intent_repeat_warn_threshold: int | None = Field(default=None, gt=0)
+    window_intent_repeat_trip_threshold: int | None = Field(default=None, gt=0)
+    window_rule_engine_version: Literal["v1", "v2"] | None = None
+    vlm_enhance: bool | None = None
+    main_model_vision: Literal["auto", "true", "false"] | None = None
+    vlm_timeout_seconds: int | None = Field(default=None, gt=0)
+    vlm_max_retries: int | None = Field(default=None, ge=0)
+    vlm_max_tokens: int | None = Field(default=None, gt=0)
+    vlm_image_max_long_edge: int | None = Field(default=None, gt=0)
+    vlm_image_jpeg_quality: int | None = Field(default=None, ge=1, le=100)
+    vlm_extraction_tier: Literal["auto", "strong", "standard", "weak"] | None = None
+    image_keep_rounds: int | None = Field(default=None, gt=0)
+    image_max_active: int | None = Field(default=None, gt=0)
+    image_token_budget: int | None = Field(default=None, gt=0)
+    # ── 系统消息与工具 ──
+    system_message_mode: Literal["auto", "merge", "replace"] | None = None
+    tool_result_hard_cap_chars: int | None = Field(default=None, ge=0)
+    large_excel_threshold_bytes: int | None = Field(default=None, gt=0)
+    parallel_readonly_tools: bool | None = None
+    hooks_command_enabled: bool | None = None
+    hooks_command_timeout_seconds: int | None = Field(default=None, gt=0)
+    hooks_output_max_chars: int | None = Field(default=None, gt=0)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None
+    # ── 代码策略 ──
     code_policy_enabled: bool | None = None
+    code_policy_green_auto_approve: bool | None = None
+    code_policy_yellow_auto_approve: bool | None = None
     tool_schema_validation_mode: Literal["off", "shadow", "enforce"] | None = None
     tool_schema_validation_canary_percent: int | None = Field(default=None, ge=0, le=100)
     tool_schema_strict_path: bool | None = None
-    guard_mode: Literal["off", "soft"] | None = None
-    # ── 新增精选核心配置项 ──
-    session_ttl_seconds: int | None = Field(default=None, gt=0)
-    max_sessions: int | None = Field(default=None, gt=0)
-    max_consecutive_failures: int | None = Field(default=None, gt=0)
-    memory_enabled: bool | None = None
-    memory_auto_extract_interval: int | None = Field(default=None, ge=0)
-    max_context_tokens: int | None = Field(default=None, gt=0)
-    summarization_enabled: bool | None = None
-    window_perception_enabled: bool | None = None
-    vlm_enhance: bool | None = None
-    main_model_vision: Literal["auto", "true", "false"] | None = None
-    parallel_readonly_tools: bool | None = None
-    chat_history_enabled: bool | None = None
-    hooks_command_enabled: bool | None = None
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None
-    thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
-    thinking_budget: int | None = Field(default=None, ge=0)
-    subagent_max_iterations: int | None = Field(default=None, gt=0)
-    subagent_timeout_seconds: int | None = Field(default=None, gt=0)
-    parallel_subagent_max: int | None = Field(default=None, gt=0)
-    prompt_cache_key_enabled: bool | None = None
-    auth_enabled: bool | None = None
-    friendly_error_messages: bool | None = None
+    # ── 技能发现 ──
+    skills_context_char_budget: int | None = Field(default=None, ge=0)
+    skills_discovery_enabled: bool | None = None
+    skills_discovery_scan_workspace_ancestors: bool | None = None
+    skills_discovery_include_agents: bool | None = None
+    skills_discovery_scan_external_tool_dirs: bool | None = None
+    # ── Embedding / 语义检索 ──
+    embedding_enabled: bool | None = None
+    embedding_model: str | None = None
+    embedding_dimensions: int | None = Field(default=None, gt=0)
+    embedding_timeout_seconds: float | None = Field(default=None, gt=0)
+    memory_semantic_top_k: int | None = Field(default=None, gt=0)
+    memory_semantic_threshold: float | None = Field(default=None, ge=0, le=1)
+    memory_semantic_fallback_recent: int | None = Field(default=None, gt=0)
+    # ── Playbook ──
+    playbook_enabled: bool | None = None
+    playbook_max_bullets: int | None = Field(default=None, gt=0)
+    playbook_inject_top_k: int | None = Field(default=None, gt=0)
+    registry_semantic_top_k: int | None = Field(default=None, gt=0)
+    registry_semantic_threshold: float | None = Field(default=None, ge=0, le=1)
 
 
 @_router.put("/api/v1/config/runtime")
@@ -5890,13 +6566,12 @@ async def execute_command(request: Request) -> JSONResponse:
     # /model, /model list → 返回模型列表
     if command in {"/model", "/model list"}:
         try:
-            engine = _require_skill_engine()
-            rows = engine.list_models()
+            assert _config is not None
             lines = ["### 可用模型\n"]
-            for row in rows:
-                marker = " ✦" if row.get("active") == "yes" else ""
-                desc = f" — {row['description']}" if row.get("description") else ""
-                lines.append(f"- **{row['name']}** → `{row['model']}`{desc}{marker}")
+            lines.append(f"- **default** → `{_config.model}` — 默认模型（主配置） ✦")
+            for profile in _config.models:
+                desc = f" — {profile.description}" if profile.description else ""
+                lines.append(f"- **{profile.name}** → `{profile.model}`{desc}")
             return JSONResponse(content={"result": "\n".join(lines), "format": "markdown"})
         except Exception:
             return JSONResponse(content={"result": "模型列表获取失败", "format": "text"})
@@ -5976,6 +6651,7 @@ async def health(request: Request) -> dict:
         return {
             "status": "ok",
             "version": excelmanus.__version__,
+            "configured": not _config_incomplete,
             "model": "hidden",
             "tools": [],
             "skillpacks": [],
@@ -6017,6 +6693,7 @@ async def health(request: Request) -> dict:
     return {
         "status": "ok",
         "version": excelmanus.__version__,
+        "configured": not _config_incomplete,
         "model": _config.model if _config is not None else "",
         "tools": tools,
         "skillpacks": skillpacks,
@@ -6131,6 +6808,194 @@ async def build_docker_sandbox_image(request: Request) -> JSONResponse:
     if ok:
         return JSONResponse(content={"status": "ok", "message": msg})
     return _error_json_response(500, f"镜像构建失败: {msg}")
+
+
+# ── 更新管理 API ──────────────────────────────────────────
+
+
+@_router.get("/api/v1/update/check")
+async def update_check(request: Request) -> JSONResponse:
+    """检查是否有可用更新。"""
+    import asyncio
+    from excelmanus.updater import check_for_updates, get_current_version
+
+    project_root = Path(__file__).resolve().parent.parent
+    loop = asyncio.get_event_loop()
+    info = await loop.run_in_executor(None, check_for_updates, project_root)
+
+    return JSONResponse(content={
+        "current_version": info.current,
+        "latest_version": info.latest,
+        "has_update": info.has_update,
+        "commits_behind": info.commits_behind,
+        "release_notes": info.release_notes,
+        "check_method": info.check_method,
+    })
+
+
+@_router.get("/api/v1/update/backups")
+async def update_backup_list(request: Request) -> JSONResponse:
+    """列出所有数据备份。"""
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    from excelmanus.updater import list_backups
+
+    project_root = Path(__file__).resolve().parent.parent
+    backups = list_backups(project_root)
+    return JSONResponse(content={"backups": backups})
+
+
+@_router.post("/api/v1/update/apply")
+async def update_apply(request: Request) -> JSONResponse:
+    """执行更新（仅管理员）。
+
+    请求体（均为可选）:
+      {"skip_backup": false, "skip_deps": false, "use_mirror": false}
+    """
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    import asyncio
+    from excelmanus.updater import perform_update
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    project_root = Path(__file__).resolve().parent.parent
+    loop = asyncio.get_event_loop()
+
+    result = await loop.run_in_executor(
+        None,
+        lambda: perform_update(
+            project_root,
+            skip_backup=bool(body.get("skip_backup", False)),
+            skip_deps=bool(body.get("skip_deps", False)),
+            use_mirror=bool(body.get("use_mirror", False)),
+        ),
+    )
+
+    status_code = 200 if result.success else 500
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": result.success,
+            "old_version": result.old_version,
+            "new_version": result.new_version,
+            "backup_dir": result.backup_dir,
+            "steps_completed": result.steps_completed,
+            "error": result.error,
+            "needs_restart": result.needs_restart,
+        },
+    )
+
+
+@_router.post("/api/v1/update/restore")
+async def update_restore(request: Request) -> JSONResponse:
+    """从指定备份恢复数据（仅管理员）。
+
+    请求体: {"backup_name": "backup_1.6.6_20260301_120000"}
+    """
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    import asyncio
+    from excelmanus.updater import restore_from_backup
+
+    body = await request.json()
+    backup_name = body.get("backup_name", "")
+    if not backup_name:
+        return _error_json_response(400, "缺少 backup_name 参数。")
+
+    project_root = Path(__file__).resolve().parent.parent
+    backup_dir = project_root / "backups" / backup_name
+    if not backup_dir.is_dir():
+        return _error_json_response(404, f"备份不存在: {backup_name}")
+
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(
+        None, restore_from_backup, str(backup_dir), str(project_root),
+    )
+
+    if ok:
+        return JSONResponse(content={"status": "ok", "message": "数据已从备份恢复，请重启服务。"})
+    return _error_json_response(500, "恢复失败，请查看服务日志。")
+
+
+# ── 集中数据 & 快捷方式管理 API ────────────────────────────
+
+
+@_router.get("/api/v1/data/installations")
+async def list_installations(request: Request) -> JSONResponse:
+    """列出所有已注册的 ExcelManus 安装。"""
+    from excelmanus.data_home import discover_old_installations
+    return JSONResponse(content={"installations": discover_old_installations()})
+
+
+@_router.post("/api/v1/data/migrate")
+async def migrate_data(request: Request) -> JSONResponse:
+    """从指定旧安装目录迁移数据到集中位置（仅管理员）。"""
+    err = await _require_admin_if_auth_enabled(request)
+    if err is not None:
+        return err
+
+    import asyncio
+    from excelmanus.data_home import migrate_data_from_project
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    source = body.get("source", "")
+    if not source:
+        project_root = Path(__file__).resolve().parent.parent
+        source = str(project_root)
+
+    loop = asyncio.get_event_loop()
+    stats = await loop.run_in_executor(None, migrate_data_from_project, source)
+    return JSONResponse(content={"status": "ok", "migrated": stats})
+
+
+@_router.get("/api/v1/shortcut/info")
+async def shortcut_info(request: Request) -> JSONResponse:
+    """返回桌面快捷方式状态。"""
+    from excelmanus.shortcuts import get_shortcut_info
+    return JSONResponse(content=get_shortcut_info())
+
+
+@_router.post("/api/v1/shortcut/create")
+async def shortcut_create(request: Request) -> JSONResponse:
+    """创建桌面快捷方式。"""
+    from excelmanus.shortcuts import create_desktop_shortcut
+    project_root = Path(__file__).resolve().parent.parent
+    result = create_desktop_shortcut(project_root)
+    if result:
+        return JSONResponse(content={"status": "ok", "path": result})
+    return _error_json_response(500, "创建快捷方式失败，请查看日志。")
+
+
+@_router.post("/api/v1/shortcut/remove")
+async def shortcut_remove(request: Request) -> JSONResponse:
+    """删除桌面快捷方式。"""
+    from excelmanus.shortcuts import remove_desktop_shortcut
+    ok = remove_desktop_shortcut()
+    if ok:
+        return JSONResponse(content={"status": "ok"})
+    return _error_json_response(404, "未找到桌面快捷方式。")
 
 
 # 默认 ASGI app（供 `uvicorn excelmanus.api:app` 与测试直接导入）

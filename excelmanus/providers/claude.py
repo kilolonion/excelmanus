@@ -22,7 +22,11 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
-from excelmanus.providers.stream_types import StreamDelta
+from excelmanus.providers.stream_types import (
+    InlineThinkingStateMachine,
+    StreamDelta,
+    extract_inline_thinking,
+)
 
 logger = get_logger("claude_provider")
 
@@ -51,6 +55,9 @@ class _Message:
     role: str = "assistant"
     content: str | None = None
     tool_calls: list[_ToolCall] | None = None
+    thinking: str | None = None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -358,6 +365,7 @@ def _claude_response_to_openai(
     msg_id = data.get("id", f"msg_{uuid.uuid4().hex[:12]}")
 
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[_ToolCall] = []
 
     for block in content_blocks:
@@ -373,12 +381,24 @@ def _claude_response_to_openai(
                 ),
             ))
         elif block_type == "thinking":
-            # Claude 扩展思考 — 暂存但不影响主流程
-            pass
+            thinking_text = block.get("thinking", "")
+            if thinking_text:
+                thinking_parts.append(thinking_text)
+
+    # 合并 text，然后检测非标准 <thinking> 内联标签
+    raw_text = "\n".join(text_parts) if text_parts else ""
+    inline_thinking, clean_text = extract_inline_thinking(raw_text)
+    if inline_thinking:
+        thinking_parts.append(inline_thinking)
+
+    thinking_joined = "\n".join(thinking_parts) if thinking_parts else None
 
     message = _Message(
-        content="\n".join(text_parts) if text_parts else None,
+        content=clean_text if clean_text else None,
         tool_calls=tool_calls if tool_calls else None,
+        thinking=thinking_joined,
+        reasoning=thinking_joined,
+        reasoning_content=thinking_joined,
     )
 
     # stop_reason 映射为 OpenAI finish_reason
@@ -608,6 +628,8 @@ class ClaudeClient:
                 # 提示词缓存统计（从 message_start 事件提取）
                 _cache_creation_tokens: int = 0
                 _cache_read_tokens: int = 0
+                # 内联 <thinking> 标签状态机（部分中转站将 thinking 混入 text）
+                _inline_sm = InlineThinkingStateMachine()
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
@@ -659,7 +681,9 @@ class ClaudeClient:
                         delta = event_data.get("delta", {})
                         delta_type = delta.get("type", "")
                         if delta_type == "text_delta":
-                            yield StreamDelta(content_delta=delta.get("text", ""))
+                            text_chunk = delta.get("text", "")
+                            for _d in _inline_sm.feed(text_chunk):
+                                yield _d
                         elif delta_type == "thinking_delta":
                             yield StreamDelta(thinking_delta=delta.get("thinking", ""))
                         elif delta_type == "input_json_delta":

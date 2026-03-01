@@ -50,6 +50,11 @@ class SessionStreamState:
         else:
             if len(self.event_buffer) < self._buffer_limit:
                 self.event_buffer.append(event)
+            elif len(self.event_buffer) == self._buffer_limit:
+                logger.warning(
+                    "SSE 事件缓冲区已满（%d），后续断连期间事件将被丢弃",
+                    self._buffer_limit,
+                )
 
     def attach(self) -> asyncio.Queue[ToolCallEvent | None]:
         """创建新订阅者队列并附着。返回新队列。"""
@@ -125,6 +130,15 @@ def sse_event_to_sse(
         EventType.VERIFICATION_REPORT: "verification_report",
         EventType.RETRACT_THINKING: "retract_thinking",
         EventType.STAGING_UPDATED: "staging_updated",
+        EventType.MODE_CHANGED: "mode_changed",
+        EventType.BATCH_PROGRESS: "batch_progress",
+        EventType.ROUTE_START: "route_start",
+        EventType.ROUTE_END: "route_end",
+        EventType.PENDING_APPROVAL: "pending_approval",
+        EventType.APPROVAL_RESOLVED: "approval_resolved",
+        EventType.CHAT_SUMMARY: "chat_summary",
+        EventType.PLAN_CREATED: "plan_created",
+        EventType.LLM_RETRY: "llm_retry",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -347,6 +361,13 @@ def sse_event_to_sse(
             "old_merge_ranges": event.excel_old_merge_ranges[:200] if event.excel_old_merge_ranges else [],
             "metadata_hints": event.excel_metadata_hints[:20] if event.excel_metadata_hints else [],
         }
+        # 跨文件/跨 Sheet 对比扩展字段
+        if event.excel_diff_mode:
+            data["diff_mode"] = event.excel_diff_mode
+            data["file_path_b"] = public_path_fn(event.excel_file_b, safe_mode) if event.excel_file_b else ""
+            data["sheet_b"] = sanitize_external_text(event.excel_sheet_b, max_len=100)
+            if event.excel_diff_summary:
+                data["diff_summary"] = event.excel_diff_summary
     elif event.event_type == EventType.TEXT_DIFF:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
@@ -411,6 +432,54 @@ def sse_event_to_sse(
             "action": event.staging_action,
             "files": event.staging_files[:50],
             "pending_count": event.staging_pending_count,
+        }
+    elif event.event_type == EventType.MODE_CHANGED:
+        data = {
+            "mode_name": event.mode_name,
+            "enabled": event.mode_enabled,
+        }
+    elif event.event_type == EventType.BATCH_PROGRESS:
+        data = {
+            "batch_index": event.batch_index,
+            "batch_total": event.batch_total,
+            "batch_item_name": sanitize_external_text(event.batch_item_name, max_len=200),
+            "batch_status": event.batch_status,
+            "batch_elapsed_seconds": event.batch_elapsed_seconds,
+            "message": sanitize_external_text(event.pipeline_message, max_len=200),
+        }
+    elif event.event_type == EventType.ROUTE_START:
+        data = {}
+    elif event.event_type == EventType.ROUTE_END:
+        data = {
+            "route_mode": event.route_mode,
+            "skills_used": event.skills_used[:20],
+        }
+    elif event.event_type == EventType.CHAT_SUMMARY:
+        data = {
+            "total_iterations": event.total_iterations,
+            "total_tool_calls": event.total_tool_calls,
+            "success_count": event.success_count,
+            "failure_count": event.failure_count,
+            "elapsed_seconds": event.elapsed_seconds,
+            "prompt_tokens": event.prompt_tokens,
+            "completion_tokens": event.completion_tokens,
+            "total_tokens": event.total_tokens,
+        }
+    elif event.event_type == EventType.PLAN_CREATED:
+        data = {
+            "plan_file_path": sanitize_external_text(event.plan_file_path, max_len=500),
+            "plan_title": sanitize_external_text(event.plan_title, max_len=200),
+            "plan_task_count": event.plan_task_count,
+        }
+    elif event.event_type == EventType.LLM_RETRY:
+        data = {
+            "retry_attempt": event.retry_attempt,
+            "retry_max_attempts": event.retry_max_attempts,
+            "retry_delay_seconds": event.retry_delay_seconds,
+            "retry_error_message": sanitize_external_text(
+                event.retry_error_message, max_len=300,
+            ),
+            "retry_status": event.retry_status,
         }
     else:
         data = event.to_dict()

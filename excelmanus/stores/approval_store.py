@@ -107,7 +107,17 @@ class ApprovalStore:
     def delete(self, approval_id: str) -> bool:
         """删除审批记录。返回是否成功。"""
         cur = self._conn.execute(
-            "DELETE FROM approvals WHERE id = ?", (approval_id,)
+            f"DELETE FROM approvals WHERE id = ? AND {self._uid_clause}",
+            (approval_id, *self._uid_params),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_undoable(self, approval_id: str, undoable: bool) -> bool:
+        """更新审批记录的 undoable 标记。返回是否成功。"""
+        cur = self._conn.execute(
+            f"UPDATE approvals SET undoable = ? WHERE id = ? AND {self._uid_clause}",
+            (1 if undoable else 0, approval_id, *self._uid_params),
         )
         self._conn.commit()
         return cur.rowcount > 0

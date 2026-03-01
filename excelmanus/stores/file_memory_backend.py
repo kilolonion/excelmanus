@@ -57,31 +57,25 @@ class FileMemoryBackend:
     # ── MemoryStorageBackend 实现 ────────────────────────────
 
     def load_core(self, limit: int = 200) -> str:
-        filepath = self._memory_dir / CORE_MEMORY_FILE
-        if not filepath.exists():
-            return ""
-        try:
-            with filepath.open("r", encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            logger.warning("读取核心记忆文件失败: %s", filepath, exc_info=True)
-            return ""
+        """聚合所有主题文件的条目，按时间排序后格式化输出。
 
-        if not lines:
+        不再直接读取 MEMORY.md（消除双写冗余）。
+        若主题文件均为空但 MEMORY.md 存在，作为向后兼容 fallback。
+        """
+        all_entries = self._aggregate_topic_entries()
+        if not all_entries:
+            # 向后兼容：旧版数据可能只存在 MEMORY.md
+            fallback = self._memory_dir / CORE_MEMORY_FILE
+            if fallback.exists():
+                try:
+                    return fallback.read_text(encoding="utf-8").rstrip("\n")
+                except OSError:
+                    return ""
             return ""
+        # 按时间排序，取最近 limit 条
         effective_limit = limit or self._auto_load_lines
-        if len(lines) <= effective_limit:
-            return "".join(lines).rstrip("\n")
-
-        selected = lines[-effective_limit:]
-        start_idx: int | None = None
-        for idx, line in enumerate(selected):
-            if ENTRY_HEADER_RE.match(line.rstrip("\n")):
-                start_idx = idx
-                break
-        if start_idx is not None:
-            selected = selected[start_idx:]
-        return "".join(selected).rstrip("\n")
+        selected = all_entries[-effective_limit:]
+        return format_entries(selected)
 
     def load_by_category(self, category: MemoryCategory) -> list[MemoryEntry]:
         filename = CATEGORY_TOPIC_MAP.get(category)
@@ -97,14 +91,18 @@ class FileMemoryBackend:
         return [e for e in parse_entries(content) if e.category == category]
 
     def load_all(self) -> list[MemoryEntry]:
-        filepath = self._memory_dir / CORE_MEMORY_FILE
-        if not filepath.exists():
-            return []
-        try:
-            raw = filepath.read_text(encoding="utf-8")
-        except OSError:
-            return []
-        return parse_entries(raw)
+        """聚合所有主题文件的条目，按时间排序返回。"""
+        entries = self._aggregate_topic_entries()
+        if not entries:
+            # 向后兼容 fallback
+            fallback = self._memory_dir / CORE_MEMORY_FILE
+            if fallback.exists():
+                try:
+                    raw = fallback.read_text(encoding="utf-8")
+                    return parse_entries(raw)
+                except OSError:
+                    return []
+        return entries
 
     def save_entries(self, entries: list[MemoryEntry]) -> None:
         if not entries:
@@ -120,7 +118,9 @@ class FileMemoryBackend:
             filename = CATEGORY_TOPIC_MAP.get(entry.category)
             if filename is not None:
                 grouped[filename].append(entry)
-        grouped[CORE_MEMORY_FILE].extend(entries)
+            else:
+                # 未知类别 fallback 到 general
+                grouped[CATEGORY_TOPIC_MAP[MemoryCategory.GENERAL]].append(entry)
 
         global_seen_keys: set[tuple[str, str]] = set()
         for filename in grouped:
@@ -150,7 +150,7 @@ class FileMemoryBackend:
     def delete_entry(self, entry_id: str) -> bool:
         if self._read_only_mode:
             return False
-        target_files = [CORE_MEMORY_FILE] + list(CATEGORY_TOPIC_MAP.values())
+        target_files = list(CATEGORY_TOPIC_MAP.values())
         deleted = False
         for filename in target_files:
             filepath = self._memory_dir / filename
@@ -169,6 +169,86 @@ class FileMemoryBackend:
                 else:
                     filepath.unlink(missing_ok=True)
         return deleted
+
+    def _aggregate_topic_entries(self) -> list[MemoryEntry]:
+        """从所有主题文件聚合条目，去重后按时间排序返回。"""
+        seen_keys: set[tuple[str, str]] = set()
+        entries: list[MemoryEntry] = []
+        for filename in CATEGORY_TOPIC_MAP.values():
+            filepath = self._memory_dir / filename
+            if not filepath.exists():
+                continue
+            try:
+                raw = filepath.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for e in parse_entries(raw):
+                key = (e.category.value, normalize_content_key(e.content))
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    entries.append(e)
+        entries.sort(key=lambda e: e.timestamp)
+        return entries
+
+    def cleanup_expired(self, max_age_days: int = 90) -> int:
+        """删除超过 max_age_days 天的旧记忆条目，返回删除数量。"""
+        if self._read_only_mode:
+            return 0
+        from datetime import timedelta
+        cutoff = datetime.now() - timedelta(days=max_age_days)
+        removed = 0
+        for filename in CATEGORY_TOPIC_MAP.values():
+            filepath = self._memory_dir / filename
+            if not filepath.exists():
+                continue
+            try:
+                raw = filepath.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            all_entries = parse_entries(raw)
+            kept = [e for e in all_entries if e.timestamp >= cutoff]
+            expired_count = len(all_entries) - len(kept)
+            if expired_count > 0:
+                removed += expired_count
+                if kept:
+                    self._atomic_write(filepath, format_entries(kept))
+                else:
+                    filepath.unlink(missing_ok=True)
+        if removed:
+            logger.info("记忆过期清理：移除 %d 条超过 %d 天的旧条目", removed, max_age_days)
+        return removed
+
+    def count(self) -> int:
+        """返回所有主题文件中的条目总数。"""
+        return len(self._aggregate_topic_entries())
+
+    def get_meta(self, key: str) -> str | None:
+        """从 .meta.json 读取元数据值。"""
+        import json as _json
+        meta_path = self._memory_dir / ".meta.json"
+        if not meta_path.exists():
+            return None
+        try:
+            data = _json.loads(meta_path.read_text(encoding="utf-8"))
+            return data.get(key)
+        except (OSError, ValueError):
+            return None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """向 .meta.json 写入元数据值。"""
+        import json as _json
+        meta_path = self._memory_dir / ".meta.json"
+        data: dict = {}
+        if meta_path.exists():
+            try:
+                data = _json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        data[key] = value
+        try:
+            meta_path.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            logger.debug("写入 .meta.json 失败", exc_info=True)
 
     # ── 内部方法 ────────────────────────────────────────────
 
@@ -355,11 +435,9 @@ class FileMemoryBackend:
             filename = CATEGORY_TOPIC_MAP.get(entry.category)
             if filename:
                 grouped[filename].append(entry)
-        grouped[CORE_MEMORY_FILE] = list(entries)
 
         target_files = set(grouped)
         target_files.update(CATEGORY_TOPIC_MAP.values())
-        target_files.add(CORE_MEMORY_FILE)
 
         for filename in sorted(target_files):
             filepath = self._memory_dir / filename

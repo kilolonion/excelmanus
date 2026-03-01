@@ -47,6 +47,7 @@ class _ToolExecOutcome:
     question_id: str | None = None
     defer_tool_result: bool = False
     finish_accepted: bool = False
+    raw_result_str: str | None = None  # 截断前的原始结果，供窗口感知解析使用
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -136,9 +137,10 @@ def _parse_vlm_json(text: str, *, try_repair: bool = False) -> dict[str, Any] | 
             continue
         if isinstance(data, dict):
             return data
-    # ── 截断修复：仅当 try_repair=True 时补全未闭合的括号 ──
-    if try_repair and left >= 0:
-        logger.info(
+    # ── 截断修复：解析失败时始终尝试，try_repair 仅影响日志级别 ──
+    if left >= 0:
+        log_fn = logger.info if try_repair else logger.debug
+        log_fn(
             "JSON 直接解析失败（%d 字符），尝试截断修复",
             len(content),
         )
@@ -879,6 +881,9 @@ class ToolDispatcher:
         if result_str:
             result_str = self._try_inject_image(result_str)
 
+        # 保存截断前的原始结果，供窗口感知解析使用
+        self._last_call_raw_result: str = result_str
+
         # 工具结果截断
         tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
         if tool_def is not None:
@@ -968,6 +973,7 @@ class ToolDispatcher:
         finish_accepted = False
         error_kind: str | None = None
         _cow_reminders: list[str] = []
+        _raw_result_str: str | None = None
 
         # 执行工具调用
         hook_skill = e.pick_route_skill(route_result)
@@ -1065,6 +1071,7 @@ class ToolDispatcher:
                 question_id = outcome.question_id
                 defer_tool_result = outcome.defer_tool_result
                 finish_accepted = outcome.finish_accepted
+                _raw_result_str = outcome.raw_result_str
 
             # ── 检测 registry 层返回的结构化错误 JSON ──
             if success and e.registry.is_error_result(result_str):
@@ -1115,6 +1122,7 @@ class ToolDispatcher:
             on_event=on_event,
             cow_reminders=_cow_reminders,
             start_time=_t0,
+            raw_result_str=_raw_result_str,
         )
 
         return ToolCallResult(
@@ -1299,6 +1307,7 @@ class ToolDispatcher:
         on_event: "EventCallback | None",
         cow_reminders: list[str],
         start_time: float = 0.0,
+        raw_result_str: str | None = None,
     ) -> tuple[str, bool, str | None]:
         """后处理流水线：CoW/备份/图片/VLM/窗口感知/硬截断/事件/审计/任务清单。
 
@@ -1399,6 +1408,7 @@ class ToolDispatcher:
             arguments=arguments,
             result_text=result_str,
             success=success,
+            raw_result_text=raw_result_str,
         )
         result_str = e._apply_tool_result_hard_cap(result_str)
         if error:

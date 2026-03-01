@@ -97,6 +97,7 @@ class PromptCommandSyncPayload:
 _BASE_SLASH_COMMANDS: tuple[StaticSlashCommand, ...] = (
     StaticSlashCommand("/help", "显示帮助"),
     StaticSlashCommand("/skills", "查看技能包"),
+    StaticSlashCommand("/clawhub", "ClawHub 技能市场"),
     StaticSlashCommand("/history", "对话历史摘要"),
     StaticSlashCommand("/clear", "清除对话历史"),
     StaticSlashCommand("/mcp", "MCP Server 状态"),
@@ -610,6 +611,169 @@ def _handle_skills_import(
 
 
 # ------------------------------------------------------------------
+# /clawhub 子命令处理
+# ------------------------------------------------------------------
+
+
+def handle_clawhub_subcommand(
+    console: Console,
+    engine: "AgentEngine",
+    user_input: str,
+    *,
+    sync_callback: Any = None,
+) -> bool:
+    """处理 `/clawhub ...` 子命令。返回是否已处理。"""
+    import asyncio
+
+    if not user_input.lower().startswith("/clawhub"):
+        return False
+    try:
+        tokens = shlex.split(user_input)
+    except ValueError:
+        tokens = user_input.split()
+
+    if len(tokens) < 2:
+        console.print(
+            f"  [{THEME.GOLD}]ClawHub 技能市场命令：\n"
+            f"  /clawhub search <query>        搜索技能\n"
+            f"  /clawhub install <slug>        安装技能\n"
+            f"  /clawhub update [slug|--all]   更新技能\n"
+            f"  /clawhub list                  已安装列表\n"
+            f"  /clawhub info <slug>           技能详情[/{THEME.GOLD}]"
+        )
+        return True
+
+    sub = tokens[1].lower()
+    manager = getattr(engine, "_skillpack_manager", None)
+    if manager is None:
+        console.print(f"  [{THEME.RED}]{THEME.FAILURE} SkillpackManager 未初始化[/{THEME.RED}]")
+        return True
+
+    loop = asyncio.get_event_loop()
+
+    if sub == "search":
+        if len(tokens) < 3:
+            console.print(f"  [{THEME.GOLD}]用法：/clawhub search <关键词>[/{THEME.GOLD}]")
+            return True
+        query = " ".join(tokens[2:])
+        try:
+            results = loop.run_until_complete(manager.clawhub_search(query, limit=15))
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 搜索失败：{exc}[/{THEME.RED}]")
+            return True
+        if not results:
+            console.print(f"  [{THEME.DIM}]未找到匹配的技能[/{THEME.DIM}]")
+            return True
+        table = Table(title="ClawHub 搜索结果", show_lines=False)
+        table.add_column("Slug", style="cyan", no_wrap=True)
+        table.add_column("名称", style="white")
+        table.add_column("版本", style="green")
+        table.add_column("摘要", style="dim")
+        for r in results:
+            table.add_row(
+                r.get("slug", ""),
+                r.get("display_name", ""),
+                r.get("version", "") or "",
+                (r.get("summary", "") or "")[:60],
+            )
+        console.print(table)
+        return True
+
+    if sub == "install":
+        if len(tokens) < 3:
+            console.print(f"  [{THEME.GOLD}]用法：/clawhub install <slug> [--overwrite][/{THEME.GOLD}]")
+            return True
+        slug = tokens[2]
+        overwrite = "--overwrite" in tokens or "--force" in tokens
+        try:
+            result = loop.run_until_complete(
+                manager.import_skillpack_async(
+                    source="clawhub", value=slug, actor="cli", overwrite=overwrite,
+                )
+            )
+            if sync_callback:
+                sync_callback()
+            files = result.get("files_copied", [])
+            ver = result.get("version", "")
+            console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 已从 ClawHub 安装: {slug}"
+                f" v{ver}（{len(files)} 个文件）[/{THEME.PRIMARY_LIGHT}]"
+            )
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 安装失败：{exc}[/{THEME.RED}]")
+        return True
+
+    if sub == "update":
+        update_all = "--all" in tokens
+        slug = None
+        remaining = [t for t in tokens[2:] if not t.startswith("--")]
+        if remaining:
+            slug = remaining[0]
+        if not slug and not update_all:
+            console.print(f"  [{THEME.GOLD}]用法：/clawhub update <slug> 或 /clawhub update --all[/{THEME.GOLD}]")
+            return True
+        try:
+            results = loop.run_until_complete(
+                manager.clawhub_update(slug=slug, update_all=update_all)
+            )
+            for r in results:
+                if r.get("success"):
+                    console.print(
+                        f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} {r['slug']} → v{r.get('version', '?')}[/{THEME.PRIMARY_LIGHT}]"
+                    )
+                else:
+                    console.print(
+                        f"  [{THEME.RED}]{THEME.FAILURE} {r['slug']}: {r.get('error', '未知错误')}[/{THEME.RED}]"
+                    )
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 更新失败：{exc}[/{THEME.RED}]")
+        return True
+
+    if sub == "list":
+        try:
+            installed = loop.run_until_complete(manager.clawhub_list_installed())
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 查询失败：{exc}[/{THEME.RED}]")
+            return True
+        if not installed:
+            console.print(f"  [{THEME.DIM}]尚未从 ClawHub 安装任何技能[/{THEME.DIM}]")
+            return True
+        table = Table(title="已安装的 ClawHub 技能", show_lines=False)
+        table.add_column("Slug", style="cyan")
+        table.add_column("版本", style="green")
+        for item in installed:
+            table.add_row(item.get("slug", ""), item.get("version", "") or "?")
+        console.print(table)
+        return True
+
+    if sub == "info":
+        if len(tokens) < 3:
+            console.print(f"  [{THEME.GOLD}]用法：/clawhub info <slug>[/{THEME.GOLD}]")
+            return True
+        slug = tokens[2]
+        try:
+            detail = loop.run_until_complete(manager.clawhub_skill_detail(slug))
+        except Exception as exc:
+            console.print(f"  [{THEME.RED}]{THEME.FAILURE} 查询失败：{exc}[/{THEME.RED}]")
+            return True
+        console.print(f"  [{THEME.PRIMARY_LIGHT}]{detail.get('display_name', slug)}[/{THEME.PRIMARY_LIGHT}]")
+        console.print(f"  [{THEME.DIM}]Slug: {detail.get('slug', '')}[/{THEME.DIM}]")
+        console.print(f"  [{THEME.DIM}]版本: {detail.get('latest_version', '?')}[/{THEME.DIM}]")
+        if detail.get("owner_handle"):
+            console.print(f"  [{THEME.DIM}]作者: {detail['owner_handle']}[/{THEME.DIM}]")
+        if detail.get("summary"):
+            console.print(f"  {detail['summary']}")
+        if detail.get("tags"):
+            console.print(f"  [{THEME.DIM}]标签: {', '.join(detail['tags'])}[/{THEME.DIM}]")
+        return True
+
+    console.print(
+        f"  [{THEME.GOLD}]未知 /clawhub 子命令。可用：search/install/update/list/info[/{THEME.GOLD}]"
+    )
+    return True
+
+
+# ------------------------------------------------------------------
 # /config 命令
 # ------------------------------------------------------------------
 
@@ -848,14 +1012,14 @@ def _handle_config_export(
 
     sections: dict = {}
     if "main" in section_names:
-        sections["main"] = {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model}
+        sections["main"] = {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model, "protocol": cfg.protocol}
     if "aux" in section_names:
-        sections["aux"] = {"api_key": cfg.aux_api_key or "", "base_url": cfg.aux_base_url or "", "model": cfg.aux_model or ""}
+        sections["aux"] = {"api_key": cfg.aux_api_key or "", "base_url": cfg.aux_base_url or "", "model": cfg.aux_model or "", "protocol": cfg.aux_protocol}
     if "vlm" in section_names:
-        sections["vlm"] = {"api_key": cfg.vlm_api_key or "", "base_url": cfg.vlm_base_url or "", "model": cfg.vlm_model or ""}
+        sections["vlm"] = {"api_key": cfg.vlm_api_key or "", "base_url": cfg.vlm_base_url or "", "model": cfg.vlm_model or "", "protocol": cfg.vlm_protocol}
     if "profiles" in section_names:
         profiles = [
-            {"name": p.name, "model": p.model, "api_key": p.api_key, "base_url": p.base_url, "description": p.description}
+            {"name": p.name, "model": p.model, "api_key": p.api_key, "base_url": p.base_url, "description": p.description, "protocol": p.protocol}
             for p in cfg.models
         ]
         sections["profiles"] = profiles
@@ -938,9 +1102,9 @@ def _handle_config_import(
     imported_items: list[str] = []
 
     _ENV_KEY_MAP = {
-        "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL"},
-        "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL"},
-        "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL"},
+        "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL", "protocol": "EXCELMANUS_PROTOCOL"},
+        "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "protocol": "EXCELMANUS_AUX_PROTOCOL"},
+        "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL", "protocol": "EXCELMANUS_VLM_PROTOCOL"},
     }
 
     for section_key in ("main", "aux", "vlm"):
@@ -948,7 +1112,7 @@ def _handle_config_import(
         if not isinstance(data, dict):
             continue
         key_map = _ENV_KEY_MAP.get(section_key, {})
-        for field in ("api_key", "base_url", "model"):
+        for field in ("api_key", "base_url", "model", "protocol"):
             val = data.get(field)
             if val and isinstance(val, str) and field in key_map:
                 dotenv_set(df, key_map[field], val)

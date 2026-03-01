@@ -69,6 +69,7 @@ class _SessionEntry:
     user_id: str | None = field(default=None)
     user_ctx: UserContext | None = field(default=None)
     scope: UserScope | None = field(default=None)
+    restored_readonly: bool = field(default=False)  # B4: 懒恢复会话标记，使用更短 TTL
 
 
 # ── SessionManager ────────────────────────────────────────
@@ -110,6 +111,7 @@ class SessionManager:
         self._mcp_initialized: bool = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
+        self._pending_creates: set[str] = set()  # B2: 正在锁外创建的会话 ID
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._cleanup_task_lock = asyncio.Lock()
@@ -166,6 +168,12 @@ class SessionManager:
                     aux_base_url=aux_base_url,
                 )
 
+    async def broadcast_model_profiles(self, profiles: tuple) -> None:
+        """向所有活跃会话广播模型档案列表变更（锁保护）。"""
+        async with self._lock:
+            for entry in self._sessions.values():
+                entry.engine.sync_model_profiles(profiles)
+
     def set_sandbox_docker_enabled(self, enabled: bool) -> None:
         """更新 Docker 沙盒开关（由 API lifespan 调用）。
 
@@ -185,7 +193,8 @@ class SessionManager:
 
         ISO-4: 仅通知工作区包含目标文件的会话，避免跨用户干扰。
         """
-        for entry in self._sessions.values():
+        entries = list(self._sessions.values())
+        for entry in entries:
             try:
                 ws_root = str(entry.engine.workspace.root_dir)
                 if not file_path.startswith(ws_root):
@@ -194,23 +203,31 @@ class SessionManager:
                 if _reg is not None and _reg.has_versions:
                     _reg.remove_staging_for_path(file_path)
             except Exception:
-                pass
+                logger.debug("notify_file_deleted 处理异常", exc_info=True)
 
     def notify_file_renamed(self, old_path: str, new_path: str) -> None:
         """W5: 通知活跃 session 文件已被重命名，更新 staging 条目。
 
         ISO-4: 仅通知工作区包含目标文件的会话。
+        注意：list() 快照 + try-except 保护确保即使并发删除/清理会话也不会崩溃。
         """
-        for entry in self._sessions.values():
+        try:
+            entries = list(self._sessions.values())
+        except RuntimeError:
+            return
+        for entry in entries:
             try:
-                ws_root = str(entry.engine.workspace.root_dir)
+                engine = entry.engine
+                if engine is None:
+                    continue
+                ws_root = str(engine.workspace.root_dir)
                 if not old_path.startswith(ws_root):
                     continue
-                _reg = entry.engine.file_registry
+                _reg = engine.file_registry
                 if _reg is not None and _reg.has_versions:
                     _reg.rename_staging_path(old_path, new_path)
             except Exception:
-                pass
+                logger.debug("notify_file_renamed 处理异常", exc_info=True)
 
     def _resolve_user_config_store(self, user_id: str | None) -> Any:
         """返回用户级 ConfigStore（用于 active_model 等偏好）。"""
@@ -375,6 +392,7 @@ class SessionManager:
             auth_enabled=auth_enabled,
             sandbox_config=self._sandbox_config,
             transaction_enabled=self._config.backup_enabled,
+            data_root=self._config.data_root,
         )
         engine_config = self._config
         if user_id is not None:
@@ -448,17 +466,27 @@ class SessionManager:
 
     async def acquire_for_chat(
         self, session_id: str | None, *, user_id: str | None = None,
+        _skip_limit_check: bool = False,
     ) -> tuple[str, AgentEngine]:
         """获取会话并标记为处理中。
 
         同一会话在同一时刻仅允许一个请求执行。
         支持从 SQLite 历史记录按需恢复会话。
         当 user_id 不为 None 时，会验证会话归属并记录用户 ID。
+
+        B2 优化：引擎创建和历史消息加载在锁外执行，避免阻塞并发请求。
+        锁内仅做快速路径判断和 slot 预留。
+
+        Args:
+            _skip_limit_check: 内部参数，跳过会话数量上限检查
+                （用于 rollback 等不应受上限约束的场景）。
         """
-        created = False
-        restored = False
+        # ── Phase 1: 锁内快速路径 ──────────────────────────────
+        need_create = False
+        new_id: str = ""
         async with self._lock:
             now = time.monotonic()
+            # 快速路径：内存中已有会话
             if session_id is not None and session_id in self._sessions:
                 entry = self._sessions[session_id]
                 if user_id is not None and entry.user_id != user_id:
@@ -471,15 +499,34 @@ class SessionManager:
                     )
                 entry.in_flight = True
                 entry.last_access = now
+                entry.restored_readonly = False  # B4: 活跃使用时恢复正常 TTL
                 logger.debug("复用会话并加锁 %s", session_id)
                 return session_id, entry.engine
 
-            if len(self._sessions) >= self._max_sessions:
+            # 另一个请求正在创建同一会话
+            if session_id is not None and session_id in self._pending_creates:
+                raise SessionBusyError(
+                    f"会话 '{session_id}' 正在初始化中，请稍后重试。"
+                )
+
+            # 会话上限检查（含正在创建的 slot）
+            total_slots = len(self._sessions) + len(self._pending_creates)
+            if not _skip_limit_check and total_slots >= self._max_sessions:
                 raise SessionLimitExceededError(
                     f"会话数量已达上限（{self._max_sessions}），请稍后重试。"
                 )
 
-            # 检查 SQLite 中是否有历史会话，按需恢复（含 user_id 归属校验）
+            # 预留 slot
+            new_id = session_id if session_id is not None else str(uuid.uuid4())
+            self._pending_creates.add(new_id)
+            need_create = True
+
+        # ── Phase 2: 锁外执行重量级操作 ────────────────────────
+        engine: AgentEngine | None = None
+        scope: UserScope | None = None
+        restored = False
+        try:
+            # SQLite 历史检查 & 消息加载
             history_messages: list[dict] | None = None
             if (
                 session_id is not None
@@ -496,13 +543,13 @@ class SessionManager:
                     history_messages = self._chat_history.load_messages(session_id)
                     restored = True
 
-            new_id = session_id if session_id is not None else str(uuid.uuid4())
             # 创建 UserScope（统一的用户作用域）
-            scope: UserScope | None = None
             if self._database is not None:
                 scope = UserScope.create(
-                    user_id, self._database, self._config.workspace_root
+                    user_id, self._database, self._config.workspace_root,
+                    data_root=self._config.data_root,
                 )
+            # 引擎创建（耗时操作：文件系统、DB、LLM client 等）
             engine = self._create_engine_with_history(
                 new_id,
                 history_messages,
@@ -514,14 +561,22 @@ class SessionManager:
             engine.set_message_snapshot_index(
                 len(history_messages) if history_messages else 0
             )
+        except Exception:
+            # 创建失败：释放预留 slot
+            async with self._lock:
+                self._pending_creates.discard(new_id)
+            raise
+
+        # ── Phase 3: 锁内注册引擎 ─────────────────────────────
+        async with self._lock:
+            self._pending_creates.discard(new_id)
             self._sessions[new_id] = _SessionEntry(
                 engine=engine,
-                last_access=now,
+                last_access=time.monotonic(),
                 in_flight=True,
                 user_id=user_id,
                 scope=scope,
             )
-            created = True
             if restored:
                 logger.info(
                     "从历史恢复会话 %s（%d 条消息，当前总数: %d）",
@@ -537,27 +592,26 @@ class SessionManager:
                     except Exception:
                         logger.warning("新建会话 %s 立即持久化失败", new_id, exc_info=True)
 
-        # 初始化 MCP 连接（失败不影响会话创建）；放在锁外避免阻塞并发请求。
-        if created:
-            try:
-                if self._shared_mcp_manager is None:
-                    await engine.initialize_mcp()
-                else:
-                    await self.ensure_mcp_initialized()
-                    engine.sync_mcp_auto_approve()
-            except BaseException as exc:
-                # initialize_mcp 失败不应中断主请求；若内部抛出 CancelledError，
-                # 需要显式清除当前任务的取消状态，避免后续 await 被级联取消。
-                if isinstance(exc, asyncio.CancelledError):
-                    task = asyncio.current_task()
-                    if task is not None:
-                        while task.cancelling():
-                            task.uncancel()
-                logger.warning(
-                    "会话 %s MCP 初始化失败，已跳过",
-                    new_id,
-                    exc_info=True,
-                )
+        # ── Phase 4: MCP 初始化（锁外） ───────────────────────
+        try:
+            if self._shared_mcp_manager is None:
+                await engine.initialize_mcp()
+            else:
+                await self.ensure_mcp_initialized()
+                engine.sync_mcp_auto_approve()
+        except BaseException as exc:
+            # initialize_mcp 失败不应中断主请求；若内部抛出 CancelledError，
+            # 需要显式清除当前任务的取消状态，避免后续 await 被级联取消。
+            if isinstance(exc, asyncio.CancelledError):
+                task = asyncio.current_task()
+                if task is not None:
+                    while task.cancelling():
+                        task.uncancel()
+            logger.warning(
+                "会话 %s MCP 初始化失败，已跳过",
+                new_id,
+                exc_info=True,
+            )
         return new_id, engine
 
     async def release_for_chat(self, session_id: str) -> None:
@@ -569,7 +623,6 @@ class SessionManager:
         避免读取 engine 可变状态时与并发 acquire 冲突。
         """
         snapshot: _PersistenceSnapshot | None = None
-        engine_ref: AgentEngine | None = None
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is None:
@@ -583,7 +636,11 @@ class SessionManager:
                     user_id=entry.user_id,
                     new_snapshot_index=len(entry.engine.raw_messages),
                 )
-                engine_ref = entry.engine
+                # B1-fix: 在锁内立即更新 snapshot_index，防止并发
+                # flush_messages_sync 读到旧值导致消息重复持久化。
+                entry.engine.set_message_snapshot_index(
+                    snapshot.new_snapshot_index
+                )
             entry.in_flight = False
             entry.last_access = time.monotonic()
 
@@ -593,11 +650,6 @@ class SessionManager:
                 self._conv_persistence.sync_from_snapshot(
                     session_id, snapshot
                 )
-                # 更新 engine 的 snapshot index（原子赋值，安全）
-                if engine_ref is not None:
-                    engine_ref.set_message_snapshot_index(
-                        snapshot.new_snapshot_index
-                    )
             except Exception:
                 logger.warning("会话 %s 消息持久化失败", session_id, exc_info=True)
 
@@ -679,6 +731,7 @@ class SessionManager:
         """清除会话的对话历史，但保留会话本身。
 
         清除引擎内存 + SQLite 消息记录。
+        锁内标记 in_flight 防止并发 acquire，锁外完成清理后释放。
 
         Args:
             session_id: 要清除的会话 ID。
@@ -687,6 +740,7 @@ class SessionManager:
             True 表示成功清除，False 表示会话不存在。
         """
         engine: AgentEngine | None = None
+        entry_ref: _SessionEntry | None = None
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
@@ -694,13 +748,19 @@ class SessionManager:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，暂无法清除。"
                     )
+                entry.in_flight = True
+                entry_ref = entry
                 engine = entry.engine
 
         if engine is not None:
-            engine.clear_memory()
-            if self._conv_persistence is not None:
-                self._conv_persistence.clear(session_id, engine)
-            logger.info("已清除会话 %s 引擎内存", session_id)
+            try:
+                engine.clear_memory()
+                if self._conv_persistence is not None:
+                    self._conv_persistence.clear(session_id, engine)
+                logger.info("已清除会话 %s 引擎内存", session_id)
+            finally:
+                if entry_ref is not None:
+                    entry_ref.in_flight = False
             return True
 
         # 仅存在于 SQLite 中的历史会话
@@ -835,11 +895,15 @@ class SessionManager:
 
         expired_engines: list[tuple[str, AgentEngine]] = []
         async with self._lock:
+            # B4: restored_readonly 会话使用 1/4 TTL，加速回收懒恢复资源
+            readonly_ttl = max(30, self._ttl_seconds // 4)
             expired_ids = [
                 sid
                 for sid, entry in self._sessions.items()
                 if (not entry.in_flight)
-                and (now - entry.last_access) > self._ttl_seconds
+                and (now - entry.last_access) > (
+                    readonly_ttl if entry.restored_readonly else self._ttl_seconds
+                )
             ]
             for sid in expired_ids:
                 expired_engines.append((sid, self._sessions[sid].engine))
@@ -912,6 +976,33 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             return entry.in_flight if entry is not None else False
 
+    async def get_engine_if_idle(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> AgentEngine | None:
+        """B3: 原子化获取引擎（仅当会话空闲时返回），消除 TOCTOU 竞态。
+
+        在同一把锁内同时检查 in_flight 和获取 engine 引用。
+        若会话不存在、不属于当前用户或正在处理中，返回 None。
+        调用方应根据 None 返回决定错误类型（404 vs 409）。
+
+        Returns:
+            AgentEngine 引用（会话空闲时）或 None。
+
+        Raises:
+            SessionBusyError: 会话正在处理中。
+        """
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is None:
+                return None
+            if user_id is not None and entry.user_id != user_id:
+                return None
+            if entry.in_flight:
+                raise SessionBusyError(
+                    f"会话 '{session_id}' 正在处理中，请等待完成后再操作。"
+                )
+            return entry.engine
+
     def session_exists(self, session_id: str) -> bool:
         """检查会话是否存在（内存或 SQLite 历史）。"""
         if session_id in self._sessions:
@@ -961,13 +1052,22 @@ class SessionManager:
         finally:
             if acquired_session_id is not None:
                 await self.release_for_chat(acquired_session_id)
+                # B4: 标记为只读恢复会话，使用更短 TTL 加速回收
+                entry = self._sessions.get(acquired_session_id)
+                if entry is not None:
+                    entry.restored_readonly = True
         return engine
 
     def get_any_engine(self) -> "AgentEngine | None":
-        """同步获取任一活跃会话的 AgentEngine（无锁，仅用于只读查询）。"""
-        for entry in self._sessions.values():
-            return entry.engine
-        return None
+        """同步获取任一活跃会话的 AgentEngine（无锁，仅用于只读查询）。
+
+        注意：CPython dict.get 是原子的，但 values() 迭代在极端并发下
+        可能因 dict 大小变化抛出 RuntimeError，此处做防御处理。
+        """
+        try:
+            return next(iter(self._sessions.values())).engine
+        except (StopIteration, RuntimeError):
+            return None
 
     async def get_active_count(self) -> int:
         """获取当前活跃会话数量（锁保护）。"""
@@ -1002,6 +1102,9 @@ class SessionManager:
             except Exception:
                 logger.warning("预取 SQLite 会话列表失败", exc_info=True)
 
+        # B6: 锁内仅收集轻量数据，锁外构建完整结果，减少锁持有时间
+        _raw_entries: list[tuple[str, int, str, bool, float]] = []
+        wall_now = time.time()
         async with self._lock:
             for sid, entry in self._sessions.items():
                 if user_id is not None and entry.user_id != user_id:
@@ -1009,7 +1112,7 @@ class SessionManager:
                 in_memory_ids.add(sid)
                 engine = entry.engine
                 msg_count = len(engine.raw_messages) if hasattr(engine, "raw_messages") else 0
-                # 规则标题：从第一条用户消息截取
+                # 从第一条用户消息截取标题（轻量遍历）
                 rule_title = ""
                 if msg_count > 0:
                     for msg in engine.raw_messages:
@@ -1018,28 +1121,29 @@ class SessionManager:
                             if isinstance(content, str):
                                 rule_title = content[:80]
                             break
-                # 优先使用 SQLite 中持久化的非 fallback 标题（LLM 或用户手动设置）
-                db_info = db_sessions_map.get(sid, {})
-                db_title = db_info.get("title", "")
-                fallback = f"会话 {sid[:8]}"
-                if db_title and db_title != fallback:
-                    title = db_title
-                else:
-                    title = rule_title or fallback
-                # 将 monotonic last_access 转换为 wall-clock ISO 时间戳
-                # monotonic 不可直接转 wall-clock，需用当前两者的差值推算
-                wall_updated = time.time() - (now - entry.last_access)
-                updated_at_iso = datetime.fromtimestamp(
-                    wall_updated, tz=timezone.utc
-                ).isoformat()
-                results.append({
-                    "id": sid,
-                    "title": title,
-                    "message_count": msg_count,
-                    "in_flight": entry.in_flight,
-                    "status": "active",
-                    "updated_at": updated_at_iso,
-                })
+                _raw_entries.append((sid, msg_count, rule_title, entry.in_flight, entry.last_access))
+
+        # 锁外构建完整结果字典
+        for sid, msg_count, rule_title, in_flight, last_access in _raw_entries:
+            db_info = db_sessions_map.get(sid, {})
+            db_title = db_info.get("title", "")
+            fallback = f"会话 {sid[:8]}"
+            if db_title and db_title != fallback:
+                title = db_title
+            else:
+                title = rule_title or fallback
+            wall_updated = wall_now - (now - last_access)
+            updated_at_iso = datetime.fromtimestamp(
+                wall_updated, tz=timezone.utc
+            ).isoformat()
+            results.append({
+                "id": sid,
+                "title": title,
+                "message_count": msg_count,
+                "in_flight": in_flight,
+                "status": "active",
+                "updated_at": updated_at_iso,
+            })
 
         # 合并 SQLite 中的历史会话（排除已在内存中的）
         for ds_id, ds in db_sessions_map.items():
@@ -1060,72 +1164,84 @@ class SessionManager:
     async def get_session_detail(
         self, session_id: str, *, user_id: str | None = None
     ) -> dict:
-        """获取会话详情含消息历史。当 user_id 非空时，会校验会话归属。"""
+        """获取会话详情含消息历史。当 user_id 非空时，会校验会话归属。
+
+        性能优化：锁内仅做快速引用捕获（微秒级），
+        所有序列化工作在锁外执行，避免阻塞并发 acquire/release。
+        """
+        engine: AgentEngine | None = None
+        in_flight = False
+
+        # ── 锁内：快速捕获引用（微秒级） ──
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
                 if user_id is not None and entry.user_id != user_id:
                     raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
                 engine = entry.engine
-                messages = []
-                if hasattr(engine, "raw_messages"):
-                    messages = list(engine.raw_messages)
+                in_flight = entry.in_flight
 
-                # 序列化待处理的审批/问题状态，供前端刷新后恢复
-                pending_approval_data = None
-                if engine.has_pending_approval():
-                    pa = engine.current_pending_approval()
-                    if pa is not None:
-                        from excelmanus.tools.policy import (
-                            get_tool_risk_level,
-                            sanitize_approval_args_summary,
-                        )
-                        pending_approval_data = {
-                            "approval_id": pa.approval_id,
-                            "tool_name": pa.tool_name,
-                            "risk_level": get_tool_risk_level(pa.tool_name),
-                            "args_summary": sanitize_approval_args_summary(pa.arguments),
-                        }
+        # ── 锁外：序列化（可能耗时但不阻塞其他会话） ──
+        if engine is not None:
+            messages = []
+            if hasattr(engine, "raw_messages"):
+                messages = list(engine.raw_messages)
 
-                pending_question_data = None
-                if engine.has_pending_question():
-                    pq = engine.current_pending_question()
-                    if pq is not None:
-                        pending_question_data = {
-                            "id": pq.question_id,
-                            "header": pq.header,
-                            "text": pq.text,
-                            "options": [
-                                {"label": o.label, "description": o.description}
-                                for o in pq.options
-                            ],
-                            "multi_select": pq.multi_select,
-                        }
-
-                # 序列化最近路由结果，供前端刷新后重建路由状态 block
-                last_route_data = None
-                lr = engine.last_route_result
-                if lr is not None:
-                    last_route_data = {
-                        "route_mode": lr.route_mode,
-                        "skills_used": list(lr.skills_used),
-                        "tool_scope": list(lr.tool_scope) if lr.tool_scope else [],
+            # 序列化待处理的审批/问题状态，供前端刷新后恢复
+            pending_approval_data = None
+            if engine.has_pending_approval():
+                pa = engine.current_pending_approval()
+                if pa is not None:
+                    from excelmanus.tools.policy import (
+                        get_tool_risk_level,
+                        sanitize_approval_args_summary,
+                    )
+                    pending_approval_data = {
+                        "approval_id": pa.approval_id,
+                        "tool_name": pa.tool_name,
+                        "risk_level": get_tool_risk_level(pa.tool_name),
+                        "args_summary": sanitize_approval_args_summary(pa.arguments),
                     }
 
-                return {
-                    "id": session_id,
-                    "message_count": len(messages),
-                    "in_flight": entry.in_flight,
-                    "messages": messages,
-                    "full_access_enabled": engine.full_access_enabled,
-                    "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
-                    "current_model": engine.current_model,
-                    "current_model_name": engine.current_model_name,
-                    "vision_capable": engine.is_vision_capable or engine.vlm_enhance_available,
-                    "pending_approval": pending_approval_data,
-                    "pending_question": pending_question_data,
-                    "last_route": last_route_data,
+            pending_question_data = None
+            if engine.has_pending_question():
+                pq = engine.current_pending_question()
+                if pq is not None:
+                    pending_question_data = {
+                        "id": pq.question_id,
+                        "header": pq.header,
+                        "text": pq.text,
+                        "options": [
+                            {"label": o.label, "description": o.description}
+                            for o in pq.options
+                        ],
+                        "multi_select": pq.multi_select,
+                    }
+
+            # 序列化最近路由结果，供前端刷新后重建路由状态 block
+            last_route_data = None
+            lr = engine.last_route_result
+            if lr is not None:
+                last_route_data = {
+                    "route_mode": lr.route_mode,
+                    "skills_used": list(lr.skills_used),
+                    "tool_scope": list(lr.tool_scope) if lr.tool_scope else [],
                 }
+
+            return {
+                "id": session_id,
+                "message_count": len(messages),
+                "in_flight": in_flight,
+                "messages": messages,
+                "full_access_enabled": engine.full_access_enabled,
+                "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
+                "current_model": engine.current_model,
+                "current_model_name": engine.current_model_name,
+                "vision_capable": engine.is_vision_capable or engine.vlm_enhance_available,
+                "pending_approval": pending_approval_data,
+                "pending_question": pending_question_data,
+                "last_route": last_route_data,
+            }
 
         # 回退到 SQLite 历史（需校验归属）
         if self._chat_history is not None:
@@ -1181,8 +1297,9 @@ class SessionManager:
         if not exists:
             raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
 
+        # B7: 跳过会话上限检查，rollback 不应因上限而失败
         acquired_session_id, engine = await self.acquire_for_chat(
-            session_id, user_id=user_id
+            session_id, user_id=user_id, _skip_limit_check=True
         )
         try:
             result = engine.rollback_conversation(

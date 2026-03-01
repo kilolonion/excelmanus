@@ -20,7 +20,11 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
-from excelmanus.providers.stream_types import StreamDelta
+from excelmanus.providers.stream_types import (
+    InlineThinkingStateMachine,
+    StreamDelta,
+    extract_inline_thinking,
+)
 
 logger = get_logger("gemini_provider")
 
@@ -49,6 +53,9 @@ class _Message:
     role: str = "assistant"
     content: str | None = None
     tool_calls: list[_ToolCall] | None = None
+    thinking: str | None = None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -339,10 +346,15 @@ def _gemini_response_to_openai(
     parts = content_obj.get("parts", [])
 
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[_ToolCall] = []
 
     for part in parts:
-        if "text" in part:
+        if "thought" in part:
+            thought = part["thought"]
+            if thought:
+                thinking_parts.append(thought)
+        elif "text" in part:
             text_parts.append(part["text"])
         elif "functionCall" in part:
             fc = part["functionCall"]
@@ -356,9 +368,20 @@ def _gemini_response_to_openai(
                 ),
             ))
 
+    # 合并 text，然后检测非标准 <thinking> 内联标签
+    raw_text = "\n".join(text_parts) if text_parts else ""
+    inline_thinking, clean_text = extract_inline_thinking(raw_text)
+    if inline_thinking:
+        thinking_parts.append(inline_thinking)
+
+    thinking_joined = "\n".join(thinking_parts) if thinking_parts else None
+
     message = _Message(
-        content="\n".join(text_parts) if text_parts else None,
+        content=clean_text if clean_text else None,
         tool_calls=tool_calls if tool_calls else None,
+        thinking=thinking_joined,
+        reasoning=thinking_joined,
+        reasoning_content=thinking_joined,
     )
 
     # 确定 finish_reason
@@ -635,6 +658,8 @@ class GeminiClient:
             params = {"key": self._api_key}
 
         async def _stream_generator():
+            _inline_sm = InlineThinkingStateMachine()
+
             async with self._http.stream("POST", url, json=body, headers=headers, params=params) as resp:
                 if resp.status_code != 200:
                     error_text = await resp.aread()
@@ -671,10 +696,11 @@ class GeminiClient:
                     finish = candidate.get("finishReason")
 
                     for part in parts:
-                        if "text" in part:
-                            yield StreamDelta(content_delta=part["text"])
-                        elif "thought" in part:
+                        if "thought" in part:
                             yield StreamDelta(thinking_delta=part["thought"])
+                        elif "text" in part:
+                            for d in _inline_sm.feed(part["text"]):
+                                yield d
                         elif "functionCall" in part:
                             fc = part["functionCall"]
                             yield StreamDelta(tool_calls_delta=[{

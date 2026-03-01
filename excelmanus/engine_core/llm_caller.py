@@ -25,6 +25,7 @@ from excelmanus.engine_utils import (
     _message_content_to_text,
 )
 from excelmanus.logger import get_logger
+from excelmanus.providers.stream_types import InlineThinkingStateMachine, extract_inline_thinking
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
@@ -169,6 +170,36 @@ def window_advisor_retry_timeout_seconds(primary_timeout_seconds: float) -> floa
     if retry_timeout >= primary_timeout_seconds:
         retry_timeout = max(0.1, primary_timeout_seconds - 0.1)
     return retry_timeout
+
+
+def is_retryable_llm_error(exc: Exception) -> bool:
+    """判断 LLM 调用异常是否可安全重试（5xx / 429 / 网络错误）。
+
+    复用 ``is_transient_window_advisor_exception`` 的判定逻辑，
+    作为主 LLM 调用重试的公共入口。
+    """
+    return is_transient_window_advisor_exception(exc)
+
+
+def compute_retry_delay(
+    attempt: int,
+    base_delay: float,
+    max_delay: float,
+    exc: Exception,
+) -> float:
+    """计算指数退避重试延迟（秒），优先使用 Retry-After 头。
+
+    - attempt: 第几次失败（从 1 开始）
+    - base_delay: 基准延迟（秒）
+    - max_delay: 单次最大延迟上限（秒）
+    - exc: 触发重试的异常
+    """
+    retry_after = extract_retry_after_seconds(exc)
+    if retry_after is not None:
+        return min(max_delay, max(1.0, retry_after))
+    # 指数退避 + jitter: base * 2^(attempt-1) + 随机 0~1s
+    delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+    return min(max_delay, delay)
 
 
 def merge_leading_system_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -337,6 +368,7 @@ class LLMCaller:
         finish_reason: str | None = None
         usage = None
         _tool_call_notified = False
+        _inline_sm = InlineThinkingStateMachine()  # 内联 <thinking> 标签检测
         _first_token_received = False
         _ttft_ms: float = 0.0
 
@@ -404,12 +436,23 @@ class LLMCaller:
 
             delta_content = getattr(delta, "content", None)
             if delta_content:
-                content_parts.append(delta_content)
-                e._emit(on_event, ToolCallEvent(
-                    event_type=EventType.TEXT_DELTA,
-                    text_delta=delta_content,
-                    iteration=iteration,
-                ))
+                # 通过状态机检测内联 <thinking> 标签
+                for _sd in _inline_sm.feed(delta_content):
+                    if _sd.thinking_delta:
+                        thinking_parts.append(_sd.thinking_delta)
+                        _thinking_streamed = True
+                        e._emit(on_event, ToolCallEvent(
+                            event_type=EventType.THINKING_DELTA,
+                            thinking_delta=_sd.thinking_delta,
+                            iteration=iteration,
+                        ))
+                    if _sd.content_delta:
+                        content_parts.append(_sd.content_delta)
+                        e._emit(on_event, ToolCallEvent(
+                            event_type=EventType.TEXT_DELTA,
+                            text_delta=_sd.content_delta,
+                            iteration=iteration,
+                        ))
 
             for thinking_key in ("thinking", "reasoning", "reasoning_content"):
                 thinking_val = getattr(delta, thinking_key, None)

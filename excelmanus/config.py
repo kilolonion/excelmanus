@@ -26,6 +26,10 @@ class ModelProfile:
     base_url: str
     description: str = ""  # 可选描述
     protocol: str = "auto"  # 协议类型：auto|openai|openai_responses|anthropic|gemini
+    thinking_mode: str = "auto"  # thinking 参数格式覆盖
+    model_family: str = ""  # 实际模型族：claude|gpt|gemini|deepseek|qwen|glm|grok
+    custom_extra_body: str = ""  # 自定义 extra_body JSON
+    custom_extra_headers: str = ""  # 自定义 extra_headers JSON
 
 
 # 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
@@ -330,6 +334,7 @@ class ExcelManusConfig:
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
     workspace_root: str = "."
+    data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
     log_level: str = "INFO"
     skills_system_dir: str = "excelmanus/skillpacks/system"
     skills_user_dir: str = "~/.excelmanus/skillpacks"
@@ -340,6 +345,9 @@ class ExcelManusConfig:
     skills_discovery_include_agents: bool = True
     skills_discovery_scan_external_tool_dirs: bool = True
     skills_discovery_extra_dirs: tuple[str, ...] = ()
+    clawhub_enabled: bool = True
+    clawhub_registry_url: str = "https://clawhub.ai"
+    clawhub_prefer_cli: bool = True
     system_message_mode: str = "auto"
     tool_result_hard_cap_chars: int = 12000
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
@@ -357,6 +365,7 @@ class ExcelManusConfig:
     aux_protocol: str = "auto"  # 辅助模型协议类型
     # subagent 执行配置
     subagent_enabled: bool = True
+    verifier_enabled: bool = False  # 完成前验证器开关（默认关闭）
     subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 6
     subagent_timeout_seconds: int = 600  # 单个子代理执行超时（秒）
@@ -370,6 +379,17 @@ class ExcelManusConfig:
     memory_dir: str = "~/.excelmanus/memory"
     memory_auto_load_lines: int = 200
     memory_auto_extract_interval: int = 15  # 每 N 轮后台静默提取记忆（0 = 禁用）
+    memory_expire_days: int = 90  # 记忆过期天数（0 = 不过期）
+    # 记忆维护代理配置
+    memory_maintenance_enabled: bool = True  # 启用 LLM 驱动的记忆维护
+    memory_maintenance_min_entries: int = 10  # 至少多少条才值得维护
+    memory_maintenance_new_threshold: int = 5  # 新增多少条后触发维护
+    memory_maintenance_interval_hours: float = 4.0  # 两次维护最小间隔（小时）
+    memory_maintenance_model: str | None = None  # 维护用模型，默认 None → 使用 aux_model
+    # LLM 调用重试配置：遇到 5xx / 429 / 网络错误时自动重试
+    llm_retry_max_attempts: int = 3          # 最大尝试次数（含首次）
+    llm_retry_base_delay_seconds: float = 2.0  # 指数退避基准延迟（秒）
+    llm_retry_max_delay_seconds: float = 30.0  # 单次重试最大延迟上限（秒）
     # 对话记忆上下文窗口大小（token 数），用于截断策略
     max_context_tokens: int = 128_000
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
@@ -427,6 +447,12 @@ class ExcelManusConfig:
     vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
     vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
     vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
+    # 视觉原生模式：图片生命周期管理
+    image_keep_rounds: int = 3  # 图片保持完整 base64 的最小轮数
+    image_max_active: int = 2  # 同时保持高清的最大图片数（LRU 淘汰）
+    image_token_budget: int = 6000  # 图片 token 总预算
+    # 提取策略配置
+    vlm_extraction_tier: str = "auto"  # 模型分级: auto | strong | standard | weak
     # 渐进式管线配置
     vlm_pipeline_uncertainty_threshold: int = 5  # 不确定项数量超过此值时暂停
     vlm_pipeline_uncertainty_confidence_floor: float = 0.3  # 任一项低于此置信度时暂停
@@ -499,9 +525,16 @@ class _ContextOptimizationConfig:
 
 
 def load_runtime_env() -> None:
-    """加载当前工作目录 .env（不覆盖已存在环境变量）。"""
+    """加载配置文件（不覆盖已存在环境变量）。
+
+    优先级: 环境变量 > 项目目录 .env > ~/.excelmanus/config.env
+    """
+    # 1. 先加载项目 .env（高优先级，不覆盖真实环境变量）
     dotenv_path = Path.cwd() / ".env"
     load_dotenv(dotenv_path=dotenv_path, override=False)
+    # 2. 再注入集中配置（最低优先级，不覆盖已有值）
+    from excelmanus.data_home import inject_centralized_config
+    inject_centralized_config()
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -952,6 +985,7 @@ def load_config() -> ExcelManusConfig:
     )
 
     workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
+    data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "")
     log_level = _parse_log_level(os.environ.get("EXCELMANUS_LOG_LEVEL"))
     default_system_skill_dir = (
         Path(__file__).resolve().parent / "skillpacks" / "system"
@@ -993,6 +1027,19 @@ def load_config() -> ExcelManusConfig:
     )
     skills_discovery_extra_dirs = _parse_csv_tuple(
         os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS")
+    )
+    clawhub_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_CLAWHUB_ENABLED"),
+        "EXCELMANUS_CLAWHUB_ENABLED",
+        True,
+    )
+    clawhub_registry_url = (
+        os.environ.get("EXCELMANUS_CLAWHUB_REGISTRY_URL", "https://clawhub.ai").strip()
+    )
+    clawhub_prefer_cli = _parse_bool(
+        os.environ.get("EXCELMANUS_CLAWHUB_PREFER_CLI"),
+        "EXCELMANUS_CLAWHUB_PREFER_CLI",
+        True,
     )
     system_message_mode = _parse_system_message_mode(
         os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE")
@@ -1039,6 +1086,11 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_SUBAGENT_ENABLED"),
         "EXCELMANUS_SUBAGENT_ENABLED",
         True,
+    )
+    verifier_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_VERIFIER_ENABLED"),
+        "EXCELMANUS_VERIFIER_ENABLED",
+        False,
     )
     parallel_readonly_tools = _parse_bool(
         os.environ.get("EXCELMANUS_PARALLEL_READONLY_TOOLS"),
@@ -1438,6 +1490,7 @@ def load_config() -> ExcelManusConfig:
         session_ttl_seconds=session_ttl_seconds,
         max_sessions=max_sessions,
         workspace_root=workspace_root,
+        data_root=data_root,
         log_level=log_level,
         skills_system_dir=skills_system_dir,
         skills_user_dir=skills_user_dir,
@@ -1448,6 +1501,9 @@ def load_config() -> ExcelManusConfig:
         skills_discovery_include_agents=skills_discovery_include_agents,
         skills_discovery_scan_external_tool_dirs=skills_discovery_scan_external_tool_dirs,
         skills_discovery_extra_dirs=skills_discovery_extra_dirs,
+        clawhub_enabled=clawhub_enabled,
+        clawhub_registry_url=clawhub_registry_url,
+        clawhub_prefer_cli=clawhub_prefer_cli,
         system_message_mode=system_message_mode,
         tool_result_hard_cap_chars=tool_result_hard_cap_chars,
         large_excel_threshold_bytes=large_excel_threshold_bytes,
@@ -1460,6 +1516,7 @@ def load_config() -> ExcelManusConfig:
         aux_model=aux_model,
         aux_protocol=aux_protocol,
         subagent_enabled=subagent_enabled,
+        verifier_enabled=verifier_enabled,
         parallel_readonly_tools=parallel_readonly_tools,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,

@@ -324,7 +324,7 @@ def _check_golden_cells(
     # ── 定位输出文件 ──
     output_file: Path | None = None
     if workfile_dir and workfile_dir.is_dir():
-        xlsx_files = list(workfile_dir.glob("*.xlsx"))
+        xlsx_files = [f for ext in ("*.xlsx", "*.xls", "*.xlsb") for f in workfile_dir.glob(ext)]
         if len(xlsx_files) == 1:
             output_file = xlsx_files[0]
         elif len(xlsx_files) > 1:

@@ -776,30 +776,19 @@ def _execute_script_docker(
                 pass
 
     result: dict[str, Any] = {
+        "stdout_tail": _tail(stdout, tail_lines),
+        "stderr_tail": _tail(stderr, tail_lines),
         "status": status,
         "return_code": return_code,
-        "timed_out": timed_out,
         "duration_seconds": docker_result["duration_seconds"],
         "mode": "inline" if inline_mode else "file",
         "script": str(script_safe.relative_to(workspace_root)),
         "workdir": str(workdir_safe.relative_to(workspace_root)),
-        "command": command_parts,
-        "python_command": ["python", "-I"],
-        "python_resolve_mode": "docker",
-        "python_probe_results": [],
-        "stdout_tail": _tail(stdout, tail_lines),
-        "stderr_tail": _tail(stderr, tail_lines),
+        "timed_out": timed_out,
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
         "cow_mapping": cow_mapping,
-        "sandbox": {
-            "mode": "docker",
-            "tier": sandbox_tier,
-            "auto_approved": sandbox_tier in ("GREEN", "YELLOW"),
-            "isolated_python": True,
-            "limits_applied": True,
-            "warnings": sandbox_warnings,
-        },
+        "sandbox_tier": sandbox_tier,
     }
 
     if cow_mapping:
@@ -997,37 +986,19 @@ def _execute_script(
                 pass
 
     result: dict[str, Any] = {
+        "stdout_tail": _tail(stdout, tail_lines),
+        "stderr_tail": _tail(stderr, tail_lines),
         "status": status,
         "return_code": return_code,
-        "timed_out": timed_out,
         "duration_seconds": round(time.time() - started, 3),
         "mode": "inline" if inline_mode else "file",
         "script": str(script_safe.relative_to(guard.workspace_root)),
         "workdir": str(workdir_safe.relative_to(guard.workspace_root)),
-        "command": command,
-        "python_command": sandbox_python_cmd,
-        "python_resolve_mode": mode,
-        "python_probe_results": [
-            {
-                "command": probe.command,
-                "status": probe.status,
-                "detail": probe.detail,
-            }
-            for probe in probes
-        ],
-        "stdout_tail": _tail(stdout, tail_lines),
-        "stderr_tail": _tail(stderr, tail_lines),
+        "timed_out": timed_out,
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
         "cow_mapping": cow_mapping,
-        "sandbox": {
-            "mode": "soft" if sandbox_tier == "RED" else "policy_engine",
-            "tier": sandbox_tier,
-            "auto_approved": sandbox_tier in ("GREEN", "YELLOW"),
-            "isolated_python": isolated_python,
-            "limits_applied": limits_applied,
-            "warnings": sandbox_warnings,
-        },
+        "sandbox_tier": sandbox_tier,
     }
     # CoW 路径提示：bench/external 文件被保护时，提醒使用副本路径
     if cow_mapping:
@@ -1199,9 +1170,9 @@ def get_tools() -> list[ToolDef]:
                 "additionalProperties": False,
             },
             func=run_code,
-            max_result_chars=3000,
-            truncate_head_chars=2000,
-            truncate_tail_chars=1000,
+            max_result_chars=8000,
+            truncate_head_chars=5000,
+            truncate_tail_chars=3000,
             write_effect="dynamic",
         ),
     ]

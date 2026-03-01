@@ -72,6 +72,14 @@ def _get_workspace_root(request: Request) -> str:
     return os.environ.get("EXCELMANUS_WORKSPACE_ROOT", "./workspace")
 
 
+def _get_data_root(request: Request) -> str:
+    dr = getattr(request.app.state, "data_root", None)
+    if dr:
+        return dr
+    import os
+    return os.environ.get("EXCELMANUS_DATA_ROOT", "")
+
+
 def _build_token_response(user: UserRecord, store: UserStore | None = None) -> TokenResponse:
     access, refresh, expires_in = create_token_pair(user.id, user.role)
     oauth_providers: list[str] = []
@@ -358,7 +366,7 @@ async def get_my_workspace_usage(
 ) -> Any:
     """返回当前用户的工作区使用统计。"""
     ws_root = _get_workspace_root(request)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True, data_root=_get_data_root(request))
     return ws.get_usage().to_dict()
 
 
@@ -851,7 +859,7 @@ async def upload_avatar(
 
     # 存储到用户工作区的 .avatars 目录（不在常规文件列表中显示）
     ws_root = _get_workspace_root(request)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True, data_root=_get_data_root(request))
 
     # 检查配额
     allowed, reason = ws.check_upload_allowed(len(compressed))
@@ -962,7 +970,7 @@ async def get_avatar_file(
         raise HTTPException(401, "未认证")
 
     ws_root = _get_workspace_root(request)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user.id, auth_enabled=True, data_root=_get_data_root(request))
     avatar_dir = ws.root_dir / ".avatars"
 
     for ext in ("jpg", "jpeg", "png", "webp", "gif"):
@@ -1006,7 +1014,7 @@ async def admin_list_users(
     for u in users:
         pub = UserPublic.from_record(u)
         user_quota = QuotaPolicy.for_user(u)
-        ws = IsolatedWorkspace.resolve(ws_root, user_id=u.id, auth_enabled=True)
+        ws = IsolatedWorkspace.resolve(ws_root, user_id=u.id, auth_enabled=True, data_root=_get_data_root(request))
         ws._quota = user_quota
         usage = ws.get_usage()
         daily = store.get_daily_usage(u.id)
@@ -1070,7 +1078,7 @@ async def admin_clear_user_workspace(
         raise HTTPException(404, "用户不存在")
 
     ws_root = _get_workspace_root(request)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True, data_root=_get_data_root(request))
 
     import shutil
     from pathlib import Path
@@ -1106,7 +1114,7 @@ async def admin_enforce_user_quota(
 
     ws_root = _get_workspace_root(request)
     user_quota = QuotaPolicy.for_user(target)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True, data_root=_get_data_root(request))
     ws._quota = user_quota
     deleted = ws.enforce_quota()
     usage = ws.get_usage()
@@ -1130,7 +1138,7 @@ async def admin_delete_user(
 
     # 1) 清空工作空间
     ws_root = _get_workspace_root(request)
-    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True)
+    ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True, data_root=_get_data_root(request))
     import shutil
     ws_path = ws.root_dir
     deleted_files = 0
