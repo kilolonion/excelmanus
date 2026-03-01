@@ -535,13 +535,16 @@ class FileVersionManager:
         size_delta = staged_size - orig_size
 
         suffix = original.suffix.lower()
-        if suffix not in {".xlsx", ".xlsm"}:
+        if suffix not in {".xlsx", ".xlsm", ".xls", ".xlsb"}:
             return {"size_delta_bytes": size_delta}
 
         try:
             import openpyxl
-            wb_orig = openpyxl.load_workbook(str(original), data_only=True, read_only=True) if original.exists() else None
-            wb_staged = openpyxl.load_workbook(str(staged), data_only=True, read_only=True)
+            from excelmanus.tools._helpers import ensure_openpyxl_compatible
+            _orig_compat = ensure_openpyxl_compatible(original) if original.exists() else original
+            _staged_compat = ensure_openpyxl_compatible(staged)
+            wb_orig = openpyxl.load_workbook(str(_orig_compat), data_only=True, read_only=True) if original.exists() else None
+            wb_staged = openpyxl.load_workbook(str(_staged_compat), data_only=True, read_only=True)
         except Exception:
             return {"size_delta_bytes": size_delta}
 

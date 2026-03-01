@@ -176,7 +176,7 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
           <button
             type="button"
             onClick={() => setExpanded(true)}
-            className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+            className="flex items-center gap-1 py-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
           >
             <ChevronDown className="h-3 w-3" />
             展开全部
@@ -187,7 +187,7 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
         <button
           type="button"
           onClick={() => setExpanded(false)}
-          className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+          className="flex items-center gap-1 mt-1 py-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
         >
           <ChevronUp className="h-3 w-3" />
           收起
@@ -323,25 +323,25 @@ function CollapsedChainCard({ stats, onExpand }: { stats: ChainStats; onExpand: 
         <div className="flex items-center gap-2 text-xs">
           <Layers className="h-3 w-3 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
           <span className="font-medium text-foreground">
-            {stats.totalTools} 次工具调用
+            {stats.totalTools} <span className="hidden sm:inline">次工具</span><span className="sm:hidden">工具</span>调用
           </span>
           {stats.iterations > 0 && (
             <span className="flex items-center gap-1 text-muted-foreground">
               <Repeat className="h-2.5 w-2.5" />
-              {stats.iterations + 1} 轮
+              {stats.iterations + 1}<span className="hidden sm:inline"> 轮</span>
             </span>
           )}
           {/* 状态指示 */}
           {allSuccess && (
             <span className="flex items-center gap-0.5 text-[10px] font-medium" style={{ color: "var(--em-primary)" }}>
               <CheckCircle2 className="h-3 w-3" />
-              全部成功
+              <span className="hidden sm:inline">全部成功</span>
             </span>
           )}
           {hasError && (
             <span className="flex items-center gap-0.5 text-[10px] font-medium" style={{ color: "var(--em-error, #ef4444)" }}>
               <XCircle className="h-3 w-3" />
-              {stats.errorCount} 失败
+              {stats.errorCount}<span className="hidden sm:inline"> 失败</span>
             </span>
           )}
           {stats.hasSubagent && (
@@ -552,7 +552,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
 
   if (validFiles.length === 0) return null;
 
-  const EXCEL_EXTS = new Set([".xlsx", ".xls", ".csv", ".tsv"]);
+  const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".tsv"]);
   const isExcel = (name: string) => {
     const dot = name.lastIndexOf(".");
     return dot >= 0 && EXCEL_EXTS.has(name.slice(dot).toLowerCase());
@@ -610,7 +610,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
                   activeSessionId ?? undefined,
                 ).catch(() => {})
               }
-              className="rounded p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
+              className="rounded p-1.5 sm:p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
               title="下载"
             >
               <Download className="h-3 w-3" />

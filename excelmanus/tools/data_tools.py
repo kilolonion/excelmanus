@@ -930,6 +930,10 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     df = pd.DataFrame(data)
 
     if safe_path.exists() and safe_path.suffix.lower() in (".xlsx", ".xlsm"):
@@ -971,6 +975,9 @@ def analyze_data(
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
+
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
 
@@ -1323,6 +1330,7 @@ def inspect_excel_files(
     from pathlib import Path
 
     from openpyxl import load_workbook
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible as _compat
 
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_SCAN_FILES_DIMENSIONS)
@@ -1371,7 +1379,7 @@ def inspect_excel_files(
             if len(matched) >= max_files:
                 break
             try:
-                wb_peek = load_workbook(fp, read_only=True, data_only=True)
+                wb_peek = load_workbook(_compat(fp), read_only=True, data_only=True)
                 try:
                     for sn in wb_peek.sheetnames:
                         sn_lower = sn.lower()
@@ -1403,7 +1411,7 @@ def inspect_excel_files(
 
         sheets_info: list[dict[str, Any]] = []
         try:
-            wb = load_workbook(fp, read_only=not needs_full, data_only=True)
+            wb = load_workbook(_compat(fp), read_only=not needs_full, data_only=True)
             for sn in wb.sheetnames:
                 ws = wb[sn]
                 total_cols = ws.max_column or 0
@@ -2510,12 +2518,13 @@ def compare_excel(
     guard = _get_guard()
 
     # ── 1. 解析与校验路径 ──
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible as _compat2
     try:
-        safe_a = guard.resolve_and_validate(file_a)
+        safe_a = _compat2(guard.resolve_and_validate(file_a))
     except Exception as e:
         return json.dumps({"error": f"文件 A 路径无效: {e}"}, ensure_ascii=False)
     try:
-        safe_b = guard.resolve_and_validate(file_b)
+        safe_b = _compat2(guard.resolve_and_validate(file_b))
     except Exception as e:
         return json.dumps({"error": f"文件 B 路径无效: {e}"}, ensure_ascii=False)
 
@@ -3097,6 +3106,10 @@ def scan_excel_snapshot(
     if _is_csv_file(safe_path):
         return _scan_csv_snapshot(safe_path, size_str, max_sample_rows)
 
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
+
     from openpyxl import load_workbook
 
     # 元数据扫描（read_only=True，快速获取行列数/公式/合并）
@@ -3353,6 +3366,10 @@ def search_excel_values(
 
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
+
+    # .xls/.xlsb → 透明转换为 xlsx
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    safe_path = ensure_openpyxl_compatible(safe_path)
 
     wb = load_workbook(safe_path, read_only=True, data_only=True)
     matches: list[dict[str, Any]] = []

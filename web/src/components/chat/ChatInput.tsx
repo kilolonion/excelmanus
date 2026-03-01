@@ -54,6 +54,37 @@ import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
 import { answerQuestion } from "@/lib/api";
 
 
+/**
+ * 截断长文件名的提及 token，保留前缀 + 前 N 字符 + … + 扩展名。
+ * 返回 [displayToken, fullToken]；若无需截断则两者相同。
+ *
+ * 例: "@file:学生成绩_2024_第一学期_期末考试.xlsx[Sheet1!A1:C10]"
+ *   → "@file:学生成绩_…考试.xlsx[Sheet1!A1:C10]"
+ */
+function truncateMention(
+  token: string,
+  maxFilenameLen = 16,
+): [display: string, full: string] {
+  // 匹配 @[file:]<filename>[rangeSpec] 结构
+  const m = token.match(/^(@(?:file:)?)(.+?)(\[[^\]]*\])?$/);
+  if (!m) return [token, token];
+  const [, prefix, filename, rangePart = ""] = m;
+
+  if (filename.length <= maxFilenameLen) return [token, token];
+
+  const dotIdx = filename.lastIndexOf(".");
+  const ext = dotIdx > 0 ? filename.slice(dotIdx) : "";
+  const base = dotIdx > 0 ? filename.slice(0, dotIdx) : filename;
+
+  // 保留首 6 字符 + … + 末 4 字符 + 扩展名
+  const head = base.slice(0, 6);
+  const tail = base.slice(-4);
+  const short = `${head}…${tail}${ext}`;
+
+  const display = `${prefix}${short}${rangePart}`;
+  return [display, token];
+}
+
 interface ChatInputProps {
   onSend: (text: string, files?: AttachedFile[]) => void;
   onCommandResult?: (command: string, result: string, format: "markdown" | "text") => void;
@@ -84,6 +115,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const setConfigError = useUIStore((s) => s.setConfigError);
   const [confirmedTokens, setConfirmedTokens] = useState<Set<string>>(new Set());
   const [undoPanelOpen, setUndoPanelOpen] = useState(false);
+
+  // 截断显示 token → 完整 token 的映射，发送前还原
+  const tokenMapRef = useRef<Map<string, string>>(new Map());
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const [questionSelected, setQuestionSelected] = useState<Set<string>>(new Set());
@@ -170,20 +204,30 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       const pattern = new RegExp(`(${escaped.join("|")})`, "g");
       const parts = raw.split(pattern);
       const allTokens = new Set([...confirmedTokens, ...slashCommandNames]);
+      // 使用 <span> 而非 <mark> 避免浏览器默认 mark 样式
+      // 导致布局偏差（移动端光标累积漂移的根因）
       return (
         <>
           {parts.map((part, i) =>
             allTokens.has(part) ? (
-              <mark
+              <span
                 key={i}
-                className="rounded"
                 style={{
                   backgroundColor: "color-mix(in srgb, var(--em-primary) 18%, transparent)",
                   color: "var(--em-primary)",
+                  display: "inline",
+                  padding: 0,
+                  margin: 0,
+                  border: "none",
+                  borderRadius: 0,
+                  lineHeight: "inherit",
+                  fontFamily: "inherit",
+                  fontSize: "inherit",
+                  letterSpacing: "inherit",
                 }}
               >
                 {part}
-              </mark>
+              </span>
             ) : (
               <span key={i}>{part}</span>
             )
@@ -292,16 +336,22 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     // 仅为非图片文件（Excel/CSV）插入文本提及
     const docFiles = newFiles.filter((f) => !isImageFile(f.name));
     if (docFiles.length > 0) {
+      const displayTokens: string[] = [];
       setConfirmedTokens((prev) => {
         const next = new Set(prev);
-        docFiles.forEach((f) => next.add(`@${f.name}`));
+        docFiles.forEach((f) => {
+          const [display, full] = truncateMention(`@${f.name}`);
+          displayTokens.push(display);
+          next.add(display);
+          if (display !== full) tokenMapRef.current.set(display, full);
+        });
         return next;
       });
       const textarea = textareaRef.current;
       const cursorPos = textarea?.selectionStart ?? text.length;
       const before = text.slice(0, cursorPos);
       const after = text.slice(cursorPos);
-      const mentions = docFiles.map((f) => `@${f.name}`).join(" ");
+      const mentions = displayTokens.join(" ");
       const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
       const prefix = needsSpace ? " " : "";
       const newText = before + prefix + mentions + " " + after;
@@ -322,18 +372,20 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     if (!pendingSelection) return;
     const { filePath, sheet, range } = pendingSelection;
     const filename = filePath.split("/").pop() || filePath;
-    const token = `@file:${filename}[${sheet}!${range}]`;
+    const fullToken = `@file:${filename}[${sheet}!${range}]`;
+    const [displayToken] = truncateMention(fullToken);
+    if (displayToken !== fullToken) tokenMapRef.current.set(displayToken, fullToken);
 
-    setConfirmedTokens((prev) => new Set(prev).add(token));
+    setConfirmedTokens((prev) => new Set(prev).add(displayToken));
     const textarea = textareaRef.current;
     const cursorPos = textarea?.selectionStart ?? text.length;
     const before = text.slice(0, cursorPos);
     const after = text.slice(cursorPos);
     const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
     const prefix = needsSpace ? " " : "";
-    const newText = before + prefix + token + " " + after;
+    const newText = before + prefix + displayToken + " " + after;
     setText(newText);
-    const newCursorPos = (before + prefix + token + " ").length;
+    const newCursorPos = (before + prefix + displayToken + " ").length;
     requestAnimationFrame(() => {
       textarea?.focus();
       textarea?.setSelectionRange(newCursorPos, newCursorPos);
@@ -341,7 +393,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     // 加入最近文件列表
     const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-    if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
+    if ([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"].includes(extLower)) {
       useExcelStore.getState().addRecentFile({
         path: filePath,
         filename,
@@ -358,18 +410,20 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   useEffect(() => {
     if (!pendingFileMention) return;
     const { path, filename } = pendingFileMention;
-    const mention = `@file:${filename}`;
+    const fullMention = `@file:${filename}`;
+    const [displayMention] = truncateMention(fullMention);
+    if (displayMention !== fullMention) tokenMapRef.current.set(displayMention, fullMention);
 
-    setConfirmedTokens((prev) => new Set(prev).add(mention));
+    setConfirmedTokens((prev) => new Set(prev).add(displayMention));
     const textarea = textareaRef.current;
     const cursorPos = textarea?.selectionStart ?? text.length;
     const before = text.slice(0, cursorPos);
     const after = text.slice(cursorPos);
     const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
     const prefix = needsSpace ? " " : "";
-    const newText = before + prefix + mention + " " + after;
+    const newText = before + prefix + displayMention + " " + after;
     setText(newText);
-    const newCursorPos = (before + prefix + mention + " ").length;
+    const newCursorPos = (before + prefix + displayMention + " ").length;
     requestAnimationFrame(() => {
       textarea?.focus();
       textarea?.setSelectionRange(newCursorPos, newCursorPos);
@@ -378,7 +432,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     // 记录到最近文件
     const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-    if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
+    if ([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"].includes(extLower)) {
       useExcelStore.getState().addRecentFile({ path, filename });
     }
 
@@ -632,6 +686,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           next.add(token);
         } else {
           changed = true;
+          // 同步清理截断映射
+          tokenMapRef.current.delete(token);
         }
       });
       return changed ? next : prev;
@@ -775,15 +831,17 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         textareaRef.current?.focus();
         return;
       }
-      // 跟踪已确认的 @提及用于高亮
-      setConfirmedTokens((prev) => new Set(prev).add(item.command));
+      // 跟踪已确认的 @提及用于高亮（截断长文件名）
+      const [displayCmd, fullCmd] = truncateMention(item.command);
+      if (displayCmd !== fullCmd) tokenMapRef.current.set(displayCmd, fullCmd);
+      setConfirmedTokens((prev) => new Set(prev).add(displayCmd));
       const lastAtIdx = text.lastIndexOf("@");
       const before = text.slice(0, lastAtIdx);
-      setText(before + item.command + " ");
+      setText(before + displayCmd + " ");
       // 在最近文件栏中跟踪 Excel 文件
       const mentionName = item.command.replace(/^@(?:file:|folder:|skill:|mcp:|tool:)?/, "");
       const extLower = mentionName.slice(mentionName.lastIndexOf(".")).toLowerCase();
-      if ([".xlsx", ".xls", ".csv"].includes(extLower)) {
+      if ([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"].includes(extLower)) {
         useExcelStore.getState().addRecentFile({
           path: mentionName,
           filename: mentionName.split("/").pop() || mentionName,
@@ -968,10 +1026,18 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       }
       return;
     }
-    onSend(trimmed, files.length > 0 ? files : undefined);
+    // 发送前还原截断的提及 token 为完整形式，确保后端能正确解析
+    let finalText = trimmed;
+    tokenMapRef.current.forEach((full, display) => {
+      if (finalText.includes(display)) {
+        finalText = finalText.replaceAll(display, full);
+      }
+    });
+    onSend(finalText, files.length > 0 ? files : undefined);
     setText("");
     setFiles([]);
     setConfirmedTokens(new Set());
+    tokenMapRef.current.clear();
     // 清空文本后重置文本区高度
     requestAnimationFrame(autoResize);
   };
@@ -1200,7 +1266,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+                className="h-9 w-9 sm:h-8 sm:w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Plus className="h-4 w-4" />
@@ -1215,7 +1281,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           ref={fileInputRef}
           type="file"
           className="hidden"
-          accept=".xlsx,.xls,.csv,.png,.jpg,.jpeg"
+          /* accept 不限制 — 后端仅做大小限制 */
           multiple
           onChange={(e) => {
             if (e.target.files) {
@@ -1232,7 +1298,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             ref={backdropRef}
             aria-hidden="true"
             className="absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words font-sans"
-            style={{ color: "var(--foreground)", padding: "8px 8px", fontSize: "13px", lineHeight: "20px" }}
+            style={{
+              color: "var(--foreground)",
+              padding: "8px 8px",
+              fontSize: "13px",
+              lineHeight: "20px",
+              wordBreak: "break-all",
+              WebkitTextSizeAdjust: "100%",
+            }}
           >
             {renderHighlightedText(text)}
           </div>
@@ -1251,7 +1324,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0
               text-transparent caret-foreground selection:bg-[var(--em-primary)]/20 relative z-10"
-            style={{ padding: "8px 8px", fontSize: "13px", lineHeight: "20px", fontFamily: "inherit" }}
+            style={{
+              padding: "8px 8px",
+              fontSize: "13px",
+              lineHeight: "20px",
+              fontFamily: "inherit",
+              wordBreak: "break-all" as const,
+              WebkitTextSizeAdjust: "100%",
+            }}
             rows={1}
           />
         </div>
@@ -1259,7 +1339,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         {/* Send / Stop button (right) */}
         <div className="flex-shrink-0">
           <AnimatePresence mode="wait" initial={false}>
-            {isStreaming ? (
+            {isStreaming && !pendingQuestion ? (
               <motion.div
                 key="stop"
                 initial={{ scale: 0, rotate: -90 }}
@@ -1269,7 +1349,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               >
                 <Button
                   size="icon"
-                  className="h-8 w-8 rounded-full bg-foreground hover:bg-foreground/80"
+                  className="h-9 w-9 sm:h-8 sm:w-8 rounded-full bg-foreground hover:bg-foreground/80"
                   onClick={onStop}
                 >
                   <Square className="h-3 w-3 fill-background text-background" />
@@ -1285,7 +1365,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               >
                 <Button
                   size="icon"
-                  className="h-8 w-8 rounded-full text-white transition-opacity send-btn-glow"
+                  className="h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
                   disabled={disabled || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}
