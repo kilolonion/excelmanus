@@ -424,6 +424,28 @@ def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: li
     return route_mode, skills_used, tool_scope
 
 
+def _build_reply_sse(chat_result: Any, engine: Any) -> str:
+    """构建 reply SSE 事件文本（chat_stream 与 chat_subscribe 共用）。"""
+    normalized_reply = guard_public_reply((chat_result.reply or "").strip())
+    route = engine.last_route_result
+    route_mode, skills_used, tool_scope = _public_route_fields(
+        route.route_mode,
+        route.skills_used,
+        route.tool_scope,
+    )
+    return _sse_format("reply", {
+        "content": normalized_reply,
+        "skills_used": skills_used,
+        "tool_scope": tool_scope,
+        "route_mode": route_mode,
+        "iterations": chat_result.iterations,
+        "truncated": chat_result.truncated,
+        "prompt_tokens": chat_result.prompt_tokens,
+        "completion_tokens": chat_result.completion_tokens,
+        "total_tokens": chat_result.total_tokens,
+    })
+
+
 def _public_excel_path(path: str, *, safe_mode: bool) -> str:
     """将 Excel 路径规范化为前端可直接回传的形式。
 
@@ -1401,7 +1423,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             event_queue = stream_state.attach()
 
             def _on_event(event: ToolCallEvent) -> None:
-                """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。"""
+                """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
+
+                注意：flush_messages_sync 在事件循环线程上做同步 SQLite I/O。
+                单次写入耗时毫秒级，当前可接受；高并发场景如需优化可改用 asyncio.to_thread。
+                """
                 stream_state.deliver(event)
                 _persist_excel_event(session_id, event)
                 if (
@@ -1421,8 +1447,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         chat_mode=request.chat_mode,
                     )
                     return _normalize_chat_result(result)
-                except Exception:
-                    raise
                 finally:
                     await _session_manager.release_for_chat(session_id)
                     nonlocal acquired
@@ -1488,23 +1512,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             # chat 任务完成：获取结果
             chat_result = chat_task.result()
             normalized_reply = guard_public_reply((chat_result.reply or "").strip())
-            route = engine.last_route_result
-            route_mode, skills_used, tool_scope = _public_route_fields(
-                route.route_mode,
-                route.skills_used,
-                route.tool_scope,
-            )
-            yield _sse_format("reply", {
-                "content": normalized_reply,
-                "skills_used": skills_used,
-                "tool_scope": tool_scope,
-                "route_mode": route_mode,
-                "iterations": chat_result.iterations,
-                "truncated": chat_result.truncated,
-                "prompt_tokens": chat_result.prompt_tokens,
-                "completion_tokens": chat_result.completion_tokens,
-                "total_tokens": chat_result.total_tokens,
-            })
+            yield _build_reply_sse(chat_result, engine)
             # 记录已认证用户的 token 使用量
             if auth_user_id and chat_result.total_tokens > 0:
                 try:
@@ -1696,12 +1704,13 @@ async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSO
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
-    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
+    try:
+        engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
+    except SessionBusyError:
+        return _error_json_response(409, "会话正在处理中，请等待完成后再应用备份。")
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
-    # W10: 防止在 agent 活跃写入期间 apply，避免文件竞态
-    if await _session_manager.is_session_in_flight(request.session_id):
-        return _error_json_response(409, "会话正在处理中，请等待完成后再应用备份。")
     tx = engine.transaction
     if tx is None:
         return _error_json_response(400, "该会话未启用备份模式。")
@@ -1753,12 +1762,13 @@ async def backup_discard(request: BackupDiscardRequest, raw_request: Request) ->
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
-    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
+    try:
+        engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
+    except SessionBusyError:
+        return _error_json_response(409, "会话正在处理中，请等待完成后再丢弃备份。")
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
-    # R3: 防止在 agent 活跃写入期间 discard，避免删除正在被写入的 staged 文件
-    if await _session_manager.is_session_in_flight(request.session_id):
-        return _error_json_response(409, "会话正在处理中，请等待完成后再丢弃备份。")
     tx = engine.transaction
     if tx is None:
         return _error_json_response(400, "该会话未启用备份模式。")
@@ -1862,13 +1872,15 @@ async def checkpoint_rollback(
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
-    engine = _session_manager.get_engine(request.session_id, user_id=user_id)
+    # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
+    try:
+        engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
+    except SessionBusyError:
+        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
     if engine is None:
         return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
     if not engine.checkpoint_enabled:
         return _error_json_response(400, "该会话未启用 checkpoint 模式。")
-    if await _session_manager.is_session_in_flight(request.session_id):
-        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
     _reg = engine.file_registry
     if _reg is None or not getattr(_reg, 'has_versions', False):
         return _error_json_response(400, "FileRegistry not available for rollback.")
@@ -1926,6 +1938,8 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
         )
     except SessionNotFoundError as exc:
         return _error_json_response(404, str(exc))
+    except SessionBusyError:
+        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
     except IndexError as exc:
         return _error_json_response(400, str(exc))
 
@@ -2091,25 +2105,38 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     engine = _session_manager.get_engine(session_id)
                     if engine is not None:
                         normalized_reply = guard_public_reply((chat_result.reply or "").strip())
-                        route = engine.last_route_result
-                        route_mode, skills_used, tool_scope = _public_route_fields(
-                            route.route_mode,
-                            route.skills_used,
-                            route.tool_scope,
-                        )
-                        yield _sse_format("reply", {
-                            "content": normalized_reply,
-                            "skills_used": skills_used,
-                            "tool_scope": tool_scope,
-                            "route_mode": route_mode,
-                            "iterations": chat_result.iterations,
-                            "truncated": chat_result.truncated,
-                            "prompt_tokens": chat_result.prompt_tokens,
-                            "completion_tokens": chat_result.completion_tokens,
-                            "total_tokens": chat_result.total_tokens,
-                        })
-                except (asyncio.CancelledError, Exception):
+                        yield _build_reply_sse(chat_result, engine)
+                        # B2: 首轮标题生成（与 chat_stream 保持一致）
+                        if engine.session_turn == 1:
+                            _user_msg = ""
+                            for _m in engine.raw_messages:
+                                if _m.get("role") == "user":
+                                    _user_msg = str(_m.get("content", ""))[:200]
+                                    break
+                            _gen_title = await _generate_session_title_with_timeout(
+                                session_id=session_id,
+                                user_message=_user_msg,
+                                assistant_reply=normalized_reply,
+                                timeout=5.0,
+                            )
+                            if _gen_title:
+                                yield _sse_format("session_title", {
+                                    "session_id": session_id,
+                                    "title": _gen_title,
+                                })
+                except asyncio.CancelledError:
                     pass
+                except Exception as exc:
+                    error_id = str(uuid.uuid4())
+                    logger.warning(
+                        "subscribe 获取 chat 结果失败 [error_id=%s]: %s",
+                        error_id, exc, exc_info=True,
+                    )
+                    friendly_enabled = _config.friendly_error_messages if _config else False
+                    yield _sse_format("error", {
+                        "error": _get_friendly_error_message(exc, friendly_enabled),
+                        "error_id": error_id,
+                    })
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -3575,6 +3602,15 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
         from openpyxl import load_workbook
         from openpyxl.utils.cell import coordinate_to_tuple
 
+        # .xls/.xlsb → 透明转换为 xlsx
+        from excelmanus.xls_converter import needs_conversion as _nc3, ensure_xlsx as _ensure3
+        if _nc3(resolved):
+            try:
+                _xlsx_p3, _ = _ensure3(resolved)
+                resolved = str(_xlsx_p3)
+            except Exception:
+                pass
+
         wb = load_workbook(resolved)
         sheet_names = wb.sheetnames
         ws = wb[request.sheet] if request.sheet and request.sheet in sheet_names else wb.active
@@ -3675,9 +3711,10 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     if auth_enabled and user_id:
         ws.enforce_quota()
 
-    # .xls/.xlsb → 自动转换为 .xlsx，保留原始文件
+    # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
     converted = False
     original_filename = filename
+    _original_dest = dest_path  # 保留引用用于清理
     from excelmanus.xls_converter import needs_conversion, convert_to_xlsx, ConversionError
     if needs_conversion(dest_path):
         try:
@@ -3685,6 +3722,11 @@ async def upload_file(raw_request: Request) -> JSONResponse:
             dest_path = xlsx_path
             filename = xlsx_path.name
             converted = True
+            # 清理原始 .xls/.xlsb 文件，避免双倍磁盘占用
+            try:
+                _original_dest.unlink(missing_ok=True)
+            except OSError:
+                pass
             logger.info("上传文件自动转换: %s → %s", original_filename, filename)
         except (ConversionError, Exception) as exc:
             logger.warning("上传文件转换失败，保留原始格式: %s (%s)", original_filename, exc)
@@ -3787,25 +3829,50 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     if auth_enabled and user_id:
         ws.enforce_quota()
 
+    # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
+    converted = False
+    original_filename = raw_filename
+    _original_dest_url = dest_path
+    from excelmanus.xls_converter import needs_conversion as _nc_url, convert_to_xlsx as _conv_url, ConversionError as _CE_url
+    if _nc_url(dest_path):
+        try:
+            xlsx_path = _conv_url(dest_path, overwrite=True)
+            dest_path = xlsx_path
+            raw_filename = xlsx_path.name
+            converted = True
+            try:
+                _original_dest_url.unlink(missing_ok=True)
+            except OSError:
+                pass
+            logger.info("URL 上传文件自动转换: %s → %s", original_filename, raw_filename)
+        except (_CE_url, Exception) as exc:
+            logger.warning("URL 上传文件转换失败，保留原始格式: %s (%s)", original_filename, exc)
+
     rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
 
     # 注册到 FileRegistry
     registry = _get_file_registry(str(ws.root_dir), user_id=user_id)
     if registry is not None:
         try:
-            registry.register_upload(
+            entry = registry.register_upload(
                 canonical_path=str(dest_path.relative_to(ws.root_dir)),
-                original_name=raw_filename,
-                size_bytes=len(content),
+                original_name=original_filename,
+                size_bytes=dest_path.stat().st_size,
             )
+            if converted:
+                registry.add_alias(entry.id, "original_path", f"./{(upload_dir / safe_name).relative_to(ws.root_dir)}")
         except Exception:
             logger.debug("FileRegistry register_upload 失败 (from-url)", exc_info=True)
 
-    return JSONResponse(content={
-        "filename": raw_filename,
+    resp: dict[str, Any] = {
+        "filename": original_filename,
         "path": rel_path,
-        "size": len(content),
-    })
+        "size": dest_path.stat().st_size,
+    }
+    if converted:
+        resp["converted_from"] = original_filename
+        resp["converted_to"] = raw_filename
+    return JSONResponse(content=resp)
 
 
 # ── 文件管理 API ─────────────────────────────────────
